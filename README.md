@@ -32,8 +32,13 @@ two that were open longest: the hot set holds 131072 notes, measured at roughly
 107 MB so that a phone can hold it, and the reward halves every two years until
 it reaches a floor it then keeps forever.
 
-What is left is a wallet that keeps and refreshes its own proofs, so it can
-spend a note that has fallen to the cold set, and then a public testnet.
+A node keeps the hot set in full and the cold set as sixty four hashes, so what
+it costs to run does not grow with the chain. An archivist keeps the whole cold
+set and is the only party that can rebuild a proof for someone who lost theirs.
+
+What is left is the other half of that: a wallet that keeps and refreshes its
+own proofs, so it can spend a note that has fallen without asking anyone. Then
+a public testnet.
 
 ## Layout
 
