@@ -36,9 +36,12 @@ A node keeps the hot set in full and the cold set as sixty four hashes, so what
 it costs to run does not grow with the chain. An archivist keeps the whole cold
 set and is the only party that can rebuild a proof for someone who lost theirs.
 
-What is left is the other half of that: a wallet that keeps and refreshes its
-own proofs, so it can spend a note that has fallen without asking anyone. Then
-a public testnet.
+A wallet keeps its own proofs current out of what every block already carries,
+so it spends a fallen note without asking anyone. Money moves between people
+across a set no node holds.
+
+What is left is a public testnet: seed addresses, an explorer, installation
+notes, and strangers running the binary.
 
 ## Layout
 

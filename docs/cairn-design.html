@@ -241,7 +241,7 @@
     <h1 class="mark">CAIRN</h1>
     <p class="thesis">Une monnaie que <em>ton téléphone</em> vérifie lui-même — aujourd'hui, et dans trente ans.</p>
     <div class="metaline">
-      <span>Document de conception · v0.11</span>
+      <span>Document de conception · v0.12</span>
       <span>26 août 2026</span>
       <span>Nom de code — provisoire</span>
     </div>
@@ -423,7 +423,7 @@
         <li class="done"><div><b>Le réseau<span class="state">Fait</span></b><span>Le transport entre machines, la présentation entre pairs, la propagation des blocs et la synchronisation d'un nœud qui démarre de zéro. Cinq nœuds branchés en ligne se transmettent une chaîne entière et un bloc neuf remonte la ligne de proche en proche. Tout ce qui décide quoi que ce soit est écrit pour être testable sans réseau ; la couche qui transporte, elle, ne décide de rien.</span></div></li>
         <li class="done"><div><b>Tenir dans la durée<span class="state">Fait</span></b><span>Un nœud écrit sa chaîne sur disque et la rejoue au démarrage, en la revérifiant plutôt qu'en faisant confiance à son propre disque. Et il trouve ses voisins en les demandant à ceux qu'il a déjà : une seule adresse suffit pour rejoindre un réseau, et plus aucune pour y revenir. Un nœud est joignable à l'adresse d'où sa connexion arrive, jamais à celle qu'il prétend.</span></div></li>
         <li class="done"><div><b>Les exécutables<span class="state">Fait</span></b><span>Un nœud et un portefeuille, en ligne de commande. Le portefeuille ne demande pas à un serveur ce qu'il possède : il rejoint le réseau, vérifie la chaîne lui-même et lit son solde dans le grand livre qu'il vient de valider. Les règles de consensus se choisissent en nommant un réseau et ne se règlent pas une par une. Une transaction attend maintenant dans une réserve qu'un bloc l'emporte, ce qui permet à quelqu'un de payer quelqu'un d'autre. Reste la version téléphone.</span></div></li>
-        <li><div><b>Le portefeuille qui garde ses preuves</b><span>Côté nœud, c'est fait : un nœud ordinaire ne détient plus la cave. Reste le pendant côté portefeuille. Dès qu'un billet descend, il faut que le portefeuille ait conservé sa preuve et la tienne à jour, ou qu'il la redemande à un archiviste. C'est la garantie n°3 de ce document, et la mesure du tiroir en a fait une pièce maîtresse plutôt qu'un confort.</span></div></li>
+        <li class="done"><div><b>Le portefeuille qui garde ses preuves<span class="state">Fait</span></b><span>L'ajout d'un billet dans la forêt fournit sa preuve au passage : elle n'est jamais à demander. À partir de là, un nœud à qui l'on a nommé un propriétaire tient ses preuves à jour avec ce qui circule déjà dans les blocs, sans jamais interroger personne. Deux corrections sont venues du premier essai réel : une preuve prise il y a quelques blocs reste acceptée, sinon une transaction écrite pendant qu'un bloc se trouve serait perdue ; et un billet qui vient de descendre reste dépensable sans preuve pendant une fenêtre fixe, sinon la frontière entre les deux tiroirs serait une falaise dont le payeur ferait les frais sans avoir rien fait de mal.</span></div></li>
         <li><div><b>Le testnet public</b><span>Une monnaie sans valeur, ouverte, que des inconnus font tourner. Le seul vrai test de décentralisation : tout ce qui précède peut être parfait et échouer ici.</span></div></li>
       </ol>
 
@@ -436,8 +436,8 @@
   </section>
 
   <footer>
-    <span>Cairn · document de conception v0.11</span>
-    <span>Statut — coût du nœud plafonné pour de bon</span>
+    <span>Cairn · document de conception v0.12</span>
+    <span>Statut — protocole terminé, testnet à ouvrir</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 
