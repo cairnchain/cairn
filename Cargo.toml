@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cairn-primitives",
+    "crates/cairn-crypto",
+    "crates/cairn-ledger",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/cairn-protocol/cairn"
+
+[workspace.dependencies]
+cairn-primitives = { path = "crates/cairn-primitives", version = "0.1.0" }
+cairn-crypto = { path = "crates/cairn-crypto", version = "0.1.0" }
+blake3 = { version = "1", default-features = false, features = ["std"] }
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc", "fast", "zeroize"] }
+getrandom = "0.3"
+thiserror = "2"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+hex = "0.4"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+arithmetic_side_effects = "deny"
+indexing_slicing = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+overflow-checks = true
