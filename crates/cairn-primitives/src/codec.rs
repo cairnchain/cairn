@@ -125,7 +125,7 @@ macro_rules! impl_codec_for_int {
     };
 }
 
-impl_codec_for_int!(u8, u16, u32, u64);
+impl_codec_for_int!(u8, u16, u32, u64, u128);
 
 impl<const N: usize> Encode for [u8; N] {
     fn encode_to(&self, out: &mut Vec<u8>) {
@@ -208,6 +208,13 @@ mod tests {
         assert_eq!(0x0102_0304_u32.encode(), vec![0x04, 0x03, 0x02, 0x01]);
         roundtrip(&u64::MAX);
         roundtrip(&7u8);
+    }
+
+    #[test]
+    fn wide_integers_roundtrip() {
+        roundtrip(&u128::MAX);
+        roundtrip(&0u128);
+        assert_eq!(1u128.encode().len(), 16);
     }
 
     #[test]

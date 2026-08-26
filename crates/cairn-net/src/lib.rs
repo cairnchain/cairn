@@ -1,0 +1,15 @@
+//! Talking to other nodes.
+//!
+//! The layer is split so that the part which decides anything can be tested
+//! without a network. [`sync`] is pure: messages in, messages out. [`node`]
+//! is the plumbing that carries them over TCP and does not decide anything.
+
+pub mod message;
+pub mod node;
+pub mod sync;
+pub mod wire;
+
+pub use message::{Handshake, Message, PROTOCOL_VERSION};
+pub use node::{Node, NodeError};
+pub use sync::{on_message, DropReason, PeerState, Reaction};
+pub use wire::{read_message, write_message, WireError, MAX_FRAME_BYTES};

@@ -1,0 +1,19 @@
+[package]
+name = "cairn-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cairn-chain.workspace = true
+cairn-ledger.workspace = true
+cairn-primitives.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+cairn-crypto.workspace = true

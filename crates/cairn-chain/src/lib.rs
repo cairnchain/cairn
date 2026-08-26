@@ -140,6 +140,68 @@ impl ChainStore {
         self.positions.contains_key(id)
     }
 
+    /// The first block of the followed branch.
+    pub fn genesis(&self) -> Option<Hash32> {
+        self.active.first().copied()
+    }
+
+    /// Which of `ids` this node has never seen.
+    pub fn missing<'a>(&self, ids: impl IntoIterator<Item = &'a Hash32>) -> Vec<Hash32> {
+        ids.into_iter()
+            .filter(|id| !self.blocks.contains_key(id))
+            .copied()
+            .collect()
+    }
+
+    /// A sparse sample of the followed branch, tip first, thinning out with
+    /// depth and always ending at the genesis block.
+    ///
+    /// Two nodes exchange these to find where their branches diverge without
+    /// either sending its whole history. Recent blocks are sampled densely
+    /// because that is where branches usually part; deep blocks are sampled
+    /// rarely because agreement there is almost certain.
+    pub fn locator(&self) -> Vec<Hash32> {
+        let mut locator = Vec::new();
+        let Some(mut index) = self.active.len().checked_sub(1) else {
+            return locator;
+        };
+        let mut step = 1usize;
+        let mut dense = 0usize;
+        loop {
+            if let Some(id) = self.active.get(index) {
+                locator.push(*id);
+            }
+            if index == 0 {
+                break;
+            }
+            dense = dense.saturating_add(1);
+            if dense > 10 {
+                step = step.saturating_mul(2);
+            }
+            index = index.saturating_sub(step);
+        }
+        locator
+    }
+
+    /// The followed branch beyond the first block of `locator` this node knows,
+    /// oldest first, capped at `max`.
+    ///
+    /// When none of the locator is recognised the answer starts at genesis,
+    /// which is what a node syncing from scratch needs.
+    pub fn chain_after(&self, locator: &[Hash32], max: usize) -> Vec<Hash32> {
+        let common = locator
+            .iter()
+            .find_map(|id| self.positions.get(id).copied());
+        let from = common.map_or(0, |index| index.saturating_add(1));
+        self.active
+            .get(from..)
+            .unwrap_or_default()
+            .iter()
+            .take(max)
+            .copied()
+            .collect()
+    }
+
     /// Records a block and follows the heaviest branch it makes available.
     ///
     /// `now` is this node's clock, in seconds since the Unix epoch.
