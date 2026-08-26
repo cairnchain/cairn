@@ -124,6 +124,7 @@ dependencies = [
 name = "cairn-wallet"
 version = "0.1.0"
 dependencies = [
+ "cairn-accumulator",
  "cairn-chain",
  "cairn-crypto",
  "cairn-ledger",

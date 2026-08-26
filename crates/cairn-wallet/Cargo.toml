@@ -14,6 +14,7 @@ name = "cairn-wallet"
 path = "src/main.rs"
 
 [dependencies]
+cairn-accumulator.workspace = true
 cairn-chain.workspace = true
 cairn-crypto.workspace = true
 cairn-ledger.workspace = true

@@ -33,10 +33,16 @@ impl Pair {
     }
 
     fn add(&mut self, index: u64) -> u64 {
-        let position = self.archive.add(leaf(index)).unwrap();
+        let (position, proof) = self.archive.add(leaf(index)).unwrap();
         // The node adds from the roots alone. It is handed no proof, because
-        // there is none to hand it.
-        assert_eq!(self.node.add(leaf(index)), Some(position));
+        // there is none to hand it: the proof falls out of the addition.
+        let (node_position, node_proof) = self.node.add(leaf(index)).unwrap();
+        assert_eq!(node_position, position);
+        assert_eq!(node_proof, proof);
+        assert!(
+            self.node.verify(position, leaf(index), &proof),
+            "the addition proves itself"
+        );
         assert_eq!(self.node.commitment(), self.archive.commitment());
         position
     }
@@ -157,7 +163,7 @@ fn a_position_still_means_the_same_place_much_later() {
 fn what_a_node_holds_does_not_grow() {
     let mut node = Forest::new();
     for index in 0..100_000u64 {
-        node.add(leaf(index));
+        node.add(leaf(index)).unwrap();
     }
     // A forest holds at most one tree per bit of its leaf count, so what a node
     // keeps is at most MAX_HEIGHT hashes and two counters, at any size at all.
@@ -197,7 +203,7 @@ fn every_change_moves_the_commitment() {
 fn proofs_stay_short_as_the_forest_grows() {
     let mut archive = Archive::new();
     for index in 0..4_096u64 {
-        archive.add(leaf(index));
+        archive.add(leaf(index)).unwrap();
     }
     let proof = archive.prove(0).unwrap();
     assert_eq!(proof.depth(), 12, "log2 of the forest, not its size");
@@ -208,7 +214,7 @@ fn proofs_stay_short_as_the_forest_grows() {
 fn a_proof_survives_the_wire_format() {
     let mut archive = Archive::new();
     for index in 0..300u64 {
-        archive.add(leaf(index));
+        archive.add(leaf(index)).unwrap();
     }
     let proof = archive.prove(42).unwrap();
     assert_eq!(ForestProof::decode(&proof.encode()).unwrap(), proof);
@@ -225,9 +231,9 @@ fn two_nodes_fed_the_same_changes_agree() {
     let mut archive = Archive::new();
 
     for index in 0..200u64 {
-        archive.add(leaf(index));
-        first.add(leaf(index));
-        second.add(leaf(index));
+        archive.add(leaf(index)).unwrap();
+        first.add(leaf(index)).unwrap();
+        second.add(leaf(index)).unwrap();
     }
 
     for position in [3u64, 90, 199] {
@@ -246,11 +252,11 @@ fn two_nodes_fed_the_same_changes_agree() {
 fn several_leaves_go_at_once_from_proofs_taken_together() {
     let mut archive = Archive::new();
     for index in 0..256u64 {
-        archive.add(leaf(index));
+        archive.add(leaf(index)).unwrap();
     }
     let mut node = Forest::new();
     for index in 0..256u64 {
-        node.add(leaf(index));
+        node.add(leaf(index)).unwrap();
     }
 
     // Everyone proves against the same root, which is what spenders in one
@@ -281,11 +287,11 @@ fn the_order_spends_appear_in_changes_nothing() {
     let build = |order: &[u64]| {
         let mut archive = Archive::new();
         for index in 0..128u64 {
-            archive.add(leaf(index));
+            archive.add(leaf(index)).unwrap();
         }
         let mut node = Forest::new();
         for index in 0..128u64 {
-            node.add(leaf(index));
+            node.add(leaf(index)).unwrap();
         }
         let removals: Vec<_> = order
             .iter()
@@ -312,11 +318,11 @@ fn the_order_spends_appear_in_changes_nothing() {
 fn a_batch_with_one_bad_proof_changes_nothing() {
     let mut archive = Archive::new();
     for index in 0..64u64 {
-        archive.add(leaf(index));
+        archive.add(leaf(index)).unwrap();
     }
     let mut node = Forest::new();
     for index in 0..64u64 {
-        node.add(leaf(index));
+        node.add(leaf(index)).unwrap();
     }
     let before = node.commitment();
 
@@ -331,4 +337,119 @@ fn a_batch_with_one_bad_proof_changes_nothing() {
         "one bad proof and none of it happened"
     );
     assert_eq!(node.len(), 64);
+}
+
+#[test]
+fn an_addition_hands_over_the_proof_of_what_it_added() {
+    let mut node = Forest::new();
+    for index in 0..37u64 {
+        let (position, proof) = node.add(leaf(index)).unwrap();
+        assert!(
+            node.verify(position, leaf(index), &proof),
+            "adding leaf {index} did not prove itself"
+        );
+    }
+}
+
+#[test]
+fn a_holder_keeps_its_own_proof_current_and_asks_nobody() {
+    let mut archive = Archive::new();
+    let mut node = Forest::new();
+    for index in 0..50u64 {
+        archive.add(leaf(index)).unwrap();
+        node.add(leaf(index)).unwrap();
+    }
+
+    // The holder's leaf arrives, and it keeps the proof the addition handed it.
+    archive.add(leaf(999)).unwrap();
+    let (mine, proof) = node.add(leaf(999)).unwrap();
+    node.watch(mine, proof);
+    assert_eq!(node.watched_count(), 1);
+
+    // Then the world moves on: hundreds of arrivals, so the trees the holder
+    // sits in merge and merge again.
+    for index in 100..600u64 {
+        archive.add(leaf(index)).unwrap();
+        node.add(leaf(index)).unwrap();
+    }
+    // And departures, which move the siblings beside it.
+    for position in [3u64, 10, 44, 51, 300] {
+        let proof = archive.prove(position).unwrap();
+        let held = archive.leaf_at(position).unwrap();
+        assert!(node.remove(position, held, &proof));
+        assert!(archive.remove(position));
+    }
+
+    let current = node.proof_of(mine).expect("still watched").clone();
+    assert!(
+        node.verify(mine, leaf(999), &current),
+        "the holder can still spend"
+    );
+    assert_eq!(
+        current,
+        archive.prove(mine).unwrap(),
+        "and its proof is exactly what an archivist would have handed it"
+    );
+    assert!(node.unwatch(mine).is_some());
+    assert_eq!(node.watched_count(), 0);
+}
+
+#[test]
+fn many_holders_are_kept_current_at_once() {
+    let mut archive = Archive::new();
+    let mut node = Forest::new();
+    let mut mine = Vec::new();
+
+    for index in 0..200u64 {
+        archive.add(leaf(index)).unwrap();
+        let (position, proof) = node.add(leaf(index)).unwrap();
+        if index % 7 == 0 {
+            node.watch(position, proof);
+            mine.push((position, index));
+        }
+    }
+    for index in 200..800u64 {
+        archive.add(leaf(index)).unwrap();
+        node.add(leaf(index)).unwrap();
+    }
+
+    let removals: Vec<_> = [5u64, 6, 99, 400]
+        .iter()
+        .map(|position| {
+            (
+                *position,
+                leaf(*position),
+                archive.prove(*position).unwrap(),
+            )
+        })
+        .collect();
+    assert!(node.remove_batch(&removals));
+    for (position, _, _) in &removals {
+        archive.remove(*position);
+    }
+
+    assert_eq!(node.watched_count(), mine.len());
+    for (position, index) in mine {
+        let proof = node.proof_of(position).expect("watched").clone();
+        assert!(
+            node.verify(position, leaf(index), &proof),
+            "holder at {position} lost its proof"
+        );
+        assert_eq!(proof, archive.prove(position).unwrap());
+    }
+}
+
+#[test]
+fn watching_nothing_costs_nothing() {
+    let mut plain = Forest::new();
+    let mut watching = Forest::new();
+    for index in 0..100u64 {
+        plain.add(leaf(index)).unwrap();
+        let (position, proof) = watching.add(leaf(index)).unwrap();
+        watching.watch(position, proof);
+    }
+    // What a node commits to does not depend on what anyone is watching.
+    assert_eq!(plain.commitment(), watching.commitment());
+    assert_eq!(plain.watched_count(), 0);
+    assert_eq!(watching.watched_count(), 100);
 }

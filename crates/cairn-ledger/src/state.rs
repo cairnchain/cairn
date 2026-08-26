@@ -8,7 +8,7 @@
 //! That split is what bounds the cost of running a node. It also keeps the
 //! friction where it belongs: on value that has not moved in a long time.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use cairn_accumulator::forest::forest_leaf;
 use cairn_accumulator::{Archive, Forest, ForestProof, Key, SparseMerkleTree};
@@ -19,6 +19,7 @@ use cairn_primitives::Hash32;
 use crate::block::{BlockHeader, HeaderSummary};
 use crate::note::{Note, NoteId};
 use crate::pow::RECENT_HEADERS;
+use cairn_crypto::PublicKey;
 
 /// Where a note sits in either accumulator.
 ///
@@ -90,6 +91,39 @@ pub struct ColdSpend {
     pub proof: ForestProof,
 }
 
+/// Notes that stay spendable without a proof after they fall.
+///
+/// The line between the two tiers cannot be a cliff. A transfer is written
+/// against the chain as it stands, and by the time a block carries it a note
+/// it spends may have fallen. Without this, a spender would have to be exactly
+/// at the tip and would lose the race whenever a block landed mid transfer.
+///
+/// So the notes that fell most recently stay resolvable: every node keeps
+/// them, and keeps their proofs current, for as long as they are in this
+/// window. The count is fixed, so what it costs is fixed.
+pub const GRACE_NOTES: usize = 8_192;
+
+/// Blocks a fallen note stays spendable without a proof, whichever bound
+/// bites first.
+pub const GRACE_BLOCKS: usize = 64;
+
+/// Blocks a spender's proof may lag behind by.
+///
+/// A proof describes the forest at the moment it was taken, and the forest
+/// moves with every block. Demanding that a spender be exactly at the tip
+/// would mean a transfer built while a block was being found is worthless, and
+/// on a busy chain almost every transfer is built while a block is being
+/// found. So a handful of recent states are kept and a proof against any of
+/// them is accepted, as long as the note has not been spent since.
+pub const PROOF_WINDOW: usize = 32;
+
+/// A forest as it stood before a block, and what that block took out of it.
+#[derive(Clone, Debug)]
+struct Bygone {
+    roots: Forest,
+    emptied: Vec<u64>,
+}
+
 /// The cold set, as whoever is holding it holds it.
 ///
 /// A plain node keeps [`ColdSet::Roots`]: at most sixty four hashes and two
@@ -104,6 +138,115 @@ pub struct ColdSpend {
 pub enum ColdSet {
     Roots(Forest),
     Archive(Archive),
+}
+
+/// The cold set together with the recent states a proof may still be checked
+/// against.
+#[derive(Clone, Debug, Default)]
+pub struct ColdTier {
+    now: ColdSet,
+    /// Oldest first, at most [`PROOF_WINDOW`] deep.
+    bygone: VecDeque<Bygone>,
+}
+
+impl ColdTier {
+    /// What a node that only validates keeps.
+    pub fn plain() -> Self {
+        Self {
+            now: ColdSet::plain(),
+            bygone: VecDeque::new(),
+        }
+    }
+
+    /// What a node that can answer with proofs keeps.
+    pub fn archiving() -> Self {
+        Self {
+            now: ColdSet::archiving(),
+            bygone: VecDeque::new(),
+        }
+    }
+
+    pub fn is_archiving(&self) -> bool {
+        self.now.is_archiving()
+    }
+
+    pub fn commitment(&self) -> Hash32 {
+        self.now.commitment()
+    }
+
+    pub fn len(&self) -> u64 {
+        self.now.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.now.is_empty()
+    }
+
+    pub fn next_position(&self) -> u64 {
+        self.now.next_position()
+    }
+
+    /// The proof for a position: the one being kept current, or one rebuilt
+    /// from the leaves if this is an archivist.
+    pub fn proof_of(&self, position: u64) -> Option<ForestProof> {
+        self.now.proof_of(position)
+    }
+
+    /// Builds a proof. Only an archivist can answer.
+    pub fn prove(&self, position: u64) -> Option<ForestProof> {
+        self.now.prove(position)
+    }
+
+    /// Where a fallen note sits. Only an archivist can answer.
+    pub fn locate(&self, id: &NoteId, note: &Note) -> Option<u64> {
+        self.now.locate(id, note)
+    }
+
+    /// Whether the proof holds now, or held recently enough and the note has
+    /// not been spent since.
+    ///
+    /// Walking backwards and gathering what each block took out is what stops
+    /// an old proof from resurrecting a note that has already been spent.
+    pub fn verify(&self, position: u64, leaf: Hash32, proof: &ForestProof) -> bool {
+        if self.now.verify(position, leaf, proof) {
+            return true;
+        }
+        // Walking backwards, a block that emptied this place is reached before
+        // any state that still showed it. Once past that block every older
+        // state describes a note that has already been spent, so the search
+        // stops rather than accepting one.
+        for bygone in self.bygone.iter().rev() {
+            if bygone.emptied.contains(&position) {
+                return false;
+            }
+            if bygone.roots.verify(position, leaf, proof) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Files the current state away before a block moves it, and says what fell
+    /// out of the window.
+    fn remember(&mut self, emptied: Vec<u64>) -> Option<Bygone> {
+        self.bygone.push_back(Bygone {
+            roots: self.now.snapshot().roots_only(),
+            emptied,
+        });
+        if self.bygone.len() > PROOF_WINDOW {
+            self.bygone.pop_front()
+        } else {
+            None
+        }
+    }
+
+    /// Puts the window back as it was.
+    fn forget(&mut self, dropped: Option<Bygone>) {
+        self.bygone.pop_back();
+        if let Some(bygone) = dropped {
+            self.bygone.push_front(bygone);
+        }
+    }
 }
 
 impl Default for ColdSet {
@@ -189,10 +332,33 @@ impl ColdSet {
         self.forest().clone()
     }
 
-    fn add(&mut self, leaf: Hash32) -> Option<u64> {
+    fn add(&mut self, leaf: Hash32) -> Option<(u64, ForestProof)> {
         match self {
             Self::Roots(forest) => forest.add(leaf),
             Self::Archive(archive) => archive.add(leaf),
+        }
+    }
+
+    /// Starts keeping the proof for a position current, which is what lets a
+    /// holder spend later without asking anyone.
+    fn watch(&mut self, position: u64, proof: ForestProof) {
+        if let Self::Roots(forest) = self {
+            forest.watch(position, proof);
+        }
+    }
+
+    fn unwatch(&mut self, position: u64) {
+        if let Self::Roots(forest) = self {
+            forest.unwatch(position);
+        }
+    }
+
+    /// The proof for a position: the one being kept current, or one rebuilt
+    /// from the leaves if this is an archivist.
+    pub fn proof_of(&self, position: u64) -> Option<ForestProof> {
+        match self {
+            Self::Roots(forest) => forest.proof_of(position).cloned(),
+            Self::Archive(archive) => archive.prove(position),
         }
     }
 
@@ -266,6 +432,11 @@ pub struct BlockUndo {
     /// it swallowed, and those are not recoverable from the roots that remain.
     /// Sixty four hashes is a small price for not having to hold the forest.
     cold_before: Forest,
+    /// The state that fell out of the acceptance window when this block landed.
+    dropped_bygone: Option<Bygone>,
+    /// Blocks whose fallen notes stopped being spendable without a proof when
+    /// this block landed.
+    grace_dropped: Vec<Vec<(NoteId, u64, Note)>>,
 }
 
 /// Replays a transition onto a hot tree and a cold set.
@@ -278,7 +449,7 @@ fn replay(
     cold: &mut ColdSet,
     transition: &StateTransition,
     height: u64,
-) {
+) -> Vec<(NoteId, u64)> {
     for id in &transition.spent_hot {
         hot_tree.remove(note_key(id));
     }
@@ -299,10 +470,22 @@ fn replay(
     }
     // Eviction runs last, so a note created by this very block can fall
     // straight through when the block creates more notes than the tier holds.
+    let mut fallen = Vec::with_capacity(transition.evicted.len());
     for (id, note) in &transition.evicted {
         hot_tree.remove(note_key(id));
-        cold.add(cold_leaf(id, note));
+        if let Some((position, proof)) = cold.add(cold_leaf(id, note)) {
+            // Every note that falls is watched: for a while, so it stays
+            // spendable without a proof, and for good if someone asked about
+            // this owner. The addition hands over the proof, so this costs
+            // nothing to start.
+            cold.watch(position, proof);
+            fallen.push((*id, position));
+        }
     }
+    for spend in &transition.spent_cold {
+        cold.unwatch(spend.position);
+    }
+    fallen
 }
 
 /// The unspent notes, split across the two tiers.
@@ -313,11 +496,24 @@ pub struct LedgerState {
     /// identifier. Iterating this yields the eviction order directly.
     hot_by_age: BTreeSet<(u64, NoteId)>,
     hot_tree: SparseMerkleTree,
-    cold: ColdSet,
+    cold: ColdTier,
     tip: Option<Tip>,
     /// The tail of the header chain, bounded by [`RECENT_HEADERS`]. The
     /// retarget and the timestamp rules read it; nothing else does.
     recent: Vec<HeaderSummary>,
+    /// Owners whose fallen notes this node keeps track of.
+    ///
+    /// A wallet names itself here and gets back the two things a node cannot
+    /// otherwise tell it: where its fallen notes sit, and a proof that is
+    /// still current. Bounded by what the operator asked for, so a node that
+    /// asked for nothing pays nothing.
+    watching: BTreeSet<PublicKey>,
+    /// Fallen notes belonging to a watched owner.
+    watched_notes: BTreeMap<NoteId, (u64, Note)>,
+    /// What fell in each of the last few blocks, oldest first. Counted in
+    /// blocks so that undoing one is exact.
+    grace: VecDeque<Vec<(NoteId, u64, Note)>>,
+    grace_index: BTreeMap<NoteId, (u64, Note)>,
 }
 
 impl LedgerState {
@@ -330,9 +526,33 @@ impl LedgerState {
     /// someone who lost theirs.
     pub fn archiving() -> Self {
         Self {
-            cold: ColdSet::archiving(),
+            cold: ColdTier::archiving(),
             ..Self::default()
         }
+    }
+
+    /// Asks to be told where this owner's notes go when they fall.
+    ///
+    /// Set before the chain is replayed, since what is learned is learned as
+    /// the notes fall.
+    pub fn watch_owner(&mut self, owner: PublicKey) {
+        self.watching.insert(owner);
+    }
+
+    pub fn is_watching(&self, owner: &PublicKey) -> bool {
+        self.watching.contains(owner)
+    }
+
+    /// Fallen notes belonging to a watched owner, with where they sit.
+    pub fn watched_notes(&self) -> impl Iterator<Item = (NoteId, u64, Note)> + '_ {
+        self.watched_notes
+            .iter()
+            .map(|(id, (position, note))| (*id, *position, *note))
+    }
+
+    /// Where a watched note fell, if it did.
+    pub fn watched_position(&self, id: &NoteId) -> Option<u64> {
+        self.watched_notes.get(id).map(|(position, _)| *position)
     }
 
     pub fn tip(&self) -> Option<Tip> {
@@ -362,6 +582,20 @@ impl LedgerState {
         self.hot.get(id).map(|entry| entry.note)
     }
 
+    /// A note that fell recently enough that every node still holds it, along
+    /// with where it sits.
+    ///
+    /// Spending one of these takes no proof from the spender, because the node
+    /// kept both the note and its proof.
+    pub fn within_grace(&self, id: &NoteId) -> Option<(u64, Note)> {
+        self.grace_index.get(id).copied()
+    }
+
+    /// Notes still spendable without a proof after falling.
+    pub fn grace_len(&self) -> usize {
+        self.grace_index.len()
+    }
+
     pub fn hot_entry(&self, id: &NoteId) -> Option<HotEntry> {
         self.hot.get(id).copied()
     }
@@ -379,7 +613,7 @@ impl LedgerState {
         self.hot.len()
     }
 
-    pub fn cold(&self) -> &ColdSet {
+    pub fn cold(&self) -> &ColdTier {
         &self.cold
     }
 
@@ -466,7 +700,7 @@ impl LedgerState {
     /// already carries.
     pub fn project(&self, transition: &StateTransition, height: u64) -> Hash32 {
         let mut hot_tree = self.hot_tree.clone();
-        let mut cold = ColdSet::Roots(self.cold.snapshot());
+        let mut cold = ColdSet::Roots(self.cold.now.snapshot());
         replay(&mut hot_tree, &mut cold, transition, height);
         compose_state_root(
             hot_tree.root(),
@@ -485,9 +719,18 @@ impl LedgerState {
         let height = header.height;
         let mut undo = BlockUndo {
             previous_tip: self.tip,
-            cold_before: self.cold.snapshot(),
+            cold_before: self.cold.now.snapshot(),
             ..BlockUndo::default()
         };
+        // File the state away before the block moves it, so a spender whose
+        // proof was taken a few blocks ago is still able to spend.
+        undo.dropped_bygone = self.cold.remember(
+            transition
+                .spent_cold
+                .iter()
+                .map(|spend| spend.position)
+                .collect(),
+        );
 
         // Read what the block is about to destroy, before it destroys it.
         for id in &transition.spent_hot {
@@ -501,7 +744,30 @@ impl LedgerState {
             }
         }
 
-        replay(&mut self.hot_tree, &mut self.cold, transition, height);
+        let fallen = replay(&mut self.hot_tree, &mut self.cold.now, transition, height);
+        let recently_fallen = fallen;
+        for (id, position) in &recently_fallen {
+            if let Some((_, note)) = transition.evicted.iter().find(|(other, _)| other == id) {
+                if self.watching.contains(&note.owner) {
+                    self.watched_notes.insert(*id, (*position, *note));
+                }
+            }
+        }
+        for spend in &transition.spent_cold {
+            self.watched_notes.remove(&spend.id);
+        }
+
+        let landed: Vec<(NoteId, u64, Note)> = recently_fallen
+            .iter()
+            .filter_map(|(id, position)| {
+                transition
+                    .evicted
+                    .iter()
+                    .find(|(other, _)| other == id)
+                    .map(|(_, note)| (*id, *position, *note))
+            })
+            .collect();
+        undo.grace_dropped = self.remember_grace(landed);
 
         for id in &transition.spent_hot {
             self.forget_hot(id);
@@ -541,7 +807,10 @@ impl LedgerState {
             .map(|spend| (spend.position, cold_leaf(&spend.id, &spend.note)))
             .collect();
         self.cold
+            .now
             .rewind(&undo.cold_before, transition.evicted.len(), &restored);
+        self.cold.forget(undo.dropped_bygone.clone());
+        self.rewind_grace(&undo.grace_dropped);
 
         for (id, entry) in &undo.unevicted {
             self.hot_tree
@@ -581,9 +850,129 @@ impl LedgerState {
         self.hot_by_age.insert((height, id));
     }
 
+    /// Records what fell in this block and drops whatever has aged out.
+    ///
+    /// Both bounds are fixed and both are checked the same way on every node,
+    /// so what is spendable without a proof is not a matter of opinion.
+    fn remember_grace(
+        &mut self,
+        landed: Vec<(NoteId, u64, Note)>,
+    ) -> Vec<Vec<(NoteId, u64, Note)>> {
+        for (id, position, note) in &landed {
+            self.grace_index.insert(*id, (*position, *note));
+        }
+        self.grace.push_back(landed);
+
+        let mut dropped = Vec::new();
+        while self.grace.len() > GRACE_BLOCKS || self.grace_index.len() > GRACE_NOTES {
+            let Some(oldest) = self.grace.pop_front() else {
+                break;
+            };
+            for (id, position, note) in &oldest {
+                self.grace_index.remove(id);
+                if !self.watching.contains(&note.owner) {
+                    self.cold.now.unwatch(*position);
+                }
+            }
+            dropped.push(oldest);
+        }
+        dropped
+    }
+
+    /// Puts the grace window back as it stood.
+    fn rewind_grace(&mut self, dropped: &[Vec<(NoteId, u64, Note)>]) {
+        if let Some(landed) = self.grace.pop_back() {
+            for (id, _, _) in &landed {
+                self.grace_index.remove(id);
+            }
+        }
+        for oldest in dropped.iter().rev() {
+            for (id, position, note) in oldest {
+                self.grace_index.insert(*id, (*position, *note));
+                let _ = position;
+            }
+            self.grace.push_front(oldest.clone());
+        }
+    }
+
     fn forget_hot(&mut self, id: &NoteId) {
         if let Some(entry) = self.hot.remove(id) {
             self.hot_by_age.remove(&(entry.height, *id));
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use cairn_accumulator::forest::forest_leaf;
+
+    use super::*;
+
+    fn leaf(index: u64) -> Hash32 {
+        forest_leaf(&index.to_le_bytes())
+    }
+
+    #[test]
+    fn a_proof_is_accepted_while_it_is_recent_and_not_after() {
+        let mut tier = ColdTier::archiving();
+        for index in 0..8u64 {
+            tier.now.add(leaf(index));
+        }
+        let proof = tier.prove(0).expect("an archivist can prove it");
+        assert!(tier.verify(0, leaf(0), &proof));
+
+        // Eight more leaves merge the tree the proof describes, so it stops
+        // matching the roots as they now stand.
+        tier.remember(Vec::new());
+        for index in 8..16u64 {
+            tier.now.add(leaf(index));
+        }
+        assert!(
+            !tier.now.verify(0, leaf(0), &proof),
+            "stale against the roots as they are"
+        );
+        assert!(
+            tier.verify(0, leaf(0), &proof),
+            "and still good, because it is recent"
+        );
+
+        // Far enough back and it is no longer worth keeping around.
+        for _ in 0..PROOF_WINDOW {
+            tier.remember(Vec::new());
+        }
+        assert!(
+            !tier.verify(0, leaf(0), &proof),
+            "past the window it is refused"
+        );
+    }
+
+    #[test]
+    fn a_recent_proof_cannot_resurrect_a_note_that_was_spent() {
+        let mut tier = ColdTier::archiving();
+        for index in 0..8u64 {
+            tier.now.add(leaf(index));
+        }
+        let proof = tier.prove(3).expect("an archivist can prove it");
+        assert!(tier.verify(3, leaf(3), &proof));
+
+        // The note is spent, which is what the block records.
+        tier.remember(vec![3]);
+        assert!(tier.now.remove_batch(&[(3, leaf(3), proof.clone())]));
+
+        assert!(
+            !tier.verify(3, leaf(3), &proof),
+            "the proof still describes a real past, and that is exactly why it is refused"
+        );
+    }
+
+    #[test]
+    fn the_window_stays_bounded() {
+        let mut tier = ColdTier::plain();
+        for index in 0..(PROOF_WINDOW as u64 * 3) {
+            tier.now.add(leaf(index));
+            tier.remember(Vec::new());
+        }
+        assert_eq!(tier.bygone.len(), PROOF_WINDOW);
     }
 }

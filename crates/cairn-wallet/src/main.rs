@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use cairn_accumulator::ForestProof;
 use cairn_crypto::{PublicKey, SecretKey};
 use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::transaction::{Input, Transfer};
@@ -147,12 +148,12 @@ fn show_address(arguments: &[String]) -> Result<(), String> {
 fn show_balance(arguments: &[String]) -> Result<(), String> {
     let flags = Flags::parse(arguments)?;
     let secret = keyfile::read(&flags.key_file()?)?;
-    let node = join(&flags)?;
-
     let mine = secret.public_key();
+    let node = join(&flags, mine)?;
     let held = owned_notes(&node, mine);
-    let total = Amount::checked_sum(held.iter().map(|(_, note)| note.value))
+    let total = Amount::checked_sum(held.iter().map(|owned| owned.note.value))
         .ok_or_else(|| "the notes held add up past the monetary ceiling".to_owned())?;
+    let fallen = held.iter().filter(|owned| owned.fallen.is_some()).count();
 
     println!();
     println!("address   {mine}");
@@ -161,12 +162,15 @@ fn show_balance(arguments: &[String]) -> Result<(), String> {
         node.height()
             .map_or_else(|| "-".to_owned(), |h| h.to_string())
     );
-    println!("notes     {}", held.len());
+    println!(
+        "notes     {} ({fallen} of them fallen to the cold set)",
+        held.len()
+    );
     println!("balance   {total}");
     if held.is_empty() {
         println!();
-        println!("Nothing here yet, or nothing this wallet can still see: a note that has");
-        println!("fallen to the cold set needs the record this wallet does not keep yet.");
+        println!("Nothing here yet. If this key should hold something, check that the");
+        println!("wallet reached a peer and caught up to the height you expect.");
     }
     node.shutdown();
     Ok(())
@@ -198,8 +202,8 @@ fn spend(arguments: &[String]) -> Result<(), String> {
         .checked_add(fee)
         .ok_or_else(|| "that total is too large".to_owned())?;
 
-    let node = join(&flags)?;
     let mine = secret.public_key();
+    let node = join(&flags, mine)?;
     let held = owned_notes(&node, mine);
 
     let (spending, gathered) = select(&held, needed)?;
@@ -213,13 +217,17 @@ fn spend(arguments: &[String]) -> Result<(), String> {
     }
 
     let network = rules_of(&flags)?.network;
-    let mut transfer = Transfer::new(
-        spending.iter().map(|(id, _)| Input::hot(*id)).collect(),
-        outputs,
-    );
-    for (position, (_, note)) in spending.iter().enumerate() {
-        let position = u32::try_from(position).map_err(|_| "too many notes".to_owned())?;
-        transfer.sign_input(network, position, note, &secret);
+    let inputs = spending
+        .iter()
+        .map(|owned| match &owned.fallen {
+            None => Input::hot(owned.id),
+            Some((position, proof)) => Input::cold(owned.id, owned.note, *position, proof.clone()),
+        })
+        .collect();
+    let mut transfer = Transfer::new(inputs, outputs);
+    for (index, owned) in spending.iter().enumerate() {
+        let index = u32::try_from(index).map_err(|_| "too many notes".to_owned())?;
+        transfer.sign_input(network, index, &owned.note, &secret);
     }
 
     let id = transfer.id();
@@ -230,7 +238,14 @@ fn spend(arguments: &[String]) -> Result<(), String> {
     println!("sending   {amount} to {recipient}");
     println!("fee       {fee}");
     println!("change    {change}");
-    println!("from      {} note(s)", spending.len());
+    let from_cold = spending
+        .iter()
+        .filter(|owned| owned.fallen.is_some())
+        .count();
+    println!(
+        "from      {} note(s), {from_cold} of them out of the cold set",
+        spending.len()
+    );
     println!("transfer  {id}");
 
     // Hold the connection open long enough for the transfer to leave.
@@ -248,26 +263,59 @@ fn spend(arguments: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Every note the chain still holds in full that belongs to `mine`.
-fn owned_notes(node: &Node, mine: PublicKey) -> Vec<(NoteId, Note)> {
+/// One note this wallet owns, and what it takes to spend it.
+#[derive(Clone, Debug)]
+struct Owned {
+    id: NoteId,
+    note: Note,
+    /// Where it fell and how to prove it, once it has fallen. The node was
+    /// asked to watch this owner, so the proof it hands back is current.
+    fallen: Option<(u64, ForestProof)>,
+}
+
+/// Everything this key owns: what the nodes still hold, and what has fallen.
+fn owned_notes(node: &Node, mine: PublicKey) -> Vec<Owned> {
     node.with_chain(|chain| {
-        chain
-            .state()
+        let state = chain.state();
+        let hot = state
             .hot_notes()
             .filter(|(_, entry)| entry.note.owner == mine)
-            .map(|(id, entry)| (id, entry.note))
-            .collect()
+            .map(|(id, entry)| Owned {
+                id,
+                note: entry.note,
+                fallen: None,
+            });
+
+        let cold = state
+            .watched_notes()
+            .filter(|(_, _, note)| note.owner == mine)
+            .filter_map(|(id, position, note)| {
+                let proof = state.cold().proof_of(position)?;
+                Some(Owned {
+                    id,
+                    note,
+                    fallen: Some((position, proof)),
+                })
+            });
+
+        hot.chain(cold).collect()
     })
 }
 
 /// Picks notes to cover `needed`, largest first so a spend uses as few as it
 /// can and leaves as little dust behind.
-fn select(
-    held: &[(NoteId, Note)],
-    needed: Amount,
-) -> Result<(Vec<(NoteId, Note)>, Amount), String> {
+fn select(held: &[Owned], needed: Amount) -> Result<(Vec<Owned>, Amount), String> {
     let mut sorted = held.to_vec();
-    sorted.sort_by(|left, right| right.1.value.cmp(&left.1.value).then(left.0.cmp(&right.0)));
+    // Notes the nodes still hold come first, because spending one of those
+    // costs no proof on the wire. Then the largest, so a spend uses as few
+    // notes as it can and leaves as little dust behind.
+    sorted.sort_by(|left, right| {
+        left.fallen
+            .is_some()
+            .cmp(&right.fallen.is_some())
+            .then(right.note.value.cmp(&left.note.value))
+            .then(left.id.cmp(&right.id))
+    });
 
     let mut chosen = Vec::new();
     let mut gathered = Amount::ZERO;
@@ -276,7 +324,7 @@ fn select(
             break;
         }
         gathered = gathered
-            .checked_add(entry.1.value)
+            .checked_add(entry.note.value)
             .ok_or_else(|| "these notes add up past the ceiling".to_owned())?;
         chosen.push(entry);
     }
@@ -295,15 +343,19 @@ fn rules_of(flags: &Flags) -> Result<ConsensusParams, String> {
 }
 
 /// Starts this wallet's own node and gives it time to catch up.
-fn join(flags: &Flags) -> Result<Node, String> {
+///
+/// The node is told which owner to watch before it replays anything, because
+/// where a note falls is learned as it falls. That is what lets this wallet
+/// spend from the cold set without asking an archivist for anything.
+fn join(flags: &Flags, mine: PublicKey) -> Result<Node, String> {
     let params = rules_of(flags)?;
 
     let data = PathBuf::from(flags.value("data").unwrap_or("cairn-wallet-data"));
     let listen: SocketAddr = "0.0.0.0:0"
         .parse()
         .map_err(|_| "bad listen address".to_owned())?;
-    let (node, restored) =
-        Node::open(params, listen, &data).map_err(|error| format!("could not start: {error}"))?;
+    let (node, restored) = Node::open_watching(params, listen, &data, &[mine])
+        .map_err(|error| format!("could not start: {error}"))?;
 
     let mut reached = 0usize;
     for seed in flags.values("seed") {

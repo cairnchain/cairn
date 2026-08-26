@@ -11,10 +11,10 @@ workspace = true
 
 [dependencies]
 cairn-chain.workspace = true
+cairn-crypto.workspace = true
 cairn-ledger.workspace = true
 cairn-primitives.workspace = true
 cairn-store.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-cairn-crypto.workspace = true

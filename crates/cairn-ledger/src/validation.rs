@@ -83,9 +83,13 @@ impl ConsensusParams {
                 ..Self::testnet()
             }),
             "testnet" => Some(Self::testnet()),
+            // A throwaway network, so its hot set is small enough that notes
+            // reach the cold set in seconds rather than months. Everything
+            // else is the same, which is the point of having it.
             "devnet" => Some(Self {
                 network: NetworkId::DEVNET,
                 target_block_time: 5,
+                hot_capacity: 64,
                 ..Self::testnet()
             }),
             _ => None,
@@ -299,11 +303,32 @@ fn resolve_input(
     match (state.hot_note(&id), &input.witness) {
         (Some(note), Witness::Hot) => Ok((note, None)),
         (Some(_), Witness::Cold(_)) => Err(TransferError::UnexpectedProof { note_id: id }),
-        // A note absent from the hot set has either fallen to the cold set or
-        // never existed. A plain node holds only the cold commitment, so it
-        // cannot tell which, and asking for a proof is the honest answer to
-        // both.
-        (None, Witness::Hot) => Err(TransferError::MissingProof { note_id: id }),
+        // A note that fell moments ago is still held by every node, along with
+        // its proof, so spending it takes nothing extra from whoever wrote the
+        // transfer. Without this the line between the tiers would be a cliff,
+        // and a transfer would lose whenever a block landed while it was being
+        // written.
+        (None, Witness::Hot) => match state.within_grace(&id) {
+            None => Err(TransferError::MissingProof { note_id: id }),
+            Some((position, note)) => {
+                let proof = state
+                    .cold()
+                    .proof_of(position)
+                    .ok_or(TransferError::MissingProof { note_id: id })?;
+                // Still checked: a note that fell within the window and has
+                // since been spent is no longer there to find.
+                if !state.cold().verify(position, cold_leaf(&id, &note), &proof) {
+                    return Err(TransferError::UnknownNote(id));
+                }
+                let spend = ColdSpend {
+                    id,
+                    position,
+                    note,
+                    proof,
+                };
+                Ok((note, Some(spend)))
+            }
+        },
         (None, Witness::Cold(cold)) => {
             let leaf = cold_leaf(&id, &cold.note);
             if !state.cold().verify(cold.position, leaf, &cold.proof) {

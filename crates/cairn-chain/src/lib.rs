@@ -123,6 +123,15 @@ impl ChainStore {
         }
     }
 
+    /// Asks to be told where this owner's notes go when they fall, and to
+    /// keep their proofs current.
+    ///
+    /// Set before any block is applied, since what is learned is learned as
+    /// the notes fall.
+    pub fn watch_owner(&mut self, owner: cairn_crypto::PublicKey) {
+        self.state.watch_owner(owner);
+    }
+
     /// Whether this node can answer with proofs.
     pub fn is_archiving(&self) -> bool {
         self.state.cold().is_archiving()

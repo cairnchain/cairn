@@ -12,6 +12,7 @@
 use cairn_accumulator::ForestProof;
 use cairn_crypto::SecretKey;
 use cairn_ledger::note::{Note, NoteId};
+use cairn_ledger::state::GRACE_BLOCKS;
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{
     assemble_block, connect_block, BlockError, ConsensusParams, TransferError,
@@ -201,13 +202,45 @@ fn a_note_that_fell_can_still_be_spent_with_a_proof() {
 }
 
 #[test]
-fn spending_a_fallen_note_without_a_proof_is_refused() {
+fn a_note_that_fell_moments_ago_still_spends_without_a_proof() {
     let params = params();
     let miner = wallet(1);
-    let mut state = LedgerState::archiving();
+    let mut state = LedgerState::new();
+
+    let notes = mine_empty(&mut state, &params, &miner, 12);
+    // The last CAPACITY notes are still held; the one before them is the most
+    // recently fallen, which is the case a transfer in flight runs into.
+    let (fallen, note) = notes[notes.len() - CAPACITY - 1];
+    assert!(state.hot_note(&fallen).is_none());
+    assert!(state.within_grace(&fallen).is_some());
+
+    let mut transfer = Transfer::new(
+        vec![Input::hot(fallen)],
+        vec![Note::new(note.value, wallet(2).public_key())],
+    );
+    transfer.sign_input(params.network, 0, &note, &miner);
+    let transfer_id = transfer.id();
+    mine(&mut state, &params, &miner, vec![transfer]);
+
+    assert_eq!(
+        state.hot_note(&NoteId::new(transfer_id, 0)),
+        Some(Note::new(note.value, wallet(2).public_key()))
+    );
+}
+
+#[test]
+fn a_note_that_fell_long_ago_needs_a_proof() {
+    let params = params();
+    let miner = wallet(1);
+    let mut state = LedgerState::new();
 
     let notes = mine_empty(&mut state, &params, &miner, 12);
     let (fallen, note) = notes[0];
+    mine_empty(&mut state, &params, &miner, GRACE_BLOCKS as u64 + 2);
+    assert!(
+        state.within_grace(&fallen).is_none(),
+        "it aged out of the window"
+    );
 
     let mut transfer = Transfer::new(
         vec![Input::hot(fallen)],
@@ -221,12 +254,61 @@ fn spending_a_fallen_note_without_a_proof_is_refused() {
         [0; 8],
     );
     assert!(matches!(
-        assemble_block(&state, coinbase, vec![transfer], &params, 9_000, 0),
+        assemble_block(&state, coinbase, vec![transfer], &params, 900_000, 0),
         Err(BlockError::InvalidTransfer {
             index: 0,
             source: TransferError::MissingProof { .. }
         })
     ));
+}
+
+#[test]
+fn a_note_spent_out_of_the_grace_window_cannot_be_spent_again() {
+    let params = params();
+    let miner = wallet(1);
+    let mut state = LedgerState::new();
+
+    let notes = mine_empty(&mut state, &params, &miner, 12);
+    let (fallen, note) = notes[notes.len() - CAPACITY - 1];
+    let spend = |to: &SecretKey| {
+        let mut transfer = Transfer::new(
+            vec![Input::hot(fallen)],
+            vec![Note::new(note.value, to.public_key())],
+        );
+        transfer.sign_input(params.network, 0, &note, &miner);
+        transfer
+    };
+
+    mine(&mut state, &params, &miner, vec![spend(&wallet(2))]);
+    // Still inside the window, which is exactly the case worth checking: the
+    // window makes a fallen note spendable, and must not make a spent one so.
+    assert!(state.within_grace(&fallen).is_some());
+
+    let coinbase = CoinbaseTransaction::new(
+        state.next_height().unwrap(),
+        vec![Note::new(params.initial_reward, miner.public_key())],
+        [0; 8],
+    );
+    let outcome = assemble_block(
+        &state,
+        coinbase,
+        vec![spend(&wallet(3))],
+        &params,
+        900_000,
+        0,
+    );
+    // Refused either way: the node let the proof go when the note was spent,
+    // and had it kept one, the place it points at is empty now.
+    assert!(
+        matches!(
+            outcome,
+            Err(BlockError::InvalidTransfer {
+                index: 0,
+                source: TransferError::MissingProof { .. } | TransferError::UnknownNote(_)
+            })
+        ),
+        "spent once already: {outcome:?}"
+    );
 }
 
 #[test]
@@ -263,7 +345,7 @@ fn offering_a_proof_for_a_note_still_in_the_hot_set_is_refused() {
 }
 
 #[test]
-fn a_proof_taken_before_the_cold_set_moved_is_refused() {
+fn a_proof_taken_a_few_blocks_ago_is_still_good() {
     let params = params();
     let miner = wallet(1);
     let mut state = LedgerState::archiving();
@@ -272,26 +354,14 @@ fn a_proof_taken_before_the_cold_set_moved_is_refused() {
     let (first, first_note) = notes[0];
     let (second, second_note) = notes[1];
 
-    // Take a proof now, then let the cold set change underneath it.
-    let outdated = spend_cold(&state, &params, first, first_note, &miner, &wallet(2));
+    // Taken now, and the cold set moves before it is used. A spender cannot
+    // be expected to be exactly at the tip: on a busy chain a block lands
+    // while the transfer is still being written.
+    let earlier = spend_cold(&state, &params, first, first_note, &miner, &wallet(2));
     let moving = spend_cold(&state, &params, second, second_note, &miner, &wallet(3));
     mine(&mut state, &params, &miner, vec![moving]);
 
-    let coinbase = CoinbaseTransaction::new(
-        state.next_height().unwrap(),
-        vec![Note::new(params.initial_reward, miner.public_key())],
-        [0; 8],
-    );
-    assert!(matches!(
-        assemble_block(&state, coinbase, vec![outdated], &params, 9_000, 0),
-        Err(BlockError::InvalidTransfer {
-            index: 0,
-            source: TransferError::InvalidProof { .. }
-        })
-    ));
-
-    let refreshed = spend_cold(&state, &params, first, first_note, &miner, &wallet(2));
-    mine(&mut state, &params, &miner, vec![refreshed]);
+    mine(&mut state, &params, &miner, vec![earlier]);
 }
 
 #[test]
@@ -476,4 +546,102 @@ fn a_block_that_evicts_is_rejected_when_its_state_root_is_wrong() {
         before,
         "the failed block changed nothing"
     );
+}
+
+#[test]
+fn a_watched_owner_spends_from_the_cold_set_with_nobody_holding_it() {
+    let params = params();
+    let miner = wallet(1);
+    let alice = wallet(2);
+
+    // A plain node: sixty four hashes and no leaves at all.
+    let mut state = LedgerState::new();
+    assert!(!state.cold().is_archiving());
+    state.watch_owner(miner.public_key());
+
+    let notes = mine_empty(&mut state, &params, &miner, 12);
+    let (fallen, note) = notes[0];
+    assert!(state.hot_note(&fallen).is_none(), "the note fell");
+    assert!(
+        state.cold().locate(&fallen, &note).is_none(),
+        "and nobody here holds it"
+    );
+
+    // The node was told to watch this owner, so it knows where the note went
+    // and has kept the proof current on its own.
+    let position = state.watched_position(&fallen).expect("it kept track");
+    let proof = state
+        .cold()
+        .proof_of(position)
+        .expect("and kept the proof current");
+
+    let mut transfer = Transfer::new(
+        vec![Input::cold(fallen, note, position, proof)],
+        vec![Note::new(note.value, alice.public_key())],
+    );
+    transfer.sign_input(params.network, 0, &note, &miner);
+    let transfer_id = transfer.id();
+    mine(&mut state, &params, &miner, vec![transfer]);
+
+    assert_eq!(
+        state.hot_note(&NoteId::new(transfer_id, 0)),
+        Some(Note::new(note.value, alice.public_key())),
+        "spent, from a set this node has never held"
+    );
+    assert!(
+        state.watched_position(&fallen).is_none(),
+        "and it stops being tracked"
+    );
+}
+
+#[test]
+fn a_proof_kept_by_the_node_stays_good_while_the_cold_set_moves() {
+    let params = params();
+    let miner = wallet(1);
+    let mut state = LedgerState::new();
+    state.watch_owner(miner.public_key());
+
+    let notes = mine_empty(&mut state, &params, &miner, 10);
+    let (mine_note, note) = notes[0];
+    let position = state.watched_position(&mine_note).expect("it fell");
+
+    // Twenty more blocks, each pushing another note down, so the trees the
+    // watched note sits in merge repeatedly.
+    mine_empty(&mut state, &params, &miner, 20);
+
+    let proof = state.cold().proof_of(position).expect("still current");
+    assert!(
+        state
+            .cold()
+            .verify(position, cairn_ledger::cold_leaf(&mine_note, &note), &proof),
+        "the node brought the proof along as the forest grew"
+    );
+}
+
+#[test]
+fn a_node_keeps_proofs_for_the_grace_window_and_nothing_more() {
+    let params = params();
+    let miner = wallet(1);
+    let mut state = LedgerState::new();
+
+    let notes = mine_empty(&mut state, &params, &miner, 12);
+    let (recent, _) = notes[notes.len() - CAPACITY - 1];
+    let (old, _) = notes[0];
+
+    let (position, _) = state.within_grace(&recent).expect("it fell recently");
+    assert!(
+        state.cold().proof_of(position).is_some(),
+        "kept while it can still be spent"
+    );
+
+    // Nobody asked about this owner, so once the window passes the node lets
+    // the proof go and keeps only what it must.
+    mine_empty(&mut state, &params, &miner, GRACE_BLOCKS as u64 + 2);
+    assert!(state.within_grace(&old).is_none());
+    assert!(state.within_grace(&recent).is_none());
+    assert!(
+        state.cold().proof_of(position).is_none(),
+        "and then lets it go"
+    );
+    assert_eq!(state.watched_notes().count(), 0);
 }

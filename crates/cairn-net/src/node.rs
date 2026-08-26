@@ -21,6 +21,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cairn_chain::{Accepted, ChainError, ChainStore};
+use cairn_crypto::PublicKey;
 use cairn_ledger::block::Block;
 use cairn_ledger::note::NetworkId;
 use cairn_ledger::transaction::Transfer;
@@ -200,7 +201,21 @@ impl Node {
         address: SocketAddr,
         directory: impl Into<PathBuf>,
     ) -> Result<(Self, Restored), NodeError> {
-        Self::open_with(params, address, directory, false)
+        Self::open_with(params, address, directory, false, &[])
+    }
+
+    /// The same, keeping track of where these owners' notes go when they fall
+    /// and holding their proofs current.
+    ///
+    /// This is what a wallet asks for. The owners have to be named before the
+    /// chain is replayed, because what is learned is learned as notes fall.
+    pub fn open_watching(
+        params: ConsensusParams,
+        address: SocketAddr,
+        directory: impl Into<PathBuf>,
+        owners: &[PublicKey],
+    ) -> Result<(Self, Restored), NodeError> {
+        Self::open_with(params, address, directory, false, owners)
     }
 
     /// The same, keeping the cold set so it can answer with proofs.
@@ -209,7 +224,7 @@ impl Node {
         address: SocketAddr,
         directory: impl Into<PathBuf>,
     ) -> Result<(Self, Restored), NodeError> {
-        Self::open_with(params, address, directory, true)
+        Self::open_with(params, address, directory, true, &[])
     }
 
     fn open_with(
@@ -217,6 +232,7 @@ impl Node {
         address: SocketAddr,
         directory: impl Into<PathBuf>,
         archiving: bool,
+        owners: &[PublicKey],
     ) -> Result<(Self, Restored), NodeError> {
         let directory = directory.into();
         let lock = DirectoryLock::acquire(&directory)?;
@@ -227,6 +243,11 @@ impl Node {
         } else {
             ChainStore::new(params)
         };
+        // Named before anything is replayed: where a note falls is learned as
+        // it falls, and there is no going back for it afterwards.
+        for owner in owners {
+            chain.watch_owner(*owner);
+        }
         let now = unix_now();
         let mut applied = 0usize;
         for block in &recovered.blocks {

@@ -22,6 +22,7 @@
 //! a forest that never shrinks, and buys a holder who can keep their own proof
 //! current from what every block already carries.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
@@ -134,6 +135,15 @@ pub struct Forest {
     leaves: u64,
     /// Leaves not yet removed.
     live: u64,
+    /// Positions whose proofs are kept current as the forest moves.
+    ///
+    /// Everything it takes to do that is already passing through: a leaf that
+    /// is added brings the roots it merged with, and a leaf that is removed
+    /// brings the proof of whoever removed it. So a holder who says which
+    /// places it cares about never has to ask anyone anything again.
+    ///
+    /// Watching nothing costs nothing, which is what a plain node does.
+    watched: BTreeMap<u64, ForestProof>,
 }
 
 impl Default for Forest {
@@ -148,6 +158,44 @@ impl Forest {
             roots: vec![None; MAX_HEIGHT],
             leaves: 0,
             live: 0,
+            watched: BTreeMap::new(),
+        }
+    }
+
+    /// Starts keeping the proof for `position` current.
+    ///
+    /// Everything it takes is already passing through the forest: a leaf that
+    /// arrives brings the trees it merged with, and a leaf that leaves brings
+    /// the proof of whoever removed it. A holder that says which places it
+    /// cares about never has to ask anyone anything again.
+    pub fn watch(&mut self, position: u64, proof: ForestProof) {
+        self.watched.insert(position, proof);
+    }
+
+    pub fn unwatch(&mut self, position: u64) -> Option<ForestProof> {
+        self.watched.remove(&position)
+    }
+
+    /// The proof for a watched position, as it stands now.
+    pub fn proof_of(&self, position: u64) -> Option<&ForestProof> {
+        self.watched.get(&position)
+    }
+
+    pub fn watched_count(&self) -> usize {
+        self.watched.len()
+    }
+
+    /// The same forest with nothing watched.
+    ///
+    /// Kept for the window of recent states a spender's proof may be checked
+    /// against, where what anyone is watching is beside the point.
+    #[must_use]
+    pub fn roots_only(&self) -> Self {
+        Self {
+            roots: self.roots.clone(),
+            leaves: self.leaves,
+            live: self.live,
+            watched: BTreeMap::new(),
         }
     }
 
@@ -183,10 +231,11 @@ impl Forest {
     ///
     /// Only the roots are read and written, which is what lets a node that
     /// holds nothing else keep the commitment current.
-    pub fn add(&mut self, leaf: Hash32) -> Option<u64> {
+    pub fn add(&mut self, leaf: Hash32) -> Option<(u64, ForestProof)> {
         let position = self.leaves;
         let next = self.leaves.checked_add(1)?;
 
+        let mut siblings = Vec::new();
         let mut carry = leaf;
         let mut height = 0usize;
         loop {
@@ -197,6 +246,12 @@ impl Forest {
                     break;
                 }
                 Some(existing) => {
+                    // The new leaf rides on the right of every merge, so the
+                    // trees it swallows are its own siblings, in order. Its
+                    // proof therefore falls out of the addition itself and
+                    // costs nothing to produce.
+                    siblings.push(existing);
+                    self.extend_watched(height, existing, carry);
                     carry = node_hash(existing, carry);
                     height = height.checked_add(1)?;
                 }
@@ -205,7 +260,40 @@ impl Forest {
 
         self.leaves = next;
         self.live = self.live.saturating_add(1);
-        Some(position)
+        Some((position, ForestProof { siblings }))
+    }
+
+    /// Gives every watched position inside a merged pair its new sibling.
+    ///
+    /// At this step the left half is the tree that stood at `level` and the
+    /// right half is everything smaller plus the leaf being added. A watched
+    /// place in one half gains the other half as its sibling.
+    fn extend_watched(&mut self, level: usize, left: Hash32, right: Hash32) {
+        let shift = u32::try_from(level.saturating_add(1)).unwrap_or(u32::MAX);
+        let Some(start) = self
+            .leaves
+            .checked_shr(shift)
+            .and_then(|high| high.checked_shl(shift))
+        else {
+            return;
+        };
+        let Some(span) = 1u64.checked_shl(u32::try_from(level).unwrap_or(u32::MAX)) else {
+            return;
+        };
+        let Some(middle) = start.checked_add(span) else {
+            return;
+        };
+        let Some(end) = middle.checked_add(span) else {
+            return;
+        };
+
+        for (position, proof) in &mut self.watched {
+            if (start..middle).contains(position) {
+                proof.siblings.push(right);
+            } else if (middle..end).contains(position) {
+                proof.siblings.push(left);
+            }
+        }
     }
 
     /// Whether `leaf` sits at `position`, according to `proof`.
@@ -244,7 +332,34 @@ impl Forest {
             None => return false,
         }
         self.live = self.live.saturating_sub(1);
+        self.refresh_watched(height, offset, index, proof);
         true
+    }
+
+    /// Brings every watched proof in the same tree up to date after a removal.
+    fn refresh_watched(
+        &mut self,
+        height: usize,
+        offset: u64,
+        emptied: u64,
+        emptied_proof: &ForestProof,
+    ) {
+        let leaves = self.leaves;
+        for (position, proof) in &mut self.watched {
+            let Some((other_height, other_offset)) = tree_of(leaves, *position) else {
+                continue;
+            };
+            if other_height != height || other_offset != offset {
+                continue;
+            }
+            let Some(index) = position.checked_sub(offset) else {
+                continue;
+            };
+            if index == emptied {
+                continue;
+            }
+            refresh(index, proof, emptied, emptied_proof);
+        }
     }
 
     /// Empties several leaves at once, all proved against the roots as they
@@ -373,10 +488,10 @@ impl Archive {
         self.forest.is_empty()
     }
 
-    pub fn add(&mut self, leaf: Hash32) -> Option<u64> {
-        let position = self.forest.add(leaf)?;
+    pub fn add(&mut self, leaf: Hash32) -> Option<(u64, ForestProof)> {
+        let added = self.forest.add(leaf)?;
         self.leaves.push(leaf);
-        Some(position)
+        Some(added)
     }
 
     /// Removes the leaf at `position`, building the proof itself.
