@@ -1,0 +1,18 @@
+[package]
+name = "cairn-ledger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cairn-primitives.workspace = true
+cairn-crypto.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
