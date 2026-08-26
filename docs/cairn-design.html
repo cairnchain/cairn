@@ -241,7 +241,7 @@
     <h1 class="mark">CAIRN</h1>
     <p class="thesis">Une monnaie que <em>ton téléphone</em> vérifie lui-même — aujourd'hui, et dans trente ans.</p>
     <div class="metaline">
-      <span>Document de conception · v0.2</span>
+      <span>Document de conception · v0.3</span>
       <span>26 août 2026</span>
       <span>Nom de code — provisoire</span>
     </div>
@@ -279,6 +279,19 @@
       <p>Sa propriété — des mathématiques établies, pas une astuce — est qu'avec ce sceau seul, on peut <strong>vérifier qu'une page est authentique sans jamais avoir eu le cahier</strong>.</p>
       <p>Le fonctionnement s'inverse alors : c'est celui qui dépense qui présente sa page, accompagnée d'une preuve qu'elle appartient bien au cahier officiel. Le nœud vérifie la preuve, met à jour le sceau, et n'a rien à conserver.</p>
       <p><strong>Le cahier peut grossir à l'infini ; le sceau, lui, garde toujours la même taille.</strong> Un nœud complet tient sur un ordinateur à soixante euros. Dans vingt ans aussi. Et sur un téléphone.</p>
+      <div class="tablewrap">
+        <table>
+          <caption>Mesuré sur l'implémentation</caption>
+          <thead><tr><th>Billets</th><th>Nœud classique</th><th>Nœud Cairn</th><th>Preuve portée</th></tr></thead>
+          <tbody>
+            <tr><td class="num">1 000</td><td class="num">76 ko</td><td class="num">32 o</td><td class="num">369 o</td></tr>
+            <tr><td class="num">10 000</td><td class="num">760 ko</td><td class="num">32 o</td><td class="num">471 o</td></tr>
+            <tr><td class="num">100 000</td><td class="num">8 Mo</td><td class="num">32 o</td><td class="num">582 o</td></tr>
+            <tr class="us"><td class="num">1 000 000</td><td class="num">76 Mo</td><td class="num">32 o</td><td class="num">685 o</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="margin-top:1.6rem">Mille fois plus de billets : la première colonne est multipliée par mille, la deuxième ne bouge pas d'un octet, et la preuve que porte un utilisateur ne fait même pas le double. C'est toute la thèse, en quatre lignes.</p>
     </div>
   </section>
 
@@ -335,6 +348,11 @@
           <span class="why">Rien n'est jamais réellement perdu : tout est reconstituable depuis l'historique complet de la chaîne. Il faut seulement que quelqu'un le conserve. On en fait un rôle ouvert et rémunéré — garder une copie, se faire payer pour refabriquer une preuve. Sans permission, sans privilège. Bitcoin et Ethereum survivent déjà exactement ainsi, à ceci près qu'ils ne le disent pas et ne rémunèrent personne.</span>
         </div>
         <div class="dec">
+          <span class="q">Mécanisme du sceau</span>
+          <span class="a">Un arbre de hachage, sans aucune cérémonie de confiance</span>
+          <span class="why">Les constructions à preuves plus courtes exigent une cérémonie d'installation dont le secret doit être détruit. Un participant qui en garderait une copie pourrait fabriquer de fausses preuves d'appartenance, c'est-à-dire créer de la monnaie à partir de rien, indéfiniment, sans que personne puisse le détecter ; et aucun audit ne peut établir après coup qu'un secret a bien disparu. Un arbre de hachage n'exige aucune cérémonie, se vérifie en quelques dizaines de hachages, et résiste aux ordinateurs quantiques, ce dont aucune des familles écartées n'est capable.</span>
+        </div>
+        <div class="dec">
           <span class="q">Langage d'implémentation</span>
           <span class="a">Rust</span>
           <span class="why">Sécurité mémoire — un dépassement dans un validateur, ce sont des fonds volés. Pas de ramasse-miettes, donc un temps d'exécution des blocs prévisible. Le meilleur écosystème cryptographique existant. Et le langage où le code d'un nœud est le plus auditable par des tiers, ce qui compte le jour où l'on demande à des inconnus de le faire tourner.</span>
@@ -373,7 +391,6 @@
       <h2>Ce qui reste ouvert</h2>
       <p>Les questions encore posées, par ordre d'urgence. Aucune ne bloque le démarrage du code.</p>
       <ul class="open">
-        <li><b>Le mécanisme de sceau.</b> Trois familles possibles, avec un arbitrage réel entre taille des preuves, vitesse de vérification, et besoin ou non d'une cérémonie d'installation de confiance. Ce dernier point est éliminatoire pour un projet qui se veut sans autorité : il oriente fortement le choix.</li>
         <li><b>La taille du tiroir.</b> Elle fixe à la fois le coût réel d'un nœud et le délai moyen avant qu'un billet inactif ne descende. À calibrer sur des chiffres, pas à l'intuition.</li>
         <li><b>Le consensus.</b> Volontairement classique et éprouvé — l'innovation est ailleurs. Reste à choisir lequel, et sur quel critère : accessibilité du minage pour des particuliers, ou rapidité de finalité.</li>
         <li><b>L'émission.</b> Combien de monnaie créée, à quel rythme, pour qui. C'est aussi ce qui rémunère les archivistes, donc c'est lié à la décision III.</li>
@@ -388,7 +405,8 @@
       <h2>L'ordre des choses</h2>
       <ol class="road">
         <li class="done"><div><b>Le cœur<span class="state">Fait</span></b><span>Billets, signatures, blocs, validation. Écrit en Rust, 50 tests au vert : une chaîne produit des blocs, les vérifie, refuse une double dépense, une signature falsifiée, une création de valeur, un bloc rattaché au mauvais parent.</span></div></li>
-        <li><div><b>Le sceau</b><span>L'accumulateur et les preuves. Le morceau le plus délicat, et celui qui définit le projet.</span></div></li>
+        <li class="done"><div><b>Le sceau<span class="state">Fait</span></b><span>L'accumulateur et les preuves d'appartenance et d'absence. Un million de billets tiennent dans une empreinte de 32 octets ; une preuve pèse 685 octets en moyenne. Une preuve périmée cesse de fonctionner, une preuve ne peut pas être rejouée pour un billet voisin, et l'empreinte ne dépend que du contenu, jamais de l'ordre des opérations.</span></div></li>
+        <li><div><b>Les deux tiroirs</b><span>Brancher le sceau dans la chaîne : l'ensemble chaud plafonné que les nœuds gardent, la cave qui ne vit que dans l'empreinte, et la règle de descente. L'accumulateur existe et se tient tout seul, mais il n'est pas encore la mémoire de la chaîne.</span></div></li>
         <li><div><b>Le réseau</b><span>Plusieurs nœuds indépendants qui se découvrent, se propagent les blocs, et se réconcilient après une coupure. Testé sous pannes et partitions.</span></div></li>
         <li><div><b>Le portefeuille</b><span>D'abord en ligne de commande, puis sur téléphone — un portefeuille qui est lui-même un nœud complet. C'est la démonstration vivante de toute la thèse.</span></div></li>
         <li><div><b>Le testnet public</b><span>Une monnaie sans valeur, ouverte, que des inconnus font tourner. Le seul vrai test de décentralisation : tout ce qui précède peut être parfait et échouer ici.</span></div></li>
@@ -403,8 +421,8 @@
   </section>
 
   <footer>
-    <span>Cairn · document de conception v0.2</span>
-    <span>Statut — cœur du grand livre implémenté</span>
+    <span>Cairn · document de conception v0.3</span>
+    <span>Statut — grand livre et accumulateur implémentés</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 
