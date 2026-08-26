@@ -15,15 +15,16 @@ The design document is `docs/cairn-design.html`.
 
 ## Status
 
-Pre-alpha. There is no network, no consensus, and no released binary. What
-exists is the ledger core: notes, transactions, blocks, and the rules that
-connect one block to the next.
+Pre-alpha. There is no released binary and no public network.
 
-The accumulator that makes the whole design work is not implemented yet. The
-state commitment is currently recomputed from the full note set, which is
-correct but does not scale. It sits behind `LedgerState::projected_state_root`
-and the `NoteResolver` trait, which are the two seams it will replace, and the
-block header field it fills is already final.
+The protocol is complete and runs end to end: notes and transactions, the
+accumulator that replaces the state database, the two tiers, proof of work with
+a difficulty that retargets in a handful of blocks, the fork choice, atomic
+reorganisation, and syncing between nodes over TCP.
+
+Two things stand between this and a network strangers can join. A node keeps
+its chain in memory, so restarting one loses it. And a node has to be told
+where its peers are, because nothing gossips addresses yet.
 
 ## Layout
 
@@ -31,19 +32,42 @@ block header field it fills is already final.
 | --- | --- |
 | `cairn-primitives` | Domain separated hashing, checked amounts, canonical encoding, Merkle roots |
 | `cairn-crypto` | Ed25519 keys and signatures, with canonical encoding and weak key rejection |
-| `cairn-ledger` | Notes, transactions, blocks, state, and the consensus rules |
+| `cairn-accumulator` | The sparse Merkle tree a node holds in place of the ledger, and its proofs |
+| `cairn-ledger` | Notes, transactions, blocks, the two tiers, and the consensus rules |
+| `cairn-chain` | The block tree, the fork choice, and reorganisation |
+| `cairn-net` | The wire protocol, block propagation, and syncing over TCP |
 
 ## Building
 
 ```
 cargo test --workspace
 cargo clippy --workspace --all-targets
-cargo run -p cairn-ledger --example walkthrough
 ```
+
+Four runnable demonstrations, each showing one part of the design:
+
+```
+cargo run -p cairn-ledger --example walkthrough
+cargo run --release -p cairn-accumulator --example scale
+cargo run -p cairn-chain --example partition
+cargo run --release -p cairn-net --example network
+```
+
+## How this is built
 
 The workspace denies `unsafe`, panicking helpers, unchecked arithmetic, and
 slice indexing. Consensus code takes the current time as an argument rather
-than reading a clock.
+than reading a clock, and holds no iteration order that varies between
+processes.
+
+Anything that decides whether two nodes agree is written so it can be tested
+without a network: the sync layer takes messages and returns messages, and the
+transport under it decides nothing.
+
+The dependency tree is deliberately small. There is no asynchronous runtime: a
+node keeps tens of connections rather than thousands, so one reader thread and
+one writer thread per peer costs nothing and leaves far less to audit inside a
+process people are being asked to run.
 
 ## Licence
 

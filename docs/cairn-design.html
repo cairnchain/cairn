@@ -241,7 +241,7 @@
     <h1 class="mark">CAIRN</h1>
     <p class="thesis">Une monnaie que <em>ton téléphone</em> vérifie lui-même — aujourd'hui, et dans trente ans.</p>
     <div class="metaline">
-      <span>Document de conception · v0.5</span>
+      <span>Document de conception · v0.6</span>
       <span>26 août 2026</span>
       <span>Nom de code — provisoire</span>
     </div>
@@ -412,7 +412,8 @@
         <li class="done"><div><b>Le sceau<span class="state">Fait</span></b><span>L'accumulateur et les preuves d'appartenance et d'absence. Un million de billets tiennent dans une empreinte de 32 octets ; une preuve pèse 685 octets en moyenne. Une preuve périmée cesse de fonctionner, une preuve ne peut pas être rejouée pour un billet voisin, et l'empreinte ne dépend que du contenu, jamais de l'ordre des opérations.</span></div></li>
         <li class="done"><div><b>Les deux tiroirs<span class="state">Fait</span></b><span>Le sceau est branché : le tiroir plafonné que les nœuds gardent, la cave qui ne vit que dans l'empreinte, la descente automatique du plus ancien, et la dépense sur preuve pour ce qui est descendu. Un billet qui remonte de la cave revient dans le tiroir. L'empreinte du bloc engage les deux tiroirs et leurs effectifs, donc la frontière elle-même est vérifiable.</span></div></li>
         <li class="done"><div><b>Le consensus et l'arbitrage<span class="state">Fait</span></b><span>Minage, difficulté qui se réajuste en quelques blocs, horodatage adossé à la médiane des blocs récents, et la règle qui départage deux versions concurrentes de l'histoire. Chaque bloc appliqué inscrit son propre inverse, donc revenir en arrière coûte les blocs déplacés et non toute l'histoire. Un changement de branche est tout ou rien : un bloc invalide découvert en cours de route ramène le nœud exactement là où il était.</span></div></li>
-        <li><div><b>Le réseau</b><span>La tuyauterie : le transport entre machines, la découverte de pairs, la propagation des blocs et la synchronisation d'un nœud qui démarre de zéro. Les règles de réconciliation existent et sont testées ; ce qui manque, c'est ce qui transporte les blocs d'une machine à l'autre.</span></div></li>
+        <li class="done"><div><b>Le réseau<span class="state">Fait</span></b><span>Le transport entre machines, la présentation entre pairs, la propagation des blocs et la synchronisation d'un nœud qui démarre de zéro. Cinq nœuds branchés en ligne se transmettent une chaîne entière et un bloc neuf remonte la ligne de proche en proche. Tout ce qui décide quoi que ce soit est écrit pour être testable sans réseau ; la couche qui transporte, elle, ne décide de rien.</span></div></li>
+        <li><div><b>Tenir dans la durée</b><span>Deux manques avant qu'un inconnu puisse rejoindre : un nœud garde sa chaîne en mémoire et la perd s'il redémarre ; et il faut lui indiquer où sont ses pairs, rien ne se propage encore les adresses. Ni l'un ni l'autre ne touche au protocole, mais aucun réseau public ne tient sans eux.</span></div></li>
         <li><div><b>Le portefeuille</b><span>D'abord en ligne de commande, puis sur téléphone — un portefeuille qui est lui-même un nœud complet. C'est la démonstration vivante de toute la thèse.</span></div></li>
         <li><div><b>Le testnet public</b><span>Une monnaie sans valeur, ouverte, que des inconnus font tourner. Le seul vrai test de décentralisation : tout ce qui précède peut être parfait et échouer ici.</span></div></li>
       </ol>
@@ -426,8 +427,8 @@
   </section>
 
   <footer>
-    <span>Cairn · document de conception v0.5</span>
-    <span>Statut — protocole complet, transport à écrire</span>
+    <span>Cairn · document de conception v0.6</span>
+    <span>Statut — protocole complet, nœuds qui se synchronisent</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 
