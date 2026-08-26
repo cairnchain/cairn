@@ -53,6 +53,45 @@ impl Amount {
         }
     }
 
+    /// Parses a decimal amount in whole CAIRN, such as `12.5`.
+    ///
+    /// The counterpart of what [`Display`](std::fmt::Display) prints, so an
+    /// amount a person reads on screen can be typed straight back in. No
+    /// separators, no sign, and no more than eight decimals, because a ninth
+    /// would be silently discarded and money is not a place for that.
+    pub fn from_cairn(text: &str) -> Option<Self> {
+        let text = text.trim();
+        let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+        if whole.is_empty() && fraction.is_empty() {
+            return None;
+        }
+        if fraction.len() > 8 {
+            return None;
+        }
+        if !whole.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        if !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+
+        let whole: u64 = if whole.is_empty() {
+            0
+        } else {
+            whole.parse().ok()?
+        };
+        let mut padded = fraction.to_owned();
+        while padded.len() < 8 {
+            padded.push('0');
+        }
+        let fraction: u64 = padded.parse().ok()?;
+
+        let pebbles = whole
+            .checked_mul(PEBBLES_PER_CAIRN)?
+            .checked_add(fraction)?;
+        Self::from_pebbles(pebbles)
+    }
+
     /// Sums an iterator, failing on overflow or on breaching the ceiling.
     pub fn checked_sum<I: IntoIterator<Item = Self>>(amounts: I) -> Option<Self> {
         amounts.into_iter().try_fold(Self::ZERO, Self::checked_add)
@@ -100,6 +139,42 @@ mod tests {
         assert_eq!(
             Amount::checked_sum([one, one, one]),
             Amount::from_pebbles(3)
+        );
+    }
+
+    #[test]
+    fn decimals_are_read_back_the_way_they_are_printed() {
+        let amount = Amount::from_cairn("1.23456789").unwrap();
+        assert_eq!(amount.as_pebbles(), 123_456_789);
+        assert_eq!(amount.to_string(), "1.23456789 CAIRN");
+
+        assert_eq!(
+            Amount::from_cairn("50").unwrap().as_pebbles(),
+            5_000_000_000
+        );
+        assert_eq!(Amount::from_cairn("0.5").unwrap().as_pebbles(), 50_000_000);
+        assert_eq!(Amount::from_cairn(" 7 ").unwrap().as_pebbles(), 700_000_000);
+        assert_eq!(Amount::from_cairn(".5").unwrap().as_pebbles(), 50_000_000);
+        assert_eq!(Amount::from_cairn("0").unwrap(), Amount::ZERO);
+    }
+
+    #[test]
+    fn an_amount_that_cannot_be_meant_is_refused() {
+        assert!(Amount::from_cairn("").is_none());
+        assert!(Amount::from_cairn(".").is_none());
+        assert!(
+            Amount::from_cairn("-1").is_none(),
+            "there are no negative amounts"
+        );
+        assert!(Amount::from_cairn("1,5").is_none(), "no separators");
+        assert!(
+            Amount::from_cairn("1.234567891").is_none(),
+            "a ninth decimal would vanish"
+        );
+        assert!(Amount::from_cairn("1e3").is_none());
+        assert!(
+            Amount::from_cairn("99999999999").is_none(),
+            "above the ceiling"
         );
     }
 

@@ -57,6 +57,37 @@ pub struct ConsensusParams {
 }
 
 impl ConsensusParams {
+    /// The rules of a named network.
+    ///
+    /// Every field here is consensus: two nodes that disagree on any of them
+    /// build different chains while believing they are on the same one. So the
+    /// rules belong to the network and are chosen by naming it, never set one
+    /// at a time by whoever starts the node.
+    pub fn for_network(name: &str) -> Option<Self> {
+        match name {
+            "mainnet" => Some(Self {
+                network: NetworkId::MAINNET,
+                ..Self::testnet()
+            }),
+            "testnet" => Some(Self::testnet()),
+            "devnet" => Some(Self {
+                network: NetworkId::DEVNET,
+                target_block_time: 5,
+                ..Self::testnet()
+            }),
+            _ => None,
+        }
+    }
+
+    /// The name [`Self::for_network`] would take to produce these rules.
+    pub fn network_name(&self) -> &'static str {
+        match self.network {
+            NetworkId::MAINNET => "mainnet",
+            NetworkId::DEVNET => "devnet",
+            _ => "testnet",
+        }
+    }
+
     pub const fn testnet() -> Self {
         Self {
             network: NetworkId::TESTNET,

@@ -7,7 +7,9 @@ members = [
     "crates/cairn-crypto",
     "crates/cairn-ledger",
     "crates/cairn-net",
+    "crates/cairn-node",
     "crates/cairn-store",
+    "crates/cairn-wallet",
 ]
 
 [workspace.package]
@@ -23,6 +25,7 @@ cairn-chain = { path = "crates/cairn-chain", version = "0.1.0" }
 cairn-crypto = { path = "crates/cairn-crypto", version = "0.1.0" }
 cairn-ledger = { path = "crates/cairn-ledger", version = "0.1.0" }
 cairn-net = { path = "crates/cairn-net", version = "0.1.0" }
+cairn-node = { path = "crates/cairn-node", version = "0.1.0" }
 cairn-store = { path = "crates/cairn-store", version = "0.1.0" }
 cairn-primitives = { path = "crates/cairn-primitives", version = "0.1.0" }
 blake3 = { version = "1", default-features = false, features = ["std"] }

@@ -222,6 +222,15 @@ impl LedgerState {
         self.hot.get(id).copied()
     }
 
+    /// Every note the node still holds in full, oldest first.
+    ///
+    /// A wallet needs this to find what it owns. Nothing answers the same
+    /// question about the cold set, because nobody holds it: a wallet keeps its
+    /// own record of what fell, which is the point of the proofs it carries.
+    pub fn hot_notes(&self) -> impl Iterator<Item = (NoteId, HotEntry)> + '_ {
+        self.hot.iter().map(|(id, entry)| (*id, *entry))
+    }
+
     pub fn hot_len(&self) -> usize {
         self.hot.len()
     }

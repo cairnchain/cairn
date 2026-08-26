@@ -91,6 +91,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn-node"
+version = "0.1.0"
+dependencies = [
+ "cairn-chain",
+ "cairn-crypto",
+ "cairn-ledger",
+ "cairn-net",
+ "cairn-primitives",
+]
+
+[[package]]
 name = "cairn-primitives"
 version = "0.1.0"
 dependencies = [
@@ -107,6 +118,17 @@ dependencies = [
  "cairn-ledger",
  "cairn-primitives",
  "thiserror",
+]
+
+[[package]]
+name = "cairn-wallet"
+version = "0.1.0"
+dependencies = [
+ "cairn-chain",
+ "cairn-crypto",
+ "cairn-ledger",
+ "cairn-net",
+ "cairn-primitives",
 ]
 
 [[package]]

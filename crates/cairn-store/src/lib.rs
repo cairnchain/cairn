@@ -18,6 +18,9 @@ use cairn_primitives::codec::{CodecError, Decode, Encode};
 /// The name the block log takes inside a node's directory.
 pub const BLOCK_LOG: &str = "blocks.log";
 
+/// The name of the file that marks a directory as in use.
+pub const LOCK_FILE: &str = "lock";
+
 /// Largest record the log will read or write.
 ///
 /// A length read from disk is not necessarily a length this process wrote, so
@@ -32,6 +35,11 @@ pub enum StoreError {
     RecordTooLarge { index: usize, declared: usize },
     #[error("block would not fit in one record")]
     BlockTooLarge,
+    #[error(
+        "{path} is already in use by process {holder}; \
+         if no node is running, delete that file"
+    )]
+    Locked { path: String, holder: String },
     #[error("record {index} is not a block: {source}")]
     Malformed {
         index: usize,
@@ -184,5 +192,55 @@ impl BlockLog {
             self.file.flush()?;
         }
         Ok(recovered)
+    }
+}
+
+/// Marks a data directory as in use for as long as it is held.
+///
+/// Two processes appending to the same block log would interleave records and
+/// leave neither chain readable. The lock is a file rather than anything the
+/// operating system enforces, so a process killed outright leaves it behind:
+/// that is a deliberate trade, because an operator deleting a stale file is a
+/// far better outcome than a silently ruined chain.
+#[derive(Debug)]
+pub struct DirectoryLock {
+    path: PathBuf,
+}
+
+impl DirectoryLock {
+    pub fn acquire(directory: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let directory = directory.as_ref();
+        std::fs::create_dir_all(directory)?;
+        let path = directory.join(LOCK_FILE);
+
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                let _ = write!(file, "{}", std::process::id());
+                let _ = file.flush();
+                Ok(Self { path })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let holder = std::fs::read_to_string(&path).unwrap_or_default();
+                Err(StoreError::Locked {
+                    path: path.display().to_string(),
+                    holder: if holder.trim().is_empty() {
+                        "unknown".to_owned()
+                    } else {
+                        holder.trim().to_owned()
+                    },
+                })
+            }
+            Err(error) => Err(StoreError::Io(error)),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for DirectoryLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
     }
 }

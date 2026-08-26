@@ -77,6 +77,8 @@ pub struct Reaction {
     pub broadcast: Vec<Hash32>,
     /// Addresses worth adding to the book.
     pub learned: Vec<SocketAddr>,
+    /// Transfers the pool did not hold before, worth passing on.
+    pub relayed: Vec<Hash32>,
     /// Set when the connection should be closed.
     pub drop_peer: Option<DropReason>,
 }
@@ -277,6 +279,25 @@ pub fn on_message(
         Message::GetPeers => Reaction::reply(vec![Message::Peers(
             local.book.sample(MAX_SHARED_ADDRESSES),
         )]),
+        // The last two arms say nothing for opposite reasons, and collapsing
+        // them would bury which is which.
+        #[allow(clippy::match_same_arms)]
+        Message::Transaction(transfer) => {
+            let id = transfer.id();
+            match local.chain.accept_transfer(*transfer) {
+                Ok(true) => Reaction {
+                    relayed: vec![id],
+                    ..Reaction::idle()
+                },
+                // Already held, or the pool is full. Neither says anything bad
+                // about the peer.
+                Ok(false) => Reaction::idle(),
+                // A transfer this node cannot use is not proof of a bad peer:
+                // it may simply be spending a note this node has already seen
+                // spent on the branch it follows.
+                Err(_) => Reaction::idle(),
+            }
+        }
         Message::Peers(addresses) => {
             let learned = addresses
                 .into_iter()

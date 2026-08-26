@@ -14,6 +14,9 @@ pub struct NetworkId(u32);
 impl NetworkId {
     pub const MAINNET: Self = Self(0x4341_524e);
     pub const TESTNET: Self = Self(0x4341_5254);
+    /// A throwaway network with the same rules but a much shorter block time,
+    /// for running the software on one machine.
+    pub const DEVNET: Self = Self(0x4341_5244);
 
     pub const fn new(value: u32) -> Self {
         Self(value)

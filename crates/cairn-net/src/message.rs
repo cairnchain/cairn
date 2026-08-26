@@ -9,6 +9,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use cairn_ledger::block::Block;
 use cairn_ledger::note::NetworkId;
+use cairn_ledger::transaction::Transfer;
 use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
 use cairn_primitives::Hash32;
 
@@ -140,6 +141,8 @@ pub enum Message {
     GetPeers,
     /// Addresses worth trying.
     Peers(Vec<PeerAddress>),
+    /// A transfer looking for a block. Boxed for the same reason a block is.
+    Transaction(Box<Transfer>),
 }
 
 impl Message {
@@ -157,6 +160,7 @@ impl Message {
             Self::Announce(_) => "announce",
             Self::GetPeers => "get peers",
             Self::Peers(_) => "peers",
+            Self::Transaction(_) => "transaction",
         }
     }
 
@@ -173,6 +177,7 @@ impl Message {
             Self::Announce(_) => 8,
             Self::GetPeers => 9,
             Self::Peers(_) => 10,
+            Self::Transaction(_) => 11,
         }
     }
 }
@@ -199,6 +204,7 @@ impl Encode for Message {
             Self::Block(block) => block.encode_to(out),
             Self::GetPeers => {}
             Self::Peers(addresses) => addresses.encode_to(out),
+            Self::Transaction(transfer) => transfer.encode_to(out),
         }
     }
 }
@@ -227,6 +233,7 @@ impl Decode for Message {
                 }
                 Ok(Self::Peers(addresses))
             }
+            11 => Ok(Self::Transaction(Box::new(Transfer::decode_from(reader)?))),
             _ => Err(CodecError::InvalidValue {
                 type_name: "Message",
             }),

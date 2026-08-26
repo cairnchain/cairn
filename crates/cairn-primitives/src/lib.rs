@@ -6,6 +6,7 @@
 pub mod amount;
 pub mod codec;
 pub mod hash;
+pub mod hex;
 pub mod merkle;
 
 pub use amount::Amount;

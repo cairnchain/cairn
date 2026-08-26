@@ -11,15 +11,24 @@
 //! has to be all or nothing. A switch that fails halfway would leave a node
 //! following neither branch, with a state matching no block anyone agrees on.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use cairn_ledger::block::Block;
+use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::pow::{meets_target, work_of};
+use cairn_ledger::transaction::Transfer;
 use cairn_ledger::validation::{
-    connect_block, disconnect_block, BlockError, ConnectedBlock, ConsensusParams,
+    check_transfer, connect_block, disconnect_block, BlockError, ConnectedBlock, ConsensusParams,
+    TransferError,
 };
 use cairn_ledger::LedgerState;
-use cairn_primitives::Hash32;
+use cairn_primitives::{Amount, Hash32};
+
+/// Transfers held while they wait for a block.
+///
+/// Bounded, because it is filled by strangers. Once full a node simply stops
+/// taking new ones rather than growing without limit.
+pub const MAX_POOLED: usize = 4_096;
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ChainError {
@@ -79,6 +88,9 @@ pub struct ChainStore {
     /// undone without replaying the chain.
     applied: HashMap<Hash32, ConnectedBlock>,
     state: LedgerState,
+    /// Transfers waiting for a block, keyed by identifier so the order a miner
+    /// walks them in does not depend on the order they arrived.
+    pool: BTreeMap<Hash32, Transfer>,
 }
 
 impl ChainStore {
@@ -91,6 +103,7 @@ impl ChainStore {
             positions: HashMap::new(),
             applied: HashMap::new(),
             state: LedgerState::new(),
+            pool: BTreeMap::new(),
         }
     }
 
@@ -202,6 +215,99 @@ impl ChainStore {
             .collect()
     }
 
+    /// Transfers waiting for a block.
+    pub fn pool_len(&self) -> usize {
+        self.pool.len()
+    }
+
+    pub fn pooled(&self, id: &Hash32) -> Option<&Transfer> {
+        self.pool.get(id)
+    }
+
+    /// Takes a transfer that has been broadcast, returning whether it was new.
+    ///
+    /// A transfer is checked against the state as it stands, so a node never
+    /// holds one it already knows cannot be included. A transfer spending a
+    /// note another pooled transfer already spends is refused rather than
+    /// replacing it: choosing between two conflicting spends is a fee policy,
+    /// and the chain has no fee market yet to decide it with.
+    pub fn accept_transfer(&mut self, transfer: Transfer) -> Result<bool, TransferError> {
+        let id = transfer.id();
+        if self.pool.contains_key(&id) {
+            return Ok(false);
+        }
+        if self.pool.len() >= MAX_POOLED {
+            return Ok(false);
+        }
+
+        let spent = self.pooled_inputs();
+        for input in &transfer.inputs {
+            if spent.contains(&input.note_id) {
+                return Err(TransferError::UnknownNote(input.note_id));
+            }
+        }
+        check_transfer(
+            &transfer,
+            &self.state,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+            &self.params,
+        )?;
+
+        self.pool.insert(id, transfer);
+        Ok(true)
+    }
+
+    /// Transfers a miner can put in the next block, and the fees they carry.
+    ///
+    /// Walked in identifier order and cut off at the first conflict, so two
+    /// nodes holding the same pool build the same block.
+    pub fn selection(&self, limit: usize) -> (Vec<Transfer>, Amount) {
+        let mut chosen = Vec::new();
+        let mut spent_hot: BTreeSet<NoteId> = BTreeSet::new();
+        let mut spent_cold: BTreeMap<NoteId, Note> = BTreeMap::new();
+        let mut fees = Amount::ZERO;
+
+        for transfer in self.pool.values() {
+            if chosen.len() >= limit {
+                break;
+            }
+            let Ok(outcome) =
+                check_transfer(transfer, &self.state, &spent_hot, &spent_cold, &self.params)
+            else {
+                continue;
+            };
+            let Some(total) = fees.checked_add(outcome.fee) else {
+                continue;
+            };
+            fees = total;
+            spent_hot.extend(outcome.spent_hot);
+            spent_cold.extend(outcome.spent_cold);
+            chosen.push(transfer.clone());
+        }
+        (chosen, fees)
+    }
+
+    fn pooled_inputs(&self) -> BTreeSet<NoteId> {
+        self.pool
+            .values()
+            .flat_map(|transfer| transfer.inputs.iter().map(|input| input.note_id))
+            .collect()
+    }
+
+    /// Drops every pooled transfer the current state no longer accepts.
+    ///
+    /// Called whenever the followed branch moves. A reorganisation can make a
+    /// transfer spendable again as easily as it can make one impossible, and
+    /// nothing here assumes which.
+    fn prune_pool(&mut self) {
+        let params = self.params;
+        let state = &self.state;
+        self.pool.retain(|_, transfer| {
+            check_transfer(transfer, state, &BTreeSet::new(), &BTreeMap::new(), &params).is_ok()
+        });
+    }
+
     /// Records a block and follows the heaviest branch it makes available.
     ///
     /// `now` is this node's clock, in seconds since the Unix epoch.
@@ -271,6 +377,9 @@ impl ChainStore {
                 }
             }
         }
+
+        // The state moved, so what the pool holds has to be reconsidered.
+        self.prune_pool();
 
         if rolled_back.is_empty() {
             return Ok(Accepted::Extended);

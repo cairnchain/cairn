@@ -23,8 +23,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use cairn_chain::{Accepted, ChainError, ChainStore};
 use cairn_ledger::block::Block;
 use cairn_ledger::note::NetworkId;
+use cairn_ledger::transaction::Transfer;
 use cairn_ledger::validation::ConsensusParams;
-use cairn_store::{BlockLog, StoreError};
+use cairn_ledger::validation::TransferError;
+use cairn_store::{BlockLog, DirectoryLock, StoreError};
 
 use crate::book::AddressBook;
 use crate::message::Message;
@@ -84,6 +86,9 @@ struct Shared {
     log: Mutex<Option<BlockLog>>,
     book: Mutex<AddressBook>,
     directory: Option<PathBuf>,
+    /// Held for as long as the node runs, so no second process writes to the
+    /// same directory.
+    _lock: Option<DirectoryLock>,
     peers: Mutex<HashMap<PeerId, Peer>>,
     threads: Mutex<Vec<JoinHandle<()>>>,
     next_id: AtomicU64,
@@ -180,6 +185,7 @@ impl Node {
             None,
             AddressBook::new(),
             None,
+            None,
         )
     }
 
@@ -195,6 +201,7 @@ impl Node {
         directory: impl Into<PathBuf>,
     ) -> Result<(Self, Restored), NodeError> {
         let directory = directory.into();
+        let lock = DirectoryLock::acquire(&directory)?;
         let (mut log, recovered) = BlockLog::open(&directory)?;
 
         let mut chain = ChainStore::new(params);
@@ -219,7 +226,15 @@ impl Node {
             addresses: book.len(),
         };
 
-        let node = Self::start(params, address, chain, Some(log), book, Some(directory))?;
+        let node = Self::start(
+            params,
+            address,
+            chain,
+            Some(log),
+            book,
+            Some(directory),
+            Some(lock),
+        )?;
         Ok((node, restored))
     }
 
@@ -230,6 +245,7 @@ impl Node {
         log: Option<BlockLog>,
         book: AddressBook,
         directory: Option<PathBuf>,
+        lock: Option<DirectoryLock>,
     ) -> Result<Self, NodeError> {
         let listener = TcpListener::bind(address)?;
         let address = listener.local_addr()?;
@@ -241,6 +257,7 @@ impl Node {
             log: Mutex::new(log),
             book: Mutex::new(book),
             directory,
+            _lock: lock,
             peers: Mutex::new(HashMap::new()),
             threads: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(0),
@@ -308,6 +325,21 @@ impl Node {
             self.shared.broadcast(None, &Message::Announce(vec![id]));
         }
         Ok(accepted)
+    }
+
+    /// Offers a transfer to the pool, passing it on if it was new.
+    pub fn submit_transaction(&self, transfer: Transfer) -> Result<bool, TransferError> {
+        let message = Message::Transaction(Box::new(transfer.clone()));
+        let fresh = self.shared.chain().accept_transfer(transfer)?;
+        if fresh {
+            self.shared.broadcast(None, &message);
+        }
+        Ok(fresh)
+    }
+
+    /// Transfers waiting for a block.
+    pub fn pool_len(&self) -> usize {
+        self.shared.chain().pool_len()
     }
 
     /// Closes every connection, stops the listener, and saves what is worth
@@ -538,7 +570,7 @@ fn read_loop(
 
         // The chain is held for the decision and released before anything is
         // written, so a slow peer never stalls the chain itself.
-        let (reaction, fresh) = {
+        let (reaction, fresh, passing) = {
             let mut chain = shared.chain();
             let book = shared.book().clone();
             let mut local = Local {
@@ -552,7 +584,12 @@ fn read_loop(
                 .iter()
                 .filter_map(|id| chain.block(id).cloned())
                 .collect();
-            (reaction, fresh)
+            let passing: Vec<Transfer> = reaction
+                .relayed
+                .iter()
+                .filter_map(|id| chain.pooled(id).cloned())
+                .collect();
+            (reaction, fresh, passing)
         };
 
         shared.persist(&fresh);
@@ -575,6 +612,9 @@ fn read_loop(
         }
         if !reaction.broadcast.is_empty() {
             shared.broadcast(Some(id), &Message::Announce(reaction.broadcast));
+        }
+        for transfer in passing {
+            shared.broadcast(Some(id), &Message::Transaction(Box::new(transfer)));
         }
         if reaction.drop_peer.is_some() {
             break;
