@@ -31,7 +31,12 @@ fn run(arguments: &[String]) -> Result<(), String> {
     println!("cairnd {}", env!("CARGO_PKG_VERSION"));
     print!("{}", options::describe(&options));
 
-    let (node, restored) = Node::open(options.params, options.listen, &options.data)
+    let started = if options.archive {
+        Node::open_archiving
+    } else {
+        Node::open
+    };
+    let (node, restored) = started(options.params, options.listen, &options.data)
         .map_err(|error| format!("could not start: {error}"))?;
     let node = Arc::new(node);
 
@@ -113,10 +118,11 @@ fn watch(node: &Node, options: &options::Options, running: &AtomicBool) {
                 .height()
                 .map_or_else(|| "-".to_owned(), |height| height.to_string());
             println!(
-                "[{:>8}] height {height:<6} peers {:<4} known {:<5} work {}",
+                "[{:>8}] height {height:<6} peers {:<4} known {:<5} cold {:<8} work {}",
                 stamp(started),
                 node.peer_count(),
                 node.known_addresses().len(),
+                node.cold_len(),
                 node.total_work(),
             );
         }

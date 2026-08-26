@@ -23,8 +23,8 @@ pub(crate) const CONFIG_FILE: &str = "cairn.conf";
 /// An unknown name stops the node rather than being passed over. A setting
 /// that is silently ignored is how an operator ends up running rules they did
 /// not choose, which on a chain means following a different one.
-const KNOWN: [&str; 8] = [
-    "data", "listen", "seed", "network", "mine", "status", "run-for", "help",
+const KNOWN: [&str; 9] = [
+    "data", "listen", "seed", "network", "mine", "status", "run-for", "archive", "help",
 ];
 const DEFAULT_DATA: &str = "cairn-data";
 const DEFAULT_LISTEN: &str = "0.0.0.0:9944";
@@ -41,6 +41,9 @@ cairnd, a Cairn node
                          devnet has the same rules with a five second block
                          time, for running the software on one machine
   --mine <public key>    produce blocks, paying rewards to this key
+  --archive              keep the cold set, so this node can rebuild a proof
+                         for a wallet that lost its own. Costs a set that
+                         grows; without it a node keeps sixty four hashes
   --status <seconds>     how often to print a status line (default: 10)
   --run-for <seconds>    stop after this long, for tests and demonstrations
   --help                 print this and stop
@@ -60,6 +63,8 @@ pub(crate) struct Options {
     /// Stops the node after this long. A node is meant to run until it is
     /// stopped; this exists so a test or a demonstration can bound it.
     pub(crate) run_for: Option<u64>,
+    /// Whether to keep the cold set and be able to prove things about it.
+    pub(crate) archive: bool,
 }
 
 /// Named values, each of which may have been given more than once.
@@ -103,7 +108,7 @@ fn parse_arguments(arguments: &[String]) -> Result<Given, String> {
         }
         index = index.saturating_add(1);
 
-        if name == "help" {
+        if name == "help" || name == "archive" {
             given.push(name, String::new());
             continue;
         }
@@ -195,6 +200,8 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         ),
     };
 
+    let archive = command_line.has("archive") || config.has("archive");
+
     Ok(Some(Options {
         data,
         listen,
@@ -203,6 +210,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         mine_to,
         status_period,
         run_for,
+        archive,
     }))
 }
 
@@ -230,6 +238,15 @@ pub(crate) fn describe(options: &Options) -> String {
             let _ = writeln!(text, "seed         {seed}");
         }
     }
+    let _ = writeln!(
+        text,
+        "keeping      {}",
+        if options.archive {
+            "the whole cold set (archivist)"
+        } else {
+            "sixty four hashes"
+        }
+    );
     match options.mine_to {
         Some(key) => {
             let _ = writeln!(text, "mining       rewards to {key}");
@@ -259,11 +276,27 @@ mod tests {
         assert_eq!(options.params.target_block_time, 60);
         assert!(options.mine_to.is_none());
         assert!(options.seeds.is_empty());
+        assert!(
+            !options.archive,
+            "a node validates without archiving by default"
+        );
     }
 
     #[test]
     fn help_stops_before_anything_else() {
         assert!(resolve_options(&args(&["--help"])).unwrap().is_none());
+    }
+
+    #[test]
+    fn archiving_is_asked_for_and_takes_no_value() {
+        let options = resolve_options(&args(&["--archive"])).unwrap().unwrap();
+        assert!(options.archive);
+        // It is a switch, so what follows it is not swallowed as its value.
+        let options = resolve_options(&args(&["--archive", "--status", "3"]))
+            .unwrap()
+            .unwrap();
+        assert!(options.archive);
+        assert_eq!(options.status_period, 3);
     }
 
     #[test]

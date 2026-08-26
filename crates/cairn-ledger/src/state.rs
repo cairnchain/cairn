@@ -10,7 +10,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cairn_accumulator::{Key, Proof, SparseMerkleTree};
+use cairn_accumulator::forest::forest_leaf;
+use cairn_accumulator::{Archive, Forest, ForestProof, Key, SparseMerkleTree};
 use cairn_primitives::codec::Encode;
 use cairn_primitives::hash::{hash, Domain, Hasher};
 use cairn_primitives::Hash32;
@@ -40,12 +41,19 @@ fn hot_value(note: &Note, height: u64) -> Hash32 {
     hasher.finalize()
 }
 
-/// Leaf value for a note that has fallen to the cold set.
+/// The leaf a fallen note takes in the forest.
 ///
-/// The height is dropped here: a cold note is never evicted again, and a
-/// spender would otherwise have to carry it just to rebuild the leaf.
-pub fn cold_value(note: &Note) -> Hash32 {
-    hash(Domain::ColdNoteValue, &note.encode())
+/// The identifier is folded in because a position in the forest carries no
+/// meaning of its own: without it, a proof for one note would serve for
+/// another note of the same value and owner sitting elsewhere.
+///
+/// The height is left out: a cold note never falls again, and a spender would
+/// otherwise have to carry it only to rebuild the leaf.
+pub fn cold_leaf(id: &NoteId, note: &Note) -> Hash32 {
+    let mut bytes = Vec::new();
+    id.encode_to(&mut bytes);
+    note.encode_to(&mut bytes);
+    forest_leaf(&bytes)
 }
 
 /// Binds the two tiers into the single root a block header carries.
@@ -69,41 +77,152 @@ pub struct HotEntry {
     pub height: u64,
 }
 
-/// The cold set.
+/// A note that has fallen, and where it sits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColdSpend {
+    pub id: NoteId,
+    /// Where the note sits in the forest. Positions are handed out in order
+    /// and never reused, so this is stable for the life of the chain.
+    pub position: u64,
+    pub note: Note,
+    /// What the spender presented. Kept because taking the note back out of
+    /// the forest on a reorganisation needs the same siblings.
+    pub proof: ForestProof,
+}
+
+/// The cold set, as whoever is holding it holds it.
 ///
-/// This holds the whole tree, which is what an archivist keeps. A plain node
-/// needs only the root and the count in order to validate: it cannot build
-/// proofs, and it does not have to, because spenders bring their own. Carving
-/// the pruned view out of this type belongs with the networking work.
-#[derive(Clone, Debug, Default)]
-pub struct ColdSet {
-    tree: SparseMerkleTree,
+/// A plain node keeps [`ColdSet::Roots`]: at most sixty four hashes and two
+/// counters, whatever the set contains. That is the whole reason the cost of
+/// running a node does not grow, and it works because folding a fallen note
+/// into an append only forest needs nothing but those roots.
+///
+/// An archivist keeps [`ColdSet::Archive`] instead, which is every leaf the
+/// forest ever held. Only an archivist can rebuild a proof for someone who
+/// lost theirs, and that is the service it is paid for.
+#[derive(Clone, Debug)]
+pub enum ColdSet {
+    Roots(Forest),
+    Archive(Archive),
+}
+
+impl Default for ColdSet {
+    fn default() -> Self {
+        Self::Roots(Forest::new())
+    }
 }
 
 impl ColdSet {
-    pub fn root(&self) -> Hash32 {
-        self.tree.root()
+    /// What a node that only validates keeps.
+    pub fn plain() -> Self {
+        Self::Roots(Forest::new())
     }
 
-    pub fn len(&self) -> usize {
-        self.tree.len()
+    /// What a node that can answer with proofs keeps.
+    pub fn archiving() -> Self {
+        Self::Archive(Archive::new())
+    }
+
+    pub fn is_archiving(&self) -> bool {
+        matches!(self, Self::Archive(_))
+    }
+
+    fn forest(&self) -> &Forest {
+        match self {
+            Self::Roots(forest) => forest,
+            Self::Archive(archive) => archive.forest(),
+        }
+    }
+
+    /// The thirty two bytes the state commitment folds in.
+    pub fn commitment(&self) -> Hash32 {
+        self.forest().commitment()
+    }
+
+    /// Notes still standing in the cold set.
+    pub fn len(&self) -> u64 {
+        self.forest().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tree.is_empty()
+        self.forest().is_empty()
     }
 
-    /// Builds the proof a spender needs. Only an archivist can answer this.
-    pub fn prove(&self, id: &NoteId) -> Proof {
-        self.tree.prove(note_key(id))
+    /// Positions handed out so far, which is where the next one goes.
+    pub fn next_position(&self) -> u64 {
+        self.forest().leaves()
     }
 
-    fn insert(&mut self, id: &NoteId, note: &Note) {
-        self.tree.insert(note_key(id), cold_value(note));
+    /// Whether the note at `position` is what the proof says it is.
+    pub fn verify(&self, position: u64, leaf: Hash32, proof: &ForestProof) -> bool {
+        self.forest().verify(position, leaf, proof)
     }
 
-    fn remove(&mut self, id: &NoteId) {
-        self.tree.remove(note_key(id));
+    /// Builds a proof. Only an archivist can answer.
+    pub fn prove(&self, position: u64) -> Option<ForestProof> {
+        match self {
+            Self::Roots(_) => None,
+            Self::Archive(archive) => archive.prove(position),
+        }
+    }
+
+    /// Where a fallen note sits. Only an archivist can answer, which is
+    /// exactly the service a wallet that lost its record pays for.
+    pub fn locate(&self, id: &NoteId, note: &Note) -> Option<u64> {
+        match self {
+            Self::Roots(_) => None,
+            Self::Archive(archive) => archive.locate(cold_leaf(id, note)),
+        }
+    }
+
+    /// The leaf at a position, if this holder keeps leaves at all.
+    pub fn leaf_at(&self, position: u64) -> Option<Hash32> {
+        match self {
+            Self::Roots(_) => None,
+            Self::Archive(archive) => archive.leaf_at(position),
+        }
+    }
+
+    /// A copy of the roots alone, which is all it takes to put the cold set
+    /// back where it was.
+    fn snapshot(&self) -> Forest {
+        self.forest().clone()
+    }
+
+    fn add(&mut self, leaf: Hash32) -> Option<u64> {
+        match self {
+            Self::Roots(forest) => forest.add(leaf),
+            Self::Archive(archive) => archive.add(leaf),
+        }
+    }
+
+    /// Empties several notes at once, all proved against the roots as they
+    /// stand before the block.
+    fn remove_batch(&mut self, removals: &[(u64, Hash32, ForestProof)]) -> bool {
+        match self {
+            Self::Roots(forest) => forest.remove_batch(removals),
+            Self::Archive(archive) => {
+                for (position, leaf, proof) in removals {
+                    if !archive.forest().verify(*position, *leaf, proof) {
+                        return false;
+                    }
+                }
+                // An archivist holds the leaves, so it rebuilds each proof for
+                // itself and the order genuinely cannot matter.
+                removals
+                    .iter()
+                    .all(|(position, _, _)| archive.remove(*position))
+            }
+        }
+    }
+
+    /// Puts the cold set back as it stood, given the roots from before and
+    /// what the block did to it.
+    fn rewind(&mut self, before: &Forest, appended: usize, restored: &[(u64, Hash32)]) {
+        match self {
+            Self::Roots(forest) => *forest = before.clone(),
+            Self::Archive(archive) => archive.rewind(before, appended, restored),
+        }
     }
 }
 
@@ -119,9 +238,9 @@ pub struct Tip {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StateTransition {
     pub spent_hot: Vec<NoteId>,
-    /// Cold notes spent, carried with their contents. The cold set stores only
-    /// hashes, so putting one back on a reorganisation needs the note itself.
-    pub spent_cold: Vec<(NoteId, Note)>,
+    /// Notes spent out of the cold set, with everything it takes to put them
+    /// back: nobody holds the cold set, so nothing else could.
+    pub spent_cold: Vec<ColdSpend>,
     pub created: Vec<(NoteId, Note)>,
     pub evicted: Vec<(NoteId, Note)>,
 }
@@ -141,9 +260,15 @@ pub struct BlockUndo {
     previous_tip: Option<Tip>,
     /// The summary that fell out of the recent window when this block landed.
     dropped_summary: Option<HeaderSummary>,
+    /// The cold roots from just before the block.
+    ///
+    /// Undoing an append to a forest means splitting a tree back into the ones
+    /// it swallowed, and those are not recoverable from the roots that remain.
+    /// Sixty four hashes is a small price for not having to hold the forest.
+    cold_before: Forest,
 }
 
-/// Replays a transition onto a pair of trees.
+/// Replays a transition onto a hot tree and a cold set.
 ///
 /// Both the projection a validator computes and the commit that follows go
 /// through this, so the root a block is judged against and the root the node
@@ -157,9 +282,18 @@ fn replay(
     for id in &transition.spent_hot {
         hot_tree.remove(note_key(id));
     }
-    for (id, _) in &transition.spent_cold {
-        cold.remove(id);
-    }
+    let removals: Vec<(u64, Hash32, ForestProof)> = transition
+        .spent_cold
+        .iter()
+        .map(|spend| {
+            (
+                spend.position,
+                cold_leaf(&spend.id, &spend.note),
+                spend.proof.clone(),
+            )
+        })
+        .collect();
+    cold.remove_batch(&removals);
     for (id, note) in &transition.created {
         hot_tree.insert(note_key(id), hot_value(note, height));
     }
@@ -167,7 +301,7 @@ fn replay(
     // straight through when the block creates more notes than the tier holds.
     for (id, note) in &transition.evicted {
         hot_tree.remove(note_key(id));
-        cold.insert(id, note);
+        cold.add(cold_leaf(id, note));
     }
 }
 
@@ -187,8 +321,18 @@ pub struct LedgerState {
 }
 
 impl LedgerState {
+    /// A node that validates and nothing more.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A node that also keeps the cold set, so it can rebuild a proof for
+    /// someone who lost theirs.
+    pub fn archiving() -> Self {
+        Self {
+            cold: ColdSet::archiving(),
+            ..Self::default()
+        }
     }
 
     pub fn tip(&self) -> Option<Tip> {
@@ -239,12 +383,13 @@ impl LedgerState {
         &self.cold
     }
 
-    pub fn cold_root(&self) -> Hash32 {
-        self.cold.root()
+    pub fn cold_len(&self) -> u64 {
+        self.cold.len()
     }
 
-    pub fn cold_len(&self) -> usize {
-        self.cold.len()
+    /// Where the next note to fall will sit.
+    pub fn next_cold_position(&self) -> u64 {
+        self.cold.next_position()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -255,8 +400,8 @@ impl LedgerState {
         compose_state_root(
             self.hot_tree.root(),
             self.hot_tree.len() as u64,
-            self.cold.root(),
-            self.cold.len() as u64,
+            self.cold.commitment(),
+            self.cold.len(),
         )
     }
 
@@ -315,17 +460,19 @@ impl LedgerState {
     /// The state root this transition would produce, computed without touching
     /// the current state.
     ///
-    /// Both trees are persistent, so the copies here are pointer copies and
-    /// only the edited paths are rebuilt.
+    /// Both copies here are cheap whatever this node is: the hot tree is
+    /// persistent, and the cold side only ever needs its roots, because
+    /// appending takes nothing else and removing takes a proof the block
+    /// already carries.
     pub fn project(&self, transition: &StateTransition, height: u64) -> Hash32 {
         let mut hot_tree = self.hot_tree.clone();
-        let mut cold = self.cold.clone();
+        let mut cold = ColdSet::Roots(self.cold.snapshot());
         replay(&mut hot_tree, &mut cold, transition, height);
         compose_state_root(
             hot_tree.root(),
             hot_tree.len() as u64,
-            cold.root(),
-            cold.len() as u64,
+            cold.commitment(),
+            cold.len(),
         )
     }
 
@@ -338,6 +485,7 @@ impl LedgerState {
         let height = header.height;
         let mut undo = BlockUndo {
             previous_tip: self.tip,
+            cold_before: self.cold.snapshot(),
             ..BlockUndo::default()
         };
 
@@ -387,8 +535,15 @@ impl LedgerState {
             self.recent.insert(0, summary);
         }
 
+        let restored: Vec<(u64, Hash32)> = transition
+            .spent_cold
+            .iter()
+            .map(|spend| (spend.position, cold_leaf(&spend.id, &spend.note)))
+            .collect();
+        self.cold
+            .rewind(&undo.cold_before, transition.evicted.len(), &restored);
+
         for (id, entry) in &undo.unevicted {
-            self.cold.remove(id);
             self.hot_tree
                 .insert(note_key(id), hot_value(&entry.note, entry.height));
             self.remember_hot(*id, entry.note, entry.height);
@@ -396,9 +551,6 @@ impl LedgerState {
         for (id, _) in &transition.created {
             self.hot_tree.remove(note_key(id));
             self.forget_hot(id);
-        }
-        for (id, note) in &transition.spent_cold {
-            self.cold.insert(id, note);
         }
         for (id, entry) in &undo.restored_hot {
             self.hot_tree

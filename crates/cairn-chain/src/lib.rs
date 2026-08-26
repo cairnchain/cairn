@@ -14,13 +14,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use cairn_ledger::block::Block;
-use cairn_ledger::note::{Note, NoteId};
+use cairn_ledger::note::NoteId;
 use cairn_ledger::pow::{meets_target, work_of};
 use cairn_ledger::transaction::Transfer;
 use cairn_ledger::validation::{
     check_transfer, connect_block, disconnect_block, BlockError, ConnectedBlock, ConsensusParams,
     TransferError,
 };
+use cairn_ledger::ColdSpend;
 use cairn_ledger::LedgerState;
 use cairn_primitives::{Amount, Hash32};
 
@@ -94,7 +95,22 @@ pub struct ChainStore {
 }
 
 impl ChainStore {
+    /// A node that validates and nothing more.
+    ///
+    /// It keeps the hot set in full and the cold set as sixty four hashes, so
+    /// what it costs to run does not grow with the chain.
     pub fn new(params: ConsensusParams) -> Self {
+        Self::with_state(params, LedgerState::new())
+    }
+
+    /// A node that also keeps the cold set, so it can rebuild a proof for
+    /// someone who lost theirs. That is what an archivist is paid for, and
+    /// what it costs is a set that grows.
+    pub fn archiving(params: ConsensusParams) -> Self {
+        Self::with_state(params, LedgerState::archiving())
+    }
+
+    fn with_state(params: ConsensusParams, state: LedgerState) -> Self {
         Self {
             params,
             blocks: HashMap::new(),
@@ -102,9 +118,14 @@ impl ChainStore {
             active: Vec::new(),
             positions: HashMap::new(),
             applied: HashMap::new(),
-            state: LedgerState::new(),
+            state,
             pool: BTreeMap::new(),
         }
+    }
+
+    /// Whether this node can answer with proofs.
+    pub fn is_archiving(&self) -> bool {
+        self.state.cold().is_archiving()
     }
 
     pub fn params(&self) -> &ConsensusParams {
@@ -265,7 +286,7 @@ impl ChainStore {
     pub fn selection(&self, limit: usize) -> (Vec<Transfer>, Amount) {
         let mut chosen = Vec::new();
         let mut spent_hot: BTreeSet<NoteId> = BTreeSet::new();
-        let mut spent_cold: BTreeMap<NoteId, Note> = BTreeMap::new();
+        let mut spent_cold: BTreeMap<NoteId, ColdSpend> = BTreeMap::new();
         let mut fees = Amount::ZERO;
 
         for transfer in self.pool.values() {
@@ -282,7 +303,12 @@ impl ChainStore {
             };
             fees = total;
             spent_hot.extend(outcome.spent_hot);
-            spent_cold.extend(outcome.spent_cold);
+            spent_cold.extend(
+                outcome
+                    .spent_cold
+                    .into_iter()
+                    .map(|spend| (spend.id, spend)),
+            );
             chosen.push(transfer.clone());
         }
         (chosen, fees)

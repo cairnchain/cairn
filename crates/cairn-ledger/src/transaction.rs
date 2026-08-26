@@ -5,7 +5,7 @@
 //! [`Transfer`] moves value and always has inputs. Keeping them apart means no
 //! code path can mint money by handing a transfer an empty input list.
 
-use cairn_accumulator::Proof;
+use cairn_accumulator::ForestProof;
 use cairn_crypto::{SecretKey, Signature};
 use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
 use cairn_primitives::hash::{Domain, Hasher};
@@ -20,7 +20,10 @@ pub const COINBASE_VERSION: u16 = 1;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColdWitness {
     pub note: Note,
-    pub proof: Proof,
+    /// Where the note sits in the forest. A proof says nothing without it: the
+    /// same siblings would carry a different leaf at a different place.
+    pub position: u64,
+    pub proof: ForestProof,
 }
 
 /// How the spender makes the note being spent available to a validator.
@@ -46,6 +49,7 @@ impl Encode for Witness {
             Self::Cold(cold) => {
                 1u8.encode_to(out);
                 cold.note.encode_to(out);
+                cold.position.encode_to(out);
                 cold.proof.encode_to(out);
             }
         }
@@ -58,7 +62,8 @@ impl Decode for Witness {
             0 => Ok(Self::Hot),
             1 => Ok(Self::Cold(Box::new(ColdWitness {
                 note: Note::decode_from(reader)?,
-                proof: Proof::decode_from(reader)?,
+                position: u64::decode_from(reader)?,
+                proof: ForestProof::decode_from(reader)?,
             }))),
             _ => Err(CodecError::InvalidValue {
                 type_name: "Witness",
@@ -86,12 +91,16 @@ impl Input {
         }
     }
 
-    /// Spends a note from the cold set, carrying it and its proof. Signed
-    /// afterwards.
-    pub fn cold(note_id: NoteId, note: Note, proof: Proof) -> Self {
+    /// Spends a note from the cold set, carrying it, where it sits, and the
+    /// proof. Signed afterwards.
+    pub fn cold(note_id: NoteId, note: Note, position: u64, proof: ForestProof) -> Self {
         Self {
             note_id,
-            witness: Witness::Cold(Box::new(ColdWitness { note, proof })),
+            witness: Witness::Cold(Box::new(ColdWitness {
+                note,
+                position,
+                proof,
+            })),
             signature: Signature::unsigned(),
         }
     }

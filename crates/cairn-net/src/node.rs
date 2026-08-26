@@ -200,11 +200,33 @@ impl Node {
         address: SocketAddr,
         directory: impl Into<PathBuf>,
     ) -> Result<(Self, Restored), NodeError> {
+        Self::open_with(params, address, directory, false)
+    }
+
+    /// The same, keeping the cold set so it can answer with proofs.
+    pub fn open_archiving(
+        params: ConsensusParams,
+        address: SocketAddr,
+        directory: impl Into<PathBuf>,
+    ) -> Result<(Self, Restored), NodeError> {
+        Self::open_with(params, address, directory, true)
+    }
+
+    fn open_with(
+        params: ConsensusParams,
+        address: SocketAddr,
+        directory: impl Into<PathBuf>,
+        archiving: bool,
+    ) -> Result<(Self, Restored), NodeError> {
         let directory = directory.into();
         let lock = DirectoryLock::acquire(&directory)?;
         let (mut log, recovered) = BlockLog::open(&directory)?;
 
-        let mut chain = ChainStore::new(params);
+        let mut chain = if archiving {
+            ChainStore::archiving(params)
+        } else {
+            ChainStore::new(params)
+        };
         let now = unix_now();
         let mut applied = 0usize;
         for block in &recovered.blocks {
@@ -335,6 +357,17 @@ impl Node {
             self.shared.broadcast(None, &message);
         }
         Ok(fresh)
+    }
+
+    /// Notes in the cold set, which this node commits to in thirty two bytes
+    /// whether or not it keeps any of them.
+    pub fn cold_len(&self) -> u64 {
+        self.with_chain(|chain| chain.state().cold_len())
+    }
+
+    /// Whether this node can rebuild a proof for someone who lost theirs.
+    pub fn is_archiving(&self) -> bool {
+        self.with_chain(ChainStore::is_archiving)
     }
 
     /// Transfers waiting for a block.

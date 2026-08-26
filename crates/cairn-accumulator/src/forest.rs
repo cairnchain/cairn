@@ -246,6 +246,88 @@ impl Forest {
         self.live = self.live.saturating_sub(1);
         true
     }
+
+    /// Empties several leaves at once, all proved against the roots as they
+    /// stand now.
+    ///
+    /// Removing one leaf moves the siblings of every other leaf in its tree, so
+    /// proofs taken against the same root cannot simply be applied one after
+    /// another. They are checked together first, then applied in order, each
+    /// application bringing the proofs still waiting up to date. Validity
+    /// therefore does not depend on the order the spends appear in a block.
+    pub fn remove_batch(&mut self, removals: &[(u64, Hash32, ForestProof)]) -> bool {
+        for (position, leaf, proof) in removals {
+            if !self.verify(*position, *leaf, proof) {
+                return false;
+            }
+        }
+
+        let mut pending: Vec<(u64, Hash32, ForestProof)> = removals.to_vec();
+        pending.sort_by_key(|(position, _, _)| *position);
+        pending.dedup_by_key(|(position, _, _)| *position);
+
+        let mut index = 0usize;
+        while index < pending.len() {
+            let Some((position, leaf, proof)) = pending.get(index).cloned() else {
+                return false;
+            };
+            if !self.remove(position, leaf, &proof) {
+                return false;
+            }
+            let Some((height, offset)) = tree_of(self.leaves, position) else {
+                return false;
+            };
+            let Some(emptied) = position.checked_sub(offset) else {
+                return false;
+            };
+
+            let next = index.saturating_add(1);
+            if let Some(rest) = pending.get_mut(next..) {
+                for (other, _, other_proof) in rest {
+                    let Some((other_height, other_offset)) = tree_of(self.leaves, *other) else {
+                        continue;
+                    };
+                    if other_height != height {
+                        continue;
+                    }
+                    let Some(other_index) = other.checked_sub(other_offset) else {
+                        continue;
+                    };
+                    refresh(other_index, other_proof, emptied, &proof);
+                }
+            }
+            index = next;
+        }
+        true
+    }
+}
+
+/// Updates one proof after another leaf in the same tree was emptied.
+///
+/// The two paths run together from the root down to the level where they part.
+/// Everything above that is untouched, everything below is inside the target's
+/// own subtree, and the one sibling that moved is the subtree the other leaf
+/// sits in. That subtree's new root folds out of the other leaf's own proof,
+/// which is why a block carrying both proofs carries enough.
+fn refresh(target: u64, proof: &mut ForestProof, changed: u64, changed_proof: &ForestProof) {
+    let mut level = 0usize;
+    while level < proof.siblings.len() {
+        let shift = u32::try_from(level).unwrap_or(u32::MAX);
+        if target.checked_shr(shift).unwrap_or(0) == changed.checked_shr(shift).unwrap_or(0) {
+            break;
+        }
+        level = level.saturating_add(1);
+    }
+    let Some(below) = level.checked_sub(1) else {
+        return;
+    };
+    let Some(prefix) = changed_proof.siblings.get(..below) else {
+        return;
+    };
+    let updated = fold(empty_leaf(), changed, prefix);
+    if let Some(slot) = proof.siblings.get_mut(below) {
+        *slot = updated;
+    }
 }
 
 impl fmt::Debug for Forest {
@@ -317,6 +399,17 @@ impl Archive {
         true
     }
 
+    /// Where a leaf sits, if it is still standing.
+    ///
+    /// This is the question a wallet that lost its record asks an archivist,
+    /// and the reason an archivist is worth paying.
+    pub fn locate(&self, leaf: Hash32) -> Option<u64> {
+        self.leaves
+            .iter()
+            .position(|held| *held == leaf)
+            .and_then(|index| u64::try_from(index).ok())
+    }
+
     pub fn leaf_at(&self, position: u64) -> Option<Hash32> {
         usize::try_from(position)
             .ok()
@@ -342,6 +435,26 @@ impl Archive {
             index = index.checked_shr(1).unwrap_or(0);
         }
         Some(ForestProof { siblings })
+    }
+
+    /// Puts the archive back as it stood before a batch of changes.
+    ///
+    /// `before` is the roots from that moment, `appended` is how many leaves
+    /// were added since, and `restored` names the leaves that were emptied and
+    /// what they held. All three are things a node already has: it computed
+    /// the first, it decided the second, and the third travelled in the block.
+    pub fn rewind(&mut self, before: &Forest, appended: usize, restored: &[(u64, Hash32)]) {
+        let keep = self.leaves.len().saturating_sub(appended);
+        self.leaves.truncate(keep);
+        for (position, leaf) in restored {
+            if let Some(slot) = usize::try_from(*position)
+                .ok()
+                .and_then(|index| self.leaves.get_mut(index))
+            {
+                *slot = *leaf;
+            }
+        }
+        self.forest = before.clone();
     }
 
     fn subtree(&self, start: u64, height: usize) -> Hash32 {

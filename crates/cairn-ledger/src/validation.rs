@@ -14,7 +14,7 @@ use crate::emission;
 use crate::block::{Block, BlockHeader, BLOCK_VERSION};
 use crate::note::{NetworkId, Note, NoteId};
 use crate::pow::{median_time_past, meets_target, next_difficulty, MIN_DIFFICULTY};
-use crate::state::{cold_value, note_key, BlockUndo, LedgerState, StateTransition};
+use crate::state::{cold_leaf, BlockUndo, ColdSpend, LedgerState, StateTransition};
 use crate::transaction::{
     CoinbaseTransaction, Input, Transfer, Witness, COINBASE_VERSION, TRANSFER_VERSION,
 };
@@ -220,19 +220,12 @@ pub enum BlockError {
     },
 }
 
-/// Which tier a spent note came from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Tier {
-    Hot,
-    Cold,
-}
-
 /// What a valid transfer contributes to the block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransferOutcome {
     pub fee: Amount,
     pub spent_hot: Vec<NoteId>,
-    pub spent_cold: Vec<(NoteId, Note)>,
+    pub spent_cold: Vec<ColdSpend>,
 }
 
 /// Checks everything about a transfer that does not require the note set.
@@ -283,28 +276,28 @@ pub fn check_transfer_shape(
     Ok(())
 }
 
-/// Finds the note an input spends, and which tier it came from.
+/// Finds the note an input spends, and what it takes to put it back.
 ///
 /// The tier is not the spender's choice: a note is cold exactly when the hot
 /// set does not hold it. A witness of the wrong kind is rejected rather than
 /// ignored, so one spend has one encoding.
 ///
-/// Cold proofs are checked against the commitment as it stood before the block.
-/// Checking them against a commitment that moves as the block is applied would
+/// Cold proofs are checked against the commitment as it stood before the
+/// block. Checking them against one that moves as the block is applied would
 /// make a transfer's validity depend on where it sits in the block.
 fn resolve_input(
     state: &LedgerState,
     input: &Input,
     spent_hot: &BTreeSet<NoteId>,
-    spent_cold: &BTreeMap<NoteId, Note>,
-) -> Result<(Note, Tier), TransferError> {
+    spent_cold: &BTreeMap<NoteId, ColdSpend>,
+) -> Result<(Note, Option<ColdSpend>), TransferError> {
     let id = input.note_id;
     if spent_hot.contains(&id) || spent_cold.contains_key(&id) {
         return Err(TransferError::UnknownNote(id));
     }
 
     match (state.hot_note(&id), &input.witness) {
-        (Some(note), Witness::Hot) => Ok((note, Tier::Hot)),
+        (Some(note), Witness::Hot) => Ok((note, None)),
         (Some(_), Witness::Cold(_)) => Err(TransferError::UnexpectedProof { note_id: id }),
         // A note absent from the hot set has either fallen to the cold set or
         // never existed. A plain node holds only the cold commitment, so it
@@ -312,15 +305,17 @@ fn resolve_input(
         // both.
         (None, Witness::Hot) => Err(TransferError::MissingProof { note_id: id }),
         (None, Witness::Cold(cold)) => {
-            if cold.proof.verify_membership(
-                state.cold_root(),
-                note_key(&id),
-                cold_value(&cold.note),
-            ) {
-                Ok((cold.note, Tier::Cold))
-            } else {
-                Err(TransferError::InvalidProof { note_id: id })
+            let leaf = cold_leaf(&id, &cold.note);
+            if !state.cold().verify(cold.position, leaf, &cold.proof) {
+                return Err(TransferError::InvalidProof { note_id: id });
             }
+            let spend = ColdSpend {
+                id,
+                position: cold.position,
+                note: cold.note,
+                proof: cold.proof.clone(),
+            };
+            Ok((cold.note, Some(spend)))
         }
     }
 }
@@ -330,7 +325,7 @@ pub fn check_transfer(
     transfer: &Transfer,
     state: &LedgerState,
     spent_hot: &BTreeSet<NoteId>,
-    spent_cold: &BTreeMap<NoteId, Note>,
+    spent_cold: &BTreeMap<NoteId, ColdSpend>,
     params: &ConsensusParams,
 ) -> Result<TransferOutcome, TransferError> {
     check_transfer_shape(transfer, params)?;
@@ -340,7 +335,7 @@ pub fn check_transfer(
     let mut from_cold = Vec::new();
 
     for (index, input) in transfer.inputs.iter().enumerate() {
-        let (spent, tier) = resolve_input(state, input, spent_hot, spent_cold)?;
+        let (spent, fallen) = resolve_input(state, input, spent_hot, spent_cold)?;
 
         let position = u32::try_from(index).unwrap_or(u32::MAX);
         let message = transfer.signature_message(params.network, position, &spent);
@@ -352,9 +347,9 @@ pub fn check_transfer(
         available = available
             .checked_add(spent.value)
             .ok_or(TransferError::ValueOverflow)?;
-        match tier {
-            Tier::Hot => from_hot.push(input.note_id),
-            Tier::Cold => from_cold.push((input.note_id, spent)),
+        match fallen {
+            None => from_hot.push(input.note_id),
+            Some(from_the_cold_set) => from_cold.push(from_the_cold_set),
         }
     }
 
@@ -422,7 +417,7 @@ pub fn evaluate_block_body(
 
     let height = state.next_height().ok_or(BlockError::HeightOverflow)?;
     let mut spent_hot: BTreeSet<NoteId> = BTreeSet::new();
-    let mut spent_cold: BTreeMap<NoteId, Note> = BTreeMap::new();
+    let mut spent_cold: BTreeMap<NoteId, ColdSpend> = BTreeMap::new();
     let mut created: Vec<(NoteId, Note)> = Vec::new();
     let mut total_fees = Amount::ZERO;
 
@@ -431,7 +426,12 @@ pub fn evaluate_block_body(
             .map_err(|source| BlockError::InvalidTransfer { index, source })?;
 
         spent_hot.extend(outcome.spent_hot);
-        spent_cold.extend(outcome.spent_cold);
+        spent_cold.extend(
+            outcome
+                .spent_cold
+                .into_iter()
+                .map(|spend| (spend.id, spend)),
+        );
         created.extend(transfer.created_notes());
         total_fees = total_fees
             .checked_add(outcome.fee)
@@ -453,7 +453,7 @@ pub fn evaluate_block_body(
     let evicted = state.plan_evictions(&spent_hot, &created, params.hot_capacity);
     let transition = StateTransition {
         spent_hot: spent_hot.into_iter().collect(),
-        spent_cold: spent_cold.into_iter().collect(),
+        spent_cold: spent_cold.into_values().collect(),
         created,
         evicted,
     };

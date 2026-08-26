@@ -23,7 +23,7 @@ use std::process::Command;
 use cairn_accumulator::SparseMerkleTree;
 use cairn_crypto::SecretKey;
 use cairn_ledger::note::{Note, NoteId};
-use cairn_ledger::{cold_value, note_key, HotEntry};
+use cairn_ledger::{cold_leaf, note_key, HotEntry};
 use cairn_primitives::hash::{hash, Domain};
 use cairn_primitives::Amount;
 
@@ -52,7 +52,7 @@ fn main() {
             let note = Note::new(value, owner);
             notes.insert(id, HotEntry { note, height });
             by_age.insert((height, id));
-            tree.insert(note_key(&id), cold_value(&note));
+            tree.insert(note_key(&id), cold_leaf(&id, &note));
         }
 
         let used = resident_bytes().unwrap_or(0).saturating_sub(baseline);

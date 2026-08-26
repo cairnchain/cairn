@@ -16,5 +16,6 @@ cairn-crypto.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+cairn-accumulator.workspace = true
 cairn-crypto.workspace = true
 hex.workspace = true

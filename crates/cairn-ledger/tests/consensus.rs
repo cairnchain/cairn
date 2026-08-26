@@ -75,7 +75,7 @@ fn mining_finds_a_nonce_at_a_real_difficulty() {
     let mut params = ConsensusParams::testnet();
     params.genesis_difficulty = 4_096;
     let miner = wallet(1);
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
 
     let block = candidate(&state, &params, &miner, Vec::new());
     assert_eq!(block.header.difficulty, 4_096);
@@ -94,7 +94,7 @@ fn a_block_without_enough_work_is_refused() {
     let mut params = ConsensusParams::testnet();
     params.genesis_difficulty = 4_096;
     let miner = wallet(1);
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
 
     let solved = mine_block(
         candidate(&state, &params, &miner, Vec::new()),
@@ -121,7 +121,7 @@ fn a_block_without_enough_work_is_refused() {
 fn a_block_cannot_choose_its_own_difficulty() {
     let params = ConsensusParams::testnet();
     let miner = wallet(1);
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
 
     let mut block = candidate(&state, &params, &miner, Vec::new());
     block.header.difficulty = 1_000_000;
@@ -142,7 +142,7 @@ fn a_block_cannot_choose_its_own_difficulty() {
 fn a_block_backdated_below_the_recent_median_is_refused() {
     let params = ConsensusParams::testnet();
     let miner = wallet(1);
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
 
     for _ in 0..12 {
         mine(&mut state, &params, &miner, Vec::new());
@@ -177,7 +177,7 @@ fn undoing_a_block_restores_the_state_exactly() {
     let params = ConsensusParams::testnet().with_hot_capacity(4);
     let miner = wallet(1);
     let alice = wallet(2);
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
 
     // Fill the hot set and push some notes down to the cold set.
     let mut minted = Vec::new();
@@ -199,12 +199,13 @@ fn undoing_a_block_restores_the_state_exactly() {
     let (cold_id, cold_note) = minted[0];
     let (hot_id, hot_note) = *minted.last().unwrap();
 
+    let cold_position = state.cold().locate(&cold_id, &cold_note).expect("it fell");
+    let cold_proof = state
+        .cold()
+        .prove(cold_position)
+        .expect("an archivist can prove it");
     let mut from_cold = Transfer::new(
-        vec![Input::cold(
-            cold_id,
-            cold_note,
-            state.cold().prove(&cold_id),
-        )],
+        vec![Input::cold(cold_id, cold_note, cold_position, cold_proof)],
         vec![Note::new(cold_note.value, alice.public_key())],
     );
     from_cold.sign_input(params.network, 0, &cold_note, &miner);
@@ -244,7 +245,7 @@ fn undoing_a_block_restores_the_state_exactly() {
 fn several_blocks_undo_in_reverse_order() {
     let params = ConsensusParams::testnet().with_hot_capacity(4);
     let miner = wallet(1);
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
 
     for _ in 0..6 {
         mine(&mut state, &params, &miner, Vec::new());
@@ -277,7 +278,7 @@ fn several_blocks_undo_in_reverse_order() {
 fn undoing_restores_a_header_that_had_left_the_window() {
     let params = ConsensusParams::testnet();
     let miner = wallet(1);
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
 
     for _ in 0..RECENT_HEADERS {
         mine(&mut state, &params, &miner, Vec::new());
@@ -305,7 +306,7 @@ fn undoing_restores_a_header_that_had_left_the_window() {
 fn a_reapplied_block_produces_the_same_state() {
     let params = ConsensusParams::testnet().with_hot_capacity(4);
     let miner = wallet(1);
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
 
     for _ in 0..7 {
         mine(&mut state, &params, &miner, Vec::new());
@@ -332,7 +333,7 @@ fn the_reward_follows_the_schedule_rather_than_the_miner() {
     params.tail_reward = Amount::from_cairn("3").unwrap();
 
     let miner = wallet(1);
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
 
     let mut paid = Vec::new();
     for _ in 0..24u64 {

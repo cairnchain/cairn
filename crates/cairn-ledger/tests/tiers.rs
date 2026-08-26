@@ -9,6 +9,7 @@
     clippy::arithmetic_side_effects
 )]
 
+use cairn_accumulator::ForestProof;
 use cairn_crypto::SecretKey;
 use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
@@ -74,9 +75,18 @@ fn spend_cold(
     owner: &SecretKey,
     recipient: &SecretKey,
 ) -> Transfer {
-    let proof = state.cold().prove(&id);
+    // An archivist answers both questions a wallet that lost its record has:
+    // where the note sits, and what proves it.
+    let position = state
+        .cold()
+        .locate(&id, &note)
+        .expect("the note is in the cold set");
+    let proof = state
+        .cold()
+        .prove(position)
+        .expect("an archivist can prove it");
     let mut transfer = Transfer::new(
-        vec![Input::cold(id, note, proof)],
+        vec![Input::cold(id, note, position, proof)],
         vec![Note::new(note.value, recipient.public_key())],
     );
     transfer.sign_input(params.network, 0, &note, owner);
@@ -87,12 +97,12 @@ fn spend_cold(
 fn notes_fall_to_the_cold_set_once_the_hot_set_is_full() {
     let params = params();
     let miner = wallet(1);
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
 
     for produced in 1..=13u64 {
         mine(&mut state, &params, &miner, Vec::new());
         let expected_hot = (produced as usize).min(CAPACITY);
-        let expected_cold = (produced as usize).saturating_sub(CAPACITY);
+        let expected_cold = produced.saturating_sub(CAPACITY as u64);
         assert_eq!(
             state.hot_len(),
             expected_hot,
@@ -110,21 +120,21 @@ fn notes_fall_to_the_cold_set_once_the_hot_set_is_full() {
 fn the_hot_set_never_grows_past_its_cap() {
     let params = params();
     let miner = wallet(1);
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
 
     for _ in 0..60 {
         mine(&mut state, &params, &miner, Vec::new());
         assert!(state.hot_len() <= CAPACITY);
     }
     assert_eq!(state.hot_len(), CAPACITY);
-    assert_eq!(state.cold_len(), 60 - CAPACITY);
+    assert_eq!(state.cold_len(), 60 - CAPACITY as u64);
 }
 
 #[test]
 fn the_oldest_note_falls_first() {
     let params = params();
     let miner = wallet(1);
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
 
     let notes = mine_empty(&mut state, &params, &miner, CAPACITY as u64);
     for (id, _) in &notes {
@@ -141,10 +151,15 @@ fn the_oldest_note_falls_first() {
         state.hot_note(&notes[1].0).is_some(),
         "the next one is still held"
     );
-    assert!(state.cold().prove(&oldest).verify_membership(
-        state.cold_root(),
-        cairn_ledger::note_key(&oldest),
-        cairn_ledger::cold_value(&oldest_note)
+    let position = state.cold().locate(&oldest, &oldest_note).expect("it fell");
+    let proof = state
+        .cold()
+        .prove(position)
+        .expect("an archivist can prove it");
+    assert!(state.cold().verify(
+        position,
+        cairn_ledger::cold_leaf(&oldest, &oldest_note),
+        &proof
     ));
 }
 
@@ -153,7 +168,7 @@ fn a_note_that_fell_can_still_be_spent_with_a_proof() {
     let params = params();
     let miner = wallet(1);
     let alice = wallet(2);
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
 
     let notes = mine_empty(&mut state, &params, &miner, 12);
     let (fallen, note) = notes[0];
@@ -168,10 +183,7 @@ fn a_note_that_fell_can_still_be_spent_with_a_proof() {
     mine(&mut state, &params, &miner, vec![transfer]);
 
     assert!(
-        state
-            .cold()
-            .prove(&fallen)
-            .verify_absence(state.cold_root(), cairn_ledger::note_key(&fallen)),
+        state.cold().locate(&fallen, &note).is_none(),
         "the note left the cold set"
     );
 
@@ -192,7 +204,7 @@ fn a_note_that_fell_can_still_be_spent_with_a_proof() {
 fn spending_a_fallen_note_without_a_proof_is_refused() {
     let params = params();
     let miner = wallet(1);
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
 
     let notes = mine_empty(&mut state, &params, &miner, 12);
     let (fallen, note) = notes[0];
@@ -221,16 +233,21 @@ fn spending_a_fallen_note_without_a_proof_is_refused() {
 fn offering_a_proof_for_a_note_still_in_the_hot_set_is_refused() {
     let params = params();
     let miner = wallet(1);
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
 
     let notes = mine_empty(&mut state, &params, &miner, 12);
     let (held, note) = *notes.last().unwrap();
     assert!(state.hot_note(&held).is_some());
 
-    // A proof of absence is what the cold set holds for a hot note. Presenting
-    // any witness of the wrong kind has to be refused, not ignored, so one
-    // spend has exactly one encoding.
-    let transfer = spend_cold(&state, &params, held, note, &miner, &wallet(2));
+    // The witness is refused for what it is, not for what it contains: a note
+    // the nodes still hold takes no proof at all. Refusing rather than
+    // ignoring is what keeps one spend to one encoding.
+    let mut transfer = Transfer::new(
+        vec![Input::cold(held, note, 0, ForestProof::default())],
+        vec![Note::new(note.value, wallet(2).public_key())],
+    );
+    transfer.sign_input(params.network, 0, &note, &miner);
+
     let coinbase = CoinbaseTransaction::new(
         state.next_height().unwrap(),
         vec![Note::new(params.initial_reward, miner.public_key())],
@@ -249,7 +266,7 @@ fn offering_a_proof_for_a_note_still_in_the_hot_set_is_refused() {
 fn a_proof_taken_before_the_cold_set_moved_is_refused() {
     let params = params();
     let miner = wallet(1);
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
 
     let notes = mine_empty(&mut state, &params, &miner, 12);
     let (first, first_note) = notes[0];
@@ -281,7 +298,7 @@ fn a_proof_taken_before_the_cold_set_moved_is_refused() {
 fn a_fallen_note_cannot_be_spent_twice() {
     let params = params();
     let miner = wallet(1);
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
 
     let notes = mine_empty(&mut state, &params, &miner, 12);
     let (fallen, note) = notes[0];
@@ -334,15 +351,19 @@ fn a_fallen_note_cannot_be_spent_twice() {
 fn changing_the_note_inside_a_proof_is_refused() {
     let params = params();
     let miner = wallet(1);
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
 
     let notes = mine_empty(&mut state, &params, &miner, 12);
     let (fallen, note) = notes[0];
 
     let inflated = Note::new(note.value.checked_add(note.value).unwrap(), note.owner);
-    let proof = state.cold().prove(&fallen);
+    let position = state.cold().locate(&fallen, &note).expect("it fell");
+    let proof = state
+        .cold()
+        .prove(position)
+        .expect("an archivist can prove it");
     let mut transfer = Transfer::new(
-        vec![Input::cold(fallen, inflated, proof)],
+        vec![Input::cold(fallen, inflated, position, proof)],
         vec![Note::new(inflated.value, wallet(2).public_key())],
     );
     transfer.sign_input(params.network, 0, &inflated, &miner);
@@ -362,16 +383,29 @@ fn changing_the_note_inside_a_proof_is_refused() {
 }
 
 #[test]
-fn a_note_that_never_existed_cannot_be_conjured_with_a_proof() {
+fn a_real_place_and_a_real_proof_do_not_make_a_note() {
     let params = params();
     let miner = wallet(1);
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
 
     let notes = mine_empty(&mut state, &params, &miner, 12);
-    let invented = NoteId::new(notes[0].0.source, 7);
-    let note = Note::new(params.initial_reward, miner.public_key());
+    let (fallen, note) = notes[0];
+    let position = state.cold().locate(&fallen, &note).expect("it fell");
+    let proof = state
+        .cold()
+        .prove(position)
+        .expect("an archivist can prove it");
 
-    let transfer = spend_cold(&state, &params, invented, note, &miner, &wallet(2));
+    // The place exists, the proof is genuine, and the identifier is one that
+    // was never there. The identifier is folded into the leaf precisely so
+    // that this cannot work.
+    let invented = NoteId::new(fallen.source, 7);
+    let mut transfer = Transfer::new(
+        vec![Input::cold(invented, note, position, proof)],
+        vec![Note::new(note.value, wallet(2).public_key())],
+    );
+    transfer.sign_input(params.network, 0, &note, &miner);
+
     let coinbase = CoinbaseTransaction::new(
         state.next_height().unwrap(),
         vec![Note::new(params.initial_reward, miner.public_key())],
@@ -392,13 +426,13 @@ fn two_nodes_replaying_the_same_blocks_agree() {
     let miner = wallet(1);
 
     let build = || {
-        let mut state = LedgerState::new();
+        let mut state = LedgerState::archiving();
         let notes = mine_empty(&mut state, &params, &miner, 14);
         let transfer = spend_cold(&state, &params, notes[1].0, notes[1].1, &miner, &wallet(2));
         mine(&mut state, &params, &miner, vec![transfer]);
         (
             state.state_root(),
-            state.cold_root(),
+            state.cold().commitment(),
             state.hot_len(),
             state.cold_len(),
         )
@@ -411,7 +445,7 @@ fn two_nodes_replaying_the_same_blocks_agree() {
 fn a_block_that_evicts_is_rejected_when_its_state_root_is_wrong() {
     let params = params();
     let miner = wallet(1);
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
 
     mine_empty(&mut state, &params, &miner, 9);
     let before = state.state_root();

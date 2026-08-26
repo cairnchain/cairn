@@ -29,7 +29,7 @@ fn main() {
     );
     println!("{}", "-".repeat(56));
 
-    let mut state = LedgerState::new();
+    let mut state = LedgerState::archiving();
     let mut minted: Vec<(NoteId, Note)> = Vec::new();
 
     for _ in 0..8 {
@@ -52,7 +52,14 @@ fn main() {
     println!();
 
     let (fallen, note) = *minted.first().expect("eight blocks minted eight notes");
-    let proof = state.cold().prove(&fallen);
+    let position = state
+        .cold()
+        .locate(&fallen, &note)
+        .expect("it fell to the cold set");
+    let proof = state
+        .cold()
+        .prove(position)
+        .expect("this node keeps the cold set");
     println!(
         "  note        {} {}",
         &fallen.source.to_string()[..16],
@@ -67,7 +74,7 @@ fn main() {
     println!();
 
     let mut transfer = Transfer::new(
-        vec![Input::cold(fallen, note, proof)],
+        vec![Input::cold(fallen, note, position, proof)],
         vec![Note::new(note.value, alice.public_key())],
     );
     transfer.sign_input(params.network, 0, &note, &miner);

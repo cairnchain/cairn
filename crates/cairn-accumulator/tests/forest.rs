@@ -241,3 +241,94 @@ fn two_nodes_fed_the_same_changes_agree() {
     assert_eq!(first.commitment(), archive.commitment());
     assert_eq!(first.len(), 197);
 }
+
+#[test]
+fn several_leaves_go_at_once_from_proofs_taken_together() {
+    let mut archive = Archive::new();
+    for index in 0..256u64 {
+        archive.add(leaf(index));
+    }
+    let mut node = Forest::new();
+    for index in 0..256u64 {
+        node.add(leaf(index));
+    }
+
+    // Everyone proves against the same root, which is what spenders in one
+    // block necessarily do.
+    let targets = [5u64, 6, 90, 91, 200];
+    let removals: Vec<_> = targets
+        .iter()
+        .map(|position| {
+            (
+                *position,
+                leaf(*position),
+                archive.prove(*position).unwrap(),
+            )
+        })
+        .collect();
+
+    assert!(node.remove_batch(&removals));
+    for position in targets {
+        assert!(archive.remove(position));
+    }
+
+    assert_eq!(node.commitment(), archive.commitment());
+    assert_eq!(node.len(), 251);
+}
+
+#[test]
+fn the_order_spends_appear_in_changes_nothing() {
+    let build = |order: &[u64]| {
+        let mut archive = Archive::new();
+        for index in 0..128u64 {
+            archive.add(leaf(index));
+        }
+        let mut node = Forest::new();
+        for index in 0..128u64 {
+            node.add(leaf(index));
+        }
+        let removals: Vec<_> = order
+            .iter()
+            .map(|position| {
+                (
+                    *position,
+                    leaf(*position),
+                    archive.prove(*position).unwrap(),
+                )
+            })
+            .collect();
+        assert!(node.remove_batch(&removals));
+        node.commitment()
+    };
+
+    let forward = build(&[3, 4, 5, 60, 127]);
+    let backward = build(&[127, 60, 5, 4, 3]);
+    let shuffled = build(&[60, 3, 127, 5, 4]);
+    assert_eq!(forward, backward);
+    assert_eq!(forward, shuffled);
+}
+
+#[test]
+fn a_batch_with_one_bad_proof_changes_nothing() {
+    let mut archive = Archive::new();
+    for index in 0..64u64 {
+        archive.add(leaf(index));
+    }
+    let mut node = Forest::new();
+    for index in 0..64u64 {
+        node.add(leaf(index));
+    }
+    let before = node.commitment();
+
+    let removals = vec![
+        (10u64, leaf(10), archive.prove(10).unwrap()),
+        (11u64, leaf(999), archive.prove(11).unwrap()),
+    ];
+    assert!(!node.remove_batch(&removals));
+    assert_eq!(
+        node.commitment(),
+        before,
+        "one bad proof and none of it happened"
+    );
+    assert_eq!(node.len(), 64);
+}
