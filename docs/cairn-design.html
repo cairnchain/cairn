@@ -241,7 +241,7 @@
     <h1 class="mark">CAIRN</h1>
     <p class="thesis">Une monnaie que <em>ton téléphone</em> vérifie lui-même — aujourd'hui, et dans trente ans.</p>
     <div class="metaline">
-      <span>Document de conception · v0.8</span>
+      <span>Document de conception · v0.9</span>
       <span>26 août 2026</span>
       <span>Nom de code — provisoire</span>
     </div>
@@ -358,6 +358,16 @@
           <span class="why">La raison est le démarrage, pas la technique. La preuve d'enjeu confie la validation à ceux qui détiennent déjà de la monnaie ; au premier jour personne n'en détient, il faut donc en distribuer d'avance, et les fondateurs décident alors qui détiendra le pouvoir. Pour une chaîne dont la thèse est que personne n'a d'autorité, c'est une contradiction inscrite dans le bloc genèse. Avec le minage, la monnaie se gagne à partir de rien. Entre deux versions concurrentes de l'histoire, celle qui l'emporte est celle qui a coûté le plus de travail, pas la plus longue : une branche plus longue faite de blocs faciles est moins chère à produire qu'une branche courte faite de blocs difficiles, et confondre les deux revient à autoriser la réécriture du passé au rabais. À travail égal, la branche déjà suivie est conservée.</span>
         </div>
         <div class="dec">
+          <span class="q">Taille du tiroir</span>
+          <span class="a">131 072 billets, soit environ 107 Mo</span>
+          <span class="why">Mesuré, pas estimé : un billet chaud coûte environ 813 octets à travers les trois structures qu'un nœud tient pour lui, et l'essentiel de ce coût est l'arbre qui les engage, pas les billets eux-mêmes. Le chiffre découle de la promesse et non de ce qu'un serveur pourrait se permettre : un téléphone doit pouvoir le tenir, sinon le portefeuille redevient dépendant d'un serveur, c'est-à-dire exactement la centralisation que ce projet existe pour supprimer. Conséquence à assumer : à ce format, un billet inactif descend à la cave en quelques semaines, parfois en quelques jours si le réseau est très actif. La cave n'est pas une perte, mais cela rend le suivi des preuves par le portefeuille indispensable et non optionnel.</span>
+        </div>
+        <div class="dec">
+          <span class="q">Émission</span>
+          <span class="a">Division par deux tous les deux ans, jusqu'à un plancher perpétuel</span>
+          <span class="why">Les divisions successives distribuent environ 105 millions de CAIRN. Ensuite la récompense ne bouge plus : quelques milliers par an, soit un vingtième de pour cent, part qui décroît d'elle-même à mesure que le total grandit. Le plancher est le point discutable, et c'est un choix délibéré. Un calendrier qui atteint zéro laisse les seuls frais payer le travail qui sécurise la chaîne, et personne n'a démontré qu'un marché de frais y suffise : la question reste ouverte sur la seule chaîne assez vieille pour se la poser. Une chaîne dont toute la promesse est d'être encore vérifiable dans trente ans ne peut pas faire reposer cette promesse sur une question ouverte. Elle continue donc de payer.</span>
+        </div>
+        <div class="dec">
           <span class="q">Langage d'implémentation</span>
           <span class="a">Rust</span>
           <span class="why">Sécurité mémoire — un dépassement dans un validateur, ce sont des fonds volés. Pas de ramasse-miettes, donc un temps d'exécution des blocs prévisible. Le meilleur écosystème cryptographique existant. Et le langage où le code d'un nœud est le plus auditable par des tiers, ce qui compte le jour où l'on demande à des inconnus de le faire tourner.</span>
@@ -396,8 +406,6 @@
       <h2>Ce qui reste ouvert</h2>
       <p>Les questions encore posées, par ordre d'urgence. Aucune ne bloque le démarrage du code.</p>
       <ul class="open">
-        <li><b>La taille du tiroir.</b> Devenue la question la plus urgente : c'est désormais le seul chiffre qui manque au protocole. Elle fixe à la fois le coût réel d'un nœud et le délai moyen avant qu'un billet inactif ne descende. À calibrer sur des mesures, pas à l'intuition.</li>
-        <li><b>L'émission.</b> Combien de monnaie créée, à quel rythme, pour qui. C'est aussi ce qui rémunère les archivistes, donc c'est lié à la décision III.</li>
         <li><b>Les billets intelligents.</b> Des billets porteurs de règles plutôt que d'un simple montant. Reporté après le testnet — utile, mais pas au prix d'un retard sur le cœur.</li>
       </ul>
     </div>
@@ -415,6 +423,7 @@
         <li class="done"><div><b>Le réseau<span class="state">Fait</span></b><span>Le transport entre machines, la présentation entre pairs, la propagation des blocs et la synchronisation d'un nœud qui démarre de zéro. Cinq nœuds branchés en ligne se transmettent une chaîne entière et un bloc neuf remonte la ligne de proche en proche. Tout ce qui décide quoi que ce soit est écrit pour être testable sans réseau ; la couche qui transporte, elle, ne décide de rien.</span></div></li>
         <li class="done"><div><b>Tenir dans la durée<span class="state">Fait</span></b><span>Un nœud écrit sa chaîne sur disque et la rejoue au démarrage, en la revérifiant plutôt qu'en faisant confiance à son propre disque. Et il trouve ses voisins en les demandant à ceux qu'il a déjà : une seule adresse suffit pour rejoindre un réseau, et plus aucune pour y revenir. Un nœud est joignable à l'adresse d'où sa connexion arrive, jamais à celle qu'il prétend.</span></div></li>
         <li class="done"><div><b>Les exécutables<span class="state">Fait</span></b><span>Un nœud et un portefeuille, en ligne de commande. Le portefeuille ne demande pas à un serveur ce qu'il possède : il rejoint le réseau, vérifie la chaîne lui-même et lit son solde dans le grand livre qu'il vient de valider. Les règles de consensus se choisissent en nommant un réseau et ne se règlent pas une par une. Une transaction attend maintenant dans une réserve qu'un bloc l'emporte, ce qui permet à quelqu'un de payer quelqu'un d'autre. Reste la version téléphone.</span></div></li>
+        <li><div><b>Le portefeuille qui garde ses preuves</b><span>Aujourd'hui le portefeuille ne sait dépenser que ce que les nœuds tiennent encore. Dès qu'un billet descend à la cave, il faut que le portefeuille ait conservé sa preuve et l'ait rafraîchie. C'est la garantie n°3 de ce document, et la mesure du tiroir vient d'en faire une pièce maîtresse plutôt qu'un confort.</span></div></li>
         <li><div><b>Le testnet public</b><span>Une monnaie sans valeur, ouverte, que des inconnus font tourner. Le seul vrai test de décentralisation : tout ce qui précède peut être parfait et échouer ici.</span></div></li>
       </ol>
 
@@ -427,8 +436,8 @@
   </section>
 
   <footer>
-    <span>Cairn · document de conception v0.8</span>
-    <span>Statut — l'argent circule, testnet public à ouvrir</span>
+    <span>Cairn · document de conception v0.9</span>
+    <span>Statut — protocole entièrement tranché</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 

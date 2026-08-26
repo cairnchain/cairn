@@ -27,10 +27,13 @@ asking the ones it already has, so it needs one address to join a network and
 none at all to rejoin one.
 
 There is a node and there is a wallet, and money moves between people on a
-network running on one machine. What is left before strangers can join is a
-public testnet, and two numbers that are still provisional: the size of the hot
-set and the emission schedule. Neither can be settled without measurements from
-a network that is actually running.
+network running on one machine. Every consensus rule is settled, including the
+two that were open longest: the hot set holds 131072 notes, measured at roughly
+107 MB so that a phone can hold it, and the reward halves every two years until
+it reaches a floor it then keeps forever.
+
+What is left is a wallet that keeps and refreshes its own proofs, so it can
+spend a note that has fallen to the cold set, and then a public testnet.
 
 ## Layout
 
