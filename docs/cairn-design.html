@@ -241,7 +241,7 @@
     <h1 class="mark">CAIRN</h1>
     <p class="thesis">Une monnaie que <em>ton téléphone</em> vérifie lui-même — aujourd'hui, et dans trente ans.</p>
     <div class="metaline">
-      <span>Document de conception · v0.9</span>
+      <span>Document de conception · v0.10</span>
       <span>26 août 2026</span>
       <span>Nom de code — provisoire</span>
     </div>
@@ -350,7 +350,7 @@
         <div class="dec">
           <span class="q">Mécanisme du sceau</span>
           <span class="a">Un arbre de hachage, sans aucune cérémonie de confiance</span>
-          <span class="why">Les constructions à preuves plus courtes exigent une cérémonie d'installation dont le secret doit être détruit. Un participant qui en garderait une copie pourrait fabriquer de fausses preuves d'appartenance, c'est-à-dire créer de la monnaie à partir de rien, indéfiniment, sans que personne puisse le détecter ; et aucun audit ne peut établir après coup qu'un secret a bien disparu. Un arbre de hachage n'exige aucune cérémonie, se vérifie en quelques dizaines de hachages, et résiste aux ordinateurs quantiques, ce dont aucune des familles écartées n'est capable.</span>
+          <span class="why">Les constructions à preuves plus courtes exigent une cérémonie d'installation dont le secret doit être détruit. Un participant qui en garderait une copie pourrait fabriquer de fausses preuves d'appartenance, c'est-à-dire créer de la monnaie à partir de rien, indéfiniment, sans que personne puisse le détecter ; et aucun audit ne peut établir après coup qu'un secret a bien disparu. Un arbre de hachage n'exige aucune cérémonie, se vérifie en quelques dizaines de hachages, et résiste aux ordinateurs quantiques, ce dont aucune des familles écartées n'est capable. La forme retenue est une forêt à ajout : y ajouter un billet ne demande que la liste des racines, jamais le contenu. C'est cette propriété précise qui permet à un nœud de suivre la cave sans la détenir, et donc qui rend le coût constant réel plutôt qu'annoncé.</span>
         </div>
         <div class="dec">
           <span class="q">Mécanisme de consensus</span>
@@ -436,7 +436,7 @@
   </section>
 
   <footer>
-    <span>Cairn · document de conception v0.9</span>
+    <span>Cairn · document de conception v0.10</span>
     <span>Statut — protocole entièrement tranché</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
