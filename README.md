@@ -26,11 +26,11 @@ A node keeps its chain on disk and replays it on start, and finds its peers by
 asking the ones it already has, so it needs one address to join a network and
 none at all to rejoin one.
 
-What is missing is not protocol but packaging. There is no node executable and
-no wallet: everything runs as a library with runnable demonstrations. Two
-numbers are also still provisional, the size of the hot set and the emission
-schedule, and neither can be settled without measurements from a running
-network.
+There is a node and there is a wallet, and money moves between people on a
+network running on one machine. What is left before strangers can join is a
+public testnet, and two numbers that are still provisional: the size of the hot
+set and the emission schedule. Neither can be settled without measurements from
+a network that is actually running.
 
 ## Layout
 
@@ -43,6 +43,40 @@ network.
 | `cairn-chain` | The block tree, the fork choice, and reorganisation |
 | `cairn-net` | The wire protocol, block propagation, syncing over TCP, and peer discovery |
 | `cairn-store` | The append only block log a node replays on start |
+| `cairn-node` | `cairnd`, a node |
+| `cairn-wallet` | `cairn-wallet`, a wallet that is itself a node |
+
+## Running it
+
+```
+cargo build --release
+```
+
+Make a key, and start a node that mines to it on a throwaway network:
+
+```
+./target/release/cairn-wallet new alice.key
+./target/release/cairnd --network devnet --data node \
+    --mine $(./target/release/cairn-wallet address alice.key)
+```
+
+From another terminal, read what that key holds and pay someone with it. The
+wallet joins the network as a node of its own and verifies the chain before it
+answers, so it needs its own directory:
+
+```
+./target/release/cairn-wallet balance alice.key \
+    --network devnet --data wallet --seed 127.0.0.1:9944
+
+./target/release/cairn-wallet send alice.key --to <public key> \
+    --amount 12.5 --fee 0.25 \
+    --network devnet --data wallet --seed 127.0.0.1:9944
+```
+
+`devnet` is testnet's rules with a five second block time. Consensus rules come
+from the network name and cannot be set one at a time: two nodes differing on
+any of them would build separate chains while believing they were on the same
+one.
 
 ## Building
 
