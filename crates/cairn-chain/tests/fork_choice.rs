@@ -50,7 +50,7 @@ impl Branch {
         self.clock += spacing;
         let coinbase = CoinbaseTransaction::new(
             height,
-            vec![Note::new(self.params.block_reward, miner.public_key())],
+            vec![Note::new(self.params.initial_reward, miner.public_key())],
             [0; 8],
         );
         let block = assemble_block(
@@ -77,7 +77,7 @@ impl Branch {
 fn coinbase_note(block: &Block, params: &ConsensusParams, miner: &SecretKey) -> (NoteId, Note) {
     (
         NoteId::new(block.coinbase.id(), 0),
-        Note::new(params.block_reward, miner.public_key()),
+        Note::new(params.initial_reward, miner.public_key()),
     )
 }
 

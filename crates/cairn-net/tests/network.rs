@@ -55,7 +55,7 @@ impl Forge {
         self.clock += 600;
         let coinbase = CoinbaseTransaction::new(
             height,
-            vec![Note::new(self.params.block_reward, miner.public_key())],
+            vec![Note::new(self.params.initial_reward, miner.public_key())],
             [0; 8],
         );
         let block = assemble_block(

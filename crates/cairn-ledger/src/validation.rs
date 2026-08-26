@@ -7,8 +7,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cairn_primitives::amount::PEBBLES_PER_CAIRN;
 use cairn_primitives::{Amount, Hash32};
+
+use crate::emission;
 
 use crate::block::{Block, BlockHeader, BLOCK_VERSION};
 use crate::note::{NetworkId, Note, NoteId};
@@ -18,21 +19,28 @@ use crate::transaction::{
     CoinbaseTransaction, Input, Transfer, Witness, COINBASE_VERSION, TRANSFER_VERSION,
 };
 
-/// Reward paid to the producer of a block.
-///
-/// Provisional. The emission schedule is an open question, and it is tied to
-/// how archivists get paid.
-const INITIAL_BLOCK_REWARD: Amount = match Amount::from_pebbles(50 * PEBBLES_PER_CAIRN) {
-    Some(amount) => amount,
-    None => Amount::ZERO,
-};
+const fn amount_or_zero(pebbles: u64) -> Amount {
+    match Amount::from_pebbles(pebbles) {
+        Some(amount) => amount,
+        None => Amount::ZERO,
+    }
+}
+
+const INITIAL_REWARD: Amount = amount_or_zero(emission::INITIAL_REWARD_PEBBLES);
+const TAIL_REWARD: Amount = amount_or_zero(emission::TAIL_REWARD_PEBBLES);
 
 /// How many notes stay in the hot set.
 ///
-/// Provisional, and the single most consequential number in the protocol: it
-/// fixes both what a node costs to run and how long a note stays reachable
-/// without a proof. It has to be settled against measurements, not intuition.
-const DEFAULT_HOT_CAPACITY: usize = 1 << 20;
+/// Chosen from a measurement rather than from a round number. A hot note costs
+/// about 813 bytes across the three structures a node keeps for it, most of
+/// that being the tree that commits to them, so this is roughly 107 MB.
+///
+/// The figure is set by the promise rather than by what a server could afford:
+/// a phone has to be able to hold it, because a wallet that cannot verify for
+/// itself is the centralisation this design exists to remove. A leaner tree
+/// representation would buy room to raise it later, and that is the single
+/// most valuable optimisation left.
+const DEFAULT_HOT_CAPACITY: usize = 1 << 17;
 
 /// Seconds a block is meant to take. Provisional.
 const DEFAULT_TARGET_BLOCK_TIME: u64 = 60;
@@ -41,7 +49,12 @@ const DEFAULT_TARGET_BLOCK_TIME: u64 = 60;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConsensusParams {
     pub network: NetworkId,
-    pub block_reward: Amount,
+    /// What the first block pays. The schedule halves from here.
+    pub initial_reward: Amount,
+    /// What every block pays once halving would take it lower.
+    pub tail_reward: Amount,
+    /// Blocks between halvings.
+    pub halving_interval: u64,
     /// Notes the hot set holds before the oldest start falling to the cold set.
     pub hot_capacity: usize,
     /// Seconds the retarget aims for between blocks.
@@ -91,7 +104,9 @@ impl ConsensusParams {
     pub const fn testnet() -> Self {
         Self {
             network: NetworkId::TESTNET,
-            block_reward: INITIAL_BLOCK_REWARD,
+            initial_reward: INITIAL_REWARD,
+            tail_reward: TAIL_REWARD,
+            halving_interval: emission::HALVING_INTERVAL,
             hot_capacity: DEFAULT_HOT_CAPACITY,
             target_block_time: DEFAULT_TARGET_BLOCK_TIME,
             genesis_difficulty: MIN_DIFFICULTY,
@@ -101,6 +116,16 @@ impl ConsensusParams {
             max_coinbase_outputs: 16,
             max_timestamp_drift: 2 * 60 * 60,
         }
+    }
+
+    /// What a block at `height` pays whoever produced it.
+    pub fn reward_at(&self, height: u64) -> Amount {
+        emission::reward_at(
+            height,
+            self.halving_interval,
+            self.initial_reward,
+            self.tail_reward,
+        )
     }
 
     /// The same rules with a hot set small enough to exercise eviction.
@@ -413,8 +438,10 @@ pub fn evaluate_block_body(
             .ok_or(BlockError::ValueOverflow)?;
     }
 
+    // What the schedule pays at this height, plus what the transfers paid to
+    // be carried.
     let allowed = params
-        .block_reward
+        .reward_at(height)
         .checked_add(total_fees)
         .ok_or(BlockError::ValueOverflow)?;
     let claimed = coinbase.total_output().ok_or(BlockError::ValueOverflow)?;

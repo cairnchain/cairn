@@ -73,7 +73,7 @@ fn build(
         // Whatever the pool holds that fits together, and what those transfers
         // pay to be carried.
         let (transfers, fees) = chain.selection(params.max_transfers_per_block);
-        let reward = params.block_reward.checked_add(fees)?;
+        let reward = params.reward_at(height).checked_add(fees)?;
 
         let coinbase = CoinbaseTransaction::new(height, vec![Note::new(reward, reward_to)], [0; 8]);
         let block = assemble_block(state, coinbase, transfers, params, timestamp, 0).ok()?;

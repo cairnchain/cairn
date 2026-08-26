@@ -124,7 +124,7 @@ fn forge(
     *clock += 600;
     let coinbase = CoinbaseTransaction::new(
         height,
-        vec![Note::new(params.block_reward, miner.public_key())],
+        vec![Note::new(params.initial_reward, miner.public_key())],
         [0; 8],
     );
     let block = assemble_block(state, coinbase, Vec::<Transfer>::new(), params, *clock, 0)

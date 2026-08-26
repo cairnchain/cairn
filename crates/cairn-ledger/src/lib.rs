@@ -6,6 +6,7 @@
 //! commits to most cheaply. The design document calls them bills.
 
 pub mod block;
+pub mod emission;
 pub mod note;
 pub mod pow;
 pub mod state;

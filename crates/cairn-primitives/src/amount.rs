@@ -18,11 +18,12 @@ impl Amount {
 
     /// Hard ceiling on any single amount and on any sum of amounts.
     ///
-    /// The figure is provisional, since the emission schedule is not settled.
-    /// What consensus relies on is the ceiling itself: it keeps any realistic
-    /// sum of validated amounts far below `u64::MAX`, so an overflow becomes a
-    /// validation failure instead of a wraparound.
-    pub const MAX_MONEY: Self = Self(2_100_000_000_000_000);
+    /// One billion CAIRN. The schedule pays out about a hundred and five
+    /// million before its floor, and the floor adds a few thousand a year, so
+    /// this leaves room for many centuries and still sits far below
+    /// `u64::MAX`. What consensus relies on is the ceiling itself: it turns
+    /// every overflow into a validation failure rather than a wraparound.
+    pub const MAX_MONEY: Self = Self(100_000_000_000_000_000);
 
     /// Returns `None` if `pebbles` exceeds [`Amount::MAX_MONEY`].
     pub const fn from_pebbles(pebbles: u64) -> Option<Self> {

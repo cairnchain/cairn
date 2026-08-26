@@ -20,7 +20,7 @@ fn main() {
     let alice = SecretKey::from_bytes(&[2; 32]);
 
     println!("network        {:#010x}", params.network.as_u32());
-    println!("block reward   {}", params.block_reward);
+    println!("block reward   {}", params.initial_reward);
     println!("hot capacity   {HOT_CAPACITY} notes");
     println!();
     println!(
@@ -36,7 +36,7 @@ fn main() {
         let block = mine(&mut state, &params, &miner, Vec::new());
         minted.push((
             NoteId::new(block.coinbase.id(), 0),
-            Note::new(params.block_reward, miner.public_key()),
+            Note::new(params.initial_reward, miner.public_key()),
         ));
         let note = if state.cold_len() == 0 {
             "the miner is paid"
@@ -91,7 +91,7 @@ fn mine(
     let height = state.next_height().expect("the chain has room");
     let coinbase = CoinbaseTransaction::new(
         height,
-        vec![Note::new(params.block_reward, miner.public_key())],
+        vec![Note::new(params.initial_reward, miner.public_key())],
         [0; 8],
     );
     let block = assemble_block(

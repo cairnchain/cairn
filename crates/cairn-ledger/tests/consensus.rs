@@ -18,6 +18,7 @@ use cairn_ledger::validation::{
     ConsensusParams,
 };
 use cairn_ledger::{Block, LedgerState};
+use cairn_primitives::Amount;
 
 const NOW: u64 = 2_000_000_000;
 const SPACING: u64 = 600;
@@ -36,7 +37,7 @@ fn candidate(
     let height = state.next_height().unwrap();
     let coinbase = CoinbaseTransaction::new(
         height,
-        vec![Note::new(params.block_reward, miner.public_key())],
+        vec![Note::new(params.initial_reward, miner.public_key())],
         [0; 8],
     );
     assemble_block(
@@ -65,7 +66,7 @@ fn mine(
 fn coinbase_note(block: &Block, params: &ConsensusParams, miner: &SecretKey) -> (NoteId, Note) {
     (
         NoteId::new(block.coinbase.id(), 0),
-        Note::new(params.block_reward, miner.public_key()),
+        Note::new(params.initial_reward, miner.public_key()),
     )
 }
 
@@ -150,7 +151,7 @@ fn a_block_backdated_below_the_recent_median_is_refused() {
     let height = state.next_height().unwrap();
     let coinbase = CoinbaseTransaction::new(
         height,
-        vec![Note::new(params.block_reward, miner.public_key())],
+        vec![Note::new(params.initial_reward, miner.public_key())],
         [0; 8],
     );
     // Well after the parent, but still behind the median of the last eleven.
@@ -321,4 +322,60 @@ fn a_reapplied_block_produces_the_same_state() {
     disconnect_block(&mut state, &connected);
     connect_block(&mut state, &block, &params, NOW).unwrap();
     assert_eq!(state.state_root(), after);
+}
+
+#[test]
+fn the_reward_follows_the_schedule_rather_than_the_miner() {
+    // A halving every four blocks, so the whole schedule fits in a test.
+    let mut params = ConsensusParams::testnet();
+    params.halving_interval = 4;
+    params.tail_reward = Amount::from_cairn("3").unwrap();
+
+    let miner = wallet(1);
+    let mut state = LedgerState::new();
+
+    let mut paid = Vec::new();
+    for _ in 0..24u64 {
+        let height = state.next_height().unwrap();
+        let reward = params.reward_at(height);
+        paid.push(reward);
+
+        let coinbase =
+            CoinbaseTransaction::new(height, vec![Note::new(reward, miner.public_key())], [0; 8]);
+        let block = assemble_block(
+            &state,
+            coinbase,
+            Vec::new(),
+            &params,
+            1_000 + height * SPACING,
+            0,
+        )
+        .unwrap();
+        let block = mine_block(block, MINING_ATTEMPTS).unwrap();
+        connect_block(&mut state, &block, &params, NOW).unwrap();
+    }
+
+    assert_eq!(paid[0], params.initial_reward);
+    assert_eq!(
+        paid[3], params.initial_reward,
+        "it holds through the interval"
+    );
+    assert_eq!(paid[4].as_pebbles(), params.initial_reward.as_pebbles() / 2);
+    assert_eq!(paid[8].as_pebbles(), params.initial_reward.as_pebbles() / 4);
+    assert_eq!(
+        paid[23], params.tail_reward,
+        "and settles on the floor it never leaves"
+    );
+
+    // A miner cannot help itself to the earlier, larger reward.
+    let height = state.next_height().unwrap();
+    let greedy = CoinbaseTransaction::new(
+        height,
+        vec![Note::new(params.initial_reward, miner.public_key())],
+        [0; 8],
+    );
+    assert!(matches!(
+        assemble_block(&state, greedy, Vec::new(), &params, 90_000, 0),
+        Err(BlockError::CoinbaseOverpay { .. })
+    ));
 }

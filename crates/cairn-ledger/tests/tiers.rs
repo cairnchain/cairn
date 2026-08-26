@@ -38,7 +38,7 @@ fn mine(
     let height = state.next_height().unwrap();
     let coinbase = CoinbaseTransaction::new(
         height,
-        vec![Note::new(params.block_reward, miner.public_key())],
+        vec![Note::new(params.initial_reward, miner.public_key())],
         [0; 8],
     );
     let block =
@@ -59,7 +59,7 @@ fn mine_empty(
             let block = mine(state, params, miner, Vec::new());
             (
                 NoteId::new(block.coinbase.id(), 0),
-                Note::new(params.block_reward, miner.public_key()),
+                Note::new(params.initial_reward, miner.public_key()),
             )
         })
         .collect()
@@ -205,7 +205,7 @@ fn spending_a_fallen_note_without_a_proof_is_refused() {
 
     let coinbase = CoinbaseTransaction::new(
         state.next_height().unwrap(),
-        vec![Note::new(params.block_reward, miner.public_key())],
+        vec![Note::new(params.initial_reward, miner.public_key())],
         [0; 8],
     );
     assert!(matches!(
@@ -233,7 +233,7 @@ fn offering_a_proof_for_a_note_still_in_the_hot_set_is_refused() {
     let transfer = spend_cold(&state, &params, held, note, &miner, &wallet(2));
     let coinbase = CoinbaseTransaction::new(
         state.next_height().unwrap(),
-        vec![Note::new(params.block_reward, miner.public_key())],
+        vec![Note::new(params.initial_reward, miner.public_key())],
         [0; 8],
     );
     assert!(matches!(
@@ -262,7 +262,7 @@ fn a_proof_taken_before_the_cold_set_moved_is_refused() {
 
     let coinbase = CoinbaseTransaction::new(
         state.next_height().unwrap(),
-        vec![Note::new(params.block_reward, miner.public_key())],
+        vec![Note::new(params.initial_reward, miner.public_key())],
         [0; 8],
     );
     assert!(matches!(
@@ -291,7 +291,7 @@ fn a_fallen_note_cannot_be_spent_twice() {
 
     let coinbase = CoinbaseTransaction::new(
         state.next_height().unwrap(),
-        vec![Note::new(params.block_reward, miner.public_key())],
+        vec![Note::new(params.initial_reward, miner.public_key())],
         [0; 8],
     );
     assert!(
@@ -315,7 +315,7 @@ fn a_fallen_note_cannot_be_spent_twice() {
     mine(&mut state, &params, &miner, vec![first]);
     let coinbase = CoinbaseTransaction::new(
         state.next_height().unwrap(),
-        vec![Note::new(params.block_reward, miner.public_key())],
+        vec![Note::new(params.initial_reward, miner.public_key())],
         [0; 8],
     );
     assert!(
@@ -349,7 +349,7 @@ fn changing_the_note_inside_a_proof_is_refused() {
 
     let coinbase = CoinbaseTransaction::new(
         state.next_height().unwrap(),
-        vec![Note::new(params.block_reward, miner.public_key())],
+        vec![Note::new(params.initial_reward, miner.public_key())],
         [0; 8],
     );
     assert!(matches!(
@@ -369,12 +369,12 @@ fn a_note_that_never_existed_cannot_be_conjured_with_a_proof() {
 
     let notes = mine_empty(&mut state, &params, &miner, 12);
     let invented = NoteId::new(notes[0].0.source, 7);
-    let note = Note::new(params.block_reward, miner.public_key());
+    let note = Note::new(params.initial_reward, miner.public_key());
 
     let transfer = spend_cold(&state, &params, invented, note, &miner, &wallet(2));
     let coinbase = CoinbaseTransaction::new(
         state.next_height().unwrap(),
-        vec![Note::new(params.block_reward, miner.public_key())],
+        vec![Note::new(params.initial_reward, miner.public_key())],
         [0; 8],
     );
     assert!(matches!(
@@ -419,7 +419,7 @@ fn a_block_that_evicts_is_rejected_when_its_state_root_is_wrong() {
     let height = state.next_height().unwrap();
     let coinbase = CoinbaseTransaction::new(
         height,
-        vec![Note::new(params.block_reward, miner.public_key())],
+        vec![Note::new(params.initial_reward, miner.public_key())],
         [0; 8],
     );
     let mut block = assemble_block(

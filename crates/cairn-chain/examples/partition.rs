@@ -38,7 +38,7 @@ impl Miner {
         self.clock += SPACING;
         let coinbase = CoinbaseTransaction::new(
             height,
-            vec![Note::new(self.params.block_reward, who.public_key())],
+            vec![Note::new(self.params.initial_reward, who.public_key())],
             [0; 8],
         );
         let block = assemble_block(
@@ -79,7 +79,7 @@ fn main() {
     // North's branch will pay alice. South's will do nothing, but run longer.
     let last_common = common.last().expect("eight blocks were mined");
     let funded = NoteId::new(last_common.coinbase.id(), 0);
-    let funded_note = Note::new(params.block_reward, miner.public_key());
+    let funded_note = Note::new(params.initial_reward, miner.public_key());
     let mut payment = Transfer::new(
         vec![Input::hot(funded)],
         vec![Note::new(funded_note.value, alice.public_key())],

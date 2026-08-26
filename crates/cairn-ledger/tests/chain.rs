@@ -52,8 +52,8 @@ fn signed_transfer(
 /// Chain with a single block whose coinbase pays `miner` the full reward.
 fn chain_with_genesis(params: &ConsensusParams, miner: &SecretKey) -> (LedgerState, NoteId, Note) {
     let mut state = LedgerState::new();
-    let note = Note::new(params.block_reward, miner.public_key());
-    let coinbase = coinbase_paying(0, miner.public_key(), params.block_reward);
+    let note = Note::new(params.initial_reward, miner.public_key());
+    let coinbase = coinbase_paying(0, miner.public_key(), params.initial_reward);
     let block = assemble_block(&state, coinbase, Vec::new(), params, 1_000, 0).unwrap();
     connect_block(&mut state, &block, params, NOW).unwrap();
 
@@ -69,7 +69,7 @@ fn a_genesis_block_connects_and_pays_the_miner() {
     let (state, _, note) = chain_with_genesis(&params, &miner);
 
     assert_eq!(state.hot_len(), 1);
-    assert_eq!(note.value, params.block_reward);
+    assert_eq!(note.value, params.initial_reward);
     let tip = state.tip().unwrap();
     assert_eq!(tip.height, 0);
     assert_eq!(tip.timestamp, 1_000);
@@ -104,7 +104,7 @@ fn a_transfer_moves_value_and_pays_a_fee() {
     let coinbase = coinbase_paying(
         1,
         miner.public_key(),
-        params.block_reward.checked_add(fee).unwrap(),
+        params.initial_reward.checked_add(fee).unwrap(),
     );
     let block = assemble_block(&state, coinbase, vec![transfer], &params, 2_000, 0).unwrap();
     connect_block(&mut state, &block, &params, NOW).unwrap();
@@ -138,7 +138,7 @@ fn a_transfer_cannot_create_value() {
         vec![Note::new(too_much, miner.public_key())],
     );
 
-    let coinbase = coinbase_paying(1, miner.public_key(), params.block_reward);
+    let coinbase = coinbase_paying(1, miner.public_key(), params.initial_reward);
     let outcome = assemble_block(&state, coinbase, vec![transfer], &params, 2_000, 0);
     assert!(matches!(
         outcome,
@@ -167,7 +167,7 @@ fn the_same_note_cannot_be_spent_twice_in_one_block() {
         vec![Note::new(half, wallet(3).public_key())],
     );
 
-    let coinbase = coinbase_paying(1, miner.public_key(), params.block_reward);
+    let coinbase = coinbase_paying(1, miner.public_key(), params.initial_reward);
     let outcome = assemble_block(&state, coinbase, vec![first, second], &params, 2_000, 0);
     assert!(matches!(
         outcome,
@@ -191,11 +191,11 @@ fn a_note_spent_in_an_earlier_block_cannot_be_spent_again() {
         vec![Note::new(half, wallet(2).public_key())],
     );
 
-    let coinbase = coinbase_paying(1, miner.public_key(), params.block_reward);
+    let coinbase = coinbase_paying(1, miner.public_key(), params.initial_reward);
     let block = assemble_block(&state, coinbase, vec![spend.clone()], &params, 2_000, 0).unwrap();
     connect_block(&mut state, &block, &params, NOW).unwrap();
 
-    let coinbase = coinbase_paying(2, miner.public_key(), params.block_reward);
+    let coinbase = coinbase_paying(2, miner.public_key(), params.initial_reward);
     let outcome = assemble_block(&state, coinbase, vec![spend], &params, 3_000, 0);
     // The note left the hot set when it was spent. A node holding only the cold
     // commitment cannot tell that from a note that fell to the cold set, so it
@@ -222,7 +222,7 @@ fn a_note_can_only_be_spent_by_its_owner() {
         vec![Note::new(pebbles(1), thief.public_key())],
     );
 
-    let coinbase = coinbase_paying(1, miner.public_key(), params.block_reward);
+    let coinbase = coinbase_paying(1, miner.public_key(), params.initial_reward);
     let outcome = assemble_block(&state, coinbase, vec![transfer], &params, 2_000, 0);
     assert!(matches!(
         outcome,
@@ -247,7 +247,7 @@ fn changing_an_output_after_signing_breaks_the_signature() {
     );
     transfer.outputs[0].owner = attacker.public_key();
 
-    let coinbase = coinbase_paying(1, miner.public_key(), params.block_reward);
+    let coinbase = coinbase_paying(1, miner.public_key(), params.initial_reward);
     let outcome = assemble_block(&state, coinbase, vec![transfer], &params, 2_000, 0);
     assert!(matches!(
         outcome,
@@ -273,7 +273,7 @@ fn a_signature_from_another_network_does_not_replay() {
     );
 
     params.network = NetworkId::TESTNET;
-    let coinbase = coinbase_paying(1, miner.public_key(), params.block_reward);
+    let coinbase = coinbase_paying(1, miner.public_key(), params.initial_reward);
     let outcome = assemble_block(&state, coinbase, vec![transfer], &params, 2_000, 0);
     assert!(matches!(
         outcome,
@@ -290,7 +290,7 @@ fn the_coinbase_cannot_claim_more_than_the_reward_and_fees() {
     let miner = wallet(1);
     let state = LedgerState::new();
 
-    let overpaid = params.block_reward.checked_add(pebbles(1)).unwrap();
+    let overpaid = params.initial_reward.checked_add(pebbles(1)).unwrap();
     let coinbase = coinbase_paying(0, miner.public_key(), overpaid);
     let outcome = assemble_block(&state, coinbase, Vec::new(), &params, 1_000, 0);
     assert!(matches!(outcome, Err(BlockError::CoinbaseOverpay { .. })));
@@ -302,7 +302,7 @@ fn a_tampered_state_root_is_rejected_and_leaves_the_state_untouched() {
     let miner = wallet(1);
     let mut state = LedgerState::new();
 
-    let coinbase = coinbase_paying(0, miner.public_key(), params.block_reward);
+    let coinbase = coinbase_paying(0, miner.public_key(), params.initial_reward);
     let mut block = assemble_block(&state, coinbase, Vec::new(), &params, 1_000, 0).unwrap();
     block.header.state_root = Hash32::ZERO;
 
@@ -320,7 +320,7 @@ fn a_tampered_transaction_root_is_rejected() {
     let miner = wallet(1);
     let mut state = LedgerState::new();
 
-    let coinbase = coinbase_paying(0, miner.public_key(), params.block_reward);
+    let coinbase = coinbase_paying(0, miner.public_key(), params.initial_reward);
     let mut block = assemble_block(&state, coinbase, Vec::new(), &params, 1_000, 0).unwrap();
     block.header.transactions_root = Hash32::ZERO;
 
@@ -336,7 +336,7 @@ fn a_block_must_extend_the_current_tip() {
     let miner = wallet(1);
     let (mut state, _, _) = chain_with_genesis(&params, &miner);
 
-    let coinbase = coinbase_paying(1, miner.public_key(), params.block_reward);
+    let coinbase = coinbase_paying(1, miner.public_key(), params.initial_reward);
     let mut block = assemble_block(&state, coinbase, Vec::new(), &params, 2_000, 0).unwrap();
     block.header.previous = Hash32::ZERO;
 
@@ -345,7 +345,7 @@ fn a_block_must_extend_the_current_tip() {
         Err(BlockError::WrongParent { .. })
     ));
 
-    let coinbase = coinbase_paying(5, miner.public_key(), params.block_reward);
+    let coinbase = coinbase_paying(5, miner.public_key(), params.initial_reward);
     assert!(matches!(
         assemble_block(&state, coinbase, Vec::new(), &params, 2_000, 0),
         Err(BlockError::CoinbaseHeightMismatch {
@@ -361,7 +361,7 @@ fn a_block_from_the_far_future_is_rejected() {
     let miner = wallet(1);
     let mut state = LedgerState::new();
 
-    let coinbase = coinbase_paying(0, miner.public_key(), params.block_reward);
+    let coinbase = coinbase_paying(0, miner.public_key(), params.initial_reward);
     let block = assemble_block(
         &state,
         coinbase,
@@ -384,7 +384,7 @@ fn a_block_must_be_later_than_the_recent_median() {
     let miner = wallet(1);
     let (mut state, _, _) = chain_with_genesis(&params, &miner);
 
-    let coinbase = coinbase_paying(1, miner.public_key(), params.block_reward);
+    let coinbase = coinbase_paying(1, miner.public_key(), params.initial_reward);
     let block = assemble_block(&state, coinbase, Vec::new(), &params, 1_000, 0).unwrap();
 
     assert!(matches!(
@@ -404,7 +404,7 @@ fn a_block_from_another_network_is_rejected() {
 
     let miner = wallet(1);
     let mut state = LedgerState::new();
-    let coinbase = coinbase_paying(0, miner.public_key(), foreign.block_reward);
+    let coinbase = coinbase_paying(0, miner.public_key(), foreign.initial_reward);
     let block = assemble_block(&state, coinbase, Vec::new(), &foreign, 1_000, 0).unwrap();
 
     assert!(matches!(
@@ -425,7 +425,7 @@ fn identical_histories_produce_identical_state_roots() {
             &[(funded_id, funded, &miner)],
             vec![Note::new(pebbles(7), wallet(2).public_key())],
         );
-        let coinbase = coinbase_paying(1, miner.public_key(), params.block_reward);
+        let coinbase = coinbase_paying(1, miner.public_key(), params.initial_reward);
         let block = assemble_block(&state, coinbase, vec![transfer], &params, 2_000, 0).unwrap();
         connect_block(&mut state, &block, &params, NOW).unwrap();
         (state.state_root(), block.id())
@@ -441,7 +441,7 @@ fn the_state_root_notices_a_single_changed_pebble() {
     let (state, _, _) = chain_with_genesis(&params, &miner);
 
     let mut shifted = ConsensusParams::testnet();
-    shifted.block_reward = params.block_reward.checked_sub(pebbles(1)).unwrap();
+    shifted.initial_reward = params.initial_reward.checked_sub(pebbles(1)).unwrap();
     let (other, _, _) = chain_with_genesis(&shifted, &miner);
 
     assert_ne!(state.state_root(), other.state_root());
@@ -458,7 +458,7 @@ fn a_block_survives_a_round_trip_through_the_wire_format() {
         &[(funded_id, funded, &miner)],
         vec![Note::new(pebbles(5), wallet(2).public_key())],
     );
-    let coinbase = coinbase_paying(1, miner.public_key(), params.block_reward);
+    let coinbase = coinbase_paying(1, miner.public_key(), params.initial_reward);
     let block = assemble_block(&state, coinbase, vec![transfer], &params, 2_000, 42).unwrap();
 
     let bytes = block.encode();
@@ -488,7 +488,7 @@ fn a_chain_of_many_blocks_stays_consistent() {
         );
         let transfer_id = transfer.id();
 
-        let coinbase = coinbase_paying(height, miner.public_key(), params.block_reward);
+        let coinbase = coinbase_paying(height, miner.public_key(), params.initial_reward);
         let block = assemble_block(
             &state,
             coinbase,
