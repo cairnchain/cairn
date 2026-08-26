@@ -241,7 +241,7 @@
     <h1 class="mark">CAIRN</h1>
     <p class="thesis">Une monnaie que <em>ton téléphone</em> vérifie lui-même — aujourd'hui, et dans trente ans.</p>
     <div class="metaline">
-      <span>Document de conception · v0.3</span>
+      <span>Document de conception · v0.4</span>
       <span>26 août 2026</span>
       <span>Nom de code — provisoire</span>
     </div>
@@ -391,7 +391,7 @@
       <h2>Ce qui reste ouvert</h2>
       <p>Les questions encore posées, par ordre d'urgence. Aucune ne bloque le démarrage du code.</p>
       <ul class="open">
-        <li><b>La taille du tiroir.</b> Elle fixe à la fois le coût réel d'un nœud et le délai moyen avant qu'un billet inactif ne descende. À calibrer sur des chiffres, pas à l'intuition.</li>
+        <li><b>La taille du tiroir.</b> Devenue la question la plus urgente : c'est désormais le seul chiffre qui manque au protocole. Elle fixe à la fois le coût réel d'un nœud et le délai moyen avant qu'un billet inactif ne descende. À calibrer sur des mesures, pas à l'intuition.</li>
         <li><b>Le consensus.</b> Volontairement classique et éprouvé — l'innovation est ailleurs. Reste à choisir lequel, et sur quel critère : accessibilité du minage pour des particuliers, ou rapidité de finalité.</li>
         <li><b>L'émission.</b> Combien de monnaie créée, à quel rythme, pour qui. C'est aussi ce qui rémunère les archivistes, donc c'est lié à la décision III.</li>
         <li><b>Les billets intelligents.</b> Des billets porteurs de règles plutôt que d'un simple montant. Reporté après le testnet — utile, mais pas au prix d'un retard sur le cœur.</li>
@@ -406,7 +406,7 @@
       <ol class="road">
         <li class="done"><div><b>Le cœur<span class="state">Fait</span></b><span>Billets, signatures, blocs, validation. Écrit en Rust, 50 tests au vert : une chaîne produit des blocs, les vérifie, refuse une double dépense, une signature falsifiée, une création de valeur, un bloc rattaché au mauvais parent.</span></div></li>
         <li class="done"><div><b>Le sceau<span class="state">Fait</span></b><span>L'accumulateur et les preuves d'appartenance et d'absence. Un million de billets tiennent dans une empreinte de 32 octets ; une preuve pèse 685 octets en moyenne. Une preuve périmée cesse de fonctionner, une preuve ne peut pas être rejouée pour un billet voisin, et l'empreinte ne dépend que du contenu, jamais de l'ordre des opérations.</span></div></li>
-        <li><div><b>Les deux tiroirs</b><span>Brancher le sceau dans la chaîne : l'ensemble chaud plafonné que les nœuds gardent, la cave qui ne vit que dans l'empreinte, et la règle de descente. L'accumulateur existe et se tient tout seul, mais il n'est pas encore la mémoire de la chaîne.</span></div></li>
+        <li class="done"><div><b>Les deux tiroirs<span class="state">Fait</span></b><span>Le sceau est branché : le tiroir plafonné que les nœuds gardent, la cave qui ne vit que dans l'empreinte, la descente automatique du plus ancien, et la dépense sur preuve pour ce qui est descendu. Un billet qui remonte de la cave revient dans le tiroir. L'empreinte du bloc engage les deux tiroirs et leurs effectifs, donc la frontière elle-même est vérifiable.</span></div></li>
         <li><div><b>Le réseau</b><span>Plusieurs nœuds indépendants qui se découvrent, se propagent les blocs, et se réconcilient après une coupure. Testé sous pannes et partitions.</span></div></li>
         <li><div><b>Le portefeuille</b><span>D'abord en ligne de commande, puis sur téléphone — un portefeuille qui est lui-même un nœud complet. C'est la démonstration vivante de toute la thèse.</span></div></li>
         <li><div><b>Le testnet public</b><span>Une monnaie sans valeur, ouverte, que des inconnus font tourner. Le seul vrai test de décentralisation : tout ce qui précède peut être parfait et échouer ici.</span></div></li>
@@ -421,8 +421,8 @@
   </section>
 
   <footer>
-    <span>Cairn · document de conception v0.3</span>
-    <span>Statut — grand livre et accumulateur implémentés</span>
+    <span>Cairn · document de conception v0.4</span>
+    <span>Statut — protocole complet hors réseau</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 
