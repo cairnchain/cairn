@@ -1,19 +1,32 @@
 //! What a node does when a message arrives.
 //!
-//! Pure by design: it reads the chain and what is known about one peer, and
-//! says what to send. No sockets, no threads, and no clock it reads itself.
-//! Everything that decides whether two nodes converge lives here, so all of it
-//! can be tested by handing it messages.
+//! Pure by design: it reads the chain, the address book, and what is known
+//! about one peer, and says what to send. No sockets, no threads, and no clock
+//! it reads itself. Everything that decides whether two nodes converge lives
+//! here, so all of it can be tested by handing it messages.
 
 use std::collections::BTreeSet;
+use std::net::{IpAddr, SocketAddr};
 
 use cairn_chain::{Accepted, ChainError, ChainStore};
+use cairn_ledger::block::Block;
 use cairn_ledger::note::NetworkId;
 use cairn_primitives::Hash32;
 
+use crate::book::AddressBook;
 use crate::message::{
-    Handshake, Message, MAX_ANNOUNCED, MAX_CHAIN, MAX_REQUESTED, PROTOCOL_VERSION,
+    Handshake, Message, PeerAddress, MAX_ANNOUNCED, MAX_CHAIN, MAX_REQUESTED, MAX_SHARED_ADDRESSES,
+    PROTOCOL_VERSION,
 };
+
+/// Everything of the surrounding node this layer is allowed to see.
+#[derive(Debug)]
+pub struct Local<'a> {
+    pub chain: &'a mut ChainStore,
+    pub book: &'a AddressBook,
+    /// The port this node listens on, so peers can pass its address along.
+    pub listen: u16,
+}
 
 /// What this node knows about one peer.
 #[derive(Clone, Debug, Default)]
@@ -26,6 +39,11 @@ pub struct PeerState {
     /// Blocks asked for and not yet received. While this is non empty the node
     /// is mid batch and does not ask for more.
     pub awaiting: BTreeSet<Hash32>,
+    /// Where the connection came from, filled in by whoever opened it.
+    pub remote: Option<IpAddr>,
+    /// Where this peer says it can be reached, which is its own port on the
+    /// address the connection came from.
+    pub advertised: Option<SocketAddr>,
     pub last_message: u64,
 }
 
@@ -51,8 +69,14 @@ pub enum DropReason {
 pub struct Reaction {
     /// Answers for the peer that sent the message.
     pub reply: Vec<Message>,
+    /// Blocks the tree did not hold before, whichever branch they landed on.
+    /// A branch that loses today can win tomorrow, so these are all worth
+    /// keeping.
+    pub stored: Vec<Hash32>,
     /// Blocks newly worth telling every other peer about.
     pub broadcast: Vec<Hash32>,
+    /// Addresses worth adding to the book.
+    pub learned: Vec<SocketAddr>,
     /// Set when the connection should be closed.
     pub drop_peer: Option<DropReason>,
 }
@@ -78,7 +102,7 @@ impl Reaction {
 }
 
 /// What this node says about itself.
-pub fn local_handshake(chain: &ChainStore) -> Handshake {
+pub fn local_handshake(chain: &ChainStore, listen: u16) -> Handshake {
     Handshake {
         version: PROTOCOL_VERSION,
         network: chain.params().network,
@@ -86,6 +110,7 @@ pub fn local_handshake(chain: &ChainStore) -> Handshake {
         tip: chain.tip().unwrap_or(Hash32::ZERO),
         height: chain.height().unwrap_or_default(),
         total_work: chain.total_work(),
+        listen,
     }
 }
 
@@ -101,9 +126,9 @@ fn accept_handshake(chain: &ChainStore, theirs: &Handshake) -> Result<(), DropRe
         });
     }
     // A node with no chain of its own has nothing to compare against and has to
-    // take the genesis it is about to be handed. Choosing whom to ask is what a
-    // seed address is: the one piece of trust in the whole protocol, and it
-    // belongs to whoever runs the node, not to the network.
+    // take the genesis it is about to be handed. Choosing whom to ask first is
+    // what a seed address is: the one piece of trust in the whole protocol, and
+    // it belongs to whoever runs the node, not to the network.
     if let Some(ours) = chain.genesis() {
         if theirs.genesis != ours && theirs.genesis != Hash32::ZERO {
             return Err(DropReason::ForeignChain {
@@ -114,11 +139,11 @@ fn accept_handshake(chain: &ChainStore, theirs: &Handshake) -> Result<(), DropRe
     Ok(())
 }
 
-fn greet(chain: &ChainStore, peer: &mut PeerState, theirs: Handshake, answer: bool) -> Reaction {
+fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: bool) -> Reaction {
     if peer.greeted {
         return Reaction::close(DropReason::RepeatedHandshake);
     }
-    if let Err(reason) = accept_handshake(chain, &theirs) {
+    if let Err(reason) = accept_handshake(local.chain, &theirs) {
         return Reaction::close(reason);
     }
 
@@ -126,16 +151,31 @@ fn greet(chain: &ChainStore, peer: &mut PeerState, theirs: Handshake, answer: bo
     peer.height = theirs.height;
     peer.total_work = theirs.total_work;
 
-    let mut reply = Vec::new();
-    if answer {
-        reply.push(Message::Welcome(local_handshake(chain)));
+    let mut reaction = Reaction::idle();
+    // The peer names its own port; the address it is reachable at is that port
+    // on the address this connection actually came from. Taking the address
+    // from the socket rather than from the peer is what stops one node
+    // advertising someone else.
+    if let Some(ip) = peer.remote {
+        if theirs.listen != 0 {
+            let address = SocketAddr::new(ip, theirs.listen);
+            peer.advertised = Some(address);
+            reaction.learned.push(address);
+        }
     }
-    if theirs.total_work > chain.total_work() {
-        reply.push(Message::GetChain {
-            locator: chain.locator(),
+
+    if answer {
+        reaction
+            .reply
+            .push(Message::Welcome(local_handshake(local.chain, local.listen)));
+    }
+    if theirs.total_work > local.chain.total_work() {
+        reaction.reply.push(Message::GetChain {
+            locator: local.chain.locator(),
         });
     }
-    Reaction::reply(reply)
+    reaction.reply.push(Message::GetPeers);
+    reaction
 }
 
 /// Asks for the blocks among `ids` this node does not have.
@@ -165,22 +205,23 @@ fn follow_up(chain: &ChainStore, peer: &PeerState) -> Reaction {
 // The last two arms answer the same way for opposite reasons, and collapsing
 // them would bury which is which.
 #[allow(clippy::match_same_arms)]
-fn on_block(
-    chain: &mut ChainStore,
-    peer: &mut PeerState,
-    block: cairn_ledger::block::Block,
-    now: u64,
-) -> Reaction {
+fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64) -> Reaction {
     let id = block.id();
     peer.awaiting.remove(&id);
 
     match chain.add_block(block, now) {
         Ok(Accepted::Extended | Accepted::Reorganised { .. }) => {
             let mut reaction = follow_up(chain, peer);
+            reaction.stored.push(id);
             reaction.broadcast.push(id);
             reaction
         }
-        Ok(Accepted::Duplicate | Accepted::SideBranch) => follow_up(chain, peer),
+        Ok(Accepted::SideBranch) => {
+            let mut reaction = follow_up(chain, peer);
+            reaction.stored.push(id);
+            reaction
+        }
+        Ok(Accepted::Duplicate) => follow_up(chain, peer),
         // Missing history rather than a bad peer: the block is fine, this node
         // simply has not caught up to where it hangs. Asking again from a fresh
         // locator resolves it.
@@ -191,7 +232,7 @@ fn on_block(
 
 /// Handles one message from one peer.
 pub fn on_message(
-    chain: &mut ChainStore,
+    local: &mut Local<'_>,
     peer: &mut PeerState,
     message: Message,
     now: u64,
@@ -199,8 +240,8 @@ pub fn on_message(
     peer.last_message = now;
 
     match &message {
-        Message::Hello(theirs) => return greet(chain, peer, *theirs, true),
-        Message::Welcome(theirs) => return greet(chain, peer, *theirs, false),
+        Message::Hello(theirs) => return greet(local, peer, *theirs, true),
+        Message::Welcome(theirs) => return greet(local, peer, *theirs, false),
         _ => {}
     }
 
@@ -211,27 +252,41 @@ pub fn on_message(
     }
 
     match message {
-        Message::Ping(nonce) => Reaction::reply(vec![Message::Pong(nonce)]),
         // A pong needs no answer, and a second introduction was already refused
         // above, so neither reaches here with anything to say.
         Message::Pong(_) | Message::Hello(_) | Message::Welcome(_) => Reaction::idle(),
-        Message::GetChain { locator } => {
-            Reaction::reply(vec![Message::Chain(chain.chain_after(&locator, MAX_CHAIN))])
-        }
-        Message::Chain(ids) => request_missing(chain, peer, &ids),
+        Message::Ping(nonce) => Reaction::reply(vec![Message::Pong(nonce)]),
+        Message::GetChain { locator } => Reaction::reply(vec![Message::Chain(
+            local.chain.chain_after(&locator, MAX_CHAIN),
+        )]),
+        Message::Chain(ids) => request_missing(local.chain, peer, &ids),
         Message::Announce(ids) => {
             let capped: Vec<Hash32> = ids.into_iter().take(MAX_ANNOUNCED).collect();
-            request_missing(chain, peer, &capped)
+            request_missing(local.chain, peer, &capped)
         }
         Message::GetBlocks(ids) => {
             let reply = ids
                 .iter()
                 .take(MAX_REQUESTED)
-                .filter_map(|id| chain.block(id).cloned())
+                .filter_map(|id| local.chain.block(id).cloned())
                 .map(|block| Message::Block(Box::new(block)))
                 .collect();
             Reaction::reply(reply)
         }
-        Message::Block(block) => on_block(chain, peer, *block, now),
+        Message::Block(block) => on_block(local.chain, peer, *block, now),
+        Message::GetPeers => Reaction::reply(vec![Message::Peers(
+            local.book.sample(MAX_SHARED_ADDRESSES),
+        )]),
+        Message::Peers(addresses) => {
+            let learned = addresses
+                .into_iter()
+                .take(MAX_SHARED_ADDRESSES)
+                .map(|PeerAddress(address)| address)
+                .collect();
+            Reaction {
+                learned,
+                ..Reaction::idle()
+            }
+        }
     }
 }

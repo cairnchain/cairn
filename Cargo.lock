@@ -86,6 +86,7 @@ dependencies = [
  "cairn-crypto",
  "cairn-ledger",
  "cairn-primitives",
+ "cairn-store",
  "thiserror",
 ]
 
@@ -95,6 +96,16 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "hex",
+ "thiserror",
+]
+
+[[package]]
+name = "cairn-store"
+version = "0.1.0"
+dependencies = [
+ "cairn-crypto",
+ "cairn-ledger",
+ "cairn-primitives",
  "thiserror",
 ]
 

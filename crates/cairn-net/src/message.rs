@@ -5,6 +5,8 @@
 //! the first thing a message format has to do is refuse to allocate whatever
 //! that stranger asks for.
 
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+
 use cairn_ledger::block::Block;
 use cairn_ledger::note::NetworkId;
 use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
@@ -23,6 +25,49 @@ pub const MAX_LOCATOR: usize = 64;
 pub const MAX_CHAIN: usize = 2_000;
 /// Blocks one request may ask for.
 pub const MAX_REQUESTED: usize = 128;
+/// Addresses one answer may carry.
+pub const MAX_SHARED_ADDRESSES: usize = 64;
+
+/// A peer's listening address, in a form the wire can carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PeerAddress(pub SocketAddr);
+
+impl Encode for PeerAddress {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        match self.0 {
+            SocketAddr::V4(address) => {
+                4u8.encode_to(out);
+                address.ip().octets().encode_to(out);
+                address.port().encode_to(out);
+            }
+            SocketAddr::V6(address) => {
+                6u8.encode_to(out);
+                address.ip().octets().encode_to(out);
+                address.port().encode_to(out);
+            }
+        }
+    }
+}
+
+impl Decode for PeerAddress {
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        match u8::decode_from(reader)? {
+            4 => {
+                let octets = <[u8; 4]>::decode_from(reader)?;
+                let port = u16::decode_from(reader)?;
+                Ok(Self(SocketAddr::from((Ipv4Addr::from(octets), port))))
+            }
+            6 => {
+                let octets = <[u8; 16]>::decode_from(reader)?;
+                let port = u16::decode_from(reader)?;
+                Ok(Self(SocketAddr::from((Ipv6Addr::from(octets), port))))
+            }
+            _ => Err(CodecError::InvalidValue {
+                type_name: "PeerAddress",
+            }),
+        }
+    }
+}
 
 /// What a node tells a peer about itself when the connection opens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +81,10 @@ pub struct Handshake {
     pub height: u64,
     /// Work behind the tip, which is what decides who is behind whom.
     pub total_work: u128,
+    /// The port this node listens on. A peer already knows the address the
+    /// connection came from, so this is what completes it into an address
+    /// others can be pointed at.
+    pub listen: u16,
 }
 
 impl Encode for Handshake {
@@ -46,6 +95,7 @@ impl Encode for Handshake {
         self.tip.encode_to(out);
         self.height.encode_to(out);
         self.total_work.encode_to(out);
+        self.listen.encode_to(out);
     }
 }
 
@@ -58,6 +108,7 @@ impl Decode for Handshake {
             tip: Hash32::decode_from(reader)?,
             height: u64::decode_from(reader)?,
             total_work: u128::decode_from(reader)?,
+            listen: u16::decode_from(reader)?,
         })
     }
 }
@@ -85,6 +136,10 @@ pub enum Message {
     Block(Box<Block>),
     /// I have these, ask if you want them.
     Announce(Vec<Hash32>),
+    /// Who else do you know?
+    GetPeers,
+    /// Addresses worth trying.
+    Peers(Vec<PeerAddress>),
 }
 
 impl Message {
@@ -100,6 +155,8 @@ impl Message {
             Self::GetBlocks(_) => "get blocks",
             Self::Block(_) => "block",
             Self::Announce(_) => "announce",
+            Self::GetPeers => "get peers",
+            Self::Peers(_) => "peers",
         }
     }
 
@@ -114,6 +171,8 @@ impl Message {
             Self::GetBlocks(_) => 6,
             Self::Block(_) => 7,
             Self::Announce(_) => 8,
+            Self::GetPeers => 9,
+            Self::Peers(_) => 10,
         }
     }
 }
@@ -138,6 +197,8 @@ impl Encode for Message {
             Self::GetChain { locator } => locator.encode_to(out),
             Self::Chain(ids) | Self::GetBlocks(ids) | Self::Announce(ids) => ids.encode_to(out),
             Self::Block(block) => block.encode_to(out),
+            Self::GetPeers => {}
+            Self::Peers(addresses) => addresses.encode_to(out),
         }
     }
 }
@@ -156,6 +217,16 @@ impl Decode for Message {
             6 => Ok(Self::GetBlocks(decode_ids(reader, MAX_REQUESTED)?)),
             7 => Ok(Self::Block(Box::new(Block::decode_from(reader)?))),
             8 => Ok(Self::Announce(decode_ids(reader, MAX_ANNOUNCED)?)),
+            9 => Ok(Self::GetPeers),
+            10 => {
+                let addresses = Vec::<PeerAddress>::decode_from(reader)?;
+                if addresses.len() > MAX_SHARED_ADDRESSES {
+                    return Err(CodecError::InvalidValue {
+                        type_name: "address list",
+                    });
+                }
+                Ok(Self::Peers(addresses))
+            }
             _ => Err(CodecError::InvalidValue {
                 type_name: "Message",
             }),

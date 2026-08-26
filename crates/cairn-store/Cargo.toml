@@ -1,5 +1,5 @@
 [package]
-name = "cairn-net"
+name = "cairn-store"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,10 +10,8 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-cairn-chain.workspace = true
 cairn-ledger.workspace = true
 cairn-primitives.workspace = true
-cairn-store.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

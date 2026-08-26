@@ -15,11 +15,13 @@ use cairn_ledger::note::{NetworkId, Note};
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
-use cairn_net::message::{Handshake, Message, PROTOCOL_VERSION};
-use cairn_net::sync::{local_handshake, on_message, DropReason, PeerState};
+use cairn_net::book::AddressBook;
+use cairn_net::message::{Handshake, Message, PeerAddress, PROTOCOL_VERSION};
+use cairn_net::sync::{local_handshake, on_message, DropReason, Local, PeerState};
 use cairn_net::wire::{read_message, write_message, WireError, MAX_FRAME_BYTES};
 use cairn_primitives::codec::{Decode, Encode};
 use cairn_primitives::Hash32;
+use std::net::SocketAddr;
 
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
@@ -81,6 +83,16 @@ fn store_with(params: ConsensusParams, blocks: &[Block]) -> ChainStore {
     store
 }
 
+/// The surroundings a test node has: a chain and an empty address book.
+fn solo(chain: &mut ChainStore) -> Local<'_> {
+    static EMPTY: std::sync::OnceLock<AddressBook> = std::sync::OnceLock::new();
+    Local {
+        chain,
+        book: EMPTY.get_or_init(AddressBook::new),
+        listen: 4242,
+    }
+}
+
 fn greeted_peer(work: u128, height: u64) -> PeerState {
     PeerState {
         greeted: true,
@@ -112,6 +124,7 @@ fn a_message_roundtrips_through_the_wire_format() {
             tip: block.id(),
             height: 0,
             total_work: u128::MAX,
+            listen: 4242,
         }),
     ];
 
@@ -184,9 +197,9 @@ fn an_introduction_is_answered_and_the_shorter_chain_asks_for_more() {
 
     let mut peer = PeerState::default();
     let reaction = on_message(
-        &mut behind,
+        &mut solo(&mut behind),
         &mut peer,
-        Message::Hello(local_handshake(&ahead)),
+        Message::Hello(local_handshake(&ahead, 4242)),
         NOW,
     );
 
@@ -211,14 +224,20 @@ fn the_longer_chain_does_not_ask_the_shorter_one_for_anything() {
 
     let mut peer = PeerState::default();
     let reaction = on_message(
-        &mut ahead,
+        &mut solo(&mut ahead),
         &mut peer,
-        Message::Hello(local_handshake(&behind)),
+        Message::Hello(local_handshake(&behind, 4242)),
         NOW,
     );
 
-    assert_eq!(reaction.reply.len(), 1, "only the greeting comes back");
     assert!(matches!(reaction.reply.first(), Some(Message::Welcome(_))));
+    assert!(
+        !reaction
+            .reply
+            .iter()
+            .any(|message| matches!(message, Message::GetChain { .. })),
+        "a node that is ahead asks for no blocks"
+    );
 }
 
 #[test]
@@ -227,7 +246,7 @@ fn a_peer_on_another_network_or_version_or_chain_is_dropped() {
     let mut forge = Forge::new(params);
     let blocks = forge.mine_many(3);
     let mut store = store_with(params, &blocks);
-    let sound = local_handshake(&store);
+    let sound = local_handshake(&store, 4242);
 
     let cases: Vec<(Handshake, DropReason)> = vec![
         (
@@ -261,7 +280,12 @@ fn a_peer_on_another_network_or_version_or_chain_is_dropped() {
 
     for (handshake, expected) in cases {
         let mut peer = PeerState::default();
-        let reaction = on_message(&mut store, &mut peer, Message::Hello(handshake), NOW);
+        let reaction = on_message(
+            &mut solo(&mut store),
+            &mut peer,
+            Message::Hello(handshake),
+            NOW,
+        );
         assert_eq!(reaction.drop_peer, Some(expected));
         assert!(!peer.greeted);
         assert!(
@@ -277,7 +301,7 @@ fn nothing_is_answered_before_an_introduction() {
     let mut store = ChainStore::new(params);
     let mut peer = PeerState::default();
 
-    let reaction = on_message(&mut store, &mut peer, Message::Ping(1), NOW);
+    let reaction = on_message(&mut solo(&mut store), &mut peer, Message::Ping(1), NOW);
     assert_eq!(
         reaction.drop_peer,
         Some(DropReason::Unannounced { kind: "ping" })
@@ -291,11 +315,21 @@ fn introducing_yourself_twice_is_refused() {
     let mut forge = Forge::new(params);
     let blocks = forge.mine_many(2);
     let mut store = store_with(params, &blocks);
-    let handshake = local_handshake(&store);
+    let handshake = local_handshake(&store, 4242);
 
     let mut peer = PeerState::default();
-    on_message(&mut store, &mut peer, Message::Hello(handshake), NOW);
-    let again = on_message(&mut store, &mut peer, Message::Hello(handshake), NOW);
+    on_message(
+        &mut solo(&mut store),
+        &mut peer,
+        Message::Hello(handshake),
+        NOW,
+    );
+    let again = on_message(
+        &mut solo(&mut store),
+        &mut peer,
+        Message::Hello(handshake),
+        NOW,
+    );
     assert_eq!(again.drop_peer, Some(DropReason::RepeatedHandshake));
 }
 
@@ -305,7 +339,7 @@ fn a_ping_comes_back_as_a_pong() {
     let mut store = ChainStore::new(params);
     let mut peer = greeted_peer(0, 0);
 
-    let reaction = on_message(&mut store, &mut peer, Message::Ping(99), NOW);
+    let reaction = on_message(&mut solo(&mut store), &mut peer, Message::Ping(99), NOW);
     assert_eq!(reaction.reply, vec![Message::Pong(99)]);
     assert!(reaction.drop_peer.is_none());
 }
@@ -320,7 +354,7 @@ fn a_locator_is_answered_with_what_follows_it() {
 
     let mut peer = greeted_peer(2, 1);
     let reaction = on_message(
-        &mut ahead,
+        &mut solo(&mut ahead),
         &mut peer,
         Message::GetChain {
             locator: behind.locator(),
@@ -348,7 +382,12 @@ fn only_the_missing_blocks_are_asked_for() {
 
     let mut peer = greeted_peer(5, 4);
     let announced: Vec<_> = blocks.iter().map(Block::id).collect();
-    let reaction = on_message(&mut behind, &mut peer, Message::Chain(announced), NOW);
+    let reaction = on_message(
+        &mut solo(&mut behind),
+        &mut peer,
+        Message::Chain(announced),
+        NOW,
+    );
 
     let asked = match reaction.reply.first() {
         Some(Message::GetBlocks(ids)) => ids.clone(),
@@ -372,7 +411,12 @@ fn a_request_is_answered_with_the_blocks_that_are_held() {
 
     let mut peer = greeted_peer(3, 2);
     let asked = vec![blocks[0].id(), Hash32::from_bytes([9; 32]), blocks[2].id()];
-    let reaction = on_message(&mut store, &mut peer, Message::GetBlocks(asked), NOW);
+    let reaction = on_message(
+        &mut solo(&mut store),
+        &mut peer,
+        Message::GetBlocks(asked),
+        NOW,
+    );
 
     assert_eq!(
         reaction.reply.len(),
@@ -399,7 +443,7 @@ fn a_block_that_lands_is_worth_telling_everyone_about() {
     let mut peer = greeted_peer(3, 2);
     peer.awaiting.insert(blocks[2].id());
     let reaction = on_message(
-        &mut behind,
+        &mut solo(&mut behind),
         &mut peer,
         Message::Block(Box::new(blocks[2].clone())),
         NOW,
@@ -420,7 +464,7 @@ fn a_block_whose_parent_is_missing_is_not_held_against_the_peer() {
 
     let mut peer = greeted_peer(4, 3);
     let reaction = on_message(
-        &mut behind,
+        &mut solo(&mut behind),
         &mut peer,
         Message::Block(Box::new(blocks[3].clone())),
         NOW,
@@ -450,7 +494,7 @@ fn a_peer_sending_an_invalid_block_is_dropped() {
 
     let mut peer = greeted_peer(3, 2);
     let reaction = on_message(
-        &mut store,
+        &mut solo(&mut store),
         &mut peer,
         Message::Block(Box::new(spoiled)),
         NOW,
@@ -476,7 +520,7 @@ fn a_full_exchange_carries_one_chain_to_the_other_node() {
     let mut mirror = PeerState::default();
 
     // Play the conversation out until nothing more is said.
-    let mut pending = vec![Message::Hello(local_handshake(&ahead))];
+    let mut pending = vec![Message::Hello(local_handshake(&ahead, 4242))];
     let mut rounds = 0;
     while !pending.is_empty() {
         rounds += 1;
@@ -485,7 +529,7 @@ fn a_full_exchange_carries_one_chain_to_the_other_node() {
         let mut answers = Vec::new();
         for message in pending.drain(..) {
             let kind = message.kind();
-            let reaction = on_message(&mut behind, &mut peer, message, NOW);
+            let reaction = on_message(&mut solo(&mut behind), &mut peer, message, NOW);
             assert!(
                 reaction.drop_peer.is_none(),
                 "behind dropped on {kind}: {:?}",
@@ -495,7 +539,7 @@ fn a_full_exchange_carries_one_chain_to_the_other_node() {
         }
         for message in answers {
             let kind = message.kind();
-            let reaction = on_message(&mut ahead, &mut mirror, message, NOW);
+            let reaction = on_message(&mut solo(&mut ahead), &mut mirror, message, NOW);
             assert!(
                 reaction.drop_peer.is_none(),
                 "ahead dropped on {kind}: {:?}",
@@ -508,4 +552,135 @@ fn a_full_exchange_carries_one_chain_to_the_other_node() {
     assert_eq!(behind.tip(), ahead.tip(), "both ended on the same block");
     assert_eq!(behind.state().state_root(), ahead.state().state_root());
     assert_eq!(behind.height(), Some(29));
+}
+
+#[test]
+fn an_introduction_asks_the_peer_who_else_it_knows() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(2);
+    let mut store = store_with(params, &blocks);
+    let handshake = local_handshake(&store, 4242);
+
+    let mut peer = PeerState::default();
+    let reaction = on_message(
+        &mut solo(&mut store),
+        &mut peer,
+        Message::Hello(handshake),
+        NOW,
+    );
+
+    assert!(
+        reaction.reply.contains(&Message::GetPeers),
+        "a node with one connection is one cable from being alone"
+    );
+}
+
+#[test]
+fn a_request_for_peers_is_answered_from_the_book() {
+    use std::net::Ipv4Addr;
+
+    let params = params();
+    let mut store = ChainStore::new(params);
+
+    let mut book = AddressBook::new();
+    for port in 9_000..9_004u16 {
+        book.insert(SocketAddr::from((Ipv4Addr::new(203, 0, 113, 7), port)));
+    }
+
+    let mut peer = greeted_peer(0, 0);
+    let mut local = Local {
+        chain: &mut store,
+        book: &book,
+        listen: 4242,
+    };
+    let reaction = on_message(&mut local, &mut peer, Message::GetPeers, NOW);
+
+    match reaction.reply.first() {
+        Some(Message::Peers(shared)) => assert_eq!(shared.len(), 4),
+        other => panic!("expected addresses, got {other:?}"),
+    }
+}
+
+#[test]
+fn addresses_received_are_passed_up_to_be_recorded() {
+    use std::net::Ipv4Addr;
+
+    let params = params();
+    let mut store = ChainStore::new(params);
+    let mut peer = greeted_peer(0, 0);
+
+    let offered = vec![
+        PeerAddress(SocketAddr::from((Ipv4Addr::new(198, 51, 100, 1), 9000))),
+        PeerAddress(SocketAddr::from((Ipv4Addr::new(198, 51, 100, 2), 9000))),
+    ];
+    let reaction = on_message(
+        &mut solo(&mut store),
+        &mut peer,
+        Message::Peers(offered),
+        NOW,
+    );
+
+    assert_eq!(reaction.learned.len(), 2);
+    assert!(reaction.reply.is_empty(), "an address list needs no answer");
+    assert!(reaction.drop_peer.is_none());
+}
+
+#[test]
+fn a_peer_is_placed_at_the_address_its_connection_came_from() {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(2);
+    let mut store = store_with(params, &blocks);
+
+    // The peer names a port. The address is taken from the socket, never from
+    // anything the peer says, so one node cannot advertise another.
+    let claimed = Handshake {
+        listen: 5_555,
+        ..local_handshake(&store, 4242)
+    };
+    let seen_from = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9));
+
+    let mut peer = PeerState {
+        remote: Some(seen_from),
+        ..PeerState::default()
+    };
+    let reaction = on_message(
+        &mut solo(&mut store),
+        &mut peer,
+        Message::Hello(claimed),
+        NOW,
+    );
+
+    let expected = SocketAddr::new(seen_from, 5_555);
+    assert_eq!(peer.advertised, Some(expected));
+    assert_eq!(reaction.learned, vec![expected]);
+}
+
+#[test]
+fn a_peer_that_does_not_listen_is_not_advertised() {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(2);
+    let mut store = store_with(params, &blocks);
+
+    let quiet = Handshake {
+        listen: 0,
+        ..local_handshake(&store, 4242)
+    };
+    let mut peer = PeerState {
+        remote: Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9))),
+        ..PeerState::default()
+    };
+    let reaction = on_message(&mut solo(&mut store), &mut peer, Message::Hello(quiet), NOW);
+
+    assert_eq!(peer.advertised, None);
+    assert!(
+        reaction.learned.is_empty(),
+        "nothing to pass on about a node nobody can reach"
+    );
 }

@@ -210,3 +210,96 @@ fn a_node_shuts_down_cleanly_while_peers_are_attached() {
         first.peer_count() == 0 && second.peer_count() == 0
     });
 }
+
+#[test]
+fn a_node_comes_back_with_the_chain_it_had() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(12);
+
+    let directory = std::env::temp_dir().join(format!("cairn-node-restart-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+
+    let root = {
+        let node = Node::open(params, loopback(), &directory).unwrap().0;
+        for block in &blocks {
+            node.submit_block(block.clone()).unwrap();
+        }
+        assert_eq!(node.height(), Some(11));
+        let root = node.with_chain(|chain| chain.state().state_root());
+        node.shutdown();
+        root
+    };
+
+    let (revived, restored) = Node::open(params, loopback(), &directory).unwrap();
+    assert_eq!(restored.blocks, 12, "every block came back");
+    assert_eq!(restored.refused, 0);
+    assert_eq!(restored.discarded_bytes, 0);
+    assert_eq!(revived.height(), Some(11));
+    assert_eq!(revived.with_chain(|chain| chain.state().state_root()), root);
+}
+
+#[test]
+fn a_restarted_node_keeps_what_it_learned_from_a_peer() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(10);
+
+    let directory = std::env::temp_dir().join(format!("cairn-node-learned-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+
+    let seeded = Node::bind(params, loopback()).unwrap();
+    for block in &blocks {
+        seeded.submit_block(block.clone()).unwrap();
+    }
+
+    {
+        let learner = Node::open(params, loopback(), &directory).unwrap().0;
+        learner.connect(seeded.address()).unwrap();
+        wait_for("the node to catch up", || learner.height() == Some(9));
+        learner.shutdown();
+    }
+
+    let (revived, restored) = Node::open(params, loopback(), &directory).unwrap();
+    assert_eq!(
+        restored.blocks, 10,
+        "what arrived over the wire was written down"
+    );
+    assert_eq!(revived.height(), Some(9));
+    assert_eq!(
+        revived.with_chain(|chain| chain.state().state_root()),
+        seeded.with_chain(|chain| chain.state().state_root())
+    );
+}
+
+#[test]
+fn a_node_reaches_a_peer_it_was_never_told_about() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(4);
+
+    // Everyone is told about the hub and nothing else.
+    let hub = Node::bind(params, loopback()).unwrap();
+    for block in &blocks {
+        hub.submit_block(block.clone()).unwrap();
+    }
+
+    let first = Node::bind(params, loopback()).unwrap();
+    let second = Node::bind(params, loopback()).unwrap();
+    first.connect(hub.address()).unwrap();
+    second.connect(hub.address()).unwrap();
+
+    wait_for("both to catch up through the hub", || {
+        first.height() == Some(3) && second.height() == Some(3)
+    });
+
+    wait_for("the two edges to hear about each other", || {
+        first.known_addresses().contains(&second.address())
+    });
+    wait_for("and then to connect directly", || first.peer_count() >= 2);
+
+    assert!(
+        second.known_addresses().contains(&first.address()),
+        "the hub passed each one along to the other"
+    );
+}
