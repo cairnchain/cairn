@@ -7,12 +7,17 @@
 
 pub mod block;
 pub mod note;
+pub mod pow;
 pub mod state;
 pub mod transaction;
 pub mod validation;
 
-pub use block::{Block, BlockHeader};
+pub use block::{Block, BlockHeader, HeaderSummary};
 pub use note::{NetworkId, Note, NoteId};
-pub use state::{cold_value, note_key, ColdSet, HotEntry, LedgerState, StateTransition, Tip};
+pub use state::{
+    cold_value, note_key, BlockUndo, ColdSet, HotEntry, LedgerState, StateTransition, Tip,
+};
 pub use transaction::{CoinbaseTransaction, ColdWitness, Input, Transfer, Witness};
-pub use validation::{connect_block, BlockError, ConsensusParams, TransferError};
+pub use validation::{
+    connect_block, disconnect_block, BlockError, ConnectedBlock, ConsensusParams, TransferError,
+};

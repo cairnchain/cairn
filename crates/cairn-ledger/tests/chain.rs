@@ -379,7 +379,7 @@ fn a_block_from_the_far_future_is_rejected() {
 }
 
 #[test]
-fn a_block_must_advance_the_clock() {
+fn a_block_must_be_later_than_the_recent_median() {
     let params = ConsensusParams::testnet();
     let miner = wallet(1);
     let (mut state, _, _) = chain_with_genesis(&params, &miner);
@@ -389,8 +389,8 @@ fn a_block_must_advance_the_clock() {
 
     assert!(matches!(
         connect_block(&mut state, &block, &params, NOW),
-        Err(BlockError::TimestampNotIncreasing {
-            previous: 1_000,
+        Err(BlockError::TimestampNotAfterMedian {
+            median: 1_000,
             found: 1_000
         })
     ));
@@ -494,7 +494,7 @@ fn a_chain_of_many_blocks_stays_consistent() {
             coinbase,
             vec![transfer],
             &params,
-            1_000 + height * 10,
+            1_000 + height * 600,
             0,
         )
         .unwrap();

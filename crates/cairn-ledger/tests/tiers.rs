@@ -41,7 +41,8 @@ fn mine(
         vec![Note::new(params.block_reward, miner.public_key())],
         [0; 8],
     );
-    let block = assemble_block(state, coinbase, transfers, params, 1_000 + height * 10, 0).unwrap();
+    let block =
+        assemble_block(state, coinbase, transfers, params, 1_000 + height * 600, 0).unwrap();
     connect_block(state, &block, params, NOW).unwrap();
     block
 }
@@ -426,7 +427,7 @@ fn a_block_that_evicts_is_rejected_when_its_state_root_is_wrong() {
         coinbase,
         Vec::new(),
         &params,
-        1_000 + height * 10,
+        1_000 + height * 600,
         0,
     )
     .unwrap();

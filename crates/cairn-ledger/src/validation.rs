@@ -5,14 +5,15 @@
 //! may depend on wall clock time, iteration order, or locale. The current time
 //! is passed in rather than read.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cairn_primitives::amount::PEBBLES_PER_CAIRN;
 use cairn_primitives::{Amount, Hash32};
 
 use crate::block::{Block, BlockHeader, BLOCK_VERSION};
 use crate::note::{NetworkId, Note, NoteId};
-use crate::state::{cold_value, note_key, LedgerState, StateTransition};
+use crate::pow::{median_time_past, meets_target, next_difficulty, MIN_DIFFICULTY};
+use crate::state::{cold_value, note_key, BlockUndo, LedgerState, StateTransition};
 use crate::transaction::{
     CoinbaseTransaction, Input, Transfer, Witness, COINBASE_VERSION, TRANSFER_VERSION,
 };
@@ -33,6 +34,9 @@ const INITIAL_BLOCK_REWARD: Amount = match Amount::from_pebbles(50 * PEBBLES_PER
 /// without a proof. It has to be settled against measurements, not intuition.
 const DEFAULT_HOT_CAPACITY: usize = 1 << 20;
 
+/// Seconds a block is meant to take. Provisional.
+const DEFAULT_TARGET_BLOCK_TIME: u64 = 60;
+
 /// Rules a node applies to every block it evaluates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConsensusParams {
@@ -40,6 +44,10 @@ pub struct ConsensusParams {
     pub block_reward: Amount,
     /// Notes the hot set holds before the oldest start falling to the cold set.
     pub hot_capacity: usize,
+    /// Seconds the retarget aims for between blocks.
+    pub target_block_time: u64,
+    /// Difficulty the first block carries, before any history exists.
+    pub genesis_difficulty: u64,
     pub max_transfers_per_block: usize,
     pub max_inputs_per_transfer: usize,
     pub max_outputs_per_transfer: usize,
@@ -54,6 +62,8 @@ impl ConsensusParams {
             network: NetworkId::TESTNET,
             block_reward: INITIAL_BLOCK_REWARD,
             hot_capacity: DEFAULT_HOT_CAPACITY,
+            target_block_time: DEFAULT_TARGET_BLOCK_TIME,
+            genesis_difficulty: MIN_DIFFICULTY,
             max_transfers_per_block: 4096,
             max_inputs_per_transfer: 256,
             max_outputs_per_transfer: 256,
@@ -136,8 +146,12 @@ pub enum BlockError {
     ValueOverflow,
     #[error("timestamp {timestamp} is more than {drift} seconds ahead of this node")]
     TimestampTooFarAhead { timestamp: u64, drift: u64 },
-    #[error("timestamp {found} does not advance on the parent's {previous}")]
-    TimestampNotIncreasing { previous: u64, found: u64 },
+    #[error("timestamp {found} is not past the median {median} of recent blocks")]
+    TimestampNotAfterMedian { median: u64, found: u64 },
+    #[error("block claims difficulty {found}, the chain demands {expected}")]
+    WrongDifficulty { expected: u64, found: u64 },
+    #[error("block identifier does not meet the target for difficulty {difficulty}")]
+    InsufficientWork { difficulty: u64 },
     #[error("header commits to transaction root {found}, body produces {expected}")]
     TransactionsRootMismatch { expected: Hash32, found: Hash32 },
     #[error("header commits to state root {found}, the block produces {expected}")]
@@ -162,7 +176,7 @@ enum Tier {
 pub struct TransferOutcome {
     pub fee: Amount,
     pub spent_hot: Vec<NoteId>,
-    pub spent_cold: Vec<NoteId>,
+    pub spent_cold: Vec<(NoteId, Note)>,
 }
 
 /// Checks everything about a transfer that does not require the note set.
@@ -226,10 +240,10 @@ fn resolve_input(
     state: &LedgerState,
     input: &Input,
     spent_hot: &BTreeSet<NoteId>,
-    spent_cold: &BTreeSet<NoteId>,
+    spent_cold: &BTreeMap<NoteId, Note>,
 ) -> Result<(Note, Tier), TransferError> {
     let id = input.note_id;
-    if spent_hot.contains(&id) || spent_cold.contains(&id) {
+    if spent_hot.contains(&id) || spent_cold.contains_key(&id) {
         return Err(TransferError::UnknownNote(id));
     }
 
@@ -260,7 +274,7 @@ pub fn check_transfer(
     transfer: &Transfer,
     state: &LedgerState,
     spent_hot: &BTreeSet<NoteId>,
-    spent_cold: &BTreeSet<NoteId>,
+    spent_cold: &BTreeMap<NoteId, Note>,
     params: &ConsensusParams,
 ) -> Result<TransferOutcome, TransferError> {
     check_transfer_shape(transfer, params)?;
@@ -284,7 +298,7 @@ pub fn check_transfer(
             .ok_or(TransferError::ValueOverflow)?;
         match tier {
             Tier::Hot => from_hot.push(input.note_id),
-            Tier::Cold => from_cold.push(input.note_id),
+            Tier::Cold => from_cold.push((input.note_id, spent)),
         }
     }
 
@@ -352,7 +366,7 @@ pub fn evaluate_block_body(
 
     let height = state.next_height().ok_or(BlockError::HeightOverflow)?;
     let mut spent_hot: BTreeSet<NoteId> = BTreeSet::new();
-    let mut spent_cold: BTreeSet<NoteId> = BTreeSet::new();
+    let mut spent_cold: BTreeMap<NoteId, Note> = BTreeMap::new();
     let mut created: Vec<(NoteId, Note)> = Vec::new();
     let mut total_fees = Amount::ZERO;
 
@@ -394,6 +408,31 @@ pub fn evaluate_block_body(
     })
 }
 
+/// The difficulty the next block must carry.
+pub fn expected_difficulty(state: &LedgerState, params: &ConsensusParams) -> u64 {
+    let recent = state.recent_headers();
+    if recent.is_empty() {
+        params.genesis_difficulty.max(MIN_DIFFICULTY)
+    } else {
+        next_difficulty(recent, params.target_block_time)
+    }
+}
+
+/// Searches for a nonce that satisfies the block's difficulty.
+///
+/// Deliberately the naive loop. A real miner runs it across cores and rolls the
+/// coinbase extra nonce once the nonce space is exhausted, but neither changes
+/// what makes a block valid. Returns `None` if no nonce below `attempts` works.
+pub fn mine_block(mut block: Block, attempts: u64) -> Option<Block> {
+    for nonce in 0..attempts {
+        block.header.nonce = nonce;
+        if meets_target(&block.header.id(), block.header.difficulty) {
+            return Some(block);
+        }
+    }
+    None
+}
+
 /// Builds the block a producer would publish, with both roots filled in.
 pub fn assemble_block(
     state: &LedgerState,
@@ -420,6 +459,7 @@ pub fn assemble_block(
         transactions_root: Hash32::ZERO,
         state_root: effect.state_root,
         timestamp,
+        difficulty: expected_difficulty(state, params),
         nonce,
     };
     let mut block = Block {
@@ -431,16 +471,25 @@ pub fn assemble_block(
     Ok(block)
 }
 
+/// A block that was applied, and what it takes to apply or undo it again.
+#[derive(Clone, Debug)]
+pub struct ConnectedBlock {
+    pub transition: StateTransition,
+    pub undo: BlockUndo,
+    pub total_fees: Amount,
+}
+
 /// Validates `block` against `state` and, if it holds, applies it.
 ///
 /// `now` is the receiving node's clock, in seconds since the Unix epoch. On
-/// failure the state is left untouched.
+/// failure the state is left untouched. Keep the returned value: undoing this
+/// block later needs it.
 pub fn connect_block(
     state: &mut LedgerState,
     block: &Block,
     params: &ConsensusParams,
     now: u64,
-) -> Result<(), BlockError> {
+) -> Result<ConnectedBlock, BlockError> {
     let header = &block.header;
 
     if header.version != BLOCK_VERSION {
@@ -469,16 +518,34 @@ pub fn connect_block(
         });
     }
 
+    let demanded = expected_difficulty(state, params);
+    if header.difficulty != demanded {
+        return Err(BlockError::WrongDifficulty {
+            expected: demanded,
+            found: header.difficulty,
+        });
+    }
+    // Cheap and decisive, so it runs before the body is looked at: a block
+    // without work behind it costs an attacker nothing to send.
+    if !meets_target(&header.id(), header.difficulty) {
+        return Err(BlockError::InsufficientWork {
+            difficulty: header.difficulty,
+        });
+    }
+
     if header.timestamp > now.saturating_add(params.max_timestamp_drift) {
         return Err(BlockError::TimestampTooFarAhead {
             timestamp: header.timestamp,
             drift: params.max_timestamp_drift,
         });
     }
-    if let Some(tip) = state.tip() {
-        if header.timestamp <= tip.timestamp {
-            return Err(BlockError::TimestampNotIncreasing {
-                previous: tip.timestamp,
+    // Measured against the median of recent blocks rather than the parent. A
+    // miner writes its own timestamp, but it holds one vote in a median, so
+    // backdating a block to claim an easier difficulty stops working.
+    if let Some(median) = median_time_past(state.recent_headers()) {
+        if header.timestamp <= median {
+            return Err(BlockError::TimestampNotAfterMedian {
+                median,
                 found: header.timestamp,
             });
         }
@@ -507,6 +574,19 @@ pub fn connect_block(
         });
     }
 
-    state.commit(header, &effect.transition);
-    Ok(())
+    let undo = state.commit(header, &effect.transition);
+    Ok(ConnectedBlock {
+        transition: effect.transition,
+        undo,
+        total_fees: effect.total_fees,
+    })
+}
+
+/// Takes the tip block back out of the state.
+///
+/// `connected` has to be what [`connect_block`] returned for the block that is
+/// currently the tip. Undoing anything else corrupts the state silently, which
+/// is why the two travel together.
+pub fn disconnect_block(state: &mut LedgerState, connected: &ConnectedBlock) {
+    state.revert(&connected.transition, &connected.undo);
 }

@@ -29,13 +29,36 @@ pub struct BlockHeader {
     pub state_root: Hash32,
     /// Seconds since the Unix epoch.
     pub timestamp: u64,
+    /// Work the block claims to carry. Validated against the value the chain
+    /// history demands, so a miner cannot pick an easier one.
+    pub difficulty: u64,
     pub nonce: u64,
 }
 
 impl BlockHeader {
+    /// The identifier, which is also what proof of work is measured against.
     pub fn id(&self) -> Hash32 {
         cairn_primitives::hash::hash(Domain::BlockHeaderId, &self.encode())
     }
+
+    pub fn summary(&self) -> HeaderSummary {
+        HeaderSummary {
+            height: self.height,
+            timestamp: self.timestamp,
+            difficulty: self.difficulty,
+        }
+    }
+}
+
+/// The part of a header the retarget and the timestamp rules need.
+///
+/// Nodes keep a short window of these rather than whole headers, so the memory
+/// a node spends on chain history is bounded like everything else here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeaderSummary {
+    pub height: u64,
+    pub timestamp: u64,
+    pub difficulty: u64,
 }
 
 impl Encode for BlockHeader {
@@ -47,6 +70,7 @@ impl Encode for BlockHeader {
         self.transactions_root.encode_to(out);
         self.state_root.encode_to(out);
         self.timestamp.encode_to(out);
+        self.difficulty.encode_to(out);
         self.nonce.encode_to(out);
     }
 }
@@ -61,6 +85,7 @@ impl Decode for BlockHeader {
             transactions_root: Hash32::decode_from(reader)?,
             state_root: Hash32::decode_from(reader)?,
             timestamp: u64::decode_from(reader)?,
+            difficulty: u64::decode_from(reader)?,
             nonce: u64::decode_from(reader)?,
         })
     }

@@ -15,8 +15,9 @@ use cairn_primitives::codec::Encode;
 use cairn_primitives::hash::{hash, Domain, Hasher};
 use cairn_primitives::Hash32;
 
-use crate::block::BlockHeader;
+use crate::block::{BlockHeader, HeaderSummary};
 use crate::note::{Note, NoteId};
+use crate::pow::RECENT_HEADERS;
 
 /// Where a note sits in either accumulator.
 ///
@@ -118,9 +119,28 @@ pub struct Tip {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StateTransition {
     pub spent_hot: Vec<NoteId>,
-    pub spent_cold: Vec<NoteId>,
+    /// Cold notes spent, carried with their contents. The cold set stores only
+    /// hashes, so putting one back on a reorganisation needs the note itself.
+    pub spent_cold: Vec<(NoteId, Note)>,
     pub created: Vec<(NoteId, Note)>,
     pub evicted: Vec<(NoteId, Note)>,
+}
+
+/// Everything needed to take a block back out of the state.
+///
+/// A node that discovers a heavier branch has to undo the blocks it already
+/// applied. Replaying the chain from genesis every time would make one
+/// reorganisation cost the whole history, so each block records its own
+/// inverse as it is applied.
+#[derive(Clone, Debug, Default)]
+pub struct BlockUndo {
+    /// Hot notes the block spent, with the height they were created at.
+    restored_hot: Vec<(NoteId, HotEntry)>,
+    /// Notes the block pushed down to the cold set, with the height they held.
+    unevicted: Vec<(NoteId, HotEntry)>,
+    previous_tip: Option<Tip>,
+    /// The summary that fell out of the recent window when this block landed.
+    dropped_summary: Option<HeaderSummary>,
 }
 
 /// Replays a transition onto a pair of trees.
@@ -137,7 +157,7 @@ fn replay(
     for id in &transition.spent_hot {
         hot_tree.remove(note_key(id));
     }
-    for id in &transition.spent_cold {
+    for (id, _) in &transition.spent_cold {
         cold.remove(id);
     }
     for (id, note) in &transition.created {
@@ -161,6 +181,9 @@ pub struct LedgerState {
     hot_tree: SparseMerkleTree,
     cold: ColdSet,
     tip: Option<Tip>,
+    /// The tail of the header chain, bounded by [`RECENT_HEADERS`]. The
+    /// retarget and the timestamp rules read it; nothing else does.
+    recent: Vec<HeaderSummary>,
 }
 
 impl LedgerState {
@@ -170,6 +193,11 @@ impl LedgerState {
 
     pub fn tip(&self) -> Option<Tip> {
         self.tip
+    }
+
+    /// The tail of the header chain, oldest first.
+    pub fn recent_headers(&self) -> &[HeaderSummary] {
+        &self.recent
     }
 
     /// Height the next block must carry.
@@ -292,9 +320,30 @@ impl LedgerState {
         )
     }
 
-    /// Applies an already validated transition.
-    pub(crate) fn commit(&mut self, header: &BlockHeader, transition: &StateTransition) {
+    /// Applies an already validated transition, returning its inverse.
+    pub(crate) fn commit(
+        &mut self,
+        header: &BlockHeader,
+        transition: &StateTransition,
+    ) -> BlockUndo {
         let height = header.height;
+        let mut undo = BlockUndo {
+            previous_tip: self.tip,
+            ..BlockUndo::default()
+        };
+
+        // Read what the block is about to destroy, before it destroys it.
+        for id in &transition.spent_hot {
+            if let Some(entry) = self.hot.get(id) {
+                undo.restored_hot.push((*id, *entry));
+            }
+        }
+        for (id, _) in &transition.evicted {
+            if let Some(entry) = self.hot.get(id) {
+                undo.unevicted.push((*id, *entry));
+            }
+        }
+
         replay(&mut self.hot_tree, &mut self.cold, transition, height);
 
         for id in &transition.spent_hot {
@@ -315,6 +364,53 @@ impl LedgerState {
             height,
             timestamp: header.timestamp,
         });
+        undo.dropped_summary = self.push_recent(header.summary());
+        undo
+    }
+
+    /// Takes a block back out, restoring the state exactly as it stood before.
+    ///
+    /// Each step is the inverse of the matching step in [`Self::commit`], run
+    /// in the opposite order.
+    pub(crate) fn revert(&mut self, transition: &StateTransition, undo: &BlockUndo) {
+        self.recent.pop();
+        if let Some(summary) = undo.dropped_summary {
+            self.recent.insert(0, summary);
+        }
+
+        for (id, entry) in &undo.unevicted {
+            self.cold.remove(id);
+            self.hot_tree
+                .insert(note_key(id), hot_value(&entry.note, entry.height));
+            self.remember_hot(*id, entry.note, entry.height);
+        }
+        for (id, _) in &transition.created {
+            self.hot_tree.remove(note_key(id));
+            self.forget_hot(id);
+        }
+        for (id, note) in &transition.spent_cold {
+            self.cold.insert(id, note);
+        }
+        for (id, entry) in &undo.restored_hot {
+            self.hot_tree
+                .insert(note_key(id), hot_value(&entry.note, entry.height));
+            self.remember_hot(*id, entry.note, entry.height);
+        }
+
+        debug_assert_eq!(self.hot.len(), self.hot_tree.len());
+        debug_assert_eq!(self.hot.len(), self.hot_by_age.len());
+
+        self.tip = undo.previous_tip;
+    }
+
+    /// Appends a summary, returning the one that fell out of the window.
+    fn push_recent(&mut self, summary: HeaderSummary) -> Option<HeaderSummary> {
+        self.recent.push(summary);
+        if self.recent.len() > RECENT_HEADERS {
+            self.recent.drain(..1).next()
+        } else {
+            None
+        }
     }
 
     fn remember_hot(&mut self, id: NoteId, note: Note, height: u64) {

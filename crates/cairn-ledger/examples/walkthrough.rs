@@ -99,7 +99,7 @@ fn mine(
         coinbase,
         transfers,
         params,
-        1_700_000_000 + height * 60,
+        1_700_000_000 + height * 600,
         0,
     )
     .expect("the block is valid");
