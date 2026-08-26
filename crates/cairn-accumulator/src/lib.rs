@@ -18,10 +18,12 @@
 //! Hash functions are not broken by quantum computers, unlike the elliptic
 //! curve and hidden order groups the shorter alternatives rest on.
 
+pub mod forest;
 pub mod key;
 pub mod proof;
 pub mod tree;
 
+pub use forest::{Archive, Forest, ForestProof};
 pub use key::{Key, KEY_LEN, MAX_DEPTH};
 pub use proof::Proof;
 pub use tree::{Change, SparseMerkleTree};

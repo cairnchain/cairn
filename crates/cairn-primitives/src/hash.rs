@@ -65,6 +65,9 @@ pub enum Domain {
     HotNoteValue,
     ColdNoteValue,
     StateCommitment,
+    ForestLeaf,
+    ForestNode,
+    ForestRoots,
 }
 
 impl Domain {
@@ -85,6 +88,9 @@ impl Domain {
             Self::HotNoteValue => "cairn v1 hot note value",
             Self::ColdNoteValue => "cairn v1 cold note value",
             Self::StateCommitment => "cairn v1 state commitment",
+            Self::ForestLeaf => "cairn v1 forest leaf",
+            Self::ForestNode => "cairn v1 forest node",
+            Self::ForestRoots => "cairn v1 forest roots",
         }
     }
 }
@@ -109,6 +115,9 @@ struct DomainKeys {
     hot_note_value: [u8; HASH_LEN],
     cold_note_value: [u8; HASH_LEN],
     state_commitment: [u8; HASH_LEN],
+    forest_leaf: [u8; HASH_LEN],
+    forest_node: [u8; HASH_LEN],
+    forest_roots: [u8; HASH_LEN],
 }
 
 fn domain_keys() -> &'static DomainKeys {
@@ -129,6 +138,9 @@ fn domain_keys() -> &'static DomainKeys {
         hot_note_value: blake3::derive_key(Domain::HotNoteValue.context(), &[]),
         cold_note_value: blake3::derive_key(Domain::ColdNoteValue.context(), &[]),
         state_commitment: blake3::derive_key(Domain::StateCommitment.context(), &[]),
+        forest_leaf: blake3::derive_key(Domain::ForestLeaf.context(), &[]),
+        forest_node: blake3::derive_key(Domain::ForestNode.context(), &[]),
+        forest_roots: blake3::derive_key(Domain::ForestRoots.context(), &[]),
     })
 }
 
@@ -150,6 +162,9 @@ fn key_for(domain: Domain) -> &'static [u8; HASH_LEN] {
         Domain::HotNoteValue => &keys.hot_note_value,
         Domain::ColdNoteValue => &keys.cold_note_value,
         Domain::StateCommitment => &keys.state_commitment,
+        Domain::ForestLeaf => &keys.forest_leaf,
+        Domain::ForestNode => &keys.forest_node,
+        Domain::ForestRoots => &keys.forest_roots,
     }
 }
 
