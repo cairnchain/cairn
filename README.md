@@ -22,9 +22,15 @@ accumulator that replaces the state database, the two tiers, proof of work with
 a difficulty that retargets in a handful of blocks, the fork choice, atomic
 reorganisation, and syncing between nodes over TCP.
 
-Two things stand between this and a network strangers can join. A node keeps
-its chain in memory, so restarting one loses it. And a node has to be told
-where its peers are, because nothing gossips addresses yet.
+A node keeps its chain on disk and replays it on start, and finds its peers by
+asking the ones it already has, so it needs one address to join a network and
+none at all to rejoin one.
+
+What is missing is not protocol but packaging. There is no node executable and
+no wallet: everything runs as a library with runnable demonstrations. Two
+numbers are also still provisional, the size of the hot set and the emission
+schedule, and neither can be settled without measurements from a running
+network.
 
 ## Layout
 
@@ -35,7 +41,8 @@ where its peers are, because nothing gossips addresses yet.
 | `cairn-accumulator` | The sparse Merkle tree a node holds in place of the ledger, and its proofs |
 | `cairn-ledger` | Notes, transactions, blocks, the two tiers, and the consensus rules |
 | `cairn-chain` | The block tree, the fork choice, and reorganisation |
-| `cairn-net` | The wire protocol, block propagation, and syncing over TCP |
+| `cairn-net` | The wire protocol, block propagation, syncing over TCP, and peer discovery |
+| `cairn-store` | The append only block log a node replays on start |
 
 ## Building
 
@@ -44,13 +51,14 @@ cargo test --workspace
 cargo clippy --workspace --all-targets
 ```
 
-Four runnable demonstrations, each showing one part of the design:
+Five runnable demonstrations, each showing one part of the design:
 
 ```
 cargo run -p cairn-ledger --example walkthrough
 cargo run --release -p cairn-accumulator --example scale
 cargo run -p cairn-chain --example partition
 cargo run --release -p cairn-net --example network
+cargo run --release -p cairn-net --example gossip
 ```
 
 ## How this is built
