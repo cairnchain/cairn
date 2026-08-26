@@ -10,6 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+cairn-accumulator.workspace = true
 cairn-primitives.workspace = true
 cairn-crypto.workspace = true
 thiserror.workspace = true

@@ -39,10 +39,7 @@ fn signed_transfer(
     outputs: Vec<Note>,
 ) -> Transfer {
     let mut transfer = Transfer::new(
-        inputs
-            .iter()
-            .map(|(id, _, _)| Input::unsigned(*id))
-            .collect(),
+        inputs.iter().map(|(id, _, _)| Input::hot(*id)).collect(),
         outputs,
     );
     for (position, (_, note, secret)) in inputs.iter().enumerate() {
@@ -61,7 +58,7 @@ fn chain_with_genesis(params: &ConsensusParams, miner: &SecretKey) -> (LedgerSta
     connect_block(&mut state, &block, params, NOW).unwrap();
 
     let note_id = NoteId::new(block.coinbase.id(), 0);
-    assert_eq!(state.note(&note_id), Some(note));
+    assert_eq!(state.hot_note(&note_id), Some(note));
     (state, note_id, note)
 }
 
@@ -71,7 +68,7 @@ fn a_genesis_block_connects_and_pays_the_miner() {
     let miner = wallet(1);
     let (state, _, note) = chain_with_genesis(&params, &miner);
 
-    assert_eq!(state.len(), 1);
+    assert_eq!(state.hot_len(), 1);
     assert_eq!(note.value, params.block_reward);
     let tip = state.tip().unwrap();
     assert_eq!(tip.height, 0);
@@ -112,17 +109,17 @@ fn a_transfer_moves_value_and_pays_a_fee() {
     let block = assemble_block(&state, coinbase, vec![transfer], &params, 2_000, 0).unwrap();
     connect_block(&mut state, &block, &params, NOW).unwrap();
 
-    assert_eq!(state.note(&funded_id), None, "the spent note is gone");
+    assert_eq!(state.hot_note(&funded_id), None, "the spent note is gone");
     assert_eq!(
-        state.note(&NoteId::new(transfer_id, 0)),
+        state.hot_note(&NoteId::new(transfer_id, 0)),
         Some(Note::new(sent, recipient.public_key()))
     );
     assert_eq!(
-        state.note(&NoteId::new(transfer_id, 1)),
+        state.hot_note(&NoteId::new(transfer_id, 1)),
         Some(Note::new(change, miner.public_key()))
     );
     assert_eq!(
-        state.len(),
+        state.hot_len(),
         3,
         "recipient, change, and the new coinbase note"
     );
@@ -200,11 +197,14 @@ fn a_note_spent_in_an_earlier_block_cannot_be_spent_again() {
 
     let coinbase = coinbase_paying(2, miner.public_key(), params.block_reward);
     let outcome = assemble_block(&state, coinbase, vec![spend], &params, 3_000, 0);
+    // The note left the hot set when it was spent. A node holding only the cold
+    // commitment cannot tell that from a note that fell to the cold set, so it
+    // asks for a proof, and no proof exists for a note that was spent.
     assert!(matches!(
         outcome,
         Err(BlockError::InvalidTransfer {
             index: 0,
-            source: TransferError::UnknownNote(_)
+            source: TransferError::MissingProof { .. }
         })
     ));
 }
@@ -508,5 +508,5 @@ fn a_chain_of_many_blocks_stays_consistent() {
     assert_eq!(tip.height, 20);
     // 20 notes for the recipient, 20 coinbase notes, and the last change note.
     // The genesis coinbase note was spent by the first transfer.
-    assert_eq!(state.len(), 41);
+    assert_eq!(state.hot_len(), 41);
 }

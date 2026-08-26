@@ -61,6 +61,10 @@ pub enum Domain {
     AccumulatorEmpty,
     AccumulatorLeaf,
     AccumulatorNode,
+    NoteKey,
+    HotNoteValue,
+    ColdNoteValue,
+    StateCommitment,
 }
 
 impl Domain {
@@ -77,6 +81,10 @@ impl Domain {
             Self::AccumulatorEmpty => "cairn v1 accumulator empty",
             Self::AccumulatorLeaf => "cairn v1 accumulator leaf",
             Self::AccumulatorNode => "cairn v1 accumulator node",
+            Self::NoteKey => "cairn v1 note key",
+            Self::HotNoteValue => "cairn v1 hot note value",
+            Self::ColdNoteValue => "cairn v1 cold note value",
+            Self::StateCommitment => "cairn v1 state commitment",
         }
     }
 }
@@ -97,6 +105,10 @@ struct DomainKeys {
     accumulator_empty: [u8; HASH_LEN],
     accumulator_leaf: [u8; HASH_LEN],
     accumulator_node: [u8; HASH_LEN],
+    note_key: [u8; HASH_LEN],
+    hot_note_value: [u8; HASH_LEN],
+    cold_note_value: [u8; HASH_LEN],
+    state_commitment: [u8; HASH_LEN],
 }
 
 fn domain_keys() -> &'static DomainKeys {
@@ -113,6 +125,10 @@ fn domain_keys() -> &'static DomainKeys {
         accumulator_empty: blake3::derive_key(Domain::AccumulatorEmpty.context(), &[]),
         accumulator_leaf: blake3::derive_key(Domain::AccumulatorLeaf.context(), &[]),
         accumulator_node: blake3::derive_key(Domain::AccumulatorNode.context(), &[]),
+        note_key: blake3::derive_key(Domain::NoteKey.context(), &[]),
+        hot_note_value: blake3::derive_key(Domain::HotNoteValue.context(), &[]),
+        cold_note_value: blake3::derive_key(Domain::ColdNoteValue.context(), &[]),
+        state_commitment: blake3::derive_key(Domain::StateCommitment.context(), &[]),
     })
 }
 
@@ -130,6 +146,10 @@ fn key_for(domain: Domain) -> &'static [u8; HASH_LEN] {
         Domain::AccumulatorEmpty => &keys.accumulator_empty,
         Domain::AccumulatorLeaf => &keys.accumulator_leaf,
         Domain::AccumulatorNode => &keys.accumulator_node,
+        Domain::NoteKey => &keys.note_key,
+        Domain::HotNoteValue => &keys.hot_note_value,
+        Domain::ColdNoteValue => &keys.cold_note_value,
+        Domain::StateCommitment => &keys.state_commitment,
     }
 }
 

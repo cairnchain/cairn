@@ -1,6 +1,6 @@
 //! The compact sparse Merkle tree.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use cairn_primitives::codec::Encode;
 use cairn_primitives::hash::{hash, Domain, Hasher};
@@ -29,6 +29,16 @@ pub(crate) fn node_hash(left: Hash32, right: Hash32) -> Hash32 {
     hasher.finalize()
 }
 
+/// A node in the tree.
+///
+/// Children sit behind an [`Arc`], which makes the tree persistent: cloning it
+/// is a pointer copy, and an edit rebuilds only the path it touches while every
+/// untouched subtree stays shared with the original.
+///
+/// A validator has to know the root a block would produce before deciding
+/// whether to accept it, so it works on a copy. Copying the whole tree per
+/// candidate block would cost more than validating it. Cheap copies also leave
+/// room to hold several competing states at once, which reorganisations need.
 #[derive(Clone, Debug)]
 enum Node {
     Empty,
@@ -38,8 +48,8 @@ enum Node {
     },
     Internal {
         hash: Hash32,
-        left: Box<Node>,
-        right: Box<Node>,
+        left: Arc<Node>,
+        right: Arc<Node>,
     },
 }
 
@@ -56,8 +66,8 @@ impl Node {
         let hash = node_hash(left.hash(), right.hash());
         Self::Internal {
             hash,
-            left: Box::new(left),
-            right: Box::new(right),
+            left: Arc::new(left),
+            right: Arc::new(right),
         }
     }
 }
@@ -119,47 +129,50 @@ fn split(existing_key: Key, existing_value: Hash32, key: Key, value: Hash32, dep
     }
 }
 
-fn insert_at(node: Node, depth: usize, key: Key, value: Hash32) -> (Node, Option<Hash32>) {
+fn insert_at(node: &Node, depth: usize, key: Key, value: Hash32) -> (Node, Option<Hash32>) {
     match node {
         Node::Empty => (Node::Leaf { key, value }, None),
         Node::Leaf {
             key: existing_key,
             value: existing_value,
         } => {
-            if existing_key == key {
-                (Node::Leaf { key, value }, Some(existing_value))
+            if *existing_key == key {
+                (Node::Leaf { key, value }, Some(*existing_value))
             } else {
-                (split(existing_key, existing_value, key, value, depth), None)
+                (
+                    split(*existing_key, *existing_value, key, value, depth),
+                    None,
+                )
             }
         }
         Node::Internal { left, right, .. } => {
             let deeper = depth.saturating_add(1);
             let (left, right, replaced) = if key.bit(depth) {
-                let (right, replaced) = insert_at(*right, deeper, key, value);
-                (*left, right, replaced)
+                let (right, replaced) = insert_at(right, deeper, key, value);
+                (left.as_ref().clone(), right, replaced)
             } else {
-                let (left, replaced) = insert_at(*left, deeper, key, value);
-                (left, *right, replaced)
+                let (left, replaced) = insert_at(left, deeper, key, value);
+                (left, right.as_ref().clone(), replaced)
             };
             (Node::internal(left, right), replaced)
         }
     }
 }
 
-fn remove_at(node: Node, depth: usize, key: Key) -> (Node, Option<Hash32>) {
+fn remove_at(node: &Node, depth: usize, key: Key) -> (Node, Option<Hash32>) {
     match node {
         Node::Empty => (Node::Empty, None),
         Node::Leaf {
             key: existing_key,
             value,
         } => {
-            if existing_key == key {
-                (Node::Empty, Some(value))
+            if *existing_key == key {
+                (Node::Empty, Some(*value))
             } else {
                 (
                     Node::Leaf {
-                        key: existing_key,
-                        value,
+                        key: *existing_key,
+                        value: *value,
                     },
                     None,
                 )
@@ -168,11 +181,11 @@ fn remove_at(node: Node, depth: usize, key: Key) -> (Node, Option<Hash32>) {
         Node::Internal { left, right, .. } => {
             let deeper = depth.saturating_add(1);
             let (left, right, removed) = if key.bit(depth) {
-                let (right, removed) = remove_at(*right, deeper, key);
-                (*left, right, removed)
+                let (right, removed) = remove_at(right, deeper, key);
+                (left.as_ref().clone(), right, removed)
             } else {
-                let (left, removed) = remove_at(*left, deeper, key);
-                (left, *right, removed)
+                let (left, removed) = remove_at(left, deeper, key);
+                (left, right.as_ref().clone(), removed)
             };
             (collapse(left, right), removed)
         }
@@ -225,8 +238,7 @@ impl SparseMerkleTree {
 
     /// Adds or replaces an entry, returning the value it displaced.
     pub fn insert(&mut self, key: Key, value: Hash32) -> Option<Hash32> {
-        let root = std::mem::replace(&mut self.root, Node::Empty);
-        let (root, replaced) = insert_at(root, 0, key, value);
+        let (root, replaced) = insert_at(&self.root, 0, key, value);
         self.root = root;
         if replaced.is_none() {
             self.len = self.len.saturating_add(1);
@@ -236,8 +248,7 @@ impl SparseMerkleTree {
 
     /// Drops an entry, returning the value it held.
     pub fn remove(&mut self, key: Key) -> Option<Hash32> {
-        let root = std::mem::replace(&mut self.root, Node::Empty);
-        let (root, removed) = remove_at(root, 0, key);
+        let (root, removed) = remove_at(&self.root, 0, key);
         self.root = root;
         if removed.is_some() {
             self.len = self.len.saturating_sub(1);

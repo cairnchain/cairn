@@ -13,6 +13,6 @@ pub mod validation;
 
 pub use block::{Block, BlockHeader};
 pub use note::{NetworkId, Note, NoteId};
-pub use state::{LedgerState, NoteResolver, Tip};
-pub use transaction::{CoinbaseTransaction, Input, Transfer};
+pub use state::{cold_value, note_key, ColdSet, HotEntry, LedgerState, StateTransition, Tip};
+pub use transaction::{CoinbaseTransaction, ColdWitness, Input, Transfer, Witness};
 pub use validation::{connect_block, BlockError, ConsensusParams, TransferError};

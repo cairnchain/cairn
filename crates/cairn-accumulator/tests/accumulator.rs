@@ -293,3 +293,25 @@ fn every_entry_in_a_large_tree_proves_against_one_root() {
         .prove(key(count + 1))
         .verify_absence(root, key(count + 1)));
 }
+
+#[test]
+fn a_copy_evolves_without_disturbing_the_original() {
+    let mut original = tree_with(0..300);
+    let root_before = original.root();
+    let proof_before = original.prove(key(42));
+
+    let mut copy = original.clone();
+    copy.insert(key(9_000), value(9_000));
+    copy.remove(key(42));
+
+    assert_eq!(original.root(), root_before, "the original did not move");
+    assert!(proof_before.verify_membership(original.root(), key(42), value(42)));
+    assert_ne!(copy.root(), root_before);
+    assert!(copy.prove(key(42)).verify_absence(copy.root(), key(42)));
+
+    original.remove(key(1));
+    assert!(
+        copy.get(key(1)).is_some(),
+        "the copy kept what the original dropped"
+    );
+}

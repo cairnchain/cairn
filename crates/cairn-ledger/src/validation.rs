@@ -5,15 +5,17 @@
 //! may depend on wall clock time, iteration order, or locale. The current time
 //! is passed in rather than read.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use cairn_primitives::amount::PEBBLES_PER_CAIRN;
 use cairn_primitives::{Amount, Hash32};
 
 use crate::block::{Block, BlockHeader, BLOCK_VERSION};
 use crate::note::{NetworkId, Note, NoteId};
-use crate::state::{LedgerState, NoteResolver};
-use crate::transaction::{CoinbaseTransaction, Transfer, COINBASE_VERSION, TRANSFER_VERSION};
+use crate::state::{cold_value, note_key, LedgerState, StateTransition};
+use crate::transaction::{
+    CoinbaseTransaction, Input, Transfer, Witness, COINBASE_VERSION, TRANSFER_VERSION,
+};
 
 /// Reward paid to the producer of a block.
 ///
@@ -24,11 +26,20 @@ const INITIAL_BLOCK_REWARD: Amount = match Amount::from_pebbles(50 * PEBBLES_PER
     None => Amount::ZERO,
 };
 
+/// How many notes stay in the hot set.
+///
+/// Provisional, and the single most consequential number in the protocol: it
+/// fixes both what a node costs to run and how long a note stays reachable
+/// without a proof. It has to be settled against measurements, not intuition.
+const DEFAULT_HOT_CAPACITY: usize = 1 << 20;
+
 /// Rules a node applies to every block it evaluates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConsensusParams {
     pub network: NetworkId,
     pub block_reward: Amount,
+    /// Notes the hot set holds before the oldest start falling to the cold set.
+    pub hot_capacity: usize,
     pub max_transfers_per_block: usize,
     pub max_inputs_per_transfer: usize,
     pub max_outputs_per_transfer: usize,
@@ -42,12 +53,20 @@ impl ConsensusParams {
         Self {
             network: NetworkId::TESTNET,
             block_reward: INITIAL_BLOCK_REWARD,
+            hot_capacity: DEFAULT_HOT_CAPACITY,
             max_transfers_per_block: 4096,
             max_inputs_per_transfer: 256,
             max_outputs_per_transfer: 256,
             max_coinbase_outputs: 16,
             max_timestamp_drift: 2 * 60 * 60,
         }
+    }
+
+    /// The same rules with a hot set small enough to exercise eviction.
+    #[must_use]
+    pub const fn with_hot_capacity(mut self, capacity: usize) -> Self {
+        self.hot_capacity = capacity;
+        self
     }
 }
 
@@ -67,6 +86,12 @@ pub enum TransferError {
     DuplicateInput(NoteId),
     #[error("note {0:?} is unknown or already spent")]
     UnknownNote(NoteId),
+    #[error("note {note_id:?} is still in the hot set, so it takes no proof")]
+    UnexpectedProof { note_id: NoteId },
+    #[error("note {note_id:?} is not in the hot set, so spending it needs a proof")]
+    MissingProof { note_id: NoteId },
+    #[error("the proof for note {note_id:?} does not match the cold commitment")]
+    InvalidProof { note_id: NoteId },
     #[error("output {index} carries no value")]
     ZeroValueOutput { index: usize },
     #[error("summing values overflowed the monetary ceiling")]
@@ -125,6 +150,21 @@ pub enum BlockError {
     },
 }
 
+/// Which tier a spent note came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tier {
+    Hot,
+    Cold,
+}
+
+/// What a valid transfer contributes to the block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransferOutcome {
+    pub fee: Amount,
+    pub spent_hot: Vec<NoteId>,
+    pub spent_cold: Vec<NoteId>,
+}
+
 /// Checks everything about a transfer that does not require the note set.
 pub fn check_transfer_shape(
     transfer: &Transfer,
@@ -152,7 +192,7 @@ pub fn check_transfer_shape(
         });
     }
 
-    let mut seen = HashSet::with_capacity(transfer.inputs.len());
+    let mut seen = BTreeSet::new();
     for input in &transfer.inputs {
         if !seen.insert(input.note_id) {
             return Err(TransferError::DuplicateInput(input.note_id));
@@ -173,19 +213,64 @@ pub fn check_transfer_shape(
     Ok(())
 }
 
-/// Fully validates a transfer against a view of the note set, returning its fee.
-pub fn check_transfer<R: NoteResolver + ?Sized>(
+/// Finds the note an input spends, and which tier it came from.
+///
+/// The tier is not the spender's choice: a note is cold exactly when the hot
+/// set does not hold it. A witness of the wrong kind is rejected rather than
+/// ignored, so one spend has one encoding.
+///
+/// Cold proofs are checked against the commitment as it stood before the block.
+/// Checking them against a commitment that moves as the block is applied would
+/// make a transfer's validity depend on where it sits in the block.
+fn resolve_input(
+    state: &LedgerState,
+    input: &Input,
+    spent_hot: &BTreeSet<NoteId>,
+    spent_cold: &BTreeSet<NoteId>,
+) -> Result<(Note, Tier), TransferError> {
+    let id = input.note_id;
+    if spent_hot.contains(&id) || spent_cold.contains(&id) {
+        return Err(TransferError::UnknownNote(id));
+    }
+
+    match (state.hot_note(&id), &input.witness) {
+        (Some(note), Witness::Hot) => Ok((note, Tier::Hot)),
+        (Some(_), Witness::Cold(_)) => Err(TransferError::UnexpectedProof { note_id: id }),
+        // A note absent from the hot set has either fallen to the cold set or
+        // never existed. A plain node holds only the cold commitment, so it
+        // cannot tell which, and asking for a proof is the honest answer to
+        // both.
+        (None, Witness::Hot) => Err(TransferError::MissingProof { note_id: id }),
+        (None, Witness::Cold(cold)) => {
+            if cold.proof.verify_membership(
+                state.cold_root(),
+                note_key(&id),
+                cold_value(&cold.note),
+            ) {
+                Ok((cold.note, Tier::Cold))
+            } else {
+                Err(TransferError::InvalidProof { note_id: id })
+            }
+        }
+    }
+}
+
+/// Fully validates a transfer against the note set.
+pub fn check_transfer(
     transfer: &Transfer,
-    resolver: &R,
+    state: &LedgerState,
+    spent_hot: &BTreeSet<NoteId>,
+    spent_cold: &BTreeSet<NoteId>,
     params: &ConsensusParams,
-) -> Result<Amount, TransferError> {
+) -> Result<TransferOutcome, TransferError> {
     check_transfer_shape(transfer, params)?;
 
     let mut available = Amount::ZERO;
+    let mut from_hot = Vec::new();
+    let mut from_cold = Vec::new();
+
     for (index, input) in transfer.inputs.iter().enumerate() {
-        let spent = resolver
-            .resolve(&input.note_id)
-            .ok_or(TransferError::UnknownNote(input.note_id))?;
+        let (spent, tier) = resolve_input(state, input, spent_hot, spent_cold)?;
 
         let position = u32::try_from(index).unwrap_or(u32::MAX);
         let message = transfer.signature_message(params.network, position, &spent);
@@ -197,46 +282,35 @@ pub fn check_transfer<R: NoteResolver + ?Sized>(
         available = available
             .checked_add(spent.value)
             .ok_or(TransferError::ValueOverflow)?;
+        match tier {
+            Tier::Hot => from_hot.push(input.note_id),
+            Tier::Cold => from_cold.push(input.note_id),
+        }
     }
 
     let requested = transfer
         .total_output()
         .ok_or(TransferError::ValueOverflow)?;
-    available
+    let fee = available
         .checked_sub(requested)
         .ok_or(TransferError::OutputsExceedInputs {
             available,
             requested,
-        })
+        })?;
+
+    Ok(TransferOutcome {
+        fee,
+        spent_hot: from_hot,
+        spent_cold: from_cold,
+    })
 }
 
 /// What applying a block body does to the state, computed without mutation.
 #[derive(Clone, Debug)]
 pub struct BlockEffect {
-    pub spent: HashSet<NoteId>,
-    pub created: Vec<(NoteId, Note)>,
+    pub transition: StateTransition,
     pub total_fees: Amount,
     pub state_root: Hash32,
-}
-
-/// A view of the note set with the notes already spent by this block removed.
-///
-/// A transfer may not spend a note created earlier in the same block. Allowing
-/// it would make validity depend on the order transfers appear in, which rules
-/// out validating them in parallel. The restriction is provisional and costs
-/// only a one block wait.
-struct BlockView<'a> {
-    state: &'a LedgerState,
-    spent: &'a HashSet<NoteId>,
-}
-
-impl NoteResolver for BlockView<'_> {
-    fn resolve(&self, id: &NoteId) -> Option<Note> {
-        if self.spent.contains(id) {
-            return None;
-        }
-        self.state.note(id)
-    }
 }
 
 fn check_coinbase_shape(
@@ -276,24 +350,21 @@ pub fn evaluate_block_body(
         });
     }
 
-    let mut spent: HashSet<NoteId> = HashSet::new();
+    let height = state.next_height().ok_or(BlockError::HeightOverflow)?;
+    let mut spent_hot: BTreeSet<NoteId> = BTreeSet::new();
+    let mut spent_cold: BTreeSet<NoteId> = BTreeSet::new();
     let mut created: Vec<(NoteId, Note)> = Vec::new();
     let mut total_fees = Amount::ZERO;
 
     for (index, transfer) in transfers.iter().enumerate() {
-        let view = BlockView {
-            state,
-            spent: &spent,
-        };
-        let fee = check_transfer(transfer, &view, params)
+        let outcome = check_transfer(transfer, state, &spent_hot, &spent_cold, params)
             .map_err(|source| BlockError::InvalidTransfer { index, source })?;
 
-        for input in &transfer.inputs {
-            spent.insert(input.note_id);
-        }
+        spent_hot.extend(outcome.spent_hot);
+        spent_cold.extend(outcome.spent_cold);
         created.extend(transfer.created_notes());
         total_fees = total_fees
-            .checked_add(fee)
+            .checked_add(outcome.fee)
             .ok_or(BlockError::ValueOverflow)?;
     }
 
@@ -307,10 +378,17 @@ pub fn evaluate_block_body(
     }
     created.extend(coinbase.created_notes());
 
-    let state_root = state.projected_state_root(&spent, &created);
-    Ok(BlockEffect {
-        spent,
+    let evicted = state.plan_evictions(&spent_hot, &created, params.hot_capacity);
+    let transition = StateTransition {
+        spent_hot: spent_hot.into_iter().collect(),
+        spent_cold: spent_cold.into_iter().collect(),
         created,
+        evicted,
+    };
+    let state_root = state.project(&transition, height);
+
+    Ok(BlockEffect {
+        transition,
         total_fees,
         state_root,
     })
@@ -429,6 +507,6 @@ pub fn connect_block(
         });
     }
 
-    state.commit(header, &effect.spent, effect.created);
+    state.commit(header, &effect.transition);
     Ok(())
 }

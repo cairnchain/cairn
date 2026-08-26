@@ -5,6 +5,7 @@
 //! [`Transfer`] moves value and always has inputs. Keeping them apart means no
 //! code path can mint money by handing a transfer an empty input list.
 
+use cairn_accumulator::Proof;
 use cairn_crypto::{SecretKey, Signature};
 use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
 use cairn_primitives::hash::{Domain, Hasher};
@@ -15,18 +16,82 @@ use crate::note::{NetworkId, Note, NoteId};
 pub const TRANSFER_VERSION: u16 = 1;
 pub const COINBASE_VERSION: u16 = 1;
 
-/// One spent note together with the signature authorising the spend.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The note and the proof a spender supplies for a note in the cold set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColdWitness {
+    pub note: Note,
+    pub proof: Proof,
+}
+
+/// How the spender makes the note being spent available to a validator.
+///
+/// The cold payload is boxed. Nearly every input spends from the hot set, an
+/// enum is as large as its largest variant, and leaving a proof sized hole in
+/// every hot input would waste memory in exactly the place this design exists
+/// to save it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Witness {
+    /// The note is in the hot set, so every node already holds it and the
+    /// identifier is enough.
+    Hot,
+    /// The note has fallen to the cold set, which no node holds. The spender
+    /// supplies it along with a proof that it belongs to the cold commitment.
+    Cold(Box<ColdWitness>),
+}
+
+impl Encode for Witness {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        match self {
+            Self::Hot => 0u8.encode_to(out),
+            Self::Cold(cold) => {
+                1u8.encode_to(out);
+                cold.note.encode_to(out);
+                cold.proof.encode_to(out);
+            }
+        }
+    }
+}
+
+impl Decode for Witness {
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        match u8::decode_from(reader)? {
+            0 => Ok(Self::Hot),
+            1 => Ok(Self::Cold(Box::new(ColdWitness {
+                note: Note::decode_from(reader)?,
+                proof: Proof::decode_from(reader)?,
+            }))),
+            _ => Err(CodecError::InvalidValue {
+                type_name: "Witness",
+            }),
+        }
+    }
+}
+
+/// One spent note, with what a validator needs to see it and the signature
+/// authorising the spend.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Input {
     pub note_id: NoteId,
+    pub witness: Witness,
     pub signature: Signature,
 }
 
 impl Input {
-    /// An input that still has to be signed.
-    pub fn unsigned(note_id: NoteId) -> Self {
+    /// Spends a note the nodes still hold. Signed afterwards.
+    pub fn hot(note_id: NoteId) -> Self {
         Self {
             note_id,
+            witness: Witness::Hot,
+            signature: Signature::unsigned(),
+        }
+    }
+
+    /// Spends a note from the cold set, carrying it and its proof. Signed
+    /// afterwards.
+    pub fn cold(note_id: NoteId, note: Note, proof: Proof) -> Self {
+        Self {
+            note_id,
+            witness: Witness::Cold(Box::new(ColdWitness { note, proof })),
             signature: Signature::unsigned(),
         }
     }
@@ -35,6 +100,7 @@ impl Input {
 impl Encode for Input {
     fn encode_to(&self, out: &mut Vec<u8>) {
         self.note_id.encode_to(out);
+        self.witness.encode_to(out);
         self.signature.encode_to(out);
     }
 }
@@ -43,6 +109,7 @@ impl Decode for Input {
     fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
         Ok(Self {
             note_id: NoteId::decode_from(reader)?,
+            witness: Witness::decode_from(reader)?,
             signature: Signature::decode_from(reader)?,
         })
     }
@@ -67,8 +134,13 @@ impl Transfer {
         }
     }
 
-    /// Encodes everything the identifier commits to, which is everything except
-    /// the signatures.
+    /// Encodes everything the identifier commits to: the version, the notes
+    /// being spent, and the notes being created.
+    ///
+    /// Signatures and witnesses are both left out. A stale proof has to be
+    /// refreshable without changing the transaction identifier, for the same
+    /// reason a signature must not change it: everything already built on top
+    /// of this transaction would otherwise become invalid.
     fn encode_body(&self, out: &mut Vec<u8>) {
         self.version.encode_to(out);
         let input_count = u32::try_from(self.inputs.len()).unwrap_or(u32::MAX);
