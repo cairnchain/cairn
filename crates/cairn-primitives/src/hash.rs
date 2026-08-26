@@ -58,6 +58,9 @@ pub enum Domain {
     MerkleNode,
     MerkleEmpty,
     StateEntry,
+    AccumulatorEmpty,
+    AccumulatorLeaf,
+    AccumulatorNode,
 }
 
 impl Domain {
@@ -71,6 +74,9 @@ impl Domain {
             Self::MerkleNode => "cairn v1 merkle node",
             Self::MerkleEmpty => "cairn v1 merkle empty",
             Self::StateEntry => "cairn v1 state entry",
+            Self::AccumulatorEmpty => "cairn v1 accumulator empty",
+            Self::AccumulatorLeaf => "cairn v1 accumulator leaf",
+            Self::AccumulatorNode => "cairn v1 accumulator node",
         }
     }
 }
@@ -88,6 +94,9 @@ struct DomainKeys {
     merkle_node: [u8; HASH_LEN],
     merkle_empty: [u8; HASH_LEN],
     state_entry: [u8; HASH_LEN],
+    accumulator_empty: [u8; HASH_LEN],
+    accumulator_leaf: [u8; HASH_LEN],
+    accumulator_node: [u8; HASH_LEN],
 }
 
 fn domain_keys() -> &'static DomainKeys {
@@ -101,6 +110,9 @@ fn domain_keys() -> &'static DomainKeys {
         merkle_node: blake3::derive_key(Domain::MerkleNode.context(), &[]),
         merkle_empty: blake3::derive_key(Domain::MerkleEmpty.context(), &[]),
         state_entry: blake3::derive_key(Domain::StateEntry.context(), &[]),
+        accumulator_empty: blake3::derive_key(Domain::AccumulatorEmpty.context(), &[]),
+        accumulator_leaf: blake3::derive_key(Domain::AccumulatorLeaf.context(), &[]),
+        accumulator_node: blake3::derive_key(Domain::AccumulatorNode.context(), &[]),
     })
 }
 
@@ -115,6 +127,9 @@ fn key_for(domain: Domain) -> &'static [u8; HASH_LEN] {
         Domain::MerkleNode => &keys.merkle_node,
         Domain::MerkleEmpty => &keys.merkle_empty,
         Domain::StateEntry => &keys.state_entry,
+        Domain::AccumulatorEmpty => &keys.accumulator_empty,
+        Domain::AccumulatorLeaf => &keys.accumulator_leaf,
+        Domain::AccumulatorNode => &keys.accumulator_node,
     }
 }
 

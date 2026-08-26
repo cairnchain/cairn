@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/cairn-accumulator",
     "crates/cairn-primitives",
     "crates/cairn-crypto",
     "crates/cairn-ledger",
@@ -14,6 +15,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/cairn-protocol/cairn"
 
 [workspace.dependencies]
+cairn-accumulator = { path = "crates/cairn-accumulator", version = "0.1.0" }
 cairn-primitives = { path = "crates/cairn-primitives", version = "0.1.0" }
 cairn-crypto = { path = "crates/cairn-crypto", version = "0.1.0" }
 blake3 = { version = "1", default-features = false, features = ["std"] }

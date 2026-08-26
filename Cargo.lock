@@ -37,6 +37,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn-accumulator"
+version = "0.1.0"
+dependencies = [
+ "cairn-primitives",
+ "hex",
+ "thiserror",
+]
+
+[[package]]
 name = "cairn-crypto"
 version = "0.1.0"
 dependencies = [
