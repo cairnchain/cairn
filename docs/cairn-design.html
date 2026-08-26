@@ -1,0 +1,411 @@
+<title>Cairn</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600&family=Newsreader:ital,opsz,wght@0,6..72,300..700;1,6..72,300..500&family=IBM+Plex+Mono:wght@400;500&display=swap">
+
+<style>
+  :root{
+    --ground:#EDEEE9; --surface:#F6F7F3; --surface-2:#E4E6DE;
+    --ink:#1A1E1B; --ink-2:#4C544E; --ink-3:#79817A;
+    --rule:#D3D6CD; --rule-strong:#B9BEB2;
+    --accent:#65761B; --accent-ink:#4E5C14; --accent-soft:#DDE4BF;
+    --cold:#3F5563; --cold-soft:#D6DDE2;
+    --shadow:0 1px 2px rgba(26,30,27,.05), 0 8px 24px -12px rgba(26,30,27,.18);
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --ground:#111412; --surface:#181C19; --surface-2:#222724;
+      --ink:#E7EAE2; --ink-2:#A8B0A7; --ink-3:#7B837B;
+      --rule:#2A2F2B; --rule-strong:#3A413B;
+      --accent:#AAC04B; --accent-ink:#BDD067; --accent-soft:#2B3318;
+      --cold:#93AEBE; --cold-soft:#1C2931;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.6);
+    }
+  }
+  :root[data-theme="dark"]{
+    --ground:#111412; --surface:#181C19; --surface-2:#222724;
+    --ink:#E7EAE2; --ink-2:#A8B0A7; --ink-3:#7B837B;
+    --rule:#2A2F2B; --rule-strong:#3A413B;
+    --accent:#AAC04B; --accent-ink:#BDD067; --accent-soft:#2B3318;
+    --cold:#93AEBE; --cold-soft:#1C2931;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.6);
+  }
+
+  *{box-sizing:border-box}
+  body{
+    background:var(--ground); color:var(--ink);
+    font-family:"Newsreader",Georgia,"Times New Roman",serif;
+    font-size:1.0625rem; line-height:1.65; font-weight:380;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:80rem;margin:0 auto;padding:0 clamp(1.1rem,4vw,3rem) 6rem}
+
+  /* ---- masthead ---- */
+  .mast{padding:clamp(3rem,9vw,6.5rem) 0 2.25rem;border-bottom:1px solid var(--rule)}
+  .mark{
+    font-family:"Cinzel",Georgia,serif;font-weight:600;
+    font-size:clamp(2.6rem,9vw,5rem);letter-spacing:.16em;
+    margin:0 0 .1em;line-height:1;text-indent:.16em;
+  }
+  .thesis{
+    font-size:clamp(1.15rem,2.6vw,1.5rem);line-height:1.4;font-weight:400;
+    max-width:30ch;margin:0 0 1.75rem;color:var(--ink);text-wrap:balance;
+  }
+  .thesis em{font-style:italic;color:var(--accent-ink)}
+  .metaline{
+    display:flex;flex-wrap:wrap;gap:.5rem 1.5rem;align-items:center;
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.7rem;letter-spacing:.11em;text-transform:uppercase;color:var(--ink-3);
+  }
+
+  /* ---- sections ---- */
+  section{
+    display:grid;grid-template-columns:8.5rem minmax(0,68ch);
+    gap:0 2.75rem;padding:3.25rem 0 .5rem;border-bottom:1px solid var(--rule);
+  }
+  section:last-of-type{border-bottom:0}
+  .rail{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.68rem;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--ink-3);display:flex;flex-direction:column;gap:.5rem;
+    align-items:flex-start;padding-top:.65rem;
+  }
+  .rail .num{font-family:"Cinzel",Georgia,serif;font-size:1.05rem;letter-spacing:.1em;color:var(--ink-2)}
+  .body>*+*{margin-top:1.1em}
+  .body>h2{margin-top:0}
+
+  h2{
+    font-size:clamp(1.5rem,3.4vw,2rem);font-weight:500;line-height:1.2;
+    letter-spacing:-.012em;margin:0 0 .9rem;text-wrap:balance;
+  }
+  h3{
+    font-size:1.08rem;font-weight:600;margin:2rem 0 .55rem;letter-spacing:-.005em;
+  }
+  p{margin:0}
+  strong{font-weight:600}
+  a{color:var(--accent-ink)}
+
+  .chip{
+    display:inline-block;padding:.22em .6em;border-radius:2px;
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.62rem;letter-spacing:.13em;text-transform:uppercase;
+    border:1px solid currentColor;line-height:1.4;
+  }
+  .chip.locked{color:var(--accent-ink)}
+  .chip.open{color:var(--cold)}
+
+  .lede{font-size:1.2rem;line-height:1.55;color:var(--ink-2);font-weight:350}
+
+  /* ---- pull ---- */
+  .pull{
+    border-left:2px solid var(--accent);padding:.15rem 0 .15rem 1.4rem;
+    font-size:1.3rem;line-height:1.4;font-weight:400;font-style:italic;
+    color:var(--ink);text-wrap:balance;
+  }
+
+  /* ---- table ---- */
+  .tablewrap{overflow-x:auto;margin-top:1.6rem}
+  table{border-collapse:collapse;width:100%;min-width:26rem;font-size:.95rem}
+  caption{
+    caption-side:top;text-align:left;
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.66rem;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--ink-3);padding-bottom:.7rem;
+  }
+  th,td{text-align:left;padding:.6rem .9rem .6rem 0;border-bottom:1px solid var(--rule)}
+  thead th{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-weight:500;
+    font-size:.66rem;letter-spacing:.11em;text-transform:uppercase;color:var(--ink-3);
+    border-bottom:1px solid var(--rule-strong);
+  }
+  td.num{font-variant-numeric:tabular-nums;white-space:nowrap}
+  tr.us td{color:var(--accent-ink);font-weight:500}
+
+  /* ---- diagram ---- */
+  .diagram{
+    margin-top:1.8rem;border:1px solid var(--rule);border-radius:3px;
+    background:var(--surface);padding:clamp(1.1rem,3vw,1.9rem);
+  }
+  .drawers{display:grid;grid-template-columns:1fr auto 1fr;gap:0 clamp(.7rem,2.5vw,1.6rem);align-items:stretch}
+  .box{border:1px solid var(--rule-strong);border-radius:3px;padding:1rem 1.05rem;background:var(--ground)}
+  .box.warm{border-color:var(--accent);background:var(--accent-soft)}
+  .box.coldbox{border-color:var(--cold);background:var(--cold-soft)}
+  .box .label{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.65rem;letter-spacing:.13em;text-transform:uppercase;
+    margin-bottom:.5rem;display:block;
+  }
+  .box.warm .label{color:var(--accent-ink)}
+  .box.coldbox .label{color:var(--cold)}
+  .box .big{font-size:1.02rem;font-weight:600;line-height:1.25;display:block;margin-bottom:.35rem}
+  .box .small{font-size:.86rem;line-height:1.45;color:var(--ink-2);display:block}
+  .flows{display:flex;flex-direction:column;justify-content:center;gap:1.1rem;padding:.4rem 0}
+  .flow{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.6rem;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--ink-3);text-align:center;line-height:1.5;white-space:nowrap;
+  }
+  .flow .arrow{display:block;font-size:1rem;color:var(--ink-2);letter-spacing:0}
+  .diagram .foot{
+    margin-top:1.15rem;padding-top:.9rem;border-top:1px solid var(--rule);
+    font-size:.9rem;color:var(--ink-2);
+  }
+  .diagram .foot b{color:var(--ink);font-weight:600}
+
+  /* ---- decisions ---- */
+  .decisions{display:flex;flex-direction:column;gap:0;margin-top:1.5rem}
+  .dec{padding:1.15rem 0;border-top:1px solid var(--rule);display:grid;gap:.45rem}
+  .dec:last-child{border-bottom:1px solid var(--rule)}
+  .dec .q{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.66rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);
+  }
+  .dec .a{font-size:1.12rem;font-weight:600;line-height:1.3}
+  .dec .why{font-size:.96rem;color:var(--ink-2);line-height:1.55}
+
+  /* ---- guarantees ---- */
+  ol.guar{list-style:none;padding:0;margin:1.4rem 0 0;counter-reset:g;display:flex;flex-direction:column;gap:1rem}
+  ol.guar li{
+    counter-increment:g;display:grid;grid-template-columns:1.9rem 1fr;gap:.9rem;
+    align-items:baseline;
+  }
+  ol.guar li::before{
+    content:counter(g);font-family:"Cinzel",Georgia,serif;font-size:1.05rem;
+    color:var(--accent-ink);
+  }
+  ol.guar b{font-weight:600}
+  ol.guar span{display:block;color:var(--ink-2);font-size:.96rem;margin-top:.15rem}
+
+  /* ---- open questions ---- */
+  ul.open{list-style:none;padding:0;margin:1.3rem 0 0;display:flex;flex-direction:column;gap:.85rem}
+  ul.open li{padding-left:1.2rem;position:relative;color:var(--ink-2);font-size:.99rem}
+  ul.open li::before{content:"";position:absolute;left:0;top:.62em;width:.45rem;height:1px;background:var(--cold)}
+  ul.open b{color:var(--ink);font-weight:600}
+
+  /* ---- roadmap ---- */
+  ol.road{list-style:none;padding:0;margin:1.4rem 0 0;counter-reset:r;display:flex;flex-direction:column;gap:0}
+  ol.road li{
+    counter-increment:r;display:grid;grid-template-columns:3.4rem 1fr;gap:1rem;
+    padding:1rem 0;border-top:1px solid var(--rule);
+  }
+  ol.road li:last-child{border-bottom:1px solid var(--rule)}
+  ol.road li::before{
+    content:"É" counter(r);font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.66rem;letter-spacing:.1em;color:var(--ink-3);padding-top:.35em;
+  }
+  ol.road li.done::before{color:var(--accent-ink)}
+  ol.road b{font-weight:600;display:block;margin-bottom:.15rem}
+  ol.road .state{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.6rem;
+    letter-spacing:.13em;text-transform:uppercase;color:var(--accent-ink);
+    border:1px solid currentColor;border-radius:2px;padding:.15em .5em;
+    margin-left:.6rem;vertical-align:.15em;white-space:nowrap;
+  }
+  ol.road span{color:var(--ink-2);font-size:.96rem}
+
+  .note{
+    margin-top:1.6rem;border:1px solid var(--rule);border-left:2px solid var(--cold);
+    border-radius:0 3px 3px 0;background:var(--surface);padding:1.1rem 1.25rem;
+    font-size:.95rem;color:var(--ink-2);line-height:1.6;
+  }
+  .note b{color:var(--ink)}
+  .note .tag{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.62rem;
+    letter-spacing:.13em;text-transform:uppercase;color:var(--cold);
+    display:block;margin-bottom:.5rem;
+  }
+
+  footer{
+    margin-top:4rem;padding-top:1.5rem;border-top:1px solid var(--rule);
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.66rem;letter-spacing:.11em;text-transform:uppercase;color:var(--ink-3);
+    display:flex;flex-wrap:wrap;gap:.4rem 1.5rem;
+  }
+
+  @media (max-width:820px){
+    section{grid-template-columns:minmax(0,1fr);gap:1rem;padding-top:2.5rem}
+    .rail{flex-direction:row;align-items:center;gap:.85rem;padding-top:0}
+    .drawers{grid-template-columns:1fr}
+    .flows{flex-direction:row;justify-content:space-around;padding:.9rem 0}
+    .flow{white-space:normal}
+  }
+  @media (prefers-reduced-motion:no-preference){
+    a{transition:color .15s ease}
+  }
+  :focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:2px}
+</style>
+
+<div class="wrap">
+
+  <header class="mast">
+    <h1 class="mark">CAIRN</h1>
+    <p class="thesis">Une monnaie que <em>ton téléphone</em> vérifie lui-même — aujourd'hui, et dans trente ans.</p>
+    <div class="metaline">
+      <span>Document de conception · v0.2</span>
+      <span>26 août 2026</span>
+      <span>Nom de code — provisoire</span>
+    </div>
+  </header>
+
+  <section>
+    <div class="rail"><span class="num">I</span><span>Le problème</span></div>
+    <div class="body">
+      <h2>Toutes les cryptomonnaies se recentralisent en grandissant</h2>
+      <p class="lede">Ce n'est pas un accident de parcours. C'est une conséquence directe de leur conception, et personne ne l'a corrigée.</p>
+      <p>Une cryptomonnaie, c'est un grand cahier de comptes public dont des milliers d'ordinateurs — les <em>nœuds</em> — gardent chacun une copie et sur le contenu duquel ils se mettent d'accord en permanence, sans banque, sans serveur central, sans patron. C'est cette redondance, et rien d'autre, qui rend le système décentralisé.</p>
+      <p>Or ce cahier ne fait que grossir. Chaque compte, chaque transaction, depuis le premier jour, à conserver pour toujours. Tenir une copie complète devient chaque année plus cher.</p>
+      <div class="tablewrap">
+        <table>
+          <caption>Ce que coûte aujourd'hui un nœud validant complet</caption>
+          <thead><tr><th>Réseau</th><th>Stockage</th><th>Trajectoire</th></tr></thead>
+          <tbody>
+            <tr><td>Bitcoin</td><td class="num">≈ 700 Go</td><td>+ ~50 Go / an</td></tr>
+            <tr><td>Ethereum</td><td class="num">≈ 1,2 To</td><td>jusqu'à ~20 To en archive</td></tr>
+            <tr><td>Solana</td><td class="num">≈ 1 To</td><td>+ NVMe rapide, 256 Go de RAM</td></tr>
+            <tr class="us"><td>Cairn</td><td class="num">plafonné</td><td>constant, par construction</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="margin-top:1.6rem">La conséquence est mécanique : de moins en moins de particuliers peuvent valider, de plus en plus ce sont des entreprises avec des datacenters.</p>
+      <p class="pull">Plus l'une de ces monnaies a du succès, moins il reste de gens capables de la vérifier. Elles se détruisent avec leur propre réussite.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail"><span class="num">II</span><span>La thèse</span></div>
+    <div class="body">
+      <h2>Ne pas transporter le cahier. Transporter son sceau.</h2>
+      <p>Et si les nœuds ne gardaient pas le cahier ? À la place, chacun garde un <strong>sceau</strong> : un très petit code, quelques dizaines de caractères, calculé à partir du cahier entier.</p>
+      <p>Sa propriété — des mathématiques établies, pas une astuce — est qu'avec ce sceau seul, on peut <strong>vérifier qu'une page est authentique sans jamais avoir eu le cahier</strong>.</p>
+      <p>Le fonctionnement s'inverse alors : c'est celui qui dépense qui présente sa page, accompagnée d'une preuve qu'elle appartient bien au cahier officiel. Le nœud vérifie la preuve, met à jour le sceau, et n'a rien à conserver.</p>
+      <p><strong>Le cahier peut grossir à l'infini ; le sceau, lui, garde toujours la même taille.</strong> Un nœud complet tient sur un ordinateur à soixante euros. Dans vingt ans aussi. Et sur un téléphone.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail"><span class="num">III</span><span>Le mécanisme</span></div>
+    <div class="body">
+      <h2>Deux températures : le tiroir et la cave</h2>
+      <p>Cette inversion a un prix : elle déplace la charge sur l'utilisateur. Sa preuve se périme dès que quiconque transige, et s'il la perd, il ne peut plus prouver ce qu'il possède. Une monnaie qui exige d'être connecté en permanence n'intéresse personne.</p>
+      <p>Cairn sépare donc l'état en deux, selon la seule chose qui compte vraiment : depuis combien de temps ça n'a pas bougé.</p>
+
+      <div class="diagram">
+        <div class="drawers">
+          <div class="box warm">
+            <span class="label">Le tiroir</span>
+            <span class="big">Taille fixe, conservé par chaque nœud</span>
+            <span class="small">Ce qui sert régulièrement. Aucune preuve à fournir, aucune complication : la monnaie s'utilise comme n'importe quelle autre. C'est le cas de la quasi-totalité des usages.</span>
+          </div>
+          <div class="flows">
+            <div class="flow"><span class="arrow">→</span>n'a pas bougé<br>depuis longtemps</div>
+            <div class="flow"><span class="arrow">←</span>tu présentes<br>ta preuve</div>
+          </div>
+          <div class="box coldbox">
+            <span class="label">La cave</span>
+            <span class="big">Taille illimitée, résumée dans le sceau</span>
+            <span class="small">Ce qui dort. N'occupe plus aucun espace chez personne. Y toucher demande une preuve — que le portefeuille fabrique tout seul, ou qu'un archiviste reconstitue.</span>
+          </div>
+        </div>
+        <p class="foot">Le coût d'un nœud, c'est <b>le tiroir seul</b>. Le tiroir a une taille fixe. Donc le coût est plafonné pour toujours, quel que soit le nombre d'utilisateurs — pendant que la cave, elle, peut grossir sans limite.</p>
+      </div>
+
+      <p style="margin-top:1.6rem">La friction ne tombe ainsi que sur ce qui dort depuis des années : exactement le bon endroit où la mettre.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail"><span class="num">IV</span><span class="chip locked">Verrouillé</span></div>
+    <div class="body">
+      <h2>Les quatre décisions prises</h2>
+      <p>Elles ne sont plus rouvertes sans raison majeure : tout le reste s'appuie dessus.</p>
+      <div class="decisions">
+        <div class="dec">
+          <span class="q">Représentation de la valeur</span>
+          <span class="a">Des billets, pas des soldes</span>
+          <span class="why">On ne possède pas « un solde », on possède un ensemble de billets — comme du liquide. Payer 7 avec un billet de 10 consomme le 10 et rend un billet de 3. Un billet est créé une fois, détruit une fois, jamais modifié : c'est précisément ce que le système de sceau traite le mieux et le plus vite. Un solde qui change sans cesse se prouverait beaucoup plus mal.</span>
+        </div>
+        <div class="dec">
+          <span class="q">Passage du tiroir à la cave</span>
+          <span class="a">Quand le tiroir est plein, le plus ancien non touché descend</span>
+          <span class="why">La seule règle qui garantisse vraiment un coût de nœud plafonné — c'est-à-dire la raison d'être du projet. L'alternative, un délai fixe, laisserait le tiroir gonfler avec la popularité et recréerait le problème qu'on veut résoudre.</span>
+        </div>
+        <div class="dec">
+          <span class="q">Conservation de la cave</span>
+          <span class="a">Des archivistes, ouverts à tous, payés à la demande</span>
+          <span class="why">Rien n'est jamais réellement perdu : tout est reconstituable depuis l'historique complet de la chaîne. Il faut seulement que quelqu'un le conserve. On en fait un rôle ouvert et rémunéré — garder une copie, se faire payer pour refabriquer une preuve. Sans permission, sans privilège. Bitcoin et Ethereum survivent déjà exactement ainsi, à ceci près qu'ils ne le disent pas et ne rémunèrent personne.</span>
+        </div>
+        <div class="dec">
+          <span class="q">Langage d'implémentation</span>
+          <span class="a">Rust</span>
+          <span class="why">Sécurité mémoire — un dépassement dans un validateur, ce sont des fonds volés. Pas de ramasse-miettes, donc un temps d'exécution des blocs prévisible. Le meilleur écosystème cryptographique existant. Et le langage où le code d'un nœud est le plus auditable par des tiers, ce qui compte le jour où l'on demande à des inconnus de le faire tourner.</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail"><span class="num">V</span><span class="chip locked">Verrouillé</span></div>
+    <div class="body">
+      <h2>Trois garanties gravées dans le protocole</h2>
+      <p>Descendre à la cave n'est pas perdre son argent. La cave n'est pas une poubelle : un billet y vaut exactement ce qu'il vaut au tiroir. Ces trois règles rendent cette phrase littéralement vraie, et elles ne bougeront plus.</p>
+      <ol class="guar">
+        <li><div><b>Rien n'est jamais détruit ni grignoté.</b><span>Aucun loyer qui ronge un solde, aucune date d'expiration, aucune confiscation. Jamais, dans aucune circonstance.</span></div></li>
+        <li><div><b>Reconstituable pour toujours, sans limite de temps.</b><span>Même après la perte totale du portefeuille, les fonds se récupèrent depuis l'historique public via un archiviste. C'est cette garantie qui rend la règle du tiroir acceptable.</span></div></li>
+        <li><div><b>Le portefeuille absorbe toute la complexité.</b><span>Il conserve et rafraîchit les preuves en arrière-plan. Dépenser depuis la cave est un peu plus lent — ce n'est pas une démarche.</span></div></li>
+      </ol>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail"><span class="num">VI</span><span>Raison d'être</span></div>
+    <div class="body">
+      <h2>À quoi ça sert, concrètement</h2>
+      <p>Une monnaie sans raison d'exister est un support de spéculation, pas un projet. Mais cette raison n'a pas à être une application posée par-dessus : chez Bitcoin, le protocole <em>est</em> le projet. Ici aussi — et l'usage découle mécaniquement de la conception, il n'est pas plaqué dessus.</p>
+      <p>Aujourd'hui, ouvrir une application crypto sur un téléphone ne vérifie rien du tout. L'appareil est incapable de porter le cahier, donc il interroge un serveur — souvent le même pour des millions de personnes. On fait confiance à une entreprise pour savoir ce qu'on possède. C'est la centralisation la plus massive de tout l'écosystème, et elle est presque invisible.</p>
+      <p class="pull">Chez Cairn, le cahier ne pèse rien. Le téléphone est donc un nœud du réseau à part entière : il vérifie lui-même, ne demande la permission à personne, et fonctionnera encore dans trente ans.</p>
+      <p>Aucune grande chaîne existante ne peut tenir cette promesse, parce qu'aucune n'a été conçue pour.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail"><span class="num">VII</span><span class="chip open">À trancher</span></div>
+    <div class="body">
+      <h2>Ce qui reste ouvert</h2>
+      <p>Les questions encore posées, par ordre d'urgence. Aucune ne bloque le démarrage du code.</p>
+      <ul class="open">
+        <li><b>Le mécanisme de sceau.</b> Trois familles possibles, avec un arbitrage réel entre taille des preuves, vitesse de vérification, et besoin ou non d'une cérémonie d'installation de confiance. Ce dernier point est éliminatoire pour un projet qui se veut sans autorité : il oriente fortement le choix.</li>
+        <li><b>La taille du tiroir.</b> Elle fixe à la fois le coût réel d'un nœud et le délai moyen avant qu'un billet inactif ne descende. À calibrer sur des chiffres, pas à l'intuition.</li>
+        <li><b>Le consensus.</b> Volontairement classique et éprouvé — l'innovation est ailleurs. Reste à choisir lequel, et sur quel critère : accessibilité du minage pour des particuliers, ou rapidité de finalité.</li>
+        <li><b>L'émission.</b> Combien de monnaie créée, à quel rythme, pour qui. C'est aussi ce qui rémunère les archivistes, donc c'est lié à la décision III.</li>
+        <li><b>Les billets intelligents.</b> Des billets porteurs de règles plutôt que d'un simple montant. Reporté après le testnet — utile, mais pas au prix d'un retard sur le cœur.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail"><span class="num">VIII</span><span>Le chemin</span></div>
+    <div class="body">
+      <h2>L'ordre des choses</h2>
+      <ol class="road">
+        <li class="done"><div><b>Le cœur<span class="state">Fait</span></b><span>Billets, signatures, blocs, validation. Écrit en Rust, 50 tests au vert : une chaîne produit des blocs, les vérifie, refuse une double dépense, une signature falsifiée, une création de valeur, un bloc rattaché au mauvais parent.</span></div></li>
+        <li><div><b>Le sceau</b><span>L'accumulateur et les preuves. Le morceau le plus délicat, et celui qui définit le projet.</span></div></li>
+        <li><div><b>Le réseau</b><span>Plusieurs nœuds indépendants qui se découvrent, se propagent les blocs, et se réconcilient après une coupure. Testé sous pannes et partitions.</span></div></li>
+        <li><div><b>Le portefeuille</b><span>D'abord en ligne de commande, puis sur téléphone — un portefeuille qui est lui-même un nœud complet. C'est la démonstration vivante de toute la thèse.</span></div></li>
+        <li><div><b>Le testnet public</b><span>Une monnaie sans valeur, ouverte, que des inconnus font tourner. Le seul vrai test de décentralisation : tout ce qui précède peut être parfait et échouer ici.</span></div></li>
+      </ol>
+
+      <div class="note">
+        <span class="tag">À savoir, pas maintenant</span>
+        <p><b>Une cotation n'est pas une étape technique.</b> C'est une décision commerciale et juridique prise par des tiers, très en aval de tout ce qui précède : elle suppose une chaîne qui tourne, des nœuds tenus par des inconnus, et de la demande réelle. La laisser influencer les choix de conception aujourd'hui abîmerait le protocole sans rapprocher l'objectif d'un jour.</p>
+        <p style="margin-top:.8rem">Côté cadre légal, l'Union européenne applique le règlement MiCA depuis fin 2024, et une émission publique y crée des obligations réelles. Un point mérite d'être connu tôt car il oriente la conception de l'émission : les crypto-actifs créés automatiquement en récompense du fonctionnement du réseau bénéficient d'un régime nettement plus léger qu'une vente au public. Ce n'est pas un avis juridique — c'est un sujet à faire regarder par un professionnel avant toute ouverture au public.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Cairn · document de conception v0.2</span>
+    <span>Statut — cœur du grand livre implémenté</span>
+    <span>Rien de ce document n'est un conseil en investissement</span>
+  </footer>
+
+</div>
