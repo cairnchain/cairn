@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/cairn-accumulator",
+    "crates/cairn-chain",
     "crates/cairn-primitives",
     "crates/cairn-crypto",
     "crates/cairn-ledger",
@@ -16,8 +17,10 @@ repository = "https://github.com/cairn-protocol/cairn"
 
 [workspace.dependencies]
 cairn-accumulator = { path = "crates/cairn-accumulator", version = "0.1.0" }
-cairn-primitives = { path = "crates/cairn-primitives", version = "0.1.0" }
+cairn-chain = { path = "crates/cairn-chain", version = "0.1.0" }
 cairn-crypto = { path = "crates/cairn-crypto", version = "0.1.0" }
+cairn-ledger = { path = "crates/cairn-ledger", version = "0.1.0" }
+cairn-primitives = { path = "crates/cairn-primitives", version = "0.1.0" }
 blake3 = { version = "1", default-features = false, features = ["std"] }
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc", "fast", "zeroize"] }
 getrandom = "0.3"
