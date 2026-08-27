@@ -109,6 +109,12 @@ pub struct Reaction {
     pub broadcast: Vec<Hash32>,
     /// Addresses worth adding to the book.
     pub learned: Vec<SocketAddr>,
+    /// Addresses worth taking out of it.
+    ///
+    /// Detecting a connection to oneself is only half the job. Left in the
+    /// book, the address is dialled again a second later, and the node spends
+    /// its life opening connections to itself and closing them.
+    pub forget: Vec<SocketAddr>,
     /// Transfers the pool did not hold before, worth passing on.
     pub relayed: Vec<Hash32>,
     /// Set when the connection should be closed.
@@ -182,7 +188,16 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
     // that reaches itself would otherwise spend one of its few connections on
     // itself, and keep its own address in the book to try again later.
     if theirs.nonce == local.nonce {
-        return Reaction::close(DropReason::Ourselves);
+        let mut reaction = Reaction::close(DropReason::Ourselves);
+        // The address this connection came from, completed by the port the
+        // handshake names, is this node's own. Take it out of the book, or it
+        // will be dialled again on the next sweep.
+        if let Some(ip) = peer.remote {
+            if theirs.listen != 0 {
+                reaction.forget.push(SocketAddr::new(ip, theirs.listen));
+            }
+        }
+        return reaction;
     }
     if let Err(reason) = accept_handshake(local.chain, &theirs) {
         return Reaction::close(reason);

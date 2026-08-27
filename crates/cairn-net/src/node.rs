@@ -221,6 +221,17 @@ impl Shared {
         }
     }
 
+    /// Takes addresses out of the book, so they are not dialled again.
+    fn forget(&self, addresses: &[SocketAddr]) {
+        if addresses.is_empty() {
+            return;
+        }
+        let mut book = self.book();
+        for address in addresses {
+            book.remove(address);
+        }
+    }
+
     fn remember(&self, addresses: &[SocketAddr]) {
         if addresses.is_empty() {
             return;
@@ -879,6 +890,7 @@ fn read_loop(
 
         shared.persist(&fresh);
         shared.remember(&reaction.learned);
+        shared.forget(&reaction.forget);
         if !announced {
             if let Some(address) = peer.advertised {
                 announced = true;

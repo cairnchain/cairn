@@ -831,9 +831,20 @@ fn a_node_that_reaches_itself_says_so_and_hangs_up() {
     assert_eq!(reaction.drop_peer, Some(DropReason::Ourselves));
     assert!(
         reaction.learned.is_empty(),
-        "our own address must not go into the book, or we would dial it again"
+        "our own address must not go into the book"
     );
     assert!(reaction.reply.is_empty(), "nothing to say to ourselves");
+    // And it has to come out of the book, not merely stay out of it: a peer
+    // that shared it with us put it there, and it would be dialled again on
+    // the next sweep.
+    assert_eq!(
+        reaction.forget,
+        vec![SocketAddr::from((
+            std::net::Ipv4Addr::new(203, 0, 113, 9),
+            4242
+        ))],
+        "the address we reached ourselves at must be dropped from the book"
+    );
 }
 
 /// And a genuine peer with a different nonce is unaffected.
