@@ -16,6 +16,14 @@ use crate::note::{NetworkId, Note, NoteId};
 pub const TRANSFER_VERSION: u16 = 1;
 pub const COINBASE_VERSION: u16 = 1;
 
+/// Bytes a coinbase may carry beyond what consensus reads.
+///
+/// It gives a miner room to search beyond the header nonce, and it is where
+/// the first block of a network says something about the day it was made. A
+/// piece of public news nobody could have known in advance is what shows the
+/// chain was not quietly started weeks earlier.
+pub const MAX_COINBASE_EXTRA: usize = 64;
+
 /// The note and the proof a spender supplies for a note in the cold set.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColdWitness {
@@ -247,7 +255,7 @@ impl Decode for Transfer {
 /// The only transaction that creates value.
 ///
 /// It carries the height it belongs to, so two coinbases paying the same
-/// outputs at different heights cannot share an identifier. `extra_nonce` gives
+/// outputs at different heights cannot share an identifier. `extra` gives
 /// a miner search space beyond the header nonce and separates two candidate
 /// blocks that are otherwise identical.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -255,16 +263,31 @@ pub struct CoinbaseTransaction {
     pub version: u16,
     pub height: u64,
     pub outputs: Vec<Note>,
-    pub extra_nonce: [u8; 8],
+    pub extra: Vec<u8>,
 }
 
 impl CoinbaseTransaction {
-    pub const fn new(height: u64, outputs: Vec<Note>, extra_nonce: [u8; 8]) -> Self {
+    pub const fn new(height: u64, outputs: Vec<Note>) -> Self {
         Self {
             version: COINBASE_VERSION,
             height,
             outputs,
-            extra_nonce,
+            extra: Vec::new(),
+        }
+    }
+
+    /// The same, carrying something beyond what consensus reads.
+    ///
+    /// A miner uses it as search space past the header nonce. The first block
+    /// of a network uses it to say something about the day it was made: a
+    /// piece of public news nobody could have known in advance is what shows
+    /// the chain was not quietly started weeks earlier.
+    pub fn with_extra(height: u64, outputs: Vec<Note>, extra: Vec<u8>) -> Self {
+        Self {
+            version: COINBASE_VERSION,
+            height,
+            outputs,
+            extra,
         }
     }
 
@@ -294,7 +317,7 @@ impl Encode for CoinbaseTransaction {
         self.version.encode_to(out);
         self.height.encode_to(out);
         self.outputs.encode_to(out);
-        self.extra_nonce.encode_to(out);
+        self.extra.encode_to(out);
     }
 }
 
@@ -304,7 +327,15 @@ impl Decode for CoinbaseTransaction {
             version: u16::decode_from(reader)?,
             height: u64::decode_from(reader)?,
             outputs: Vec::decode_from(reader)?,
-            extra_nonce: <[u8; 8]>::decode_from(reader)?,
+            extra: {
+                let extra = Vec::<u8>::decode_from(reader)?;
+                if extra.len() > MAX_COINBASE_EXTRA {
+                    return Err(CodecError::InvalidValue {
+                        type_name: "coinbase extra",
+                    });
+                }
+                extra
+            },
         })
     }
 }

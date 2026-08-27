@@ -38,7 +38,6 @@ fn candidate(
     let coinbase = CoinbaseTransaction::new(
         height,
         vec![Note::new(params.initial_reward, miner.public_key())],
-        [0; 8],
     );
     assemble_block(
         state,
@@ -152,7 +151,6 @@ fn a_block_backdated_below_the_recent_median_is_refused() {
     let coinbase = CoinbaseTransaction::new(
         height,
         vec![Note::new(params.initial_reward, miner.public_key())],
-        [0; 8],
     );
     // Well after the parent, but still behind the median of the last eleven.
     let backdated = assemble_block(
@@ -342,7 +340,7 @@ fn the_reward_follows_the_schedule_rather_than_the_miner() {
         paid.push(reward);
 
         let coinbase =
-            CoinbaseTransaction::new(height, vec![Note::new(reward, miner.public_key())], [0; 8]);
+            CoinbaseTransaction::new(height, vec![Note::new(reward, miner.public_key())]);
         let block = assemble_block(
             &state,
             coinbase,
@@ -373,10 +371,92 @@ fn the_reward_follows_the_schedule_rather_than_the_miner() {
     let greedy = CoinbaseTransaction::new(
         height,
         vec![Note::new(params.initial_reward, miner.public_key())],
-        [0; 8],
     );
     assert!(matches!(
         assemble_block(&state, greedy, Vec::new(), &params, 90_000, 0),
         Err(BlockError::CoinbaseOverpay { .. })
     ));
+}
+
+#[test]
+fn a_pinned_network_refuses_a_chain_that_starts_elsewhere() {
+    let params = ConsensusParams::for_network("devnet").expect("devnet exists");
+    let miner = wallet(1);
+    let mut state = LedgerState::new();
+
+    // A first block of one's own, perfectly valid on its own terms.
+    let coinbase = CoinbaseTransaction::new(
+        0,
+        vec![Note::new(params.initial_reward, miner.public_key())],
+    );
+    let mine_alone = assemble_block(
+        &state,
+        coinbase,
+        Vec::new(),
+        &params,
+        params.opens_at + 60,
+        0,
+    )
+    .unwrap();
+
+    // Not even mined: where a chain starts is settled before the work behind
+    // it is looked at, because a chain starting elsewhere is not this one
+    // however much work it carries.
+    assert!(
+        matches!(
+            connect_block(&mut state, &mine_alone, &params, NOW),
+            Err(BlockError::WrongGenesis { .. })
+        ),
+        "two people starting alone must not end up on two chains without noticing"
+    );
+
+    // The one the network actually starts from is taken.
+    let opening = cairn_ledger::genesis::block(params.network).expect("devnet has one");
+    assert!(connect_block(&mut state, &opening, &params, NOW).is_ok());
+    assert_eq!(state.tip().unwrap().id, params.genesis.unwrap());
+}
+
+#[test]
+fn nothing_may_be_dated_before_the_network_opened() {
+    let params = ConsensusParams::for_network("devnet").expect("devnet exists");
+    let miner = wallet(1);
+    let mut state = LedgerState::new();
+
+    let opening = cairn_ledger::genesis::block(params.network).unwrap();
+    connect_block(&mut state, &opening, &params, NOW).unwrap();
+
+    let coinbase = CoinbaseTransaction::new(
+        1,
+        vec![Note::new(params.initial_reward, miner.public_key())],
+    );
+    let backdated = assemble_block(
+        &state,
+        coinbase,
+        Vec::new(),
+        &params,
+        params.opens_at - 1,
+        0,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        connect_block(&mut state, &backdated, &params, NOW),
+        Err(BlockError::BeforeTheNetworkOpened { .. })
+    ));
+}
+
+#[test]
+fn a_first_block_already_takes_real_work() {
+    // Otherwise the opening seconds are a race the rest of the world has not
+    // been told about yet.
+    for name in ["testnet-1", "devnet"] {
+        let params = ConsensusParams::for_network(name).expect("it exists");
+        assert!(
+            params.genesis_difficulty > 1_000_000,
+            "{name} opens at difficulty {}",
+            params.genesis_difficulty
+        );
+        let opening = cairn_ledger::genesis::block(params.network).unwrap();
+        assert_eq!(opening.header.difficulty, params.genesis_difficulty);
+    }
 }

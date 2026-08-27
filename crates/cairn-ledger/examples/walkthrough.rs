@@ -99,7 +99,6 @@ fn mine(
     let coinbase = CoinbaseTransaction::new(
         height,
         vec![Note::new(params.initial_reward, miner.public_key())],
-        [0; 8],
     );
     let block = assemble_block(
         state,

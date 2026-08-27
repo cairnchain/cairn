@@ -39,7 +39,6 @@ impl Miner {
         let coinbase = CoinbaseTransaction::new(
             height,
             vec![Note::new(self.params.initial_reward, who.public_key())],
-            [0; 8],
         );
         let block = assemble_block(
             &self.state,

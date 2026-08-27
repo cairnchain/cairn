@@ -29,7 +29,7 @@ fn pebbles(value: u64) -> Amount {
 }
 
 fn coinbase_paying(height: u64, owner: PublicKey, value: Amount) -> CoinbaseTransaction {
-    CoinbaseTransaction::new(height, vec![Note::new(value, owner)], [0; 8])
+    CoinbaseTransaction::new(height, vec![Note::new(value, owner)])
 }
 
 /// Builds a transfer spending `inputs` and signs every one of them.

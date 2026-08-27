@@ -16,7 +16,8 @@ use crate::note::{NetworkId, Note, NoteId};
 use crate::pow::{median_time_past, meets_target, next_difficulty, MIN_DIFFICULTY};
 use crate::state::{cold_leaf, BlockUndo, ColdSpend, LedgerState, StateTransition};
 use crate::transaction::{
-    CoinbaseTransaction, Input, Transfer, Witness, COINBASE_VERSION, TRANSFER_VERSION,
+    CoinbaseTransaction, Input, Transfer, Witness, COINBASE_VERSION, MAX_COINBASE_EXTRA,
+    TRANSFER_VERSION,
 };
 
 const fn amount_or_zero(pebbles: u64) -> Amount {
@@ -49,6 +50,20 @@ const DEFAULT_TARGET_BLOCK_TIME: u64 = 60;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConsensusParams {
     pub network: NetworkId,
+    /// The block every chain on this network must start from.
+    ///
+    /// `None` means nothing is pinned, which is what tests and unnamed
+    /// networks use. A live network always pins it: without that, a node
+    /// starting fresh has to take whatever first block the peer it happens to
+    /// ask hands it, which is the one piece of trust worth removing.
+    pub genesis: Option<Hash32>,
+    /// No block may be dated before this.
+    ///
+    /// Published ahead of a launch, it makes the opening moment the same for
+    /// everyone. Whoever knew about the network first cannot have mined it
+    /// quietly the week before, because every node refuses blocks dated
+    /// earlier.
+    pub opens_at: u64,
     /// What the first block pays. The schedule halves from here.
     pub initial_reward: Amount,
     /// What every block pays once halving would take it lower.
@@ -60,6 +75,10 @@ pub struct ConsensusParams {
     /// Seconds the retarget aims for between blocks.
     pub target_block_time: u64,
     /// Difficulty the first block carries, before any history exists.
+    ///
+    /// It should already take about the target block time on one ordinary
+    /// machine. Anything less and the opening seconds are a race the rest of
+    /// the world has not been told about yet.
     pub genesis_difficulty: u64,
     pub max_transfers_per_block: usize,
     pub max_inputs_per_transfer: usize,
@@ -76,18 +95,31 @@ impl ConsensusParams {
     /// build different chains while believing they are on the same one. So the
     /// rules belong to the network and are chosen by naming it, never set one
     /// at a time by whoever starts the node.
+    // The mainnet arm answers like the unknown one on purpose, and saying so
+    // out loud is the point: it is a name that will mean something and does
+    // not yet.
+    #[allow(clippy::match_same_arms)]
     pub fn for_network(name: &str) -> Option<Self> {
         match name {
-            "mainnet" => Some(Self {
-                network: NetworkId::MAINNET,
+            // Not yet made. A network exists once its first block does, and
+            // that block will be mined in the open on the day it is announced.
+            "mainnet" => None,
+            "testnet" | "testnet-1" => Some(Self {
+                network: NetworkId::TESTNET_1,
+                genesis: crate::genesis::pinned(NetworkId::TESTNET_1),
+                opens_at: crate::genesis::opens_at(NetworkId::TESTNET_1),
+                genesis_difficulty: 1 << 27,
                 ..Self::testnet()
             }),
-            "testnet" => Some(Self::testnet()),
             // A throwaway network, so its hot set is small enough that notes
-            // reach the cold set in seconds rather than months. Everything
-            // else is the same, which is the point of having it.
+            // reach the cold set in seconds rather than months, and its first
+            // block is found in seconds. Everything else is the same, which is
+            // the point of having it.
             "devnet" => Some(Self {
                 network: NetworkId::DEVNET,
+                genesis: crate::genesis::pinned(NetworkId::DEVNET),
+                opens_at: crate::genesis::opens_at(NetworkId::DEVNET),
+                genesis_difficulty: 1 << 23,
                 target_block_time: 5,
                 hot_capacity: 64,
                 ..Self::testnet()
@@ -99,15 +131,24 @@ impl ConsensusParams {
     /// The name [`Self::for_network`] would take to produce these rules.
     pub fn network_name(&self) -> &'static str {
         match self.network {
-            NetworkId::MAINNET => "mainnet",
             NetworkId::DEVNET => "devnet",
-            _ => "testnet",
+            NetworkId::TESTNET_1 => "testnet-1",
+            // Mainnet lands here too until it has a first block, which is the
+            // honest answer: it is not a network yet.
+            _ => "unnamed",
         }
     }
 
+    /// The rule set, with nothing tying it to a live network.
+    ///
+    /// No pinned first block and a trivial opening difficulty, which is what
+    /// tests want and what no public network should ever run. Public networks
+    /// come from [`Self::for_network`].
     pub const fn testnet() -> Self {
         Self {
             network: NetworkId::TESTNET,
+            genesis: None,
+            opens_at: 0,
             initial_reward: INITIAL_REWARD,
             tail_reward: TAIL_REWARD,
             halving_interval: emission::HALVING_INTERVAL,
@@ -200,6 +241,8 @@ pub enum BlockError {
     TooManyCoinbaseOutputs { count: usize, limit: usize },
     #[error("coinbase output {index} carries no value")]
     ZeroValueCoinbaseOutput { index: usize },
+    #[error("coinbase carries {size} extra bytes, limit is {MAX_COINBASE_EXTRA}")]
+    CoinbaseExtraTooLarge { size: usize },
     #[error("coinbase claims {claimed}, only {allowed} is available")]
     CoinbaseOverpay { allowed: Amount, claimed: Amount },
     #[error("summing values overflowed the monetary ceiling")]
@@ -208,6 +251,10 @@ pub enum BlockError {
     TimestampTooFarAhead { timestamp: u64, drift: u64 },
     #[error("timestamp {found} is not past the median {median} of recent blocks")]
     TimestampNotAfterMedian { median: u64, found: u64 },
+    #[error("block is dated {found}, before this network opened at {opens_at}")]
+    BeforeTheNetworkOpened { opens_at: u64, found: u64 },
+    #[error("this network starts at {expected}, block claims to start at {found}")]
+    WrongGenesis { expected: Hash32, found: Hash32 },
     #[error("block claims difficulty {found}, the chain demands {expected}")]
     WrongDifficulty { expected: u64, found: u64 },
     #[error("block identifier does not meet the target for difficulty {difficulty}")]
@@ -410,6 +457,11 @@ fn check_coinbase_shape(
     if coinbase.version != COINBASE_VERSION {
         return Err(BlockError::UnsupportedCoinbaseVersion(coinbase.version));
     }
+    if coinbase.extra.len() > MAX_COINBASE_EXTRA {
+        return Err(BlockError::CoinbaseExtraTooLarge {
+            size: coinbase.extra.len(),
+        });
+    }
     if coinbase.outputs.len() > params.max_coinbase_outputs {
         return Err(BlockError::TooManyCoinbaseOutputs {
             count: coinbase.outputs.len(),
@@ -585,7 +637,24 @@ pub fn connect_block(
         });
     }
 
+    // Nothing may predate the moment the network opened, which is what makes
+    // the opening the same for everyone rather than for whoever knew first.
+    if header.timestamp < params.opens_at {
+        return Err(BlockError::BeforeTheNetworkOpened {
+            opens_at: params.opens_at,
+            found: header.timestamp,
+        });
+    }
+
     let expected_height = state.next_height().ok_or(BlockError::HeightOverflow)?;
+    if expected_height == 0 {
+        if let Some(expected) = params.genesis {
+            let found = header.id();
+            if found != expected {
+                return Err(BlockError::WrongGenesis { expected, found });
+            }
+        }
+    }
     if header.height != expected_height {
         return Err(BlockError::WrongHeight {
             expected: expected_height,

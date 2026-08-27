@@ -75,7 +75,7 @@ fn build(
         let (transfers, fees) = chain.selection(params.max_transfers_per_block);
         let reward = params.reward_at(height).checked_add(fees)?;
 
-        let coinbase = CoinbaseTransaction::new(height, vec![Note::new(reward, reward_to)], [0; 8]);
+        let coinbase = CoinbaseTransaction::new(height, vec![Note::new(reward, reward_to)]);
         let block = assemble_block(state, coinbase, transfers, params, timestamp, 0).ok()?;
         Some((block, extending))
     })

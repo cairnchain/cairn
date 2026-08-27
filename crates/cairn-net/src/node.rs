@@ -23,6 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use cairn_chain::{Accepted, ChainError, ChainStore};
 use cairn_crypto::PublicKey;
 use cairn_ledger::block::Block;
+use cairn_ledger::genesis;
 use cairn_ledger::note::NetworkId;
 use cairn_ledger::transaction::Transfer;
 use cairn_ledger::validation::ConsensusParams;
@@ -163,6 +164,22 @@ impl Shared {
     }
 }
 
+/// Lays down the network's first block, so a node that has never spoken to
+/// anyone still knows where the story starts.
+///
+/// A network without one pinned leaves this alone, which is what tests and
+/// unnamed networks do.
+fn open_the_chain(chain: &mut ChainStore, params: ConsensusParams, now: u64) {
+    // Only for a network that pins its first block. An unnamed one, which is
+    // what tests use, starts from whatever it is given.
+    if params.genesis.is_none() || !chain.is_empty() {
+        return;
+    }
+    if let Some(block) = genesis::block(params.network) {
+        let _ = chain.add_block(block, now);
+    }
+}
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -249,6 +266,7 @@ impl Node {
             chain.watch_owner(*owner);
         }
         let now = unix_now();
+        open_the_chain(&mut chain, params, now);
         let mut applied = 0usize;
         for block in &recovered.blocks {
             if chain.add_block(block.clone(), now).is_err() {
@@ -306,6 +324,11 @@ impl Node {
             next_id: AtomicU64::new(0),
             running: AtomicBool::new(true),
         });
+
+        {
+            let mut chain = shared.chain();
+            open_the_chain(&mut chain, params, unix_now());
+        }
 
         let accepting = Arc::clone(&shared);
         let accept = thread::spawn(move || accept_loop(&accepting, &listener));

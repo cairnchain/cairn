@@ -43,7 +43,6 @@ fn chain(count: usize) -> Vec<Block> {
             let coinbase = CoinbaseTransaction::new(
                 height,
                 vec![Note::new(params.initial_reward, miner.public_key())],
-                [0; 8],
             );
             let block = assemble_block(&state, coinbase, Vec::<Transfer>::new(), &params, clock, 0)
                 .unwrap();

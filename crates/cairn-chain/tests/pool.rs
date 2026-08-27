@@ -43,7 +43,6 @@ fn funded(count: usize, miner: &SecretKey) -> (ChainStore, Vec<(NoteId, Note)>) 
         let coinbase = CoinbaseTransaction::new(
             height,
             vec![Note::new(params.initial_reward, miner.public_key())],
-            [0; 8],
         );
         let block =
             assemble_block(&ledger, coinbase, Vec::<Transfer>::new(), &params, clock, 0).unwrap();
@@ -241,7 +240,6 @@ fn a_block_clears_what_it_carried_out_of_the_pool() {
     let coinbase = CoinbaseTransaction::new(
         height,
         vec![Note::new(params.initial_reward, miner.public_key())],
-        [0; 8],
     );
     let block =
         assemble_block(&ledger, coinbase, vec![carried.clone()], &params, 5_000, 0).unwrap();

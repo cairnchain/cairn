@@ -13,7 +13,16 @@ pub struct NetworkId(u32);
 
 impl NetworkId {
     pub const MAINNET: Self = Self(0x4341_524e);
-    pub const TESTNET: Self = Self(0x4341_5254);
+    /// The first public test network.
+    ///
+    /// Test networks are numbered because they get thrown away. A rule that
+    /// has to change makes every block already mined invalid, so the network
+    /// starts over, and the next one takes the next number. A node still on
+    /// the old one is then told plainly that it is on another network, rather
+    /// than failing somewhere confusing.
+    pub const TESTNET_1: Self = Self(0x4341_5254);
+    /// Kept as the name of whichever test network is current.
+    pub const TESTNET: Self = Self::TESTNET_1;
     /// A throwaway network with the same rules but a much shorter block time,
     /// for running the software on one machine.
     pub const DEVNET: Self = Self(0x4341_5244);

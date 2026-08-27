@@ -37,9 +37,12 @@ cairnd, a Cairn node
   --listen <address>     address to accept connections on
                          (default: 0.0.0.0:9944)
   --seed <address>       a peer to start from; repeat for more
-  --network <name>       mainnet, testnet, or devnet (default: testnet)
+  --network <name>       testnet-1 or devnet (default: testnet-1)
                          devnet has the same rules with a five second block
-                         time, for running the software on one machine
+                         time and a tiny hot set, for one machine.
+                         mainnet does not exist yet: a network exists once
+                         its first block does, and that one will be mined in
+                         the open on the day it is announced
   --mine <public key>    produce blocks, paying rewards to this key
   --archive              keep the cold set, so this node can rebuild a proof
                          for a wallet that lost its own. Costs a set that
@@ -177,8 +180,13 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
     // Every consensus rule comes from the name, and none of them can be set
     // one at a time. Two nodes that differ on any of them would build
     // different chains while believing they were on the same network.
-    let params =
-        ConsensusParams::for_network(&name).ok_or_else(|| format!("unknown network `{name}`"))?;
+    let params = ConsensusParams::for_network(&name).ok_or_else(|| {
+        if name == "mainnet" {
+            "mainnet does not exist yet: its first block has not been mined".to_owned()
+        } else {
+            format!("unknown network `{name}`, try testnet-1 or devnet")
+        }
+    })?;
 
     let mine_to = match setting("mine") {
         None => None,
@@ -225,9 +233,14 @@ pub(crate) fn describe(options: &Options) -> String {
     let mut text = String::new();
     let _ = writeln!(
         text,
-        "network      {:#010x}",
+        "network      {} ({:#010x})",
+        options.params.network_name(),
         options.params.network.as_u32()
     );
+    if let Some(genesis) = options.params.genesis {
+        let _ = writeln!(text, "starts from  {genesis}");
+        let _ = writeln!(text, "opened at    {}", options.params.opens_at);
+    }
     let _ = writeln!(text, "data         {}", options.data.display());
     let _ = writeln!(text, "listen       {}", options.listen);
     let _ = writeln!(text, "block time   {} s", options.params.target_block_time);
@@ -272,7 +285,7 @@ mod tests {
         let options = resolve_options(&[]).unwrap().unwrap();
         assert_eq!(options.data, PathBuf::from(DEFAULT_DATA));
         assert_eq!(options.listen.port(), 9_944);
-        assert_eq!(options.params.network_name(), "testnet");
+        assert_eq!(options.params.network_name(), "testnet-1");
         assert_eq!(options.params.target_block_time, 60);
         assert!(options.mine_to.is_none());
         assert!(options.seeds.is_empty());
@@ -316,6 +329,10 @@ mod tests {
     fn a_bad_value_is_reported_rather_than_guessed_at() {
         assert!(resolve_options(&args(&["--listen", "not an address"])).is_err());
         assert!(resolve_options(&args(&["--network", "moonnet"])).is_err());
+        assert!(
+            resolve_options(&args(&["--network", "mainnet"])).is_err(),
+            "a network exists once its first block does"
+        );
         assert!(resolve_options(&args(&["--mine", "abcd"])).is_err());
         assert!(
             resolve_options(&args(&["--listen"])).is_err(),
@@ -359,12 +376,12 @@ mod tests {
         assert_eq!(options.seeds.len(), 1);
         assert_eq!(options.status_period, 3);
 
-        let options = resolve_options(&args(&["--data", &data, "--network", "mainnet"]))
+        let options = resolve_options(&args(&["--data", &data, "--network", "testnet-1"]))
             .unwrap()
             .unwrap();
         assert_eq!(
             options.params.network_name(),
-            "mainnet",
+            "testnet-1",
             "the command line wins"
         );
     }

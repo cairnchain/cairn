@@ -42,8 +42,8 @@ Network options
                        (default: cairn-wallet-data, and it must not be the
                        same directory a node is using)
   --seed <address>     a peer to start from; repeat for more
-  --network <name>     mainnet, testnet, or devnet (default: testnet);
-                       it has to be the same network the node is on
+  --network <name>     testnet-1 or devnet (default: testnet-1); it has to
+                       be the same network the node is on
   --wait <seconds>     how long to spend catching up (default: 30)
   --fee <cairn>        what to pay to be carried (default: 0)";
 
@@ -338,8 +338,14 @@ fn select(held: &[Owned], needed: Amount) -> Result<(Vec<Owned>, Amount), String
 }
 
 fn rules_of(flags: &Flags) -> Result<ConsensusParams, String> {
-    let name = flags.value("network").unwrap_or("testnet");
-    ConsensusParams::for_network(name).ok_or_else(|| format!("unknown network `{name}`"))
+    let name = flags.value("network").unwrap_or("testnet-1");
+    ConsensusParams::for_network(name).ok_or_else(|| {
+        if name == "mainnet" {
+            "mainnet does not exist yet: its first block has not been mined".to_owned()
+        } else {
+            format!("unknown network `{name}`, try testnet-1 or devnet")
+        }
+    })
 }
 
 /// Starts this wallet's own node and gives it time to catch up.
