@@ -13,7 +13,7 @@ every rented server runs.
 On each server, as root:
 
 ```
-git clone https://github.com/cairn-protocol/cairn /usr/local/src/cairn
+git clone https://github.com/cairnchain/cairn /usr/local/src/cairn
 sh /usr/local/src/cairn/deploy/install.sh
 ```
 

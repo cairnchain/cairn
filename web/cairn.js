@@ -954,7 +954,7 @@ function download() {
       panel(
         t('run.build.title'),
         prose('run.build.body'),
-        el('pre', { class: 'code', text: 'git clone https://github.com/cairn-protocol/cairn\ncd cairn\ncargo build --release' })
+        el('pre', { class: 'code', text: 'git clone https://github.com/cairnchain/cairn\ncd cairn\ncargo build --release' })
       ),
       panel(
         t('run.node.title'),

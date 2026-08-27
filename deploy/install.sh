@@ -20,7 +20,7 @@ set -eu
 NETWORK="${NETWORK:-testnet-2}"
 PORT="${PORT:-9944}"
 SEED="${SEED:-}"
-REPO="${REPO:-https://github.com/cairn-protocol/cairn}"
+REPO="${REPO:-https://github.com/cairnchain/cairn}"
 SRC="/usr/local/src/cairn"
 DATA="/var/lib/cairn"
 

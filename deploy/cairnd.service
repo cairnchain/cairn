@@ -1,6 +1,6 @@
 [Unit]
 Description=Cairn node
-Documentation=https://github.com/cairn-protocol/cairn
+Documentation=https://github.com/cairnchain/cairn
 After=network-online.target
 Wants=network-online.target
 

@@ -11,7 +11,9 @@ everything that has not moved in a long time lives only in the commitment and
 is spent by presenting a proof. Nothing is ever destroyed, expired, or charged
 rent.
 
-The design document is `docs/cairn-design.html`.
+The design document is `docs/cairn-design.html`. What the field has already
+done with this problem, and where Cairn actually stands against it, is in
+`docs/cairn-prior-art.html`.
 
 ## Status
 
@@ -189,4 +191,10 @@ rather than left for someone to discover.
 
 ## Licence
 
-MIT or Apache-2.0, at your option.
+MIT or Apache-2.0, at your option. See `LICENSE-MIT` and `LICENSE-APACHE`.
+
+Contributions are welcome, and reviews of the protocol more than anything
+else. The parts most worth an outside eye are the two tiers in
+`crates/cairn-ledger/src/state.rs`, the accumulator in
+`crates/cairn-accumulator/src/forest.rs`, and the consensus rules in
+`crates/cairn-ledger/src/validation.rs`.
