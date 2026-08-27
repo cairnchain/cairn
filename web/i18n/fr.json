@@ -208,6 +208,7 @@
   "address": {
     "eyebrow": "Adresse",
     "holdings": "Billets détenus en ce moment",
+    "moreNotes": "Les {shown} billets les plus récents sur {total}.",
     "history": "Tout ce qui a bougé"
   },
 

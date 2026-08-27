@@ -42,11 +42,28 @@ impl NoteRecord {
     }
 }
 
+/// One movement in or out of an owner's holdings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Movement {
+    pub(crate) height: u64,
+    /// True for a note arriving, false for one being spent.
+    pub(crate) incoming: bool,
+    pub(crate) transaction: Hash32,
+    pub(crate) value: Amount,
+}
+
 /// Everything an owner has ever been paid.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct OwnerRecord {
     /// Notes made out to this owner, oldest first.
     pub(crate) notes: Vec<NoteId>,
+    /// Every movement, in the order the chain produced them.
+    ///
+    /// Recorded as it happens rather than assembled and sorted per request.
+    /// A miner's address accumulates hundreds of thousands of these, and
+    /// rebuilding that list to answer one page was work an anonymous caller
+    /// could ask for as often as they liked.
+    pub(crate) movements: Vec<Movement>,
     pub(crate) received: Amount,
     pub(crate) spent: Amount,
 }
@@ -92,7 +109,13 @@ pub(crate) struct Index {
     notes: BTreeMap<NoteId, NoteRecord>,
     owners: HashMap<PublicKey, OwnerRecord>,
     totals: Totals,
+    /// Worked out once per refresh rather than once per request.
+    richest: Vec<(PublicKey, Amount)>,
+    holders: usize,
 }
+
+/// Owners listed in the holders table.
+const RICHEST: usize = 50;
 
 impl Index {
     pub(crate) fn new() -> Self {
@@ -121,6 +144,7 @@ impl Index {
         }
 
         let mut position = shared;
+        let before = self.indexed.len();
         while let Some(id) = active.get(position) {
             let Some(block) = chain.block(id) else {
                 break;
@@ -128,6 +152,9 @@ impl Index {
             self.apply(block);
             self.indexed.push(*id);
             position = position.saturating_add(1);
+        }
+        if self.indexed.len() != before {
+            self.take_stock();
         }
     }
 
@@ -197,6 +224,12 @@ impl Index {
         );
         let record = self.owners.entry(owner).or_default();
         record.notes.push(id);
+        record.movements.push(Movement {
+            height,
+            incoming: true,
+            transaction: id.source,
+            value,
+        });
         record.received = record
             .received
             .checked_add(value)
@@ -213,6 +246,12 @@ impl Index {
         let owner = record.owner;
         if let Some(owner) = self.owners.get_mut(&owner) {
             owner.spent = owner.spent.checked_add(value).unwrap_or(owner.spent);
+            owner.movements.push(Movement {
+                height,
+                incoming: false,
+                transaction: by,
+                value,
+            });
         }
         self.totals.notes_spent = self.totals.notes_spent.saturating_add(1);
         Some(value)
@@ -239,27 +278,31 @@ impl Index {
         self.owners.get(owner)
     }
 
-    /// Owners holding anything, heaviest first, capped at `limit`.
+    /// Owners holding anything, heaviest first.
     ///
-    /// Walked rather than kept sorted, because it is asked for once a page and
-    /// a running order would have to be corrected on every reorganisation.
-    pub(crate) fn richest(&self, limit: usize) -> Vec<(PublicKey, Amount)> {
+    /// Read from what the last refresh worked out. Sorting every owner in
+    /// order to answer one page was work any caller could ask for at will;
+    /// now it happens once per block, whether anyone is looking or not.
+    pub(crate) fn richest(&self) -> &[(PublicKey, Amount)] {
+        &self.richest
+    }
+
+    /// How many owners hold anything at all.
+    pub(crate) fn holders(&self) -> usize {
+        self.holders
+    }
+
+    /// Works out the distribution once, after the chain has moved.
+    fn take_stock(&mut self) {
         let mut held: Vec<(PublicKey, Amount)> = self
             .owners
             .iter()
             .map(|(owner, record)| (*owner, record.balance()))
             .filter(|(_, balance)| *balance > Amount::ZERO)
             .collect();
+        self.holders = held.len();
         held.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-        held.truncate(limit);
-        held
-    }
-
-    /// How many owners hold anything at all.
-    pub(crate) fn holders(&self) -> usize {
-        self.owners
-            .values()
-            .filter(|record| record.balance() > Amount::ZERO)
-            .count()
+        held.truncate(RICHEST);
+        self.richest = held;
     }
 }

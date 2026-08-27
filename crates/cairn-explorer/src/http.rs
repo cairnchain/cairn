@@ -24,7 +24,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What a caller asked for, once the head has been read.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Request {
     /// Percent-decoded path, always starting with a slash.
     pub(crate) path: String,
@@ -146,7 +146,7 @@ fn handle<F>(mut stream: TcpStream, answer: &F)
 where
     F: Fn(&Request) -> Response,
 {
-    let response = match read_request(&stream) {
+    let response = match read_request(&mut BufReader::new(&stream)) {
         Ok(Some(request)) => {
             let head_only = request.head_only;
             (answer(&request), head_only)
@@ -161,15 +161,14 @@ where
 /// Reads one request head.
 ///
 /// `Ok(None)` means a well-formed request this server does not answer.
-fn read_request(stream: &TcpStream) -> Result<Option<Request>, u16> {
-    let mut reader = BufReader::new(stream);
+fn read_request<R: io::Read>(reader: &mut R) -> Result<Option<Request>, u16> {
     let mut consumed = 0usize;
-    let start = read_line(&mut reader, &mut consumed)?;
+    let start = read_line(reader, &mut consumed)?;
 
     // Drain the header block so the caller sees a complete exchange rather
     // than a reset, and so a request that never ends is cut off by the cap.
     loop {
-        let line = read_line(&mut reader, &mut consumed)?;
+        let line = read_line(reader, &mut consumed)?;
         if line.is_empty() {
             break;
         }
@@ -207,14 +206,14 @@ fn read_request(stream: &TcpStream) -> Result<Option<Request>, u16> {
     }))
 }
 
-fn read_line(reader: &mut BufReader<&TcpStream>, consumed: &mut usize) -> Result<String, u16> {
+fn read_line<R: io::Read>(reader: &mut R, consumed: &mut usize) -> Result<String, u16> {
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
     loop {
         if line.len() >= MAX_LINE_BYTES || *consumed >= MAX_HEAD_BYTES {
             return Err(431);
         }
-        match io::Read::read(reader, &mut byte) {
+        match reader.read(&mut byte) {
             Ok(0) => return Err(400),
             Ok(_) => {}
             Err(_) => return Err(408),
@@ -359,6 +358,99 @@ mod tests {
         let request = request("/api/search", "q=41%20208&other=1");
         assert_eq!(request.parameter("q").as_deref(), Some("41 208"));
         assert_eq!(request.parameter("missing"), None);
+    }
+
+    fn head(text: &str) -> Result<Option<Request>, u16> {
+        super::read_request(&mut text.as_bytes())
+    }
+
+    #[test]
+    fn an_ordinary_request_is_read() {
+        let request = head("GET /api/status HTTP/1.1\r\nhost: x\r\n\r\n")
+            .unwrap()
+            .unwrap();
+        assert_eq!(request.path, "/api/status");
+        assert!(!request.head_only);
+    }
+
+    #[test]
+    fn a_query_string_is_kept_apart_from_the_path() {
+        let request = head("GET /api/blocks?from=12&limit=5 HTTP/1.1\r\n\r\n")
+            .unwrap()
+            .unwrap();
+        assert_eq!(request.path, "/api/blocks");
+        assert_eq!(request.parameter("from").as_deref(), Some("12"));
+    }
+
+    /// This server reads no bodies, so anything that would carry one is
+    /// refused rather than half understood.
+    #[test]
+    fn a_method_this_server_does_not_answer_is_turned_away() {
+        assert!(head("POST /api/status HTTP/1.1\r\n\r\n").unwrap().is_none());
+        assert!(head("PUT / HTTP/1.1\r\n\r\n").unwrap().is_none());
+        assert!(head("DELETE / HTTP/1.1\r\n\r\n").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_head_request_is_answered_without_a_body() {
+        let request = head("HEAD / HTTP/1.1\r\n\r\n").unwrap().unwrap();
+        assert!(request.head_only);
+    }
+
+    /// An absolute target is legal HTTP and has no meaning here, so accepting
+    /// one would mean deciding what host it named.
+    #[test]
+    fn a_target_that_is_not_a_path_is_refused() {
+        assert_eq!(head("GET http://elsewhere/ HTTP/1.1\r\n\r\n"), Err(400));
+        assert_eq!(head("GET api/status HTTP/1.1\r\n\r\n"), Err(400));
+    }
+
+    #[test]
+    fn a_malformed_request_line_is_refused() {
+        assert_eq!(head("GET\r\n\r\n"), Err(400));
+        assert_eq!(head("GET / HTTP/1.1 extra\r\n\r\n"), Err(400));
+        assert_eq!(head("GET / SPDY/3\r\n\r\n"), Err(400));
+    }
+
+    /// The head is the one thing a caller controls the size of before
+    /// anything is decided about them.
+    #[test]
+    fn an_endless_header_block_is_cut_off() {
+        let mut request = String::from("GET / HTTP/1.1\r\n");
+        for index in 0..2_000 {
+            request.push_str(&format!("x-pad-{index}: filler\r\n"));
+        }
+        request.push_str("\r\n");
+        assert_eq!(head(&request), Err(431));
+    }
+
+    #[test]
+    fn a_single_endless_line_is_cut_off() {
+        let mut request = String::from("GET /");
+        request.push_str(&"a".repeat(4_000));
+        request.push_str(" HTTP/1.1\r\n\r\n");
+        assert_eq!(head(&request), Err(431));
+    }
+
+    #[test]
+    fn a_request_that_stops_partway_is_refused() {
+        assert_eq!(head("GET / HTTP/1.1\r\nhost: x"), Err(400));
+        assert_eq!(head(""), Err(400));
+    }
+
+    /// Nothing is read from disk, so a traversal has nothing to reach. The
+    /// path still arrives decoded and intact, which is what the router sees.
+    #[test]
+    fn a_traversal_attempt_is_just_a_path() {
+        let request = head("GET /..%2f..%2fetc%2fpasswd HTTP/1.1\r\n\r\n")
+            .unwrap()
+            .unwrap();
+        assert_eq!(request.path, "/../../etc/passwd");
+    }
+
+    #[test]
+    fn an_embedded_null_is_refused() {
+        assert_eq!(head("GET /a%00b HTTP/1.1\r\n\r\n"), Err(400));
     }
 
     #[test]

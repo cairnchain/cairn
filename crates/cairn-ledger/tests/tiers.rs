@@ -18,6 +18,7 @@ use cairn_ledger::validation::{
     assemble_block, connect_block, BlockError, ConsensusParams, TransferError,
 };
 use cairn_ledger::{Block, LedgerState};
+use cairn_primitives::Amount;
 
 const NOW: u64 = 1_000_000_000;
 const CAPACITY: usize = 8;
@@ -635,4 +636,109 @@ fn a_node_keeps_proofs_for_the_grace_window_and_nothing_more() {
         "and then lets it go"
     );
     assert_eq!(state.watched_notes().count(), 0);
+}
+
+/// A transfer is checked against the ledger as it stood before the block, so
+/// it cannot spend a note the same block creates.
+///
+/// Deliberate, and worth being explicit about. Allowing it would make a
+/// transfer's validity depend on where it sits in the block, and a cold proof
+/// is checked against a commitment that would then be moving underneath it.
+#[test]
+fn a_note_created_in_this_block_cannot_be_spent_in_it() {
+    let params = params();
+    let miner = wallet(1);
+    let receiver = wallet(2);
+    let mut state = LedgerState::new();
+
+    let first = mine(&mut state, &params, &miner, Vec::new());
+    let (id, note) = {
+        let coinbase = first.coinbase.id();
+        (NoteId::new(coinbase, 0), first.coinbase.outputs[0])
+    };
+
+    // One transfer moves the coinbase note on, and a second tries to spend
+    // what the first created, in the same block.
+    let mut first_hop = Transfer::new(
+        vec![Input::hot(id)],
+        vec![Note::new(note.value, receiver.public_key())],
+    );
+    first_hop.sign_input(params.network, 0, &note, &miner);
+
+    let made = first_hop.created_notes();
+    let (fresh_id, fresh_note) = made[0];
+    let mut second_hop = Transfer::new(
+        vec![Input::hot(fresh_id)],
+        vec![Note::new(fresh_note.value, miner.public_key())],
+    );
+    second_hop.sign_input(params.network, 0, &fresh_note, &receiver);
+
+    let height = state.next_height().unwrap();
+    let coinbase = CoinbaseTransaction::new(
+        height,
+        vec![Note::new(params.initial_reward, miner.public_key())],
+    );
+    let outcome = assemble_block(
+        &state,
+        coinbase,
+        vec![first_hop, second_hop],
+        &params,
+        1_000 + height * 600,
+        0,
+    );
+
+    // Refused as needing a proof rather than as unknown, and that is the
+    // honest answer: the note is not in the hot set, and a node holds neither
+    // the cold set nor a record of what was never in it, so it cannot tell a
+    // note that fell from one that never existed. Only a proof settles it, and
+    // for a note this block invents there is none to give.
+    match outcome {
+        Err(BlockError::InvalidTransfer {
+            index,
+            source: TransferError::MissingProof { .. },
+        }) => assert_eq!(index, 1, "the second transfer is the one refused"),
+        other => panic!("expected the second transfer to be refused, got {other:?}"),
+    }
+}
+
+/// One block can create more notes than the hot set holds.
+///
+/// The eviction plan then has to reach into the notes the block itself is
+/// creating, which is the one path where a note is created and evicted by the
+/// same block. Both nodes have to land on the same set, so the order is taken
+/// from the identifier rather than from anything that varies.
+#[test]
+fn a_block_creating_more_notes_than_the_drawer_holds_still_agrees() {
+    let params = params();
+    let miner = wallet(1);
+    let receiver = wallet(2);
+
+    let mut state = LedgerState::new();
+    let first = mine(&mut state, &params, &miner, Vec::new());
+    let id = NoteId::new(first.coinbase.id(), 0);
+    let note = first.coinbase.outputs[0];
+
+    // Split one note into far more pieces than the drawer can hold.
+    let pieces = CAPACITY * 3;
+    let each = Amount::from_pebbles(note.value.as_pebbles() / pieces as u64).unwrap();
+    let outputs: Vec<Note> = (0..pieces)
+        .map(|_| Note::new(each, receiver.public_key()))
+        .collect();
+    let mut splitting = Transfer::new(vec![Input::hot(id)], outputs);
+    splitting.sign_input(params.network, 0, &note, &miner);
+
+    let mut theirs = state.clone();
+    let block = mine(&mut state, &params, &miner, vec![splitting]);
+
+    assert!(
+        state.hot_len() <= CAPACITY,
+        "the drawer holds {} notes, its cap is {CAPACITY}",
+        state.hot_len()
+    );
+
+    // A second node given the same block reaches the same commitment, which is
+    // what makes the fallback safe to have at all.
+    connect_block(&mut theirs, &block, &params, NOW).unwrap();
+    assert_eq!(state.state_root(), theirs.state_root());
+    assert_eq!(state.hot_len(), theirs.hot_len());
 }

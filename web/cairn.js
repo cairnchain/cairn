@@ -701,6 +701,9 @@ async function address(owner, parameters) {
       panel(
         t('address.holdings'),
         explainer('explain.holdings'),
+        data.moreNotes
+          ? el('p', { class: 'small dim', text: t('address.moreNotes', { shown: count(data.unspent.length), total: count(data.unspentNotes) }) })
+          : null,
         table(
           [{ label: t('field.note') }, { label: t('field.value'), numeric: true }, { label: t('field.since'), numeric: true }, { label: t('field.state') }],
           data.unspent.map((note) =>

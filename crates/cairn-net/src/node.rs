@@ -77,6 +77,8 @@ const FLOOD_WINDOW: u64 = 10;
 /// let it decide how much memory this node spends. Dropped announcements cost
 /// it nothing lasting: it asks for what it is missing on the next exchange.
 const OUTBOUND_QUEUE: usize = 256;
+/// How long the accept loop waits between looks when nothing is arriving.
+const ACCEPT_POLL: Duration = Duration::from_millis(50);
 /// How often the node looks for peers and saves its address book.
 const MAINTENANCE_PERIOD: Duration = Duration::from_millis(1_000);
 /// Maintenance sleeps in slices so a shutdown does not wait out a full period.
@@ -514,9 +516,8 @@ impl Node {
         for peer in self.shared.peers().values() {
             let _ = peer.stream.shutdown(Shutdown::Both);
         }
-        // The listener blocks in accept, so it takes one connection to wake it.
-        let _ = TcpStream::connect_timeout(&self.address, DIAL_TIMEOUT);
-
+        // Nothing has to be woken: the accept loop polls, and every peer
+        // thread is either reading with a deadline or on a socket just shut.
         let handles = std::mem::take(&mut *self.shared.threads());
         for handle in handles {
             let _ = handle.join();
@@ -552,10 +553,22 @@ fn save_book(shared: &Arc<Shared>) {
 /// read buffer per connection, and nothing stopping one machine from opening
 /// thousands. The three refusals here are the ceiling, the per address share,
 /// and peers still under refusal for something they did earlier.
+///
+/// The listener is polled rather than blocked on. A blocking accept only
+/// returns when someone connects, so stopping the node meant opening a
+/// connection to it purely to wake this thread. On a node listening on a
+/// public address that connection can fail, and then the node never stops:
+/// an operator's stop or reboot would hang on a process waiting for a
+/// visitor. Fifty milliseconds of idle polling buys an exit that always works.
 fn accept_loop(shared: &Arc<Shared>, listener: &TcpListener) {
+    let polling = listener.set_nonblocking(true).is_ok();
     while shared.running.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, from)) => {
+                // A socket accepted from a non-blocking listener inherits that
+                // mode on some platforms. Left alone, every read on it would
+                // return immediately and be taken for a deadline passing.
+                let _ = stream.set_nonblocking(false);
                 if !shared.running.load(Ordering::SeqCst) {
                     let _ = stream.shutdown(Shutdown::Both);
                     break;
@@ -567,6 +580,10 @@ fn accept_loop(shared: &Arc<Shared>, listener: &TcpListener) {
                 }
                 attach_peer(shared, stream, false);
             }
+            Err(error) if polling && error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(ACCEPT_POLL);
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(_) => break,
         }
     }

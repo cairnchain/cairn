@@ -199,7 +199,11 @@ pub enum TransferError {
     UnknownNote(NoteId),
     #[error("note {note_id:?} is still in the hot set, so it takes no proof")]
     UnexpectedProof { note_id: NoteId },
-    #[error("note {note_id:?} is not in the hot set, so spending it needs a proof")]
+    #[error(
+        "note {note_id:?} is not in the hot set: either it fell and spending it \
+         needs a proof, or it never existed. A node cannot tell the two apart, \
+         because it holds neither the cold set nor a record of what was never in it"
+    )]
     MissingProof { note_id: NoteId },
     #[error("the proof for note {note_id:?} does not match the cold commitment")]
     InvalidProof { note_id: NoteId },

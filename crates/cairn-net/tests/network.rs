@@ -366,3 +366,20 @@ fn a_peer_that_sends_a_bad_block_is_dropped() {
 
     wait_for("the bad peer to be dropped", || node.peer_count() == 0);
 }
+
+/// Stopping must not depend on someone connecting.
+///
+/// The accept loop used to block until a connection arrived, so shutting down
+/// meant opening one to wake it. On a node listening on a public address that
+/// connection can fail, and the node would then never stop.
+#[test]
+fn a_node_stops_promptly_with_nobody_around() {
+    let node = Node::bind(params(), loopback()).unwrap();
+    let started = Instant::now();
+    node.shutdown();
+    let took = started.elapsed();
+    assert!(
+        took < Duration::from_secs(2),
+        "shutting down took {took:?}, which means it waited on something"
+    );
+}

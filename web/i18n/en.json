@@ -208,6 +208,7 @@
   "address": {
     "eyebrow": "Address",
     "holdings": "Notes held right now",
+    "moreNotes": "Showing the {shown} most recent of {total} notes.",
     "history": "Everything that moved"
   },
 

@@ -28,9 +28,12 @@ const PAGE: usize = 25;
 /// Largest page a caller may ask for.
 const MAX_PAGE: usize = 200;
 /// Entries returned for one address before the caller has to ask for more.
-const HISTORY_PAGE: usize = 100;
-/// Owners listed in the holders table.
-const RICHEST: usize = 50;
+///
+/// Both the notes an address holds and the movements through it are paged. An
+/// address that has mined for a year holds hundreds of thousands of notes, and
+/// an answer carrying all of them is one an anonymous caller could ask for
+/// repeatedly to make this node do arbitrary work and send arbitrary bytes.
+const ADDRESS_PAGE: usize = 100;
 
 /// Bytes one hot note costs a node, measured on the running implementation:
 /// the note itself, its identifier, and its share of the sparse tree.
@@ -685,12 +688,14 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
         json.field_str("spent", "0");
         json.field_usize("notes", 0);
         json.field_usize("unspentNotes", 0);
+        json.field_bool("moreNotes", false);
         json.key("unspent");
         json.begin_array();
         json.end_array();
         json.key("history");
         json.begin_array();
         json.end_array();
+        json.field_usize("movements", 0);
         json.field_null("next");
         json.end_object();
         return Response::json(json.finish());
@@ -701,10 +706,14 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
     json.field_str("spent", &record.spent.as_pebbles().to_string());
     json.field_usize("notes", record.notes.len());
 
+    // Newest first, and only one page of them. Walking every note an address
+    // ever held is exactly the work this endpoint must not do on demand.
     let mut unspent = 0usize;
+    let mut listed = 0usize;
+    let mut more_notes = false;
     json.key("unspent");
     json.begin_array();
-    for id in &record.notes {
+    for id in record.notes.iter().rev() {
         let Some(note) = context.index.note(id) else {
             continue;
         };
@@ -712,6 +721,11 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
             continue;
         }
         unspent = unspent.saturating_add(1);
+        if listed >= ADDRESS_PAGE {
+            more_notes = true;
+            continue;
+        }
+        listed = listed.saturating_add(1);
         json.begin_object();
         json.field_str("note", &note_reference(id));
         json.field_str("value", &note.value.as_pebbles().to_string());
@@ -721,44 +735,34 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
     }
     json.end_array();
     json.field_usize("unspentNotes", unspent);
+    json.field_bool("moreNotes", more_notes);
 
     // One line per movement: a note arriving, and later the transfer that
-    // spent it. Newest first, which is the order a person reads in.
-    let mut events: Vec<(u64, bool, Hash32, Amount)> = Vec::new();
-    for id in &record.notes {
-        let Some(note) = context.index.note(id) else {
-            continue;
-        };
-        events.push((note.created_at, true, id.source, note.value));
-        if let (Some(height), Some(by)) = (note.spent_at, note.spent_by) {
-            events.push((height, false, by, note.value));
-        }
-    }
-    events.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.2.cmp(&right.2)));
+    // spent it. The index records these as the chain produces them, so they
+    // are already in order and a page is a slice rather than a sort.
+    let movements = &record.movements;
+    let total = movements.len();
+    let end = total.saturating_sub(offset);
+    let start = end.saturating_sub(ADDRESS_PAGE);
 
     json.key("history");
     json.begin_array();
-    let mut listed = 0usize;
-    for (height, incoming, transaction, value) in events.iter().skip(offset) {
-        if listed >= HISTORY_PAGE {
-            break;
-        }
+    for movement in movements.get(start..end).unwrap_or_default().iter().rev() {
         json.begin_object();
-        json.field_u64("height", *height);
-        json.field_str("direction", if *incoming { "in" } else { "out" });
-        json.field_str("transaction", &transaction.to_string());
-        json.field_str("value", &value.as_pebbles().to_string());
-        match context.chain.block_at(*height) {
+        json.field_u64("height", movement.height);
+        json.field_str("direction", if movement.incoming { "in" } else { "out" });
+        json.field_str("transaction", &movement.transaction.to_string());
+        json.field_str("value", &movement.value.as_pebbles().to_string());
+        match context.chain.block_at(movement.height) {
             Some(block) => json.field_u64("timestamp", block.header.timestamp),
             None => json.field_null("timestamp"),
         }
         json.end_object();
-        listed = listed.saturating_add(1);
     }
     json.end_array();
-    let seen = offset.saturating_add(listed);
-    if seen < events.len() {
-        json.field_usize("next", seen);
+    json.field_usize("movements", total);
+    if start > 0 {
+        json.field_usize("next", offset.saturating_add(end.saturating_sub(start)));
     } else {
         json.field_null("next");
     }
@@ -825,7 +829,7 @@ fn holders(context: &Context<'_>) -> Response {
     json.field_usize("holders", context.index.holders());
     json.key("richest");
     json.begin_array();
-    for (owner, balance) in context.index.richest(RICHEST) {
+    for (owner, balance) in context.index.richest() {
         json.begin_object();
         json.field_str("address", &owner.to_string());
         json.field_str("balance", &balance.as_pebbles().to_string());
