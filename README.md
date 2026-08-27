@@ -40,8 +40,18 @@ A wallet keeps its own proofs current out of what every block already carries,
 so it spends a fallen note without asking anyone. Money moves between people
 across a set no node holds.
 
-What is left is a public testnet: seed addresses, an explorer, installation
-notes, and strangers running the binary.
+Each network starts from a block written into the source, so two nodes that
+have never met are on the same chain by construction and neither has to take a
+stranger's word for where the story begins.
+
+| Network | Starts from | Opens at | Block time |
+| --- | --- | --- | --- |
+| `testnet-1` | `0000000f2729...` | 1787783117 | 60 s |
+| `devnet` | `00000051 1ff5...` | 1787783108 | 5 s |
+| `mainnet` | not made yet | | |
+
+What is left is running the thing in public: seed addresses, an explorer,
+installation notes, and strangers running the binary.
 
 ## Layout
 
@@ -84,10 +94,10 @@ answers, so it needs its own directory:
     --network devnet --data wallet --seed 127.0.0.1:9944
 ```
 
-`devnet` is testnet's rules with a five second block time. Consensus rules come
-from the network name and cannot be set one at a time: two nodes differing on
-any of them would build separate chains while believing they were on the same
-one.
+`devnet` is the same rules with a five second block time and a hot set small
+enough to watch notes fall. Consensus rules come from the network name and
+cannot be set one at a time: two nodes differing on any of them would build
+separate chains while believing they were on the same one.
 
 ## Building
 
