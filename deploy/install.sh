@@ -32,8 +32,26 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 say "Packages"
-apt-get update -qq
-apt-get install -y -qq git curl build-essential pkg-config
+# A refresh that reports errors is common and usually harmless: an older
+# release whose backports have been archived says so every time, while the
+# packages below live in the main repository and install fine. Failing here
+# would stop an installation for a reason that has nothing to do with it.
+if ! apt-get update -qq; then
+    echo "apt-get update reported errors; carrying on with what is available"
+fi
+apt-get install -y -qq git curl build-essential pkg-config || true
+
+# What actually matters is whether the tools are here.
+missing=
+for tool in git curl cc; do
+    command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+done
+if [ -n "$missing" ]; then
+    echo "missing:$missing" >&2
+    echo "install them and run this again; on Debian or Ubuntu that is" >&2
+    echo "  apt-get install git curl build-essential pkg-config" >&2
+    exit 1
+fi
 
 say "Rust"
 if ! command -v cargo >/dev/null 2>&1; then
