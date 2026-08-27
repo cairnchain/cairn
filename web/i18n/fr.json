@@ -489,11 +489,11 @@
         ],
         "curious": [
           "La synchronisation initiale revalide chaque bloc depuis la genèse. Le coût en régime établi est plat, celui du premier démarrage ne l'est pas, et la tension entre absence de confiance et points de contrôle est non résolue plutôt que cachée.",
-          "Autres manques connus : pas encore de notation des pairs ni de délais d'attente, donc un pair qui ouvre un message puis se tait immobilise un fil d'exécution. Les enregistrements d'annulation sont conservés pour chaque bloc de la chaîne active et ne sont pas encore bornés. L'archiviste reconstruit une preuve en temps linéaire par demande."
+          "Un coût grandit encore avec la chaîne, et c'est la mémoire plutôt que la validation : un nœud garde tous les blocs de la branche qu'il suit. C'est l'histoire, pas l'état contre lequel il vérifie, et savoir si un nœud doit la porter est la même question ouverte que celle du premier démarrage. Plus petit : un archiviste reconstruit une preuve en un temps proportionnel à l'ensemble qu'il détient."
         ],
         "technical": [
           "Aucun audit externe à ce jour, et aucune des primitives cryptographiques n'est nouvelle : BLAKE3 avec des clés dérivées par domaine, Ed25519 avec rejet à la construction des clés de petit ordre et des encodages non canoniques. La nouveauté est dans la disposition de l'état, là où elle doit être si elle doit être quelque part.",
-          "Le travail à venir, dans l'ordre : borner les enregistrements d'annulation, ajouter la notation des pairs et les délais d'attente, alléger la représentation de l'arbre chaud, puis la question de la synchronisation initiale, la seule qui demande une décision de conception plutôt qu'une implémentation."
+          "Les délais d'attente, le plafond de connexions, la part par adresse, le refus temporaire, les enregistrements d'annulation bornés et les files d'envoi bornées sont en place : plus rien de ce qu'un inconnu fait ne décide de ce qu'un nœud dépense. Reste, dans l'ordre : alléger la représentation de l'arbre chaud, puis les deux questions qui demandent une décision de conception plutôt qu'une implémentation, la synchronisation initiale et le fait qu'un nœud doive ou non porter l'histoire."
         ]
       }
     },

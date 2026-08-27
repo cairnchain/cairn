@@ -489,11 +489,11 @@
         ],
         "curious": [
           "Initial sync revalidates every block from genesis. Steady state cost is flat, first-start cost is not, and the trustless versus checkpoint tension is unresolved rather than hidden.",
-          "Other known gaps: no peer scoring or stall timeouts yet, so a peer that opens a message and goes quiet ties up a thread. Undo records are kept for every active-chain block and are not yet bounded. The archivist rebuilds proofs in linear time per request."
+          "One cost does still grow with the chain, and it is memory rather than validation: a node holds every block of the branch it follows. That is the history, not the state it checks against, and the question of whether a node has to carry it at all is the same open question as the first start. Smaller: an archivist rebuilds a proof in time proportional to the set it holds."
         ],
         "technical": [
           "No external audit yet, and none of the cryptography is novel: BLAKE3 with per-domain derived keys, Ed25519 with small-order and non-canonical encodings rejected at construction. Novelty is in the state layout, which is where it should be if anywhere.",
-          "The forward work, in order: bound the undo records, add peer scoring and stall timeouts, a leaner hot tree representation, then the initial sync question, which is the only one that needs a design decision rather than an implementation."
+          "Deadlines, connection ceilings, per address shares, temporary refusal, bounded undo records and bounded send queues are all in place, so nothing an anonymous peer does decides how much a node spends. What is left, in order: a leaner hot tree representation, then the two questions that need a design decision rather than an implementation, which are initial sync and whether a node has to carry the history at all."
         ]
       }
     },
