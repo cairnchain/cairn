@@ -39,6 +39,12 @@ pub struct PeerState {
     /// Blocks asked for and not yet received. While this is non empty the node
     /// is mid batch and does not ask for more.
     pub awaiting: BTreeSet<Hash32>,
+    /// When the outstanding batch was asked for.
+    ///
+    /// A peer that answers everything else but never delivers the blocks it
+    /// was asked for would otherwise hold this node mid batch indefinitely,
+    /// which is a way of stalling a sync without ever looking unresponsive.
+    pub asked_at: u64,
     /// Where the connection came from, filled in by whoever opened it.
     pub remote: Option<IpAddr>,
     /// Where this peer says it can be reached, which is its own port on the
@@ -62,6 +68,24 @@ pub enum DropReason {
     ForeignChain { theirs: Hash32 },
     #[error("peer sent a block this node rejects")]
     BadBlock { id: Hash32 },
+}
+
+impl DropReason {
+    /// Whether this peer behaved badly, rather than merely belonging elsewhere.
+    ///
+    /// A node on another network or an older protocol has done nothing wrong
+    /// and may be on this one tomorrow, so it is disconnected and forgotten
+    /// rather than refused. A peer sending a block this node rejects, or
+    /// speaking before introducing itself, is broken or probing, and is worth
+    /// turning away for a while.
+    pub fn is_misbehaviour(self) -> bool {
+        match self {
+            Self::Unannounced { .. } | Self::RepeatedHandshake | Self::BadBlock { .. } => true,
+            Self::WrongVersion { .. } | Self::WrongNetwork { .. } | Self::ForeignChain { .. } => {
+                false
+            }
+        }
+    }
 }
 
 /// What to do about one received message.
@@ -180,14 +204,19 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
     reaction
 }
 
+/// How long a batch of blocks may be outstanding before the node gives up on
+/// it and asks again.
+pub const BATCH_PATIENCE: u64 = 60;
+
 /// Asks for the blocks among `ids` this node does not have.
-fn request_missing(chain: &ChainStore, peer: &mut PeerState, ids: &[Hash32]) -> Reaction {
+fn request_missing(chain: &ChainStore, peer: &mut PeerState, ids: &[Hash32], now: u64) -> Reaction {
     let missing = chain.missing(ids.iter());
     if missing.is_empty() {
-        return follow_up(chain, peer);
+        return follow_up(chain, peer, now);
     }
     let batch: Vec<Hash32> = missing.into_iter().take(MAX_REQUESTED).collect();
     peer.awaiting.extend(batch.iter().copied());
+    peer.asked_at = now;
     Reaction::reply(vec![Message::GetBlocks(batch)])
 }
 
@@ -195,7 +224,15 @@ fn request_missing(chain: &ChainStore, peer: &mut PeerState, ids: &[Hash32]) -> 
 ///
 /// This is what drives a sync forward without any timer: each answer produces
 /// the next question, and the questions stop when the node has caught up.
-fn follow_up(chain: &ChainStore, peer: &PeerState) -> Reaction {
+///
+/// The one exception is a batch that never arrives. A peer answering
+/// everything else while quietly never sending the blocks it was asked for
+/// looks perfectly healthy and stalls the sync all the same, so an outstanding
+/// batch is abandoned after [`BATCH_PATIENCE`] and the question asked again.
+fn follow_up(chain: &ChainStore, peer: &mut PeerState, now: u64) -> Reaction {
+    if !peer.awaiting.is_empty() && now.saturating_sub(peer.asked_at) >= BATCH_PATIENCE {
+        peer.awaiting.clear();
+    }
     if peer.awaiting.is_empty() && peer.total_work > chain.total_work() {
         return Reaction::reply(vec![Message::GetChain {
             locator: chain.locator(),
@@ -213,21 +250,21 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
 
     match chain.add_block(block, now) {
         Ok(Accepted::Extended | Accepted::Reorganised { .. }) => {
-            let mut reaction = follow_up(chain, peer);
+            let mut reaction = follow_up(chain, peer, now);
             reaction.stored.push(id);
             reaction.broadcast.push(id);
             reaction
         }
         Ok(Accepted::SideBranch) => {
-            let mut reaction = follow_up(chain, peer);
+            let mut reaction = follow_up(chain, peer, now);
             reaction.stored.push(id);
             reaction
         }
-        Ok(Accepted::Duplicate) => follow_up(chain, peer),
+        Ok(Accepted::Duplicate) => follow_up(chain, peer, now),
         // Missing history rather than a bad peer: the block is fine, this node
         // simply has not caught up to where it hangs. Asking again from a fresh
         // locator resolves it.
-        Err(ChainError::UnknownParent(_) | ChainError::NotGenesis) => follow_up(chain, peer),
+        Err(ChainError::UnknownParent(_) | ChainError::NotGenesis) => follow_up(chain, peer, now),
         Err(_) => Reaction::close(DropReason::BadBlock { id }),
     }
 }
@@ -261,10 +298,10 @@ pub fn on_message(
         Message::GetChain { locator } => Reaction::reply(vec![Message::Chain(
             local.chain.chain_after(&locator, MAX_CHAIN),
         )]),
-        Message::Chain(ids) => request_missing(local.chain, peer, &ids),
+        Message::Chain(ids) => request_missing(local.chain, peer, &ids, now),
         Message::Announce(ids) => {
             let capped: Vec<Hash32> = ids.into_iter().take(MAX_ANNOUNCED).collect();
-            request_missing(local.chain, peer, &capped)
+            request_missing(local.chain, peer, &capped, now)
         }
         Message::GetBlocks(ids) => {
             let reply = ids

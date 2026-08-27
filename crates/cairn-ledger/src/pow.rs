@@ -120,9 +120,8 @@ pub fn next_difficulty(recent: &[HeaderSummary], target_block_time: u64) -> u64 
     }
 
     let start = recent.len().saturating_sub(available.saturating_add(1));
-    let window = match recent.get(start..) {
-        None => return last.difficulty.max(MIN_DIFFICULTY),
-        Some(window) => window,
+    let Some(window) = recent.get(start..) else {
+        return last.difficulty.max(MIN_DIFFICULTY);
     };
 
     let ceiling = target_block_time.saturating_mul(MAX_SOLVETIME_FACTOR);

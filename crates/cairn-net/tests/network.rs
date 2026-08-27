@@ -8,7 +8,8 @@
     clippy::arithmetic_side_effects
 )]
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::io::Write;
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,7 +20,11 @@ use cairn_ledger::note::Note;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
+use cairn_net::message::{Handshake, Message, PROTOCOL_VERSION};
+use cairn_net::wire::write_message;
 use cairn_net::Node;
+use cairn_primitives::codec::Encode;
+use cairn_primitives::Hash32;
 
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
@@ -301,4 +306,63 @@ fn a_node_reaches_a_peer_it_was_never_told_about() {
         second.known_addresses().contains(&first.address()),
         "the hub passed each one along to the other"
     );
+}
+
+/// The failure this guards against: a peer that opens a frame and stops.
+///
+/// Before deadlines existed, the thread reading from it waited for as long as
+/// the peer kept the socket open, and a handful of such peers was enough to
+/// leave a node unable to hear anything else.
+#[test]
+fn a_peer_that_opens_a_frame_and_goes_quiet_is_let_go() {
+    let node = Node::bind(params(), loopback()).unwrap();
+
+    let mut stalled = TcpStream::connect(node.address()).unwrap();
+    let mut header = Vec::new();
+    params().network.as_u32().encode_to(&mut header);
+    1_000_000u32.encode_to(&mut header);
+    stalled.write_all(&header).unwrap();
+    stalled.flush().unwrap();
+
+    wait_for("the node to take the connection", || node.peer_count() == 1);
+    wait_for("the stalled peer to be let go", || node.peer_count() == 0);
+
+    // And the node is still itself: a well behaved peer still gets in.
+    let other = Node::bind(params(), loopback()).unwrap();
+    other.connect(node.address()).unwrap();
+    wait_for("a healthy peer to be accepted", || node.peer_count() == 1);
+}
+
+/// A peer that sends a block this node rejects is disconnected.
+///
+/// Whether it is then turned away for a while is decided in `refusal`, which
+/// exempts the loopback address and so cannot be exercised from here: several
+/// nodes on one machine must not lock each other out.
+#[test]
+fn a_peer_that_sends_a_bad_block_is_dropped() {
+    let node = Node::bind(params(), loopback()).unwrap();
+    let mut forge = Forge::new(params());
+    let mut block = forge.mine();
+    // Claim a ledger this block does not produce.
+    block.header.state_root = Hash32::ZERO;
+
+    let mut rude = TcpStream::connect(node.address()).unwrap();
+    let hello = Message::Hello(Handshake {
+        version: PROTOCOL_VERSION,
+        network: params().network,
+        genesis: Hash32::ZERO,
+        tip: Hash32::ZERO,
+        height: 0,
+        total_work: 0,
+        listen: 1,
+    });
+    write_message(&mut rude, params().network, &hello).unwrap();
+    write_message(
+        &mut rude,
+        params().network,
+        &Message::Block(Box::new(block)),
+    )
+    .unwrap();
+
+    wait_for("the bad peer to be dropped", || node.peer_count() == 0);
 }

@@ -8,7 +8,7 @@
 //! when it is replayed, which catches anything a checksum would and a great
 //! deal more.
 
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -35,11 +35,16 @@ pub enum StoreError {
     RecordTooLarge { index: usize, declared: usize },
     #[error("block would not fit in one record")]
     BlockTooLarge,
-    #[error(
-        "{path} is already in use by process {holder}; \
-         if no node is running, delete that file"
-    )]
+    #[error("{path} is already in use by process {holder}, which is still running")]
     Locked { path: String, holder: String },
+    #[error(
+        "this filesystem does not support locking, so two nodes could write to \
+         the same directory without noticing: {source}"
+    )]
+    Unlockable {
+        #[source]
+        source: std::io::Error,
+    },
     #[error("record {index} is not a block: {source}")]
     Malformed {
         index: usize,
@@ -198,13 +203,24 @@ impl BlockLog {
 /// Marks a data directory as in use for as long as it is held.
 ///
 /// Two processes appending to the same block log would interleave records and
-/// leave neither chain readable. The lock is a file rather than anything the
-/// operating system enforces, so a process killed outright leaves it behind:
-/// that is a deliberate trade, because an operator deleting a stale file is a
-/// far better outcome than a silently ruined chain.
+/// leave neither chain readable.
+///
+/// The lock is held by the operating system on an open file, not by the
+/// presence of the file itself. That distinction is what makes it survive a
+/// machine losing power: the kernel drops the lock when the process ends,
+/// however it ends, so a node killed outright or a server that reboots comes
+/// straight back up. A lock that had to be cleaned up by hand would mean every
+/// unattended restart needing a person, which is not a property a node can
+/// have.
+///
+/// The file also carries the process identifier, which is written for the
+/// operator to read and never trusted: a stale identifier is only ever a hint
+/// in a message, and whether the lock is held is the kernel's answer alone.
 #[derive(Debug)]
 pub struct DirectoryLock {
     path: PathBuf,
+    /// Holding it open is the lock. Dropping this releases it.
+    file: File,
 }
 
 impl DirectoryLock {
@@ -213,25 +229,34 @@ impl DirectoryLock {
         std::fs::create_dir_all(directory)?;
         let path = directory.join(LOCK_FILE);
 
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
-                let _ = write!(file, "{}", std::process::id());
-                let _ = file.flush();
-                Ok(Self { path })
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let holder = std::fs::read_to_string(&path).unwrap_or_default();
-                Err(StoreError::Locked {
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                return Err(StoreError::Locked {
                     path: path.display().to_string(),
-                    holder: if holder.trim().is_empty() {
-                        "unknown".to_owned()
-                    } else {
-                        holder.trim().to_owned()
-                    },
+                    holder: read_holder(&path),
                 })
             }
-            Err(error) => Err(StoreError::Io(error)),
+            // A filesystem that does not support locking, most often a network
+            // mount. Refusing is the only safe answer: silently carrying on
+            // would let two nodes write to one log, which is the outcome this
+            // exists to prevent.
+            Err(TryLockError::Error(error)) => {
+                return Err(StoreError::Unlockable { source: error })
+            }
         }
+
+        let mut file = file;
+        file.set_len(0)?;
+        let _ = write!(file, "{}", std::process::id());
+        let _ = file.flush();
+        Ok(Self { path, file })
     }
 
     pub fn path(&self) -> &Path {
@@ -239,8 +264,24 @@ impl DirectoryLock {
     }
 }
 
+/// What the lock file says about who holds it, for the error message only.
+fn read_holder(path: &Path) -> String {
+    let holder = std::fs::read_to_string(path).unwrap_or_default();
+    let holder = holder.trim();
+    if holder.is_empty() {
+        "unknown".to_owned()
+    } else {
+        holder.to_owned()
+    }
+}
+
 impl Drop for DirectoryLock {
+    /// The file is left behind on purpose.
+    ///
+    /// Removing it would open a window where another process has the file open
+    /// and then loses it from under itself, which turns a clean exclusion into
+    /// a race. An idle lock file costs nothing.
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        let _ = self.file.unlock();
     }
 }

@@ -8,7 +8,7 @@
     clippy::arithmetic_side_effects
 )]
 
-use cairn_chain::{Accepted, ChainError, ChainStore};
+use cairn_chain::{Accepted, ChainError, ChainStore, MAX_REORG_DEPTH};
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::Block;
 use cairn_ledger::note::{Note, NoteId};
@@ -70,6 +70,15 @@ impl Branch {
         (0..count)
             .map(|_| self.mine(miner, Vec::new(), spacing))
             .collect()
+    }
+
+    /// A second branch carrying on from where this one stands.
+    fn fork(&self) -> Self {
+        Self {
+            params: self.params,
+            state: self.state.clone(),
+            clock: self.clock,
+        }
     }
 }
 
@@ -386,4 +395,62 @@ fn two_nodes_given_the_same_blocks_in_different_orders_agree() {
         Some(right_blocks[4].id()),
         "the heavier branch won"
     );
+}
+
+/// Undo records are what a reorganisation needs, and keeping one per block
+/// ever applied is a cost that grows with the chain on a node whose whole
+/// claim is that its cost does not.
+#[test]
+fn undo_records_do_not_pile_up_forever() {
+    let miner = wallet(1);
+    let mut branch = Branch::new(params());
+    let blocks = branch.mine_empty(&miner, MAX_REORG_DEPTH + 200, 600);
+
+    let mut store = ChainStore::new(params());
+    feed(&mut store, &blocks);
+
+    assert_eq!(store.height(), Some((MAX_REORG_DEPTH + 199) as u64));
+    assert!(
+        store.undo_records() <= MAX_REORG_DEPTH,
+        "kept {} undo records, the limit is {MAX_REORG_DEPTH}",
+        store.undo_records()
+    );
+}
+
+/// A switch this node could not undo is refused before it starts, rather than
+/// found halfway through when a missing undo record reads as a broken tree.
+#[test]
+fn a_reorganisation_deeper_than_the_limit_is_refused() {
+    let miner = wallet(1);
+    let rival = wallet(2);
+
+    let mut shared = Branch::new(params());
+    let genesis = shared.mine_empty(&miner, 1, 600);
+
+    // Two branches from the same first block. The rival is heavier because it
+    // is longer, and it forks further back than this node can undo.
+    let mut ours = shared.fork();
+    let ours_blocks = ours.mine_empty(&miner, MAX_REORG_DEPTH + 50, 600);
+    let mut theirs = shared.fork();
+    let theirs_blocks = theirs.mine_empty(&rival, MAX_REORG_DEPTH + 60, 600);
+
+    let mut store = ChainStore::new(params());
+    feed(&mut store, &genesis);
+    feed(&mut store, &ours_blocks);
+
+    // Everything up to the last block lands on a side branch without asking
+    // for a switch. The one that finally outweighs us is the one refused.
+    let mut outcome = None;
+    for block in &theirs_blocks {
+        outcome = Some(store.add_block(block.clone(), NOW));
+    }
+    match outcome {
+        Some(Err(ChainError::ForkTooDeep { depth })) => {
+            assert!(depth > MAX_REORG_DEPTH, "refused a depth of {depth}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+
+    // And the node is exactly where it was.
+    assert_eq!(store.height(), Some((MAX_REORG_DEPTH + 50) as u64));
 }

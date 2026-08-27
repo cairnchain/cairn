@@ -18,7 +18,7 @@ use cairn_ledger::LedgerState;
 use cairn_net::book::AddressBook;
 use cairn_net::message::{Handshake, Message, PeerAddress, PROTOCOL_VERSION};
 use cairn_net::sync::{local_handshake, on_message, DropReason, Local, PeerState};
-use cairn_net::wire::{read_message, write_message, WireError, MAX_FRAME_BYTES};
+use cairn_net::wire::{read_message, write_message, Incoming, WireError, MAX_FRAME_BYTES};
 use cairn_primitives::codec::{Decode, Encode};
 use cairn_primitives::Hash32;
 use std::net::SocketAddr;
@@ -141,7 +141,7 @@ fn a_message_roundtrips_through_the_wire_format() {
         let mut cursor = framed.as_slice();
         assert_eq!(
             read_message(&mut cursor, NetworkId::TESTNET).unwrap(),
-            message
+            Incoming::Message(message)
         );
     }
 }
@@ -682,4 +682,107 @@ fn a_peer_that_does_not_listen_is_not_advertised() {
         reaction.learned.is_empty(),
         "nothing to pass on about a node nobody can reach"
     );
+}
+
+/// A reader that hands over what it holds, then behaves like a socket whose
+/// deadline has passed.
+struct Stalling {
+    bytes: Vec<u8>,
+    at: usize,
+}
+
+impl Stalling {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes, at: 0 }
+    }
+}
+
+impl std::io::Read for Stalling {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.at >= self.bytes.len() {
+            return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+        }
+        let take = buffer.len().min(self.bytes.len() - self.at);
+        buffer[..take].copy_from_slice(&self.bytes[self.at..self.at + take]);
+        self.at += take;
+        Ok(take)
+    }
+}
+
+#[test]
+fn a_peer_with_nothing_to_say_is_not_a_failure() {
+    let mut quiet = Stalling::new(Vec::new());
+    assert_eq!(
+        read_message(&mut quiet, NetworkId::TESTNET).unwrap(),
+        Incoming::Quiet,
+        "an idle peer must not be mistaken for a broken one"
+    );
+}
+
+#[test]
+fn a_peer_that_opens_a_frame_and_stops_is_refused() {
+    let mut framed = Vec::new();
+    NetworkId::TESTNET.as_u32().encode_to(&mut framed);
+    1_000_000u32.encode_to(&mut framed);
+    // The header, and then nothing at all. Without the deadline this is where
+    // the reading thread would wait for as long as the peer kept the socket.
+    let mut stalled = Stalling::new(framed);
+
+    match read_message(&mut stalled, NetworkId::TESTNET) {
+        Err(WireError::Stalled { had, wanted }) => {
+            assert_eq!(had, 0);
+            assert_eq!(wanted, 1_000_000);
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_peer_that_stops_partway_through_a_frame_is_refused() {
+    let mut framed = Vec::new();
+    write_message(&mut framed, NetworkId::TESTNET, &Message::Ping(1)).unwrap();
+    let full = framed.len();
+    framed.truncate(full - 1);
+    let mut stalled = Stalling::new(framed);
+
+    match read_message(&mut stalled, NetworkId::TESTNET) {
+        Err(WireError::Stalled { had, .. }) => assert!(had > 0),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_peer_that_stops_partway_through_a_header_is_refused() {
+    let mut framed = Vec::new();
+    NetworkId::TESTNET.as_u32().encode_to(&mut framed);
+    framed.push(0);
+    let mut stalled = Stalling::new(framed);
+
+    match read_message(&mut stalled, NetworkId::TESTNET) {
+        Err(WireError::Stalled { had, wanted }) => {
+            assert_eq!(had, 5);
+            assert_eq!(wanted, 8);
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn belonging_elsewhere_is_not_misbehaviour() {
+    assert!(!DropReason::WrongNetwork {
+        theirs: NetworkId::MAINNET
+    }
+    .is_misbehaviour());
+    assert!(!DropReason::WrongVersion { theirs: 99 }.is_misbehaviour());
+    assert!(!DropReason::ForeignChain {
+        theirs: Hash32::ZERO
+    }
+    .is_misbehaviour());
+}
+
+#[test]
+fn sending_a_bad_block_or_speaking_out_of_turn_is_misbehaviour() {
+    assert!(DropReason::BadBlock { id: Hash32::ZERO }.is_misbehaviour());
+    assert!(DropReason::RepeatedHandshake.is_misbehaviour());
+    assert!(DropReason::Unannounced { kind: "block" }.is_misbehaviour());
 }

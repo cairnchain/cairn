@@ -7,6 +7,7 @@
 pub mod book;
 pub mod message;
 pub mod node;
+pub mod refusal;
 pub mod sync;
 pub mod wire;
 

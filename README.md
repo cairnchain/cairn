@@ -56,6 +56,14 @@ nothing, something, or everything. It keeps an index from owners to their
 notes, which is the growing cost the protocol refuses to put on validators and
 is exactly why it lives in a separate program nobody has to run.
 
+A node survives being treated badly. It holds a bounded number of connections,
+a bounded share of them from any one address, and lets go of a peer that opens
+a frame and stops talking rather than waiting on it forever. Undo records,
+known-bad blocks and dead branches are all bounded, so nothing an anonymous
+peer does decides how much memory this node spends. The data directory is held
+by a lock the operating system releases when the process ends, so a machine
+that loses power comes straight back up.
+
 What is left is running the thing in public: seed addresses, installation
 notes, and strangers running the binary.
 
@@ -152,6 +160,16 @@ The dependency tree is deliberately small. There is no asynchronous runtime: a
 node keeps tens of connections rather than thousands, so one reader thread and
 one writer thread per peer costs nothing and leaves far less to audit inside a
 process people are being asked to run.
+
+Every number an anonymous peer gets to choose is capped, and every table one
+can fill is bounded. A reorganisation deeper than `MAX_REORG_DEPTH` is refused
+rather than kept possible by holding undo records forever; that is a local
+safety policy, not a consensus rule, and it is written down as such.
+
+One cost still grows with the chain: a node holds every block of the followed
+branch in memory, which is the history rather than the validation state. That
+is the same open question as initial sync, and it is named in the design
+document instead of being left for someone to discover.
 
 ## Licence
 

@@ -31,6 +31,35 @@ use cairn_primitives::{Amount, Hash32};
 /// taking new ones rather than growing without limit.
 pub const MAX_POOLED: usize = 4_096;
 
+/// How far back the followed branch can be undone.
+///
+/// Every applied block records what it took to apply, so it can be undone
+/// without replaying the chain. Keeping those records for every block ever
+/// applied is a cost that grows with the chain, on a node whose whole claim is
+/// that its cost does not, so they are kept for this many blocks and no more.
+///
+/// A switch that would reach deeper is refused. This is a local safety
+/// policy rather than a consensus rule: two nodes with different limits still
+/// build the same chain, and only ever differ after a reorganisation deeper
+/// than either would accept, which on a live network means an attack or a
+/// partition lasting the better part of a day.
+pub const MAX_REORG_DEPTH: usize = 1_024;
+
+/// Blocks kept off the followed branch before the unreachable ones are
+/// dropped.
+///
+/// A branch that lost by more than [`MAX_REORG_DEPTH`] can never be switched
+/// to, so holding its blocks is holding history nobody will ask for.
+const MAX_SIDE_BLOCKS: usize = 4_096;
+
+/// Identifiers of blocks known to be invalid, held before the set is cleared.
+///
+/// Remembering a bad block is what stops it being revalidated every time it
+/// arrives. Remembering every bad block ever seen is a table an anonymous peer
+/// gets to fill, so past this many the set is emptied: the cost is revalidating
+/// a handful of blocks that will fail again, which is bounded, unlike the set.
+const MAX_INVALID: usize = 8_192;
+
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ChainError {
     #[error("block {0} builds on a parent this node has never seen")]
@@ -47,6 +76,11 @@ pub enum ChainError {
         #[source]
         source: BlockError,
     },
+    #[error(
+        "switching branches here would undo {depth} blocks, past the {MAX_REORG_DEPTH} \
+         this node keeps undo records for"
+    )]
+    ForkTooDeep { depth: usize },
     #[error("the block tree lost a block it had recorded")]
     Corrupt,
 }
@@ -86,8 +120,14 @@ pub struct ChainStore {
     active: Vec<Hash32>,
     positions: HashMap<Hash32, usize>,
     /// What it took to apply each block on the active branch, so each can be
-    /// undone without replaying the chain.
+    /// undone without replaying the chain. Held for the most recent
+    /// [`MAX_REORG_DEPTH`] blocks only.
     applied: HashMap<Hash32, ConnectedBlock>,
+    /// Index in `active` of the oldest block whose undo record is still held.
+    ///
+    /// Kept as a cursor rather than recomputed, so trimming one block off the
+    /// back costs the same whether the chain is a day or a decade old.
+    undo_from: usize,
     state: LedgerState,
     /// Transfers waiting for a block, keyed by identifier so the order a miner
     /// walks them in does not depend on the order they arrived.
@@ -118,6 +158,7 @@ impl ChainStore {
             active: Vec::new(),
             positions: HashMap::new(),
             applied: HashMap::new(),
+            undo_from: 0,
             state,
             pool: BTreeMap::new(),
         }
@@ -261,6 +302,11 @@ impl ChainStore {
             .take(max)
             .copied()
             .collect()
+    }
+
+    /// Undo records held, which is bounded by [`MAX_REORG_DEPTH`].
+    pub fn undo_records(&self) -> usize {
+        self.applied.len()
     }
 
     /// Transfers waiting for a block.
@@ -422,6 +468,16 @@ impl ChainStore {
     /// Moves the followed branch onto the one ending at `target`.
     fn follow(&mut self, target: Hash32, now: u64) -> Result<Accepted, ChainError> {
         let (fork_position, branch) = self.branch_to(target)?;
+
+        // Refused here rather than discovered halfway through the rewind, when
+        // the undo record for a block this node no longer keeps one for would
+        // read as a corrupt tree.
+        let keep = fork_position.map_or(0, |index| index.saturating_add(1));
+        let depth = self.active.len().saturating_sub(keep);
+        if depth > MAX_REORG_DEPTH {
+            return Err(ChainError::ForkTooDeep { depth });
+        }
+
         let rolled_back = self.rewind_to(fork_position)?;
 
         let mut added = Vec::new();
@@ -429,6 +485,9 @@ impl ChainStore {
             match self.apply(*id, now) {
                 Ok(()) => added.push(*id),
                 Err(error) => {
+                    if self.invalid.len() >= MAX_INVALID {
+                        self.invalid.clear();
+                    }
                     self.invalid.insert(*id);
                     self.restore(&added, &rolled_back, now)?;
                     return Err(error);
@@ -438,6 +497,8 @@ impl ChainStore {
 
         // The state moved, so what the pool holds has to be reconsidered.
         self.prune_pool();
+        self.forget_what_cannot_be_undone();
+        self.forget_unreachable_branches();
 
         if rolled_back.is_empty() {
             return Ok(Accepted::Extended);
@@ -496,7 +557,45 @@ impl ChainStore {
             self.positions.remove(&id);
             removed.push(id);
         }
+        self.undo_from = self.undo_from.min(self.active.len());
         Ok(removed)
+    }
+
+    /// Drops undo records for blocks now deeper than [`MAX_REORG_DEPTH`].
+    ///
+    /// One block leaves the window each time one is added, so this is a step
+    /// rather than a sweep: what it costs does not depend on how long the
+    /// chain has been running.
+    fn forget_what_cannot_be_undone(&mut self) {
+        while self.active.len().saturating_sub(self.undo_from) > MAX_REORG_DEPTH {
+            let Some(id) = self.active.get(self.undo_from).copied() else {
+                break;
+            };
+            self.applied.remove(&id);
+            self.undo_from = self.undo_from.saturating_add(1);
+        }
+    }
+
+    /// Drops blocks on branches that can no longer be switched to.
+    ///
+    /// Only when there are enough of them to be worth the walk, because this
+    /// one does have to look at every block it holds.
+    fn forget_unreachable_branches(&mut self) {
+        let limit = self.active.len().saturating_add(MAX_SIDE_BLOCKS);
+        if self.blocks.len() <= limit {
+            return;
+        }
+        let Some(cutoff) = self
+            .height()
+            .and_then(|tip| tip.checked_sub(u64::try_from(MAX_REORG_DEPTH).unwrap_or(u64::MAX)))
+        else {
+            return;
+        };
+        let positions = &self.positions;
+        self.blocks.retain(|id, stored| {
+            positions.contains_key(id) || stored.block.header.height >= cutoff
+        });
+        self.invalid.retain(|id| !positions.contains_key(id));
     }
 
     fn apply(&mut self, id: Hash32, now: u64) -> Result<(), ChainError> {

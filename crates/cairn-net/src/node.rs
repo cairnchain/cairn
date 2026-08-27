@@ -12,10 +12,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -32,14 +32,51 @@ use cairn_store::{BlockLog, DirectoryLock, StoreError};
 
 use crate::book::AddressBook;
 use crate::message::Message;
+use crate::refusal::{can_be_refused, Refusals};
 use crate::sync::{local_handshake, on_message, Local, PeerState};
-use crate::wire::{read_message, write_message, WireError};
+use crate::wire::{read_message, write_message, Incoming, WireError};
 
-/// Connections a node tries to keep open.
+/// Connections a node dials for itself.
 pub const TARGET_PEERS: usize = 8;
+
+/// Connections a node holds at once, dialled and accepted together.
+///
+/// Without a ceiling, anyone can open connections until the node runs out of
+/// threads. Each one costs two threads and a read buffer, so the ceiling is
+/// what turns an unbounded cost into a known one.
+pub const MAX_PEERS: usize = 48;
+
+/// Connections accepted from any one address.
+///
+/// A single machine opening every slot would leave a node surrounded by one
+/// peer wearing many hats, which is the cheapest way to isolate it.
+const MAX_PER_HOST: usize = 2;
 
 /// How long a dial may hang before it is given up on.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a read waits before the loop looks up to check on things.
+const READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a write may block before the peer is treated as gone.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a peer may say nothing at all before it is dropped.
+///
+/// A node asks every peer for addresses once a second and a healthy one
+/// answers, so silence this long is not quiet, it is absent.
+const PEER_SILENCE: Duration = Duration::from_secs(90);
+/// Messages one peer may send within [`FLOOD_WINDOW`] before it is treated as
+/// flooding rather than talking.
+///
+/// A peer catching up sends blocks in batches and is nowhere near this. A peer
+/// asking the same question hundreds of times a second is not syncing.
+const MAX_MESSAGES_PER_WINDOW: u32 = 2_000;
+/// The window that count is measured over.
+const FLOOD_WINDOW: u64 = 10;
+/// Messages queued for one peer before further ones are dropped.
+///
+/// A peer this far behind is not keeping up, and queueing without limit would
+/// let it decide how much memory this node spends. Dropped announcements cost
+/// it nothing lasting: it asks for what it is missing on the next exchange.
+const OUTBOUND_QUEUE: usize = 256;
 /// How often the node looks for peers and saves its address book.
 const MAINTENANCE_PERIOD: Duration = Duration::from_millis(1_000);
 /// Maintenance sleeps in slices so a shutdown does not wait out a full period.
@@ -73,9 +110,12 @@ type PeerId = u64;
 
 /// One live connection, as the rest of the node sees it.
 struct Peer {
-    outbound: Sender<Message>,
+    outbound: SyncSender<Message>,
     /// Kept so a shutdown can unblock the thread reading from it.
     stream: TcpStream,
+    /// Where the connection came from, which is the only address about this
+    /// peer that it did not choose itself.
+    host: Option<IpAddr>,
     /// Where this peer says it listens, once it has said so.
     advertised: Option<SocketAddr>,
 }
@@ -92,6 +132,8 @@ struct Shared {
     /// same directory.
     _lock: Option<DirectoryLock>,
     peers: Mutex<HashMap<PeerId, Peer>>,
+    /// Peers turned away for a while, for something they did earlier.
+    refusals: Mutex<Refusals>,
     threads: Mutex<Vec<JoinHandle<()>>>,
     next_id: AtomicU64,
     running: AtomicBool,
@@ -107,6 +149,42 @@ impl Shared {
 
     fn peers(&self) -> MutexGuard<'_, HashMap<PeerId, Peer>> {
         self.peers.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn refusals(&self) -> MutexGuard<'_, Refusals> {
+        self.refusals.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Turns `host` away for a while.
+    ///
+    /// Only for peers that behaved badly, never for peers that merely belong
+    /// somewhere else: a node on another network has done nothing wrong and
+    /// may be on this one tomorrow.
+    fn refuse(&self, host: IpAddr, now: u64) {
+        self.refusals().refuse(host, now);
+    }
+
+    fn refuses(&self, host: IpAddr, now: u64) -> bool {
+        self.refusals().refuses(host, now)
+    }
+
+    /// Whether one more connection from `host` is welcome.
+    fn has_room_for(&self, host: Option<IpAddr>) -> bool {
+        let peers = self.peers();
+        if peers.len() >= MAX_PEERS {
+            return false;
+        }
+        let Some(host) = host else {
+            return true;
+        };
+        if !can_be_refused(host) {
+            return true;
+        }
+        let from_host = peers
+            .values()
+            .filter(|peer| peer.host == Some(host))
+            .count();
+        from_host < MAX_PER_HOST
     }
 
     fn book(&self) -> MutexGuard<'_, AddressBook> {
@@ -153,13 +231,19 @@ impl Shared {
     /// Hands `message` to every peer but `except`.
     ///
     /// Queued rather than written here, so one unresponsive peer cannot hold up
-    /// the thread that is announcing a block to everyone else.
+    /// the thread that is announcing a block to everyone else. The queue is
+    /// bounded and this never waits on it: a peer too far behind to take the
+    /// message loses it and asks for what it missed later, which is a better
+    /// outcome than letting it decide how much memory this node spends.
     fn broadcast(&self, except: Option<PeerId>, message: &Message) {
         for (id, peer) in self.peers().iter() {
             if Some(*id) == except {
                 continue;
             }
-            let _ = peer.outbound.send(message.clone());
+            // A full queue and a gone peer are both left alone: the first
+            // catches up by asking, and the second is already being cleared up
+            // by the thread that was reading from it.
+            let _ = peer.outbound.try_send(message.clone());
         }
     }
 }
@@ -320,6 +404,7 @@ impl Node {
             directory,
             _lock: lock,
             peers: Mutex::new(HashMap::new()),
+            refusals: Mutex::new(Refusals::new()),
             threads: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(0),
             running: AtomicBool::new(true),
@@ -461,13 +546,24 @@ fn save_book(shared: &Arc<Shared>) {
     let _ = book.save(directory);
 }
 
+/// Takes connections, and turns away the ones this node has no room for.
+///
+/// Accepting without limit is the cheapest attack there is: two threads and a
+/// read buffer per connection, and nothing stopping one machine from opening
+/// thousands. The three refusals here are the ceiling, the per address share,
+/// and peers still under refusal for something they did earlier.
 fn accept_loop(shared: &Arc<Shared>, listener: &TcpListener) {
     while shared.running.load(Ordering::SeqCst) {
         match listener.accept() {
-            Ok((stream, _)) => {
+            Ok((stream, from)) => {
                 if !shared.running.load(Ordering::SeqCst) {
                     let _ = stream.shutdown(Shutdown::Both);
                     break;
+                }
+                let host = from.ip();
+                if shared.refuses(host, unix_now()) || !shared.has_room_for(Some(host)) {
+                    let _ = stream.shutdown(Shutdown::Both);
+                    continue;
                 }
                 attach_peer(shared, stream, false);
             }
@@ -496,6 +592,32 @@ fn maintenance_loop(shared: &Arc<Shared>) {
         shared.broadcast(None, &Message::GetPeers);
         dial_from_book(shared);
         save_book(shared);
+        collect_finished(shared);
+        shared.refusals().forget_expired(unix_now());
+    }
+}
+
+/// Joins the threads of peers that have already gone.
+///
+/// Without this the handles pile up for the life of the process: one per peer
+/// that ever connected, which on a node left running is a slow leak fed by
+/// anyone who cares to connect and hang up.
+fn collect_finished(shared: &Arc<Shared>) {
+    let mut done = Vec::new();
+    {
+        let mut threads = shared.threads();
+        let mut index = 0usize;
+        while index < threads.len() {
+            let finished = threads.get(index).is_some_and(JoinHandle::is_finished);
+            if finished {
+                done.push(threads.swap_remove(index));
+            } else {
+                index = index.saturating_add(1);
+            }
+        }
+    }
+    for handle in done {
+        let _ = handle.join();
     }
 }
 
@@ -521,6 +643,10 @@ fn dial_from_book(shared: &Arc<Shared>) {
     for address in candidates {
         if !shared.running.load(Ordering::SeqCst) {
             return;
+        }
+        let host = address.ip();
+        if shared.refuses(host, unix_now()) || !shared.has_room_for(Some(host)) {
+            continue;
         }
         if let Ok(stream) = TcpStream::connect_timeout(&address, DIAL_TIMEOUT) {
             attach_peer(shared, stream, true);
@@ -579,14 +705,20 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, initiator: bool) {
     // a larger packet to fill, and every message here is an answer someone is
     // blocked on.
     let _ = stream.set_nodelay(true);
+    // Deadlines on both directions. Without them a peer that opens a frame and
+    // stops, or one that stops reading, holds a thread of this node for as long
+    // as it cares to keep the socket open.
+    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
+    let _ = writing_end.set_write_timeout(Some(WRITE_TIMEOUT));
 
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
-    let (outbound, inbox) = mpsc::channel::<Message>();
+    let (outbound, inbox) = mpsc::sync_channel::<Message>(OUTBOUND_QUEUE);
     shared.peers().insert(
         id,
         Peer {
             outbound: outbound.clone(),
             stream: shutdown_end,
+            host: remote,
             advertised: None,
         },
     );
@@ -607,7 +739,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, initiator: bool) {
             let chain = shared.chain();
             Message::Hello(local_handshake(&chain, shared.address.port()))
         };
-        let _ = outbound.send(hello);
+        let _ = outbound.try_send(hello);
     }
 
     let reading = Arc::clone(shared);
@@ -620,12 +752,24 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, initiator: bool) {
     shared.threads().push(handle);
 }
 
+/// Whether a framing failure is the peer's fault rather than the network's.
+///
+/// A closed socket or a peer from another network has done nothing wrong. A
+/// peer that opens a frame and stops, announces a size past the limit, or
+/// sends something that does not decode is either broken or probing.
+fn is_peer_fault(error: &WireError) -> bool {
+    matches!(
+        error,
+        WireError::Stalled { .. } | WireError::FrameTooLarge { .. } | WireError::Malformed(_)
+    )
+}
+
 fn read_loop(
     shared: &Arc<Shared>,
     mut stream: TcpStream,
     id: PeerId,
-    outbound: &Sender<Message>,
-    remote: Option<std::net::IpAddr>,
+    outbound: &SyncSender<Message>,
+    remote: Option<IpAddr>,
     initiator: bool,
 ) {
     let network = shared.network();
@@ -634,15 +778,41 @@ fn read_loop(
         ..PeerState::default()
     };
     let mut announced = false;
+    let mut last_heard = unix_now();
+    let mut window_start = last_heard;
+    let mut in_window = 0u32;
+    let mut misbehaved = false;
 
-    // Reads block until a frame arrives or the socket closes. A peer that opens
-    // a frame and then stalls holds this thread, which is what peer scoring and
-    // stall timeouts are for; neither exists yet.
+    // Reads carry a deadline, so this loop looks up regularly rather than
+    // waiting on a peer that may never speak again. Two silences are told
+    // apart: a peer with nothing to say between frames is fine and stays, and
+    // a peer holding a frame open is not and goes.
     while shared.running.load(Ordering::SeqCst) {
         let message = match read_message(&mut stream, network) {
-            Ok(message) => message,
+            Ok(Incoming::Message(message)) => {
+                last_heard = unix_now();
+                if last_heard.saturating_sub(window_start) >= FLOOD_WINDOW {
+                    window_start = last_heard;
+                    in_window = 0;
+                }
+                in_window = in_window.saturating_add(1);
+                if in_window > MAX_MESSAGES_PER_WINDOW {
+                    misbehaved = true;
+                    break;
+                }
+                message
+            }
+            Ok(Incoming::Quiet) => {
+                if unix_now().saturating_sub(last_heard) >= PEER_SILENCE.as_secs() {
+                    break;
+                }
+                continue;
+            }
             Err(WireError::Io(error)) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
+            Err(error) => {
+                misbehaved = is_peer_fault(&error);
+                break;
+            }
         };
 
         // The chain is held for the decision and released before anything is
@@ -683,7 +853,9 @@ fn read_loop(
         }
 
         for reply in reaction.reply {
-            if outbound.send(reply).is_err() {
+            // A full queue means the peer is not reading what it asked for, so
+            // the answer would be stale by the time it arrived.
+            if outbound.try_send(reply).is_err() {
                 return;
             }
         }
@@ -693,11 +865,17 @@ fn read_loop(
         for transfer in passing {
             shared.broadcast(Some(id), &Message::Transaction(Box::new(transfer)));
         }
-        if reaction.drop_peer.is_some() {
+        if let Some(reason) = reaction.drop_peer {
+            misbehaved = reason.is_misbehaviour();
             break;
         }
     }
 
+    if misbehaved {
+        if let Some(host) = remote {
+            shared.refuse(host, unix_now());
+        }
+    }
     let _ = stream.shutdown(Shutdown::Both);
 }
 
