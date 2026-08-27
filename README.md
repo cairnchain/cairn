@@ -40,14 +40,28 @@ A wallet keeps its own proofs current out of what every block already carries,
 so it spends a fallen note without asking anyone. Money moves between people
 across a set no node holds.
 
+Every header commits to two things beyond its own block: the work behind the
+whole chain, and every header that came before it, held as sixty four hashes
+like the cold set. Neither changes what a node does today. What they buy is the
+only way to join this chain without downloading all of it: someone starting
+from nothing can be handed a sample of old headers, check each is really where
+it claims to be, and work out what stands behind the tip without reading the
+millions in between. That is roughly three hundred kilobytes and the hundred
+megabytes of state, against the tens of gigabytes it takes to read everything.
+
+The mechanism that uses them is not written yet. The fields are, because they
+could not have been added later: changing the shape of a header invalidates
+every block already mined, so a chain that ever carries value can never gain
+one.
+
 Each network starts from a block written into the source, so two nodes that
 have never met are on the same chain by construction and neither has to take a
 stranger's word for where the story begins.
 
 | Network | Starts from | Opens at | Block time |
 | --- | --- | --- | --- |
-| `testnet-1` | `0000000f2729...` | 1787783117 | 60 s |
-| `devnet` | `00000051 1ff5...` | 1787783108 | 5 s |
+| `testnet-2` | `0000001b9876...` | 1787820378 | 60 s |
+| `devnet` | `00000139ffc6...` | 1787820357 | 5 s |
 | `mainnet` | not made yet | | |
 
 There is an explorer, which is a node that also serves a website: the chain in
@@ -167,9 +181,11 @@ rather than kept possible by holding undo records forever; that is a local
 safety policy, not a consensus rule, and it is written down as such.
 
 One cost still grows with the chain: a node holds every block of the followed
-branch in memory, which is the history rather than the validation state. That
-is the same open question as initial sync, and it is named in the design
-document instead of being left for someone to discover.
+branch in memory, which is the history rather than the validation state. What
+a node must hold to validate is capped and always will be; what it currently
+holds to serve its own history is not. The header commitment is what makes it
+possible to stop holding it, and that work is named in the design document
+rather than left for someone to discover.
 
 ## Licence
 

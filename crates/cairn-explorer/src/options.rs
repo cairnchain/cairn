@@ -29,7 +29,7 @@ cairn-explorer, a Cairn node that also serves a website
   --http <address>       address to serve the website on
                          (default: 127.0.0.1:8080)
   --seed <address>       a peer to start from; repeat for more
-  --network <name>       testnet-1 or devnet (default: testnet-1)
+  --network <name>       testnet-2 or devnet (default: testnet-2)
   --help                 print this and stop
 
 The explorer always keeps the cold set, because answering questions about
@@ -125,7 +125,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         if name == "mainnet" {
             "mainnet does not exist yet: its first block has not been mined".to_owned()
         } else {
-            format!("unknown network `{name}`, try testnet-1 or devnet")
+            format!("unknown network `{name}`, try testnet-2 or devnet")
         }
     })?;
 

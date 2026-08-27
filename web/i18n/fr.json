@@ -162,7 +162,9 @@
     "confirmations": "Blocs par-dessus", "difficulty": "Difficulté", "work": "Travail",
     "nonce": "Nonce", "previous": "Bloc précédent", "next": "Bloc suivant",
     "reward": "Récompense de bloc", "fees": "Frais", "stateRoot": "Engagement d'état",
-    "transactionsRoot": "Racine des transactions", "message": "Message", "extra": "Octets libres",
+    "transactionsRoot": "Racine des transactions",
+    "history": "Engagement d'histoire", "history.note": "tous les en-têtes précédents, en soixante-quatre empreintes",
+    "totalWork": "Travail derrière ce bloc", "message": "Message", "extra": "Octets libres",
     "transaction": "Transaction", "owner": "Propriétaire", "value": "Valeur", "state": "État",
     "note": "Billet", "proof": "Détenu où", "kind": "Type", "status": "Statut",
     "totalIn": "Total dépensé", "totalOut": "Total créé", "fee": "Frais",
@@ -485,16 +487,17 @@
       "body": {
         "plain": [
           "Deux choses à dire clairement. D'abord, Cairn est nouvelle et n'a rien prouvé. Elle n'a pas été attaquée, elle n'a pas été auditée par des tiers, et le réseau actuel est un réseau de test dont la monnaie ne vaut rien et qui sera effacé.",
-          "Ensuite, une vraie limite demeure. Un ordinateur qui rejoint pour la première fois revérifie encore toute l'histoire depuis le début, ce qui prend des heures sur une longue chaîne. Tout ce qui vient après ce premier démarrage est bon marché et le reste, mais le premier démarrage n'est pas résolu, et c'est le trou honnête dans la promesse.",
+          "Ensuite, rejoindre pour la première fois demande encore de télécharger toute l'histoire. Chaque bloc porte désormais ce qu'il faut pour que ce ne soit plus nécessaire, et la partie qui s'en sert n'est pas écrite. Donc aujourd'hui un nouveau venu télécharge tout ; le jour où ce travail sera fait, il en téléchargera environ un millième et vérifiera tout aussi sérieusement.",
           "C'est écrit ici plutôt que laissé à votre découverte."
         ],
         "curious": [
-          "La synchronisation initiale revalide chaque bloc depuis la genèse. Le coût en régime établi est plat, celui du premier démarrage ne l'est pas, et la tension entre absence de confiance et points de contrôle est non résolue plutôt que cachée.",
-          "Un coût grandit encore avec la chaîne, et c'est la mémoire plutôt que la validation : un nœud garde tous les blocs de la branche qu'il suit. C'est l'histoire, pas l'état contre lequel il vérifie, et savoir si un nœud doit la porter est la même question ouverte que celle du premier démarrage. Plus petit : un archiviste reconstruit une preuve en un temps proportionnel à l'ensemble qu'il détient."
+          "La synchronisation initiale télécharge et revalide encore chaque bloc. Le coût en régime établi est plat, celui du premier démarrage ne l'est pas, et la réparation est à moitié faite : chaque en-tête engage désormais le travail accumulé derrière la chaîne et tous les en-têtes qui le précèdent, si bien qu'un nouveau venu peut recevoir un échantillon plutôt que la totalité. Ce qui manque est le protocole qui sert cet échantillon.",
+          "Mesuré, à raison d'un bloc par minute : trente ans de chaîne chargée représentent environ quarante-huit gigaoctets à télécharger et cinq heures à revalider. Par l'échantillon, c'est quelques centaines de kilooctets d'en-têtes plus les cent mégaoctets d'état, vérifiés contre l'engagement inscrit dans le sommet. Aucun point de contrôle, aucun instantané de confiance, personne à croire.",
+          "Un coût grandit encore : un nœud garde en mémoire tous les blocs de la branche qu'il suit. C'est l'histoire, pas l'état contre lequel il valide, et le même engagement est ce qui lui permettra d'arrêter. Plus petit : un archiviste reconstruit une preuve en un temps proportionnel à l'ensemble qu'il détient."
         ],
         "technical": [
           "Aucun audit externe à ce jour, et aucune des primitives cryptographiques n'est nouvelle : BLAKE3 avec des clés dérivées par domaine, Ed25519 avec rejet à la construction des clés de petit ordre et des encodages non canoniques. La nouveauté est dans la disposition de l'état, là où elle doit être si elle doit être quelque part.",
-          "Les délais d'attente, le plafond de connexions, la part par adresse, le refus temporaire, les enregistrements d'annulation bornés et les files d'envoi bornées sont en place : plus rien de ce qu'un inconnu fait ne décide de ce qu'un nœud dépense. Reste, dans l'ordre : alléger la représentation de l'arbre chaud, puis les deux questions qui demandent une décision de conception plutôt qu'une implémentation, la synchronisation initiale et le fait qu'un nœud doive ou non porter l'histoire."
+          "Les délais d'attente, le plafond de connexions, la part par adresse, le refus temporaire, les enregistrements d'annulation bornés et les files d'envoi bornées sont en place : plus rien de ce qu'un inconnu fait ne décide de ce qu'un nœud dépense. Les en-têtes engagent le travail cumulé et une forêt de tous les en-têtes antérieurs, ce dont un démarrage échantillonné a besoin et ce qui n'aurait pas pu être ajouté une fois qu'un réseau porte de la valeur. Reste : le protocole d'échantillonnage lui-même, sortir l'histoire de la mémoire, et alléger la représentation de l'arbre chaud."
         ]
       }
     },
@@ -553,7 +556,7 @@
       "body": {
         "plain": ["C'est comme cela qu'on obtient des CAIRN sur un réseau de test. Votre ordinateur se met à chercher des blocs, et quand il en trouve un, la récompense va à votre adresse. Il n'y a aucun autre moyen d'en obtenir : personne n'a de stock à distribuer."],
         "curious": ["Minage sur un seul fil d'exécution dans le nœud, ce qui suffit pour un réseau de test. Les récompenses vont à la clé que vous indiquez."],
-        "technical": ["La difficulté de genèse de testnet-1 est 2^27, calibrée pour que le premier bloc prenne à peu près le temps de bloc visé sur un cœur ordinaire, à 2,29 millions d'empreintes par seconde mesurées."]
+        "technical": ["La difficulté de genèse de testnet-2 est 2^27, calibrée pour que le premier bloc prenne à peu près le temps de bloc visé sur un cœur ordinaire, à 2,29 millions d'empreintes par seconde mesurées."]
       }
     },
     "explorer": {

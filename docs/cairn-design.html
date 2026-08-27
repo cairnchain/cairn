@@ -241,7 +241,7 @@
     <h1 class="mark">CAIRN</h1>
     <p class="thesis">Une monnaie que <em>ton téléphone</em> vérifie lui-même — aujourd'hui, et dans trente ans.</p>
     <div class="metaline">
-      <span>Document de conception · v0.15</span>
+      <span>Document de conception · v0.16</span>
       <span>26 août 2026</span>
       <span>Nom de code — provisoire</span>
     </div>
@@ -406,7 +406,8 @@
       <h2>Ce qui reste ouvert</h2>
       <p>Les questions encore posées, par ordre d'urgence. Aucune ne bloque le démarrage du code.</p>
       <ul class="open">
-        <li><b>L'histoire en mémoire.</b> Un nœud garde en mémoire tous les blocs de la chaîne qu'il suit. Ce n'est pas l'état de validation, qui lui est bien plafonné, c'est l'histoire. Le coût grandit donc lentement avec la longueur de la chaîne, et c'est la même question que le premier démarrage : à partir de quand un nœud peut-il se dispenser de porter le passé, et à quel prix pour ceux qui en ont besoin. La réponse demande une décision de conception, pas une implémentation.</li>
+        <li><b>Le protocole d'échantillonnage.</b> Les en-têtes portent maintenant ce qu'il faut pour rejoindre la chaîne sans la télécharger entièrement. Reste à écrire ce qui s'en sert : comment un nœud demande un échantillon, comment celui qui répond fabrique les preuves, et combien d'en-têtes il faut tirer pour qu'une tricherie soit décelée à coup sûr. C'est du travail d'implémentation et de calibrage, plus une décision de conception.</li>
+        <li><b>L'histoire en mémoire.</b> Un nœud garde en mémoire tous les blocs de la chaîne qu'il suit. Ce n'est pas l'état de validation, qui lui est bien plafonné, c'est l'histoire. Le même engagement dans l'en-tête est ce qui lui permettra d'arrêter de la porter.</li>
         <li><b>Les billets intelligents.</b> Des billets porteurs de règles plutôt que d'un simple montant. Reporté après le testnet, utile mais pas au prix d'un retard sur le cœur.</li>
       </ul>
     </div>
@@ -428,6 +429,7 @@
         <li class="done"><div><b>De quoi ouvrir un réseau<span class="state">Fait</span></b><span>Chaque réseau part d'un bloc inscrit dans le programme, donc deux nœuds qui ne se sont jamais rencontrés sont sur la même chaîne par construction, et aucun n'a à croire un inconnu sur l'origine de l'histoire. Ce qui est écrit n'est pas une promesse mais des octets : n'importe qui recalcule l'empreinte et vérifie le travail derrière. Le premier bloc demande déjà un vrai travail, mesuré, sans quoi les premières secondes appartiennent à qui démarre en avance. Aucun bloc ne peut être daté avant l'ouverture annoncée. Et le premier bloc porte de quoi dire de quel jour il est, ce qui prouve que la chaîne n'a pas été lancée en douce des semaines plus tôt.</span></div></li>
         <li class="done"><div><b>La porte d'entrée<span class="state">Fait</span></b><span>Un explorateur, qui est un nœud qui sert en plus un site : la chaîne en public, et l'explication de la chaîne. Il tient un index des propriétaires vers leurs billets, c'est-à-dire exactement le coût qui grandit que le protocole refuse d'imposer aux validateurs, et c'est la raison pour laquelle il vit dans un programme séparé que personne n'est obligé de faire tourner. Le site est écrit trois fois : le lecteur choisit en arrivant ce qu'il sait déjà, et ce choix le suit partout, si bien que la page d'un bloc explique ce qu'est un bloc ou donne la structure des engagements. Anglais et français, une langue étant un fichier et rien d'autre. La page ne fait que lire : elle ne détient aucune clé et ne peut rien signer, parce qu'un portefeuille dans un navigateur est d'où viennent la plupart des vols de ce milieu.</span></div></li>
         <li class="done"><div><b>Tenir le choc<span class="state">Fait</span></b><span>Un nœud ne peut plus être immobilisé ni noyé. Un pair qui ouvre un message puis se tait était capable de bloquer un fil d'exécution aussi longtemps qu'il gardait la connexion ouverte, et une poignée d'entre eux suffisait à rendre un nœud sourd : il est maintenant relâché en quelques secondes, et la distinction est faite entre un pair qui n'a rien à dire, ce qui est normal, et un pair qui retient un message en cours, ce qui ne l'est pas. Le nombre de connexions est plafonné, ainsi que la part qu'une même adresse peut en prendre, et un pair qui envoie un bloc invalide est refusé pendant un moment plutôt que libre de recommencer aussitôt. Rien de ce qu'un inconnu fait ne décide plus de la mémoire que dépense le nœud : les enregistrements d'annulation, les blocs déjà jugés mauvais, les branches perdues et la file d'attente de chaque pair sont tous bornés. Enfin, le répertoire de données est tenu par un verrou que le système d'exploitation relâche à la mort du processus, si bien qu'un serveur qui perd le courant redémarre seul, là où un fichier oublié imposait une intervention humaine.</span></div></li>
+        <li class="done"><div><b>Pouvoir rejoindre sans tout télécharger<span class="state">Fait</span></b><span>Le coût de validation était plafonné, mais celui de l'arrivée ne l'était pas : mesuré, trente ans de chaîne chargée représentent quarante-huit gigaoctets à télécharger, pour aboutir à un état qui en pèse cent méga. Chaque en-tête engage désormais deux choses de plus : le travail accumulé derrière toute la chaîne, et l'ensemble des en-têtes antérieurs, porté comme la cave sous forme de soixante-quatre empreintes. Cela permet de remettre à un nouveau venu un échantillon d'anciens en-têtes, qu'il vérifie être réellement à la place annoncée, et d'établir ce qui se tient derrière le sommet sans lire les millions d'en-têtes intermédiaires : quelques centaines de kilooctets au lieu de deux gigaoctets, sans point de contrôle et sans croire personne. Le protocole qui s'en sert reste à écrire ; les champs, eux, ne pouvaient pas attendre, car changer la forme d'un en-tête invalide tous les blocs déjà minés. Le réseau de test a donc pris le numéro suivant, ce qui n'a rien coûté aujourd'hui et aurait tout coûté plus tard.</span></div></li>
         <li><div><b>Le testnet public</b><span>Une monnaie sans valeur, ouverte, que des inconnus font tourner. Le seul vrai test de décentralisation : tout ce qui précède peut être parfait et échouer ici.</span></div></li>
       </ol>
 
@@ -440,7 +442,7 @@
   </section>
 
   <footer>
-    <span>Cairn · document de conception v0.15</span>
+    <span>Cairn · document de conception v0.16</span>
     <span>Statut — prêt à être lancé en public</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>

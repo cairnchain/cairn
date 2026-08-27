@@ -21,8 +21,17 @@ impl NetworkId {
     /// the old one is then told plainly that it is on another network, rather
     /// than failing somewhere confusing.
     pub const TESTNET_1: Self = Self(0x4341_5254);
+    /// The second, which exists because the header gained the two fields that
+    /// make it possible to join this chain without downloading all of it.
+    ///
+    /// That is a change to the shape of a header, so every block mined under
+    /// the old shape is invalid under the new one, and the rule above applies
+    /// to the letter: the network starts over and takes the next number. It
+    /// cost nothing this time, and it is exactly the change that could not
+    /// have been made after a network had value on it.
+    pub const TESTNET_2: Self = Self(0x4341_5255);
     /// Kept as the name of whichever test network is current.
-    pub const TESTNET: Self = Self::TESTNET_1;
+    pub const TESTNET: Self = Self::TESTNET_2;
     /// A throwaway network with the same rules but a much shorter block time,
     /// for running the software on one machine.
     pub const DEVNET: Self = Self(0x4341_5244);

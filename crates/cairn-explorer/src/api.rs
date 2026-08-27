@@ -399,6 +399,8 @@ fn block(context: &Context<'_>, reference: &str) -> Response {
     json.field_str("difficulty", &block.header.difficulty.to_string());
     json.field_str("nonce", &block.header.nonce.to_string());
     json.field_str("work", &work_of(block.header.difficulty).to_string());
+    json.field_str("totalWork", &block.header.total_work.to_string());
+    json.field_str("history", &block.header.history.to_string());
     json.field_str(
         "transactionsRoot",
         &block.header.transactions_root.to_string(),

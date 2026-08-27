@@ -13,7 +13,7 @@ use crate::emission;
 
 use crate::block::{Block, BlockHeader, BLOCK_VERSION};
 use crate::note::{NetworkId, Note, NoteId};
-use crate::pow::{median_time_past, meets_target, next_difficulty, MIN_DIFFICULTY};
+use crate::pow::{median_time_past, meets_target, next_difficulty, work_of, MIN_DIFFICULTY};
 use crate::state::{cold_leaf, BlockUndo, ColdSpend, LedgerState, StateTransition};
 use crate::transaction::{
     CoinbaseTransaction, Input, Transfer, Witness, COINBASE_VERSION, MAX_COINBASE_EXTRA,
@@ -104,10 +104,10 @@ impl ConsensusParams {
             // Not yet made. A network exists once its first block does, and
             // that block will be mined in the open on the day it is announced.
             "mainnet" => None,
-            "testnet" | "testnet-1" => Some(Self {
-                network: NetworkId::TESTNET_1,
-                genesis: crate::genesis::pinned(NetworkId::TESTNET_1),
-                opens_at: crate::genesis::opens_at(NetworkId::TESTNET_1),
+            "testnet" | "testnet-2" => Some(Self {
+                network: NetworkId::TESTNET_2,
+                genesis: crate::genesis::pinned(NetworkId::TESTNET_2),
+                opens_at: crate::genesis::opens_at(NetworkId::TESTNET_2),
                 genesis_difficulty: 1 << 27,
                 ..Self::testnet()
             }),
@@ -132,7 +132,7 @@ impl ConsensusParams {
     pub fn network_name(&self) -> &'static str {
         match self.network {
             NetworkId::DEVNET => "devnet",
-            NetworkId::TESTNET_1 => "testnet-1",
+            NetworkId::TESTNET_2 => "testnet-2",
             // Mainnet lands here too until it has a first block, which is the
             // honest answer: it is not a network yet.
             _ => "unnamed",
@@ -267,6 +267,12 @@ pub enum BlockError {
     TransactionsRootMismatch { expected: Hash32, found: Hash32 },
     #[error("header commits to state root {found}, the block produces {expected}")]
     StateRootMismatch { expected: Hash32, found: Hash32 },
+    #[error("header commits to history {found}, this chain's headers produce {expected}")]
+    HistoryMismatch { expected: Hash32, found: Hash32 },
+    #[error("header claims {found} total work, its parent and difficulty give {expected}")]
+    WrongTotalWork { expected: u128, found: u128 },
+    #[error("accumulated work would overflow")]
+    WorkOverflow,
     #[error("transfer {index} is invalid")]
     InvalidTransfer {
         index: usize,
@@ -590,6 +596,7 @@ pub fn assemble_block(
     }
 
     let effect = evaluate_block_body(state, &coinbase, &transfers, params)?;
+    let difficulty = expected_difficulty(state, params);
     let header = BlockHeader {
         version: BLOCK_VERSION,
         network: params.network,
@@ -597,8 +604,13 @@ pub fn assemble_block(
         previous: state.expected_parent(),
         transactions_root: Hash32::ZERO,
         state_root: effect.state_root,
+        history: state.history_root(),
         timestamp,
-        difficulty: expected_difficulty(state, params),
+        difficulty,
+        total_work: state
+            .total_work()
+            .checked_add(work_of(difficulty))
+            .ok_or(BlockError::WorkOverflow)?,
         nonce,
     };
     let mut block = Block {
@@ -681,6 +693,29 @@ pub fn connect_block(
             found: header.difficulty,
         });
     }
+
+    // Both of these are one comparison, and both are what makes a header worth
+    // sampling later. A header that misstates the work behind it, or the
+    // history it follows, would let someone hand a newcomer a short chain
+    // wearing a long one's numbers.
+    let demanded_work = state
+        .total_work()
+        .checked_add(work_of(header.difficulty))
+        .ok_or(BlockError::WorkOverflow)?;
+    if header.total_work != demanded_work {
+        return Err(BlockError::WrongTotalWork {
+            expected: demanded_work,
+            found: header.total_work,
+        });
+    }
+    let demanded_history = state.history_root();
+    if header.history != demanded_history {
+        return Err(BlockError::HistoryMismatch {
+            expected: demanded_history,
+            found: header.history,
+        });
+    }
+
     // Cheap and decisive, so it runs before the body is looked at: a block
     // without work behind it costs an attacker nothing to send.
     if !meets_target(&header.id(), header.difficulty) {

@@ -521,6 +521,23 @@ async function block(reference) {
       { class: 'row lv-technical' },
       el('div', { class: 'row-label', text: t('field.transactionsRoot') }),
       el('div', { class: 'row-value' }, hashLink(data.transactionsRoot, null, { head: 64, tail: 0 }))
+    ),
+    el(
+      'div',
+      { class: 'row lv-technical' },
+      el('div', { class: 'row-label', text: t('field.history') }),
+      el(
+        'div',
+        { class: 'row-value' },
+        hashLink(data.history, null, { head: 64, tail: 0 }),
+        el('span', { class: 'row-note', text: ' ' + t('field.history.note') })
+      )
+    ),
+    el(
+      'div',
+      { class: 'row lv-curious' },
+      el('div', { class: 'row-label', text: t('field.totalWork') }),
+      el('div', { class: 'row-value' }, count(BigInt(data.totalWork)))
     )
   );
 
@@ -927,7 +944,7 @@ function learn() {
 
 function download() {
   clear(view);
-  const network = state.status && state.status.network ? state.status.network.name : 'testnet-1';
+  const network = state.status && state.status.network ? state.status.network.name : 'testnet-2';
   view.append(
     el(
       'div',

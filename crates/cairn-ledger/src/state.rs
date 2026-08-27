@@ -398,6 +398,8 @@ pub struct Tip {
     pub id: Hash32,
     pub height: u64,
     pub timestamp: u64,
+    /// Work behind this block and everything before it.
+    pub total_work: u128,
 }
 
 /// Everything a block does to the note set.
@@ -437,6 +439,9 @@ pub struct BlockUndo {
     /// Blocks whose fallen notes stopped being spendable without a proof when
     /// this block landed.
     grace_dropped: Vec<Vec<(NoteId, u64, Note)>>,
+    /// The header forest from just before the block, for the same reason the
+    /// cold roots are kept: an append cannot be undone from the roots left.
+    headers_before: Forest,
 }
 
 /// Replays a transition onto a hot tree and a cold set.
@@ -489,6 +494,14 @@ fn replay(
 }
 
 /// The unspent notes, split across the two tiers.
+/// The leaf a header takes in the history forest.
+///
+/// Hashed under its own domain so a header leaf can never be read as a note
+/// leaf, even though both forests are built the same way.
+pub fn header_leaf(id: &Hash32) -> Hash32 {
+    cairn_primitives::hash::hash(Domain::HeaderHistoryLeaf, id.as_bytes())
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct LedgerState {
     hot: BTreeMap<NoteId, HotEntry>,
@@ -514,6 +527,13 @@ pub struct LedgerState {
     /// blocks so that undoing one is exact.
     grace: VecDeque<Vec<(NoteId, u64, Note)>>,
     grace_index: BTreeMap<NoteId, (u64, Note)>,
+    /// Every header this chain has carried, as sixty four hashes.
+    ///
+    /// The same append-only forest the cold set uses, holding one leaf per
+    /// header rather than one per note. Nobody stores the headers themselves;
+    /// what is kept is enough to say whether a header handed over later was
+    /// really at the position it claims.
+    headers: Forest,
 }
 
 impl LedgerState {
@@ -557,6 +577,25 @@ impl LedgerState {
 
     pub fn tip(&self) -> Option<Tip> {
         self.tip
+    }
+
+    /// What the next header must carry as its `history`.
+    ///
+    /// The commitment to every header applied so far. A node holds sixty four
+    /// hashes for it, whatever the chain's age.
+    pub fn history_root(&self) -> Hash32 {
+        self.headers.commitment()
+    }
+
+    /// Headers folded into that commitment, which is the chain's height plus
+    /// one once anything has been applied.
+    pub fn headers_committed(&self) -> u64 {
+        self.headers.len()
+    }
+
+    /// Work behind the followed branch, as the tip's own header states it.
+    pub fn total_work(&self) -> u128 {
+        self.tip.map_or(0, |tip| tip.total_work)
     }
 
     /// The tail of the header chain, oldest first.
@@ -720,6 +759,7 @@ impl LedgerState {
         let mut undo = BlockUndo {
             previous_tip: self.tip,
             cold_before: self.cold.now.snapshot(),
+            headers_before: self.headers.clone(),
             ..BlockUndo::default()
         };
         // File the state away before the block moves it, so a spender whose
@@ -782,10 +822,15 @@ impl LedgerState {
         debug_assert_eq!(self.hot.len(), self.hot_tree.len());
         debug_assert_eq!(self.hot.len(), self.hot_by_age.len());
 
+        let id = header.id();
+        // Appended after the block is committed, so `history` on the next
+        // header commits to this one and every one before it.
+        self.headers.add(header_leaf(&id));
         self.tip = Some(Tip {
-            id: header.id(),
+            id,
             height,
             timestamp: header.timestamp,
+            total_work: header.total_work,
         });
         undo.dropped_summary = self.push_recent(header.summary());
         undo
@@ -830,6 +875,7 @@ impl LedgerState {
         debug_assert_eq!(self.hot.len(), self.hot_tree.len());
         debug_assert_eq!(self.hot.len(), self.hot_by_age.len());
 
+        self.headers = undo.headers_before.clone();
         self.tip = undo.previous_tip;
     }
 

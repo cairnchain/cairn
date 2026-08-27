@@ -162,7 +162,9 @@
     "confirmations": "Blocks on top", "difficulty": "Difficulty", "work": "Work",
     "nonce": "Nonce", "previous": "Previous block", "next": "Next block",
     "reward": "Block reward", "fees": "Fees", "stateRoot": "State commitment",
-    "transactionsRoot": "Transactions root", "message": "Message", "extra": "Extra bytes",
+    "transactionsRoot": "Transactions root",
+    "history": "History commitment", "history.note": "every header before this one, in sixty four hashes",
+    "totalWork": "Work behind this block", "message": "Message", "extra": "Extra bytes",
     "transaction": "Transaction", "owner": "Owner", "value": "Value", "state": "State",
     "note": "Note", "proof": "Held where", "kind": "Kind", "status": "Status",
     "totalIn": "Total spent", "totalOut": "Total created", "fee": "Fee",
@@ -485,16 +487,17 @@
       "body": {
         "plain": [
           "Two things worth saying out loud. First, Cairn is new and unproven. It has not been attacked, it has not been audited by outsiders, and the current network is a test network whose money is worth nothing and which will be wiped.",
-          "Second, one real limitation remains. A computer joining for the first time still rechecks the whole history from the beginning, which on a long chain takes hours. Everything after that first start is cheap and stays cheap, but the first start is not solved yet, and it is the honest gap in the promise.",
+          "Second, joining for the first time still means downloading the whole history. Every block carries what is needed to make that unnecessary, and the part that uses it is not written yet. So today a newcomer downloads everything; the day that work is done, a newcomer downloads about a thousandth of it and checks it just as thoroughly.",
           "It is written here rather than left for you to find."
         ],
         "curious": [
-          "Initial sync revalidates every block from genesis. Steady state cost is flat, first-start cost is not, and the trustless versus checkpoint tension is unresolved rather than hidden.",
-          "One cost does still grow with the chain, and it is memory rather than validation: a node holds every block of the branch it follows. That is the history, not the state it checks against, and the question of whether a node has to carry it at all is the same open question as the first start. Smaller: an archivist rebuilds a proof in time proportional to the set it holds."
+          "Initial sync still downloads and revalidates every block. Steady state cost is flat, first-start cost is not, and the fix is half done: every header now commits to the work behind the chain and to every header before it, so a newcomer can be given a sample rather than the lot. What is missing is the protocol that serves that sample.",
+          "Measured, at one block a minute: thirty years of a busy chain is about forty eight gigabytes to download and five hours to revalidate. Through the sample it is a few hundred kilobytes of headers plus the hundred megabytes of state, checked against the commitment in the tip. No checkpoint, no trusted snapshot, nobody to believe.",
+          "One cost also still grows: a node holds every block of the branch it follows in memory. That is the history, not the state it validates against, and the same commitment is what will let it stop. Smaller: an archivist rebuilds a proof in time proportional to the set it holds."
         ],
         "technical": [
           "No external audit yet, and none of the cryptography is novel: BLAKE3 with per-domain derived keys, Ed25519 with small-order and non-canonical encodings rejected at construction. Novelty is in the state layout, which is where it should be if anywhere.",
-          "Deadlines, connection ceilings, per address shares, temporary refusal, bounded undo records and bounded send queues are all in place, so nothing an anonymous peer does decides how much a node spends. What is left, in order: a leaner hot tree representation, then the two questions that need a design decision rather than an implementation, which are initial sync and whether a node has to carry the history at all."
+          "Deadlines, connection ceilings, per address shares, temporary refusal, bounded undo records and bounded send queues are all in place, so nothing an anonymous peer does decides how much a node spends. Headers commit to cumulative work and to a forest of every earlier header, which is what a sampled start needs and what could not have been added after a network had value on it. What is left: the sampling protocol itself, moving the history out of memory, and a leaner hot tree representation."
         ]
       }
     },
@@ -553,7 +556,7 @@
       "body": {
         "plain": ["This is how you get CAIRN on a test network. Your computer starts trying to find blocks, and when it finds one, the reward goes to your address. There is no other way to get any: nobody has a stock to hand out."],
         "curious": ["Single-threaded mining on the node, which is enough for a test network. Rewards go to the key you name."],
-        "technical": ["The genesis difficulty of testnet-1 is 2^27, calibrated so the first block takes roughly the target block time on one ordinary core, at a measured 2.29 million hashes per second."]
+        "technical": ["The genesis difficulty of testnet-2 is 2^27, calibrated so the first block takes roughly the target block time on one ordinary core, at a measured 2.29 million hashes per second."]
       }
     },
     "explorer": {

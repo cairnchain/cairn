@@ -449,7 +449,7 @@ fn nothing_may_be_dated_before_the_network_opened() {
 fn a_first_block_already_takes_real_work() {
     // Otherwise the opening seconds are a race the rest of the world has not
     // been told about yet.
-    for name in ["testnet-1", "devnet"] {
+    for name in ["testnet-2", "devnet"] {
         let params = ConsensusParams::for_network(name).expect("it exists");
         assert!(
             params.genesis_difficulty > 1_000_000,
@@ -458,5 +458,156 @@ fn a_first_block_already_takes_real_work() {
         );
         let opening = cairn_ledger::genesis::block(params.network).unwrap();
         assert_eq!(opening.header.difficulty, params.genesis_difficulty);
+    }
+}
+
+/// The two fields that make it possible to join this chain without
+/// downloading all of it.
+mod joining_without_the_whole_chain {
+    use super::*;
+    use cairn_ledger::state::header_leaf;
+    use cairn_primitives::Hash32;
+
+    /// A header states the work behind it, and cannot make that up.
+    ///
+    /// Without this check the field would be decoration: someone could hand a
+    /// newcomer a short chain wearing a long one's numbers, and sampling it
+    /// would prove nothing.
+    #[test]
+    fn a_header_cannot_overstate_the_work_behind_it() {
+        let params = ConsensusParams::testnet();
+        let miner = wallet(1);
+        let mut state = LedgerState::new();
+        mine(&mut state, &params, &miner, Vec::new());
+
+        let mut lying = candidate(&state, &params, &miner, Vec::new());
+        lying.header.total_work = lying.header.total_work.saturating_mul(1_000);
+        let lying = mine_block(lying, MINING_ATTEMPTS).unwrap();
+
+        match connect_block(&mut state, &lying, &params, NOW) {
+            Err(BlockError::WrongTotalWork { expected, found }) => {
+                assert!(found > expected, "the lie was upward");
+            }
+            other => panic!("expected the claim to be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_header_cannot_understate_the_work_behind_it() {
+        let params = ConsensusParams::testnet();
+        let miner = wallet(1);
+        let mut state = LedgerState::new();
+        mine(&mut state, &params, &miner, Vec::new());
+
+        let mut lying = candidate(&state, &params, &miner, Vec::new());
+        lying.header.total_work = 1;
+        let lying = mine_block(lying, MINING_ATTEMPTS).unwrap();
+
+        assert!(matches!(
+            connect_block(&mut state, &lying, &params, NOW),
+            Err(BlockError::WrongTotalWork { .. })
+        ));
+    }
+
+    /// Work accumulates exactly, block by block.
+    #[test]
+    fn the_work_a_header_states_is_everything_behind_it() {
+        let params = ConsensusParams::testnet();
+        let miner = wallet(1);
+        let mut state = LedgerState::new();
+
+        let mut running = 0u128;
+        for _ in 0..6 {
+            let (block, _) = mine(&mut state, &params, &miner, Vec::new());
+            running += cairn_ledger::pow::work_of(block.header.difficulty);
+            assert_eq!(block.header.total_work, running);
+            assert_eq!(state.total_work(), running);
+        }
+    }
+
+    /// A header commits to every header before it, and cannot claim a history
+    /// this chain did not produce.
+    #[test]
+    fn a_header_cannot_claim_a_history_it_did_not_follow() {
+        let params = ConsensusParams::testnet();
+        let miner = wallet(1);
+        let mut state = LedgerState::new();
+        mine(&mut state, &params, &miner, Vec::new());
+
+        let mut lying = candidate(&state, &params, &miner, Vec::new());
+        lying.header.history = Hash32::ZERO;
+        let lying = mine_block(lying, MINING_ATTEMPTS).unwrap();
+
+        assert!(matches!(
+            connect_block(&mut state, &lying, &params, NOW),
+            Err(BlockError::HistoryMismatch { .. })
+        ));
+    }
+
+    /// The commitment moves with every block, and folds in the one just
+    /// applied rather than lagging behind it.
+    #[test]
+    fn the_history_commitment_takes_in_each_block_as_it_lands() {
+        let params = ConsensusParams::testnet();
+        let miner = wallet(1);
+        let mut state = LedgerState::new();
+
+        let mut leaves = Vec::new();
+        for height in 0..5u64 {
+            let before = state.history_root();
+            let (block, _) = mine(&mut state, &params, &miner, Vec::new());
+            assert_eq!(
+                block.header.history, before,
+                "a header commits to the headers before it, not to itself"
+            );
+            assert_ne!(state.history_root(), before, "the commitment moved");
+            assert_eq!(state.headers_committed(), height + 1);
+            leaves.push(header_leaf(&block.id()));
+        }
+
+        // Every header went in once, under its own leaf, and no two are alike.
+        leaves.sort_unstable();
+        leaves.dedup();
+        assert_eq!(leaves.len(), 5);
+    }
+
+    /// Undoing a block puts the commitment back exactly, which a reorganisation
+    /// depends on.
+    #[test]
+    fn undoing_a_block_puts_the_history_back() {
+        let params = ConsensusParams::testnet();
+        let miner = wallet(1);
+        let mut state = LedgerState::new();
+        mine(&mut state, &params, &miner, Vec::new());
+
+        let before = state.history_root();
+        let work_before = state.total_work();
+        let (_, connected) = mine(&mut state, &params, &miner, Vec::new());
+        assert_ne!(state.history_root(), before);
+
+        disconnect_block(&mut state, &connected);
+        assert_eq!(state.history_root(), before);
+        assert_eq!(state.total_work(), work_before);
+    }
+
+    /// Two nodes fed the same blocks agree on the commitment, which is what
+    /// makes it worth putting in a header at all.
+    #[test]
+    fn two_nodes_given_the_same_blocks_commit_to_the_same_history() {
+        let params = ConsensusParams::testnet();
+        let miner = wallet(1);
+        let mut ours = LedgerState::new();
+        let mut blocks = Vec::new();
+        for _ in 0..7 {
+            let (block, _) = mine(&mut ours, &params, &miner, Vec::new());
+            blocks.push(block);
+        }
+
+        let mut theirs = LedgerState::new();
+        for block in &blocks {
+            connect_block(&mut theirs, block, &params, NOW).unwrap();
+        }
+        assert_eq!(ours.history_root(), theirs.history_root());
+        assert_eq!(ours.total_work(), theirs.total_work());
     }
 }

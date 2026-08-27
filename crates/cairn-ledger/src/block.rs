@@ -21,17 +21,33 @@ pub struct BlockHeader {
     /// identifier, in the order they appear in the block.
     pub transactions_root: Hash32,
     /// Commitment to the whole note set as it stands after this block.
-    ///
-    /// It is recomputed from scratch today, which is the one part of this
-    /// design that does not scale and precisely what the accumulator replaces.
-    /// The field is already at its final position and size, so making that
-    /// change will not alter the header format.
     pub state_root: Hash32,
+    /// Commitment to every header before this one.
+    ///
+    /// The root of an append-only forest holding the identifier of each
+    /// earlier header, which a node carries as sixty four hashes exactly like
+    /// the cold set. It costs one hash to check and one append to maintain.
+    ///
+    /// What it buys is the only way to join this chain without downloading all
+    /// of it. Someone starting from nothing can be handed a handful of old
+    /// headers, check that each is really where it claims to be in this
+    /// commitment, and work out what stands behind the tip without seeing the
+    /// millions of headers in between. Without this field that takes every
+    /// header there has ever been, and it cannot be added later: changing a
+    /// header's shape invalidates every block already mined.
+    pub history: Hash32,
     /// Seconds since the Unix epoch.
     pub timestamp: u64,
     /// Work the block claims to carry. Validated against the value the chain
     /// history demands, so a miner cannot pick an easier one.
     pub difficulty: u64,
+    /// Work behind this block and every block before it.
+    ///
+    /// Checked against the parent's, so a block cannot claim work it did not
+    /// do. Sampling headers proves nothing unless the work each one stands for
+    /// is known, and reading it here is what lets a verifier weight its sample
+    /// by work rather than by how many blocks it was shown.
+    pub total_work: u128,
     pub nonce: u64,
 }
 
@@ -69,8 +85,10 @@ impl Encode for BlockHeader {
         self.previous.encode_to(out);
         self.transactions_root.encode_to(out);
         self.state_root.encode_to(out);
+        self.history.encode_to(out);
         self.timestamp.encode_to(out);
         self.difficulty.encode_to(out);
+        self.total_work.encode_to(out);
         self.nonce.encode_to(out);
     }
 }
@@ -84,8 +102,10 @@ impl Decode for BlockHeader {
             previous: Hash32::decode_from(reader)?,
             transactions_root: Hash32::decode_from(reader)?,
             state_root: Hash32::decode_from(reader)?,
+            history: Hash32::decode_from(reader)?,
             timestamp: u64::decode_from(reader)?,
             difficulty: u64::decode_from(reader)?,
+            total_work: u128::decode_from(reader)?,
             nonce: u64::decode_from(reader)?,
         })
     }

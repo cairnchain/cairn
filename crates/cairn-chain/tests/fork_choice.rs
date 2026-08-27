@@ -454,3 +454,33 @@ fn a_reorganisation_deeper_than_the_limit_is_refused() {
     // And the node is exactly where it was.
     assert_eq!(store.height(), Some((MAX_REORG_DEPTH + 50) as u64));
 }
+
+/// The work the chain adds up for itself, and the work the tip's header
+/// states, must be the same number.
+///
+/// Two independent counts of the same thing: one summed by the node as it
+/// stores blocks, one written into each header and checked against its
+/// parent's. They cannot drift apart without one of them being wrong, and a
+/// newcomer who reads only the header is relying on the second.
+#[test]
+fn the_chain_and_its_headers_agree_on_the_work() {
+    let miner = wallet(1);
+    let mut branch = Branch::new(params());
+    let blocks = branch.mine_empty(&miner, 12, 600);
+
+    let mut store = ChainStore::new(params());
+    for block in &blocks {
+        store.add_block(block.clone(), NOW).unwrap();
+        let stated = block.header.total_work;
+        assert_eq!(
+            store.total_work(),
+            stated,
+            "at height {} the chain and the header disagree",
+            block.header.height
+        );
+    }
+
+    // And the state carries the same figure, so a node restarted from its own
+    // disk lands on it too.
+    assert_eq!(store.state().total_work(), store.total_work());
+}
