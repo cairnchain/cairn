@@ -3,6 +3,11 @@ Description=Cairn node
 Documentation=https://github.com/cairnchain/cairn
 After=network-online.target
 Wants=network-online.target
+# These two belong to the unit rather than the service. systemd ignores them
+# in [Service] and says so only in the journal, so a restart loop would have
+# run unbounded while the file looked right.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -19,12 +24,10 @@ ExecStart=/usr/local/bin/cairnd \
 # A seed node has to come back on its own. Since the data directory lock is
 # held by the kernel on an open file, a node killed outright releases it as it
 # dies, and the restart below finds the directory free.
+# Give up only if it fails to hold, five times running, which means something
+# is wrong that restarting will not fix. The limit itself is in [Unit].
 Restart=always
 RestartSec=5s
-# Give up only if it fails to hold for a minute, five times running, which
-# means something is wrong that restarting will not fix.
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
 # Nothing here holds a key or signs anything, so it needs almost no access to
 # the machine it runs on. What it does need is one directory and one port.

@@ -96,7 +96,11 @@ if [ "$NETWORK" != "testnet-2" ] || [ "$PORT" != "9944" ] || [ -n "$SEED" ]; the
 fi
 
 systemctl daemon-reload
-systemctl enable --now cairnd
+systemctl enable cairnd
+# restart rather than start: on an update the service is already running, and
+# `enable --now` would leave the old binary in place while reporting success.
+# An operator would then believe a fix was applied when it was not.
+systemctl restart cairnd
 
 say "Firewall"
 if command -v ufw >/dev/null 2>&1; then
@@ -107,6 +111,8 @@ else
 fi
 
 say "Done"
+# Print what is actually running, so an update can be told from a no-op.
+echo "commit  $(git -C "$SRC" rev-parse --short HEAD) $(git -C "$SRC" log -1 --format=%cd --date=short)"
 systemctl --no-pager --lines=12 status cairnd || true
 cat <<NOTE
 
