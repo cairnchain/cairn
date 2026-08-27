@@ -630,19 +630,16 @@ pub struct ConnectedBlock {
     pub total_fees: Amount,
 }
 
-/// Validates `block` against `state` and, if it holds, applies it.
+/// Checks everything about a header that does not need the block body.
 ///
-/// `now` is the receiving node's clock, in seconds since the Unix epoch. On
-/// failure the state is left untouched. Keep the returned value: undoing this
-/// block later needs it.
-pub fn connect_block(
-    state: &mut LedgerState,
-    block: &Block,
+/// Split out from [`connect_block`] so that each half stays short enough to
+/// hold in one reading, which matters more here than anywhere else in the
+/// codebase: every line of it is a rule two nodes must agree on exactly.
+fn check_header(
+    state: &LedgerState,
+    header: &BlockHeader,
     params: &ConsensusParams,
-    now: u64,
-) -> Result<ConnectedBlock, BlockError> {
-    let header = &block.header;
-
+) -> Result<(), BlockError> {
     if header.version != BLOCK_VERSION {
         return Err(BlockError::UnsupportedVersion(header.version));
     }
@@ -694,10 +691,15 @@ pub fn connect_block(
         });
     }
 
-    // Both of these are one comparison, and both are what makes a header worth
-    // sampling later. A header that misstates the work behind it, or the
-    // history it follows, would let someone hand a newcomer a short chain
-    // wearing a long one's numbers.
+    check_header_commitments(state, header)
+}
+
+/// The two fields a newcomer relies on, and nothing else does.
+fn check_header_commitments(state: &LedgerState, header: &BlockHeader) -> Result<(), BlockError> {
+    // Both are one comparison, and both are what makes a header worth sampling
+    // later. A header that misstates the work behind it, or the history it
+    // follows, would let someone hand a newcomer a short chain wearing a long
+    // one's numbers.
     let demanded_work = state
         .total_work()
         .checked_add(work_of(header.difficulty))
@@ -715,6 +717,22 @@ pub fn connect_block(
             found: header.history,
         });
     }
+    Ok(())
+}
+
+/// Validates `block` against `state` and, if it holds, applies it.
+///
+/// `now` is the receiving node's clock, in seconds since the Unix epoch. On
+/// failure the state is left untouched. Keep the returned value: undoing this
+/// block later needs it.
+pub fn connect_block(
+    state: &mut LedgerState,
+    block: &Block,
+    params: &ConsensusParams,
+    now: u64,
+) -> Result<ConnectedBlock, BlockError> {
+    let header = &block.header;
+    check_header(state, header, params)?;
 
     // Cheap and decisive, so it runs before the body is looked at: a block
     // without work behind it costs an attacker nothing to send.

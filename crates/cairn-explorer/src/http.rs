@@ -332,6 +332,7 @@ pub(crate) fn bind(address: SocketAddr) -> io::Result<TcpListener> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{percent_decode, Request};
+    use std::fmt::Write as _;
 
     fn request(path: &str, query: &str) -> Request {
         Request {
@@ -418,7 +419,7 @@ mod tests {
     fn an_endless_header_block_is_cut_off() {
         let mut request = String::from("GET / HTTP/1.1\r\n");
         for index in 0..2_000 {
-            request.push_str(&format!("x-pad-{index}: filler\r\n"));
+            let _ = write!(request, "x-pad-{index}: filler\r\n");
         }
         request.push_str("\r\n");
         assert_eq!(head(&request), Err(431));
