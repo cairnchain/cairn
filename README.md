@@ -11,9 +11,13 @@ everything that has not moved in a long time lives only in the commitment and
 is spent by presenting a proof. Nothing is ever destroyed, expired, or charged
 rent.
 
-The design document is `docs/cairn-design.html`. What the field has already
-done with this problem, and where Cairn actually stands against it, is in
-`docs/cairn-prior-art.html`.
+The paper is `docs/cairn-whitepaper.html`. What the field has already done
+with this problem, and where Cairn stands against it, is in
+`docs/cairn-prior-art.html`; the working design notes are in
+`docs/cairn-design.html`.
+
+Review is the contribution most wanted right now, and the paper says plainly
+what it borrows and what limit it accepts.
 
 ## Status
 

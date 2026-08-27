@@ -1,0 +1,904 @@
+<title>The Cairn Protocol</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,300..700;1,8..60,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+  :root{
+    color-scheme: light;
+    --paper:#FCFCFD; --card:#FFFFFF; --sunk:#F3F4F7;
+    --ink:#14171C; --ink-2:#4E555F; --ink-3:#828A94;
+    --rule:#E1E4E9; --rule-firm:#C4C9D1;
+    --accent:#5F7017; --accent-ink:#4B5A12;
+    --hot:#5F7017; --hot-soft:#EBEFDC;
+    --cold:#3D5665; --cold-soft:#E4EBEF;
+    --measure:66ch;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      color-scheme: dark;
+      --paper:#0F1216; --card:#151A1F; --sunk:#1A2027;
+      --ink:#E7EAEE; --ink-2:#A3ABB5; --ink-3:#79818B;
+      --rule:#252B33; --rule-firm:#38404A;
+      --accent:#AFC454; --accent-ink:#C2D471;
+      --hot:#AFC454; --hot-soft:#20270F;
+      --cold:#8CAFC4; --cold-soft:#16222A;
+    }
+  }
+  :root[data-theme="dark"]{
+    color-scheme: dark;
+    --paper:#0F1216; --card:#151A1F; --sunk:#1A2027;
+    --ink:#E7EAEE; --ink-2:#A3ABB5; --ink-3:#79818B;
+    --rule:#252B33; --rule-firm:#38404A;
+    --accent:#AFC454; --accent-ink:#C2D471;
+    --hot:#AFC454; --hot-soft:#20270F;
+    --cold:#8CAFC4; --cold-soft:#16222A;
+  }
+
+  *{box-sizing:border-box}
+  body{
+    margin:0;background:var(--paper);color:var(--ink);
+    font-family:"Source Serif 4",Georgia,"Times New Roman",serif;
+    font-size:17.5px;line-height:1.6;font-weight:380;
+    -webkit-font-smoothing:antialiased;
+    font-variant-numeric:oldstyle-nums;
+  }
+  .paper{max-width:74rem;margin:0 auto;padding:0 clamp(1.1rem,4vw,3rem) 7rem}
+
+  /* ---- title block ---- */
+  .title{padding:clamp(3rem,9vw,6.5rem) 0 2.2rem;border-bottom:1px solid var(--ink)}
+  .title h1{
+    font-size:clamp(2.1rem,5.4vw,3.2rem);font-weight:600;line-height:1.05;
+    letter-spacing:-.02em;margin:0 0 .7rem;max-width:20ch;text-wrap:balance;
+    font-variant-numeric:lining-nums;
+  }
+  .title .strap{
+    font-size:clamp(1.05rem,2.3vw,1.28rem);color:var(--ink-2);font-weight:300;
+    max-width:58ch;margin:0 0 1.6rem;line-height:1.45;
+  }
+  .byline{
+    display:flex;flex-wrap:wrap;gap:.4rem 2rem;
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.68rem;letter-spacing:.11em;text-transform:uppercase;color:var(--ink-3);
+  }
+  .byline a{color:inherit}
+
+  /* ---- abstract ---- */
+  .abstract{
+    margin-top:2.4rem;padding:1.4rem 1.6rem;background:var(--sunk);
+    border-left:2px solid var(--accent);
+  }
+  .abstract h2{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.66rem;letter-spacing:.16em;text-transform:uppercase;
+    color:var(--ink-3);margin:0 0 .8rem;font-weight:500;
+  }
+  .abstract p{font-size:1.02rem;line-height:1.6;color:var(--ink-2);max-width:70ch}
+  .abstract p + p{margin-top:.8rem}
+
+  /* ---- sections ---- */
+  section{
+    display:grid;grid-template-columns:minmax(0,1fr);gap:.9rem;
+    padding:3rem 0 .4rem;
+  }
+  @media (min-width:64rem){
+    section{grid-template-columns:4.5rem minmax(0,var(--measure));gap:0 3.2rem}
+  }
+  .num{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.78rem;color:var(--ink-3);padding-top:.55rem;
+    font-variant-numeric:lining-nums;
+  }
+  .body > * + *{margin-top:1.05em}
+  .body > h2{margin-top:0}
+
+  h2{
+    font-size:clamp(1.35rem,2.9vw,1.72rem);font-weight:600;line-height:1.18;
+    letter-spacing:-.014em;margin:0 0 1rem;text-wrap:balance;
+  }
+  h3{
+    font-size:1.06rem;font-weight:600;margin:2.1rem 0 .5rem;letter-spacing:-.004em;
+  }
+  h3 .sub{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-weight:400;
+    font-size:.7rem;letter-spacing:.09em;color:var(--ink-3);margin-right:.6rem;
+    font-variant-numeric:lining-nums;
+  }
+  p{margin:0}
+  strong{font-weight:600}
+  em{font-style:italic}
+  a{color:var(--accent-ink);text-decoration:underline;text-decoration-color:var(--rule-firm);text-underline-offset:.16em}
+  a:hover{text-decoration-color:currentColor}
+  a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  code,.mono{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.85em;
+    font-variant-numeric:lining-nums;
+  }
+  sup a{text-decoration:none;font-size:.72em;padding:0 .1em;font-variant-numeric:lining-nums}
+
+  /* ---- figures ---- */
+  figure{margin:1.8rem 0 0;padding:0}
+  figcaption{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.66rem;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--ink-3);margin-bottom:.7rem;
+  }
+  .fig-note{font-size:.86rem;color:var(--ink-3);margin-top:.7rem;line-height:1.5}
+
+  .tiers{border:1px solid var(--rule-firm);background:var(--card)}
+  .tier-row{display:grid;grid-template-columns:minmax(0,1fr);border-bottom:1px solid var(--rule)}
+  @media (min-width:40rem){.tier-row{grid-template-columns:9.5rem minmax(0,1fr)}}
+  .tier-row:last-child{border-bottom:0}
+  .tier-label{
+    padding:1rem 1.1rem;font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;
+    border-right:1px solid var(--rule);
+  }
+  .tier-row.hot .tier-label{color:var(--hot);background:var(--hot-soft)}
+  .tier-row.cold .tier-label{color:var(--cold);background:var(--cold-soft)}
+  .tier-body{padding:1rem 1.15rem;font-size:.94rem;color:var(--ink-2);line-height:1.55}
+  .tier-body b{color:var(--ink);font-weight:600;display:block;margin-bottom:.25rem;font-size:1rem}
+  .tier-figure{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.78rem;
+    color:var(--ink-3);margin-top:.5rem;display:block;
+    font-variant-numeric:lining-nums;
+  }
+
+  /* ---- tables ---- */
+  .scroll{overflow-x:auto;border:1px solid var(--rule-firm);margin-top:1.5rem}
+  table{border-collapse:collapse;width:100%;min-width:34rem;font-size:.9rem;background:var(--card)}
+  caption{
+    caption-side:top;text-align:left;padding:.8rem 1rem;background:var(--sunk);
+    border-bottom:1px solid var(--rule-firm);
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.64rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);
+  }
+  th,td{text-align:left;padding:.55rem .9rem;border-bottom:1px solid var(--rule);vertical-align:top}
+  thead th{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-weight:500;
+    font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);
+    white-space:nowrap;
+  }
+  tbody tr:last-child td{border-bottom:0}
+  td.n,th.n{font-family:"IBM Plex Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums lining-nums;white-space:nowrap;text-align:right}
+  tr.us td{background:var(--hot-soft)}
+
+  /* ---- pull statement ---- */
+  .claim{
+    border-left:2px solid var(--accent);padding:.2rem 0 .2rem 1.3rem;
+    font-size:1.12rem;line-height:1.45;color:var(--ink);
+  }
+
+  /* ---- parameter block ---- */
+  .params{
+    margin-top:1.5rem;border:1px solid var(--rule-firm);background:var(--card);
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.8rem;
+    font-variant-numeric:lining-nums;
+  }
+  .params div{
+    display:grid;grid-template-columns:minmax(0,1fr) auto;gap:1rem;
+    padding:.45rem .95rem;border-bottom:1px solid var(--rule);
+  }
+  .params div:last-child{border-bottom:0}
+  .params .k{color:var(--ink-2)}
+  .params .v{color:var(--ink);white-space:nowrap}
+
+  /* ---- references ---- */
+  ol.refs{list-style:none;counter-reset:r;padding:0;margin:1.3rem 0 0;display:grid;gap:.75rem}
+  ol.refs li{
+    counter-increment:r;display:grid;grid-template-columns:2rem minmax(0,1fr);
+    gap:.8rem;font-size:.9rem;line-height:1.5;color:var(--ink-2);
+  }
+  ol.refs li::before{
+    content:"[" counter(r) "]";
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.72rem;
+    color:var(--ink-3);padding-top:.2rem;font-variant-numeric:lining-nums;
+  }
+
+  footer{
+    margin-top:3.5rem;padding-top:1.3rem;border-top:1px solid var(--ink);
+    display:flex;flex-wrap:wrap;gap:.4rem 2rem;
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.64rem;letter-spacing:.11em;text-transform:uppercase;color:var(--ink-3);
+  }
+  @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+
+<div class="paper">
+
+<header class="title">
+  <h1>Cairn: a chain whose validation state does not grow</h1>
+  <p class="strap">
+    A proof-of-work currency in which the state every node must hold is capped
+    by consensus rule at a fixed size, and everything beyond that cap is
+    carried in sixty four hashes.
+  </p>
+  <div class="byline">
+    <span>Draft, 28 August 2026</span>
+    <span><a href="https://github.com/cairnchain/cairn">github.com/cairnchain/cairn</a></span>
+    <span>testnet-2, no mainnet exists</span>
+  </div>
+</header>
+
+<div class="abstract">
+  <h2>Abstract</h2>
+  <p>
+    Every deployed chain grows the state a validator must hold as it is used.
+    Bitcoin's unspent output set is past 170 million entries and roughly 11 GB;
+    Ethereum has pursued statelessness for years and its own documentation
+    places it several years from mainnet. The consequence is uncomfortable and
+    rarely stated plainly: the more a chain succeeds, the fewer people can
+    afford to verify it, and verification drifts toward the parties that can.
+  </p>
+  <p>
+    Cairn caps that cost by rule. A bounded hot set of 131 072 notes is held in
+    full by every node, measured at 813 bytes each, about 107 MB, and that
+    figure is a ceiling rather than an average. Everything older lives in an
+    append-only Merkle forest which a node carries as sixty four hashes,
+    whatever its size. Spending from it takes an inclusion proof supplied by the
+    spender and checked against roots the node already holds. Nothing is ever
+    destroyed, expired, or charged rent.
+  </p>
+  <p>
+    The design accepts a proven cost rather than claiming to escape it. Christ
+    and Bonneau show that a succinct global state forces a near-linear rate of
+    local proof updates <sup><a href="#r1">[1]</a></sup>; Cairn falls on that
+    side deliberately, and confines the burden to notes that have not moved in
+    a long time. Headers commit to accumulated work and to a forest of every
+    earlier header, so that joining the chain need not mean downloading it.
+  </p>
+</div>
+
+<section>
+  <div class="num">1</div>
+  <div class="body">
+    <h2>The problem is the cost of verifying, not the cost of transacting</h2>
+    <p>
+      A permissionless currency works because many independent parties check
+      it. Nobody is in charge, so the checking is what prevents cheating. The
+      security of the system is therefore a function of how many people can
+      afford to be one of those parties.
+    </p>
+    <p>
+      That number falls as the chain succeeds. A full node holds the set of
+      unspent outputs and validates every rule against it, and that set grows
+      with adoption. Bitcoin's is past 170 million entries and roughly 11 GB
+      <sup><a href="#r2">[2]</a></sup>. Ethereum's state has driven a research
+      programme spanning state expiry, weak statelessness and Verkle trees,
+      which its own roadmap places several years out and dependent on two other
+      unfinished efforts <sup><a href="#r3">[3]</a></sup>.
+    </p>
+    <p>
+      The usual answer is that hardware gets cheaper. Perhaps, but the
+      direction is still wrong: the ratio between what a chain demands and what
+      an ordinary person owns moves against the person. Light clients do not
+      resolve this. They change who is trusted rather than removing the need to
+      trust.
+    </p>
+    <p class="claim">
+      Cairn treats the growth of validation state as the design problem, not as
+      an operational detail to be managed later.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">2</div>
+  <div class="body">
+    <h2>Notes, and why they are not balances</h2>
+    <p>
+      Cairn keeps notes rather than accounts. A note is a value locked to a
+      public key, identified by the transaction that created it and its index
+      among that transaction's outputs. It is written once and consumed once.
+      This is the unspent output model, as in Bitcoin.
+    </p>
+    <p>
+      The choice is not stylistic. An account balance must be read and written,
+      so the account has to be held. A note is created once and destroyed once,
+      which means a node can hold a commitment to it instead of the note
+      itself, and can forget it entirely while remaining certain about what
+      remains. Everything that follows depends on this property.
+    </p>
+    <p>
+      Ordering over note identifiers is defined, so the note set has exactly
+      one canonical enumeration, which the state commitment depends on.
+      Transfer identifiers exclude signatures and witnesses. That gives
+      malleability resistance, and more importantly it means a stale inclusion
+      proof can be replaced with a fresh one without changing any identifier
+      that anything else has committed to.
+    </p>
+    <p>
+      Hashing is BLAKE3 with a distinct derived key per domain, so a value
+      hashed as a note leaf can never be read as a header leaf or a Merkle
+      node. Signatures are Ed25519 with two restrictions beyond the standard:
+      small-order keys are rejected at construction, and non-canonical
+      encodings are refused, so two byte strings can never name one key. Every
+      signature commits to the network, the version, the transaction
+      identifier, the input index, and the value and owner of the note being
+      spent. Committing to the spent note is the lesson of transaction formats
+      that could be deceived about their own inputs.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">3</div>
+  <div class="body">
+    <h2>Two tiers, and only one of them is held</h2>
+    <p>
+      Validation state is split in two by a consensus rule.
+    </p>
+
+    <figure>
+      <figcaption>Figure 1. What a node holds, at any age of the chain</figcaption>
+      <div class="tiers">
+        <div class="tier-row hot">
+          <div class="tier-label">Hot set</div>
+          <div class="tier-body">
+            <b>Held in full by every node</b>
+            Notes that have moved recently, in a sparse Merkle tree, capped at
+            131 072 entries. When the cap is reached, the oldest are evicted at
+            block boundaries by a rule every node applies identically.
+            <span class="tier-figure">131 072 notes · 813 bytes each measured · 107 MB at capacity</span>
+          </div>
+        </div>
+        <div class="tier-row cold">
+          <div class="tier-label">Cold set</div>
+          <div class="tier-body">
+            <b>Held by nobody</b>
+            An append-only Merkle forest of everything evicted. A node keeps
+            its roots and nothing else. Spending from it requires an inclusion
+            proof, supplied by the spender, verified against those roots.
+            <span class="tier-figure">unbounded contents · 64 hashes · 2 kB, constant</span>
+          </div>
+        </div>
+      </div>
+      <p class="fig-note">
+        The cap is consensus, not configuration. Two nodes disagreeing on it
+        would evict different notes at the same height, produce different state
+        commitments, and follow different chains while each believed it was on
+        the same one.
+      </p>
+    </figure>
+
+    <h3><span class="sub">3.1</span>The hot set</h3>
+    <p>
+      A sparse Merkle tree, persistent through structural sharing so that a
+      reorganisation restores the previous root without a rebuild. Eviction is
+      by age, oldest first, in batches at block boundaries. The measured cost is
+      813 bytes per note, which is the note, its identifier, and its share of
+      the tree. A leaner representation is the clearest remaining optimisation
+      and changes no rule.
+    </p>
+
+    <h3><span class="sub">3.2</span>The cold set</h3>
+    <p>
+      An append-only forest of perfect binary trees, held as one root per
+      possible height. This is the structure introduced by Utreexo
+      <sup><a href="#r4">[4]</a></sup>, and Cairn does not claim it.
+    </p>
+    <p>
+      The property the whole design turns on is that adding a leaf requires
+      only the roots. A node holding none of the set can still extend the
+      accumulator correctly, which is not true of a plain Merkle tree. On
+      insertion the new leaf rides on the right of every merge, so the trees it
+      swallows are its own siblings in order, and the inclusion proof falls out
+      of the addition itself at no extra cost.
+    </p>
+    <p>
+      Removal is batched. Every proof in a block is verified against the
+      pre-block root before anything is applied, then applied in order with the
+      remaining proofs refreshed, so two cold spends in the same block cannot
+      invalidate each other.
+    </p>
+
+    <h3><span class="sub">3.3</span>Where Cairn differs from prior accumulator work</h3>
+    <p>
+      Utreexo is a node-level optimisation. Any operator may adopt it
+      independently, the protocol is unchanged, and the underlying set remains
+      unbounded. Accumulator schemes over RSA groups, such as MiniChain
+      <sup><a href="#r5">[5]</a></sup> and CompactChain
+      <sup><a href="#r6">[6]</a></sup>, achieve constant-size commitments but
+      require a group of unknown order, meaning either a trusted setup or class
+      groups, and likewise leave the set unbounded.
+    </p>
+    <p>
+      Mina takes the opposite route to the same goal, compressing the entire
+      chain to about 22 kB with recursive zero-knowledge proofs
+      <sup><a href="#r12">[12]</a></sup>. It works, and it is the most complete
+      answer to this problem in production. The price is proof of stake, with
+      the initial distribution that implies, and a cryptographic stack almost
+      nobody can audit. Cairn pays a different price for a weaker guarantee:
+      the state is bounded rather than eliminated, and everything used to do it
+      is old and widely understood.
+    </p>
+    <p>
+      Cairn's contribution is not the accumulator. It is the pairing of a
+      consensus-enforced cap on the held tier with an accumulator for the
+      remainder, so that what a validator must hold is bounded by rule rather
+      than by the operator's choice of implementation.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">4</div>
+  <div class="body">
+    <h2>Spending what nobody holds</h2>
+    <p>
+      A spender of a fallen note supplies an inclusion proof. The node verifies
+      it against roots it already has and never needs the set. Two windows make
+      this workable rather than merely correct.
+    </p>
+
+    <h3><span class="sub">4.1</span>The proof window</h3>
+    <p>
+      A proof may be up to <code>PROOF_WINDOW = 32</code> blocks stale. Without
+      this, a transfer written while a block was being found would be invalid
+      by the time it arrived, through no fault of its author. Verification
+      walks backwards through recent roots and stops at the first block that
+      emptied the position. An earlier version of this check compared roots
+      before checking whether the position had been spent, which permitted a
+      double spend; the ordering is load-bearing.
+    </p>
+
+    <h3><span class="sub">4.2</span>The grace window</h3>
+    <p>
+      A note that has just fallen remains spendable with no proof at all for
+      <code>GRACE_BLOCKS = 64</code> blocks, bounded also at
+      <code>GRACE_NOTES = 8 192</code> entries. Every node still holds both the
+      note and its proof during that window, so nothing is asked of the
+      spender. Without it the boundary between tiers would be a cliff that a
+      payer falls off for no reason of their own.
+    </p>
+    <p>
+      Utreexo has a comparable observation, that outputs created and spent
+      within one block need not enter the accumulator at all
+      <sup><a href="#r4">[4]</a></sup>, and roughly 40% of outputs live fewer
+      than twenty blocks. There it is an optimisation each node may choose.
+      Here it is a rule the whole network applies, which turns a likelihood
+      into a guarantee for whoever is paying.
+    </p>
+
+    <h3><span class="sub">4.3</span>Archivists</h3>
+    <p>
+      A wallet keeps its own proofs current from what every block already
+      carries, and asks nobody. A wallet that has been offline long enough, or
+      that has lost its records, needs someone who kept the cold set. Archivists
+      are optional nodes that do, and are paid on request.
+    </p>
+    <p>
+      They were in the design from the first day, for an intuition. Section 8
+      explains why they turn out to be structural rather than convenient.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">5</div>
+  <div class="body">
+    <h2>Consensus</h2>
+
+    <h3><span class="sub">5.1</span>Proof of work, and why not stake</h3>
+    <p>
+      The reason is the beginning rather than the steady state. Proof of stake
+      requires an initial distribution before it can function, which means
+      somebody decides who holds influence on day one. Proof of work requires
+      nobody to decide anything: the network opens and the first block goes to
+      whoever mines it. For a currency whose claim is that no party is
+      privileged, the opening is exactly where that claim is tested.
+    </p>
+
+    <h3><span class="sub">5.2</span>Difficulty and timestamps</h3>
+    <p>
+      Difficulty retargets every block over a linearly weighted moving average
+      of the previous 90, with solve times clamped at six times the target and
+      a maximum factor of four per retarget. A large miner arriving or leaving
+      changes the rate without stranding the chain.
+    </p>
+    <p>
+      Timestamps are validated against the median of the previous 11 blocks
+      rather than against the parent. A miner writes its own timestamp but holds
+      one vote in a median, which removes the single-block manipulation that a
+      later-than-parent rule permits. A block may not be dated more than two
+      hours ahead of the receiving node's clock, nor before the moment the
+      network opened.
+    </p>
+
+    <h3><span class="sub">5.3</span>Fork choice</h3>
+    <p>
+      By cumulative work, not length. Ties keep the branch already followed, so
+      churning the tip costs work rather than nothing. A switch is applied
+      atomically: each applied block records its own inverse, and a bad block
+      discovered partway through a switch returns the node exactly where it
+      was.
+    </p>
+    <p>
+      Undo records are kept for the most recent
+      <code>MAX_REORG_DEPTH = 1 024</code> blocks and a deeper switch is
+      refused. This is a local safety policy rather than a consensus rule: two
+      nodes with different limits build the same chain and differ only after a
+      reorganisation deeper than either would accept, which on a live network
+      means an attack or a partition lasting most of a day.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">6</div>
+  <div class="body">
+    <h2>Emission</h2>
+    <p>
+      Nothing is allocated. There is no sale, no founder allocation and no
+      reserve; on the day a network opens the supply is zero and every unit
+      since has been paid for the work of finding a block. The first blocks of
+      both existing networks pay nobody at all.
+    </p>
+    <p>
+      The reward begins at 50 CAIRN and halves every 1 051 200 blocks, about two
+      years at a one minute block time, until halving would take it below a
+      floor of 0.01 CAIRN, which is then paid indefinitely. Roughly 105 million
+      CAIRN exist by the time the floor takes over. The smallest unit is the
+      pebble, at 10<sup>8</sup> to one CAIRN.
+    </p>
+    <p>
+      The perpetual tail is deliberate. Whether transaction fees alone can fund
+      security in the long run is an open question, and a chain whose central
+      promise is verifiability in thirty years cannot rest its security budget
+      on an open question. The price is a known, small and permanently
+      decreasing rate of dilution.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">7</div>
+  <div class="body">
+    <h2>Joining a chain without downloading it</h2>
+    <p>
+      A bounded steady-state cost is not the whole promise if arrival is
+      unbounded, and this is where the design was weakest.
+    </p>
+
+    <h3><span class="sub">7.1</span>The measured cost of arrival</h3>
+    <p>
+      On this implementation, at one block per minute with blocks carrying 64
+      transfers, thirty years of chain is 48 GB to download and 5.3 hours to
+      revalidate on one core, to arrive at a validation state weighing 107 MB.
+      The wall is bandwidth, not computation.
+    </p>
+
+    <h3><span class="sub">7.2</span>What headers commit to</h3>
+    <p>
+      Every header carries two fields beyond its own block, for 48 bytes:
+    </p>
+    <p>
+      <strong>Accumulated work.</strong> The work behind this block and every
+      block before it, checked against the parent's, so a block cannot claim
+      work it did not do.
+    </p>
+    <p>
+      <strong>A commitment to every earlier header.</strong> The root of an
+      append-only forest holding one leaf per header, carried by a node as
+      sixty four hashes exactly like the cold set, at a cost of one append per
+      block.
+    </p>
+    <p>
+      These were added before any network carried value, because they could not
+      be added afterwards: changing the shape of a header invalidates every
+      block already mined. The test network took the next number when they
+      landed, which cost nothing at the time and would have cost everything
+      later.
+    </p>
+
+    <h3><span class="sub">7.3</span>Sampled verification</h3>
+    <p>
+      With those commitments, a newcomer holding only the tip can be handed a
+      logarithmic sample of old headers, verify that each sits where it claims
+      in the tip's commitment, and conclude what work stands behind the tip
+      without reading the headers in between. This is FlyClient
+      <sup><a href="#r7">[7]</a></sup>, whose security rests on the same
+      assumption as the chain itself, that no adversary controls a majority of
+      the work.
+    </p>
+    <p>
+      The earlier superblock approach, NIPoPoW <sup><a href="#r11">[11]</a></sup>,
+      achieves a similar compression by showing only unusually heavy blocks,
+      but is vulnerable to bribing the miners who find them into withholding
+      them. FlyClient's sampling has no equivalent target and is the
+      construction to follow.
+    </p>
+    <p>
+      Cairn will adopt the published construction with its proven parameters
+      rather than devise its own. A prototype measured on a chain of 20 000
+      blocks confirms the fields suffice: 128 sampled headers with their
+      inclusion proofs come to 76 kB, against 3.5 MB to read every header. The
+      same prototype demonstrates why the distribution must be taken and not
+      improvised. Under a uniform draw, a forger who keeps the real chain and
+      fakes only the last twenty blocks goes unnoticed 88% of the time, which
+      is precisely why FlyClient samples the recent end of the chain more
+      densely.
+    </p>
+    <p>
+      One practical note in Cairn's favour. A production study of FlyClient
+      reports that proof size is dominated by header size, at 1 344 bytes per
+      header on the chain it was deployed to, and that restructuring headers
+      would reduce proofs by 71% at the cost of a consensus change it can no
+      longer make <sup><a href="#r8">[8]</a></sup>. A Cairn header is 182 bytes.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">8</div>
+  <div class="body">
+    <h2>The limit that applies, and where Cairn falls</h2>
+    <p>
+      Christ and Bonneau prove an information-theoretic result about any system
+      of this shape <sup><a href="#r1">[1]</a></sup>: there is no useful
+      trade-off point. A system must either hold a global state linear in the
+      number of accounts, or require a near-linear rate of local proof updates
+      as coins are spent. They add, and this bears directly on the design here,
+      that so long as the succinct state is too small to capture the full
+      state, enlarging it helps little.
+    </p>
+    <p class="claim">
+      Cairn falls on the proof-update side of that dilemma, deliberately, and
+      had accepted the cost before knowing it was proven inevitable.
+    </p>
+    <p>
+      A wallet refreshes its own proofs from what every block already carries.
+      The hot set does not repeal the result; what it changes is who is
+      affected. Notes that have moved recently, which are the ones ordinarily
+      spent, are held in full by every node and require no proof at all. The
+      obligation falls only on value that has not moved in a long time.
+    </p>
+    <p>
+      The authors name proof-serving nodes, third parties holding the full
+      state and producing current witnesses for others, as the natural
+      relaxation, and call for work on how such parties would be compensated.
+      Those are Cairn's archivists. They were included for an intuition and
+      turn out to be structural, and the open question about their economics is
+      open for everyone rather than for this design in particular.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">9</div>
+  <div class="body">
+    <h2>What this borrows, stated plainly</h2>
+    <p>
+      Overclaiming is the fastest way to lose the only readers whose opinion
+      matters.
+    </p>
+    <p>
+      The append-only forest carried by its roots is Utreexo's
+      <sup><a href="#r4">[4]</a></sup>. Spender-supplied inclusion proofs are
+      the common model of Utreexo, MiniChain and CompactChain. The header
+      commitment and work-weighted sampling are FlyClient's
+      <sup><a href="#r7">[7]</a></sup>. The archivists are the proof-serving
+      nodes of Christ and Bonneau <sup><a href="#r1">[1]</a></sup>, arrived at
+      independently. None of the cryptography is novel, and it is not meant to
+      be: BLAKE3 and Ed25519, both with domain separation and canonical
+      encoding enforced, and no trusted setup anywhere.
+    </p>
+    <p>
+      What a survey of the field did not find an equivalent of: a hot set
+      capped by consensus rule; the two tiers paired, holding a bounded set in
+      full while carrying the remainder in constant space; a grace window as a
+      network rule rather than a per-node cache; and bounding state without
+      destroying anything. Ergo charges storage rent and lets a miner take a
+      box left idle for four years <sup><a href="#r9">[9]</a></sup>; a December
+      2025 proposal to the bitcoin-dev list would render outputs below a moving
+      floor permanently unspendable <sup><a href="#r10">[10]</a></sup>. Both
+      bound the state by removing value from its owner, which the first
+      guarantee here forbids.
+    </p>
+    <p>
+      A search is not proof of absence, and this section should be read as a
+      claim about what was found rather than about what exists.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">10</div>
+  <div class="body">
+    <h2>Parameters and measurements</h2>
+    <p>
+      Every figure below is measured on the implementation rather than
+      estimated, on one core of an ordinary machine.
+    </p>
+
+    <div class="params">
+      <div><span class="k">Hot set capacity</span><span class="v">131 072 notes</span></div>
+      <div><span class="k">Bytes per hot note, measured</span><span class="v">813</span></div>
+      <div><span class="k">Hot set at capacity</span><span class="v">107 MB</span></div>
+      <div><span class="k">Cold set carried by a node</span><span class="v">64 hashes, 2 kB</span></div>
+      <div><span class="k">Proof window</span><span class="v">32 blocks</span></div>
+      <div><span class="k">Grace window</span><span class="v">64 blocks, 8 192 notes</span></div>
+      <div><span class="k">Difficulty window</span><span class="v">90 blocks, LWMA</span></div>
+      <div><span class="k">Median time past</span><span class="v">11 blocks</span></div>
+      <div><span class="k">Maximum retarget</span><span class="v">factor 4</span></div>
+      <div><span class="k">Maximum reorganisation depth</span><span class="v">1 024 blocks</span></div>
+      <div><span class="k">Initial reward</span><span class="v">50 CAIRN</span></div>
+      <div><span class="k">Halving interval</span><span class="v">1 051 200 blocks</span></div>
+      <div><span class="k">Tail reward</span><span class="v">0.01 CAIRN, perpetual</span></div>
+      <div><span class="k">Header size</span><span class="v">182 bytes</span></div>
+      <div><span class="k">Empty block</span><span class="v">196 bytes</span></div>
+      <div><span class="k">Block with 64 transfers</span><span class="v">3 211 bytes</span></div>
+      <div><span class="k">Validation, empty block</span><span class="v">0.009 ms</span></div>
+      <div><span class="k">Validation, 64 transfers</span><span class="v">1.21 ms</span></div>
+    </div>
+
+    <div class="scroll">
+      <table>
+        <caption>Thirty years of chain at one block per minute, blocks carrying 64 transfers</caption>
+        <thead>
+          <tr>
+            <th>Quantity</th>
+            <th class="n">Size</th>
+            <th>Bounded?</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>All blocks, to download</td>
+            <td class="n">48 GB</td>
+            <td>No, grows with history</td>
+          </tr>
+          <tr>
+            <td>All headers, to read</td>
+            <td class="n">2 GB</td>
+            <td>No, grows with history</td>
+          </tr>
+          <tr>
+            <td>Revalidating from genesis</td>
+            <td class="n">5.3 h</td>
+            <td>No, grows with history</td>
+          </tr>
+          <tr class="us">
+            <td>Validation state a node holds</td>
+            <td class="n">107 MB</td>
+            <td>Yes, by consensus rule</td>
+          </tr>
+          <tr class="us">
+            <td>Cold set a node carries</td>
+            <td class="n">2 kB</td>
+            <td>Yes, whatever its contents</td>
+          </tr>
+          <tr class="us">
+            <td>Header history a node carries</td>
+            <td class="n">2 kB</td>
+            <td>Yes, whatever the height</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="fig-note">
+      The first three rows are the cost of arriving; the last three are the cost
+      of participating. Section 7 is about turning the first group into
+      something closer to the second, and the header commitments that make it
+      possible are already in place.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">11</div>
+  <div class="body">
+    <h2>Limitations</h2>
+    <p>
+      <strong>Nothing here has been audited.</strong> No external review has
+      taken place. The only network in existence is a test network whose
+      currency is worthless by design and which will be reset.
+    </p>
+    <p>
+      <strong>Arrival is still unbounded in practice.</strong> The headers
+      commit to what a sampled start requires; the protocol that serves the
+      sample is not written. Until it is, joining means downloading and
+      revalidating everything.
+    </p>
+    <p>
+      <strong>A node holds the history it follows in memory.</strong> This is
+      the history, not the validation state, and it is the last quantity that
+      grows with the chain. The same header commitment is what will allow a
+      node to stop carrying it.
+    </p>
+    <p>
+      <strong>The theorem's cost is real.</strong> A wallet offline long enough
+      must ask an archivist, and the economics of archivists are unspecified.
+      This is an open question in the literature, not only here.
+    </p>
+    <p>
+      <strong>Smaller.</strong> An archivist rebuilds a proof in time
+      proportional to the set it holds. The hot tree representation has clear
+      room at 813 bytes per note.
+    </p>
+    <p>
+      The implementation is roughly 19 000 lines of Rust with 287 tests, no
+      unsafe code, no asynchronous runtime, and five dependencies. Arithmetic
+      side effects, slice indexing, and panicking helpers are denied at the
+      workspace level. It is small enough to be read, which is the point: a
+      chain asking people to verify for themselves should be verifiable in
+      more than one sense.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">12</div>
+  <div class="body">
+    <h2>References</h2>
+    <ol class="refs">
+      <li id="r1">
+        M. Christ and J. Bonneau. <em>Limits on revocable proof systems, with
+        applications to stateless blockchains.</em> Financial Cryptography and
+        Data Security, 2023.
+        <a href="https://eprint.iacr.org/2022/1478">eprint.iacr.org/2022/1478</a>
+      </li>
+      <li id="r2">
+        Bitcoin Optech. <em>Utreexo topic page</em>, UTXO set size figures.
+        <a href="https://bitcoinops.org/en/topics/utreexo/">bitcoinops.org/en/topics/utreexo</a>
+      </li>
+      <li id="r3">
+        Ethereum Foundation. <em>Statelessness, state expiry and history
+        expiry.</em>
+        <a href="https://ethereum.org/roadmap/statelessness/">ethereum.org/roadmap/statelessness</a>
+      </li>
+      <li id="r4">
+        T. Dryja. <em>Utreexo: a dynamic hash-based accumulator optimized for
+        the Bitcoin UTXO set.</em> MIT Digital Currency Initiative, 2019.
+        <a href="https://eprint.iacr.org/2019/611">eprint.iacr.org/2019/611</a>
+      </li>
+      <li id="r5">
+        <em>MiniChain: a lightweight protocol to combat the UTXO growth in
+        public blockchain.</em> Journal of Parallel and Distributed Computing,
+        2020.
+      </li>
+      <li id="r6">
+        <em>CompactChain: an efficient stateless chain for UTXO-model
+        blockchain.</em> Frontiers of Computer Science, 2023.
+        <a href="https://arxiv.org/pdf/2211.06735">arxiv.org/abs/2211.06735</a>
+      </li>
+      <li id="r7">
+        B. Bünz, L. Kiffer, L. Luu and M. Zamani. <em>FlyClient: super-light
+        clients for cryptocurrencies.</em> IEEE Symposium on Security and
+        Privacy, 2020.
+        <a href="https://eprint.iacr.org/2019/226.pdf">eprint.iacr.org/2019/226</a>
+      </li>
+      <li id="r8">
+        <em>Catching the Fly: practical challenges in making blockchain
+        FlyClient real.</em> 2026.
+        <a href="https://arxiv.org/html/2604.26736v1">arxiv.org/abs/2604.26736</a>
+      </li>
+      <li id="r9">
+        Ergo Platform. <em>Storage rent.</em>
+        <a href="https://docs.ergoplatform.com/dev/protocol/storage-rent/">docs.ergoplatform.com/dev/protocol/storage-rent</a>
+      </li>
+      <li id="r10">
+        <em>Reducing RAM requirements with dynamic dust.</em> bitcoin-dev
+        mailing list, December 2025.
+        <a href="https://groups.google.com/g/bitcoindev/c/PMtM_I3qwqg/m/CsbaSXRaCwAJ">groups.google.com/g/bitcoindev</a>
+      </li>
+      <li id="r11">
+        A. Kiayias, A. Miller and D. Zindros. <em>Non-interactive proofs of
+        proof-of-work.</em> 2017.
+        <a href="https://eprint.iacr.org/2017/963.pdf">eprint.iacr.org/2017/963</a>
+      </li>
+      <li id="r12">
+        O(1) Labs. <em>Mina: a 22 kB blockchain, technical reference.</em>
+        <a href="https://minaprotocol.com/blog/22kb-sized-blockchain-a-technical-reference">minaprotocol.com</a>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<footer>
+  <span>Cairn · draft whitepaper · 28 August 2026</span>
+  <span>Nothing here is investment advice</span>
+  <span>No mainnet exists</span>
+</footer>
+
+</div>
