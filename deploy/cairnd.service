@@ -1,0 +1,48 @@
+[Unit]
+Description=Cairn node
+Documentation=https://github.com/cairn-protocol/cairn
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cairn
+Group=cairn
+
+# The node prints a status line and nothing else; journald keeps it.
+ExecStart=/usr/local/bin/cairnd \
+    --network testnet-2 \
+    --data /var/lib/cairn \
+    --listen 0.0.0.0:9944 \
+    --status 60
+
+# A seed node has to come back on its own. Since the data directory lock is
+# held by the kernel on an open file, a node killed outright releases it as it
+# dies, and the restart below finds the directory free.
+Restart=always
+RestartSec=5s
+# Give up only if it fails to hold for a minute, five times running, which
+# means something is wrong that restarting will not fix.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Nothing here holds a key or signs anything, so it needs almost no access to
+# the machine it runs on. What it does need is one directory and one port.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/cairn
+
+[Install]
+WantedBy=multi-user.target
