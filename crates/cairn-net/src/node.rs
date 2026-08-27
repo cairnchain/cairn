@@ -681,9 +681,12 @@ fn dial_from_book(shared: &Arc<Shared>) {
         return;
     }
 
+    // Most recently heard from first, so a node spends its attention on peers
+    // that have proved they exist rather than on whatever sorts lowest.
     let candidates: Vec<SocketAddr> = shared
         .book()
-        .iter()
+        .candidates()
+        .into_iter()
         .filter(|address| *address != shared.address && !connected.contains(address))
         .take(wanted)
         .collect();
@@ -696,8 +699,13 @@ fn dial_from_book(shared: &Arc<Shared>) {
         if shared.refuses(host, unix_now()) || !shared.has_room_for(Some(host)) {
             continue;
         }
-        if let Ok(stream) = TcpStream::connect_timeout(&address, DIAL_TIMEOUT) {
-            attach_peer(shared, stream, true);
+        match TcpStream::connect_timeout(&address, DIAL_TIMEOUT) {
+            Ok(stream) => attach_peer(shared, stream, true),
+            // An address that never answers would otherwise be dialled every
+            // second forever, and handed to every peer that asks.
+            Err(_) => {
+                shared.book().missed(&address);
+            }
         }
     }
 }
@@ -894,6 +902,8 @@ fn read_loop(
         if !announced {
             if let Some(address) = peer.advertised {
                 announced = true;
+                // It spoke, so whatever was held against it no longer holds.
+                shared.book().answered(&address, last_heard);
                 if register(shared, id, address) == Registration::Redundant
                     && loses_the_tie(shared.address, address, initiator)
                 {
