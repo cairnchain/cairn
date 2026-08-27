@@ -241,7 +241,7 @@
     <h1 class="mark">CAIRN</h1>
     <p class="thesis">Une monnaie que <em>ton téléphone</em> vérifie lui-même — aujourd'hui, et dans trente ans.</p>
     <div class="metaline">
-      <span>Document de conception · v0.13</span>
+      <span>Document de conception · v0.14</span>
       <span>26 août 2026</span>
       <span>Nom de code — provisoire</span>
     </div>
@@ -425,6 +425,7 @@
         <li class="done"><div><b>Les exécutables<span class="state">Fait</span></b><span>Un nœud et un portefeuille, en ligne de commande. Le portefeuille ne demande pas à un serveur ce qu'il possède : il rejoint le réseau, vérifie la chaîne lui-même et lit son solde dans le grand livre qu'il vient de valider. Les règles de consensus se choisissent en nommant un réseau et ne se règlent pas une par une. Une transaction attend maintenant dans une réserve qu'un bloc l'emporte, ce qui permet à quelqu'un de payer quelqu'un d'autre. Reste la version téléphone.</span></div></li>
         <li class="done"><div><b>Le portefeuille qui garde ses preuves<span class="state">Fait</span></b><span>L'ajout d'un billet dans la forêt fournit sa preuve au passage : elle n'est jamais à demander. À partir de là, un nœud à qui l'on a nommé un propriétaire tient ses preuves à jour avec ce qui circule déjà dans les blocs, sans jamais interroger personne. Deux corrections sont venues du premier essai réel : une preuve prise il y a quelques blocs reste acceptée, sinon une transaction écrite pendant qu'un bloc se trouve serait perdue ; et un billet qui vient de descendre reste dépensable sans preuve pendant une fenêtre fixe, sinon la frontière entre les deux tiroirs serait une falaise dont le payeur ferait les frais sans avoir rien fait de mal.</span></div></li>
         <li class="done"><div><b>De quoi ouvrir un réseau<span class="state">Fait</span></b><span>Chaque réseau part d'un bloc inscrit dans le programme, donc deux nœuds qui ne se sont jamais rencontrés sont sur la même chaîne par construction, et aucun n'a à croire un inconnu sur l'origine de l'histoire. Ce qui est écrit n'est pas une promesse mais des octets : n'importe qui recalcule l'empreinte et vérifie le travail derrière. Le premier bloc demande déjà un vrai travail, mesuré, sans quoi les premières secondes appartiennent à qui démarre en avance. Aucun bloc ne peut être daté avant l'ouverture annoncée. Et le premier bloc porte de quoi dire de quel jour il est, ce qui prouve que la chaîne n'a pas été lancée en douce des semaines plus tôt.</span></div></li>
+        <li class="done"><div><b>La porte d'entrée<span class="state">Fait</span></b><span>Un explorateur, qui est un nœud qui sert en plus un site : la chaîne en public, et l'explication de la chaîne. Il tient un index des propriétaires vers leurs billets, c'est-à-dire exactement le coût qui grandit que le protocole refuse d'imposer aux validateurs, et c'est la raison pour laquelle il vit dans un programme séparé que personne n'est obligé de faire tourner. Le site est écrit trois fois : le lecteur choisit en arrivant ce qu'il sait déjà, et ce choix le suit partout, si bien que la page d'un bloc explique ce qu'est un bloc ou donne la structure des engagements. Anglais et français, une langue étant un fichier et rien d'autre. La page ne fait que lire : elle ne détient aucune clé et ne peut rien signer, parce qu'un portefeuille dans un navigateur est d'où viennent la plupart des vols de ce milieu.</span></div></li>
         <li><div><b>Le testnet public</b><span>Une monnaie sans valeur, ouverte, que des inconnus font tourner. Le seul vrai test de décentralisation : tout ce qui précède peut être parfait et échouer ici.</span></div></li>
       </ol>
 
@@ -437,7 +438,7 @@
   </section>
 
   <footer>
-    <span>Cairn · document de conception v0.13</span>
+    <span>Cairn · document de conception v0.14</span>
     <span>Statut — prêt à être lancé en public</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
