@@ -81,9 +81,9 @@
     font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.62rem;
     letter-spacing:.06em;color:var(--ground);white-space:nowrap;overflow:hidden;
   }
-  .bar .code{background:var(--mine);flex:0 0 26%}
-  .bar .wait{background:var(--outside);flex:0 0 44%}
-  .bar .money{background:var(--yours);flex:0 0 30%}
+  .bar .code{background:var(--mine);flex:0 0 20%}
+  .bar .wait{background:var(--outside);flex:0 0 48%}
+  .bar .money{background:var(--yours);flex:0 0 32%}
   .legend{display:flex;flex-wrap:wrap;gap:.5rem 1.4rem;margin-top:.75rem;font-size:.82rem;color:var(--ink-2)}
   .legend span{display:inline-flex;align-items:center;gap:.4rem}
   .legend i{width:9px;height:9px;border-radius:2px;display:inline-block}
@@ -168,7 +168,7 @@
 <div class="page">
 
   <header class="top">
-    <p class="eyebrow">Cairn · état des lieux · 27 août 2026</p>
+    <p class="eyebrow">Cairn · état des lieux · 28 août 2026</p>
     <h1>La route jusqu'au mainnet</h1>
     <p class="sub">
       Ce qui est fait, ce qui reste, qui le fait, ce que ça coûte. Sans
@@ -179,19 +179,19 @@
   <div class="answer">
     <div class="answer-row">
       <div>
-        <h3>Le protocole</h3>
-        <p class="big">Complet</p>
-        <p class="note">Il tourne, il résiste, 279 tests. Rien de bloquant n'y reste.</p>
+        <h3>Le réseau</h3>
+        <p class="big">En ligne</p>
+        <p class="note">Deux serveurs chez deux hébergeurs, un mineur, une chaîne qui avance.</p>
       </div>
       <div>
         <h3>Prêt pour du vrai argent</h3>
         <p class="big">Non</p>
-        <p class="note">Jamais attaqué, jamais audité, jamais vu par un inconnu.</p>
+        <p class="note">Jamais audité, et vu par personne d'autre que nous.</p>
       </div>
       <div>
         <h3>Délai réaliste</h3>
         <p class="big">Un an</p>
-        <p class="note">Et vouloir aller plus vite est la meilleure façon de tout perdre.</p>
+        <p class="note">Presque entièrement fait d'attente et de relecture, pas d'écriture.</p>
       </div>
     </div>
   </div>
@@ -199,7 +199,8 @@
   <div class="weigh">
     <p>
       La chose importante à voir avant tout le reste : l'essentiel de ce qui
-      reste n'est pas du code.
+      reste n'est pas du code. Et cette part a grandi depuis hier, puisque la
+      première phase est faite.
     </p>
     <div class="bar">
       <span class="code">écrire</span>
@@ -217,11 +218,12 @@
     <div class="phase-head">
       <span class="phase-n">Phase 1</span>
       <h2>Ouvrir le testnet</h2>
-      <span class="phase-when">quelques jours</span>
+      <span class="phase-when">faite dans la nuit du 27 au 28</span>
     </div>
     <p class="phase-why">
-      Rien de technique ne bloque. Le code est prêt, le premier bloc est miné,
-      les règles sont figées. Ce qui manque tient en trois choses matérielles.
+      Le réseau existe. Deux serveurs chez deux hébergeurs, le code public,
+      un mineur, une chaîne qui avance. Il reste deux choses, et l'une des
+      deux ne dépend que de toi.
     </p>
 
     <div class="tasks">
@@ -233,26 +235,42 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
+      <div class="task finished">
+        <div class="task-what">
+          <b>Le code public</b>
+          <span>github.com/cairnchain/cairn, licences MIT et Apache, historique verrouillé contre l'effacement et la réécriture. C'est ce qui permet à un serveur de l'installer, à quiconque de vérifier ce qui tourne, et à des chercheurs de regarder sans que ça coûte un audit.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task finished">
+        <div class="task-what">
+          <b>Deux serveurs allumés en permanence</b>
+          <span>213.32.69.172 et 92.222.100.238, chez deux hébergeurs différents. Un nouveau venu n'a besoin que d'une des deux adresses : le réseau lui apprend l'autre tout seul, ce qui a été vérifié en direct.</span>
+        </div>
+        <div class="who you">toi</div>
+        <div class="cost real">quelques € / mois</div>
+      </div>
+      <div class="task finished">
+        <div class="task-what">
+          <b>L'installation en deux commandes</b>
+          <span>Un script qui compile depuis les sources, un service qui redémarre seul après un plantage ou un reboot, un pare-feu, et les notes d'exploitation.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task finished">
+        <div class="task-what">
+          <b>Une chaîne qui avance</b>
+          <span>Un mineur produit des blocs, les serveurs les propagent, un portefeuille lit un solde sans faire confiance à personne. La difficulté s'ajuste toute seule à la puissance présente.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
       <div class="task">
         <div class="task-what">
           <b>Des programmes téléchargeables</b>
-          <span>Compilés pour Mac, Linux et Windows, avec leurs empreintes publiées, pour que personne n'ait à installer Rust.</span>
-        </div>
-        <div class="who me">moi</div>
-        <div class="cost">un jour</div>
-      </div>
-      <div class="task">
-        <div class="task-what">
-          <b>Deux ou trois serveurs allumés en permanence</b>
-          <span>Les portes d'entrée du réseau. Sans elles, personne ne peut rejoindre. Il faut les louer et publier leurs adresses.</span>
-        </div>
-        <div class="who you">toi</div>
-        <div class="cost real">15 à 30 € / mois</div>
-      </div>
-      <div class="task">
-        <div class="task-what">
-          <b>La page d'installation et l'avertissement</b>
-          <span>Trois commandes, et écrit noir sur blanc que cette monnaie ne vaut rien et que le réseau sera effacé.</span>
+          <span>Compilés pour Mac, Linux et Windows, avec leurs empreintes publiées, pour que personne n'ait à installer Rust. Aujourd'hui il faut compiler, ce qui écarte tous ceux qui ne sont pas développeurs.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">un jour</div>
@@ -260,11 +278,29 @@
       <div class="task">
         <div class="task-what">
           <b>Inviter des gens</b>
-          <span>Le seul vrai test de décentralisation commence quand quelqu'un que tu ne connais pas lance un nœud.</span>
+          <span>Le seul vrai test de décentralisation commence quand quelqu'un que tu ne connais pas lance un nœud. C'est aussi la seule chose de toute cette page sur laquelle je ne peux rien.</span>
         </div>
         <div class="who you">toi</div>
         <div class="cost">ton temps</div>
       </div>
+    </div>
+    <div class="callout grey">
+      <b>Ce que le réseau a déjà trouvé, en trois heures</b>
+      <p>
+        Cinq défauts, dont aucun n'était visible sur une seule machine. Un
+        nœud qui se parlait à lui-même et gaspillait une place de connexion,
+        puis qui n'oubliait pas sa propre adresse et recommençait chaque
+        seconde. Un carnet d'adresses qui gardait à jamais les machines mortes
+        et les transmettait aux autres. Une mise à jour qui installait le
+        nouveau programme sans le démarrer, et annonçait un succès. Un script
+        qui s'arrêtait parce qu'un dépôt de paquets sans rapport se plaignait.
+      </p>
+      <p>
+        Trois de ces cinq ne touchent pas au protocole mais à la capacité de
+        le réparer, ce qui compte autant : un correctif qu'on croit appliqué et
+        qui ne l'est pas est pire qu'un correctif absent. C'est la justification
+        la plus concrète possible de la phase qui suit.
+      </p>
     </div>
   </section>
 
@@ -277,14 +313,31 @@
     <p class="phase-why">
       Cette phase est longue non pas à cause du travail, mais parce qu'un
       réseau ne révèle ses défauts qu'en tournant devant des gens qui ne le
-      ménagent pas. Le code se fait en parallèle, pendant que le temps passe.
+      ménagent pas. Elle a commencé cette nuit : le compteur tourne pendant
+      que le code s'écrit.
     </p>
 
     <div class="tasks">
+      <div class="task finished">
+        <div class="task-what">
+          <b>L'étude de l'existant</b>
+          <span>Seize travaux lus. Aucune chaîne ne plafonne son état par règle de consensus, ce qui laisse cette place vacante. Un théorème de 2023 prouve que personne n'échappe au dilemme que Cairn assume, et nomme comme seule échappatoire ce que ce projet appelait déjà les archivistes.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task finished">
+        <div class="task-what">
+          <b>Les en-têtes qui rendront le démarrage léger possible</b>
+          <span>Quarante-huit octets par bloc, gravés avant l'ouverture parce qu'ils ne pouvaient plus l'être après. Un prototype a vérifié qu'ils suffisent : 76 kB à lire contre 3,5 Mo, sur une chaîne de vingt mille blocs.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
       <div class="task">
         <div class="task-what">
           <b>Le whitepaper en anglais</b>
-          <span>La pièce qui attire les regards compétents. Il devra citer le théorème de Christ et Bonneau et dire de quel côté nous tombons, parce qu'un lecteur sérieux le connaîtra et cherchera notre réponse.</span>
+          <span>La pièce qui attire les regards compétents, et le meilleur moyen de réduire la facture d'audit. Il devra citer le théorème de Christ et Bonneau et dire de quel côté nous tombons, parce qu'un lecteur sérieux le connaîtra et cherchera notre réponse.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">une à deux semaines</div>
@@ -292,7 +345,7 @@
       <div class="task">
         <div class="task-what">
           <b>Le protocole d'échantillonnage</b>
-          <span>La distribution de FlyClient avec ses paramètres démontrés, les messages réseau, et le service par les archivistes. Le prototype a prouvé que nos en-têtes suffisent.</span>
+          <span>La distribution de FlyClient avec ses paramètres démontrés, les messages réseau, et le service par les archivistes. Le prototype a montré pourquoi il ne faut surtout pas improviser la nôtre : avec un tirage uniforme, vingt blocs falsifiés au bout de la chaîne passent inaperçus neuf fois sur dix.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">une à deux semaines</div>
@@ -312,6 +365,14 @@
         </div>
         <div class="who me">moi</div>
         <div class="cost">quelques jours</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Spécifier les archivistes</b>
+          <span>L'étude les a fait passer de confort à nécessité : le théorème montre qu'un état succinct impose que quelqu'un tienne les preuves à jour. Comment on les trouve sur le réseau, comment ils sont payés, et comment un portefeuille s'en passe tant qu'il reste à jour.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">une semaine</div>
       </div>
       <div class="task">
         <div class="task-what">
@@ -457,35 +518,42 @@
   </section>
 
   <div class="closing">
-    <h2>Ce que ça donne, mis bout à bout</h2>
+    <h2>Ce qui vient maintenant, dans l'ordre</h2>
     <p>
-      Le testnet peut ouvrir <strong>dans les jours qui viennent</strong>, dès
-      que les serveurs sont loués. C'est la seule chose qui te sépare d'un
-      réseau public en fonctionnement.
+      <strong>Le whitepaper.</strong> C'est ce qui a le plus de valeur
+      aujourd'hui, et pour une raison chiffrable : il fait regarder des gens
+      compétents gratuitement, avant de payer un cabinet pour chercher les
+      mêmes choses. La matière est fraîche, l'étude de l'existant est faite,
+      et le réseau tourne pour appuyer ce qu'il raconte.
     </p>
     <p>
-      Le mainnet, lui, demande d'enchaîner trois à six mois de vie réelle sur
-      le testnet, puis trois à six mois d'audit et de corrections. <strong>Un
-      an est le délai honnête</strong>, et il est presque entièrement fait
-      d'attente et de relecture, pas d'écriture.
+      <strong>Les programmes téléchargeables.</strong> Un jour de travail, et
+      ça retire la seule barrière qui reste entre un curieux et un nœud. Tant
+      qu'il faut compiler, seuls les développeurs peuvent essayer.
     </p>
     <p>
-      Le budget se sépare nettement en deux. Quelques dizaines d'euros par mois
-      pour faire vivre le testnet, à partir de maintenant. Puis, une seule
-      fois avant le mainnet, <strong>l'ordre de 60 000 à 140 000 dollars</strong>
-      d'audit et de conseil juridique.
+      <strong>Puis le temps fait son travail.</strong> Le reste du code, dans
+      l'ordre qui t'arrange, pendant que le réseau tourne et révèle ce
+      qu'aucun test ne trouve. Trois à six mois, dont cette nuit est le
+      premier soir.
+    </p>
+    <p>
+      <strong>Ensuite seulement, l'audit</strong>, qui reste la dépense
+      principale et le seul vrai obstacle entre Cairn et de l'argent réel.
+      L'ordre de 60 000 à 140 000 dollars avec le conseil juridique, une seule
+      fois, et non négociable.
     </p>
     <p>
       Et une chose qu'aucune somme n'achète : que des gens que tu ne connais
       pas trouvent le projet assez intéressant pour faire tourner un nœud.
-      C'est le seul chiffre qui dira si Cairn est décentralisée, et c'est aussi
-      le seul sur lequel je ne peux rien.
+      C'est le seul chiffre qui dira si Cairn est décentralisée, et c'est le
+      seul sur lequel je ne peux rien.
     </p>
   </div>
 
   <footer>
-    <span>Cairn · route jusqu'au mainnet · v1</span>
-    <span>36 commits · 279 tests</span>
+    <span>Cairn · route jusqu'au mainnet · v2</span>
+    <span>46 commits · 287 tests</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 
