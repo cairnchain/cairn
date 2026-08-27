@@ -72,6 +72,24 @@
   .answer .big{font-size:1.5rem;font-weight:600;letter-spacing:-.02em;line-height:1.2}
   .answer .note{font-size:.86rem;color:var(--ink-2);margin-top:.3rem}
 
+  /* ---- resume block ---- */
+  .resume{margin-top:1.6rem;border:1px solid var(--rule-firm);border-radius:4px;background:var(--card);padding:1.3rem 1.4rem}
+  .resume > h2{
+    margin:0 0 1.1rem;font-size:.68rem;font-weight:500;
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);
+  }
+  .resume-grid{display:grid;gap:1.4rem}
+  @media (min-width:52rem){.resume-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:2rem}}
+  .resume-grid h3{margin:0 0 .5rem;font-size:.92rem;font-weight:600;letter-spacing:-.006em}
+  .resume-grid p{margin:0;font-size:.89rem;color:var(--ink-2);line-height:1.55}
+  .resume-grid p + p{margin-top:.5rem}
+  .resume-grid b{color:var(--ink);font-weight:600}
+  .resume-grid ul{margin:0;padding-left:1.05rem;display:grid;gap:.3rem}
+  .resume-grid li{font-size:.89rem;color:var(--ink-2);line-height:1.5}
+  .resume-note{color:var(--ink-3)!important;font-size:.84rem!important}
+  .mono{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.82em;color:var(--ink-2)}
+
   /* ---- weight bar ---- */
   .weigh{margin-top:1.6rem;padding:1.15rem 1.25rem;border:1px solid var(--rule);border-radius:4px;background:var(--sunk)}
   .weigh p{margin:0 0 .8rem;font-size:.92rem;color:var(--ink-2)}
@@ -192,6 +210,52 @@
         <h3>Délai réaliste</h3>
         <p class="big">Un an</p>
         <p class="note">Presque entièrement fait d'attente et de relecture, pas d'écriture.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="resume">
+    <h2>Reprendre ici</h2>
+    <div class="resume-grid">
+      <div>
+        <h3>Ce qui tourne en ce moment</h3>
+        <ul>
+          <li><span class="mono">213.32.69.172:9944</span> serveur, permanent</li>
+          <li><span class="mono">92.222.100.238:9944</span> serveur, permanent</li>
+          <li>Un mineur sur le Mac, à arrêter ou à laisser</li>
+          <li>La chaîne avance, un bloc à la minute</li>
+        </ul>
+        <p class="resume-note">
+          Arrêter le mineur ne détruit rien : les serveurs gardent les blocs et
+          la chaîne repart au prochain mineur.
+          <span class="mono">pkill -f "cairnd --network testnet-2"</span>
+        </p>
+      </div>
+      <div>
+        <h3>La prochaine chose que j'écris</h3>
+        <p>
+          <b>Les programmes téléchargeables.</b> Un jour de travail, et ça
+          retire la dernière barrière entre un curieux et un nœud. Tant qu'il
+          faut compiler, seuls les développeurs peuvent essayer.
+        </p>
+        <p class="resume-note">
+          Ensuite, dans l'ordre qui t'arrange : le protocole d'échantillonnage,
+          sortir l'histoire de la mémoire, spécifier les archivistes, un
+          portefeuille qui n'est pas un terminal.
+        </p>
+      </div>
+      <div>
+        <h3>La prochaine chose qui t'appartient</h3>
+        <p>
+          <b>Montrer le papier à quelqu'un.</b> Un forum, une liste de
+          diffusion, quelqu'un du domaine. C'est ce qui fait relire le
+          protocole gratuitement, avant de payer un cabinet pour chercher les
+          mêmes choses.
+        </p>
+        <p class="resume-note">
+          Et quand tu voudras : inviter des gens à lancer un nœud. C'est le
+          seul point de toute cette page sur lequel je ne peux rien.
+        </p>
       </div>
     </div>
   </div>
@@ -334,13 +398,13 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Le whitepaper en anglais</b>
-          <span>La pièce qui attire les regards compétents, et le meilleur moyen de réduire la facture d'audit. Il devra citer le théorème de Christ et Bonneau et dire de quel côté nous tombons, parce qu'un lecteur sérieux le connaîtra et cherchera notre réponse.</span>
+          <span>Douze sections, douze références, chaque chiffre mesuré et non estimé. Une section dit ce qu'il emprunte, une autre affronte le théorème plutôt que de le contourner, et les limites sont une section entière et non une note de bas de page.</span>
         </div>
         <div class="who me">moi</div>
-        <div class="cost">une à deux semaines</div>
+        <div class="cost">terminé</div>
       </div>
       <div class="task">
         <div class="task-what">
@@ -552,8 +616,8 @@
   </div>
 
   <footer>
-    <span>Cairn · route jusqu'au mainnet · v2</span>
-    <span>46 commits · 287 tests</span>
+    <span>Cairn · route jusqu'au mainnet · v3</span>
+    <span>48 commits · 287 tests</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 
