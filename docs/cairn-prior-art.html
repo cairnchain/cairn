@@ -1,0 +1,952 @@
+<title>Cairn devant l'existant</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,300;0,400;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+  :root{
+    --paper:#F7F8F6; --surface:#FFFFFF; --sunk:#EFF1EC;
+    --ink:#171A17; --ink-2:#4A524C; --ink-3:#7C847E;
+    --rule:#DDE0D9; --rule-firm:#C2C7BC;
+
+    /* Two accents, because the document is about one distinction:
+       what is taken from elsewhere, and what is ours. */
+    --borrowed:#3D5665; --borrowed-soft:#E4EAEE; --borrowed-line:#B6C6D0;
+    --ours:#5F7017; --ours-soft:#E6EBCF; --ours-line:#B9C583;
+    --caution:#8A5411; --caution-soft:#F3E7D6;
+  }
+
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --paper:#12150F; --surface:#191D16; --sunk:#1F241C;
+      --ink:#E8EBE1; --ink-2:#A7B0A4; --ink-3:#78807A;
+      --rule:#2A2F27; --rule-firm:#3B4237;
+      --borrowed:#8FB2C6; --borrowed-soft:#1A2630; --borrowed-line:#33495A;
+      --ours:#AFC454; --ours-soft:#232B12; --ours-line:#495620;
+      --caution:#D2A05C; --caution-soft:#2C2113;
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#12150F; --surface:#191D16; --sunk:#1F241C;
+    --ink:#E8EBE1; --ink-2:#A7B0A4; --ink-3:#78807A;
+    --rule:#2A2F27; --rule-firm:#3B4237;
+    --borrowed:#8FB2C6; --borrowed-soft:#1A2630; --borrowed-line:#33495A;
+    --ours:#AFC454; --ours-soft:#232B12; --ours-line:#495620;
+    --caution:#D2A05C; --caution-soft:#2C2113;
+  }
+
+  *{box-sizing:border-box}
+
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:"Spectral",Georgia,"Times New Roman",serif;
+    font-size:17px;
+    line-height:1.62;
+    font-weight:400;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  .sheet{max-width:70rem;margin:0 auto;padding:0 clamp(1.1rem,4vw,3rem) 7rem}
+
+  /* ---- masthead ---- */
+
+  .head{
+    padding:clamp(3rem,8vw,6rem) 0 2rem;
+    border-bottom:2px solid var(--ink);
+  }
+  .kicker{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;
+    color:var(--ink-3);margin:0 0 1.4rem;
+  }
+  h1{
+    font-size:clamp(2.1rem,6vw,3.4rem);
+    font-weight:700;line-height:1.06;letter-spacing:-.022em;
+    margin:0 0 1rem;max-width:18ch;text-wrap:balance;
+  }
+  .standfirst{
+    font-size:clamp(1.05rem,2.2vw,1.24rem);
+    line-height:1.5;color:var(--ink-2);max-width:56ch;
+    font-weight:300;margin:0;
+  }
+  .stamp{
+    display:flex;flex-wrap:wrap;gap:.4rem 1.6rem;
+    margin-top:1.8rem;
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.68rem;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);
+  }
+
+  /* ---- verdict panel ---- */
+
+  .verdict{
+    margin-top:2.5rem;
+    display:grid;
+    grid-template-columns:minmax(0,1fr);
+    gap:1px;
+    background:var(--rule-firm);
+    border:1px solid var(--rule-firm);
+  }
+  @media (min-width:52rem){
+    .verdict{grid-template-columns:repeat(3,minmax(0,1fr))}
+  }
+  .verdict > div{background:var(--surface);padding:1.15rem 1.25rem}
+  .verdict dt{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.64rem;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--ink-3);margin:0 0 .5rem;
+  }
+  .verdict dd{margin:0;font-size:.95rem;line-height:1.5;color:var(--ink-2)}
+  .verdict dd b{color:var(--ink);font-weight:600}
+
+  /* ---- sections ---- */
+
+  section{
+    display:grid;
+    grid-template-columns:minmax(0,1fr);
+    gap:1.1rem;
+    padding:3.4rem 0 .6rem;
+    border-bottom:1px solid var(--rule);
+  }
+  @media (min-width:62rem){
+    section{grid-template-columns:9rem minmax(0,66ch);gap:0 3rem}
+  }
+  section:last-of-type{border-bottom:0}
+
+  .rail{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.66rem;letter-spacing:.13em;text-transform:uppercase;
+    color:var(--ink-3);
+    display:flex;flex-direction:column;gap:.4rem;align-items:flex-start;
+    padding-top:.55rem;
+  }
+  .rail .n{
+    font-family:"Spectral",Georgia,serif;font-size:1.5rem;font-weight:300;
+    color:var(--ink-3);line-height:1;letter-spacing:0;
+  }
+
+  .body > * + *{margin-top:1.05em}
+  .body > h2{margin-top:0}
+  .body > .card + .card{margin-top:.9rem}
+
+  h2{
+    font-size:clamp(1.4rem,3vw,1.85rem);font-weight:600;line-height:1.16;
+    letter-spacing:-.014em;margin:0 0 1rem;text-wrap:balance;
+  }
+  h3{
+    font-size:1.06rem;font-weight:600;margin:2.2rem 0 .5rem;
+    letter-spacing:-.004em;
+  }
+  p{margin:0}
+  strong{font-weight:600}
+  em{font-style:italic}
+  a{color:inherit;text-decoration:underline;text-decoration-color:var(--rule-firm);text-underline-offset:.18em}
+  a:hover{text-decoration-color:currentColor}
+  a:focus-visible{outline:2px solid var(--ours);outline-offset:2px}
+
+  .lede{font-size:1.1rem;line-height:1.55;color:var(--ink-2);font-weight:300}
+
+  /* ---- the survey cards ---- */
+
+  .card{
+    border:1px solid var(--rule);
+    border-left:3px solid var(--borrowed);
+    background:var(--surface);
+    padding:1.05rem 1.2rem;
+  }
+  .card.ours{border-left-color:var(--ours)}
+  .card.caution{border-left-color:var(--caution)}
+
+  .card-top{
+    display:flex;flex-wrap:wrap;align-items:baseline;gap:.45rem .8rem;
+    margin-bottom:.55rem;
+  }
+  .card-name{font-weight:600;font-size:1.02rem;letter-spacing:-.005em}
+  .card-where{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.66rem;letter-spacing:.07em;color:var(--ink-3);
+  }
+  .card p{font-size:.95rem;line-height:1.55;color:var(--ink-2)}
+  .card p + p{margin-top:.5rem}
+  .card .split{
+    margin-top:.75rem;padding-top:.7rem;border-top:1px solid var(--rule);
+    display:grid;gap:.45rem;
+  }
+  .split div{
+    display:grid;grid-template-columns:5.4rem minmax(0,1fr);gap:.2rem .8rem;
+    font-size:.9rem;line-height:1.5;
+  }
+  @media (max-width:34rem){
+    .split div{grid-template-columns:1fr;gap:.05rem}
+  }
+  .split .lbl{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.62rem;letter-spacing:.11em;text-transform:uppercase;
+    padding-top:.28rem;
+  }
+  .split .take .lbl{color:var(--borrowed)}
+  .split .apart .lbl{color:var(--ours)}
+  .split .val{color:var(--ink-2)}
+
+  /* ---- theorem ---- */
+
+  .theorem{
+    border:1px solid var(--caution);
+    background:var(--caution-soft);
+    padding:1.2rem 1.3rem;
+  }
+  .theorem .tag{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--caution);display:block;margin-bottom:.6rem;
+  }
+  .theorem .claim{
+    font-size:1.1rem;line-height:1.45;font-weight:400;color:var(--ink);
+    font-style:italic;
+  }
+  .theorem p:not(.claim){font-size:.95rem;color:var(--ink-2);margin-top:.7rem}
+
+  /* ---- table ---- */
+
+  .scroll{overflow-x:auto;margin-top:1.4rem;border:1px solid var(--rule)}
+  table{border-collapse:collapse;width:100%;min-width:44rem;font-size:.88rem;background:var(--surface)}
+  caption{
+    caption-side:top;text-align:left;padding:.85rem 1rem;
+    background:var(--sunk);border-bottom:1px solid var(--rule);
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.64rem;letter-spacing:.13em;text-transform:uppercase;color:var(--ink-3);
+  }
+  th,td{text-align:left;padding:.6rem .9rem;border-bottom:1px solid var(--rule);vertical-align:top}
+  thead th{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-weight:500;
+    font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);
+    border-bottom:1px solid var(--rule-firm);white-space:nowrap;
+  }
+  tbody tr:last-child td{border-bottom:0}
+  td.num{font-family:"IBM Plex Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums;white-space:nowrap}
+  tr.us td{background:var(--ours-soft)}
+  tr.us td:first-child{font-weight:600}
+
+  .yes{color:var(--ours);font-weight:600}
+  .no{color:var(--ink-3)}
+
+  /* ---- ledger of what is borrowed and what is ours ---- */
+
+  .ledger{display:grid;gap:1px;background:var(--rule-firm);border:1px solid var(--rule-firm);margin-top:1.4rem}
+  .ledger > div{background:var(--surface);padding:1rem 1.15rem}
+  .ledger h4{
+    margin:0 0 .6rem;font-size:.95rem;font-weight:600;
+    display:flex;align-items:center;gap:.5rem;
+  }
+  .ledger h4::before{content:"";width:9px;height:9px;flex:none;border-radius:1px}
+  .ledger .taken h4::before{background:var(--borrowed)}
+  .ledger .mine h4::before{background:var(--ours)}
+  .ledger ul{margin:0;padding-left:1.1rem;display:grid;gap:.45rem}
+  .ledger li{font-size:.93rem;line-height:1.5;color:var(--ink-2)}
+  .ledger li b{color:var(--ink);font-weight:600}
+
+  /* ---- next steps ---- */
+
+  ol.next{list-style:none;padding:0;margin:1.3rem 0 0;display:grid;gap:1.05rem;counter-reset:s}
+  ol.next li{counter-increment:s;display:grid;grid-template-columns:1.7rem minmax(0,1fr);gap:.9rem;align-items:baseline}
+  ol.next li::before{
+    content:counter(s);
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.78rem;
+    color:var(--ours);padding-top:.15rem;
+  }
+  ol.next b{font-weight:600;display:block}
+  ol.next span{display:block;color:var(--ink-2);font-size:.94rem;margin-top:.15rem;line-height:1.55}
+
+  /* ---- sources ---- */
+
+  .sources{margin-top:1.2rem;display:grid;gap:.7rem}
+  .src{
+    display:grid;grid-template-columns:auto minmax(0,1fr);gap:.2rem .9rem;
+    font-size:.88rem;line-height:1.5;
+  }
+  @media (max-width:40rem){.src{grid-template-columns:1fr;gap:.1rem}}
+  .src .who{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.64rem;letter-spacing:.08em;color:var(--ink-3);
+    text-transform:uppercase;padding-top:.28rem;white-space:nowrap;
+  }
+  .src .what{color:var(--ink-2)}
+  .src .what a{color:var(--ink)}
+
+  footer{
+    margin-top:3.5rem;padding-top:1.4rem;border-top:2px solid var(--ink);
+    display:flex;flex-wrap:wrap;gap:.4rem 1.8rem;
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.66rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);
+  }
+
+  @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+
+<div class="sheet">
+
+  <header class="head">
+    <p class="kicker">Cairn · étude de l'existant</p>
+    <h1>Ce qui existe déjà, et ce qui reste à nous</h1>
+    <p class="standfirst">
+      Avant d'écrire une ligne du protocole de démarrage léger, il fallait savoir
+      ce que d'autres ont fait, publié et cassé. Voici l'état du terrain, et la
+      position exacte de Cairn dessus.
+    </p>
+    <div class="stamp">
+      <span>27 août 2026</span>
+      <span>16 travaux examinés</span>
+      <span>Un résultat théorique décisif</span>
+    </div>
+  </header>
+
+  <dl class="verdict">
+    <div>
+      <dt>La bonne nouvelle</dt>
+      <dd>
+        Aucune chaîne, en production ou en projet, ne <b>plafonne son état par
+        règle de consensus</b>. C'est le cœur de Cairn et il est vacant.
+      </dd>
+    </div>
+    <div>
+      <dt>La mauvaise</dt>
+      <dd>
+        Un théorème de 2023 prouve que <b>personne n'échappe</b> à un dilemme
+        que Cairn subit aussi. Nous sommes du bon côté, mais nous le payons.
+      </dd>
+    </div>
+    <div>
+      <dt>La surprise</dt>
+      <dd>
+        La faiblesse principale du meilleur schéma de démarrage léger est
+        <b>la taille des en-têtes</b>. Les nôtres sont sept fois plus petits
+        que ceux qu'il a fallu supporter ailleurs.
+      </dd>
+    </div>
+  </dl>
+
+  <section>
+    <div class="rail"><span class="n">1</span><span>Le problème</span></div>
+    <div class="body">
+      <h2>Il est reconnu, chiffré, et non résolu</h2>
+      <p class="lede">
+        Cairn n'a pas inventé le problème. Il est documenté depuis des années et
+        chacun le traite à sa façon, sans que personne ne s'en soit débarrassé.
+      </p>
+      <p>
+        L'ensemble des sorties non dépensées de Bitcoin dépasse aujourd'hui
+        170 millions d'entrées, pour environ 11 gigaoctets sur disque, et il ne
+        cesse de grandir. Ethereum poursuit depuis des années un chantier appelé
+        <em>statelessness</em> qui, de l'aveu de sa propre documentation, reste
+        à plusieurs années du réseau principal et dépend d'au moins deux autres
+        chantiers pour aboutir.
+      </p>
+      <p>
+        La conséquence est celle que Cairn met en avant depuis le début : plus
+        une chaîne réussit, plus il devient cher de la vérifier soi-même, et
+        moins il reste de gens capables de le faire.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail"><span class="n">2</span><span>L'existant</span></div>
+    <div class="body">
+      <h2>Sept familles de réponses</h2>
+      <p class="lede">
+        Chaque encart indique ce que Cairn en reprend, et ce qui l'en sépare. Le
+        trait bleu marque un travail dont nous nous inspirons, le trait vert un
+        endroit où nous divergeons volontairement, le trait ambre une approche
+        que nous refusons.
+      </p>
+
+      <h3>Accumulateurs par empreintes</h3>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="card-name">Utreexo</span>
+          <span class="card-where">MIT DCI · 2019 · implémenté</span>
+        </div>
+        <p>
+          Remplace l'ensemble des sorties non dépensées par une forêt d'arbres
+          de Merkle parfaits. Onze gigaoctets deviennent moins d'un demi
+          kilooctet. Le dépensier fournit une preuve d'appartenance avec sa
+          transaction. Coût mesuré : environ 25 % de bande passante en plus.
+        </p>
+        <div class="split">
+          <div class="take">
+            <span class="lbl">Repris</span>
+            <span class="val">
+              La structure exacte de notre cave. Une forêt en ajout seul dont on
+              ne garde que les racines est l'idée d'Utreexo, et nous ne
+              prétendons pas l'avoir trouvée.
+            </span>
+          </div>
+          <div class="apart">
+            <span class="lbl">Écart</span>
+            <span class="val">
+              Utreexo est une optimisation de nœud, pas une règle. Chaque
+              opérateur l'adopte ou non, l'ensemble reste non borné, et le
+              protocole l'ignore. Chez Cairn, la frontière entre le tiroir et la
+              cave est du consensus : deux nœuds qui en divergeraient
+              suivraient deux chaînes.
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="card-name">MiniChain, CompactChain</span>
+          <span class="card-where">2020, 2023 · académique</span>
+        </div>
+        <p>
+          Même objectif avec des accumulateurs RSA : deux engagements de taille
+          constante, l'un sur les sorties créées, l'autre sur les sorties
+          dépensées. Preuves d'appartenance de taille constante, plus courtes
+          que celles d'une forêt d'empreintes.
+        </p>
+        <div class="split">
+          <div class="apart">
+            <span class="lbl">Écart</span>
+            <span class="val">
+              Un accumulateur RSA demande un groupe d'ordre inconnu : soit une
+              cérémonie de confiance initiale, soit des groupes de classes,
+              lourds et bien moins éprouvés. Cairn n'a que BLAKE3, sans
+              cérémonie et sans hypothèse cryptographique nouvelle. L'ensemble y
+              reste aussi non borné.
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <h3>Tout prouver</h3>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="card-name">Mina</span>
+          <span class="card-where">2020 · en production</span>
+        </div>
+        <p>
+          Chaque bloc porte une preuve à divulgation nulle que toute l'histoire
+          précédente est valide. La chaîne entière tient dans environ 22
+          kilooctets, constants. C'est la réponse la plus complète au problème
+          que Cairn attaque, et elle fonctionne.
+        </p>
+        <div class="split">
+          <div class="apart">
+            <span class="lbl">Écart</span>
+            <span class="val">
+              Preuve d'enjeu, donc une distribution initiale décidée par
+              quelqu'un. Et une pile cryptographique que presque personne ne
+              peut auditer, à l'opposé d'une ligne qui tient à ce qu'un lecteur
+              puisse tout relire. Mina paie en complexité ce que Cairn paie en
+              acceptant une garantie plus faible.
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <h3>Faire payer, ou détruire</h3>
+
+      <div class="card caution">
+        <div class="card-top">
+          <span class="card-name">Ergo, loyer de stockage</span>
+          <span class="card-where">2023 · en production</span>
+        </div>
+        <p>
+          Une boîte inactive depuis quatre ans doit un loyer, environ 0,14 ERG.
+          Depuis le bloc 1 051 200, un mineur peut prélever ce loyer, ou prendre
+          la boîte entière si elle ne le couvre pas.
+        </p>
+        <div class="split">
+          <div class="apart">
+            <span class="lbl">Refus</span>
+            <span class="val">
+              Cairn a gravé l'inverse comme première garantie : rien n'est
+              jamais détruit ni grignoté. Borner l'état en confisquant ce qui
+              dort est une solution, ce n'est pas la nôtre.
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card caution">
+        <div class="card-top">
+          <span class="card-name">Poussière dynamique</span>
+          <span class="card-where">bitcoin-dev · décembre 2025 · proposition</span>
+        </div>
+        <p>
+          Un régulateur asservi ajuste, à chaque période de difficulté, un
+          plancher de valeur sous lequel une sortie devient définitivement
+          indépensable. Six à douze mois de grâce pour consolider, puis c'est
+          perdu. L'accueil de la liste a été franchement sceptique.
+        </p>
+        <div class="split">
+          <div class="apart">
+            <span class="lbl">Refus</span>
+            <span class="val">
+              Même raison, en plus net : la proposition assume de rendre de
+              l'argent inaccessible pour tenir une cible de taille. C'est très
+              exactement ce que Cairn a promis de ne jamais faire.
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <h3>Accélérer l'arrivée</h3>
+
+      <div class="card caution">
+        <div class="card-top">
+          <span class="card-name">AssumeUTXO</span>
+          <span class="card-where">Bitcoin Core v28 · octobre 2024 · en production</span>
+        </div>
+        <p>
+          Un nœud neuf part d'un instantané de l'état plutôt que de l'origine :
+          utilisable en une heure et demie au lieu de dix heures et plus.
+          L'empreinte de cet instantané est écrite en dur dans le code source, et
+          la vérification complète se poursuit ensuite en arrière-plan.
+        </p>
+        <div class="split">
+          <div class="apart">
+            <span class="lbl">Écart</span>
+            <span class="val">
+              C'est le modèle de confiance que Cairn refuse : croire une valeur
+              parce que des développeurs l'ont relue. Notre chemin doit tenir
+              sans que personne n'ait à être cru, ce qui est exactement l'objet
+              de la famille suivante.
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <h3>Prouver le travail sans le montrer</h3>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="card-name">NIPoPoW</span>
+          <span class="card-where">2017 · académique</span>
+        </div>
+        <p>
+          Prouve qu'un travail considérable a eu lieu en ne montrant que les
+          blocs exceptionnellement lourds, dits superblocs. Ressources
+          logarithmiques en la longueur de la chaîne.
+        </p>
+        <div class="split">
+          <div class="apart">
+            <span class="lbl">Écart</span>
+            <span class="val">
+              Vulnérabilité connue : un attaquant peut corrompre les mineurs
+              chanceux qui trouvent des superblocs pour qu'ils ne les publient
+              pas. Schéma écarté au profit du suivant.
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="card-name">FlyClient</span>
+          <span class="card-where">IEEE S&amp;P 2020 · déployé sur Zcash</span>
+        </div>
+        <p>
+          Chaque en-tête engage un accumulateur de tous les en-têtes précédents.
+          Un nouveau venu tire au sort un nombre logarithmique d'en-têtes, avec
+          un tirage pondéré par le travail accumulé, et vérifie chacun contre cet
+          engagement. Preuve de synchronisation inférieure à 500 kilooctets sur
+          Ethereum, environ 6 600 fois plus petite qu'une preuve classique.
+          Sécurité établie sous l'hypothèse d'un attaquant contrôlant moins de
+          la moitié de la puissance de calcul.
+        </p>
+        <div class="split">
+          <div class="take">
+            <span class="lbl">Repris</span>
+            <span class="val">
+              C'est le schéma que Cairn suivra, et les deux champs gravés dans
+              nos en-têtes hier sont précisément ce qu'il exige. Nous ne
+              l'inventerons pas : nous le reprendrons avec ses paramètres
+              démontrés.
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="card-name">Catching the Fly</span>
+          <span class="card-where">2026 · retour de terrain</span>
+        </div>
+        <p>
+          Une équipe raconte ce qu'implanter FlyClient en production coûte
+          vraiment. Trois constats. Le modèle d'adversaire d'origine, à deux
+          paramètres, n'a pas d'interprétation économique et se prête mal au
+          déploiement ; un modèle à un seul paramètre, le budget de l'attaquant,
+          réduit l'échantillonnage de 37 % à sécurité égale. Les preuves sont
+          dominées par la taille des en-têtes, 1 344 octets chacun sur leur
+          chaîne. Et restructurer les en-têtes pour n'y garder que le nécessaire
+          réduit les preuves de 71 %, au prix d'un changement de consensus.
+        </p>
+        <div class="split">
+          <div class="take">
+            <span class="lbl">Repris</span>
+            <span class="val">
+              Le modèle d'adversaire économique, plus clair et moins coûteux.
+            </span>
+          </div>
+          <div class="apart">
+            <span class="lbl">Avantage</span>
+            <span class="val">
+              Leurs deux difficultés majeures ne sont pas les nôtres. Notre
+              en-tête fait 182 octets, sept fois moins que celui qui plombe
+              leurs preuves. Et le changement de consensus qu'ils ne peuvent
+              plus faire, nous l'avons fait hier, précisément parce que notre
+              réseau ne porte encore aucune valeur.
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <h3>Le plus proche par le vocabulaire</h3>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="card-name">Midstate</span>
+          <span class="card-where">février 2026 · en production</span>
+        </div>
+        <p>
+          Chaîne post-quantique lancée cette année, qui emploie les mêmes mots
+          que nous : <em>bounded state</em>, arbre de Merkle creux, accumulateur
+          en ajout seul pour l'historique. Signatures à usage unique, montants
+          contraints à des puissances de deux, machine à covenants.
+        </p>
+        <div class="split">
+          <div class="apart">
+            <span class="lbl">Écart</span>
+            <span class="val">
+              L'ensemble n'y est pas plafonné par une règle : ce sont les seize
+              premiers niveaux de l'arbre qui tiennent en mémoire, le reste
+              étant recalculé à la volée depuis les sorties conservées sur
+              disque. La mémoire est bornée, l'ensemble ne l'est pas, et il
+              existe toujours quelque part. Chez Cairn, ce qui est descendu à la
+              cave n'existe plus nulle part.
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail"><span class="n">3</span><span>La limite</span></div>
+    <div class="body">
+      <h2>Le théorème que personne ne contourne</h2>
+      <p class="lede">
+        C'est la découverte importante de cette étude, et il faut la regarder en
+        face plutôt que la ranger en note de bas de page.
+      </p>
+
+      <div class="theorem">
+        <span class="tag">Christ et Bonneau · Financial Cryptography 2023</span>
+        <p class="claim">
+          Il n'existe aucun point de compromis utile : un système doit soit
+          garder un état global de taille linéaire, soit exiger un rythme
+          quasi linéaire de mises à jour de preuves chez ses utilisateurs.
+        </p>
+        <p>
+          Le résultat est de théorie de l'information, donc il ne dépend
+          d'aucune hypothèse cryptographique et aucune construction future ne
+          l'annulera. Les auteurs ajoutent une phrase qui nous concerne
+          directement : tant que l'état succinct est trop petit pour contenir
+          l'état complet, l'agrandir n'aide guère.
+        </p>
+      </div>
+
+      <p>
+        Traduit : on ne peut pas faire disparaître l'état par la cryptographie.
+        On peut seulement décider qui le porte. Si les validateurs ne le portent
+        plus, ce sont les détenteurs qui doivent tenir leurs preuves à jour, et
+        un utilisateur qui ne fait rien voit malgré tout sa preuve vieillir
+        parce que les autres, eux, transigent.
+      </p>
+      <p>
+        Cairn tombe de ce côté du dilemme, et l'avait déjà accepté sans savoir
+        que c'était démontré. La cave est succincte, donc les preuves doivent
+        être entretenues. Notre portefeuille le fait à chaque bloc, tout seul,
+        et c'est très exactement le prix que le théorème rend inévitable.
+      </p>
+      <p>
+        Les auteurs nomment ensuite la seule relaxation praticable : des
+        <em>proof-serving nodes</em>, des tiers qui détiennent l'état complet et
+        fabriquent des preuves à jour pour les autres. Ils appellent à des
+        travaux sur la façon dont ces tiers seraient rémunérés.
+      </p>
+      <p>
+        <strong>Ce sont nos archivistes.</strong> Ils sont dans la conception de
+        Cairn depuis le premier jour, avec leur rémunération à la demande, et ils
+        y ont été mis pour une intuition. L'étude montre qu'ils n'étaient pas un
+        confort mais une nécessité structurelle, et que la question de leur
+        modèle économique est ouverte pour tout le monde, pas seulement pour
+        nous.
+      </p>
+
+      <h3>Ce que notre tiroir change vraiment</h3>
+      <p>
+        Il ne fait pas tomber le théorème, et il faut le dire clairement. Ce
+        qu'il change, c'est la population concernée. Les billets récents, qui
+        sont ceux que l'on dépense le plus souvent, sont détenus en entier par
+        tous les nœuds et ne demandent aucune preuve. L'entretien ne pèse que
+        sur ce qui dort depuis longtemps.
+      </p>
+      <p>
+        Autrement dit : le théorème dit que quelqu'un doit payer. Cairn ne fait
+        pas payer celui qui utilise sa monnaie normalement.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail"><span class="n">4</span><span>La position</span></div>
+    <div class="body">
+      <h2>Où Cairn se tient exactement</h2>
+      <p class="lede">
+        Le tableau ci-dessous ne compare pas des qualités mais des choix. Une
+        colonne seule décide de tout le reste : le plafond est-il une règle du
+        réseau, ou une préférence d'opérateur.
+      </p>
+
+      <div class="scroll">
+        <table>
+          <caption>Ce que chaque approche borne, et par quel moyen</caption>
+          <thead>
+            <tr>
+              <th>Système</th>
+              <th>État plafonné par règle</th>
+              <th>Rien n'est détruit</th>
+              <th>Sans cérémonie ni valeur crue</th>
+              <th>Démarrage sans confiance</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Bitcoin</td>
+              <td class="no">Non</td>
+              <td class="yes">Oui</td>
+              <td class="yes">Oui</td>
+              <td>Intégral, ou instantané cru</td>
+            </tr>
+            <tr>
+              <td>Utreexo</td>
+              <td class="no">Non, choix du nœud</td>
+              <td class="yes">Oui</td>
+              <td class="yes">Oui</td>
+              <td>Intégral</td>
+            </tr>
+            <tr>
+              <td>CompactChain</td>
+              <td class="no">Non</td>
+              <td class="yes">Oui</td>
+              <td class="no">Cérémonie RSA</td>
+              <td>Intégral</td>
+            </tr>
+            <tr>
+              <td>Mina</td>
+              <td class="yes">Oui, par la preuve</td>
+              <td class="yes">Oui</td>
+              <td class="no">Preuve d'enjeu, distribution</td>
+              <td class="yes">Oui, 22 ko</td>
+            </tr>
+            <tr>
+              <td>Ergo</td>
+              <td class="no">Non, découragé</td>
+              <td class="no">Non, loyer</td>
+              <td class="yes">Oui</td>
+              <td>Intégral</td>
+            </tr>
+            <tr>
+              <td>Midstate</td>
+              <td class="no">Non, mémoire seule</td>
+              <td class="yes">Oui</td>
+              <td class="yes">Oui</td>
+              <td>Instantané plus mille blocs</td>
+            </tr>
+            <tr class="us">
+              <td>Cairn</td>
+              <td class="yes">Oui, 131 072 billets</td>
+              <td class="yes">Oui</td>
+              <td class="yes">Oui</td>
+              <td>Prévu, en-têtes gravés</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="ledger">
+        <div class="taken">
+          <h4>Ce que nous empruntons, et devons dire</h4>
+          <ul>
+            <li><b>La forêt en ajout seul</b> tenue par ses racines est l'idée d'Utreexo, MIT Digital Currency Initiative, 2019.</li>
+            <li><b>Les preuves fournies par le dépensier</b> sont le modèle commun d'Utreexo, MiniChain et CompactChain.</li>
+            <li><b>L'engagement sur l'histoire des en-têtes</b> et le tirage pondéré par le travail viennent de FlyClient.</li>
+            <li><b>Les archivistes</b> sont les <em>proof-serving nodes</em> de Christ et Bonneau, arrivés chez nous par une autre route.</li>
+            <li><b>L'idée que les billets très récents coûtent moins</b> existe chez Utreexo sous forme d'optimisation locale.</li>
+          </ul>
+        </div>
+        <div class="mine">
+          <h4>Ce qui, après recherche, n'a pas d'équivalent</h4>
+          <ul>
+            <li><b>Un plafond dur sur l'état chaud, inscrit dans le consensus.</b> Les autres bornent la mémoire d'un nœud ou découragent l'occupation par un coût. Aucun ne fait de la taille de l'ensemble détenu une règle que le réseau applique.</li>
+            <li><b>Les deux températures ensemble</b> : détenir intégralement un ensemble borné et porter tout le reste en soixante-quatre empreintes. La recherche menée n'a rien trouvé de cette forme.</li>
+            <li><b>La fenêtre de grâce comme règle du réseau.</b> Utreexo exempte le cas d'une sortie créée et dépensée dans le même bloc, et laisse le reste au cache de chaque nœud. Chez nous, soixante-quatre blocs de grâce sont une règle que tous appliquent, donc une garantie pour le payeur et non une chance.</li>
+            <li><b>Un état borné sans rien détruire.</b> Ergo et la proposition de décembre bornent en confisquant. Cairn borne en déplaçant, et la première garantie du protocole l'interdit explicitement.</li>
+          </ul>
+        </div>
+      </div>
+
+      <p style="margin-top:1.4rem">
+        Aucune de ces quatre pièces n'est une invention cryptographique. Ce sont
+        des choix de protocole, et c'est là que doit être la nouveauté si elle
+        doit être quelque part : la cryptographie de Cairn est délibérément
+        ordinaire et bien connue.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail"><span class="n">5</span><span>La suite</span></div>
+    <div class="body">
+      <h2>Ce que cette étude change pour nous</h2>
+
+      <ol class="next">
+        <li>
+          <b>Reprendre FlyClient, ne pas l'inventer.</b>
+          <span>
+            Le schéma est publié, relu, déployé, et sa sécurité est établie sous
+            une hypothèse claire. Nous l'implanterons avec le modèle d'adversaire
+            économique proposé en 2026, qui coûte 37 % d'échantillons en moins à
+            sécurité égale.
+          </span>
+        </li>
+        <li>
+          <b>Exploiter la légèreté de nos en-têtes.</b>
+          <span>
+            La difficulté principale rencontrée en production ailleurs est le
+            poids des en-têtes dans les preuves. Les nôtres font 182 octets. La
+            même preuve devrait donc être nettement plus petite chez nous, et
+            c'est un chiffre à mesurer et à publier plutôt qu'à supposer.
+          </span>
+        </li>
+        <li>
+          <b>Traiter les archivistes comme une pièce du protocole.</b>
+          <span>
+            Le théorème les rend structurels. Leur rémunération, leur découverte
+            sur le réseau et le fait qu'un portefeuille puisse s'en passer tant
+            qu'il reste à jour méritent d'être spécifiés, pas laissés à
+            l'improvisation.
+          </span>
+        </li>
+        <li>
+          <b>Écrire le dilemme dans le whitepaper.</b>
+          <span>
+            Un papier qui cite Christ et Bonneau, dit de quel côté il tombe et
+            pourquoi, sera bien plus solide qu'un papier qui n'en parle pas. Un
+            lecteur compétent connaîtra ce résultat et cherchera notre réponse.
+          </span>
+        </li>
+        <li>
+          <b>Ne pas revendiquer ce qui ne nous appartient pas.</b>
+          <span>
+            La colonne de gauche du registre ci-dessus doit apparaître telle
+            quelle dans le whitepaper. Une revendication excessive est le moyen
+            le plus rapide de perdre la confiance des seuls lecteurs dont l'avis
+            compte vraiment.
+          </span>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail"><span class="n">6</span><span>Sources</span></div>
+    <div class="body">
+      <h2>Ce sur quoi tout ce qui précède repose</h2>
+
+      <div class="sources">
+        <div class="src">
+          <span class="who">Théorie</span>
+          <span class="what">
+            Miranda Christ, Joseph Bonneau, <a href="https://eprint.iacr.org/2022/1478">Limits on revocable proof systems, with applications to stateless blockchains</a>, Financial Cryptography 2023. Vulgarisé par <a href="https://a16zcrypto.com/posts/article/on-the-impossibility-of-stateless-blockchains/">a16z crypto</a>.
+          </span>
+        </div>
+        <div class="src">
+          <span class="who">Accumulateur</span>
+          <span class="what">
+            Thaddeus Dryja, <a href="https://eprint.iacr.org/2019/611">Utreexo: A dynamic hash-based accumulator optimized for the Bitcoin UTXO set</a>, MIT DCI. Contexte et chiffres via <a href="https://bitcoinops.org/en/topics/utreexo/">Bitcoin Optech</a>.
+          </span>
+        </div>
+        <div class="src">
+          <span class="who">Démarrage</span>
+          <span class="what">
+            Bünz, Kiffer, Luu, Zamani, <a href="https://eprint.iacr.org/2019/226.pdf">FlyClient: Super-Light Clients for Cryptocurrencies</a>, IEEE S&amp;P 2020. Retour de terrain : <a href="https://arxiv.org/html/2604.26736v1">Catching the Fly: Practical Challenges in Making Blockchain FlyClient Real</a>, 2026.
+          </span>
+        </div>
+        <div class="src">
+          <span class="who">Superblocs</span>
+          <span class="what">
+            Kiayias, Miller, Zindros, <a href="https://eprint.iacr.org/2017/963.pdf">Non-Interactive Proofs of Proof-of-Work</a>, 2017.
+          </span>
+        </div>
+        <div class="src">
+          <span class="who">RSA</span>
+          <span class="what">
+            <a href="https://arxiv.org/pdf/2211.06735">CompactChain: An Efficient Stateless Chain for UTXO-model Blockchain</a>, 2023, et MiniChain, <em>Journal of Parallel and Distributed Computing</em>, 2020. Fondations chez Boneh, Bünz, Fisch, <a href="https://eprint.iacr.org/2018/1188">Batching Techniques for Accumulators</a>, 2018.
+          </span>
+        </div>
+        <div class="src">
+          <span class="who">Preuves</span>
+          <span class="what">
+            <a href="https://minaprotocol.com/blog/22kb-sized-blockchain-a-technical-reference">Mina, 22kB-Sized Blockchain, a technical reference</a>.
+          </span>
+        </div>
+        <div class="src">
+          <span class="who">Loyer</span>
+          <span class="what">
+            <a href="https://docs.ergoplatform.com/dev/protocol/storage-rent/">Ergo, Storage Rent</a>, et la proposition de poussière dynamique sur <a href="https://groups.google.com/g/bitcoindev/c/PMtM_I3qwqg/m/CsbaSXRaCwAJ">bitcoin-dev</a>, décembre 2025.
+          </span>
+        </div>
+        <div class="src">
+          <span class="who">Instantanés</span>
+          <span class="what">
+            <a href="https://bitcoinops.org/en/topics/assumeutxo/">AssumeUTXO</a>, Bitcoin Optech, disponible depuis Bitcoin Core v28.
+          </span>
+        </div>
+        <div class="src">
+          <span class="who">Ethereum</span>
+          <span class="what">
+            <a href="https://ethereum.org/roadmap/statelessness/">Statelessness, state expiry and history expiry</a>, documentation officielle.
+          </span>
+        </div>
+        <div class="src">
+          <span class="who">Voisin</span>
+          <span class="what">
+            <a href="https://midstate.cash/">Midstate</a>, architecture du protocole, réseau principal ouvert en février 2026.
+          </span>
+        </div>
+      </div>
+
+      <p style="margin-top:1.6rem;font-size:.9rem;color:var(--ink-3)">
+        Une réserve de méthode, qui vaut d'être écrite. Une recherche ne prouve
+        pas une absence. Que rien n'ait été trouvé sur le plafond par consensus
+        rend la chose probable, pas certaine, et il restera utile de faire relire
+        cette section par quelqu'un du domaine avant de la publier telle quelle.
+      </p>
+    </div>
+  </section>
+
+  <footer>
+    <span>Cairn · étude de l'existant · v1</span>
+    <span>27 août 2026</span>
+    <span>Rien de ce document n'est un conseil en investissement</span>
+  </footer>
+
+</div>
