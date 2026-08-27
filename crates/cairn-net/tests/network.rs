@@ -355,6 +355,7 @@ fn a_peer_that_sends_a_bad_block_is_dropped() {
         height: 0,
         total_work: 0,
         listen: 1,
+        nonce: 424_242,
     });
     write_message(&mut rude, params().network, &hello).unwrap();
     write_message(

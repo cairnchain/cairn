@@ -15,7 +15,7 @@ use cairn_primitives::Hash32;
 
 /// Bumped when the meaning of a message changes. Peers on another version are
 /// refused rather than misunderstood.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Identifiers one announcement may carry.
 pub const MAX_ANNOUNCED: usize = 512;
@@ -86,6 +86,14 @@ pub struct Handshake {
     /// connection came from, so this is what completes it into an address
     /// others can be pointed at.
     pub listen: u16,
+    /// Drawn once when the node starts, and never reused.
+    ///
+    /// A node behind a router does not know the address the world reaches it
+    /// at, so when a peer hands that address back it looks like a stranger's
+    /// and gets dialled. Comparing addresses cannot fix this; comparing a
+    /// number the node drew for itself can. Seeing your own means the
+    /// connection is your own.
+    pub nonce: u64,
 }
 
 impl Encode for Handshake {
@@ -97,6 +105,7 @@ impl Encode for Handshake {
         self.height.encode_to(out);
         self.total_work.encode_to(out);
         self.listen.encode_to(out);
+        self.nonce.encode_to(out);
     }
 }
 
@@ -110,6 +119,7 @@ impl Decode for Handshake {
             height: u64::decode_from(reader)?,
             total_work: u128::decode_from(reader)?,
             listen: u16::decode_from(reader)?,
+            nonce: u64::decode_from(reader)?,
         })
     }
 }

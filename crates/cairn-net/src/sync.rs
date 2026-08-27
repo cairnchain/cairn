@@ -26,6 +26,9 @@ pub struct Local<'a> {
     pub book: &'a AddressBook,
     /// The port this node listens on, so peers can pass its address along.
     pub listen: u16,
+    /// What this node calls itself on the wire, so it can recognise its own
+    /// connection coming back to it.
+    pub nonce: u64,
 }
 
 /// What this node knows about one peer.
@@ -68,6 +71,8 @@ pub enum DropReason {
     ForeignChain { theirs: Hash32 },
     #[error("peer sent a block this node rejects")]
     BadBlock { id: Hash32 },
+    #[error("this connection is this node talking to itself")]
+    Ourselves,
 }
 
 impl DropReason {
@@ -81,9 +86,12 @@ impl DropReason {
     pub fn is_misbehaviour(self) -> bool {
         match self {
             Self::Unannounced { .. } | Self::RepeatedHandshake | Self::BadBlock { .. } => true,
-            Self::WrongVersion { .. } | Self::WrongNetwork { .. } | Self::ForeignChain { .. } => {
-                false
-            }
+            // Reaching yourself is a fact about routing, not a fault, and the
+            // node it happened to is this one.
+            Self::WrongVersion { .. }
+            | Self::WrongNetwork { .. }
+            | Self::ForeignChain { .. }
+            | Self::Ourselves => false,
         }
     }
 }
@@ -128,7 +136,7 @@ impl Reaction {
 }
 
 /// What this node says about itself.
-pub fn local_handshake(chain: &ChainStore, listen: u16) -> Handshake {
+pub fn local_handshake(chain: &ChainStore, listen: u16, nonce: u64) -> Handshake {
     Handshake {
         version: PROTOCOL_VERSION,
         network: chain.params().network,
@@ -137,6 +145,7 @@ pub fn local_handshake(chain: &ChainStore, listen: u16) -> Handshake {
         height: chain.height().unwrap_or_default(),
         total_work: chain.total_work(),
         listen,
+        nonce,
     }
 }
 
@@ -169,6 +178,12 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
     if peer.greeted {
         return Reaction::close(DropReason::RepeatedHandshake);
     }
+    // Before anything else, and before the address is written down: a node
+    // that reaches itself would otherwise spend one of its few connections on
+    // itself, and keep its own address in the book to try again later.
+    if theirs.nonce == local.nonce {
+        return Reaction::close(DropReason::Ourselves);
+    }
     if let Err(reason) = accept_handshake(local.chain, &theirs) {
         return Reaction::close(reason);
     }
@@ -191,9 +206,11 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
     }
 
     if answer {
-        reaction
-            .reply
-            .push(Message::Welcome(local_handshake(local.chain, local.listen)));
+        reaction.reply.push(Message::Welcome(local_handshake(
+            local.chain,
+            local.listen,
+            local.nonce,
+        )));
     }
     if theirs.total_work > local.chain.total_work() {
         reaction.reply.push(Message::GetChain {

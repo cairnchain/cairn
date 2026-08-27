@@ -84,8 +84,17 @@ fn store_with(params: ConsensusParams, blocks: &[Block]) -> ChainStore {
 
 /// The surroundings a test node has: a chain and an empty address book.
 fn solo(chain: &mut ChainStore) -> Local<'_> {
+    solo_as(chain, 1)
+}
+
+/// The same, for a test that needs two nodes to be distinguishable.
+///
+/// Two nodes sharing a nonce would each take the other for itself, which is
+/// exactly what the nonce exists to detect.
+fn solo_as(chain: &mut ChainStore, nonce: u64) -> Local<'_> {
     static EMPTY: std::sync::OnceLock<AddressBook> = std::sync::OnceLock::new();
     Local {
+        nonce,
         chain,
         book: EMPTY.get_or_init(AddressBook::new),
         listen: 4242,
@@ -124,6 +133,7 @@ fn a_message_roundtrips_through_the_wire_format() {
             height: 0,
             total_work: u128::MAX,
             listen: 4242,
+            nonce: 99,
         }),
     ];
 
@@ -198,7 +208,7 @@ fn an_introduction_is_answered_and_the_shorter_chain_asks_for_more() {
     let reaction = on_message(
         &mut solo(&mut behind),
         &mut peer,
-        Message::Hello(local_handshake(&ahead, 4242)),
+        Message::Hello(local_handshake(&ahead, 4242, 7)),
         NOW,
     );
 
@@ -225,7 +235,7 @@ fn the_longer_chain_does_not_ask_the_shorter_one_for_anything() {
     let reaction = on_message(
         &mut solo(&mut ahead),
         &mut peer,
-        Message::Hello(local_handshake(&behind, 4242)),
+        Message::Hello(local_handshake(&behind, 4242, 7)),
         NOW,
     );
 
@@ -245,7 +255,7 @@ fn a_peer_on_another_network_or_version_or_chain_is_dropped() {
     let mut forge = Forge::new(params);
     let blocks = forge.mine_many(3);
     let mut store = store_with(params, &blocks);
-    let sound = local_handshake(&store, 4242);
+    let sound = local_handshake(&store, 4242, 7);
 
     let cases: Vec<(Handshake, DropReason)> = vec![
         (
@@ -314,7 +324,7 @@ fn introducing_yourself_twice_is_refused() {
     let mut forge = Forge::new(params);
     let blocks = forge.mine_many(2);
     let mut store = store_with(params, &blocks);
-    let handshake = local_handshake(&store, 4242);
+    let handshake = local_handshake(&store, 4242, 7);
 
     let mut peer = PeerState::default();
     on_message(
@@ -519,7 +529,8 @@ fn a_full_exchange_carries_one_chain_to_the_other_node() {
     let mut mirror = PeerState::default();
 
     // Play the conversation out until nothing more is said.
-    let mut pending = vec![Message::Hello(local_handshake(&ahead, 4242))];
+    // Two nodes, two nonces, as on a real network.
+    let mut pending = vec![Message::Hello(local_handshake(&ahead, 4242, 2))];
     let mut rounds = 0;
     while !pending.is_empty() {
         rounds += 1;
@@ -528,7 +539,7 @@ fn a_full_exchange_carries_one_chain_to_the_other_node() {
         let mut answers = Vec::new();
         for message in pending.drain(..) {
             let kind = message.kind();
-            let reaction = on_message(&mut solo(&mut behind), &mut peer, message, NOW);
+            let reaction = on_message(&mut solo_as(&mut behind, 1), &mut peer, message, NOW);
             assert!(
                 reaction.drop_peer.is_none(),
                 "behind dropped on {kind}: {:?}",
@@ -538,7 +549,7 @@ fn a_full_exchange_carries_one_chain_to_the_other_node() {
         }
         for message in answers {
             let kind = message.kind();
-            let reaction = on_message(&mut solo(&mut ahead), &mut mirror, message, NOW);
+            let reaction = on_message(&mut solo_as(&mut ahead, 2), &mut mirror, message, NOW);
             assert!(
                 reaction.drop_peer.is_none(),
                 "ahead dropped on {kind}: {:?}",
@@ -559,7 +570,7 @@ fn an_introduction_asks_the_peer_who_else_it_knows() {
     let mut forge = Forge::new(params);
     let blocks = forge.mine_many(2);
     let mut store = store_with(params, &blocks);
-    let handshake = local_handshake(&store, 4242);
+    let handshake = local_handshake(&store, 4242, 7);
 
     let mut peer = PeerState::default();
     let reaction = on_message(
@@ -592,6 +603,7 @@ fn a_request_for_peers_is_answered_from_the_book() {
         chain: &mut store,
         book: &book,
         listen: 4242,
+        nonce: 1,
     };
     let reaction = on_message(&mut local, &mut peer, Message::GetPeers, NOW);
 
@@ -638,7 +650,7 @@ fn a_peer_is_placed_at_the_address_its_connection_came_from() {
     // anything the peer says, so one node cannot advertise another.
     let claimed = Handshake {
         listen: 5_555,
-        ..local_handshake(&store, 4242)
+        ..local_handshake(&store, 4242, 7)
     };
     let seen_from = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9));
 
@@ -669,7 +681,7 @@ fn a_peer_that_does_not_listen_is_not_advertised() {
 
     let quiet = Handshake {
         listen: 0,
-        ..local_handshake(&store, 4242)
+        ..local_handshake(&store, 4242, 7)
     };
     let mut peer = PeerState {
         remote: Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9))),
@@ -785,4 +797,77 @@ fn sending_a_bad_block_or_speaking_out_of_turn_is_misbehaviour() {
     assert!(DropReason::BadBlock { id: Hash32::ZERO }.is_misbehaviour());
     assert!(DropReason::RepeatedHandshake.is_misbehaviour());
     assert!(DropReason::Unannounced { kind: "block" }.is_misbehaviour());
+}
+
+/// A node that reaches itself hangs up, rather than spending one of its few
+/// connections on itself.
+///
+/// Found on the first contact with the real internet, not by any of these
+/// tests: a node behind a router does not know the address the world reaches
+/// it at, so when a peer hands that address back it looks like a stranger's.
+/// Comparing addresses cannot fix that. Comparing a number the node drew for
+/// itself can.
+#[test]
+fn a_node_that_reaches_itself_says_so_and_hangs_up() {
+    let params = params();
+    let mut store = ChainStore::new(params);
+    let ours = 0x0BAD_C0DE_0BAD_C0DE;
+
+    // Our own introduction, arriving back at us.
+    let mine = local_handshake(&store, 4242, ours);
+    let mut peer = PeerState {
+        remote: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+            203, 0, 113, 9,
+        ))),
+        ..PeerState::default()
+    };
+    let reaction = on_message(
+        &mut solo_as(&mut store, ours),
+        &mut peer,
+        Message::Hello(mine),
+        NOW,
+    );
+
+    assert_eq!(reaction.drop_peer, Some(DropReason::Ourselves));
+    assert!(
+        reaction.learned.is_empty(),
+        "our own address must not go into the book, or we would dial it again"
+    );
+    assert!(reaction.reply.is_empty(), "nothing to say to ourselves");
+}
+
+/// And a genuine peer with a different nonce is unaffected.
+#[test]
+fn a_peer_that_is_not_us_is_greeted_normally() {
+    let params = params();
+    let mut store = ChainStore::new(params);
+    let theirs = local_handshake(&store, 5000, 0x1111_1111_1111_1111);
+
+    let mut peer = PeerState {
+        remote: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+            203, 0, 113, 9,
+        ))),
+        ..PeerState::default()
+    };
+    let reaction = on_message(
+        &mut solo_as(&mut store, 0x2222_2222_2222_2222),
+        &mut peer,
+        Message::Hello(theirs),
+        NOW,
+    );
+
+    assert_eq!(reaction.drop_peer, None);
+    assert_eq!(
+        reaction.learned,
+        vec![SocketAddr::from((
+            std::net::Ipv4Addr::new(203, 0, 113, 9),
+            5000
+        ))]
+    );
+}
+
+/// Reaching yourself is a fact about routing, not a peer behaving badly.
+#[test]
+fn reaching_ourselves_is_not_held_against_anyone() {
+    assert!(!DropReason::Ourselves.is_misbehaviour());
 }

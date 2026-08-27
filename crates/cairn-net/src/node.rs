@@ -125,6 +125,9 @@ struct Peer {
 struct Shared {
     params: ConsensusParams,
     address: SocketAddr,
+    /// Drawn once at start. A node behind a router cannot recognise its own
+    /// address coming back from a peer, but it can recognise this.
+    nonce: u64,
     chain: Mutex<ChainStore>,
     /// Absent when the node keeps its chain only in memory.
     log: Mutex<Option<BlockLog>>,
@@ -266,6 +269,22 @@ fn open_the_chain(chain: &mut ChainStore, params: ConsensusParams, now: u64) {
     }
 }
 
+/// A number this node calls itself by, for one run.
+///
+/// Only ever compared for equality, so what matters is that two nodes do not
+/// draw the same one. If the system refuses to give randomness, the clock is
+/// a poor substitute but a harmless one: the worst case is failing to notice
+/// a connection to oneself, which is what happened before this existed.
+fn fresh_nonce() -> u64 {
+    let mut bytes = [0u8; 8];
+    if getrandom::fill(&mut bytes).is_ok() {
+        return u64::from_le_bytes(bytes);
+    }
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(1, |since| u64::try_from(since.as_nanos()).unwrap_or(1))
+}
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -400,6 +419,7 @@ impl Node {
         let shared = Arc::new(Shared {
             params,
             address,
+            nonce: fresh_nonce(),
             chain: Mutex::new(chain),
             log: Mutex::new(log),
             book: Mutex::new(book),
@@ -754,7 +774,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, initiator: bool) {
     if initiator {
         let hello = {
             let chain = shared.chain();
-            Message::Hello(local_handshake(&chain, shared.address.port()))
+            Message::Hello(local_handshake(&chain, shared.address.port(), shared.nonce))
         };
         let _ = outbound.try_send(hello);
     }
@@ -841,6 +861,7 @@ fn read_loop(
                 chain: &mut chain,
                 book: &book,
                 listen: shared.address.port(),
+                nonce: shared.nonce,
             };
             let reaction = on_message(&mut local, &mut peer, message, unix_now());
             let fresh: Vec<Block> = reaction
