@@ -47,7 +47,9 @@ if [ -f "$HOME/.cargo/env" ]; then
 fi
 
 say "Source"
+before=none
 if [ -d "$SRC/.git" ]; then
+    before=$(git -C "$SRC" rev-parse HEAD)
     branch=$(git -C "$SRC" symbolic-ref --short HEAD 2>/dev/null || echo main)
     git -C "$SRC" fetch --quiet origin
     git -C "$SRC" reset --hard --quiet "origin/$branch"
@@ -55,8 +57,25 @@ else
     rm -rf "$SRC"
     git clone --quiet "$REPO" "$SRC"
 fi
+after=$(git -C "$SRC" rev-parse HEAD)
+echo "at $(git -C "$SRC" rev-parse --short HEAD) $(git -C "$SRC" log -1 --format=%cd --date=short)"
+
+# A shell reads its script as it goes, so the update just fetched is not the
+# one running: this script has already been read from the file it overwrote.
+# If the installer itself moved, hand over to the new one rather than carry on
+# with instructions that are now out of date.
+if [ "${CAIRN_INSTALLER_REEXEC:-}" != "1" ] && [ "$before" != "none" ] &&
+   [ "$before" != "$after" ] &&
+   ! git -C "$SRC" diff --quiet "$before" "$after" -- deploy/install.sh; then
+    echo "the installer changed; running the new one"
+    CAIRN_INSTALLER_REEXEC=1
+    export CAIRN_INSTALLER_REEXEC
+    exec sh "$SRC/deploy/install.sh"
+fi
 
 say "Build"
+# Nothing to do here when only the deployment files moved, which is why this
+# step can finish in a fraction of a second and still be correct.
 # A small server can run out of memory linking with optimisation on. If this
 # step is killed, add swap and run the script again:
 #
@@ -111,9 +130,10 @@ else
 fi
 
 say "Done"
-# Print what is actually running, so an update can be told from a no-op.
-echo "commit  $(git -C "$SRC" rev-parse --short HEAD) $(git -C "$SRC" log -1 --format=%cd --date=short)"
-systemctl --no-pager --lines=12 status cairnd || true
+# What is actually running, so an update can be told from a no-op.
+echo "commit   $(git -C "$SRC" rev-parse --short HEAD)"
+echo "started  $(systemctl show -p ActiveEnterTimestamp --value cairnd)"
+systemctl --no-pager --lines=6 status cairnd || true
 cat <<NOTE
 
 The node is running and will come back on its own after a reboot or a crash.
