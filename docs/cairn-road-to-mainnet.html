@@ -1,0 +1,492 @@
+<title>La route jusqu'au mainnet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+
+<style>
+  :root{
+    --ground:#FBFBFA; --card:#FFFFFF; --sunk:#F2F3F0;
+    --ink:#16181A; --ink-2:#565C60; --ink-3:#878D8F;
+    --rule:#E3E5E1; --rule-firm:#C9CDC7;
+
+    --done:#5F7017; --done-soft:#EAEFDA;
+    --mine:#3D5665; --mine-soft:#E6ECEF;
+    --yours:#8A5411; --yours-soft:#F6EBDB;
+    --outside:#6B5C7A; --outside-soft:#EFEAF3;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --ground:#111312; --card:#181B19; --sunk:#1E2220;
+      --ink:#E9EBE6; --ink-2:#A4AAA6; --ink-3:#767C79;
+      --rule:#282C29; --rule-firm:#3A3F3B;
+      --done:#AEC353; --done-soft:#212917;
+      --mine:#8FB0C2; --mine-soft:#1A2429;
+      --yours:#D3A263; --yours-soft:#2B2115;
+      --outside:#AE9BC2; --outside-soft:#241E2B;
+    }
+  }
+  :root[data-theme="dark"]{
+    --ground:#111312; --card:#181B19; --sunk:#1E2220;
+    --ink:#E9EBE6; --ink-2:#A4AAA6; --ink-3:#767C79;
+    --rule:#282C29; --rule-firm:#3A3F3B;
+    --done:#AEC353; --done-soft:#212917;
+    --mine:#8FB0C2; --mine-soft:#1A2429;
+    --yours:#D3A263; --yours-soft:#2B2115;
+    --outside:#AE9BC2; --outside-soft:#241E2B;
+  }
+
+  *{box-sizing:border-box}
+  body{
+    margin:0;background:var(--ground);color:var(--ink);
+    font-family:"Archivo",system-ui,-apple-system,"Segoe UI",sans-serif;
+    font-size:16px;line-height:1.55;-webkit-font-smoothing:antialiased;
+  }
+  .page{max-width:64rem;margin:0 auto;padding:0 clamp(1rem,4vw,2.5rem) 6rem}
+
+  /* ---- head ---- */
+  header.top{padding:clamp(2.5rem,7vw,5rem) 0 2rem}
+  .eyebrow{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.68rem;letter-spacing:.15em;text-transform:uppercase;
+    color:var(--ink-3);margin:0 0 1.1rem;
+  }
+  h1{
+    font-size:clamp(2rem,5.6vw,3.1rem);font-weight:700;line-height:1.05;
+    letter-spacing:-.026em;margin:0 0 .9rem;max-width:16ch;text-wrap:balance;
+  }
+  .sub{font-size:clamp(1rem,2.1vw,1.15rem);color:var(--ink-2);max-width:54ch;margin:0;font-weight:400}
+
+  /* ---- the answer up front ---- */
+  .answer{
+    margin-top:2.2rem;border:1px solid var(--rule-firm);border-radius:4px;
+    background:var(--card);overflow:hidden;
+  }
+  .answer-row{display:grid;grid-template-columns:minmax(0,1fr);gap:1px;background:var(--rule)}
+  @media (min-width:46rem){.answer-row{grid-template-columns:repeat(3,minmax(0,1fr))}}
+  .answer-row > div{background:var(--card);padding:1.05rem 1.15rem}
+  .answer h3{
+    margin:0 0 .35rem;font-size:.68rem;font-weight:500;
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    letter-spacing:.13em;text-transform:uppercase;color:var(--ink-3);
+  }
+  .answer .big{font-size:1.5rem;font-weight:600;letter-spacing:-.02em;line-height:1.2}
+  .answer .note{font-size:.86rem;color:var(--ink-2);margin-top:.3rem}
+
+  /* ---- weight bar ---- */
+  .weigh{margin-top:1.6rem;padding:1.15rem 1.25rem;border:1px solid var(--rule);border-radius:4px;background:var(--sunk)}
+  .weigh p{margin:0 0 .8rem;font-size:.92rem;color:var(--ink-2)}
+  .bar{display:flex;height:26px;border-radius:3px;overflow:hidden;border:1px solid var(--rule-firm)}
+  .bar span{
+    display:flex;align-items:center;justify-content:center;
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.62rem;
+    letter-spacing:.06em;color:var(--ground);white-space:nowrap;overflow:hidden;
+  }
+  .bar .code{background:var(--mine);flex:0 0 26%}
+  .bar .wait{background:var(--outside);flex:0 0 44%}
+  .bar .money{background:var(--yours);flex:0 0 30%}
+  .legend{display:flex;flex-wrap:wrap;gap:.5rem 1.4rem;margin-top:.75rem;font-size:.82rem;color:var(--ink-2)}
+  .legend span{display:inline-flex;align-items:center;gap:.4rem}
+  .legend i{width:9px;height:9px;border-radius:2px;display:inline-block}
+
+  /* ---- phases ---- */
+  .phase{margin-top:2.6rem}
+  .phase-head{
+    display:flex;flex-wrap:wrap;align-items:baseline;gap:.5rem 1rem;
+    padding-bottom:.7rem;border-bottom:2px solid var(--ink);
+  }
+  .phase-n{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.7rem;
+    letter-spacing:.12em;color:var(--ink-3);
+  }
+  .phase h2{font-size:clamp(1.25rem,2.8vw,1.6rem);font-weight:600;letter-spacing:-.018em;margin:0;flex:1 1 auto}
+  .phase-when{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.7rem;
+    letter-spacing:.06em;color:var(--ink-2);
+  }
+  .phase-why{margin:.9rem 0 0;font-size:.95rem;color:var(--ink-2);max-width:60ch}
+
+  .tasks{display:grid;gap:1px;background:var(--rule);border:1px solid var(--rule);margin-top:1.1rem;border-radius:4px;overflow:hidden}
+  .task{
+    background:var(--card);padding:.9rem 1.05rem;
+    display:grid;grid-template-columns:minmax(0,1fr);gap:.5rem;
+  }
+  @media (min-width:48rem){
+    .task{grid-template-columns:minmax(0,1fr) 8.5rem 8rem;gap:0 1.2rem;align-items:start}
+  }
+  .task-what b{display:block;font-weight:600;font-size:.97rem;letter-spacing:-.006em}
+  .task-what span{display:block;font-size:.88rem;color:var(--ink-2);margin-top:.2rem;line-height:1.5}
+  .who,.cost{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.68rem;
+    letter-spacing:.05em;padding-top:.15rem;
+  }
+  .who{color:var(--ink-2)}
+  .who::before{content:"";display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:.45rem;vertical-align:.02em}
+  .who.me::before{background:var(--mine)}
+  .who.you::before{background:var(--yours)}
+  .who.third::before{background:var(--outside)}
+  .who.time::before{background:var(--outside)}
+  .cost{color:var(--ink-3)}
+  .cost.real{color:var(--yours);font-weight:500}
+  @media (max-width:48rem){
+    .who,.cost{padding-top:0}
+    .task{gap:.35rem}
+  }
+
+  .task.finished{background:var(--done-soft)}
+  .task.finished .task-what b::after{
+    content:"fait";
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.6rem;
+    letter-spacing:.1em;text-transform:uppercase;color:var(--done);
+    margin-left:.6rem;font-weight:500;
+  }
+
+  /* ---- callouts ---- */
+  .callout{
+    margin-top:1.3rem;border-left:3px solid var(--yours);background:var(--yours-soft);
+    padding:1rem 1.15rem;border-radius:0 4px 4px 0;
+  }
+  .callout.grey{border-left-color:var(--outside);background:var(--outside-soft)}
+  .callout b{display:block;margin-bottom:.35rem;font-size:.95rem;font-weight:600}
+  .callout p{margin:0;font-size:.9rem;color:var(--ink-2);line-height:1.55}
+  .callout p + p{margin-top:.5rem}
+
+  /* ---- closing ---- */
+  .closing{margin-top:3rem;padding-top:1.6rem;border-top:2px solid var(--ink)}
+  .closing h2{font-size:clamp(1.3rem,3vw,1.7rem);font-weight:600;letter-spacing:-.02em;margin:0 0 .9rem}
+  .closing p{margin:0 0 .8rem;color:var(--ink-2);max-width:62ch;font-size:.97rem}
+  .closing p strong{color:var(--ink);font-weight:600}
+
+  footer{
+    margin-top:2.6rem;padding-top:1.2rem;border-top:1px solid var(--rule);
+    display:flex;flex-wrap:wrap;gap:.4rem 1.6rem;
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.65rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);
+  }
+  @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+
+<div class="page">
+
+  <header class="top">
+    <p class="eyebrow">Cairn · état des lieux · 27 août 2026</p>
+    <h1>La route jusqu'au mainnet</h1>
+    <p class="sub">
+      Ce qui est fait, ce qui reste, qui le fait, ce que ça coûte. Sans
+      arrondir dans le bon sens.
+    </p>
+  </header>
+
+  <div class="answer">
+    <div class="answer-row">
+      <div>
+        <h3>Le protocole</h3>
+        <p class="big">Complet</p>
+        <p class="note">Il tourne, il résiste, 279 tests. Rien de bloquant n'y reste.</p>
+      </div>
+      <div>
+        <h3>Prêt pour du vrai argent</h3>
+        <p class="big">Non</p>
+        <p class="note">Jamais attaqué, jamais audité, jamais vu par un inconnu.</p>
+      </div>
+      <div>
+        <h3>Délai réaliste</h3>
+        <p class="big">Un an</p>
+        <p class="note">Et vouloir aller plus vite est la meilleure façon de tout perdre.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="weigh">
+    <p>
+      La chose importante à voir avant tout le reste : l'essentiel de ce qui
+      reste n'est pas du code.
+    </p>
+    <div class="bar">
+      <span class="code">écrire</span>
+      <span class="wait">attendre et regarder</span>
+      <span class="money">payer et faire relire</span>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--mine)"></i> ce que j'écris</span>
+      <span><i style="background:var(--outside)"></i> ce que seul le temps donne</span>
+      <span><i style="background:var(--yours)"></i> ce qui demande ton argent et ta décision</span>
+    </div>
+  </div>
+
+  <section class="phase">
+    <div class="phase-head">
+      <span class="phase-n">Phase 1</span>
+      <h2>Ouvrir le testnet</h2>
+      <span class="phase-when">quelques jours</span>
+    </div>
+    <p class="phase-why">
+      Rien de technique ne bloque. Le code est prêt, le premier bloc est miné,
+      les règles sont figées. Ce qui manque tient en trois choses matérielles.
+    </p>
+
+    <div class="tasks">
+      <div class="task finished">
+        <div class="task-what">
+          <b>Le protocole et les programmes</b>
+          <span>Nœud, portefeuille, explorateur, site. Le premier bloc de testnet-2 est miné et inscrit dans le code.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Des programmes téléchargeables</b>
+          <span>Compilés pour Mac, Linux et Windows, avec leurs empreintes publiées, pour que personne n'ait à installer Rust.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">un jour</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Deux ou trois serveurs allumés en permanence</b>
+          <span>Les portes d'entrée du réseau. Sans elles, personne ne peut rejoindre. Il faut les louer et publier leurs adresses.</span>
+        </div>
+        <div class="who you">toi</div>
+        <div class="cost real">15 à 30 € / mois</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>La page d'installation et l'avertissement</b>
+          <span>Trois commandes, et écrit noir sur blanc que cette monnaie ne vaut rien et que le réseau sera effacé.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">un jour</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Inviter des gens</b>
+          <span>Le seul vrai test de décentralisation commence quand quelqu'un que tu ne connais pas lance un nœud.</span>
+        </div>
+        <div class="who you">toi</div>
+        <div class="cost">ton temps</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="phase">
+    <div class="phase-head">
+      <span class="phase-n">Phase 2</span>
+      <h2>Le laisser tourner, et écrire</h2>
+      <span class="phase-when">trois à six mois</span>
+    </div>
+    <p class="phase-why">
+      Cette phase est longue non pas à cause du travail, mais parce qu'un
+      réseau ne révèle ses défauts qu'en tournant devant des gens qui ne le
+      ménagent pas. Le code se fait en parallèle, pendant que le temps passe.
+    </p>
+
+    <div class="tasks">
+      <div class="task">
+        <div class="task-what">
+          <b>Le whitepaper en anglais</b>
+          <span>La pièce qui attire les regards compétents. Il devra citer le théorème de Christ et Bonneau et dire de quel côté nous tombons, parce qu'un lecteur sérieux le connaîtra et cherchera notre réponse.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">une à deux semaines</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Le protocole d'échantillonnage</b>
+          <span>La distribution de FlyClient avec ses paramètres démontrés, les messages réseau, et le service par les archivistes. Le prototype a prouvé que nos en-têtes suffisent.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">une à deux semaines</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Sortir l'histoire de la mémoire</b>
+          <span>Un nœud garde encore tous les blocs qu'il suit en mémoire vive. C'est la dernière chose qui grandit avec la chaîne.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">une semaine</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Alléger le tiroir</b>
+          <span>813 octets par billet aujourd'hui. Il y a de la marge, et chaque octet gagné est du téléphone rendu possible.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">quelques jours</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Un portefeuille qui n'est pas un terminal</b>
+          <span>Aujourd'hui il faut taper des commandes. Une application de bureau d'abord, un téléphone ensuite. C'est ce qui sépare un projet technique d'une monnaie utilisable.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">deux à trois semaines</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Regarder le réseau vivre</b>
+          <span>Des mineurs réels, une difficulté qui monte, des pannes, des pairs hostiles, des cas que personne n'a imaginés. Aucun test ne remplace ça et rien ne l'accélère.</span>
+        </div>
+        <div class="who time">le temps</div>
+        <div class="cost">trois à six mois</div>
+      </div>
+    </div>
+
+    <div class="callout grey">
+      <b>Pourquoi on ne peut pas raccourcir</b>
+      <p>
+        Tout ce que j'écris est vérifié par des tests que j'écris moi-même. Un
+        réseau public est vérifié par des gens qui n'ont aucune raison d'être
+        gentils. Les deux ne trouvent pas les mêmes choses, et la seconde
+        catégorie est celle qui coûte cher quand elle arrive trop tard.
+      </p>
+    </div>
+  </section>
+
+  <section class="phase">
+    <div class="phase-head">
+      <span class="phase-n">Phase 3</span>
+      <h2>Se faire relire par des professionnels</h2>
+      <span class="phase-when">trois à six mois, et de l'argent</span>
+    </div>
+    <p class="phase-why">
+      C'est la phase que rien ne remplace et que je ne peux pas faire
+      moi-même. Elle demande une décision et un budget de ta part.
+    </p>
+
+    <div class="tasks">
+      <div class="task">
+        <div class="task-what">
+          <b>Un audit de sécurité externe</b>
+          <span>Un cabinet spécialisé relit le protocole et la cryptographie. Les cabinets sérieux facturent autour de 25 000 dollars par ingénieur et par semaine. Notre code est petit et sans dépendances, ce qui joue en notre faveur, mais un protocole de consensus se relit lentement.</span>
+        </div>
+        <div class="who third">un cabinet</div>
+        <div class="cost real">50 000 à 120 000 $</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>La deuxième passe après corrections</b>
+          <span>Presque tout protocole en a besoin. Ils trouvent, je corrige, ils revérifient.</span>
+        </div>
+        <div class="who third">le même cabinet</div>
+        <div class="cost real">5 000 à 20 000 $</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Le cadre légal</b>
+          <span>Le règlement européen MiCA s'applique depuis fin 2024. Un point joue en notre faveur et mérite d'être vérifié tôt : les monnaies créées automatiquement en récompense du fonctionnement du réseau relèvent d'un régime nettement plus léger qu'une vente au public. Cairn n'a ni prévente ni allocation, ce qui est exactement le bon profil, mais ce n'est pas à moi de le confirmer.</span>
+        </div>
+        <div class="who third">un avocat</div>
+        <div class="cost real">quelques milliers d'euros</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Corriger ce qu'ils trouvent</b>
+          <span>Et si ce qu'ils trouvent touche au format des blocs, le testnet repart au numéro suivant. C'est précisément à ça que sert un testnet.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">inconnu par nature</div>
+      </div>
+    </div>
+
+    <div class="callout">
+      <b>Le chiffre à retenir</b>
+      <p>
+        L'audit est de loin la dépense principale du projet, et elle n'est pas
+        négociable. Un protocole qui porte de l'argent réel sans avoir été relu
+        par des tiers compétents n'est pas un projet ambitieux, c'est un
+        accident qui attend une date.
+      </p>
+      <p>
+        Il y a une manière de réduire la note : publier le whitepaper et le
+        code tôt, et laisser des chercheurs regarder gratuitement. Ça ne
+        remplace pas l'audit, mais ça fait trouver les erreurs évidentes avant
+        de payer quelqu'un pour les chercher.
+      </p>
+    </div>
+  </section>
+
+  <section class="phase">
+    <div class="phase-head">
+      <span class="phase-n">Phase 4</span>
+      <h2>Ouvrir le mainnet</h2>
+      <span class="phase-when">un jour, annoncé à l'avance</span>
+    </div>
+    <p class="phase-why">
+      Techniquement, c'est la partie la plus simple, et tout est déjà en place
+      pour la faire proprement.
+    </p>
+
+    <div class="tasks">
+      <div class="task">
+        <div class="task-what">
+          <b>Choisir et annoncer la date</b>
+          <span>Le protocole refuse déjà tout bloc daté avant l'ouverture. Annoncer la date à l'avance rend l'instant du départ identique pour tout le monde, et ce n'est pas une promesse : chaque nœud le vérifie.</span>
+        </div>
+        <div class="who you">toi</div>
+        <div class="cost">une décision</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Miner le premier bloc en public</b>
+          <span>Il portera un message daté du jour, quelque chose que personne ne pouvait connaître à l'avance, ce qui prouve que la chaîne n'a pas été lancée en douce des semaines plus tôt. Et il ne paiera personne.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">deux minutes</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Ne rien se réserver</b>
+          <span>Aucune prévente, aucune allocation aux fondateurs, aucune réserve. Le jour de l'ouverture, le total en circulation est zéro. C'est déjà le cas dans le code et c'est ce qui rend le reste crédible.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">déjà fait</div>
+      </div>
+    </div>
+
+    <div class="callout grey">
+      <b>Et la cotation sur les plateformes ?</b>
+      <p>
+        Ce n'est pas une étape technique et ça ne se planifie pas ici. C'est
+        une décision commerciale prise par des tiers, très en aval : elle
+        suppose une chaîne qui tourne depuis un moment, des nœuds tenus par
+        des inconnus, et une demande réelle. Laisser cet objectif influencer
+        les choix de conception aujourd'hui abîmerait le protocole sans
+        rapprocher la date d'un jour.
+      </p>
+    </div>
+  </section>
+
+  <div class="closing">
+    <h2>Ce que ça donne, mis bout à bout</h2>
+    <p>
+      Le testnet peut ouvrir <strong>dans les jours qui viennent</strong>, dès
+      que les serveurs sont loués. C'est la seule chose qui te sépare d'un
+      réseau public en fonctionnement.
+    </p>
+    <p>
+      Le mainnet, lui, demande d'enchaîner trois à six mois de vie réelle sur
+      le testnet, puis trois à six mois d'audit et de corrections. <strong>Un
+      an est le délai honnête</strong>, et il est presque entièrement fait
+      d'attente et de relecture, pas d'écriture.
+    </p>
+    <p>
+      Le budget se sépare nettement en deux. Quelques dizaines d'euros par mois
+      pour faire vivre le testnet, à partir de maintenant. Puis, une seule
+      fois avant le mainnet, <strong>l'ordre de 60 000 à 140 000 dollars</strong>
+      d'audit et de conseil juridique.
+    </p>
+    <p>
+      Et une chose qu'aucune somme n'achète : que des gens que tu ne connais
+      pas trouvent le projet assez intéressant pour faire tourner un nœud.
+      C'est le seul chiffre qui dira si Cairn est décentralisée, et c'est aussi
+      le seul sur lequel je ne peux rien.
+    </p>
+  </div>
+
+  <footer>
+    <span>Cairn · route jusqu'au mainnet · v1</span>
+    <span>36 commits · 279 tests</span>
+    <span>Rien de ce document n'est un conseil en investissement</span>
+  </footer>
+
+</div>
