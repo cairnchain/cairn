@@ -1,0 +1,572 @@
+{
+  "site": { "title": "Cairn" },
+
+  "a11y": {
+    "skip": "Aller au contenu",
+    "level": "Niveau de lecture",
+    "language": "Langue"
+  },
+
+  "nav": {
+    "home": "Accueil",
+    "explore": "Explorer",
+    "learn": "Comprendre",
+    "rules": "Règles",
+    "run": "Lancer un nœud"
+  },
+
+  "level": {
+    "plain": {
+      "name": "Je débute",
+      "blurb": "Vous avez entendu parler de cryptomonnaie et c'est à peu près tout. Rien ici n'en supposera davantage."
+    },
+    "curious": {
+      "name": "J'ai des bases",
+      "blurb": "Vous savez en gros ce qu'est une blockchain et un portefeuille, et vous voulez savoir ce qui change ici."
+    },
+    "technical": {
+      "name": "Technique",
+      "blurb": "L'accumulateur, le recalcul de difficulté, la structure des engagements et les chiffres."
+    }
+  },
+
+  "welcome": {
+    "eyebrow": "Avant de commencer",
+    "title": "Vous connaissez déjà tout ça ?",
+    "lede": "Tout ce site est écrit trois fois. Choisissez la version qui vous convient. Vous pouvez en changer à tout moment, sur n'importe quelle page."
+  },
+
+  "search": {
+    "placeholder": "Hauteur, bloc, transaction, adresse, billet",
+    "action": "Chercher",
+    "nothing": "Rien sur cette chaîne ne correspond."
+  },
+
+  "common": {
+    "loading": "Lecture de la chaîne",
+    "nothing": "Rien pour l'instant.",
+    "seeAll": "Voir tous les blocs",
+    "older": "Plus anciens"
+  },
+
+  "unit": {
+    "seconds": "{n} secondes",
+    "minutes": "{n} minutes",
+    "hours": "{n} heures",
+    "days": "{n} jours",
+    "years": "{n} ans"
+  },
+
+  "error": {
+    "title": "Ça n'a pas marché",
+    "missing": "Rien sur cette chaîne ne porte ce nom.",
+    "unreachable": "Le nœud derrière cette page n'a pas répondu. Il redémarre peut-être, ou il rattrape encore son retard.",
+    "noPage": "Aucune page à cette adresse."
+  },
+
+  "tick": {
+    "network": "réseau",
+    "height": "hauteur",
+    "hot": "dans le tiroir",
+    "cold": "dans la cave",
+    "pool": "en attente",
+    "peers": "pairs",
+    "supply": "émis"
+  },
+
+  "home": {
+    "eyebrow": "{network}, en direct",
+    "title": {
+      "plain": "Une monnaie que vous pouvez vérifier |vous-même|, sur un ordinateur ordinaire, pour toujours.",
+      "curious": "Un nœud complet qui coûtera |dans trente ans| ce qu'il coûte aujourd'hui.",
+      "technical": "Un coût de validation constant |par construction|, pas par politique."
+    },
+    "lede": {
+      "plain": [
+        "Toutes les cryptomonnaies ont un problème dont on parle peu : plus elles sont utilisées, plus il devient cher de les vérifier soi-même. Or c'est la vérification qui les tient honnêtes. Donc plus elles réussissent, moins il reste de gens capables de leur demander des comptes, et plus il faut croire quelqu'un d'autre sur parole.",
+        "Cairn est construite pour que ça n'arrive jamais. Quoi que fasse la chaîne, quel que soit le nombre d'utilisateurs, la vérifier coûte la même chose. Pas moins qu'aujourd'hui, pas plus. La même chose."
+      ],
+      "curious": [
+        "Sur les chaînes existantes, faire tourner un nœud complet signifie détenir l'intégralité des sorties non dépensées, et cet ensemble grandit avec l'adoption. Bitcoin en est à plusieurs gigaoctets, Ethereum demande une machine que peu de gens possèdent. Le coût de la vérification monte avec l'usage, donc le succès pousse discrètement la vérification vers les centres de données.",
+        "Cairn pose un plafond dur sur ce coût. Un nœud garde en entier un ensemble de travail borné, et tout le reste sous forme de soixante-quatre empreintes. Ce n'est pas un compromis sur la validation : le nœud vérifie toujours chaque règle sur chaque bloc. Il n'a simplement jamais à détenir plus qu'aujourd'hui."
+      ],
+      "technical": [
+        "L'état de validation est coupé en deux. Un ensemble chaud borné de 131072 billets est détenu en entier, dans un arbre de Merkle creux. Tout ce qui est plus ancien vit dans une forêt de Merkle en ajout seul, qu'un nœud porte sous la forme de soixante-quatre racines et rien d'autre.",
+        "Ajouter une feuille à cette forêt ne demande que les racines, et c'est ce qui rend un nœud élagué possible : il peut étendre l'accumulateur sans le détenir. Dépenser un billet tombé demande une preuve d'inclusion fournie par le dépensier, vérifiée contre des racines que le nœud possède déjà."
+      ]
+    },
+    "action": { "learn": "Comprendre", "explore": "Explorer la chaîne", "run": "Lancer un nœud" },
+    "cost": {
+      "title": {
+        "plain": "Ce qu'un ordinateur du réseau détient réellement",
+        "curious": "Ce qu'un nœud complet détient réellement",
+        "technical": "L'état de validation, en direct"
+      },
+      "body": {
+        "plain": [
+          "Voyez ça comme un tiroir et une cave. Chaque ordinateur du réseau garde le tiroir en entier : l'argent qui a bougé récemment, {capacity} billets au maximum, ce qui fait environ {megabytes}. C'est tout le coût, et il ne grandit jamais.",
+          "Tout ce qui est plus ancien descend à la cave. Personne ne garde la cave. Ce que chaque ordinateur garde à la place, ce sont soixante-quatre courtes empreintes, de quoi vérifier que ce qu'on remonte y était vraiment."
+        ],
+        "curious": [
+          "L'ensemble chaud est borné à {capacity} billets, environ {megabytes} détenus en entier par chaque nœud. Quand il est plein, les billets les plus anciens tombent dans l'ensemble froid.",
+          "L'ensemble froid n'a pas de limite et personne ne le stocke. Chaque nœud garde soixante-quatre empreintes qui en tiennent lieu. Dépenser quelque chose venu de là demande d'apporter une preuve, que votre propre portefeuille garde pour vous."
+        ],
+        "technical": [
+          "Ensemble chaud : {capacity} billets au maximum, dans un arbre de Merkle creux, environ {megabytes} à pleine capacité. L'éviction se fait par ancienneté, les plus vieux d'abord, par lots aux frontières de bloc.",
+          "Ensemble froid : une forêt de Merkle en ajout seul, soixante-quatre racines. Une dépense qui en vient porte une preuve d'inclusion ; une preuve peut avoir jusqu'à 32 blocs de retard, et un billet qui vient de tomber reste dépensable sans preuve pendant 64 blocs."
+        ]
+      }
+    },
+    "recent": { "title": "Derniers blocs" }
+  },
+
+  "stat": {
+    "height": "Hauteur",
+    "difficulty": "Difficulté",
+    "supply": "Émis à ce jour",
+    "supply.note": "{reward} CAIRN par bloc actuellement",
+    "holders": "Adresses détentrices",
+    "pool": "En attente",
+    "pool.note": "transferts pas encore dans un bloc",
+    "peers": "Pairs",
+    "balance": "Solde",
+    "received": "Reçu au total",
+    "sent": "Envoyé au total",
+    "notesHeld": "Billets détenus",
+    "notesHeld.note": "sur {total} reçus depuis le début"
+  },
+
+  "tier": {
+    "hot": "Dans le tiroir",
+    "cold": "Dans la cave",
+    "grace": "Vient de tomber",
+    "spent": "Dépensé",
+    "unknown": "Inconnu",
+    "hot.name": "Le tiroir, détenu par chaque nœud",
+    "hot.note": "Plein, il coûte {size}. Il ne coûtera jamais plus.",
+    "hot.explain": "Chaque nœud du réseau détient ce billet en ce moment même.",
+    "cold.name": "La cave, détenue par personne",
+    "cold.note": "Quelle que soit sa taille, un nœud porte {roots} empreintes pour elle.",
+    "cold.explain": "Plus aucun nœud ne détient ce billet. Le dépenser demande une preuve, que son propriétaire conserve.",
+    "grace.explain": "Il vient tout juste de sortir du tiroir, donc les nœuds l'ont encore et aucune preuve n'est nécessaire.",
+    "spent.explain": "Ce billet a été dépensé. Un billet est créé une fois et dépensé une fois.",
+    "unknown.explain": "Ce billet n'est pas encore dans l'index."
+  },
+
+  "direction": { "in": "reçu", "out": "envoyé" },
+  "kind": { "transfer": "Transfert", "coinbase": "Récompense de bloc" },
+
+  "field": {
+    "height": "Hauteur", "block": "Bloc", "age": "Âge", "time": "Date",
+    "transfers": "Transferts", "paid": "Payé au mineur", "size": "Taille",
+    "confirmations": "Blocs par-dessus", "difficulty": "Difficulté", "work": "Travail",
+    "nonce": "Nonce", "previous": "Bloc précédent", "next": "Bloc suivant",
+    "reward": "Récompense de bloc", "fees": "Frais", "stateRoot": "Engagement d'état",
+    "transactionsRoot": "Racine des transactions", "message": "Message", "extra": "Octets libres",
+    "transaction": "Transaction", "owner": "Propriétaire", "value": "Valeur", "state": "État",
+    "note": "Billet", "proof": "Détenu où", "kind": "Type", "status": "Statut",
+    "totalIn": "Total dépensé", "totalOut": "Total créé", "fee": "Frais",
+    "address": "Adresse", "balance": "Solde", "since": "Depuis le bloc",
+    "direction": "Sens", "madeBy": "Créé par", "madeAt": "Créé au bloc",
+    "spentBy": "Dépensé par", "spentAt": "Dépensé au bloc", "position": "Position dans la cave",
+    "position.note": "là où pointe sa preuve",
+    "none": "Aucun", "pending": "Pas encore miné", "unknown": "Pas indexé",
+    "network": "Réseau", "networkId": "Identifiant de réseau", "genesis": "Premier bloc",
+    "opensAt": "Ouvert le", "opensAt.note": "aucun bloc ne peut être daté avant",
+    "initialReward": "Récompense du premier bloc", "halvingInterval": "Blocs entre deux halvings",
+    "halvingInterval.note": "environ {time}",
+    "tailReward": "Récompense plancher", "tailReward.note": "versée à jamais, une fois le halving passé sous ce seuil",
+    "pebble": "Cailloux dans un CAIRN", "pebble.note": "la plus petite unité",
+    "hotCapacity": "Billets dans le tiroir", "hotCapacity.note": "le plafond, pas une moyenne",
+    "paid.column": "Payé au mineur (CAIRN)", "perNote": "Octets par billet", "atCapacity": "Tiroir, plein",
+    "coldCost": "La cave coûte à un nœud", "coldCost.value": "64 empreintes, quelle que soit sa taille",
+    "blockTime": "Temps visé entre deux blocs", "genesisDifficulty": "Difficulté d'ouverture",
+    "maxTransfers": "Transferts par bloc", "maxInputs": "Entrées par transfert",
+    "maxOutputs": "Sorties par transfert", "drift": "Tolérance d'horloge",
+    "drift.note": "de combien un bloc peut devancer l'horloge d'un nœud"
+  },
+
+  "blocks": { "title": "Blocs" },
+
+  "block": {
+    "eyebrow": "Bloc",
+    "title": "Bloc {height}",
+    "coinbase": { "title": "Ce que ce bloc a payé" },
+    "transfers": { "title": "Transferts ({n})", "none": "Personne n'a envoyé quoi que ce soit dans ce bloc." }
+  },
+
+  "transfer": {
+    "spends": "Dépense ({n})",
+    "creates": "Crée ({n})",
+    "fee": "frais {fee} CAIRN",
+    "waiting": "En attente d'un bloc",
+    "included": "Dans la chaîne, {n} blocs de profondeur"
+  },
+
+  "tx": { "eyebrow": "Transaction", "title": "Transaction", "noInputs": "Rien n'a été dépensé : cet argent vient d'être créé." },
+
+  "address": {
+    "eyebrow": "Adresse",
+    "holdings": "Billets détenus en ce moment",
+    "history": "Tout ce qui a bougé"
+  },
+
+  "note": { "eyebrow": "Billet", "title": "Un billet" },
+
+  "pool": { "eyebrow": "Salle d'attente", "title": "Transferts en attente d'un bloc", "empty": "Rien n'attend." },
+
+  "holders": { "eyebrow": "Répartition", "title": "Plus gros détenteurs" },
+
+  "rules": {
+    "eyebrow": "Consensus",
+    "title": "Les règles de ce réseau",
+    "lede": {
+      "plain": [
+        "Ce sont les règles sur lesquelles chaque ordinateur du réseau est d'accord. Ce ne sont pas des réglages que chacun modifie dans son coin : deux ordinateurs qui divergeraient sur une seule ligne construiraient deux chaînes différentes en croyant chacun être sur la même.",
+        "Elles sont lues directement dans un nœud en fonctionnement, cette page ne peut donc pas être périmée."
+      ],
+      "curious": [
+        "Chaque valeur ci-dessous relève du consensus. Aucune n'est une option d'opérateur. Un nœud les choisit en nommant un réseau, jamais une par une, parce qu'un nœud qui en changerait une suivrait silencieusement une autre chaîne.",
+        "Lues en direct depuis le nœud qui sert cette page."
+      ],
+      "technical": [
+        "L'ensemble complet des paramètres de consensus, lu en direct depuis ConsensusParams sur le nœud derrière cette page. Chaque champ est engagé par les règles qui l'utilisent, aucun n'est configurable nœud par nœud."
+      ]
+    },
+    "identity": "De quelle chaîne il s'agit",
+    "money": "Comment la monnaie est créée",
+    "cost": "Ce qu'un nœud porte",
+    "blocks": "Blocs et rythme"
+  },
+
+  "explain": {
+    "blocks": {
+      "plain": "Un bloc est une page du registre. Environ une fois par minute, quelqu'un en trouve une valide, et tout ce qu'elle contient devient définitif. Chaque page renvoie à la précédente, ce qui empêche de réécrire discrètement une page ancienne.",
+      "curious": "Les blocs arrivent environ toutes les minutes. La chaîne est choisie sur le travail accumulé et non sur la longueur, donc la branche qui a demandé le plus de calcul est celle que suit chaque nœud.",
+      "technical": "Le choix de branche se fait au travail cumulé. En cas d'égalité, la branche déjà suivie est conservée, et un basculement s'applique de façon atomique. La difficulté est recalculée sur une fenêtre LWMA de 90 blocs, avec des temps de résolution bornés et un facteur quatre au maximum par recalcul."
+    },
+    "block": {
+      "plain": "Tout ce qui suit a été figé au moment où ce bloc a été trouvé. Les longues chaînes de caractères sont des empreintes : changez une seule lettre n'importe où dans le bloc et chacune d'elles change entièrement.",
+      "curious": "L'en-tête engage les transactions du bloc et l'ensemble des billets tel qu'il est ensuite. Le nonce est ce que le mineur a fait varier jusqu'à ce que l'identifiant du bloc passe sous la cible.",
+      "technical": "L'identifiant est un BLAKE3 à domaine séparé sur l'encodage canonique de l'en-tête, et c'est lui que mesure la preuve de travail. Les horodatages sont comparés à la médiane des onze blocs précédents, et non au parent."
+    },
+    "coinbase": {
+      "plain": "C'est d'ici que vient l'argent neuf. Celui qui a trouvé ce bloc est payé pour son travail, et ce paiement est la seule façon dont du CAIRN est jamais créé. Personne n'en a reçu au départ.",
+      "curious": "La coinbase verse la récompense de bloc plus tous les frais du bloc. La récompense est divisée par deux selon un calendrier fixe, puis cesse de baisser à un plancher versé à jamais.",
+      "technical": "Les sorties de coinbase prennent des identifiants dérivés de la transaction, qui engage la hauteur, si bien que deux blocs payant des sorties identiques à des hauteurs différentes ne peuvent pas entrer en collision. Le champ libre est plafonné à 64 octets et donne au mineur un espace de recherche au-delà du nonce d'en-tête."
+    },
+    "transfers": {
+      "plain": "Chacun de ces éléments est quelqu'un qui envoie de l'argent à quelqu'un d'autre. Ici l'argent n'est pas un solde qui monte et descend : c'est un ensemble de billets, et envoyer consiste à déchirer les billets que l'on détient pour en écrire de nouveaux.",
+      "curious": "Les transferts consomment des billets et en créent de nouveaux, à la manière des sorties non dépensées. Ce qu'un transfert ne consomme pas, il le verse en frais à celui qui a miné le bloc.",
+      "technical": "Les identifiants de transfert excluent les signatures et les témoins. Cela supprime la malléabilité, et surtout cela permet de remplacer une preuve d'inclusion périmée par une preuve fraîche sans invalider quoi que ce soit en aval."
+    },
+    "transaction": {
+      "plain": "Une transaction déchire des billets et en écrit de nouveaux. Le total écrit ne peut jamais dépasser le total déchiré. Ce qui reste va à celui qui a trouvé le bloc, sous forme de frais.",
+      "curious": "Les entrées désignent les billets dépensés, les sorties sont les billets créés. Une signature par entrée prouve que le dépensier en était propriétaire.",
+      "technical": "Chaque signature engage le réseau, la version, l'identifiant de transaction, l'indice de l'entrée, ainsi que la valeur et le propriétaire du billet dépensé. Engager le billet dépensé est la leçon des transactions que l'on pouvait tromper sur leur propre valeur."
+    },
+    "inputs": {
+      "plain": "Ce sont les billets déchirés. Chacun a été écrit par une transaction antérieure, et chacun ne peut être déchiré qu'une fois.",
+      "curious": "Chaque entrée désigne un billet et prouve le droit de le dépenser. La colonne détenu où indique si chaque nœud avait encore ce billet, ou si le dépensier a dû apporter une preuve.",
+      "technical": "Un témoin chaud ne demande rien : le nœud détient le billet. Un témoin froid porte le billet, sa position dans la forêt et une preuve d'inclusion vérifiée contre des racines que le nœud possède déjà."
+    },
+    "outputs": {
+      "plain": "Ce sont les nouveaux billets. Chacun appartient à une adresse et pourra être dépensé exactement une fois, plus tard, par celui qui détient le secret correspondant.",
+      "curious": "Chaque sortie est une valeur verrouillée sur une clé publique. Son identifiant vient de la transaction qui l'a créée et de sa position dans la liste.",
+      "technical": "Un identifiant de billet est l'identifiant de la transaction source et un indice. L'ordre sur les identifiants est défini pour que l'ensemble des billets ait une énumération canonique unique, dont dépend l'engagement d'état."
+    },
+    "address": {
+      "plain": "Une adresse est un nom public que vous pouvez distribuer sans risque. N'importe qui peut voir ce qu'elle détient. Seule la personne qui a le secret correspondant peut la dépenser, et ce secret n'apparaît jamais ici ni nulle part sur ce site.",
+      "curious": "Cette page est construite à partir d'un index sur toute la chaîne, un service que l'explorateur rend et que le protocole refuse délibérément : aucun nœud ne garde de table associant les propriétaires à leurs billets.",
+      "technical": "Clés Ed25519, avec deux restrictions au-delà du standard : les clés de petit ordre sont rejetées à la construction, et les encodages non canoniques sont refusés pour que deux suites d'octets ne puissent jamais désigner une même clé."
+    },
+    "holdings": {
+      "plain": "Les billets que cette adresse détient, un par un. Un solde n'est que leur somme.",
+      "curious": "L'état indique quels billets chaque nœud détient encore et lesquels sont tombés. Un portefeuille conserve les preuves des billets tombés, ce qui lui permet de les dépenser quand même.",
+      "technical": "Les billets tombés demandent une preuve au moment de la dépense. Un portefeuille suit la position et rafraîchit la preuve à mesure que la forêt grandit ; le nœud accepte une preuve avec jusqu'à 32 blocs de retard."
+    },
+    "note": {
+      "plain": "Un billet. Il a été écrit une fois, il appartient à une adresse, et il pourra être déchiré une fois. Voilà toute sa vie.",
+      "curious": "Un billet est une sortie non dépensée : une valeur et un propriétaire. Il n'est jamais modifié, seulement créé puis consommé.",
+      "technical": "La feuille engagée dans l'accumulateur est une empreinte à domaine séparé sur l'identifiant, la valeur et le propriétaire, si bien qu'un billet ne peut être ni déplacé d'une position à l'autre ni réinterprété."
+    },
+    "pool": {
+      "plain": "Des transferts annoncés mais pas encore réglés. Ils attendent que quelqu'un trouve un bloc où les mettre.",
+      "curious": "La réserve de transactions telle que ce nœud la voit. Chaque nœud garde la sienne, ce que vous voyez ici est donc la vue d'un nœud, pas une vérité du réseau.",
+      "technical": "La sélection est déterministe, par ordre d'identifiant, si bien que l'ordre dans lequel un mineur parcourt la réserve ne dépend pas de l'ordre d'arrivée. Un transfert en conflit avec un transfert déjà en réserve est refusé plutôt que de le remplacer : arbitrer entre deux dépenses concurrentes est une politique de frais, et il n'existe pas encore de marché des frais pour en décider."
+    },
+    "holders": {
+      "plain": "Qui détient le plus. Sur un réseau de test, cela ne dit pas grand-chose : c'est surtout celui qui a laissé un ordinateur miner le plus longtemps.",
+      "curious": "Calculé depuis l'index de l'explorateur, en comptant les billets non dépensés par propriétaire. Un propriétaire peut détenir autant d'adresses qu'il veut : c'est donc une vue des adresses, pas des personnes.",
+      "technical": "Les soldes sont la somme des billets non dépensés par clé publique sur la branche suivie. Une réorganisation reconstruit l'index plutôt que de le dérouler à l'envers."
+    },
+    "emission": {
+      "plain": "L'argent neuf n'apparaît qu'en paiement du travail de recherche des blocs. Le montant est divisé par deux régulièrement, puis cesse de baisser et reste à un petit chiffre pour toujours, afin qu'il y ait toujours une raison de faire tourner le réseau.",
+      "curious": "Division par deux tous les 1051200 blocs, en partant de 50 CAIRN jusqu'à un plancher permanent de 0,01 CAIRN par bloc. Environ 105 millions de CAIRN existent avant que le plancher ne prenne le relais. La durée d'une période dépend du temps de bloc, indiqué plus haut pour ce réseau.",
+      "technical": "Une chaîne qui promet d'être vérifiable dans trente ans ne peut pas faire reposer son budget de sécurité sur la question ouverte de savoir si les frais seuls suffisent. La queue d'émission est une réponse assumée à cela, à un taux de dilution connu et faible."
+    },
+    "cost": {
+      "plain": "C'est tout l'objet de Cairn. Le tiroir a un plafond, donc le coût de la participation a un plafond. La cave peut grandir sans limite et coûte toujours à chaque ordinateur exactement soixante-quatre empreintes.",
+      "curious": "Regardez la forme de la chose : la partie bornée l'est par une règle et non par une convention, et la partie non bornée est portée comme une constante. C'est ce qui rend le coût d'un nœud complet plat dans le temps.",
+      "technical": "La forêt est en ajout seul, et ajouter une feuille ne demande que les racines. C'est la propriété sur laquelle tout le reste repose : un nœud qui ne détient rien de l'ensemble peut malgré tout étendre l'accumulateur correctement."
+    }
+  },
+
+  "learn": {
+    "eyebrow": "Depuis le début",
+    "title": "Ce qu'est Cairn, et pourquoi elle est construite ainsi",
+    "lede": {
+      "plain": ["Huit courts chapitres. Aucun prérequis. Si un mot inconnu apparaît, il est expliqué avant d'être utilisé."],
+      "curious": ["Huit chapitres, en supposant que vous savez en gros ce qu'est une blockchain, un portefeuille et un mineur."],
+      "technical": ["Huit chapitres, au niveau du document de conception. Des chiffres et des structures plutôt que des analogies."]
+    },
+    "problem": {
+      "title": {
+        "plain": "Le problème dont personne ne fait la publicité",
+        "curious": "Le succès pousse la vérification vers les centres de données",
+        "technical": "Le coût de validation croît avec l'adoption"
+      },
+      "body": {
+        "plain": [
+          "Une cryptomonnaie fonctionne parce que beaucoup de gens séparés la vérifient. Personne n'est aux commandes, donc c'est cette vérification qui empêche de tricher.",
+          "Mais sur les systèmes existants, vérifier devient plus cher à mesure que le système est utilisé. À un certain point, une personne ordinaire ne peut plus le faire et doit faire confiance à une entreprise qui, elle, le peut. Le système dépend alors de la confiance en une poignée d'entreprises, ce qu'il était justement censé éviter.",
+          "Donc plus il réussit, plus il dérive vers ce qu'il devait remplacer."
+        ],
+        "curious": [
+          "Un nœud complet détient l'ensemble des sorties non dépensées et valide chaque règle contre lui. Cet ensemble grandit avec l'adoption, donc le coût de la vérification indépendante monte avec l'usage.",
+          "La réponse habituelle est que le matériel devient moins cher. Peut-être, mais le sens reste le mauvais : le nombre de vérificateurs indépendants baisse quand le système réussit. Les clients légers ne règlent rien, ils changent qui vous devez croire.",
+          "Cairn traite cela comme le problème de conception, pas comme un détail d'exploitation."
+        ],
+        "technical": [
+          "La croissance de l'ensemble UTXO n'est bornée dans aucun système déployé. L'expiration d'état, l'absence d'état et divers accumulateurs s'y attaquent ; la plupart déplacent le coût ailleurs ou exigent une cérémonie de confiance initiale.",
+          "La thèse ici : poser un plafond dur sur l'état qu'un validateur doit détenir, et rendre le reste non borné portable en espace constant, sans cérémonie de confiance et sans affaiblir ce qu'un nœud vérifie réellement."
+        ]
+      }
+    },
+    "notes": {
+      "title": {
+        "plain": "L'argent en billets, pas en solde",
+        "curious": "Des billets, c'est-à-dire des sorties non dépensées",
+        "technical": "Le modèle des billets"
+      },
+      "body": {
+        "plain": [
+          "Cairn ne tient pas un compte avec un solde qui monte et descend. Elle tient des billets, comme un portefeuille tient des billets de banque.",
+          "Un billet a une valeur et un propriétaire. Il est écrit une fois, et il peut être déchiré une fois. Pour envoyer 30 à quelqu'un quand vous détenez un billet de 50, vous déchirez le 50 et vous écrivez deux nouveaux billets : un de 30 pour lui, un de 20 pour vous.",
+          "Cela ressemble à un détail. Ce n'en est pas un : parce qu'un billet n'est jamais modifié, seulement créé puis détruit, un ordinateur peut oublier entièrement un vieux billet et rester certain de ceux qui restent."
+        ],
+        "curious": [
+          "Le modèle des sorties non dépensées, comme dans Bitcoin, plutôt que celui des comptes. Un billet est une valeur verrouillée sur une clé publique, identifiée par la transaction qui l'a créé et son indice dans les sorties.",
+          "L'immuabilité est la raison de ce choix ici. Un solde de compte doit être lu et réécrit, donc le compte doit être détenu. Un billet est créé une fois et consommé une fois, ce qui permet à un nœud de détenir un engagement plutôt que le billet lui-même."
+        ],
+        "technical": [
+          "Un identifiant de billet est le couple (transaction source, indice de sortie). L'ordre est défini sur les identifiants pour que l'ensemble ait une énumération canonique unique, dont dépend l'engagement d'état.",
+          "Les identifiants de transfert excluent les signatures et les témoins. Cela donne la résistance à la malléabilité, et surtout cela permet de remplacer une preuve d'inclusion périmée par une preuve fraîche sans changer aucun identifiant engagé ailleurs."
+        ]
+      }
+    },
+    "drawer": {
+      "title": {
+        "plain": "Le tiroir",
+        "curious": "L'ensemble chaud",
+        "technical": "L'ensemble chaud : un arbre de Merkle creux borné"
+      },
+      "body": {
+        "plain": [
+          "Chaque ordinateur du réseau garde un tiroir. Dedans se trouvent les billets qui ont bougé récemment, et il y a une limite dure au nombre qui y tient : 131072.",
+          "Cette limite n'est ni une suggestion ni une moyenne. C'est une règle sur laquelle tout le réseau est d'accord, donc le tiroir ne peut jamais dépasser cette taille, quelle que soit la popularité de Cairn. Plein, il fait environ 107 mégaoctets. Une fraction d'un téléphone.",
+          "Quand le tiroir est plein et qu'il faut de la place, les billets les plus anciens en sortent et descendent à la cave."
+        ],
+        "curious": [
+          "Un ensemble borné de 131072 billets, détenu en entier par chaque nœud, dans un arbre de Merkle creux pour que l'engagement d'état se recalcule à bas coût. Environ 107 Mo à pleine capacité, mesuré sur l'implémentation réelle.",
+          "L'éviction se fait par ancienneté, les plus vieux d'abord, par lots aux frontières de bloc. Chaque nœud évince les mêmes billets à la même hauteur, parce que la règle relève du consensus."
+        ],
+        "technical": [
+          "131072 billets, arbre de Merkle creux, persistant par partage de structure pour qu'une réorganisation puisse restaurer la racine précédente sans reconstruction. 813 octets par billet mesurés, soit environ 107 Mo à pleine capacité.",
+          "L'arbre est la seule partie du système où il reste clairement de la marge : une représentation plus légère est l'optimisation la plus rentable qui reste, et elle ne change aucune règle."
+        ]
+      }
+    },
+    "cave": {
+      "title": {
+        "plain": "La cave",
+        "curious": "L'ensemble froid, que personne ne stocke",
+        "technical": "L'ensemble froid : une forêt de Merkle en ajout seul"
+      },
+      "body": {
+        "plain": [
+          "Tout ce qui sort du tiroir descend à la cave. La cave n'a pas de limite de taille, et voici le plus surprenant : personne ne la garde. Pas un seul ordinateur du réseau ne stocke ce qui s'y trouve.",
+          "Ce que chaque ordinateur garde à la place, ce sont soixante-quatre courtes empreintes. Elles suffisent à répondre à une question : si quelqu'un prétend qu'un billet donné est dans la cave, est-ce vrai ? Oui ou non, avec certitude, sans jamais avoir vu la cave.",
+          "Soixante-quatre empreintes, que la cave contienne mille billets ou mille milliards."
+        ],
+        "curious": [
+          "Une forêt de Merkle en ajout seul : une liste d'arbres binaires parfaits, gardés sous forme de racines. Un nœud garde soixante-quatre empreintes et rien d'autre, quel que soit le nombre de billets tombés.",
+          "La propriété décisive est qu'ajouter une feuille ne demande que les racines. C'est ce qui rend possible un nœud élagué. Il peut étendre correctement l'accumulateur sans en détenir la moindre partie, ce qui n'est pas vrai d'un arbre de Merkle ordinaire."
+        ],
+        "technical": [
+          "Soixante-quatre racines, une par hauteur d'arbre possible. À l'insertion, la nouvelle feuille chevauche par la droite chaque fusion, si bien que les arbres qu'elle absorbe sont ses propres frères dans l'ordre : la preuve d'inclusion tombe de l'ajout lui-même, sans coût supplémentaire.",
+          "Le retrait se fait par lots et est vérifié contre la racine d'avant-bloc avant que quoi que ce soit ne soit appliqué, puis les preuves en attente sont rafraîchies, de sorte que deux dépenses froides dans le même bloc ne peuvent pas s'invalider mutuellement."
+        ]
+      }
+    },
+    "proof": {
+      "title": {
+        "plain": "Dépenser quelque chose venu de la cave",
+        "curious": "Les preuves, et qui les garde",
+        "technical": "Preuves d'inclusion, fenêtres et grâce"
+      },
+      "body": {
+        "plain": [
+          "Si personne ne garde la cave, comment dépenser un billet qui y est tombé ? Vous apportez la preuve vous-même.",
+          "Votre portefeuille la garde discrètement pour vous depuis le jour où le billet est tombé, et il la tient à jour. Vous n'avez rien à faire : elle est simplement là au moment de dépenser. Le réseau la vérifie contre ces soixante-quatre empreintes, et il accepte ou il refuse.",
+          "Le coût de se souvenir d'un vieux billet est ainsi porté par la seule personne que ça intéresse, au lieu d'être porté par tous les ordinateurs du réseau pour toujours. Ce seul déplacement est ce qui fait tenir l'ensemble."
+        ],
+        "curious": [
+          "Le dépensier fournit une preuve d'inclusion, vérifiée contre des racines que le nœud possède déjà. Votre portefeuille suit la position de chacun de vos billets tombés et rafraîchit la preuve à mesure que la forêt grandit.",
+          "Deux fenêtres rendent cela vivable en pratique. Une preuve peut avoir jusqu'à 32 blocs de retard, si bien qu'un portefeuille légèrement à la traîne n'est pas refusé. Et un billet qui vient juste de tomber reste dépensable sans aucune preuve pendant 64 blocs, parce que chaque nœud l'a encore."
+        ],
+        "technical": [
+          "PROOF_WINDOW vaut 32 blocs. La vérification remonte les racines récentes et s'arrête au premier bloc qui a vidé la position : une version antérieure de ce contrôle comparait les racines avant de vérifier si la position avait été dépensée, ce qui autorisait une double dépense.",
+          "GRACE_BLOCKS vaut 64 et GRACE_NOTES vaut 8192. Les archivistes, des nœuds optionnels qui gardent l'ensemble froid, peuvent reconstruire une preuve pour qui a perdu la sienne."
+        ]
+      }
+    },
+    "work": {
+      "title": {
+        "plain": "Qui écrit la page suivante",
+        "curious": "La preuve de travail, et pourquoi elle a été choisie",
+        "technical": "Preuve de travail, LWMA, médiane des horodatages"
+      },
+      "body": {
+        "plain": [
+          "Environ une fois par minute, quelqu'un obtient le droit d'ajouter une page au registre. Qui ? Celui qui résout le premier une énigme qui ne se résout qu'en essayant : pas de raccourci, pas d'astuce, juste de l'électricité et du temps.",
+          "Cela paraît du gaspillage, et c'est précisément le but. Réécrire l'histoire ancienne obligerait à refaire tout ce travail, plus vite que tous les autres n'en font du nouveau. C'est ce qui rend le passé difficile à changer.",
+          "Le gagnant est payé en CAIRN neufs. C'est la seule façon dont du CAIRN est jamais créé, ce qui veut dire que la seule façon d'en obtenir au début est de faire le travail, ou d'être payé par quelqu'un qui l'a fait."
+        ],
+        "curious": [
+          "Preuve de travail plutôt que preuve d'enjeu, et la raison tient au départ plus qu'au régime de croisière. La preuve d'enjeu exige une distribution initiale pour fonctionner, ce qui veut dire que des fondateurs décident qui détient le pouvoir au premier jour. La preuve de travail n'exige que personne ne décide quoi que ce soit : le réseau ouvre, et le premier bloc va à qui le mine.",
+          "La difficulté s'ajuste à chaque bloc sur une fenêtre de 90 blocs, avec des temps de résolution bornés et un facteur quatre au maximum par recalcul, de sorte que l'arrivée ou le départ d'un gros mineur ne bloque pas la chaîne."
+        ],
+        "technical": [
+          "LWMA sur 90 blocs, temps de résolution bornés, facteur 4 au maximum par recalcul. Les horodatages sont validés contre la médiane des onze blocs précédents plutôt que contre le parent, ce qui supprime la manipulation sur un bloc que permet une règle du type postérieur au parent.",
+          "Le choix de branche se fait au travail cumulé, pas à la longueur. En cas d'égalité, la branche déjà suivie est conservée. Les réorganisations s'appliquent de façon atomique, avec un enregistrement d'annulation par bloc de la chaîne active."
+        ]
+      }
+    },
+    "money": {
+      "title": {
+        "plain": "D'où vient l'argent",
+        "curious": "L'émission",
+        "technical": "Le calendrier d'émission et sa justification"
+      },
+      "body": {
+        "plain": [
+          "Personne n'a reçu de CAIRN au départ. Pas de vente, pas d'allocation aux fondateurs, pas de réserve. Le jour où un réseau ouvre, le total en circulation est zéro, et chaque unité depuis vient du paiement du travail de recherche d'un bloc.",
+          "Le paiement commence à 50 CAIRN par bloc et est divisé par deux environ tous les deux ans. Il ne baisse pas indéfiniment : il s'arrête à un petit chiffre, un centième de CAIRN par bloc, et y reste.",
+          "Environ 105 millions de CAIRN existent au moment où ce plancher est atteint."
+        ],
+        "curious": [
+          "50 CAIRN au départ, division par deux tous les 1051200 blocs, soit environ deux ans à raison d'un bloc par minute. Le calendrier bute sur une queue permanente de 0,01 CAIRN par bloc, ce qui donne environ 105 millions de CAIRN avant que la queue ne domine.",
+          "La plus petite unité est le caillou : cent millions de cailloux font un CAIRN, la même granularité que Bitcoin."
+        ],
+        "technical": [
+          "La queue d'émission est un choix de conception assumé, pas un oubli. Savoir si les frais de transaction seuls peuvent financer la sécurité sur le long terme est une question ouverte, et une chaîne dont la promesse centrale est d'être vérifiable dans trente ans ne peut pas faire reposer son budget de sécurité sur une question ouverte.",
+          "Le prix est un taux de dilution connu, faible et perpétuellement décroissant, ce qui vaut la peine pour un budget de sécurité qui ne dépend pas de l'existence d'un marché des frais."
+        ]
+      }
+    },
+    "trust": {
+      "title": {
+        "plain": "Ce qu'il faut encore prendre sur parole",
+        "curious": "Les limites, dites franchement",
+        "technical": "Les manques connus, énoncés"
+      },
+      "body": {
+        "plain": [
+          "Deux choses à dire clairement. D'abord, Cairn est nouvelle et n'a rien prouvé. Elle n'a pas été attaquée, elle n'a pas été auditée par des tiers, et le réseau actuel est un réseau de test dont la monnaie ne vaut rien et qui sera effacé.",
+          "Ensuite, une vraie limite demeure. Un ordinateur qui rejoint pour la première fois revérifie encore toute l'histoire depuis le début, ce qui prend des heures sur une longue chaîne. Tout ce qui vient après ce premier démarrage est bon marché et le reste, mais le premier démarrage n'est pas résolu, et c'est le trou honnête dans la promesse.",
+          "C'est écrit ici plutôt que laissé à votre découverte."
+        ],
+        "curious": [
+          "La synchronisation initiale revalide chaque bloc depuis la genèse. Le coût en régime établi est plat, celui du premier démarrage ne l'est pas, et la tension entre absence de confiance et points de contrôle est non résolue plutôt que cachée.",
+          "Autres manques connus : pas encore de notation des pairs ni de délais d'attente, donc un pair qui ouvre un message puis se tait immobilise un fil d'exécution. Les enregistrements d'annulation sont conservés pour chaque bloc de la chaîne active et ne sont pas encore bornés. L'archiviste reconstruit une preuve en temps linéaire par demande."
+        ],
+        "technical": [
+          "Aucun audit externe à ce jour, et aucune des primitives cryptographiques n'est nouvelle : BLAKE3 avec des clés dérivées par domaine, Ed25519 avec rejet à la construction des clés de petit ordre et des encodages non canoniques. La nouveauté est dans la disposition de l'état, là où elle doit être si elle doit être quelque part.",
+          "Le travail à venir, dans l'ordre : borner les enregistrements d'annulation, ajouter la notation des pairs et les délais d'attente, alléger la représentation de l'arbre chaud, puis la question de la synchronisation initiale, la seule qui demande une décision de conception plutôt qu'une implémentation."
+        ]
+      }
+    },
+    "next": {
+      "title": "Où aller ensuite",
+      "body": {
+        "plain": ["Vous pouvez regarder les règles sur lesquelles le réseau tourne, voir les blocs arriver en direct, ou lancer un nœud vous-même. Lancer un nœud est la seule façon de vérifier tout cela sans croire quiconque sur parole, et c'est tout l'objet de cette conception."],
+        "curious": ["Les paramètres de consensus sont lus en direct depuis le nœud. L'explorateur montre la chaîne telle que ce nœud la voit. Lancer le vôtre prend quelques minutes et retire entièrement cette page de vos hypothèses de confiance."],
+        "technical": ["Paramètres en direct depuis ConsensusParams, état de la chaîne depuis la branche suivie. Le code source est public et l'arbre de dépendances est volontairement réduit : blake3, ed25519-dalek, getrandom, thiserror, zeroize."]
+      }
+    }
+  },
+
+  "run": {
+    "eyebrow": "Participer",
+    "title": "Lancer un nœud",
+    "lede": {
+      "plain": ["Un nœud est le programme qui vérifie la chaîne pour vous. En lancer un, c'est cesser de croire qui que ce soit sur parole, y compris ce site. Il ne demande ni matériel particulier ni autorisation de personne."],
+      "curious": ["Un nœud de validation complet, à état borné, sur du matériel ordinaire. À compiler depuis les sources, il n'y a pas encore d'installateur."],
+      "technical": ["Compilation depuis les sources. Pas encore de binaires précompilés, et aucun ne sera publié sans signature ni compilation reproductible."]
+    },
+    "warning": {
+      "title": "À lire d'abord",
+      "body": [
+        "Ceci est un réseau de test. Le CAIRN qui s'y trouve ne vaut rien, et il est fait pour ne rien valoir.",
+        "Le réseau sera réinitialisé. Ce jour-là, tous les soldes disparaissent et rien n'est reporté vers un réseau futur. N'en achetez pas, n'en vendez pas, n'en acceptez pas en paiement.",
+        "Cairn n'a pas été auditée. N'y mettez rien qui compte pour vous."
+      ]
+    },
+    "build": {
+      "title": "Compiler",
+      "body": {
+        "plain": ["Il vous faut Rust, une chaîne d'outils de programmation gratuite. Ces trois commandes récupèrent le code source et le compilent. Cela prend deux ou trois minutes."],
+        "curious": ["Rust 1.87 ou plus récent. Rien d'autre n'est nécessaire : l'arbre de dépendances tient en cinq bibliothèques et il n'y a pas de moteur asynchrone."],
+        "technical": ["Rust 1.87. Les lints du workspace interdisent le code non sûr, les effets de bord arithmétiques, l'indexation directe, unwrap, expect et panic. Le profil release active les contrôles de débordement."]
+      }
+    },
+    "node": {
+      "title": "Le lancer",
+      "body": {
+        "plain": ["C'est tout. Il va trouver d'autres ordinateurs sur le réseau, télécharger la chaîne, et vérifier chaque règle lui-même. Il affiche une ligne toutes les dix secondes pour dire où il en est."],
+        "curious": ["Il part du premier bloc inscrit dans le code source, trouve des pairs, se synchronise et valide. Aucune règle ne peut être réglée en ligne de commande : elles viennent uniquement du nom du réseau."],
+        "technical": ["Ajoutez --archive pour garder l'ensemble froid et pouvoir reconstruire des preuves pour autrui, ce qui coûte un ensemble qui grandit. Ajoutez --seed pour désigner un pair connu. Une option inconnue est une erreur fatale plutôt qu'ignorée."]
+      }
+    },
+    "wallet": {
+      "title": "Créer un portefeuille",
+      "body": {
+        "plain": ["Ceci crée une clé secrète sur votre machine et affiche l'adresse qui va avec. Le secret ne quitte jamais votre ordinateur, et il n'est jamais envoyé à ce site ni à personne. Si vous le perdez, l'argent est perdu : personne ne peut vous le rendre."],
+        "curious": ["Le fichier de clé est écrit avec des permissions restrictives et n'est jamais écrasé. Le portefeuille conserve lui-même les preuves d'inclusion des billets tombés dans l'ensemble froid."],
+        "technical": ["Ed25519. Le portefeuille suit les positions de ses billets tombés et rafraîchit les preuves à mesure que la forêt grandit, si bien qu'une dépense froide ne demande aucun tiers."]
+      }
+    },
+    "mine": {
+      "title": "Miner",
+      "body": {
+        "plain": ["C'est comme cela qu'on obtient des CAIRN sur un réseau de test. Votre ordinateur se met à chercher des blocs, et quand il en trouve un, la récompense va à votre adresse. Il n'y a aucun autre moyen d'en obtenir : personne n'a de stock à distribuer."],
+        "curious": ["Minage sur un seul fil d'exécution dans le nœud, ce qui suffit pour un réseau de test. Les récompenses vont à la clé que vous indiquez."],
+        "technical": ["La difficulté de genèse de testnet-1 est 2^27, calibrée pour que le premier bloc prenne à peu près le temps de bloc visé sur un cœur ordinaire, à 2,29 millions d'empreintes par seconde mesurées."]
+      }
+    },
+    "explorer": {
+      "title": "Faire tourner ce site vous-même",
+      "body": {
+        "plain": ["Ce site est lui-même un programme que vous pouvez lancer. Il sert exactement ces pages depuis votre machine, en lisant votre propre nœud. Rien ici non plus n'a besoin d'être pris sur parole."],
+        "curious": ["L'explorateur est un nœud qui construit en plus un index et sert le site. Cet index est un coût qui grandit avec la chaîne, et c'est précisément pour cela qu'il vit ici et pas dans le nœud que tout le monde fait tourner."],
+        "technical": ["Le site est compilé dans le binaire, rien n'est lu sur le disque à l'exécution. La couche HTTP n'utilise que la bibliothèque standard, un fil par connexion, GET et HEAD, sans corps de requête."]
+      }
+    }
+  },
+
+  "foot": {
+    "watching": "Cette page ne fait que lire. Elle ne détient aucune clé, elle ne peut rien signer, et elle ne vous en demandera jamais.",
+    "node": "{network} · {blocks} blocs indexés · depuis {genesis}"
+  }
+}

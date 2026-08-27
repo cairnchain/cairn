@@ -5,6 +5,7 @@ members = [
     "crates/cairn-chain",
     "crates/cairn-primitives",
     "crates/cairn-crypto",
+    "crates/cairn-explorer",
     "crates/cairn-ledger",
     "crates/cairn-net",
     "crates/cairn-node",
@@ -23,6 +24,7 @@ repository = "https://github.com/cairn-protocol/cairn"
 cairn-accumulator = { path = "crates/cairn-accumulator", version = "0.1.0" }
 cairn-chain = { path = "crates/cairn-chain", version = "0.1.0" }
 cairn-crypto = { path = "crates/cairn-crypto", version = "0.1.0" }
+cairn-explorer = { path = "crates/cairn-explorer", version = "0.1.0" }
 cairn-ledger = { path = "crates/cairn-ledger", version = "0.1.0" }
 cairn-net = { path = "crates/cairn-net", version = "0.1.0" }
 cairn-node = { path = "crates/cairn-node", version = "0.1.0" }

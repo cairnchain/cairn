@@ -68,6 +68,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn-explorer"
+version = "0.1.0"
+dependencies = [
+ "cairn-chain",
+ "cairn-crypto",
+ "cairn-ledger",
+ "cairn-net",
+ "cairn-primitives",
+]
+
+[[package]]
 name = "cairn-ledger"
 version = "0.1.0"
 dependencies = [

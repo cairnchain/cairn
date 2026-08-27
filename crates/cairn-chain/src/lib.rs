@@ -183,6 +183,24 @@ impl ChainStore {
         self.positions.contains_key(id)
     }
 
+    /// The followed branch, genesis first.
+    ///
+    /// Read only. Nothing outside this module decides what the branch is; an
+    /// explorer or a status page only needs to walk what was decided here.
+    pub fn active(&self) -> &[Hash32] {
+        &self.active
+    }
+
+    /// The block the followed branch carries at `height`.
+    ///
+    /// Heights index the branch directly because the first block sits at
+    /// height zero and every block since has added exactly one.
+    pub fn block_at(&self, height: u64) -> Option<&Block> {
+        let index = usize::try_from(height).ok()?;
+        let id = self.active.get(index)?;
+        self.block(id)
+    }
+
     /// The first block of the followed branch.
     pub fn genesis(&self) -> Option<Hash32> {
         self.active.first().copied()
@@ -252,6 +270,11 @@ impl ChainStore {
 
     pub fn pooled(&self, id: &Hash32) -> Option<&Transfer> {
         self.pool.get(id)
+    }
+
+    /// Every transfer waiting for a block, in identifier order.
+    pub fn pooled_transfers(&self) -> impl Iterator<Item = (&Hash32, &Transfer)> {
+        self.pool.iter()
     }
 
     /// Takes a transfer that has been broadcast, returning whether it was new.

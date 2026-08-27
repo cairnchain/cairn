@@ -1,0 +1,572 @@
+{
+  "site": { "title": "Cairn" },
+
+  "a11y": {
+    "skip": "Skip to content",
+    "level": "Reading level",
+    "language": "Language"
+  },
+
+  "nav": {
+    "home": "Home",
+    "explore": "Explore",
+    "learn": "Learn",
+    "rules": "Rules",
+    "run": "Run a node"
+  },
+
+  "level": {
+    "plain": {
+      "name": "New to this",
+      "blurb": "You have heard of cryptocurrency and that is about it. Nothing here will assume more."
+    },
+    "curious": {
+      "name": "Some background",
+      "blurb": "You know roughly what a blockchain and a wallet are, and you want to know what is different here."
+    },
+    "technical": {
+      "name": "Technical",
+      "blurb": "Give me the accumulator, the retarget, the commitment structure and the numbers."
+    }
+  },
+
+  "welcome": {
+    "eyebrow": "Before you start",
+    "title": "How much of this do you already know?",
+    "lede": "Everything on this site is written three times. Pick the one that suits you. You can change it at any moment, on any page."
+  },
+
+  "search": {
+    "placeholder": "Block height, block, transaction, address, note",
+    "action": "Look up",
+    "nothing": "Nothing on this chain matches that."
+  },
+
+  "common": {
+    "loading": "Reading the chain",
+    "nothing": "Nothing here yet.",
+    "seeAll": "See all blocks",
+    "older": "Older"
+  },
+
+  "unit": {
+    "seconds": "{n} seconds",
+    "minutes": "{n} minutes",
+    "hours": "{n} hours",
+    "days": "{n} days",
+    "years": "{n} years"
+  },
+
+  "error": {
+    "title": "That did not work",
+    "missing": "There is nothing on this chain with that name.",
+    "unreachable": "The node behind this page did not answer. It may be restarting, or still catching up.",
+    "noPage": "No page lives at this address."
+  },
+
+  "tick": {
+    "network": "network",
+    "height": "height",
+    "hot": "in the drawer",
+    "cold": "in the cave",
+    "pool": "waiting",
+    "peers": "peers",
+    "supply": "issued"
+  },
+
+  "home": {
+    "eyebrow": "{network}, live",
+    "title": {
+      "plain": "Money you can check |yourself|, on an ordinary computer, forever.",
+      "curious": "A full node that costs |the same in thirty years| as it does today.",
+      "technical": "Constant validation cost |by construction|, not by policy."
+    },
+    "lede": {
+      "plain": [
+        "Every cryptocurrency has a problem it does not talk about much: the more people use it, the more expensive it becomes to check it yourself. Checking is what keeps it honest. So the more successful it gets, the fewer people can hold it to account, and the more everyone has to take someone else at their word.",
+        "Cairn is built so that never happens. Whatever the chain does, however many people use it, checking it costs the same. Not less than today, not more. The same."
+      ],
+      "curious": [
+        "On existing chains, running a full node means holding the entire set of unspent outputs, and that set grows with adoption. Bitcoin sits at gigabytes, Ethereum needs a machine most people do not own. The cost of verification rises with usage, so success quietly pushes verification into data centres.",
+        "Cairn puts a hard ceiling on that cost. A node keeps a bounded working set in full and everything else as sixty four hashes. Not a compromise on validation: a node still checks every rule on every block. It just never has to hold more than it holds today."
+      ],
+      "technical": [
+        "Validation state is split in two. A bounded hot set of 131072 notes is held in full, in a sparse Merkle tree. Everything older lives in an append-only Merkle forest, which a node carries as sixty four roots and nothing else.",
+        "Adding a leaf to that forest needs only the roots, which is what makes a pruned node possible: it can extend the accumulator without holding it. Spending a fallen note takes an inclusion proof supplied by the spender, checked against roots the node already has."
+      ]
+    },
+    "action": { "learn": "Understand it", "explore": "Explore the chain", "run": "Run a node" },
+    "cost": {
+      "title": {
+        "plain": "What a computer on this network actually holds",
+        "curious": "What a full node actually holds",
+        "technical": "Validation state, live"
+      },
+      "body": {
+        "plain": [
+          "Think of it as a drawer and a cave. Every computer on the network keeps the drawer in full: the money that has moved recently, {capacity} notes at most, which comes to about {megabytes}. That is the whole cost, and it never grows.",
+          "Everything older goes down to the cave. Nobody keeps the cave. What every computer keeps instead is sixty four short fingerprints, enough to check that anything pulled back up really was down there."
+        ],
+        "curious": [
+          "The hot set is bounded at {capacity} notes, roughly {megabytes} held in full by every node. When it is full, the oldest notes fall to the cold set.",
+          "The cold set is unbounded and nobody stores it. Every node keeps sixty four hashes that stand for all of it. Spending something from down there means bringing a proof, which your own wallet has been keeping for you."
+        ],
+        "technical": [
+          "Hot set: {capacity} notes maximum, held in a sparse Merkle tree, about {megabytes} at capacity. Eviction is by age, oldest first, in batches at block boundaries.",
+          "Cold set: an append-only Merkle forest, sixty four roots. A spend from it carries an inclusion proof; proofs may lag up to 32 blocks, and a note that has just fallen stays spendable without one for 64 blocks."
+        ]
+      }
+    },
+    "recent": { "title": "Latest blocks" }
+  },
+
+  "stat": {
+    "height": "Height",
+    "difficulty": "Difficulty",
+    "supply": "Issued so far",
+    "supply.note": "{reward} CAIRN per block right now",
+    "holders": "Addresses holding",
+    "pool": "Waiting",
+    "pool.note": "transfers not yet in a block",
+    "peers": "Peers",
+    "balance": "Balance",
+    "received": "Received in total",
+    "sent": "Sent in total",
+    "notesHeld": "Notes held",
+    "notesHeld.note": "out of {total} ever received"
+  },
+
+  "tier": {
+    "hot": "In the drawer",
+    "cold": "In the cave",
+    "grace": "Just fell",
+    "spent": "Spent",
+    "unknown": "Unknown",
+    "hot.name": "The drawer, held by every node",
+    "hot.note": "Full, this costs {size}. It never costs more.",
+    "hot.explain": "Every node on the network is holding this note right now.",
+    "cold.name": "The cave, held by nobody",
+    "cold.note": "However large this becomes, a node carries {roots} hashes for it.",
+    "cold.explain": "No node holds this note any more. Spending it takes a proof, which its owner keeps.",
+    "grace.explain": "It fell out of the drawer very recently, so nodes still hold it and no proof is needed yet.",
+    "spent.explain": "This note has been spent. A note is created once and spent once.",
+    "unknown.explain": "This note is not in the index yet."
+  },
+
+  "direction": { "in": "received", "out": "sent" },
+  "kind": { "transfer": "Transfer", "coinbase": "Block reward" },
+
+  "field": {
+    "height": "Height", "block": "Block", "age": "Age", "time": "Time",
+    "transfers": "Transfers", "paid": "Paid to miner", "size": "Size",
+    "confirmations": "Blocks on top", "difficulty": "Difficulty", "work": "Work",
+    "nonce": "Nonce", "previous": "Previous block", "next": "Next block",
+    "reward": "Block reward", "fees": "Fees", "stateRoot": "State commitment",
+    "transactionsRoot": "Transactions root", "message": "Message", "extra": "Extra bytes",
+    "transaction": "Transaction", "owner": "Owner", "value": "Value", "state": "State",
+    "note": "Note", "proof": "Held where", "kind": "Kind", "status": "Status",
+    "totalIn": "Total spent", "totalOut": "Total created", "fee": "Fee",
+    "address": "Address", "balance": "Balance", "since": "Since block",
+    "direction": "Direction", "madeBy": "Created by", "madeAt": "Created in block",
+    "spentBy": "Spent by", "spentAt": "Spent in block", "position": "Position in the cave",
+    "position.note": "where its proof points",
+    "none": "None", "pending": "Not mined yet", "unknown": "Not indexed",
+    "network": "Network", "networkId": "Network identifier", "genesis": "First block",
+    "opensAt": "Opened at", "opensAt.note": "no block may be dated earlier",
+    "initialReward": "First block reward", "halvingInterval": "Blocks between halvings",
+    "halvingInterval.note": "about {time}",
+    "tailReward": "Floor reward", "tailReward.note": "paid forever, once halving would go lower",
+    "pebble": "Pebbles in one CAIRN", "pebble.note": "the smallest unit",
+    "hotCapacity": "Notes in the drawer", "hotCapacity.note": "the ceiling, not an average",
+    "paid.column": "Paid to miner (CAIRN)", "perNote": "Bytes per note", "atCapacity": "Drawer, full",
+    "coldCost": "The cave costs a node", "coldCost.value": "64 hashes, whatever its size",
+    "blockTime": "Target time between blocks", "genesisDifficulty": "Opening difficulty",
+    "maxTransfers": "Transfers per block", "maxInputs": "Inputs per transfer",
+    "maxOutputs": "Outputs per transfer", "drift": "Clock tolerance",
+    "drift.note": "how far ahead of a node a block may be dated"
+  },
+
+  "blocks": { "title": "Blocks" },
+
+  "block": {
+    "eyebrow": "Block",
+    "title": "Block {height}",
+    "coinbase": { "title": "What this block paid" },
+    "transfers": { "title": "Transfers ({n})", "none": "Nobody sent anything in this block." }
+  },
+
+  "transfer": {
+    "spends": "Spends ({n})",
+    "creates": "Creates ({n})",
+    "fee": "fee {fee} CAIRN",
+    "waiting": "Waiting for a block",
+    "included": "In the chain, {n} blocks deep"
+  },
+
+  "tx": { "eyebrow": "Transaction", "title": "Transaction", "noInputs": "Nothing was spent: this money is newly created." },
+
+  "address": {
+    "eyebrow": "Address",
+    "holdings": "Notes held right now",
+    "history": "Everything that moved"
+  },
+
+  "note": { "eyebrow": "Note", "title": "One note" },
+
+  "pool": { "eyebrow": "Waiting room", "title": "Transfers waiting for a block", "empty": "Nothing is waiting." },
+
+  "holders": { "eyebrow": "Distribution", "title": "Largest holders" },
+
+  "rules": {
+    "eyebrow": "Consensus",
+    "title": "The rules of this network",
+    "lede": {
+      "plain": [
+        "These are the rules every computer on the network agrees on. They are not settings anyone can change on their own machine: two computers that disagreed on any single line here would end up building two different chains while each believed it was on the same one.",
+        "They are read directly from a running node, so this page cannot be out of date."
+      ],
+      "curious": [
+        "Every value below is consensus. None of them is an operator flag. A node picks them by naming a network, never one at a time, because a node running one different value silently follows a different chain.",
+        "Read live from the node serving this page."
+      ],
+      "technical": [
+        "The full consensus parameter set, read live from ConsensusParams on the node behind this page. Every field is committed to by the rules that use it; none is configurable per node."
+      ]
+    },
+    "identity": "Which chain this is",
+    "money": "How money is made",
+    "cost": "What a node carries",
+    "blocks": "Blocks and timing"
+  },
+
+  "explain": {
+    "blocks": {
+      "plain": "A block is a page in the ledger. Roughly once a minute, someone finds a valid one, and everything in it becomes settled. Each page points back at the one before it, which is why nobody can quietly rewrite an old one.",
+      "curious": "Blocks arrive about once a minute. The chain is chosen by accumulated work rather than by length, so the branch that took the most computing to build is the one every node follows.",
+      "technical": "Fork choice is by cumulative work. Ties keep the branch already followed, and a switch is applied atomically. Difficulty retargets over a 90 block LWMA window with clamped solve times and a factor of four per retarget cap."
+    },
+    "block": {
+      "plain": "Everything below was fixed the moment this block was found. The long strings are fingerprints: change one letter anywhere in the block and every one of them changes completely.",
+      "curious": "The header commits to the transactions in the block and to the whole note set as it stands afterwards. The nonce is what the miner varied until the block identifier came out below the target.",
+      "technical": "The identifier is a domain-separated BLAKE3 hash of the canonical header encoding, and it is what proof of work is measured against. Timestamps are checked against the median of the previous eleven blocks, not against the parent."
+    },
+    "coinbase": {
+      "plain": "This is where new money comes from. Whoever found this block is paid for the work, and that payment is the only way CAIRN is ever created. Nobody was given any at the start.",
+      "curious": "The coinbase pays the block reward plus every fee in the block. The reward halves on a fixed schedule and then stops falling at a floor that is paid forever.",
+      "technical": "Coinbase outputs take identifiers derived from the transaction, which commits to the height, so two blocks paying identical outputs at different heights cannot collide. The extra field is capped at 64 bytes and gives a miner search space beyond the header nonce."
+    },
+    "transfers": {
+      "plain": "Each of these is somebody sending money to somebody else. Money here is not a balance that goes up and down: it is a set of notes, and sending means tearing up notes you hold and writing new ones.",
+      "curious": "Transfers consume notes and create new ones, in the style of unspent outputs. What a transfer does not consume, it pays as a fee to whoever mined the block.",
+      "technical": "Transfer identifiers exclude signatures and witnesses. That kills malleability, and it is also what lets a stale inclusion proof be swapped for a fresh one without invalidating anything downstream."
+    },
+    "transaction": {
+      "plain": "A transaction tears up some notes and writes new ones. The total written can never exceed the total torn up. Whatever is left over goes to whoever found the block, as a fee.",
+      "curious": "Inputs name the notes being spent, outputs are the notes being created. A signature per input proves the spender owned it.",
+      "technical": "Each signature commits to the network, the version, the transaction identifier, the input index, and the value and owner of the note being spent. Committing to the spent note is the lesson from the transactions that could be tricked about their own value."
+    },
+    "inputs": {
+      "plain": "These are the notes being torn up. Each one was written by an earlier transaction, and each can only be torn up once.",
+      "curious": "Each input names a note and proves the right to spend it. Held where tells you whether every node still had that note, or whether the spender had to bring a proof.",
+      "technical": "A hot witness needs nothing: the node holds the note. A cold witness carries the note, its position in the forest, and an inclusion proof verified against roots the node already has."
+    },
+    "outputs": {
+      "plain": "These are the new notes. Each belongs to one address and can be spent exactly once, later, by whoever holds the matching secret.",
+      "curious": "Each output is a value locked to a public key. Its identifier comes from the transaction that made it plus its position in the list.",
+      "technical": "Note identifiers are the source transaction identifier and an index. Ordering over identifiers is defined so the note set has one canonical enumeration, which the state commitment depends on."
+    },
+    "address": {
+      "plain": "An address is a public name you can hand out safely. Anyone can see what it holds. Only the person with the matching secret can spend it, and that secret never appears here or anywhere on this site.",
+      "curious": "This page is built from an index over the whole chain, which is a service the explorer provides and the protocol deliberately does not: no node keeps a map from owners to notes.",
+      "technical": "Ed25519 keys, with two restrictions beyond the standard: small order keys are rejected at construction, and non-canonical encodings are refused so two byte strings can never name one key."
+    },
+    "holdings": {
+      "plain": "The individual notes this address is holding. A balance is just what they add up to.",
+      "curious": "State tells you which notes every node still holds and which have fallen. A wallet keeps proofs for the fallen ones, so it can still spend them.",
+      "technical": "Fallen notes need a proof at spend time. A wallet tracks the position and refreshes the proof as the forest grows; the node accepts a proof up to 32 blocks stale."
+    },
+    "note": {
+      "plain": "One note. It was written once, it belongs to one address, and it can be torn up once. That is the whole life of it.",
+      "curious": "A note is an unspent output: a value and an owner. It is never modified, only created and consumed.",
+      "technical": "The leaf committed to the accumulator is a domain-separated hash over the identifier, the value and the owner, so a note cannot be moved between positions or reinterpreted."
+    },
+    "pool": {
+      "plain": "Transfers that have been announced but are not settled yet. They are waiting for someone to find a block to put them in.",
+      "curious": "The mempool as this node sees it. Every node keeps its own, so what you see here is one node's view, not a network-wide truth.",
+      "technical": "Selection is deterministic in identifier order, so the order a miner walks the pool does not depend on arrival order. A transfer conflicting with a pooled one is refused rather than replacing it: choosing between conflicting spends is a fee policy, and there is no fee market yet to decide it."
+    },
+    "holders": {
+      "plain": "Who holds the most. On a test network this says very little: it is mostly whoever left a computer mining the longest.",
+      "curious": "Computed from the explorer index, counting unspent notes per owner. An owner can hold any number of addresses, so this is a view of addresses, not of people.",
+      "technical": "Balances are the sum of unspent notes per public key over the followed branch. Reorganisations rebuild the index rather than unwinding it."
+    },
+    "emission": {
+      "plain": "New money appears only as payment for the work of finding blocks. The amount halves every so often, then stops falling and stays at a small figure forever, so there is always a reason to keep the network running.",
+      "curious": "Halving every 1051200 blocks, from 50 CAIRN down to a permanent floor of 0.01 CAIRN per block. Around 105 million CAIRN exist before the floor takes over. How long a halving period lasts depends on the block time, which is listed above for this network.",
+      "technical": "A chain that promises verifiability in thirty years cannot rest its security budget on the open question of whether fee revenue alone is sufficient. The tail is a deliberate answer to that, at a known and small rate of dilution."
+    },
+    "cost": {
+      "plain": "This is the whole point of Cairn. The drawer has a ceiling, so the cost of taking part has a ceiling. The cave can grow without limit and it still costs every computer exactly sixty four fingerprints.",
+      "curious": "Note the shape of it: the bounded part is bounded by rule, not by convention, and the unbounded part is carried as a constant. That is what makes the cost of a full node flat over time.",
+      "technical": "The forest is append-only, and adding a leaf needs only the roots. That is the property the whole design turns on: a node that holds none of the set can still extend the accumulator correctly."
+    }
+  },
+
+  "learn": {
+    "eyebrow": "From the beginning",
+    "title": "What Cairn is, and why it is built this way",
+    "lede": {
+      "plain": ["Eight short pieces. No prior knowledge assumed. If a word appears that you do not know, it is explained before it is used."],
+      "curious": ["Eight pieces, assuming you know roughly what a blockchain, a wallet and a miner are."],
+      "technical": ["Eight pieces, at the level of the design document. Numbers and structures rather than analogies."]
+    },
+    "problem": {
+      "title": {
+        "plain": "The problem nobody advertises",
+        "curious": "Success pushes verification into data centres",
+        "technical": "Validation cost grows with adoption"
+      },
+      "body": {
+        "plain": [
+          "A cryptocurrency works because lots of separate people check it. Nobody is in charge, so the checking is what stops anyone cheating.",
+          "But on existing systems, checking gets more expensive the more the system is used. At some point an ordinary person cannot do it any more, and has to trust a company that can. The system then depends on trusting a handful of companies, which is exactly what it was built to avoid.",
+          "So the more successful it gets, the more it drifts back into the thing it was meant to replace."
+        ],
+        "curious": [
+          "A full node holds the set of unspent outputs and validates every rule against it. That set grows with adoption, so the cost of independent verification rises with usage.",
+          "The usual response is that hardware gets cheaper. Perhaps, but the direction is still wrong: the number of independent verifiers falls as the system succeeds. Light clients do not fix it, they change who you trust.",
+          "Cairn treats this as the design problem, not as an operational detail."
+        ],
+        "technical": [
+          "UTXO set growth is unbounded in every deployed design. State expiry, statelessness and various accumulator schemes all address it; most either move the cost elsewhere or need a trusted setup.",
+          "The thesis here: put a hard ceiling on the state a validator must hold, and make the unbounded remainder carriable in constant space, without a trusted setup and without weakening what a node actually verifies."
+        ]
+      }
+    },
+    "notes": {
+      "title": {
+        "plain": "Money as notes, not as a balance",
+        "curious": "Notes, which is to say unspent outputs",
+        "technical": "The note model"
+      },
+      "body": {
+        "plain": [
+          "Cairn does not keep an account with a balance that goes up and down. It keeps notes, the way cash keeps banknotes.",
+          "A note has a value and an owner. It is written once, and it can be torn up once. To send someone 30 when you hold a note worth 50, you tear up the 50 and write two new notes: one for 30 to them, one for 20 back to yourself.",
+          "This sounds like a detail. It is not: because a note is never modified, only created and destroyed, a computer can forget an old note entirely and still be certain about the ones that are left."
+        ],
+        "curious": [
+          "The unspent output model, as in Bitcoin, rather than accounts. A note is a value locked to a public key, identified by the transaction that made it and its index in the outputs.",
+          "Immutability is the reason this model was chosen here. An account balance has to be read and written, so the account must be held. A note is created once and consumed once, which lets a node hold a commitment rather than the note itself."
+        ],
+        "technical": [
+          "Note identifiers are (source transaction, output index). Ordering is defined over identifiers so the note set has one canonical enumeration, which the state commitment depends on.",
+          "Transfer identifiers exclude signatures and witnesses. This gives malleability resistance, and more importantly it means a stale inclusion proof can be replaced by a fresh one without changing any identifier that anything else committed to."
+        ]
+      }
+    },
+    "drawer": {
+      "title": {
+        "plain": "The drawer",
+        "curious": "The hot set",
+        "technical": "The hot set: a bounded sparse Merkle tree"
+      },
+      "body": {
+        "plain": [
+          "Every computer on the network keeps one drawer. In it are the notes that have moved recently, and there is a hard limit on how many fit: 131072.",
+          "That limit is not a suggestion or an average. It is a rule the whole network agrees on, so the drawer can never grow past it, no matter how popular Cairn becomes. Full, it comes to about 107 megabytes. That is a fraction of a phone.",
+          "When the drawer is full and new notes need room, the oldest ones are taken out and moved to the cave."
+        ],
+        "curious": [
+          "A bounded set of 131072 notes, held in full by every node, in a sparse Merkle tree so the state commitment can be recomputed cheaply. About 107 MB at capacity, measured on the running implementation.",
+          "Eviction is by age, oldest first, in batches at block boundaries. Every node evicts the same notes at the same height, because the rule is consensus."
+        ],
+        "technical": [
+          "131072 notes, sparse Merkle tree, persistent through structural sharing so a reorganisation can restore the previous root without a rebuild. 813 bytes per note measured, giving about 107 MB at capacity.",
+          "The tree is the one part of the design with clear room left: a leaner representation is the most valuable remaining optimisation, and it changes no rule."
+        ]
+      }
+    },
+    "cave": {
+      "title": {
+        "plain": "The cave",
+        "curious": "The cold set, which nobody stores",
+        "technical": "The cold set: an append-only Merkle forest"
+      },
+      "body": {
+        "plain": [
+          "Everything that falls out of the drawer goes to the cave. The cave has no size limit, and here is the surprising part: nobody keeps it. Not one computer on the network stores what is down there.",
+          "What every computer keeps instead is sixty four short fingerprints. They are enough to answer one question: if someone claims a particular note is down in the cave, is that true? Yes or no, with certainty, without ever having seen the cave.",
+          "Sixty four fingerprints, whether the cave holds a thousand notes or a thousand billion."
+        ],
+        "curious": [
+          "An append-only Merkle forest: a list of perfect binary trees, held as their roots. A node keeps sixty four hashes and nothing else, regardless of how many notes have fallen.",
+          "The critical property is that adding a leaf needs only the roots. That is what makes a pruned node possible. It can extend the accumulator correctly while holding none of it, which is not true of a plain Merkle tree."
+        ],
+        "technical": [
+          "Sixty four roots, one per possible tree height. On insertion the new leaf rides on the right of every merge, so the trees it swallows are its own siblings in order: the inclusion proof falls out of the addition itself, at no extra cost.",
+          "Removal is batched and verified against the pre-block root before anything is applied, then pending proofs are refreshed, so two cold spends in the same block cannot invalidate each other."
+        ]
+      }
+    },
+    "proof": {
+      "title": {
+        "plain": "Spending something from the cave",
+        "curious": "Proofs, and who keeps them",
+        "technical": "Inclusion proofs, windows and grace"
+      },
+      "body": {
+        "plain": [
+          "If nobody keeps the cave, how do you spend a note that has fallen into it? You bring the proof yourself.",
+          "Your wallet has been quietly keeping it for you since the day the note fell, and keeping it current. You do not do anything: it is just there when you spend. The network checks it against those sixty four fingerprints and either accepts it or does not.",
+          "So the cost of remembering an old note sits with the one person who cares about it, instead of with every computer on the network forever. That single move is what makes the whole thing work."
+        ],
+        "curious": [
+          "The spender supplies an inclusion proof, verified against roots the node already holds. Your wallet tracks the position of each of your fallen notes and refreshes the proof as the forest grows.",
+          "Two windows make this survivable in practice. A proof may be up to 32 blocks stale, so a wallet that fell slightly behind is not refused. And a note that has only just fallen stays spendable with no proof at all for 64 blocks, because every node still has it."
+        ],
+        "technical": [
+          "PROOF_WINDOW is 32 blocks. Verification walks backwards through recent roots and stops at the first block that emptied the position: an earlier version of this check compared roots before checking whether the position had been spent, which allowed a double spend.",
+          "GRACE_BLOCKS is 64 and GRACE_NOTES is 8192. Archivists, which are optional nodes that do keep the cold set, can rebuild a proof for someone who lost theirs."
+        ]
+      }
+    },
+    "work": {
+      "title": {
+        "plain": "Who gets to write the next page",
+        "curious": "Proof of work, and why it was chosen",
+        "technical": "Proof of work, LWMA retarget, median time past"
+      },
+      "body": {
+        "plain": [
+          "Roughly once a minute, someone gets to add a page to the ledger. Who? Whoever first solves a puzzle that can only be solved by trying: no shortcut, no cleverness, just electricity and time.",
+          "That sounds wasteful, and it is the point. Rewriting old history would mean redoing all of that work, faster than everyone else is doing new work. That is what makes the past hard to change.",
+          "The winner is paid in new CAIRN. This is the only way CAIRN is ever created, which means the only way to get some at the start is to do the work, or to be paid by someone who did."
+        ],
+        "curious": [
+          "Proof of work rather than proof of stake, and the reason is the start rather than the steady state. Proof of stake needs an initial distribution before it can work, which means founders deciding who holds power on day one. Proof of work needs nobody to decide anything: the network opens, and the first block goes to whoever mines it.",
+          "Difficulty adjusts every block over a 90 block window, with solve times clamped and a factor of four cap per retarget, so a large miner arriving or leaving does not strand the chain."
+        ],
+        "technical": [
+          "LWMA over 90 blocks, clamped solve times, maximum 4x per retarget. Timestamps are validated against the median of the previous eleven blocks rather than against the parent, which removes the single-block manipulation that a later-than-parent rule permits.",
+          "Fork choice is by cumulative work, not length. Ties keep the branch already followed. Reorganisations are applied atomically, with undo records per active-chain block."
+        ]
+      }
+    },
+    "money": {
+      "title": {
+        "plain": "Where the money comes from",
+        "curious": "Emission",
+        "technical": "The emission schedule and its rationale"
+      },
+      "body": {
+        "plain": [
+          "Nobody was given CAIRN at the start. There was no sale, no founder allocation, no reserve. On the day a network opens, the total in existence is zero, and every single unit since has come from paying for the work of finding a block.",
+          "The payment starts at 50 CAIRN per block and halves roughly every two years. It does not fall forever: it stops at a small figure, one hundredth of a CAIRN per block, and stays there.",
+          "Roughly 105 million CAIRN exist by the time it reaches that floor."
+        ],
+        "curious": [
+          "50 CAIRN initially, halving every 1051200 blocks, which is about two years at a one minute block time. The schedule bottoms out at a permanent tail of 0.01 CAIRN per block, giving around 105 million CAIRN before the tail dominates.",
+          "The smallest unit is the pebble: one hundred million pebbles make one CAIRN, the same granularity Bitcoin uses."
+        ],
+        "technical": [
+          "The tail is a deliberate design choice, not an oversight. Whether transaction fees alone can fund security in the long run is an open question, and a chain whose central promise is verifiability in thirty years cannot rest its security budget on an open question.",
+          "The cost is a known, small, and permanently decreasing rate of dilution, which is a price worth paying for a security budget that does not depend on a fee market existing."
+        ]
+      }
+    },
+    "trust": {
+      "title": {
+        "plain": "What you still have to take on faith",
+        "curious": "The honest limits",
+        "technical": "Known gaps, stated plainly"
+      },
+      "body": {
+        "plain": [
+          "Two things worth saying out loud. First, Cairn is new and unproven. It has not been attacked, it has not been audited by outsiders, and the current network is a test network whose money is worth nothing and which will be wiped.",
+          "Second, one real limitation remains. A computer joining for the first time still rechecks the whole history from the beginning, which on a long chain takes hours. Everything after that first start is cheap and stays cheap, but the first start is not solved yet, and it is the honest gap in the promise.",
+          "It is written here rather than left for you to find."
+        ],
+        "curious": [
+          "Initial sync revalidates every block from genesis. Steady state cost is flat, first-start cost is not, and the trustless versus checkpoint tension is unresolved rather than hidden.",
+          "Other known gaps: no peer scoring or stall timeouts yet, so a peer that opens a message and goes quiet ties up a thread. Undo records are kept for every active-chain block and are not yet bounded. The archivist rebuilds proofs in linear time per request."
+        ],
+        "technical": [
+          "No external audit yet, and none of the cryptography is novel: BLAKE3 with per-domain derived keys, Ed25519 with small-order and non-canonical encodings rejected at construction. Novelty is in the state layout, which is where it should be if anywhere.",
+          "The forward work, in order: bound the undo records, add peer scoring and stall timeouts, a leaner hot tree representation, then the initial sync question, which is the only one that needs a design decision rather than an implementation."
+        ]
+      }
+    },
+    "next": {
+      "title": "Where to go from here",
+      "body": {
+        "plain": ["You can look at the rules the network runs on, watch blocks arriving live, or run a node yourself. Running one is the only way to check any of this without taking someone else at their word, and it is the point of the whole design."],
+        "curious": ["The consensus parameters are read live from the node. The explorer shows the chain as that node sees it. Running your own is a few minutes of work and removes this page from your trust assumptions entirely."],
+        "technical": ["Parameters live from ConsensusParams, chain state from the followed branch. The source is public and the dependency tree is deliberately small: blake3, ed25519-dalek, getrandom, thiserror, zeroize."]
+      }
+    }
+  },
+
+  "run": {
+    "eyebrow": "Take part",
+    "title": "Run a node",
+    "lede": {
+      "plain": ["A node is the program that checks the chain for you. Running one means you stop taking anyone at their word, including this website. It needs no special hardware and no permission from anybody."],
+      "curious": ["A full validating node, with a bounded state, on ordinary hardware. Build it from source; there is no installer yet."],
+      "technical": ["Build from source. No prebuilt binaries yet, and none will be published without a signature and a reproducible build."]
+    },
+    "warning": {
+      "title": "Read this first",
+      "body": [
+        "This is a test network. The CAIRN on it is worth nothing, and it is meant to be worth nothing.",
+        "The network will be reset. When it is, every balance on it disappears and nothing is carried over to any future network. Do not buy it, do not sell it, do not accept it as payment.",
+        "Cairn has not been audited. Do not put anything you care about on it."
+      ]
+    },
+    "build": {
+      "title": "Build it",
+      "body": {
+        "plain": ["You need Rust installed, which is a free programming toolchain. These three commands fetch the source and build it. It takes a couple of minutes."],
+        "curious": ["Rust 1.87 or later. Nothing else is needed: the dependency tree is five crates and no asynchronous runtime."],
+        "technical": ["Rust 1.87. Workspace lints deny unsafe code, arithmetic side effects, indexing and slicing, unwrap, expect and panic. The release profile enables overflow checks."]
+      }
+    },
+    "node": {
+      "title": "Run it",
+      "body": {
+        "plain": ["That is the whole thing. It will find other computers on the network, download the chain, and check every rule itself. It prints a line every ten seconds telling you where it stands."],
+        "curious": ["It starts from the pinned first block written into the source, finds peers, syncs, and validates. Nothing about the rules can be set on the command line: they come from the network name only."],
+        "technical": ["Add --archive to keep the cold set and be able to rebuild proofs for others, which costs a set that grows. Add --seed to point at a known peer. An unknown option is a hard error rather than being ignored."]
+      }
+    },
+    "wallet": {
+      "title": "Make a wallet",
+      "body": {
+        "plain": ["This makes a secret key on your own machine and shows you the address that goes with it. The secret never leaves your computer, and it is never sent to this website or to anyone else. If you lose it, the money is gone: nobody can recover it for you."],
+        "curious": ["The key file is written with restrictive permissions and is never overwritten. The wallet keeps its own inclusion proofs for notes that have fallen to the cold set."],
+        "technical": ["Ed25519. The wallet tracks positions for its fallen notes and refreshes proofs as the forest grows, so a cold spend needs no third party."]
+      }
+    },
+    "mine": {
+      "title": "Mine",
+      "body": {
+        "plain": ["This is how you get CAIRN on a test network. Your computer starts trying to find blocks, and when it finds one, the reward goes to your address. There is no other way to get any: nobody has a stock to hand out."],
+        "curious": ["Single-threaded mining on the node, which is enough for a test network. Rewards go to the key you name."],
+        "technical": ["The genesis difficulty of testnet-1 is 2^27, calibrated so the first block takes roughly the target block time on one ordinary core, at a measured 2.29 million hashes per second."]
+      }
+    },
+    "explorer": {
+      "title": "Run this site yourself",
+      "body": {
+        "plain": ["This website is itself a program you can run. It serves these exact pages from your own machine, reading your own node. Nothing here needs to be taken on trust either."],
+        "curious": ["The explorer is a node that also builds an index and serves the site. The index is a cost that grows with the chain, which is precisely why it lives here and not in the node everybody runs."],
+        "technical": ["The site is compiled into the binary; nothing is read from disk at runtime. The HTTP layer is standard library only, one thread per connection, GET and HEAD, no request body."]
+      }
+    }
+  },
+
+  "foot": {
+    "watching": "This page only reads. It holds no key, it can sign nothing, and it will never ask you for one.",
+    "node": "{network} · {blocks} blocks indexed · from {genesis}"
+  }
+}

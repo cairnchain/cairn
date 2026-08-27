@@ -50,8 +50,14 @@ stranger's word for where the story begins.
 | `devnet` | `00000051 1ff5...` | 1787783108 | 5 s |
 | `mainnet` | not made yet | | |
 
-What is left is running the thing in public: seed addresses, an explorer,
-installation notes, and strangers running the binary.
+There is an explorer, which is a node that also serves a website: the chain in
+public, and an explanation of it written at three levels for readers who know
+nothing, something, or everything. It keeps an index from owners to their
+notes, which is the growing cost the protocol refuses to put on validators and
+is exactly why it lives in a separate program nobody has to run.
+
+What is left is running the thing in public: seed addresses, installation
+notes, and strangers running the binary.
 
 ## Layout
 
@@ -66,6 +72,11 @@ installation notes, and strangers running the binary.
 | `cairn-store` | The append only block log a node replays on start |
 | `cairn-node` | `cairnd`, a node |
 | `cairn-wallet` | `cairn-wallet`, a wallet that is itself a node |
+| `cairn-explorer` | `cairn-explorer`, a node that indexes the chain and serves `web/` |
+
+The website itself is in `web/`, kept out of the protocol crates. It is plain
+HTML, CSS and JavaScript with no build step and no framework, compiled into the
+explorer binary, so what is served is what was written.
 
 ## Running it
 
@@ -93,6 +104,16 @@ answers, so it needs its own directory:
     --amount 12.5 --fee 0.25 \
     --network devnet --data wallet --seed 127.0.0.1:9944
 ```
+
+Watch the same network in a browser, with the explorer alongside the node:
+
+```
+./target/release/cairn-explorer --network devnet --data explorer \
+    --seed 127.0.0.1:9944
+```
+
+It prints the address to open, `http://127.0.0.1:8080/` unless told otherwise.
+The site holds no key and signs nothing; spending needs the wallet above.
 
 `devnet` is the same rules with a five second block time and a hot set small
 enough to watch notes fall. Consensus rules come from the network name and

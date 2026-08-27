@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en" data-level="curious">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cairn</title>
+<meta name="description" content="A chain whose full node costs the same in thirty years as it does today. Explore it, and understand it.">
+<meta name="color-scheme" content="dark light">
+<link rel="stylesheet" href="/cairn.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2312161A'/%3E%3Cellipse cx='16' cy='24' rx='9' ry='3.2' fill='%23AAC04B'/%3E%3Cellipse cx='16' cy='18' rx='6.4' ry='2.6' fill='%23AAC04B' opacity='.78'/%3E%3Cellipse cx='16' cy='13' rx='4.4' ry='2' fill='%23AAC04B' opacity='.56'/%3E%3Cellipse cx='16' cy='9' rx='2.6' ry='1.5' fill='%23AAC04B' opacity='.36'/%3E%3C/svg%3E">
+<script src="/cairn.js" defer></script>
+</head>
+<body>
+
+<a class="skip" href="#view" data-t="a11y.skip">Skip to content</a>
+
+<header class="masthead">
+  <div class="bar">
+    <a class="mark" href="/" data-link>
+      <svg class="cairn-mark" viewBox="0 0 24 28" aria-hidden="true" focusable="false">
+        <ellipse cx="12" cy="23" rx="9.5" ry="3.4"/>
+        <ellipse cx="12" cy="17" rx="7" ry="2.8" opacity=".76"/>
+        <ellipse cx="12" cy="11.6" rx="5" ry="2.2" opacity=".54"/>
+        <ellipse cx="12" cy="7" rx="3" ry="1.6" opacity=".34"/>
+      </svg>
+      <span class="wordmark">CAIRN</span>
+    </a>
+
+    <nav class="links" aria-label="Sections">
+      <a href="/" data-link data-t="nav.home">Home</a>
+      <a href="/blocks" data-link data-t="nav.explore">Explore</a>
+      <a href="/learn" data-link data-t="nav.learn">Learn</a>
+      <a href="/rules" data-link data-t="nav.rules">Rules</a>
+      <a href="/download" data-link data-t="nav.run">Run a node</a>
+    </nav>
+
+    <div class="controls">
+      <label class="picker">
+        <span class="sr-only" data-t="a11y.level">Reading level</span>
+        <select id="level">
+          <option value="plain" data-t="level.plain.name">New to this</option>
+          <option value="curious" data-t="level.curious.name">Some background</option>
+          <option value="technical" data-t="level.technical.name">Technical</option>
+        </select>
+      </label>
+      <label class="picker">
+        <span class="sr-only" data-t="a11y.language">Language</span>
+        <select id="language"></select>
+      </label>
+    </div>
+  </div>
+
+  <form class="search" id="search" role="search" autocomplete="off">
+    <input id="query" type="search" spellcheck="false"
+           data-t-placeholder="search.placeholder"
+           placeholder="Block height, block, transaction, address, note">
+    <button type="submit" data-t="search.action">Look up</button>
+    <p class="search-note" id="search-note" hidden></p>
+  </form>
+
+  <div class="ticker" id="ticker" hidden></div>
+</header>
+
+<main id="view" tabindex="-1"></main>
+
+<footer class="foot">
+  <p class="foot-line">
+    <span data-t="foot.watching">This page reads a node. It holds no key and can sign nothing.</span>
+  </p>
+  <p class="foot-line dim">
+    <span id="foot-node"></span>
+  </p>
+</footer>
+
+<div class="welcome" id="welcome" hidden>
+  <div class="welcome-panel" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
+    <p class="eyebrow" data-t="welcome.eyebrow">Before you start</p>
+    <h1 id="welcome-title" data-t="welcome.title">How much of this do you already know?</h1>
+    <p class="lede" data-t="welcome.lede">Everything on this site is written three times. Pick the one that suits you. You can change it at any moment, on any page.</p>
+    <div class="choices">
+      <button class="choice" data-choose="plain">
+        <span class="choice-name" data-t="level.plain.name">New to this</span>
+        <span class="choice-blurb" data-t="level.plain.blurb">You have heard of cryptocurrency and that is about it. Nothing here will assume more.</span>
+      </button>
+      <button class="choice" data-choose="curious">
+        <span class="choice-name" data-t="level.curious.name">Some background</span>
+        <span class="choice-blurb" data-t="level.curious.blurb">You know roughly what a blockchain and a wallet are, and you want to know what is different here.</span>
+      </button>
+      <button class="choice" data-choose="technical">
+        <span class="choice-name" data-t="level.technical.name">Technical</span>
+        <span class="choice-blurb" data-t="level.technical.blurb">Give me the accumulator, the retarget, the commitment structure and the numbers.</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
