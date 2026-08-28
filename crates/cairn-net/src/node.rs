@@ -970,10 +970,7 @@ fn read_loop(
     initiator: bool,
 ) {
     let network = shared.network();
-    let mut peer = PeerState {
-        remote,
-        ..PeerState::default()
-    };
+    let mut peer = PeerState::new(remote);
     let mut announced = false;
     let mut last_heard = unix_now();
     let mut window_start = last_heard;

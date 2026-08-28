@@ -882,3 +882,76 @@ fn a_peer_that_is_not_us_is_greeted_normally() {
 fn reaching_ourselves_is_not_held_against_anyone() {
     assert!(!DropReason::Ourselves.is_misbehaviour());
 }
+
+/// How much a node spends answering must not be decided by whoever asks.
+///
+/// The node keeps a ceiling on how many messages a peer may send, which
+/// catches a peer repeating itself. It does not catch a peer asking for a
+/// great deal in each of them: two thousand messages is within that ceiling,
+/// and two thousand asking for a hundred and twenty eight blocks each is a
+/// quarter of a million records to read off a disk.
+#[test]
+fn a_peer_cannot_decide_how_much_answering_it_costs() {
+    let mut forge = Forge::new(params());
+    let blocks = forge.mine_many(4);
+    let mut store = ChainStore::new(params());
+    for block in &blocks {
+        store.add_block(block.clone(), NOW).unwrap();
+    }
+
+    let mut peer = greeted_peer(0, 0);
+    let wanted: Vec<Hash32> = blocks.iter().map(Block::id).collect();
+
+    // Asking for everything it can, over and over, inside one window.
+    let mut answered = 0usize;
+    let mut refused = 0usize;
+    for _ in 0..4_000 {
+        let asking = Message::GetBlocks(wanted.clone());
+        let reaction = on_message(&mut solo(&mut store), &mut peer, asking, NOW);
+        if reaction.reply.is_empty() {
+            refused = refused.saturating_add(1);
+        } else {
+            answered = answered.saturating_add(1);
+        }
+    }
+    assert!(answered > 0, "an honest peer is answered");
+    assert!(
+        refused > 0,
+        "and a peer that keeps asking runs out of allowance"
+    );
+
+    // A refusal is not a grudge: the window turns over and it is served again.
+    let later = on_message(
+        &mut solo(&mut store),
+        &mut peer,
+        Message::GetBlocks(wanted.clone()),
+        NOW + 30,
+    );
+    assert!(!later.reply.is_empty(), "a fresh window answers again");
+}
+
+/// Taking delivery of what you asked for is not something to be charged for.
+#[test]
+fn blocks_this_node_asked_for_do_not_use_up_its_allowance() {
+    let mut forge = Forge::new(params());
+    let blocks = forge.mine_many(3);
+    let mut store = ChainStore::new(params());
+
+    let mut peer = greeted_peer(0, 0);
+    // As though this node had just asked for all three.
+    peer.asked_at = NOW;
+    for block in &blocks {
+        peer.awaiting.insert(block.id());
+    }
+
+    for block in &blocks {
+        on_message(
+            &mut solo(&mut store),
+            &mut peer,
+            Message::Block(Box::new(block.clone())),
+            NOW,
+        );
+    }
+    assert_eq!(store.height(), Some(2), "all three landed");
+    assert_eq!(peer.spent, 3, "one apiece, not the price of a stranger's");
+}

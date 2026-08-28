@@ -54,6 +54,79 @@ pub struct PeerState {
     /// address the connection came from.
     pub advertised: Option<SocketAddr>,
     pub last_message: u64,
+    /// Work this peer may still ask for in the current window.
+    ///
+    /// Nothing here stops a peer asking as fast as its connection allows, and
+    /// what it asks for is not free: a block to validate, a signature to
+    /// check, a hundred and twenty eight records to read off a disk. Without a
+    /// ceiling, how much a node spends answering is decided by whoever
+    /// connects to it, which is the cheapest attack there is on a program that
+    /// answers strangers.
+    /// Held by [`PeerState::afford`]; nothing else should touch it.
+    pub spent: u32,
+    /// When the current window began.
+    pub window_started: u64,
+}
+
+/// How long a peer's allowance lasts before it is handed out again.
+const WINDOW_SECONDS: u64 = 10;
+
+/// What a peer may ask for within one window.
+///
+/// This is not the same as the ceiling the node keeps on how many messages a
+/// peer may send, which is there against a peer repeating itself hundreds of
+/// times a second and closes the connection when it is passed. This one counts
+/// what answering costs rather than how often it is asked: two thousand
+/// messages are within that ceiling, and two thousand asking for a hundred and
+/// twenty eight blocks each is a quarter of a million records to read off a
+/// disk. Being asked a lot is not misbehaviour, so this slows rather than
+/// closes.
+///
+/// Set from what an honest peer needs rather than from what feels safe. The
+/// most a peer ever legitimately wants is a full sync, which asks for blocks
+/// as fast as it can take them; at this allowance that is eight hundred blocks
+/// a second, so thirty years of chain arrives in about five hours, which is
+/// what the bandwidth alone would take. Nothing else an honest peer does comes
+/// anywhere near it.
+const ALLOWANCE: u32 = 8_192;
+
+/// What each kind of message costs to answer, in the same units.
+///
+/// Roughly proportional to the work rather than measured: a block has to be
+/// validated, a transfer carries signatures, and a block read off a disk is a
+/// seek. Being roughly right is what matters, since the ceiling is far above
+/// what an honest peer asks for and far below what a busy one could spend.
+const COST_TRIVIAL: u32 = 1;
+const COST_CHAIN: u32 = 8;
+const COST_TRANSFER: u32 = 4;
+const COST_BLOCK: u32 = 8;
+const COST_PER_BLOCK_SERVED: u32 = 1;
+
+impl PeerState {
+    /// A peer just connected, reached at `remote`.
+    pub fn new(remote: Option<IpAddr>) -> Self {
+        Self {
+            remote,
+            ..Self::default()
+        }
+    }
+
+    /// Takes `cost` from this peer's allowance, saying whether it was there.
+    ///
+    /// A window that has run out is refilled rather than carried over, so a
+    /// peer that was quiet for a minute does not get a minute's worth at once.
+    fn afford(&mut self, cost: u32, now: u64) -> bool {
+        if now.saturating_sub(self.window_started) >= WINDOW_SECONDS {
+            self.window_started = now;
+            self.spent = 0;
+        }
+        let after = self.spent.saturating_add(cost);
+        if after > ALLOWANCE {
+            return false;
+        }
+        self.spent = after;
+        true
+    }
 }
 
 /// Why a peer is no longer worth talking to.
@@ -325,6 +398,37 @@ pub fn on_message(
         return Reaction::close(DropReason::Unannounced {
             kind: message.kind(),
         });
+    }
+
+    // What answering this will cost, taken before it is spent.
+    //
+    // What is counted is work this peer causes: what it asks for, and what it
+    // sends that nobody asked it for. A block this node asked for is not
+    // charged, because refusing to take delivery of what you requested is a
+    // way of never finishing a sync. An unasked one is, because that is a
+    // stranger handing this node work.
+    //
+    // A peer that has used its window is answered with silence rather than
+    // closed. What it asked for is not wrong, there has only been a lot of it,
+    // and it asks again a moment later against a fresh window.
+    let cost = match &message {
+        Message::GetChain { .. } => COST_CHAIN,
+        Message::Block(block) => {
+            if peer.awaiting.contains(&block.id()) {
+                COST_TRIVIAL
+            } else {
+                COST_BLOCK
+            }
+        }
+        Message::Transaction(_) => COST_TRANSFER,
+        Message::GetBlocks(ids) => {
+            let wanted = u32::try_from(ids.len().min(MAX_REQUESTED)).unwrap_or(u32::MAX);
+            wanted.saturating_mul(COST_PER_BLOCK_SERVED)
+        }
+        _ => COST_TRIVIAL,
+    };
+    if !peer.afford(cost, now) {
+        return Reaction::idle();
     }
 
     match message {
