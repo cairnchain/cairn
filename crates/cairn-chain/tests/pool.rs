@@ -8,7 +8,7 @@
     clippy::arithmetic_side_effects
 )]
 
-use cairn_chain::{ChainStore, MAX_POOLED};
+use cairn_chain::{ChainStore, MAX_POOLED, MAX_POOL_BYTES};
 use cairn_crypto::SecretKey;
 use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
@@ -93,6 +93,29 @@ fn funded_widely(count: usize, miner: &SecretKey) -> (ChainStore, Vec<(NoteId, N
         }
     }
     (store, notes)
+}
+
+/// Spends one note into as many outputs as the rules allow, which is the
+/// largest ordinary transfer there is.
+fn wide_spend(
+    params: &ConsensusParams,
+    id: NoteId,
+    note: Note,
+    owner: &SecretKey,
+    to: &SecretKey,
+) -> Transfer {
+    let count = params.max_outputs_per_transfer;
+    let each = note.value.as_pebbles() / count as u64;
+    let first = note.value.as_pebbles() - each * (count as u64 - 1);
+    let outputs: Vec<Note> = (0..count)
+        .map(|index| {
+            let value = if index == 0 { first } else { each };
+            Note::new(Amount::from_pebbles(value).unwrap(), to.public_key())
+        })
+        .collect();
+    let mut transfer = Transfer::new(vec![Input::hot(id)], outputs);
+    transfer.sign_input(params.network, 0, &note, owner);
+    transfer
 }
 
 /// Spends one note, paying `to` and leaving the rest as a fee.
@@ -372,4 +395,38 @@ fn a_miner_takes_the_best_paying_transfers_first() {
     // And the whole pool still fits in a block that has room for it.
     let (all, _) = store.selection(64);
     assert_eq!(all.len(), 8);
+}
+
+/// A pool is bounded by what it weighs, not only by what it counts.
+///
+/// One transfer spending notes out of the cold set carries a proof for each,
+/// and the rules allow two hundred and fifty six of them: half a megabyte in
+/// a single transfer. Four thousand of those is two gigabytes of memory handed
+/// to whoever cared to send them, without a rule being broken.
+#[test]
+fn the_pool_is_bounded_by_weight_as_well_as_by_count() {
+    let params = params();
+    let miner = wallet(1);
+    let (mut store, notes) = funded_widely(64, &miner);
+
+    // Transfers as large as the rules allow, which is what an attacker sends.
+    let mut taken = 0usize;
+    for (id, note) in &notes {
+        let transfer = wide_spend(&params, *id, *note, &miner, &wallet(2));
+        if store.accept_transfer(transfer).is_err() {
+            break;
+        }
+        taken = taken.saturating_add(1);
+    }
+
+    assert!(taken > 0, "some were taken");
+    assert!(
+        store.pool_bytes() <= MAX_POOL_BYTES,
+        "the pool holds {} bytes, over the {MAX_POOL_BYTES} it may",
+        store.pool_bytes()
+    );
+    assert!(
+        store.pool_len() < MAX_POOLED,
+        "and it filled up on weight long before it filled up on count"
+    );
 }

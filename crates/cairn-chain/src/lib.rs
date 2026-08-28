@@ -32,6 +32,28 @@ use cairn_primitives::{Amount, Hash32};
 /// taking new ones rather than growing without limit.
 pub const MAX_POOLED: usize = 4_096;
 
+/// What every waiting transfer may take altogether.
+///
+/// Four blocks' worth, which is as far ahead as a pool is any use: what waits
+/// longer than that is waiting because nobody will carry it. Counting bytes as
+/// well as transfers is what makes the ceiling mean something, since one
+/// transfer spending notes out of the cold set carries a proof for each and
+/// can run to half a megabyte on its own.
+pub const MAX_POOL_BYTES: usize = 4 * 1024 * 1024;
+
+/// A transfer waiting for a block, with what it was worth and what it takes.
+///
+/// Both are worked out once, when it arrives. What it is worth decides what it
+/// displaces and what a miner reaches for first; what it takes decides whether
+/// there is room. Reading either again from the transfer itself would mean
+/// encoding it or revalidating it on every comparison.
+#[derive(Clone, Debug)]
+struct Pooled {
+    transfer: Transfer,
+    fee: Amount,
+    bytes: usize,
+}
+
 /// How far back the followed branch can be undone.
 ///
 /// Every applied block records what it took to apply, so it can be undone
@@ -137,7 +159,15 @@ pub struct ChainStore {
     state: LedgerState,
     /// Transfers waiting for a block, keyed by identifier so the order a miner
     /// walks them in does not depend on the order they arrived.
-    pool: BTreeMap<Hash32, Transfer>,
+    pool: BTreeMap<Hash32, Pooled>,
+    /// What the pool takes altogether.
+    ///
+    /// Counting transfers alone bounds the wrong thing. One may spend two
+    /// hundred and fifty six notes out of the cold set, each carrying its own
+    /// proof, which runs to half a megabyte; four thousand of those is two
+    /// gigabytes of memory handed to whoever cared to send them, without a
+    /// single rule being broken.
+    pool_bytes: usize,
     /// The same transfers by what they pay, cheapest first.
     ///
     /// Kept alongside rather than derived, so finding what to make room for
@@ -173,6 +203,7 @@ impl ChainStore {
             undo_from: 0,
             state,
             pool: BTreeMap::new(),
+            pool_bytes: 0,
             pool_by_fee: BTreeSet::new(),
         }
     }
@@ -343,13 +374,27 @@ impl ChainStore {
         self.pool.len()
     }
 
+    /// What every transfer waiting for a block takes altogether.
+    pub fn pool_bytes(&self) -> usize {
+        self.pool_bytes
+    }
+
     pub fn pooled(&self, id: &Hash32) -> Option<&Transfer> {
-        self.pool.get(id)
+        self.pool.get(id).map(|held| &held.transfer)
     }
 
     /// Every transfer waiting for a block, in identifier order.
     pub fn pooled_transfers(&self) -> impl Iterator<Item = (&Hash32, &Transfer)> {
-        self.pool.iter()
+        self.pool.iter().map(|(id, held)| (id, &held.transfer))
+    }
+
+    /// Takes one transfer out of the pool and its indexes.
+    fn drop_pooled(&mut self, id: &Hash32) {
+        let Some(held) = self.pool.remove(id) else {
+            return;
+        };
+        self.pool_by_fee.remove(&(held.fee, *id));
+        self.pool_bytes = self.pool_bytes.saturating_sub(held.bytes);
     }
 
     /// Takes a transfer that has been broadcast, returning whether it was new.
@@ -379,24 +424,44 @@ impl ChainStore {
             &self.params,
         )?;
 
+        let bytes = transfer.encode().len();
+        if bytes > MAX_POOL_BYTES {
+            // Nothing this large can be held whatever else is dropped, and
+            // nothing this large fits in a block either.
+            return Ok(false);
+        }
+
         // A full pool that refuses everything is a pool anyone can close. Four
         // thousand transfers paying nothing would hold every place, and a
         // sender who paid would be turned away behind them, for as long as the
         // attacker cared to keep it up. So a full pool makes room for whoever
         // pays more than the least it already holds, and refuses only what
         // would not improve it.
-        if self.pool.len() >= MAX_POOLED {
+        //
+        // Full by count or full by size: one large transfer can take the room
+        // of a hundred small ones, so both have to be made room for, and one
+        // arrival can displace several.
+        while self.pool.len() >= MAX_POOLED
+            || self.pool_bytes.saturating_add(bytes) > MAX_POOL_BYTES
+        {
             let Some((cheapest, victim)) = self.pool_by_fee.first().copied() else {
                 return Ok(false);
             };
             if outcome.fee <= cheapest {
                 return Ok(false);
             }
-            self.pool.remove(&victim);
-            self.pool_by_fee.remove(&(cheapest, victim));
+            self.drop_pooled(&victim);
         }
 
-        self.pool.insert(id, transfer);
+        self.pool_bytes = self.pool_bytes.saturating_add(bytes);
+        self.pool.insert(
+            id,
+            Pooled {
+                transfer,
+                fee: outcome.fee,
+                bytes,
+            },
+        );
         self.pool_by_fee.insert((outcome.fee, id));
         Ok(true)
     }
@@ -432,7 +497,8 @@ impl ChainStore {
             .pool_by_fee
             .iter()
             .rev()
-            .filter_map(|(_, id)| self.pool.get(id));
+            .filter_map(|(_, id)| self.pool.get(id))
+            .map(|held| &held.transfer);
 
         // What is left for transfers once the rest of the block is allowed for.
         let mut room = self
@@ -476,7 +542,7 @@ impl ChainStore {
     fn pooled_inputs(&self) -> BTreeSet<NoteId> {
         self.pool
             .values()
-            .flat_map(|transfer| transfer.inputs.iter().map(|input| input.note_id))
+            .flat_map(|held| held.transfer.inputs.iter().map(|input| input.note_id))
             .collect()
     }
 
@@ -489,18 +555,29 @@ impl ChainStore {
         let params = self.params;
         let state = &self.state;
         let mut kept: BTreeSet<(Amount, Hash32)> = BTreeSet::new();
-        self.pool.retain(|id, transfer| {
-            match check_transfer(transfer, state, &BTreeSet::new(), &BTreeMap::new(), &params) {
-                // The fee is read again rather than carried: what a transfer
-                // pays depends on the state, and the state is what moved.
+        let mut bytes = 0usize;
+        self.pool.retain(|id, held| {
+            match check_transfer(
+                &held.transfer,
+                state,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+                &params,
+            ) {
+                // The fee is worked out again rather than carried over: what a
+                // transfer pays depends on the state, and the state is what
+                // moved. What it takes does not, so that is kept.
                 Ok(outcome) => {
+                    held.fee = outcome.fee;
                     kept.insert((outcome.fee, *id));
+                    bytes = bytes.saturating_add(held.bytes);
                     true
                 }
                 Err(_) => false,
             }
         });
         self.pool_by_fee = kept;
+        self.pool_bytes = bytes;
     }
 
     /// Records a block and follows the heaviest branch it makes available.
