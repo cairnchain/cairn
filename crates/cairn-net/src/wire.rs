@@ -23,7 +23,18 @@ use cairn_ledger::note::NetworkId;
 use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
 
 /// Largest message this node will read or write.
-pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
+///
+/// Twice what the consensus rules allow a block to take, which is the largest
+/// thing that legitimately crosses this wire. The two limits are written in
+/// two places and have to be kept in that order: a block the rules allow and
+/// the wire refuses would be a block its miner could not hand to anyone, and
+/// that miner would then be following a chain nobody else can follow.
+///
+/// The margin is deliberate and modest. Larger costs memory, since this is the
+/// one allocation an anonymous peer gets to ask for and a node holds several
+/// dozen connections at once. Smaller leaves no room for a message that
+/// carries a block and anything else.
+pub const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
 
 const HEADER_BYTES: usize = 8;
 

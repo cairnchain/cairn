@@ -23,6 +23,7 @@ use cairn_ledger::validation::{
 };
 use cairn_ledger::ColdSpend;
 use cairn_ledger::LedgerState;
+use cairn_primitives::codec::Encode;
 use cairn_primitives::{Amount, Hash32};
 
 /// Transfers held while they wait for a block.
@@ -400,6 +401,14 @@ impl ChainStore {
         Ok(true)
     }
 
+    /// Room set aside for everything in a block that is not a transfer.
+    ///
+    /// The header is fixed and small, and the coinbase is at most sixteen
+    /// notes. Four kilobytes is several times either, which is the right
+    /// margin for a number whose only job is to keep the selection below a
+    /// limit checked exactly elsewhere.
+    const BLOCK_OVERHEAD_BYTES: usize = 4096;
+
     /// Transfers a miner can put in the next block, and the fees they carry.
     ///
     /// Walked from the best paying down, and within the same fee in identifier
@@ -425,10 +434,23 @@ impl ChainStore {
             .rev()
             .filter_map(|(_, id)| self.pool.get(id));
 
+        // What is left for transfers once the rest of the block is allowed for.
+        let mut room = self
+            .params
+            .max_block_bytes
+            .saturating_sub(Self::BLOCK_OVERHEAD_BYTES);
+
         for transfer in ordered {
             if chosen.len() >= limit {
                 break;
             }
+            // A block over the limit is refused by every node including the
+            // one that made it, so a miner that filled one past it would have
+            // spent the work for nothing.
+            let size = transfer.encode().len();
+            let Some(remaining) = room.checked_sub(size) else {
+                continue;
+            };
             let Ok(outcome) =
                 check_transfer(transfer, &self.state, &spent_hot, &spent_cold, &self.params)
             else {
@@ -445,6 +467,7 @@ impl ChainStore {
                     .into_iter()
                     .map(|spend| (spend.id, spend)),
             );
+            room = remaining;
             chosen.push(transfer.clone());
         }
         (chosen, fees)

@@ -611,3 +611,52 @@ mod joining_without_the_whole_chain {
         assert_eq!(ours.total_work(), theirs.total_work());
     }
 }
+
+/// A block is bounded by what it takes, not only by what it holds.
+///
+/// The counts on transfers, inputs and outputs bound the shape of a block.
+/// Multiplied out they allow one of over two gigabytes, which no network
+/// carries: a miner could produce a block that is valid and cannot be handed
+/// to anyone, and would then be following a chain nobody else can follow. The
+/// limit that matters is the one on bytes, and it is checked on the encoding a
+/// node actually received.
+#[test]
+fn a_block_larger_than_the_rules_allow_is_refused() {
+    let mut params = ConsensusParams::testnet();
+    // Small enough that a handful of notes passes it, so this test builds a
+    // block rather than a gigabyte.
+    params.max_block_bytes = 512;
+    let miner = wallet(1);
+    let mut state = LedgerState::archiving();
+
+    let fat = CoinbaseTransaction::new(
+        0,
+        vec![
+            Note::new(
+                Amount::from_pebbles(params.initial_reward.as_pebbles() / 16).unwrap(),
+                miner.public_key()
+            );
+            16
+        ],
+    );
+    let block = assemble_block(&state, fat, Vec::new(), &params, 1_000, 0).unwrap();
+    let solved = mine_block(block, MINING_ATTEMPTS).expect("a nonce exists");
+
+    let bytes = cairn_primitives::codec::Encode::encode(&solved).len();
+    assert!(
+        bytes > params.max_block_bytes,
+        "the block has to be over it"
+    );
+    assert!(
+        matches!(
+            connect_block(&mut state, &solved, &params, NOW),
+            Err(BlockError::BlockTooLarge { .. })
+        ),
+        "a block of {bytes} bytes passed a limit of {}",
+        params.max_block_bytes
+    );
+
+    // And the same block is fine once the rules allow its size.
+    params.max_block_bytes = 4096;
+    assert!(connect_block(&mut state, &solved, &params, NOW).is_ok());
+}

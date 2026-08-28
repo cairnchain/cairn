@@ -201,6 +201,8 @@ cargo run --release -p cairn-net --example gossip          a block crossing a ro
 cargo run --release -p cairn-ledger --example history      the cost of arriving late
 cargo run --release -p cairn-ledger --example collapse   losing most of the miners
 cargo run --release -p cairn-ledger --example sampled_start   catching a forged chain
+cargo run --release -p cairn-ledger --example blocksize    what a block may take
+cargo run --release -p cairn-chain --example weight    what a node holds in memory
 ```
 
 ## How this is built

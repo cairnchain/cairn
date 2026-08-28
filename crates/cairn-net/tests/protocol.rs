@@ -955,3 +955,19 @@ fn blocks_this_node_asked_for_do_not_use_up_its_allowance() {
     assert_eq!(store.height(), Some(2), "all three landed");
     assert_eq!(peer.spent, 3, "one apiece, not the price of a stranger's");
 }
+
+/// The wire has to carry what the rules allow.
+///
+/// Two limits on the same object, written in two crates, with nothing to make
+/// them agree. If the rules allowed a block this wire refused, a miner could
+/// produce one that is valid and cannot be handed to anyone: it would follow a
+/// chain nobody else can follow, and no attacker would be needed for the fork.
+#[test]
+fn the_wire_carries_the_largest_block_the_rules_allow() {
+    let allowed = params().max_block_bytes;
+    assert!(
+        allowed < cairn_net::wire::MAX_FRAME_BYTES,
+        "a block of {allowed} bytes is valid and would not fit in a frame of {}",
+        cairn_net::wire::MAX_FRAME_BYTES
+    );
+}

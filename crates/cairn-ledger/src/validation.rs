@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use cairn_primitives::codec::Encode;
 use cairn_primitives::{Amount, Hash32};
 
 use crate::emission;
@@ -84,6 +85,19 @@ pub struct ConsensusParams {
     pub max_inputs_per_transfer: usize,
     pub max_outputs_per_transfer: usize,
     pub max_coinbase_outputs: usize,
+    /// Bytes a block may take once encoded.
+    ///
+    /// The counts above bound the shape of a block; this bounds the thing
+    /// itself, which is what a peer has to carry, a node has to hold while it
+    /// validates, and a disk has to keep. Without it those counts multiply out
+    /// to a block far larger than any network would carry, and a miner could
+    /// produce one that is valid and cannot be handed to anyone: it would
+    /// follow a chain nobody else can follow, which is a fork with no attacker
+    /// in it.
+    ///
+    /// It has to stay comfortably under what the wire carries, and it is the
+    /// wire's business to be the larger of the two.
+    pub max_block_bytes: usize,
     /// How far ahead of the receiving node's clock a timestamp may sit.
     pub max_timestamp_drift: u64,
 }
@@ -159,6 +173,7 @@ impl ConsensusParams {
             max_inputs_per_transfer: 256,
             max_outputs_per_transfer: 256,
             max_coinbase_outputs: 16,
+            max_block_bytes: 1024 * 1024,
             max_timestamp_drift: 2 * 60 * 60,
         }
     }
@@ -241,6 +256,8 @@ pub enum BlockError {
     CoinbaseHeightMismatch { header: u64, coinbase: u64 },
     #[error("block carries {count} transfers, limit is {limit}")]
     TooManyTransfers { count: usize, limit: usize },
+    #[error("block takes {bytes} bytes, limit is {limit}")]
+    BlockTooLarge { bytes: usize, limit: usize },
     #[error("coinbase creates {count} notes, limit is {limit}")]
     TooManyCoinbaseOutputs { count: usize, limit: usize },
     #[error("coinbase output {index} carries no value")]
@@ -739,6 +756,18 @@ pub fn connect_block(
     if !meets_target(&header.id(), header.difficulty) {
         return Err(BlockError::InsufficientWork {
             difficulty: header.difficulty,
+        });
+    }
+
+    // What a peer has to carry, a node has to hold while it validates, and a
+    // disk has to keep. Checked once here, on the encoding a node received
+    // rather than on a count of parts, because bytes are what the limit is
+    // about and counting parts is how the two drifted apart.
+    let bytes = block.encode().len();
+    if bytes > params.max_block_bytes {
+        return Err(BlockError::BlockTooLarge {
+            bytes,
+            limit: params.max_block_bytes,
         });
     }
 
