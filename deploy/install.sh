@@ -34,7 +34,36 @@ say() { printf '\n== %s\n' "$1"; }
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "run this as root" >&2
+    echo "with sudo, pass the settings through env, since sudo clears them:" >&2
+    echo "  sudo env SEED=... MINE=... sh $0" >&2
     exit 1
+fi
+
+# A key that is not a key produces a service that will not start, and systemd
+# reports that as a failure to launch rather than as a bad argument.
+if [ -n "$MINE" ]; then
+    case "$MINE" in
+        *[!0-9a-fA-F]* | "")
+            echo "MINE is not a public key: $MINE" >&2
+            exit 1
+            ;;
+    esac
+    if [ "${#MINE}" -ne 64 ]; then
+        echo "MINE should be 64 hex characters, this is ${#MINE}" >&2
+        echo "get it with: cairn-wallet address <your key file>" >&2
+        exit 1
+    fi
+fi
+
+# Said early, so a run that lost a setting on its way through sudo is obvious
+# before anything is built rather than after it is running.
+echo "network  $NETWORK"
+echo "port     $PORT"
+echo "seeds    ${SEED:-none}"
+if [ -n "$MINE" ]; then
+    echo "mining   to $MINE"
+else
+    echo "mining   off"
 fi
 
 say "Packages"
@@ -158,9 +187,11 @@ else
 fi
 
 say "Done"
-# What is actually running, so an update can be told from a no-op.
+# What is actually running, so an update can be told from a no-op and a
+# setting that went missing is visible without reading the unit file.
 echo "commit   $(git -C "$SRC" rev-parse --short HEAD)"
 echo "started  $(systemctl show -p ActiveEnterTimestamp --value cairnd)"
+grep '^ExecStart=' "$UNIT"
 systemctl --no-pager --lines=6 status cairnd || true
 cat <<NOTE
 

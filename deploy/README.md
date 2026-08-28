@@ -10,7 +10,15 @@ every rented server runs.
 
 ## The short version
 
-On each server, as root:
+On each server, as root. If you reach root through `sudo`, pass the settings
+with `sudo env`, because `sudo` clears the environment and a setting that goes
+missing produces a node that runs correctly and does the wrong thing:
+
+```
+sudo env SEED=203.0.113.10:9944 sh /usr/local/src/cairn/deploy/install.sh
+```
+
+Otherwise:
 
 ```
 git clone https://github.com/cairnchain/cairn /usr/local/src/cairn
