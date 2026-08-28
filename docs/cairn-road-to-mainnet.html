@@ -234,27 +234,30 @@
       <div>
         <h3>La prochaine chose que j'écris</h3>
         <p>
-          <b>Les programmes téléchargeables.</b> Un jour de travail, et ça
-          retire la dernière barrière entre un curieux et un nœud. Tant qu'il
-          faut compiler, seuls les développeurs peuvent essayer.
+          <b>Sortir l'histoire de la mémoire du nœud.</b> Un nœud garde en
+          mémoire vive chaque bloc qu'il a validé. Mesuré : neuf mois de chaîne
+          coûtent 637 Mo, trente ans en coûteraient vingt-cinq gigaoctets. Il
+          n'en a besoin que d'un millier, plus l'état ; le reste est déjà sur
+          son disque. C'est le dernier trou dans la phrase écrite en haut du
+          dépôt.
         </p>
         <p class="resume-note">
           Ensuite, dans l'ordre qui t'arrange : le protocole d'échantillonnage,
-          sortir l'histoire de la mémoire, spécifier les archivistes, un
-          portefeuille qui n'est pas un terminal.
+          spécifier les archivistes, un portefeuille qui n'est pas un terminal.
         </p>
       </div>
       <div>
         <h3>La prochaine chose qui t'appartient</h3>
         <p>
-          <b>Montrer le papier à quelqu'un.</b> Un forum, une liste de
-          diffusion, quelqu'un du domaine. C'est ce qui fait relire le
-          protocole gratuitement, avant de payer un cabinet pour chercher les
-          mêmes choses.
+          <b>Acheter <span class="mono">cairnchain.org</span>.</b> Deux choses
+          attendent ce nom : mettre l'explorateur en ligne, et publier les
+          programmes téléchargeables. Les deux sont écrits, testés et prêts à
+          partir ; il leur manque une adresse et un certificat.
         </p>
         <p class="resume-note">
-          Et quand tu voudras : inviter des gens à lancer un nœud. C'est le
-          seul point de toute cette page sur lequel je ne peux rien.
+          Puis : montrer le papier à quelqu'un du domaine, et inviter des gens
+          à lancer un nœud. Ce sont les seuls points de cette page sur lesquels
+          je ne peux rien.
         </p>
       </div>
     </div>
@@ -334,10 +337,26 @@
       <div class="task">
         <div class="task-what">
           <b>Des programmes téléchargeables</b>
-          <span>Compilés pour Mac, Linux et Windows, avec leurs empreintes publiées, pour que personne n'ait à installer Rust. Aujourd'hui il faut compiler, ce qui écarte tous ceux qui ne sont pas développeurs.</span>
+          <span>Compilés en public pour Mac, Linux et Windows, avec leurs empreintes et une attestation signée par GitHub qui relie chaque fichier au code qui l'a produit. Écrit et vérifié à blanc : les cinq programmes se construisent, il ne reste qu'à appuyer.</span>
         </div>
         <div class="who me">moi</div>
-        <div class="cost">un jour</div>
+        <div class="cost">prêt</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>L'explorateur en ligne</b>
+          <span>Le site public, derrière un certificat, sur un nom que les gens peuvent partager. Écrit aussi : un script installe le nœud, le site et le certificat. Il attend <span class="mono">cairnchain.org</span>.</span>
+        </div>
+        <div class="who you">toi</div>
+        <div class="cost">une dizaine d'euros par an</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Sortir l'histoire de la mémoire</b>
+          <span>Un nœud garde en mémoire vive chaque bloc validé : 637 Mo pour neuf mois de chaîne, vingt-cinq gigaoctets pour trente ans. Mesuré, pas supposé. C'est le dernier endroit où le coût d'un nœud grandit encore avec la chaîne.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">quelques jours</div>
       </div>
       <div class="task">
         <div class="task-what">
@@ -584,16 +603,19 @@
   <div class="closing">
     <h2>Ce qui vient maintenant, dans l'ordre</h2>
     <p>
-      <strong>Le whitepaper.</strong> C'est ce qui a le plus de valeur
-      aujourd'hui, et pour une raison chiffrable : il fait regarder des gens
-      compétents gratuitement, avant de payer un cabinet pour chercher les
-      mêmes choses. La matière est fraîche, l'étude de l'existant est faite,
-      et le réseau tourne pour appuyer ce qu'il raconte.
+      <strong>Sortir l'histoire de la mémoire du nœud.</strong> C'est le
+      dernier trou dans la phrase écrite en haut du dépôt. Le grand livre tient
+      sa promesse, plafonné par une règle que personne ne peut contourner. À
+      côté, l'arbre des blocs grossit sans limite : chaque bloc jamais validé
+      reste en mémoire vive, alors qu'il est déjà sur le disque et que le nœud
+      n'ira jamais le relire. Vingt-cinq gigaoctets à trente ans, pour un
+      projet qui promet un coût constant.
     </p>
     <p>
-      <strong>Les programmes téléchargeables.</strong> Un jour de travail, et
-      ça retire la seule barrière qui reste entre un curieux et un nœud. Tant
-      qu'il faut compiler, seuls les développeurs peuvent essayer.
+      <strong>Deux choses attendent un nom de domaine.</strong> Les programmes
+      téléchargeables et l'explorateur en ligne sont écrits, testés, prêts à
+      partir. Ce qui leur manque est <span class="mono">cairnchain.org</span>
+      et un certificat, pas du travail.
     </p>
     <p>
       <strong>Puis le temps fait son travail.</strong> Le reste du code, dans
@@ -616,8 +638,8 @@
   </div>
 
   <footer>
-    <span>Cairn · route jusqu'au mainnet · v3</span>
-    <span>48 commits · 287 tests</span>
+    <span>Cairn · route jusqu'au mainnet · v4</span>
+    <span>50 commits · 295 tests</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 
