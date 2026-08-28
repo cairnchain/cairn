@@ -18,6 +18,21 @@ use cairn_primitives::codec::{CodecError, Decode, Encode};
 /// The name the block log takes inside a node's directory.
 pub const BLOCK_LOG: &str = "blocks.log";
 
+/// The name of the file holding where each record ends.
+///
+/// Eight bytes per record and nothing else, so the offset of record `n` sits
+/// at `n * 8` and finding a block is a seek. Kept beside the log rather than
+/// in memory: a node that held one offset per block would be spending memory
+/// on the length of its history, which is the cost this whole design exists to
+/// avoid, and it would have to read every block at every start to work them
+/// out again.
+///
+/// Derived, never authoritative. Lose it and it is rebuilt from the log.
+pub const BLOCK_INDEX: &str = "blocks.idx";
+
+/// Bytes one entry of the index takes.
+const OFFSET_BYTES: u64 = 8;
+
 /// The name of the file that marks a directory as in use.
 pub const LOCK_FILE: &str = "lock";
 
@@ -73,13 +88,19 @@ pub struct Recovered {
 }
 
 /// An append only record of every block a node has accepted.
+///
+/// Two files: the records themselves, and where each one ends. What this holds
+/// in memory is how many there are and where the last one ends, and nothing
+/// that grows with the chain.
 #[derive(Debug)]
 pub struct BlockLog {
     file: File,
+    index: File,
     path: PathBuf,
-    /// Byte offset just past each record, so the file can be cut back to any
-    /// record boundary.
-    ends: Vec<u64>,
+    /// Records held.
+    count: usize,
+    /// Byte offset just past the last record.
+    end: u64,
 }
 
 impl BlockLog {
@@ -98,12 +119,21 @@ impl BlockLog {
             .create(true)
             .truncate(false)
             .open(&path)?;
+        let index = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(directory.join(BLOCK_INDEX))?;
+
         let mut log = Self {
             file,
+            index,
             path,
-            ends: Vec::new(),
+            count: 0,
+            end: 0,
         };
-        let recovered = log.scan()?;
+        let recovered = log.recover()?;
         Ok((log, recovered))
     }
 
@@ -112,14 +142,20 @@ impl BlockLog {
     }
 
     pub fn len(&self) -> usize {
-        self.ends.len()
+        self.count
     }
 
     pub fn is_empty(&self) -> bool {
-        self.ends.is_empty()
+        self.count == 0
     }
 
     /// Adds one block to the end of the log.
+    ///
+    /// The record goes down before the offset that points at it. Dying between
+    /// the two leaves an index one entry short, and the tail of the log is
+    /// then cut back to match on the next start: the block is lost and asked
+    /// for again, which is what a torn write has always cost here. The other
+    /// order would leave an offset pointing at bytes that were never written.
     pub fn append(&mut self, block: &Block) -> Result<(), StoreError> {
         let body = block.encode();
         if body.len() > MAX_RECORD_BYTES {
@@ -131,12 +167,57 @@ impl BlockLog {
         length.encode_to(&mut record);
         record.extend_from_slice(&body);
 
-        let start = self.ends.last().copied().unwrap_or(0);
+        let start = self.end;
         self.file.seek(SeekFrom::Start(start))?;
         self.file.write_all(&record)?;
         self.file.flush()?;
-        self.ends.push(start.saturating_add(record.len() as u64));
+
+        let end = start.saturating_add(record.len() as u64);
+        self.write_offset(self.count, end)?;
+        self.count = self.count.saturating_add(1);
+        self.end = end;
         Ok(())
+    }
+
+    /// Writes where record `index` ends.
+    fn write_offset(&mut self, index: usize, end: u64) -> Result<(), StoreError> {
+        let at = (index as u64).saturating_mul(OFFSET_BYTES);
+        self.index.seek(SeekFrom::Start(at))?;
+        self.index.write_all(&end.to_le_bytes())?;
+        self.index.flush()?;
+        Ok(())
+    }
+
+    /// Where record `index` ends, and where it starts.
+    fn bounds(&self, index: usize) -> Result<Option<(u64, u64)>, StoreError> {
+        if index >= self.count {
+            return Ok(None);
+        }
+        let mut file = &self.index;
+        if index == 0 {
+            let mut end = [0u8; 8];
+            file.seek(SeekFrom::Start(0))?;
+            file.read_exact(&mut end)?;
+            return Ok(Some((0, u64::from_le_bytes(end))));
+        }
+        // The two offsets sit next to each other, so one read finds both.
+        let mut pair = [0u8; 16];
+        let at = (index as u64)
+            .saturating_sub(1)
+            .saturating_mul(OFFSET_BYTES);
+        file.seek(SeekFrom::Start(at))?;
+        file.read_exact(&mut pair)?;
+        let start = u64::from_le_bytes(
+            pair.get(..8)
+                .and_then(|s| s.try_into().ok())
+                .unwrap_or([0; 8]),
+        );
+        let end = u64::from_le_bytes(
+            pair.get(8..)
+                .and_then(|s| s.try_into().ok())
+                .unwrap_or([0; 8]),
+        );
+        Ok(Some((start, end)))
     }
 
     /// Reads the record at `index`.
@@ -144,13 +225,8 @@ impl BlockLog {
     /// Every read seeks, so this is for one block at a time. Reading the whole
     /// log in order is what [`BlockLog::replay`] is for.
     pub fn read(&self, index: usize) -> Result<Option<Block>, StoreError> {
-        let Some(end) = self.ends.get(index).copied() else {
+        let Some((start, end)) = self.bounds(index)? else {
             return Ok(None);
-        };
-        let start = if index == 0 {
-            0
-        } else {
-            self.ends.get(index.saturating_sub(1)).copied().unwrap_or(0)
         };
         let length = usize::try_from(end.saturating_sub(start)).unwrap_or(0);
         let body = length.saturating_sub(4);
@@ -182,30 +258,100 @@ impl BlockLog {
         Replay {
             reader: BufReader::new(&self.file),
             index: 0,
-            total: self.ends.len(),
+            total: self.count,
             started: false,
         }
     }
 
     /// Cuts the log back to its first `count` records.
+    ///
+    /// The index is cut first. Between the two the index is the shorter of the
+    /// pair, which is the state a torn append leaves and which the next start
+    /// already knows how to repair.
     pub fn keep_first(&mut self, count: usize) -> Result<(), StoreError> {
-        if count >= self.ends.len() {
+        if count >= self.count {
             return Ok(());
         }
-        let end = if count == 0 {
-            0
-        } else {
-            self.ends.get(count.saturating_sub(1)).copied().unwrap_or(0)
+        let end = match count.checked_sub(1) {
+            None => 0,
+            Some(last) => self.bounds(last)?.map_or(0, |(_, end)| end),
         };
+        let entries = (count as u64).saturating_mul(OFFSET_BYTES);
+        self.index.set_len(entries)?;
+        self.index.flush()?;
         self.file.set_len(end)?;
         self.file.flush()?;
-        self.ends.truncate(count);
+        self.count = count;
+        self.end = end;
         Ok(())
     }
 
+    /// Works out what the log holds, rebuilding the index only when it has to.
+    ///
+    /// The usual start reads sixteen bytes: how long the index is, and where
+    /// the last record ends. Nothing is decoded and nothing is walked, so
+    /// opening a log costs the same on a chain of ten blocks and one of ten
+    /// million. Every block is still verified when it is replayed, which is
+    /// where a record that cannot be read is found and where the log is cut.
+    ///
+    /// The index is rebuilt from the log when it is missing, when it is
+    /// shorter than the log, or when it claims records the log does not reach.
+    /// It is derived, so losing it costs one slow start and nothing else.
+    fn recover(&mut self) -> Result<Recovered, StoreError> {
+        let logged = self.file.metadata()?.len();
+        let indexed = self.index.metadata()?.len();
+
+        // A torn write to the index leaves a partial offset behind.
+        let whole = indexed.saturating_sub(indexed % OFFSET_BYTES);
+        if whole != indexed {
+            self.index.set_len(whole)?;
+            self.index.flush()?;
+        }
+        let count = usize::try_from(whole / OFFSET_BYTES).unwrap_or(0);
+
+        if count == 0 {
+            // Either there is nothing here, or the index is gone and the log
+            // is not. Only the second needs the walk.
+            if logged == 0 {
+                self.count = 0;
+                self.end = 0;
+                return Ok(Recovered::default());
+            }
+            return self.rebuild();
+        }
+
+        let mut last = [0u8; 8];
+        let at = whole.saturating_sub(OFFSET_BYTES);
+        (&self.index).seek(SeekFrom::Start(at))?;
+        (&self.index).read_exact(&mut last)?;
+        let end = u64::from_le_bytes(last);
+
+        // The index reaches past the log, so one of them is not what this
+        // process last wrote. The log is the record; the index is derived.
+        if end > logged {
+            return self.rebuild();
+        }
+
+        self.count = count;
+        self.end = end;
+
+        // Bytes past the last offset are a record that was being written when
+        // something stopped, or the block of an index entry that never landed.
+        // Either way they are not a record anything points at.
+        let discarded = logged.saturating_sub(end);
+        if discarded > 0 {
+            self.file.set_len(end)?;
+            self.file.flush()?;
+        }
+        Ok(Recovered {
+            blocks: count,
+            discarded_bytes: discarded,
+        })
+    }
+
     /// Reads every complete record, cutting the file back at the first one that
-    /// cannot be read.
-    fn scan(&mut self) -> Result<Recovered, StoreError> {
+    /// cannot be read, and writes the index out again from what it found.
+    fn rebuild(&mut self) -> Result<Recovered, StoreError> {
         self.file.seek(SeekFrom::Start(0))?;
         let total = self.file.metadata()?.len();
         let mut reader = BufReader::new(&self.file);
@@ -249,11 +395,21 @@ impl BlockLog {
 
         drop(reader);
         recovered.discarded_bytes = total.saturating_sub(offset);
-        self.ends = ends;
+        self.count = ends.len();
+        self.end = offset;
         if recovered.discarded_bytes > 0 {
             self.file.set_len(offset)?;
             self.file.flush()?;
         }
+
+        let mut written = Vec::with_capacity(ends.len().saturating_mul(8));
+        for end in &ends {
+            written.extend_from_slice(&end.to_le_bytes());
+        }
+        self.index.set_len(0)?;
+        self.index.seek(SeekFrom::Start(0))?;
+        self.index.write_all(&written)?;
+        self.index.flush()?;
         Ok(recovered)
     }
 }

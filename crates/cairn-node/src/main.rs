@@ -47,7 +47,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
     );
     if restored.refused > 0 {
         println!(
-            "             {} stored blocks were refused and cut from the log",
+            "             {} stored blocks were set aside; they will be asked for again",
             restored.refused
         );
     }

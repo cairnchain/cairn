@@ -146,9 +146,60 @@ fn a_write_cut_short_costs_only_the_block_it_was_writing() {
     assert_eq!(read_back(&again_log), blocks);
 }
 
+/// A record that is not a block is reported when it is read.
+///
+/// Opening a log does not decode what it holds: that would mean reading the
+/// whole chain to find out how long it is, at every start, forever. What the
+/// index says is taken as read, and a record that turns out not to be a block
+/// is found by whoever asks for it. A node asks for all of them as it replays,
+/// so nothing goes unnoticed; it is noticed a moment later than it used to be.
 #[test]
-fn a_record_that_is_not_a_block_is_reported_rather_than_ignored() {
+fn a_record_that_is_not_a_block_is_reported_when_it_is_read() {
     let directory = scratch("garbage");
+    let blocks = chain(1);
+
+    let end = {
+        let (mut log, _) = BlockLog::open(&directory).unwrap();
+        log.append(&blocks[0]).unwrap();
+        std::fs::metadata(directory.join(BLOCK_LOG)).unwrap().len()
+    };
+
+    // A second record that is four bytes of nonsense, with an index entry
+    // pointing at it, so nothing about the shape of either file gives it away.
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(directory.join(BLOCK_LOG))
+        .unwrap();
+    file.write_all(&[0x04, 0x00, 0x00, 0x00, 0xde, 0xad, 0xbe, 0xef])
+        .unwrap();
+    drop(file);
+    let mut index = OpenOptions::new()
+        .append(true)
+        .open(directory.join(cairn_store::BLOCK_INDEX))
+        .unwrap();
+    index.write_all(&(end + 8).to_le_bytes()).unwrap();
+    drop(index);
+
+    let (log, recovered) = BlockLog::open(&directory).unwrap();
+    assert_eq!(
+        recovered.blocks, 2,
+        "the index says two, and it is believed"
+    );
+
+    assert!(
+        matches!(log.read(1), Err(StoreError::Malformed { index: 1, .. })),
+        "silence would be worse"
+    );
+    // And a replay stops there rather than carrying on past a hole.
+    let replayed: Vec<_> = log.replay().collect();
+    assert!(replayed[0].is_ok());
+    assert!(replayed[1].is_err(), "the walk reports it too");
+}
+
+/// Bytes past the last record are what a write that never finished leaves.
+#[test]
+fn bytes_the_index_does_not_reach_are_dropped() {
+    let directory = scratch("trailing");
     let blocks = chain(2);
 
     {
@@ -166,11 +217,90 @@ fn a_record_that_is_not_a_block_is_reported_rather_than_ignored() {
         .unwrap();
     drop(file);
 
-    let outcome = BlockLog::open(&directory);
-    assert!(
-        matches!(outcome, Err(StoreError::Malformed { index: 2, .. })),
-        "silence would be worse"
+    let (log, recovered) = BlockLog::open(&directory).unwrap();
+    assert_eq!(recovered.blocks, 2);
+    assert_eq!(recovered.discarded_bytes, 8);
+    assert_eq!(read_back(&log), blocks);
+}
+
+/// The index is derived, so losing it costs one slow start and nothing else.
+#[test]
+fn a_missing_index_is_rebuilt_from_the_log() {
+    let directory = scratch("reindex");
+    let blocks = chain(7);
+
+    {
+        let (mut log, _) = BlockLog::open(&directory).unwrap();
+        for block in &blocks {
+            log.append(block).unwrap();
+        }
+    }
+    std::fs::remove_file(directory.join(cairn_store::BLOCK_INDEX)).unwrap();
+
+    let (log, recovered) = BlockLog::open(&directory).unwrap();
+    assert_eq!(recovered.blocks, 7, "worked out from the log itself");
+    assert_eq!(read_back(&log), blocks);
+    assert_eq!(log.read(4).unwrap().unwrap(), blocks[4]);
+
+    // Written back down, so the next start is quick again.
+    let written = std::fs::metadata(directory.join(cairn_store::BLOCK_INDEX))
+        .unwrap()
+        .len();
+    assert_eq!(written, 7 * 8);
+}
+
+/// An index that reaches past the log is not what this process last wrote.
+#[test]
+fn an_index_longer_than_the_log_is_rebuilt() {
+    let directory = scratch("ahead");
+    let blocks = chain(4);
+
+    {
+        let (mut log, _) = BlockLog::open(&directory).unwrap();
+        for block in &blocks {
+            log.append(block).unwrap();
+        }
+    }
+
+    // Two more offsets, pointing at bytes that are not there.
+    let mut index = OpenOptions::new()
+        .append(true)
+        .open(directory.join(cairn_store::BLOCK_INDEX))
+        .unwrap();
+    index.write_all(&u64::MAX.to_le_bytes()).unwrap();
+    drop(index);
+
+    let (log, recovered) = BlockLog::open(&directory).unwrap();
+    assert_eq!(
+        recovered.blocks, 4,
+        "the log is the record, the index is not"
     );
+    assert_eq!(read_back(&log), blocks);
+}
+
+/// A torn write to the index leaves part of an offset behind.
+#[test]
+fn a_partial_offset_is_cut_back() {
+    let directory = scratch("partial");
+    let blocks = chain(3);
+
+    {
+        let (mut log, _) = BlockLog::open(&directory).unwrap();
+        for block in &blocks {
+            log.append(block).unwrap();
+        }
+    }
+
+    let mut index = OpenOptions::new()
+        .append(true)
+        .open(directory.join(cairn_store::BLOCK_INDEX))
+        .unwrap();
+    index.write_all(&[0x01, 0x02, 0x03]).unwrap();
+    drop(index);
+
+    let (log, recovered) = BlockLog::open(&directory).unwrap();
+    assert_eq!(recovered.blocks, 3);
+    assert_eq!(read_back(&log), blocks);
 }
 
 #[test]

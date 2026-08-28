@@ -105,10 +105,16 @@ pub enum NodeError {
 pub struct Restored {
     /// Blocks read back and reapplied.
     pub blocks: usize,
-    /// Blocks read back but refused, and therefore cut from the log.
+    /// Blocks read back but not replayed, and therefore cut from the log.
     ///
-    /// Every block in the log was valid when it was written, so a refusal here
-    /// means the file changed underneath the node or the rules did.
+    /// Two things end a replay. A block that no longer applies, which means
+    /// the file changed underneath the node or the rules did. And a block that
+    /// applies but does not extend the branch, which means the log is not the
+    /// followed branch in order of height: a log written before that was the
+    /// rule, or one left mid reorganisation by a machine that stopped.
+    ///
+    /// Neither loses anything but time. What was cut is asked for again, and
+    /// a node that was following the heaviest branch still is.
     pub refused: usize,
     /// Bytes dropped from the end of the log because a write never finished.
     pub discarded_bytes: u64,
