@@ -44,8 +44,12 @@ two that were open longest: the hot set holds 131072 notes, measured at roughly
 it reaches a floor it then keeps forever.
 
 A node keeps the hot set in full and the cold set as sixty four hashes, so what
-it costs to run does not grow with the chain. An archivist keeps the whole cold
-set and is the only party that can rebuild a proof for someone who lost theirs.
+it costs to run does not grow with the chain. It also lets go of any block too
+deep to be undone, and reads one back from its log if a peer catching up asks
+for it, so the chain it has already validated is not carried twice. Measured:
+nothing is added between four hundred thousand blocks and eight hundred
+thousand. An archivist keeps the whole cold set and is the only party that can
+rebuild a proof for someone who lost theirs.
 
 A wallet keeps its own proofs current out of what every block already carries,
 so it spends a fallen note without asking anyone. Money moves between people
