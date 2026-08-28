@@ -21,7 +21,12 @@ what it borrows and what limit it accepts.
 
 ## Status
 
-Pre-alpha. There is no released binary and no public network.
+Pre-alpha, and running in public. `testnet-2` has been up since 27 August 2026
+on two seed nodes at two hosts in two countries. Its money is worth nothing,
+is meant to be worth nothing, and the network will be reset.
+
+There is no mainnet. A network exists once its first block does, and that one
+will be mined in the open on the day it is announced.
 
 The protocol is complete and runs end to end: notes and transactions, the
 accumulator that replaces the state database, the two tiers, proof of work with
@@ -84,8 +89,34 @@ peer does decides how much memory this node spends. The data directory is held
 by a lock the operating system releases when the process ends, so a machine
 that loses power comes straight back up.
 
-What is left is running the thing in public: seed addresses, installation
-notes, and strangers running the binary.
+What is left before a network worth trusting: the sampling protocol that uses
+the header commitments, an outside audit, and enough people running nodes that
+no single one of them matters.
+
+## Getting it
+
+Programs for macOS, Linux and Windows are on the
+[releases page](https://github.com/cairnchain/cairn/releases/latest), with a
+`SHA256SUMS` file beside them. They are built in public by GitHub from a
+tagged commit, and each one carries an attestation saying which commit and
+which workflow produced it:
+
+```
+gh attestation verify <the archive> --repo cairnchain/cairn
+```
+
+That asks GitHub rather than us, which is the point. Your operating system
+will still warn you, because these programs carry no paid certificate. The
+check above is worth more than one.
+
+Join the network with either seed:
+
+```
+cairnd --seed 213.32.69.172:9944 --seed 92.222.100.238:9944
+```
+
+To run one of those addresses yourself, `deploy/` has an installer and the
+notes that go with it.
 
 ## Layout
 
@@ -155,14 +186,17 @@ cargo test --workspace
 cargo clippy --workspace --all-targets
 ```
 
-Five runnable demonstrations, each showing one part of the design:
+Runnable demonstrations, each showing or measuring one part of the design:
 
 ```
-cargo run -p cairn-ledger --example walkthrough
-cargo run --release -p cairn-accumulator --example scale
-cargo run -p cairn-chain --example partition
-cargo run --release -p cairn-net --example network
-cargo run --release -p cairn-net --example gossip
+cargo run -p cairn-ledger --example walkthrough        money moving, end to end
+cargo run --release -p cairn-accumulator --example scale     what a node stores
+cargo run -p cairn-chain --example partition          two chains meeting again
+cargo run --release -p cairn-net --example network       nodes finding each other
+cargo run --release -p cairn-net --example gossip          a block crossing a room
+cargo run --release -p cairn-ledger --example history      the cost of arriving late
+cargo run --release -p cairn-ledger --example collapse   losing most of the miners
+cargo run --release -p cairn-ledger --example sampled_start   catching a forged chain
 ```
 
 ## How this is built

@@ -135,7 +135,9 @@ jobs:
       # Signed by GitHub, tying each file to this commit and this workflow.
       # Verified with:
       #   gh attestation verify <file> --repo ${{ github.repository }}
+      # Recorded in a public transparency log, so only for a real release.
       - uses: actions/attest-build-provenance@v2
+        if: github.event_name == 'push'
         with:
           subject-path: "downloads/*.tar.gz, downloads/*.zip"
 
