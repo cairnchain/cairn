@@ -35,7 +35,7 @@ pub enum StoreError {
     RecordTooLarge { index: usize, declared: usize },
     #[error("block would not fit in one record")]
     BlockTooLarge,
-    #[error("{path} is already in use by process {holder}, which is still running")]
+    #[error("{path} is already in use by {holder}, which is still running")]
     Locked { path: String, holder: String },
     #[error(
         "this filesystem does not support locking, so two nodes could write to \
@@ -265,13 +265,20 @@ impl DirectoryLock {
 }
 
 /// What the lock file says about who holds it, for the error message only.
+///
+/// Not always readable, and that is not a failure. Locks on Unix are advisory:
+/// they stop another lock, not another read, so the process id written inside
+/// comes back. On Windows they are mandatory and cover the bytes themselves,
+/// so a file this node cannot lock is also a file it cannot read. The answer
+/// is then the honest one rather than a guess, and an operator on that machine
+/// has the task manager for the rest.
 fn read_holder(path: &Path) -> String {
     let holder = std::fs::read_to_string(path).unwrap_or_default();
     let holder = holder.trim();
     if holder.is_empty() {
-        "unknown".to_owned()
+        "another process".to_owned()
     } else {
-        holder.to_owned()
+        format!("process {holder}")
     }
 }
 

@@ -33,7 +33,16 @@ fn a_second_holder_is_refused_while_the_first_lives() {
 
     match DirectoryLock::acquire(&directory) {
         Err(StoreError::Locked { holder, .. }) => {
-            assert_eq!(holder, std::process::id().to_string());
+            // Who holds it is a courtesy, and one the platform decides. Unix
+            // locks are advisory and leave the file readable, so the process
+            // id written inside comes back. Windows locks cover the bytes, so
+            // a file this node cannot lock is one it cannot read either, and
+            // the message says that rather than inventing a holder.
+            let named = format!("process {}", std::process::id());
+            assert!(
+                holder == named || holder == "another process",
+                "unexpected holder: {holder}"
+            );
         }
         Err(other) => panic!("expected a refusal, got {other}"),
         Ok(_) => panic!("two holders got the same directory"),
