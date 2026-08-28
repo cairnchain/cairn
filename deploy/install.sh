@@ -12,14 +12,20 @@
 # you can read. That takes a few minutes and a little memory; see the note
 # about swap below if the build is killed partway.
 #
-# A seed node mines nothing and holds no key. If this machine were taken
-# tomorrow, there would be nothing on it to steal.
+# A seed node holds no key. If this machine were taken tomorrow, there would be
+# nothing on it to steal. It can still be asked to mine, with MINE set to a
+# public key: what a miner needs is the address rewards are paid to, never the
+# key that spends them.
 
 set -eu
 
 NETWORK="${NETWORK:-testnet-2}"
 PORT="${PORT:-9944}"
 SEED="${SEED:-}"
+# A public key to pay block rewards to. Mining needs the address money goes to
+# and nothing else: the key that spends it never leaves the machine that holds
+# it, so this stays true even here, where nothing worth stealing may sit.
+MINE="${MINE:-}"
 REPO="${REPO:-https://github.com/cairnchain/cairn}"
 SRC="/usr/local/src/cairn"
 DATA="/var/lib/cairn"
@@ -117,11 +123,15 @@ cp "$SRC/deploy/cairnd.service" "$UNIT"
 
 # The unit ships with the defaults; rewrite the line if this run asked for
 # something else, so every server ends up with a unit that says what it does.
-if [ "$NETWORK" != "testnet-2" ] || [ "$PORT" != "9944" ] || [ -n "$SEED" ]; then
+if [ "$NETWORK" != "testnet-2" ] || [ "$PORT" != "9944" ] ||
+   [ -n "$SEED" ] || [ -n "$MINE" ]; then
     ARGS="--network $NETWORK --data $DATA --listen 0.0.0.0:$PORT --status 60"
     for peer in $SEED; do
         ARGS="$ARGS --seed $peer"
     done
+    if [ -n "$MINE" ]; then
+        ARGS="$ARGS --mine $MINE"
+    fi
     # Collapse the shipped multi-line ExecStart into one line with our
     # arguments, leaving every hardening directive untouched.
     awk -v args="$ARGS" '

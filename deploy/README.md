@@ -1,9 +1,9 @@
 # Running a Cairn seed node
 
 A seed node is an address people can start from. It validates the chain like
-any other node, mines nothing, and holds no key. If the machine were taken
-tomorrow there would be nothing on it to steal, which is why a seed should be
-a machine with nothing else of yours on it.
+any other node and holds no key. If the machine were taken tomorrow there
+would be nothing on it to steal, which is why a seed should be a machine with
+nothing else of yours on it.
 
 Everything here targets Debian or Ubuntu with systemd, which is what almost
 every rented server runs.
@@ -57,10 +57,24 @@ mkswap /swapfile && swapon /swapfile
 
 ## The one rule about these machines
 
-**No wallet key ever goes on a seed node.** Not to mine with, not to test
-with. A seed is a public address that strangers connect to, and the whole
-reason it can be exposed without worry is that there is nothing on it worth
-taking. Mine from your own machine if you want to mine.
+**No wallet key ever goes on a seed node.** Not to test with, not to hold a
+balance on. A seed is a public address that strangers connect to, and the
+whole reason it can be exposed without worry is that there is nothing on it
+worth taking.
+
+Mining does not break this rule, because a miner is told the address rewards
+are paid to and nothing more. The key that spends them stays wherever you keep
+it. Set `MINE` to a public key and the node will mine to it:
+
+```
+MINE="<public key>" sh /usr/local/src/cairn/deploy/install.sh
+```
+
+On a test network at least one machine has to keep mining, or the chain
+stands still and nobody can try anything. On a real network this would be a
+poor arrangement, because the entry points people start from would also be
+the machines producing blocks. Two servers is what this network has, so for
+now one of them does both.
 
 ## Watching it
 
@@ -92,6 +106,10 @@ systemctl restart cairnd
 systemctl stop cairnd
 sh /usr/local/src/cairn/deploy/install.sh   # rebuilds and restarts
 ```
+
+`install.sh` rewrites the service file from the environment it is given, so
+whatever `SEED` and `MINE` were set to on the last run is what the unit says.
+Pass them again on an update, or edit `/etc/systemd/system/cairnd.service`.
 
 A node killed outright, or a server that loses power, comes back on its own:
 the data directory lock is held by the kernel on an open file and is released
