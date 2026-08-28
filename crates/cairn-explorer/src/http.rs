@@ -97,13 +97,19 @@ impl Response {
 
 /// Serves `listener` until `running` is cleared, handing every request to
 /// `answer`.
+///
+/// `running` is read between connections rather than waited on: this blocks
+/// on accept, so clearing it stops the server at the next visitor and not
+/// before. That is enough for what runs here. A node has to stop on command,
+/// because an operator restarting one should not wait on a stranger; a website
+/// is stopped by stopping the process, and the explorer keeps nothing in
+/// memory that is not already on disk.
 pub(crate) fn serve<F>(listener: &TcpListener, running: &Arc<AtomicBool>, answer: F)
 where
     F: Fn(&Request) -> Response + Send + Sync + 'static,
 {
     let answer = Arc::new(answer);
     let live = Arc::new(AtomicUsize::new(0));
-    // So the accept loop wakes up often enough to notice a shutdown.
     let _ = listener.set_nonblocking(false);
 
     for incoming in listener.incoming() {
