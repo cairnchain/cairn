@@ -370,6 +370,7 @@ fn join(flags: &Flags, mine: PublicKey) -> Result<Node, String> {
             .map_err(|error| format!("`{seed}` is not an address: {error}"))?
             .next()
             .ok_or_else(|| format!("`{seed}` resolved to nothing"))?;
+        node.remember_seed(address);
         if node.connect(address).is_ok() {
             reached = reached.saturating_add(1);
         }

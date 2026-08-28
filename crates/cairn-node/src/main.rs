@@ -60,9 +60,12 @@ fn run(arguments: &[String]) -> Result<(), String> {
     println!();
 
     for seed in &options.seeds {
+        // Written down before it is dialled, so a seed that is down right now
+        // is tried again later rather than never known at all.
+        node.remember_seed(*seed);
         match node.connect(*seed) {
             Ok(()) => println!("reached      {seed}"),
-            Err(error) => println!("unreachable  {seed} ({error})"),
+            Err(error) => println!("unreachable  {seed} ({error}), will keep trying"),
         }
     }
 

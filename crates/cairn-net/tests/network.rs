@@ -384,3 +384,45 @@ fn a_node_stops_promptly_with_nobody_around() {
         "shutting down took {took:?}, which means it waited on something"
     );
 }
+
+/// The address an operator gives is the one a node can always come back to.
+///
+/// A node keeps the addresses it learns and drops the ones that stop
+/// answering, which is right until every one of them stops answering at once:
+/// a closed laptop, a pulled cable, a machine that slept. The book empties,
+/// and an empty book has no way back, because rejoining a network means asking
+/// someone and there is nobody left to ask. Seeds are what a node is left with
+/// when everything else is gone, so they survive any amount of silence, and
+/// they are written down before they are dialled rather than after they answer.
+#[test]
+fn a_seed_that_never_answers_is_still_known() {
+    let params = params();
+
+    // An address nothing is listening on: bound to learn the port, then let go.
+    let vacant = {
+        let held = std::net::TcpListener::bind(loopback()).unwrap();
+        held.local_addr().unwrap()
+    };
+
+    let node = Node::bind(params, loopback()).unwrap();
+    node.remember_seed(vacant);
+    assert!(
+        node.connect(vacant).is_err(),
+        "nothing is listening there, so the dial has to fail"
+    );
+
+    assert!(
+        node.known_addresses().contains(&vacant),
+        "a seed that was down when this node started is still worth trying later"
+    );
+
+    // Naming it again is not a second address.
+    node.remember_seed(vacant);
+    assert_eq!(
+        node.known_addresses()
+            .iter()
+            .filter(|address| **address == vacant)
+            .count(),
+        1
+    );
+}

@@ -81,6 +81,14 @@ const OUTBOUND_QUEUE: usize = 256;
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
 /// How often the node looks for peers and saves its address book.
 const MAINTENANCE_PERIOD: Duration = Duration::from_millis(1_000);
+/// A gap between two rounds of maintenance that means the machine was away.
+///
+/// A round takes a second. Thirty of them passing at once is not a busy
+/// machine, it is a laptop that was closed, a container that was paused, or a
+/// clock that was put right. Whatever it was, the node was not on the network
+/// while it happened, and every address that failed to answer meanwhile failed
+/// for a reason that has nothing to do with the address.
+const AWAY_GAP: u64 = 30;
 /// Maintenance sleeps in slices so a shutdown does not wait out a full period.
 const SLEEP_SLICE: Duration = Duration::from_millis(50);
 
@@ -466,6 +474,21 @@ impl Node {
         self.address
     }
 
+    /// Writes down an address the operator gave, whether or not it answers.
+    ///
+    /// This is what a node falls back on. Every other address in the book was
+    /// learned from the network and can be taken away by it: peers stop
+    /// answering, the misses add up, the entries go. A node whose book has
+    /// emptied is not on the network and has no way back onto it, because
+    /// rejoining means asking someone, and it has nobody left to ask. Seeds
+    /// are the addresses that never go, so there is always someone to ask.
+    ///
+    /// Called before dialling, so a seed that happens to be down at the moment
+    /// this node starts is still tried again later rather than never known.
+    pub fn remember_seed(&self, address: SocketAddr) {
+        self.shared.book().insert_seed(address);
+    }
+
     /// Opens a connection to a peer, introduces this node, and remembers the
     /// address for next time.
     pub fn connect(&self, address: SocketAddr) -> Result<(), NodeError> {
@@ -623,6 +646,7 @@ fn accept_loop(shared: &Arc<Shared>, listener: &TcpListener) {
 /// Keeps the node connected to roughly [`TARGET_PEERS`] peers, and writes the
 /// address book down so the next start is not from nothing.
 fn maintenance_loop(shared: &Arc<Shared>) {
+    let mut last_round = unix_now();
     while shared.running.load(Ordering::SeqCst) {
         let mut waited = Duration::ZERO;
         while waited < MAINTENANCE_PERIOD {
@@ -635,14 +659,32 @@ fn maintenance_loop(shared: &Arc<Shared>) {
         if !shared.running.load(Ordering::SeqCst) {
             return;
         }
+        let now = unix_now();
+        // A machine that was away comes back holding nothing against anyone.
+        // Without this a laptop closed for a night wakes with an empty book
+        // and no way back onto the network: every address it knew failed while
+        // it slept, and an address that fails enough times is dropped.
+        if was_away(last_round, now) {
+            shared.book().forgive_all();
+        }
+        last_round = now;
         // Asking again matters: a peer that joined after this node introduced
         // itself is only ever learned about by asking a second time.
         shared.broadcast(None, &Message::GetPeers);
-        dial_from_book(shared);
+        dial_from_book(shared, now);
         save_book(shared);
         collect_finished(shared);
-        shared.refusals().forget_expired(unix_now());
+        shared.refusals().forget_expired(now);
     }
+}
+
+/// Whether the gap between two rounds of maintenance means the machine was not
+/// running, or not on the network, while it passed.
+///
+/// The clock going backwards counts as away too. It says the same thing: what
+/// this node believes about the last few minutes is not to be trusted.
+fn was_away(previous: u64, now: u64) -> bool {
+    now < previous || now.saturating_sub(previous) >= AWAY_GAP
 }
 
 /// Joins the threads of peers that have already gone.
@@ -669,7 +711,7 @@ fn collect_finished(shared: &Arc<Shared>) {
     }
 }
 
-fn dial_from_book(shared: &Arc<Shared>) {
+fn dial_from_book(shared: &Arc<Shared>, now: u64) {
     let (connected, count) = {
         let peers = shared.peers();
         let connected: HashSet<SocketAddr> =
@@ -682,10 +724,11 @@ fn dial_from_book(shared: &Arc<Shared>) {
     }
 
     // Most recently heard from first, so a node spends its attention on peers
-    // that have proved they exist rather than on whatever sorts lowest.
+    // that have proved they exist rather than on whatever sorts lowest, and
+    // only those whose wait after a failed dial is over.
     let candidates: Vec<SocketAddr> = shared
         .book()
-        .candidates()
+        .ready(now)
         .into_iter()
         .filter(|address| *address != shared.address && !connected.contains(address))
         .take(wanted)
@@ -696,7 +739,7 @@ fn dial_from_book(shared: &Arc<Shared>) {
             return;
         }
         let host = address.ip();
-        if shared.refuses(host, unix_now()) || !shared.has_room_for(Some(host)) {
+        if shared.refuses(host, now) || !shared.has_room_for(Some(host)) {
             continue;
         }
         match TcpStream::connect_timeout(&address, DIAL_TIMEOUT) {
@@ -704,7 +747,7 @@ fn dial_from_book(shared: &Arc<Shared>) {
             // An address that never answers would otherwise be dialled every
             // second forever, and handed to every peer that asks.
             Err(_) => {
-                shared.book().missed(&address);
+                shared.book().missed(&address, now);
             }
         }
     }
@@ -948,6 +991,18 @@ mod tests {
 
     fn address(last: u8) -> SocketAddr {
         SocketAddr::from((Ipv4Addr::new(127, 0, 0, last), 9_000))
+    }
+
+    /// A laptop closed for a night is the case this exists for: the thread
+    /// below stops with the machine, and the seconds it missed are the only
+    /// trace left of the time it was not on the network.
+    #[test]
+    fn a_long_gap_between_rounds_means_the_machine_was_away() {
+        assert!(!was_away(1_000, 1_000), "no time passed at all");
+        assert!(!was_away(1_000, 1_000 + AWAY_GAP - 1), "a busy machine");
+        assert!(was_away(1_000, 1_000 + AWAY_GAP), "a machine that stopped");
+        assert!(was_away(1_000, 1_000 + 30_000), "one that slept for hours");
+        assert!(was_away(1_000, 900), "and a clock that was put right");
     }
 
     #[test]

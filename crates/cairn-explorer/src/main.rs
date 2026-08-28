@@ -64,9 +64,10 @@ fn run(arguments: &[String]) -> Result<(), String> {
     );
 
     for seed in &options.seeds {
+        node.remember_seed(*seed);
         match node.connect(*seed) {
             Ok(()) => println!("reached      {seed}"),
-            Err(error) => println!("unreachable  {seed} ({error})"),
+            Err(error) => println!("unreachable  {seed} ({error}), will keep trying"),
         }
     }
 

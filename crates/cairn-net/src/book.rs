@@ -4,6 +4,12 @@
 //! it is part of a configuration file. The book is how a node keeps the
 //! addresses it has been given or been told about, and carries them across a
 //! restart.
+//!
+//! Two things it must never do. It must never keep dialling the dead, or a
+//! node spends its life on machines that are gone. And it must never end up
+//! empty, because a node that knows no address has no way back: nobody to ask,
+//! nobody to be told about. The first is what the misses below are for. The
+//! second is what seeds are for.
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
@@ -19,7 +25,9 @@ pub const PEER_FILE: &str = "peers.txt";
 /// The book is filled by strangers, so it needs a ceiling. Ignoring new
 /// entries once full is the simplest policy that cannot be gamed into
 /// unbounded memory; a real network wants eviction that resists an attacker
-/// flooding the book with addresses it controls.
+/// flooding the book with addresses it controls. Seeds are outside this
+/// ceiling: they come from the operator, and the ceiling is there against
+/// strangers.
 pub const MAX_ADDRESSES: usize = 4_096;
 
 /// Failed dials in a row before an address is dropped.
@@ -28,19 +36,57 @@ pub const MAX_ADDRESSES: usize = 4_096;
 /// than ten, because an address that has not answered three times running is
 /// almost never coming back. What it costs to be wrong is one address that
 /// has to be learned again from a peer.
+///
+/// Three only means something alongside the waiting below. Counted against
+/// dials a second apart, three misses is three seconds, and three seconds of
+/// a bad connection would empty the book.
 pub const MAX_MISSES: u8 = 3;
+
+/// How long an address is left alone after one failed dial.
+///
+/// It doubles twice over per further miss, so an address that has just missed
+/// is tried again in a minute, and one that has missed twice in four. A node
+/// therefore spends about five minutes finding out that an address is gone,
+/// which is longer than a server takes to reboot and shorter than anyone
+/// waits for a network.
+const RETRY_DELAY: u64 = 60;
+
+/// The longest an address is ever left alone.
+///
+/// Only seeds live long enough to reach it, since nothing else survives three
+/// misses. Ten minutes is short enough that a node whose network came back an
+/// hour ago is not still waiting, and long enough that dialling a machine that
+/// is genuinely gone costs nothing worth counting.
+const MAX_QUIET: u64 = 600;
 
 /// What is known about one address beyond the address itself.
 ///
 /// None of this is written down. A restart forgets which addresses were quiet
 /// and finds out again in a few seconds, which is a better trade than a file
-/// format carrying counters that mean nothing to the person reading it.
+/// format carrying counters that mean nothing to the person reading it. Being
+/// a seed is not written down either: it is told to the book at every start by
+/// whoever started the node.
 #[derive(Clone, Copy, Debug, Default)]
 struct Known {
     /// Failed dials in a row, cleared by any peer that introduces itself.
     misses: u8,
     /// When it last spoke, or when it was first written down.
     heard: u64,
+    /// The moment before which this address is not dialled again.
+    quiet_until: u64,
+    /// Given at the start rather than learned along the way.
+    seed: bool,
+}
+
+impl Known {
+    /// How long to leave an address alone after `misses` failures running.
+    fn quiet_for(misses: u8) -> u64 {
+        let steps = u32::from(misses.saturating_sub(1)).saturating_mul(2);
+        RETRY_DELAY
+            .checked_shl(steps)
+            .unwrap_or(MAX_QUIET)
+            .min(MAX_QUIET)
+    }
 }
 
 /// Addresses a node knows about.
@@ -49,6 +95,12 @@ struct Known {
 /// that stop answering are dropped, and the ones that answered most recently
 /// are the ones dialled and passed on first, so a node spends its attention
 /// on peers that exist.
+///
+/// Seeds are the exception, and they are the reason a node can always come
+/// back. They are dialled more and more slowly when they do not answer, like
+/// everything else, but they are never dropped. An address the operator gave
+/// is the one thing in the book that was not learned from the network, so it
+/// is the one thing the network cannot take away.
 #[derive(Clone, Debug, Default)]
 pub struct AddressBook {
     known: BTreeMap<SocketAddr, Known>,
@@ -90,6 +142,35 @@ impl AddressBook {
         true
     }
 
+    /// Records an address the operator gave, which is never dropped.
+    ///
+    /// Marking one already in the book is the ordinary case: the book is read
+    /// back from disk before the seeds are known, so the same addresses are
+    /// usually already there as plain entries.
+    pub fn insert_seed(&mut self, address: SocketAddr) -> bool {
+        if !is_dialable(&address) {
+            return false;
+        }
+        let entry = self.known.entry(address).or_default();
+        let was_seed = entry.seed;
+        entry.seed = true;
+        !was_seed
+    }
+
+    /// Whether this address was given rather than learned.
+    pub fn is_seed(&self, address: &SocketAddr) -> bool {
+        self.known.get(address).is_some_and(|known| known.seed)
+    }
+
+    /// The addresses this node was started from.
+    pub fn seeds(&self) -> Vec<SocketAddr> {
+        self.known
+            .iter()
+            .filter(|(_, known)| known.seed)
+            .map(|(address, _)| *address)
+            .collect()
+    }
+
     pub fn remove(&mut self, address: &SocketAddr) -> bool {
         self.known.remove(address).is_some()
     }
@@ -102,22 +183,40 @@ impl AddressBook {
         if let Some(known) = self.known.get_mut(address) {
             known.misses = 0;
             known.heard = now;
+            known.quiet_until = 0;
         }
     }
 
     /// Notes that a dial to this address came to nothing.
     ///
-    /// Returns whether that was the last chance it had.
-    pub fn missed(&mut self, address: &SocketAddr) -> bool {
+    /// Returns whether that was the last chance it had. A seed has no last
+    /// chance: it is left alone for longer and longer, and kept.
+    pub fn missed(&mut self, address: &SocketAddr, now: u64) -> bool {
         let Some(known) = self.known.get_mut(address) else {
             return false;
         };
         known.misses = known.misses.saturating_add(1);
-        if known.misses < MAX_MISSES {
+        known.quiet_until = now.saturating_add(Known::quiet_for(known.misses));
+        if known.misses < MAX_MISSES || known.seed {
             return false;
         }
         self.known.remove(address);
         true
+    }
+
+    /// Forgets every miss held against every address.
+    ///
+    /// For the one case where a run of failed dials says nothing about the
+    /// addresses: the machine itself was not on the network. A laptop that
+    /// slept, a cable pulled out, a connection that dropped for a minute. The
+    /// node cannot tell which, and it does not need to. What it can tell is
+    /// that the whole world went quiet at once, and the whole world does not
+    /// go quiet at once.
+    pub fn forgive_all(&mut self) {
+        for known in self.known.values_mut() {
+            known.misses = 0;
+            known.quiet_until = 0;
+        }
     }
 
     /// Addresses worth dialling, the most recently heard from first.
@@ -125,6 +224,26 @@ impl AddressBook {
     /// An address never heard from sorts last but is still offered, since a
     /// node starting out has nothing else and every peer begins unheard.
     pub fn candidates(&self) -> Vec<SocketAddr> {
+        self.ordered()
+            .into_iter()
+            .map(|(address, _)| address)
+            .collect()
+    }
+
+    /// Addresses worth dialling right now, in the same order.
+    ///
+    /// An address that just failed is left out until its wait is over, so a
+    /// bad minute costs a node one dial rather than an address.
+    pub fn ready(&self, now: u64) -> Vec<SocketAddr> {
+        self.ordered()
+            .into_iter()
+            .filter(|(_, known)| known.quiet_until <= now)
+            .map(|(address, _)| address)
+            .collect()
+    }
+
+    /// Every address, most recently heard from first.
+    fn ordered(&self) -> Vec<(SocketAddr, Known)> {
         let mut ordered: Vec<(SocketAddr, Known)> =
             self.known.iter().map(|(a, k)| (*a, *k)).collect();
         ordered.sort_by(|left, right| {
@@ -134,7 +253,7 @@ impl AddressBook {
                 .cmp(&left.1.heard)
                 .then_with(|| left.0.cmp(&right.0))
         });
-        ordered.into_iter().map(|(address, _)| address).collect()
+        ordered
     }
 
     /// Addresses to hand to a peer that asked, most recently heard first.
@@ -209,6 +328,13 @@ mod tests {
         SocketAddr::from((Ipv4Addr::new(203, 0, 113, last), port))
     }
 
+    /// Misses far enough apart that the waiting never hides one.
+    fn miss_repeatedly(book: &mut AddressBook, address: &SocketAddr, times: u8) {
+        for step in 0..u64::from(times) {
+            book.missed(address, step.saturating_mul(MAX_QUIET));
+        }
+    }
+
     #[test]
     fn addresses_go_in_once() {
         let mut book = AddressBook::new();
@@ -235,6 +361,10 @@ mod tests {
         assert!(!book.insert(SocketAddr::from((Ipv4Addr::BROADCAST, 9000))));
         assert!(!book.insert(SocketAddr::from((Ipv4Addr::new(224, 0, 0, 1), 9000))));
         assert!(!book.insert(SocketAddr::from((Ipv6Addr::UNSPECIFIED, 9000))));
+        assert!(
+            !book.insert_seed(address(1, 0)),
+            "not even from an operator"
+        );
         assert!(book.is_empty());
     }
 
@@ -255,6 +385,22 @@ mod tests {
         assert_eq!(book.len(), filled.min(MAX_ADDRESSES));
     }
 
+    /// The ceiling is there against strangers, and a seed is not a stranger.
+    #[test]
+    fn a_full_book_still_takes_a_seed() {
+        let mut book = AddressBook::new();
+        for index in 0..MAX_ADDRESSES {
+            let port = u16::try_from(index % 60_000)
+                .unwrap_or(1)
+                .saturating_add(1_024);
+            let last = u8::try_from(index / 60_000).unwrap_or(0);
+            book.insert(address(last, port));
+        }
+        assert!(!book.insert(address(255, 65_535)), "full for strangers");
+        assert!(book.insert_seed(address(255, 65_535)));
+        assert!(book.is_seed(&address(255, 65_535)));
+    }
+
     #[test]
     fn a_sample_is_bounded() {
         let mut book = AddressBook::new();
@@ -273,14 +419,90 @@ mod tests {
 
         for attempt in 1..MAX_MISSES {
             assert!(
-                !book.missed(&address(1, 9000)),
+                !book.missed(&address(1, 9000), u64::from(attempt) * MAX_QUIET),
                 "still worth another try after {attempt} miss(es)"
             );
             assert!(book.contains(&address(1, 9000)));
         }
-        assert!(book.missed(&address(1, 9000)), "the last chance is used up");
+        assert!(
+            book.missed(&address(1, 9000), u64::from(MAX_MISSES) * MAX_QUIET),
+            "the last chance is used up"
+        );
         assert!(!book.contains(&address(1, 9000)));
         assert!(book.is_empty());
+    }
+
+    /// The one address a node can always fall back on. A node whose book has
+    /// emptied has no way back onto the network at all, so the addresses its
+    /// operator gave it outlive any run of silence.
+    #[test]
+    fn a_seed_is_never_dropped() {
+        let mut book = AddressBook::new();
+        book.insert_seed(address(1, 9000));
+
+        miss_repeatedly(&mut book, &address(1, 9000), 50);
+
+        assert!(book.contains(&address(1, 9000)));
+        assert!(book.is_seed(&address(1, 9000)));
+        assert_eq!(book.seeds(), vec![address(1, 9000)]);
+    }
+
+    /// An address already in the book keeps its place when it turns out to be
+    /// a seed, which is the ordinary case: the book is read from disk before
+    /// the command line is.
+    #[test]
+    fn an_address_can_become_a_seed() {
+        let mut book = AddressBook::new();
+        book.insert(address(1, 9000));
+        book.answered(&address(1, 9000), 900);
+
+        assert!(book.insert_seed(address(1, 9000)), "newly a seed");
+        assert!(!book.insert_seed(address(1, 9000)), "and not twice");
+        assert_eq!(book.len(), 1);
+
+        miss_repeatedly(&mut book, &address(1, 9000), 10);
+        assert!(book.contains(&address(1, 9000)));
+    }
+
+    /// Dialled once a second, three misses is three seconds, and a bad minute
+    /// would empty the book. The waiting is what makes three misses mean an
+    /// address that is gone rather than a connection that hiccuped.
+    #[test]
+    fn an_address_that_just_missed_is_left_alone_for_a_while() {
+        let mut book = AddressBook::new();
+        book.insert(address(1, 9000));
+        book.insert(address(2, 9000));
+
+        book.missed(&address(1, 9000), 1_000);
+
+        assert_eq!(
+            book.ready(1_000),
+            vec![address(2, 9000)],
+            "the one that just failed is not dialled again this second"
+        );
+        assert_eq!(
+            book.ready(1_000 + RETRY_DELAY).len(),
+            2,
+            "a minute later it is"
+        );
+
+        // And the wait grows, so a node stops spending attention on it.
+        book.missed(&address(1, 9000), 1_000 + RETRY_DELAY);
+        assert_eq!(book.ready(1_000 + RETRY_DELAY * 2).len(), 1);
+        assert_eq!(book.ready(1_000 + RETRY_DELAY * 5).len(), 2);
+    }
+
+    /// However long a seed has been silent, it is tried again before long.
+    #[test]
+    fn a_seed_is_never_left_alone_for_more_than_ten_minutes() {
+        let mut book = AddressBook::new();
+        book.insert_seed(address(1, 9000));
+
+        miss_repeatedly(&mut book, &address(1, 9000), 20);
+
+        let last = 19 * MAX_QUIET;
+        assert!(book.ready(last).is_empty());
+        assert_eq!(book.ready(last + MAX_QUIET), vec![address(1, 9000)]);
     }
 
     /// A machine restarting must not cost its address a place in the book.
@@ -289,15 +511,42 @@ mod tests {
         let mut book = AddressBook::new();
         book.insert(address(1, 9000));
 
-        book.missed(&address(1, 9000));
-        book.missed(&address(1, 9000));
+        book.missed(&address(1, 9000), 100);
+        book.missed(&address(1, 9000), 200);
         book.answered(&address(1, 9000), 1_000);
 
+        assert_eq!(
+            book.ready(1_000),
+            vec![address(1, 9000)],
+            "and dialled again"
+        );
+
         // Back to a full allowance rather than one miss from being dropped.
-        for _ in 1..MAX_MISSES {
-            assert!(!book.missed(&address(1, 9000)));
+        for attempt in 1..MAX_MISSES {
+            assert!(!book.missed(&address(1, 9000), u64::from(attempt) * MAX_QUIET));
         }
         assert!(book.contains(&address(1, 9000)));
+    }
+
+    /// The whole world does not go quiet at once. When every address stops
+    /// answering together, the machine is what changed.
+    #[test]
+    fn a_node_that_was_away_holds_nothing_against_anyone() {
+        let mut book = AddressBook::new();
+        book.insert(address(1, 9000));
+        book.insert(address(2, 9000));
+
+        book.missed(&address(1, 9000), 1_000);
+        book.missed(&address(2, 9000), 1_000);
+        assert!(book.ready(1_000).is_empty());
+
+        book.forgive_all();
+
+        assert_eq!(book.ready(1_000).len(), 2, "both worth trying again");
+        for attempt in 1..MAX_MISSES {
+            assert!(!book.missed(&address(1, 9000), u64::from(attempt) * MAX_QUIET));
+        }
+        assert!(book.contains(&address(1, 9000)), "with a full allowance");
     }
 
     /// Being mentioned again by a peer is not evidence that an address works.
@@ -305,12 +554,12 @@ mod tests {
     fn hearing_about_an_address_again_does_not_absolve_it() {
         let mut book = AddressBook::new();
         book.insert(address(1, 9000));
-        book.missed(&address(1, 9000));
-        book.missed(&address(1, 9000));
+        book.missed(&address(1, 9000), 0);
+        book.missed(&address(1, 9000), MAX_QUIET);
 
         assert!(!book.insert(address(1, 9000)), "not new");
         assert!(
-            book.missed(&address(1, 9000)),
+            book.missed(&address(1, 9000), MAX_QUIET * 2),
             "its record should have survived being mentioned again"
         );
         assert!(!book.contains(&address(1, 9000)));
@@ -344,7 +593,7 @@ mod tests {
     #[test]
     fn missing_an_address_the_book_never_had_changes_nothing() {
         let mut book = AddressBook::new();
-        assert!(!book.missed(&address(9, 9000)));
+        assert!(!book.missed(&address(9, 9000), 0));
         assert!(book.is_empty());
     }
 
