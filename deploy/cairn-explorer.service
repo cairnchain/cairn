@@ -1,0 +1,45 @@
+[Unit]
+Description=Cairn explorer
+Documentation=https://github.com/cairnchain/cairn
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=cairn
+Group=cairn
+
+# The site is served to localhost only. What faces the internet is a reverse
+# proxy holding the certificate, because this program speaks HTTP and nothing
+# else, and a page about who owns what must not be alterable in transit.
+ExecStart=/usr/local/bin/cairn-explorer \
+    --network testnet-2 \
+    --data /var/lib/cairn-explorer \
+    --listen 0.0.0.0:9945 \
+    --http 127.0.0.1:8080
+
+Restart=always
+RestartSec=5s
+
+# It holds no key and signs nothing. What it needs is one directory, one
+# inbound port for peers, and one loopback port for the proxy.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/cairn-explorer
+
+[Install]
+WantedBy=multi-user.target

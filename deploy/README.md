@@ -123,6 +123,29 @@ A node killed outright, or a server that loses power, comes back on its own:
 the data directory lock is held by the kernel on an open file and is released
 when the process dies, however it dies. Nothing has to be cleaned up by hand.
 
+## Putting the explorer on a public address
+
+The explorer is a node that also serves the website: the chain in public, and
+an explanation of it for readers who know nothing, something, or everything.
+It holds no key and mines nothing, like a seed, and it can share a machine
+with one.
+
+It needs a name that already points at the machine, because a page saying who
+owns what has to arrive unaltered, and that means a certificate:
+
+```
+sudo env DOMAIN=explorer.example.org SEED=213.32.69.172:9944     sh /usr/local/src/cairn/deploy/explorer.sh
+```
+
+That builds the explorer, runs it on loopback, installs Caddy in front of it,
+and asks for a certificate. Without `DOMAIN` the site is served over plain
+HTTP, which is fine for looking at and wrong for publishing.
+
+Unlike a plain node, the explorer keeps the whole cold set and an index from
+owners to their notes. That is a cost which grows with the chain, and it is
+here on purpose: it is exactly the cost the protocol refuses to put on the
+program everybody runs.
+
 ## What this network is
 
 `testnet-2` is a test network. Its money is worth nothing, it is meant to be
