@@ -1,0 +1,159 @@
+# Builds the programs people download, in public, from a tagged commit.
+#
+# A binary is the one part of this project you cannot read. Everything here
+# exists to narrow that gap: the build runs on machines nobody involved
+# controls, from a commit anyone can check out, with a log anyone can read,
+# and it signs an attestation saying which commit and which workflow produced
+# each file. `gh attestation verify` checks that against GitHub rather than
+# against us, so trusting the download does not mean trusting us.
+#
+# Run it by pushing a tag:
+#
+#     git tag -a v0.1.0 -m "..." && git push origin v0.1.0
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to build, for a dry run
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-apple-silicon
+            os: macos-latest
+            target: aarch64-apple-darwin
+          - name: macos-intel
+            os: macos-latest
+            target: x86_64-apple-darwin
+          # musl rather than glibc: a binary linked against the glibc of the
+          # machine that built it refuses to start on an older one, which is
+          # exactly the machine a cheap server is.
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain this repository pins
+        run: rustup show
+
+      - run: rustup target add ${{ matrix.target }}
+
+      - name: Install the musl linker
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+
+      # --locked so the release is built from the dependency versions in
+      # Cargo.lock and not from whatever resolved newest this morning.
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin cairnd --bin cairn-wallet
+
+      - name: Gather what goes in the archive
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          fi
+          folder="cairn-${version}-${{ matrix.name }}"
+          echo "FOLDER=$folder" >> "$GITHUB_ENV"
+          mkdir "$folder"
+          suffix=""
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            suffix=".exe"
+          fi
+          for program in cairnd cairn-wallet; do
+            cp "target/${{ matrix.target }}/release/${program}${suffix}" "$folder/"
+          done
+          cp LICENSE-MIT LICENSE-APACHE "$folder/"
+          cp deploy/DOWNLOAD.txt "$folder/README.txt"
+
+      - name: Archive
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "${FOLDER}.zip" "$FOLDER" > /dev/null
+          else
+            tar czf "${FOLDER}.tar.gz" "$FOLDER"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            *.tar.gz
+            *.zip
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The tag message becomes the release notes, so the tag has to
+          # arrive with its annotation rather than as a bare ref.
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloads
+          merge-multiple: true
+
+      # One file listing every archive and its hash, so a download can be
+      # checked with a command every operating system already has.
+      - name: Write the checksums
+        working-directory: downloads
+        run: |
+          sha256sum *.tar.gz *.zip > SHA256SUMS
+          cat SHA256SUMS
+
+      # Signed by GitHub, tying each file to this commit and this workflow.
+      # Verified with:
+      #   gh attestation verify <file> --repo ${{ github.repository }}
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "downloads/*.tar.gz, downloads/*.zip"
+
+      # What the tag says, followed by the same closing note every time: how
+      # to check these files without having to believe anyone.
+      - name: Write the release notes
+        run: |
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
+          cat deploy/RELEASE_FOOTER.md >> notes.md
+          cat notes.md
+
+      - name: Publish
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            downloads/*

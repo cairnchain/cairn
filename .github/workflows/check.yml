@@ -1,0 +1,61 @@
+# What has to hold before anything is merged or released.
+#
+# The point is not that it passes here. The point is that anyone reading a
+# change can see it passed, on three operating systems, without taking our
+# word for it or having a Rust toolchain of their own.
+
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # A warning in this code is a mistake that has not been noticed yet.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Formatting and lints are the same everywhere, so they run once.
+  style:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain this repository pins
+        run: rustup show
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets
+
+  # Tests run on all three, because a node is meant to run on all three and
+  # the differences that matter are the ones nobody thought to look for:
+  # file locks, path separators, socket behaviour.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain this repository pins
+        run: rustup show
+      - run: cargo test --workspace --release
+
+  # A node has to build for the machines people actually run servers on, and
+  # those are not the machines this is developed on.
+  cross:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - x86_64-pc-windows-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain this repository pins
+        run: rustup show
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo check --workspace --target ${{ matrix.target }}

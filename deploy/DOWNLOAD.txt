@@ -1,0 +1,74 @@
+Cairn
+=====
+
+Two programs are in this folder.
+
+  cairnd          a node. It holds the whole chain, checks every rule for
+                  itself, and takes nobody's word for anything.
+  cairn-wallet    a wallet. It is a node too, so it also takes nobody's
+                  word for what you own.
+
+This is testnet-2, a test network. Its money is worth nothing, it is meant
+to be worth nothing, and the network will be reset. Nothing on it carries
+over to anything.
+
+
+Running a node
+--------------
+
+  ./cairnd --seed 213.32.69.172:9944 --seed 92.222.100.238:9944
+
+It writes a status line every ten seconds:
+
+  [00:04:00] height 41  peers 3  known 5  cold 0  work 5637144576
+
+height is how many blocks it has. peers is how many nodes it is talking to.
+Stop it with Ctrl-C. Start it again and it picks up where it left off.
+
+On Windows, run cairnd.exe from a terminal the same way.
+
+
+Using the wallet
+----------------
+
+  ./cairn-wallet new mine.key            make a key, once
+  ./cairn-wallet address mine.key        the address people pay you at
+  ./cairn-wallet balance mine.key --seed 213.32.69.172:9944
+
+Back up mine.key. It is the only thing that can spend what it holds, and
+nobody, including us, can replace it or recover from its loss.
+
+
+Your computer will warn you about these files
+---------------------------------------------
+
+macOS will say the program cannot be checked for malicious software.
+Windows will say an unrecognised app was blocked. Both are saying the same
+true thing: these programs are not signed by a certificate their maker paid
+for, so the operating system has no name to show you.
+
+On macOS, tell it you know where the file came from:
+
+  xattr -d com.apple.quarantine cairnd cairn-wallet
+
+There is a better check than a certificate, and you can run it yourself.
+Every release is built in public by GitHub, from a commit you can read, with
+a log you can read, and each file is signed with an attestation saying which
+commit produced it. To verify:
+
+  gh attestation verify <the archive you downloaded> --repo cairnchain/cairn
+
+That asks GitHub, not us. Or compare the hash of what you downloaded against
+the SHA256SUMS file published beside it:
+
+  shasum -a 256 <the archive you downloaded>        macOS and Linux
+  certutil -hashfile <the archive> SHA256           Windows
+
+If you would rather not run a binary at all, the source is at
+https://github.com/cairnchain/cairn and builds with one command.
+
+
+Licence
+-------
+
+MIT or Apache 2.0, whichever you prefer. Both are in this folder.
