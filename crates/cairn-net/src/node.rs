@@ -33,7 +33,7 @@ use cairn_store::{BlockLog, DirectoryLock, StoreError};
 use crate::book::AddressBook;
 use crate::message::Message;
 use crate::refusal::{can_be_refused, Refusals};
-use crate::sync::{local_handshake, on_message, Archive, Local, PeerState};
+use crate::sync::{local_handshake, on_message, Local, PeerState};
 use crate::wire::{read_message, write_message, Incoming, WireError};
 
 /// Connections a node dials for itself.
@@ -221,6 +221,26 @@ impl Shared {
         if let Some(log) = log.as_mut() {
             write_branch(log, accepted, chain);
         }
+    }
+
+    /// Blocks read from the log, by their heights on the followed branch.
+    ///
+    /// The log lock is taken once for the lot. Called with nothing else held,
+    /// because these are disk reads and a peer may ask for a hundred and
+    /// twenty eight of them in one message.
+    fn archived(&self, heights: &[u64]) -> Vec<Block> {
+        if heights.is_empty() {
+            return Vec::new();
+        }
+        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(log) = log.as_ref() else {
+            return Vec::new();
+        };
+        heights
+            .iter()
+            .filter_map(|height| usize::try_from(*height).ok())
+            .filter_map(|index| log.read(index).ok().flatten())
+            .collect()
     }
 
     /// Takes addresses out of the book, so they are not dialled again.
@@ -634,38 +654,34 @@ impl std::fmt::Debug for Node {
 /// A failure here costs blocks on the next restart, not the chain this node is
 /// following, so it does not stop the node.
 fn write_branch(log: &mut BlockLog, accepted: &Accepted, chain: &ChainStore) {
-    let (removed, added) = match accepted {
+    let added = match accepted {
         Accepted::Duplicate | Accepted::SideBranch => return,
         // The block just applied is the tip, and the log ends one short.
-        Accepted::Extended => (0usize, 1usize),
-        Accepted::Reorganised { removed, added } => (removed.len(), added.len()),
+        Accepted::Extended => 1usize,
+        Accepted::Reorganised { added, .. } => added.len(),
     };
 
-    let kept = log.len().saturating_sub(removed);
-    if removed > 0 && log.keep_first(kept).is_err() {
+    let branch = chain.active();
+    // Where the branch and what the log held part company, counted from the
+    // branch rather than from the log. Counting from the log would be right
+    // only while the two agree, and a write that failed earlier leaves them
+    // disagreeing: the log would then be cut in the wrong place, or extended
+    // from the wrong end, and every record past that point would sit at a
+    // position that is not its height. A node reading its own log by position
+    // would serve the wrong blocks, confidently, to everyone catching up.
+    let common = branch.len().saturating_sub(added);
+    if log.len() > common && log.keep_first(common).is_err() {
         return;
     }
-    // Whatever the branch now carries above what the log still holds.
-    let branch = chain.active();
-    let from = branch.len().saturating_sub(added);
-    for id in branch.get(from..).unwrap_or_default() {
+    // Everything the branch carries beyond what the log holds. Usually one
+    // block; more if a write failed earlier and the log fell behind.
+    for id in branch.get(log.len()..).unwrap_or_default() {
+        // A block the chain has already let go of cannot be written, so the
+        // log stays short and the rest is asked for again after a restart.
         let Some(block) = chain.block(id) else { break };
         if log.append(block).is_err() {
             break;
         }
-    }
-}
-
-/// The block log seen as somewhere to find a forgotten block.
-///
-/// Position is height, because the log holds the followed branch in order, so
-/// finding one is a seek rather than a search.
-struct Logged<'a>(Option<&'a BlockLog>);
-
-impl Archive for Logged<'_> {
-    fn block_at(&self, height: u64) -> Option<Block> {
-        let index = usize::try_from(height).ok()?;
-        self.0?.read(index).ok().flatten()
     }
 }
 
@@ -999,17 +1015,13 @@ fn read_loop(
             let book = shared.book().clone();
             let mut log = shared.log.lock().unwrap_or_else(PoisonError::into_inner);
 
-            let reaction = {
-                let archive = Logged(log.as_ref());
-                let mut local = Local {
-                    chain: &mut chain,
-                    book: &book,
-                    listen: shared.address.port(),
-                    nonce: shared.nonce,
-                    archive: Some(&archive),
-                };
-                on_message(&mut local, &mut peer, message, unix_now())
+            let mut local = Local {
+                chain: &mut chain,
+                book: &book,
+                listen: shared.address.port(),
+                nonce: shared.nonce,
             };
+            let reaction = on_message(&mut local, &mut peer, message, unix_now());
 
             // Written while the chain is still held, so the log cannot record
             // a branch the chain has already moved off.
@@ -1046,6 +1058,13 @@ fn read_loop(
                 return;
             }
         }
+        // Blocks this node settled and let go of, read now that nothing is
+        // held. A peer catching up asks for these and almost nothing else.
+        for block in shared.archived(&reaction.fetch) {
+            if outbound.try_send(Message::Block(Box::new(block))).is_err() {
+                return;
+            }
+        }
         if !reaction.broadcast.is_empty() {
             shared.broadcast(Some(id), &Message::Announce(reaction.broadcast));
         }
@@ -1067,14 +1086,81 @@ fn read_loop(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use std::net::Ipv4Addr;
+
+    use cairn_ledger::note::Note;
+    use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
+    use cairn_ledger::validation::{assemble_block, connect_block, mine_block};
+    use cairn_ledger::LedgerState;
 
     use super::*;
 
     fn address(last: u8) -> SocketAddr {
         SocketAddr::from((Ipv4Addr::new(127, 0, 0, last), 9_000))
+    }
+
+    /// A short valid chain, built off to the side.
+    fn chain_of(count: usize, params: ConsensusParams) -> Vec<Block> {
+        let miner = cairn_crypto::SecretKey::from_bytes(&[7; 32]);
+        let mut state = LedgerState::new();
+        let mut clock = 1_000u64;
+        (0..count)
+            .map(|_| {
+                let height = state.next_height().unwrap();
+                clock = clock.saturating_add(600);
+                let coinbase = CoinbaseTransaction::new(
+                    height,
+                    vec![Note::new(params.initial_reward, miner.public_key())],
+                );
+                let block =
+                    assemble_block(&state, coinbase, Vec::<Transfer>::new(), &params, clock, 0)
+                        .unwrap();
+                let block = mine_block(block, 1 << 22).unwrap();
+                connect_block(&mut state, &block, &params, clock).unwrap();
+                block
+            })
+            .collect()
+    }
+
+    /// A log that fell behind is caught up, not written past.
+    ///
+    /// A write can fail: a full disk, a directory that went away. The chain
+    /// carries on, because losing the log costs blocks on the next start and
+    /// not the branch this node follows. What must not happen is the next
+    /// block being appended anyway, landing at a position that is not its
+    /// height. Every record after that would sit at the wrong height, and a
+    /// node answering a newcomer by position would hand out the wrong blocks
+    /// while believing it had answered.
+    #[test]
+    fn a_log_that_fell_behind_is_caught_up_rather_than_written_past() {
+        let params = ConsensusParams::testnet();
+        let blocks = chain_of(6, params);
+
+        let directory = std::env::temp_dir().join(format!("cairn-behind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let (mut log, _) = BlockLog::open(&directory).unwrap();
+
+        let mut chain = ChainStore::new(params);
+        for block in &blocks[..5] {
+            chain.add_block(block.clone(), 2_000_000_000).unwrap();
+        }
+        // What a failed write leaves: a chain of five, a log of two.
+        log.append(&blocks[0]).unwrap();
+        log.append(&blocks[1]).unwrap();
+
+        let accepted = chain.add_block(blocks[5].clone(), 2_000_000_000).unwrap();
+        assert_eq!(accepted, Accepted::Extended);
+        write_branch(&mut log, &accepted, &chain);
+
+        assert_eq!(log.len(), 6, "the log caught up rather than skipping ahead");
+        for (height, want) in blocks.iter().enumerate() {
+            let found = log.read(height).unwrap().unwrap();
+            assert_eq!(found.id(), want.id(), "record {height} is not that height");
+        }
+
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// A laptop closed for a night is the case this exists for: the thread

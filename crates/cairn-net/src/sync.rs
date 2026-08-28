@@ -20,9 +20,7 @@ use crate::message::{
 };
 
 /// Everything of the surrounding node this layer is allowed to see.
-///
-/// Written out rather than derived: the archive behind it is a trait object,
-/// and what would be printed of it is its address, which says nothing.
+#[derive(Debug)]
 pub struct Local<'a> {
     pub chain: &'a mut ChainStore,
     pub book: &'a AddressBook,
@@ -31,40 +29,6 @@ pub struct Local<'a> {
     /// What this node calls itself on the wire, so it can recognise its own
     /// connection coming back to it.
     pub nonce: u64,
-    /// Where to find a block the chain no longer keeps in memory.
-    ///
-    /// A node holds the bodies of blocks it could still undo and lets the rest
-    /// go, so almost every block a peer catching up asks for is one this node
-    /// has forgotten. Absent for a node that keeps no log, which then answers
-    /// only for what it happens to hold.
-    pub archive: Option<&'a dyn Archive>,
-}
-
-/// Blocks a node kept but no longer holds in memory.
-pub trait Archive {
-    /// The block the followed branch carries at `height`.
-    fn block_at(&self, height: u64) -> Option<Block>;
-}
-
-impl std::fmt::Debug for Local<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Local")
-            .field("listen", &self.listen)
-            .field("nonce", &self.nonce)
-            .field("archived", &self.archive.is_some())
-            .finish_non_exhaustive()
-    }
-}
-
-impl Local<'_> {
-    /// A block this node has, wherever it is.
-    fn block(&self, id: &Hash32) -> Option<Block> {
-        if let Some(block) = self.chain.block(id) {
-            return Some(block.clone());
-        }
-        let height = self.chain.height_of(id)?;
-        self.archive?.block_at(height)
-    }
 }
 
 /// What this node knows about one peer.
@@ -144,6 +108,14 @@ pub struct Reaction {
     pub applied: Option<Accepted>,
     /// Blocks newly worth telling every other peer about.
     pub broadcast: Vec<Hash32>,
+    /// Heights on the followed branch a peer asked for and this node no longer
+    /// holds in memory.
+    ///
+    /// Named rather than read here, because reading them means going to disk,
+    /// and this runs with the chain held. A hundred and twenty eight seeks
+    /// under that lock is a peer deciding how long everyone else waits. The
+    /// node reads them once it has let go.
+    pub fetch: Vec<u64>,
     /// Addresses worth adding to the book.
     pub learned: Vec<SocketAddr>,
     /// Addresses worth taking out of it.
@@ -369,13 +341,17 @@ pub fn on_message(
             request_missing(local.chain, peer, &capped, now)
         }
         Message::GetBlocks(ids) => {
-            let reply = ids
-                .iter()
-                .take(MAX_REQUESTED)
-                .filter_map(|id| local.block(id))
-                .map(|block| Message::Block(Box::new(block)))
-                .collect();
-            Reaction::reply(reply)
+            let mut reaction = Reaction::idle();
+            for id in ids.iter().take(MAX_REQUESTED) {
+                if let Some(block) = local.chain.block(id) {
+                    reaction.reply.push(Message::Block(Box::new(block.clone())));
+                } else if let Some(height) = local.chain.height_of(id) {
+                    // Settled, so the body is gone from memory and sits in the
+                    // log at this height. Fetched after the locks are let go.
+                    reaction.fetch.push(height);
+                }
+            }
+            reaction
         }
         Message::Block(block) => on_block(local.chain, peer, *block, now),
         Message::GetPeers => Reaction::reply(vec![Message::Peers(

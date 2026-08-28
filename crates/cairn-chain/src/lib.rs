@@ -215,11 +215,16 @@ impl ChainStore {
         self.blocks.contains_key(id)
     }
 
-    /// Blocks known, on any branch.
+    /// Blocks held in memory, on any branch.
+    ///
+    /// Not how many blocks this node has ever accepted: the bodies of blocks
+    /// too deep to be undone are let go of, and read back from a log when they
+    /// are wanted. Use [`ChainStore::height`] for how far the chain reaches.
     pub fn len(&self) -> usize {
         self.blocks.len()
     }
 
+    /// Whether this node holds no block at all, which means it has no chain.
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
     }
