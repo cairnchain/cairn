@@ -417,10 +417,15 @@ fn undo_records_do_not_pile_up_forever() {
     );
 }
 
-/// A switch this node could not undo is refused before it starts, rather than
-/// found halfway through when a missing undo record reads as a broken tree.
+/// A branch that forks deeper than this node could undo is refused at its
+/// first block, not after its last.
+///
+/// The rule is that a block past [`MAX_REORG_DEPTH`] below the tip is settled.
+/// A rival branch forking further back than that can never be followed, so
+/// nothing it carries is worth holding: the refusal comes on the first block
+/// of it, before a peer has made this node store a thousand more.
 #[test]
-fn a_reorganisation_deeper_than_the_limit_is_refused() {
+fn a_branch_forking_deeper_than_the_limit_is_refused_at_once() {
     let miner = wallet(1);
     let rival = wallet(2);
 
@@ -438,18 +443,26 @@ fn a_reorganisation_deeper_than_the_limit_is_refused() {
     feed(&mut store, &genesis);
     feed(&mut store, &ours_blocks);
 
-    // Everything up to the last block lands on a side branch without asking
-    // for a switch. The one that finally outweighs us is the one refused.
-    let mut outcome = None;
-    for block in &theirs_blocks {
-        outcome = Some(store.add_block(block.clone(), NOW));
-    }
-    match outcome {
-        Some(Err(ChainError::ForkTooDeep { depth })) => {
-            assert!(depth > MAX_REORG_DEPTH, "refused a depth of {depth}");
+    // The first rival block sits below the floor, so it is turned away there
+    // and every block built on it is then an orphan this node never sees a
+    // parent for.
+    let first = store.add_block(theirs_blocks[0].clone(), NOW);
+    match first {
+        Err(ChainError::TooOld { height, floor }) => {
+            assert_eq!(height, 1);
+            assert!(height < floor, "refused at height {height}, floor {floor}");
         }
         other => panic!("expected a refusal, got {other:?}"),
     }
+
+    let held = store.len();
+    for block in &theirs_blocks[1..] {
+        assert!(
+            store.add_block(block.clone(), NOW).is_err(),
+            "a block whose parent was refused has nowhere to hang"
+        );
+    }
+    assert_eq!(store.len(), held, "and none of them was kept");
 
     // And the node is exactly where it was.
     assert_eq!(store.height(), Some((MAX_REORG_DEPTH + 50) as u64));

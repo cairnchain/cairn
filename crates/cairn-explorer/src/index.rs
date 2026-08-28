@@ -129,7 +129,10 @@ impl Index {
     /// of bugs here: reorganisations are short and rare, and an explorer that
     /// is briefly slow is better than one that is quietly wrong about who
     /// owns what.
-    pub(crate) fn refresh(&mut self, chain: &ChainStore) {
+    /// `archived` reaches the blocks the chain no longer holds: a node lets go
+    /// of the bodies of blocks too deep to be undone, and an index built from
+    /// the start of the chain wants exactly those.
+    pub(crate) fn refresh(&mut self, chain: &ChainStore, archived: impl Fn(u64) -> Option<Block>) {
         let active = chain.active();
         let mut shared = 0usize;
         while let (Some(known), Some(current)) = (self.indexed.get(shared), active.get(shared)) {
@@ -146,10 +149,14 @@ impl Index {
         let mut position = shared;
         let before = self.indexed.len();
         while let Some(id) = active.get(position) {
-            let Some(block) = chain.block(id) else {
+            let block = chain.block(id).cloned().or_else(|| {
+                let height = u64::try_from(position).ok()?;
+                archived(height)
+            });
+            let Some(block) = block else {
                 break;
             };
-            self.apply(block);
+            self.apply(&block);
             self.indexed.push(*id);
             position = position.saturating_add(1);
         }

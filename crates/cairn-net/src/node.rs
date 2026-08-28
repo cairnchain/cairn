@@ -33,7 +33,7 @@ use cairn_store::{BlockLog, DirectoryLock, StoreError};
 use crate::book::AddressBook;
 use crate::message::Message;
 use crate::refusal::{can_be_refused, Refusals};
-use crate::sync::{local_handshake, on_message, Local, PeerState};
+use crate::sync::{local_handshake, on_message, Archive, Local, PeerState};
 use crate::wire::{read_message, write_message, Incoming, WireError};
 
 /// Connections a node dials for itself.
@@ -212,20 +212,14 @@ impl Shared {
         self.params.network
     }
 
-    /// Writes blocks the chain has already accepted.
+    /// Writes down what the chain now follows, taking the log lock itself.
     ///
-    /// A failure here costs the blocks on the next restart, not the chain the
-    /// node is following, so it does not stop the node.
-    fn persist(&self, blocks: &[Block]) {
-        if blocks.is_empty() {
-            return;
-        }
+    /// For callers that hold the chain and nothing else. Where the log is
+    /// already held, call [`write_branch`] with it.
+    fn persist(&self, accepted: &Accepted, chain: &ChainStore) {
         let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(log) = log.as_mut() else {
-            return;
-        };
-        for block in blocks {
-            let _ = log.append(block);
+        if let Some(log) = log.as_mut() {
+            write_branch(log, accepted, chain);
         }
     }
 
@@ -391,14 +385,26 @@ impl Node {
         }
         let now = unix_now();
         open_the_chain(&mut chain, params, now);
+        // One block at a time, straight off the disk. Reading them all into a
+        // vector first would make the largest allocation this process ever
+        // performs out of a chain it looks at once and in order.
+        //
+        // Anything but a plain extension ends the replay. The log is meant to
+        // be the followed branch in order of height, and that is what makes a
+        // record's position its height and lets a node find a block it has
+        // forgotten. A record that does not extend the branch breaks that, so
+        // the log is cut there and the rest is asked for again. It costs a
+        // partial resync once, on a node whose log was written before this
+        // rule existed or interrupted in the middle of a reorganisation.
         let mut applied = 0usize;
-        for block in &recovered.blocks {
-            if chain.add_block(block.clone(), now).is_err() {
+        for block in log.replay() {
+            let Ok(block) = block else { break };
+            if !matches!(chain.add_block(block, now), Ok(Accepted::Extended)) {
                 break;
             }
             applied = applied.saturating_add(1);
         }
-        let refused = recovered.blocks.len().saturating_sub(applied);
+        let refused = recovered.blocks.saturating_sub(applied);
         if refused > 0 {
             log.keep_first(applied)?;
         }
@@ -512,6 +518,22 @@ impl Node {
         read(&self.shared.chain())
     }
 
+    /// A block read straight from the log, by its height on the branch.
+    ///
+    /// This takes the log lock and not the chain lock, so it can be called
+    /// from inside [`Node::with_chain`]. That is the position anything reading
+    /// old blocks is in: it has already asked the chain, which no longer holds
+    /// the bodies of blocks too deep to be undone, and is now asking the disk.
+    pub fn archived_at(&self, height: u64) -> Option<Block> {
+        let index = usize::try_from(height).ok()?;
+        let log = self
+            .shared
+            .log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        log.as_ref()?.read(index).ok().flatten()
+    }
+
     pub fn height(&self) -> Option<u64> {
         self.with_chain(ChainStore::height)
     }
@@ -523,11 +545,14 @@ impl Node {
     /// Offers a locally produced block to the chain, announcing it if it lands.
     pub fn submit_block(&self, block: Block) -> Result<Accepted, ChainError> {
         let id = block.id();
-        let accepted = self.shared.chain().add_block(block.clone(), unix_now())?;
-        if matches!(accepted, Accepted::Duplicate) {
-            return Ok(accepted);
-        }
-        self.shared.persist(&[block]);
+        let accepted = {
+            let mut chain = self.shared.chain();
+            let accepted = chain.add_block(block, unix_now())?;
+            // Written while the chain is still held, so the log cannot record
+            // a branch the chain has already moved off.
+            self.shared.persist(&accepted, &chain);
+            accepted
+        };
         if matches!(accepted, Accepted::Extended | Accepted::Reorganised { .. }) {
             self.shared.broadcast(None, &Message::Announce(vec![id]));
         }
@@ -590,6 +615,57 @@ impl std::fmt::Debug for Node {
         f.debug_struct("Node")
             .field("address", &self.address)
             .finish_non_exhaustive()
+    }
+}
+
+/// Brings the log in line with the branch the chain now follows.
+///
+/// The log holds the followed branch in order of height, and nothing else. It
+/// could as easily hold every block as it arrived, which is simpler to write
+/// and what this used to do, but then a record's position means nothing: the
+/// fifth record is the fifth block that turned up, and asking for the block at
+/// height five means reading the whole file. Keeping the branch instead makes
+/// position and height the same number, which is what lets a node forget a
+/// block and still find it again.
+///
+/// The cost is that a reorganisation rewrites the tail. That is bounded by how
+/// deep a reorganisation may go, and reorganisations are rare.
+///
+/// A failure here costs blocks on the next restart, not the chain this node is
+/// following, so it does not stop the node.
+fn write_branch(log: &mut BlockLog, accepted: &Accepted, chain: &ChainStore) {
+    let (removed, added) = match accepted {
+        Accepted::Duplicate | Accepted::SideBranch => return,
+        // The block just applied is the tip, and the log ends one short.
+        Accepted::Extended => (0usize, 1usize),
+        Accepted::Reorganised { removed, added } => (removed.len(), added.len()),
+    };
+
+    let kept = log.len().saturating_sub(removed);
+    if removed > 0 && log.keep_first(kept).is_err() {
+        return;
+    }
+    // Whatever the branch now carries above what the log still holds.
+    let branch = chain.active();
+    let from = branch.len().saturating_sub(added);
+    for id in branch.get(from..).unwrap_or_default() {
+        let Some(block) = chain.block(id) else { break };
+        if log.append(block).is_err() {
+            break;
+        }
+    }
+}
+
+/// The block log seen as somewhere to find a forgotten block.
+///
+/// Position is height, because the log holds the followed branch in order, so
+/// finding one is a seek rather than a search.
+struct Logged<'a>(Option<&'a BlockLog>);
+
+impl Archive for Logged<'_> {
+    fn block_at(&self, height: u64) -> Option<Block> {
+        let index = usize::try_from(height).ok()?;
+        self.0?.read(index).ok().flatten()
     }
 }
 
@@ -914,32 +990,40 @@ fn read_loop(
             }
         };
 
-        // The chain is held for the decision and released before anything is
-        // written, so a slow peer never stalls the chain itself.
-        let (reaction, fresh, passing) = {
+        // The chain is held for the decision and for writing the log, and let
+        // go before anything is sent, so a slow peer never stalls the chain.
+        let (reaction, passing) = {
+            // Chain first and log second, here and everywhere, so two threads
+            // never take these two the other way round from each other.
             let mut chain = shared.chain();
             let book = shared.book().clone();
-            let mut local = Local {
-                chain: &mut chain,
-                book: &book,
-                listen: shared.address.port(),
-                nonce: shared.nonce,
+            let mut log = shared.log.lock().unwrap_or_else(PoisonError::into_inner);
+
+            let reaction = {
+                let archive = Logged(log.as_ref());
+                let mut local = Local {
+                    chain: &mut chain,
+                    book: &book,
+                    listen: shared.address.port(),
+                    nonce: shared.nonce,
+                    archive: Some(&archive),
+                };
+                on_message(&mut local, &mut peer, message, unix_now())
             };
-            let reaction = on_message(&mut local, &mut peer, message, unix_now());
-            let fresh: Vec<Block> = reaction
-                .stored
-                .iter()
-                .filter_map(|id| chain.block(id).cloned())
-                .collect();
+
+            // Written while the chain is still held, so the log cannot record
+            // a branch the chain has already moved off.
+            if let (Some(accepted), Some(log)) = (reaction.applied.as_ref(), log.as_mut()) {
+                write_branch(log, accepted, &chain);
+            }
             let passing: Vec<Transfer> = reaction
                 .relayed
                 .iter()
                 .filter_map(|id| chain.pooled(id).cloned())
                 .collect();
-            (reaction, fresh, passing)
+            (reaction, passing)
         };
 
-        shared.persist(&fresh);
         shared.remember(&reaction.learned);
         shared.forget(&reaction.forget);
         if !announced {

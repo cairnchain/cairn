@@ -20,7 +20,9 @@ use crate::message::{
 };
 
 /// Everything of the surrounding node this layer is allowed to see.
-#[derive(Debug)]
+///
+/// Written out rather than derived: the archive behind it is a trait object,
+/// and what would be printed of it is its address, which says nothing.
 pub struct Local<'a> {
     pub chain: &'a mut ChainStore,
     pub book: &'a AddressBook,
@@ -29,6 +31,40 @@ pub struct Local<'a> {
     /// What this node calls itself on the wire, so it can recognise its own
     /// connection coming back to it.
     pub nonce: u64,
+    /// Where to find a block the chain no longer keeps in memory.
+    ///
+    /// A node holds the bodies of blocks it could still undo and lets the rest
+    /// go, so almost every block a peer catching up asks for is one this node
+    /// has forgotten. Absent for a node that keeps no log, which then answers
+    /// only for what it happens to hold.
+    pub archive: Option<&'a dyn Archive>,
+}
+
+/// Blocks a node kept but no longer holds in memory.
+pub trait Archive {
+    /// The block the followed branch carries at `height`.
+    fn block_at(&self, height: u64) -> Option<Block>;
+}
+
+impl std::fmt::Debug for Local<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Local")
+            .field("listen", &self.listen)
+            .field("nonce", &self.nonce)
+            .field("archived", &self.archive.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Local<'_> {
+    /// A block this node has, wherever it is.
+    fn block(&self, id: &Hash32) -> Option<Block> {
+        if let Some(block) = self.chain.block(id) {
+            return Some(block.clone());
+        }
+        let height = self.chain.height_of(id)?;
+        self.archive?.block_at(height)
+    }
 }
 
 /// What this node knows about one peer.
@@ -101,10 +137,11 @@ impl DropReason {
 pub struct Reaction {
     /// Answers for the peer that sent the message.
     pub reply: Vec<Message>,
-    /// Blocks the tree did not hold before, whichever branch they landed on.
-    /// A branch that loses today can win tomorrow, so these are all worth
-    /// keeping.
-    pub stored: Vec<Hash32>,
+    /// What the block in this message did to the followed branch, when there
+    /// was one and it was new. The node writes its log from this: what has to
+    /// be kept on disk is the branch being followed, not every block that ever
+    /// arrived.
+    pub applied: Option<Accepted>,
     /// Blocks newly worth telling every other peer about.
     pub broadcast: Vec<Hash32>,
     /// Addresses worth adding to the book.
@@ -281,17 +318,13 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
     peer.awaiting.remove(&id);
 
     match chain.add_block(block, now) {
-        Ok(Accepted::Extended | Accepted::Reorganised { .. }) => {
+        Ok(accepted @ (Accepted::Extended | Accepted::Reorganised { .. })) => {
             let mut reaction = follow_up(chain, peer, now);
-            reaction.stored.push(id);
+            reaction.applied = Some(accepted);
             reaction.broadcast.push(id);
             reaction
         }
-        Ok(Accepted::SideBranch) => {
-            let mut reaction = follow_up(chain, peer, now);
-            reaction.stored.push(id);
-            reaction
-        }
+        Ok(Accepted::SideBranch) => follow_up(chain, peer, now),
         Ok(Accepted::Duplicate) => follow_up(chain, peer, now),
         // Missing history rather than a bad peer: the block is fine, this node
         // simply has not caught up to where it hangs. Asking again from a fresh
@@ -339,7 +372,7 @@ pub fn on_message(
             let reply = ids
                 .iter()
                 .take(MAX_REQUESTED)
-                .filter_map(|id| local.chain.block(id).cloned())
+                .filter_map(|id| local.block(id))
                 .map(|block| Message::Block(Box::new(block)))
                 .collect();
             Reaction::reply(reply)

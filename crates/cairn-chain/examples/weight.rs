@@ -1,13 +1,14 @@
 //! What a running node holds in memory as its chain grows.
 //!
 //! The claim this project makes is that a full validating node costs the same
-//! in thirty years as it does today. The ledger keeps that promise: the hot
-//! set is capped by a consensus rule and the cold set is sixty four hashes.
-//! The block tree does not. A node keeps every block it has ever applied,
-//! keyed by identifier, plus the list of the branch it follows.
+//! in thirty years as it does today, so the number that matters is not what a
+//! node holds at a given height but what one more block adds. A cost that does
+//! not grow shows up here as a marginal cost that falls towards nothing.
 //!
-//! This measures the gap, so the work of closing it is decided by a number
-//! rather than by an intuition.
+//! What is measured is resident memory, which is what the machine actually
+//! gives up. It never falls back: an allocator that hands memory back to the
+//! program rather than to the kernel keeps the pages. So this reads high, and
+//! reads high in the honest direction.
 //!
 //! Run with `cargo run --release -p cairn-chain --example weight`.
 
@@ -33,9 +34,9 @@ use cairn_ledger::LedgerState;
 const SPACING: u64 = 3_600;
 const ATTEMPTS: u64 = 1 << 20;
 
-/// Heights to measure at. The last is nine months of a sixty second chain,
-/// which is short against thirty years and already enough to see the shape.
-const HEIGHTS: [usize; 5] = [10_000, 50_000, 100_000, 200_000, 400_000];
+/// Heights to measure at, each roughly double the last, so the marginal cost
+/// is measured over a stretch as long as everything before it.
+const HEIGHTS: [usize; 6] = [25_000, 50_000, 100_000, 200_000, 400_000, 800_000];
 
 fn main() {
     let params = ConsensusParams::testnet();
@@ -44,15 +45,16 @@ fn main() {
     println!("What a node holds as the chain grows");
     println!("empty blocks, so this is the floor and not the cost of a busy chain\n");
     println!(
-        "{:>10}  {:>12}  {:>12}  {:>14}",
-        "blocks", "memory", "per block", "at 30 years"
+        "{:>10}  {:>10}  {:>12}  {:>14}  {:>14}",
+        "blocks", "memory", "added since", "per new block", "at 30 years"
     );
-    println!("{}", "-".repeat(54));
+    println!("{}", "-".repeat(68));
 
     let mut forge = Forge::new(params);
     let mut store = ChainStore::new(params);
     let baseline = resident_bytes().unwrap_or(0);
     let mut built = 0usize;
+    let mut previous = (0usize, 0u64);
 
     for target in HEIGHTS {
         while built < target {
@@ -62,27 +64,47 @@ fn main() {
             built += 1;
         }
         let used = resident_bytes().unwrap_or(0).saturating_sub(baseline);
-        let per_block = used / built as u64;
+        let added = used.saturating_sub(previous.1);
+        let over = built.saturating_sub(previous.0) as u64;
+        let per_block = added.checked_div(over).unwrap_or(0);
         // A sixty second chain reaches this many blocks in thirty years.
         let thirty_years = 30 * 365 * 24 * 60;
         println!(
-            "{:>10}  {:>12}  {:>12}  {:>14}",
+            "{:>10}  {:>10}  {:>12}  {:>14}  {:>14}",
             format_count(built),
             format_bytes(used),
+            format_bytes(added),
             format_bytes(per_block),
             format_bytes(per_block * thirty_years),
         );
+        previous = (built, used);
     }
 
+    // Resident memory stops rising well before the structures stop growing:
+    // an allocator that has already asked the kernel for pages fills them
+    // again rather than asking for more. What is still growing is countable,
+    // so it is counted rather than measured.
+    let per_id = std::mem::size_of::<cairn_primitives::Hash32>() as u64;
+    // A hash map entry is a key, a value, one byte of control, and the room
+    // hashbrown leaves so it never fills past seven eighths.
+    let per_entry = (per_id + std::mem::size_of::<usize>() as u64 + 1) * 8 / 7;
+    let per_block = per_id + per_entry;
+    let thirty_years = 30 * 365 * 24 * 60;
     println!(
-        "\nThe hot set is capped and the cold set is sixty four hashes, so\n\
-         neither appears above. What grows is the block tree: every block a\n\
-         node has applied, and the list of the branch it follows.\n\
-         \n\
-         Read the last row: the earlier ones carry the fixed cost of starting\n\
-         a process spread over too few blocks. What a node actually needs to\n\
-         keep is the ledger, ninety headers for the difficulty, and enough\n\
-         undo records to reorganise. Everything else is already on disk."
+        "\nStill growing, counted rather than measured:\n\
+         {per_id} B for the identifier on the branch, {per_entry} B for the entry\n\
+         that finds it, so {per_block} B per block and {} in thirty years.",
+        format_bytes(per_block * thirty_years)
+    );
+
+    println!(
+        "\nThe hot set is capped by a consensus rule and the cold set is sixty\n\
+         four hashes, so neither appears above. A node also lets go of the body\n\
+         of any block too deep to be undone, and reads it back from its log if\n\
+         anyone asks. What is left growing is the list of the branch it follows\n\
+         and the index into it: an identifier and a position per block, and\n\
+         nothing else. Both go the same way the bodies did once a locator\n\
+         carries heights, since then a position can be read from the log."
     );
 }
 

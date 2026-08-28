@@ -53,12 +53,17 @@ fn chain(count: usize) -> Vec<Block> {
         .collect()
 }
 
+/// Everything the log holds, read back the way a node replays it.
+fn read_back(log: &BlockLog) -> Vec<Block> {
+    log.replay().map(|block| block.unwrap()).collect()
+}
+
 #[test]
 fn a_fresh_directory_starts_empty() {
     let directory = scratch("fresh");
     let (log, recovered) = BlockLog::open(&directory).unwrap();
     assert!(log.is_empty());
-    assert!(recovered.blocks.is_empty());
+    assert_eq!(recovered.blocks, 0);
     assert_eq!(recovered.discarded_bytes, 0);
     assert!(log.path().exists());
 }
@@ -78,8 +83,9 @@ fn blocks_come_back_in_the_order_they_went_in() {
 
     let (log, recovered) = BlockLog::open(&directory).unwrap();
     assert_eq!(log.len(), 12);
-    assert_eq!(recovered.blocks, blocks);
+    assert_eq!(recovered.blocks, 12);
     assert_eq!(recovered.discarded_bytes, 0);
+    assert_eq!(read_back(&log), blocks, "and in order");
 }
 
 #[test]
@@ -95,14 +101,15 @@ fn appending_after_reopening_continues_the_log() {
     }
     {
         let (mut log, recovered) = BlockLog::open(&directory).unwrap();
-        assert_eq!(recovered.blocks.len(), 3);
+        assert_eq!(recovered.blocks, 3);
         for block in &blocks[3..] {
             log.append(block).unwrap();
         }
     }
 
-    let (_, recovered) = BlockLog::open(&directory).unwrap();
-    assert_eq!(recovered.blocks, blocks);
+    let (log, recovered) = BlockLog::open(&directory).unwrap();
+    assert_eq!(recovered.blocks, 6);
+    assert_eq!(read_back(&log), blocks);
 }
 
 #[test]
@@ -127,14 +134,16 @@ fn a_write_cut_short_costs_only_the_block_it_was_writing() {
     drop(file);
 
     let (log, recovered) = BlockLog::open(&directory).unwrap();
-    assert_eq!(recovered.blocks, blocks, "everything complete survived");
+    assert_eq!(recovered.blocks, 5, "everything complete survived");
+    assert_eq!(read_back(&log), blocks);
     assert_eq!(recovered.discarded_bytes, 7);
     assert_eq!(log.len(), 5);
 
     // The file was cut back, so the next open finds nothing left over.
-    let (_, again) = BlockLog::open(&directory).unwrap();
+    let (again_log, again) = BlockLog::open(&directory).unwrap();
     assert_eq!(again.discarded_bytes, 0);
-    assert_eq!(again.blocks, blocks);
+    assert_eq!(again.blocks, 5);
+    assert_eq!(read_back(&again_log), blocks);
 }
 
 #[test]
@@ -190,7 +199,36 @@ fn the_log_can_be_cut_back_to_a_prefix() {
     assert_eq!(log.len(), 3);
     drop(log);
 
-    let (_, recovered) = BlockLog::open(&directory).unwrap();
-    assert_eq!(recovered.blocks, blocks[..3]);
+    let (reopened, recovered) = BlockLog::open(&directory).unwrap();
+    assert_eq!(recovered.blocks, 3);
+    assert_eq!(read_back(&reopened), blocks[..3]);
     assert_eq!(recovered.discarded_bytes, 0);
+}
+
+/// A node that has forgotten a block it once applied has to be able to get it
+/// back, because a peer catching up will ask for exactly those.
+#[test]
+fn any_single_block_can_be_read_back_by_position() {
+    let directory = scratch("byindex");
+    let blocks = chain(10);
+
+    let (mut log, _) = BlockLog::open(&directory).unwrap();
+    for block in &blocks {
+        log.append(block).unwrap();
+    }
+
+    // Out of order on purpose: each read seeks for itself and leaves nothing
+    // behind, so the order they are asked for cannot matter.
+    for index in [7usize, 0, 9, 3, 0] {
+        let found = log.read(index).unwrap().expect("that record exists");
+        assert_eq!(&found, &blocks[index], "record {index}");
+    }
+
+    assert!(
+        log.read(10).unwrap().is_none(),
+        "past the end is nothing, not an error"
+    );
+
+    // And the log is still readable in order afterwards.
+    assert_eq!(read_back(&log), blocks);
 }

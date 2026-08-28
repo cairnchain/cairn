@@ -54,9 +54,16 @@ pub enum StoreError {
 }
 
 /// What opening a log found on disk.
+///
+/// The blocks themselves are counted rather than returned. A node that read
+/// them all into a vector to replay them would hold its entire history in
+/// memory for as long as the replay took, which on an old chain is the largest
+/// allocation the process ever makes and is needed for no reason: they are
+/// replayed once, in order, and never looked at together.
 #[derive(Debug, Default)]
 pub struct Recovered {
-    pub blocks: Vec<Block>,
+    /// Records the log holds.
+    pub blocks: usize,
     /// Bytes dropped from the end because they were incomplete or unreadable.
     ///
     /// A torn record at the end is the ordinary trace of a crash during a
@@ -132,6 +139,54 @@ impl BlockLog {
         Ok(())
     }
 
+    /// Reads the record at `index`.
+    ///
+    /// Every read seeks, so this is for one block at a time. Reading the whole
+    /// log in order is what [`BlockLog::replay`] is for.
+    pub fn read(&self, index: usize) -> Result<Option<Block>, StoreError> {
+        let Some(end) = self.ends.get(index).copied() else {
+            return Ok(None);
+        };
+        let start = if index == 0 {
+            0
+        } else {
+            self.ends.get(index.saturating_sub(1)).copied().unwrap_or(0)
+        };
+        let length = usize::try_from(end.saturating_sub(start)).unwrap_or(0);
+        let body = length.saturating_sub(4);
+        if body == 0 {
+            return Ok(None);
+        }
+
+        // `&File` reads and seeks, so this needs no exclusive borrow and no
+        // second handle on the file.
+        let mut file = &self.file;
+        file.seek(SeekFrom::Start(start.saturating_add(4)))?;
+        let mut bytes = vec![0u8; body];
+        file.read_exact(&mut bytes)?;
+        let block =
+            Block::decode(&bytes).map_err(|source| StoreError::Malformed { index, source })?;
+        Ok(Some(block))
+    }
+
+    /// Every record in order, read one at a time.
+    ///
+    /// For the replay a node does when it starts. It holds one block at a
+    /// time rather than all of them, which is the difference between a fixed
+    /// cost and one that grows with the chain.
+    ///
+    /// Do not interleave this with [`BlockLog::read`]: both move the same file
+    /// cursor, and the reader here carries a buffer that would then be reading
+    /// from somewhere else.
+    pub fn replay(&self) -> Replay<'_> {
+        Replay {
+            reader: BufReader::new(&self.file),
+            index: 0,
+            total: self.ends.len(),
+            started: false,
+        }
+    }
+
     /// Cuts the log back to its first `count` records.
     pub fn keep_first(&mut self, count: usize) -> Result<(), StoreError> {
         if count >= self.ends.len() {
@@ -179,14 +234,17 @@ impl BlockLog {
                 // leaves behind.
                 break;
             }
-            let block = Block::decode(&body).map_err(|source| StoreError::Malformed {
+            // Decoded and thrown away: the scan has to know whether a record
+            // can be read, because that is where the file is cut, but the
+            // block itself is read again when it is wanted.
+            Block::decode(&body).map_err(|source| StoreError::Malformed {
                 index: ends.len(),
                 source,
             })?;
 
             offset = offset.saturating_add(4).saturating_add(declared as u64);
             ends.push(offset);
-            recovered.blocks.push(block);
+            recovered.blocks = recovered.blocks.saturating_add(1);
         }
 
         drop(reader);
@@ -197,6 +255,56 @@ impl BlockLog {
             self.file.flush()?;
         }
         Ok(recovered)
+    }
+}
+
+/// Every block in a log, in the order they were written.
+///
+/// An error stops the walk: a record that cannot be read means the rest cannot
+/// be trusted to be where it says it is, and a node that carried on would be
+/// replaying a chain with a hole in it.
+#[derive(Debug)]
+pub struct Replay<'a> {
+    reader: BufReader<&'a File>,
+    index: usize,
+    total: usize,
+    started: bool,
+}
+
+impl Iterator for Replay<'_> {
+    type Item = Result<Block, StoreError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index >= self.total {
+            return None;
+        }
+        if !self.started {
+            self.started = true;
+            if let Err(error) = self.reader.seek(SeekFrom::Start(0)) {
+                self.index = self.total;
+                return Some(Err(error.into()));
+            }
+        }
+
+        let mut header = [0u8; 4];
+        if let Err(error) = self.reader.read_exact(&mut header) {
+            self.index = self.total;
+            return Some(Err(error.into()));
+        }
+        let declared = usize::try_from(u32::from_le_bytes(header)).unwrap_or(usize::MAX);
+        if declared > MAX_RECORD_BYTES {
+            let index = self.index;
+            self.index = self.total;
+            return Some(Err(StoreError::RecordTooLarge { index, declared }));
+        }
+        let mut body = vec![0u8; declared];
+        if let Err(error) = self.reader.read_exact(&mut body) {
+            self.index = self.total;
+            return Some(Err(error.into()));
+        }
+        let index = self.index;
+        self.index = self.index.saturating_add(1);
+        Some(Block::decode(&body).map_err(|source| StoreError::Malformed { index, source }))
     }
 }
 

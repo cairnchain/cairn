@@ -79,6 +79,16 @@ impl Forge {
     fn mine_many(&mut self, count: usize) -> Vec<Block> {
         (0..count).map(|_| self.mine()).collect()
     }
+
+    /// A second forge carrying on from the same point, for building a rival
+    /// branch off the one already made.
+    fn fork(&self) -> Self {
+        Self {
+            params: self.params,
+            state: self.state.clone(),
+            clock: self.clock,
+        }
+    }
 }
 
 fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
@@ -425,4 +435,120 @@ fn a_seed_that_never_answers_is_still_known() {
             .count(),
         1
     );
+}
+
+/// A node serves history it no longer holds in memory.
+///
+/// Past the depth a reorganisation may reach, a block is settled: it will
+/// never be undone, so a node lets its body go and keeps only its place. That
+/// is what stops a node's memory growing with the chain. But a newcomer asks
+/// for exactly those blocks, and a network where nobody can answer for its own
+/// past is not a network anybody can join. The log on disk holds the followed
+/// branch in order of height, so the answer is a seek.
+#[test]
+fn a_node_serves_blocks_it_has_forgotten() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    // Comfortably past the window, so the early blocks are gone from memory.
+    let depth = cairn_chain::MAX_REORG_DEPTH + 200;
+    let blocks = forge.mine_many(depth);
+
+    let directory = std::env::temp_dir().join(format!("cairn-forgotten-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+
+    let (seeded, _) = Node::open(params, loopback(), &directory).unwrap();
+    for block in &blocks {
+        seeded.submit_block(block.clone()).unwrap();
+    }
+    let top = (depth - 1) as u64;
+    assert_eq!(seeded.height(), Some(top));
+
+    // The first block is out of memory, and the node still knows where it was.
+    let genesis = blocks[0].id();
+    seeded.with_chain(|chain| {
+        assert!(
+            chain.block(&genesis).is_none(),
+            "a settled block should not still be held in memory"
+        );
+        assert_eq!(chain.height_of(&genesis), Some(0), "but its place is known");
+    });
+
+    // A node starting from nothing has to be given all of it, forgotten or not.
+    let fresh = Node::bind(params, loopback()).unwrap();
+    assert_eq!(fresh.height(), None);
+    fresh.connect(seeded.address()).unwrap();
+    wait_for("the fresh node to catch up", || fresh.height() == Some(top));
+
+    assert_eq!(
+        fresh.with_chain(|chain| chain.state().state_root()),
+        seeded.with_chain(|chain| chain.state().state_root()),
+        "the ledger came across, not just the blocks"
+    );
+    assert_eq!(fresh.total_work(), seeded.total_work());
+
+    seeded.shutdown();
+    fresh.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// A reorganisation leaves the log holding the branch, not the arrivals.
+///
+/// The log is what a node reads a forgotten block back from, and it finds one
+/// by position, because position is height. That only holds while the log is
+/// the followed branch: if a reorganisation left the abandoned blocks in it,
+/// every position past the fork would point at a block on a branch this node
+/// gave up, and the node would serve those to anyone catching up. Wrong
+/// answers, delivered confidently, which is worse than no answer.
+#[test]
+fn a_reorganisation_leaves_the_log_matching_the_branch() {
+    let params = params();
+    let mut shared = Forge::new(params);
+    let common = shared.mine_many(6);
+
+    // Two branches from the same point. The rival is longer, so it is heavier.
+    let mut ours = shared.fork();
+    let ours_blocks = ours.mine_many(4);
+    let mut theirs = shared.fork();
+    let theirs_blocks = theirs.mine_many(9);
+
+    let directory = std::env::temp_dir().join(format!("cairn-reorg-log-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+
+    {
+        let (node, _) = Node::open(params, loopback(), &directory).unwrap();
+        for block in common.iter().chain(&ours_blocks) {
+            node.submit_block(block.clone()).unwrap();
+        }
+        assert_eq!(node.height(), Some(9), "six shared and four of ours");
+
+        for block in &theirs_blocks {
+            node.submit_block(block.clone()).unwrap();
+        }
+        assert_eq!(node.height(), Some(14), "six shared and nine of theirs");
+        node.shutdown();
+    }
+
+    // Read the log back on its own, the way a node does when it starts.
+    let (log, recovered) = cairn_store::BlockLog::open(&directory).unwrap();
+    let expected: Vec<Block> = common.iter().chain(&theirs_blocks).cloned().collect();
+    assert_eq!(recovered.blocks, expected.len(), "no abandoned blocks left");
+
+    for (height, want) in expected.iter().enumerate() {
+        let found = log.read(height).unwrap().expect("a record at every height");
+        assert_eq!(
+            found.id(),
+            want.id(),
+            "the record at position {height} is not the block at that height"
+        );
+        assert_eq!(found.header.height, height as u64);
+    }
+
+    // And a node opened on it comes back on the branch it was following.
+    let (again, restored) = Node::open(params, loopback(), &directory).unwrap();
+    assert_eq!(restored.blocks, expected.len(), "every record replayed");
+    assert_eq!(again.height(), Some(14));
+    assert_eq!(again.with_chain(ChainStore::tip), Some(expected[14].id()));
+    again.shutdown();
+
+    let _ = std::fs::remove_dir_all(&directory);
 }

@@ -98,6 +98,8 @@ fn solo_as(chain: &mut ChainStore, nonce: u64) -> Local<'_> {
         chain,
         book: EMPTY.get_or_init(AddressBook::new),
         listen: 4242,
+        // No log here, so this node answers only for what it still holds.
+        archive: None,
     }
 }
 
@@ -604,6 +606,7 @@ fn a_request_for_peers_is_answered_from_the_book() {
         book: &book,
         listen: 4242,
         nonce: 1,
+        archive: None,
     };
     let reaction = on_message(&mut local, &mut peer, Message::GetPeers, NOW);
 

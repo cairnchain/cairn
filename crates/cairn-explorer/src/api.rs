@@ -73,7 +73,8 @@ impl Explorer {
     /// Reads whatever the chain has added since the last call.
     pub(crate) fn refresh(&self) {
         let mut index = self.index();
-        self.node.with_chain(|chain| index.refresh(chain));
+        self.node
+            .with_chain(|chain| index.refresh(chain, |height| self.node.archived_at(height)));
     }
 
     /// Routes one request, or reports that nothing here answers it.
@@ -100,6 +101,27 @@ struct Context<'a> {
 impl Context<'_> {
     fn params(&self) -> &ConsensusParams {
         self.chain.params()
+    }
+
+    /// The block at `height` on the followed branch, wherever it is.
+    ///
+    /// A node lets go of the bodies of blocks too deep to be undone, which is
+    /// what keeps its memory from growing with the chain. An explorer answers
+    /// about all of them, so it reads the rest from the log, where the branch
+    /// sits in order of height.
+    fn block_at(&self, height: u64) -> Option<Block> {
+        if let Some(block) = self.chain.block_at(height) {
+            return Some(block.clone());
+        }
+        self.node.archived_at(height)
+    }
+
+    /// The same, found by identifier.
+    fn block(&self, id: &Hash32) -> Option<Block> {
+        if let Some(block) = self.chain.block(id) {
+            return Some(block.clone());
+        }
+        self.node.archived_at(self.chain.height_of(id)?)
     }
 
     fn height(&self) -> Option<u64> {
@@ -154,7 +176,7 @@ fn status(context: &Context<'_>) -> Response {
             json.begin_object();
             json.field_u64("height", height);
             json.field_str("id", &id.to_string());
-            if let Some(block) = context.chain.block(&id) {
+            if let Some(block) = context.block(&id) {
                 json.field_u64("timestamp", block.header.timestamp);
                 json.field_str("difficulty", &block.header.difficulty.to_string());
                 json.field_usize("transfers", block.transfers.len());
@@ -321,8 +343,8 @@ fn blocks(context: &Context<'_>, request: &Request) -> Response {
         if listed >= limit {
             break;
         }
-        if let Some(block) = context.chain.block_at(height) {
-            block_summary(&mut json, context, block);
+        if let Some(block) = context.block_at(height) {
+            block_summary(&mut json, context, &block);
             listed = listed.saturating_add(1);
         }
         let Some(next) = height.checked_sub(1) else {
@@ -410,13 +432,13 @@ fn block(context: &Context<'_>, reference: &str) -> Response {
     json.field_u64("confirmations", context.confirmations(height));
     match height
         .checked_add(1)
-        .and_then(|next| context.chain.block_at(next))
+        .and_then(|next| context.block_at(next))
     {
         Some(next) => json.field_str("next", &next.id().to_string()),
         None => json.field_null("next"),
     }
 
-    let fees = block_fees(context, block);
+    let fees = block_fees(context, &block);
     json.field_str("fees", &fees.as_pebbles().to_string());
     json.field_str(
         "reward",
@@ -468,12 +490,12 @@ fn block(context: &Context<'_>, reference: &str) -> Response {
     Response::json(json.finish())
 }
 
-fn resolve_block<'a>(context: &Context<'a>, reference: &str) -> Option<&'a Block> {
+fn resolve_block(context: &Context<'_>, reference: &str) -> Option<Block> {
     if let Ok(height) = reference.parse::<u64>() {
-        return context.chain.block_at(height);
+        return context.block_at(height);
     }
     let id = parse_hash(reference)?;
-    context.chain.block(&id)
+    context.block(&id)
 }
 
 fn output_object(json: &mut Writer, context: &Context<'_>, id: &NoteId, note: &Note) {
@@ -578,7 +600,7 @@ fn transfer_object(json: &mut Writer, context: &Context<'_>, transfer: &Transfer
             json.field_u64("height", location.height);
             json.field_u64("position", u64::from(location.position));
             json.field_u64("confirmations", context.confirmations(location.height));
-            if let Some(block) = context.chain.block_at(location.height) {
+            if let Some(block) = context.block_at(location.height) {
                 json.field_str("block", &block.id().to_string());
                 json.field_u64("timestamp", block.header.timestamp);
             } else {
@@ -614,7 +636,7 @@ fn transaction(context: &Context<'_>, reference: &str) -> Response {
     let Some(location) = context.index.locate(&id) else {
         return Response::error(404, "no such transaction");
     };
-    let Some(block) = context.chain.block_at(location.height) else {
+    let Some(block) = context.block_at(location.height) else {
         return Response::error(404, "no such transaction");
     };
 
@@ -623,7 +645,7 @@ fn transaction(context: &Context<'_>, reference: &str) -> Response {
     json.field_bool("pooled", false);
     json.key("transaction");
     if location.position == 0 {
-        coinbase_object(&mut json, context, block);
+        coinbase_object(&mut json, context, &block);
     } else {
         let index = usize::try_from(location.position)
             .ok()
@@ -755,7 +777,7 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
         json.field_str("direction", if movement.incoming { "in" } else { "out" });
         json.field_str("transaction", &movement.transaction.to_string());
         json.field_str("value", &movement.value.as_pebbles().to_string());
-        match context.chain.block_at(movement.height) {
+        match context.block_at(movement.height) {
             Some(block) => json.field_u64("timestamp", block.header.timestamp),
             None => json.field_null("timestamp"),
         }
@@ -856,7 +878,7 @@ fn search(context: &Context<'_>, request: &Request) -> Response {
     json.field_str("query", query);
 
     if let Ok(height) = query.parse::<u64>() {
-        if context.chain.block_at(height).is_some() {
+        if context.block_at(height).is_some() {
             json.field_str("kind", "block");
             json.field_str("target", &format!("/block/{height}"));
             json.end_object();
@@ -874,7 +896,7 @@ fn search(context: &Context<'_>, request: &Request) -> Response {
     }
 
     if let Some(hash) = parse_hash(query) {
-        if let Some(block) = context.chain.block(&hash) {
+        if let Some(block) = context.block(&hash) {
             json.field_str("kind", "block");
             json.field_str("target", &format!("/block/{}", block.header.height));
             json.end_object();

@@ -81,6 +81,11 @@ pub enum ChainError {
          this node keeps undo records for"
     )]
     ForkTooDeep { depth: usize },
+    #[error(
+        "a block at height {height} is below {floor}, the oldest this node could \
+         still reorganise onto"
+    )]
+    TooOld { height: u64, floor: u64 },
     #[error("the block tree lost a block it had recorded")]
     Corrupt,
 }
@@ -222,6 +227,17 @@ impl ChainStore {
     /// Whether `id` is on the branch currently followed.
     pub fn is_active(&self, id: &Hash32) -> bool {
         self.positions.contains_key(id)
+    }
+
+    /// The height `id` sits at on the followed branch.
+    ///
+    /// A node forgets the bodies of blocks it can no longer undo but keeps
+    /// knowing where they were, which is what lets it fetch one back from a
+    /// log that holds the branch in order of height.
+    pub fn height_of(&self, id: &Hash32) -> Option<u64> {
+        self.positions
+            .get(id)
+            .and_then(|index| u64::try_from(*index).ok())
     }
 
     /// The followed branch, genesis first.
@@ -429,7 +445,22 @@ impl ChainStore {
             return Err(ChainError::NoWork { id });
         }
 
-        let total_work = if self.blocks.is_empty() {
+        // A block this far below the tip cannot be followed whatever is built
+        // on it, because reaching it would mean undoing more than this node
+        // allows. Refusing it here costs one comparison; storing it costs
+        // memory for a branch that ends in the same refusal, and a peer could
+        // make a node hold a thousand of them by sending old history.
+        if let Some(tip) = self.height() {
+            let floor = tip.saturating_sub(u64::try_from(MAX_REORG_DEPTH).unwrap_or(u64::MAX));
+            if block.header.height < floor {
+                return Err(ChainError::TooOld {
+                    height: block.header.height,
+                    floor,
+                });
+            }
+        }
+
+        let total_work = if self.active.is_empty() {
             if block.header.height != 0 || block.header.previous != Hash32::ZERO {
                 return Err(ChainError::NotGenesis);
             }
@@ -472,6 +503,11 @@ impl ChainStore {
         // Refused here rather than discovered halfway through the rewind, when
         // the undo record for a block this node no longer keeps one for would
         // read as a corrupt tree.
+        //
+        // A branch this deep can no longer be assembled, since its first block
+        // is below the floor `add_block` refuses at. This stays as the last
+        // word on the rule it enforces, rather than as a check that happens to
+        // be unreachable today.
         let keep = fork_position.map_or(0, |index| index.saturating_add(1));
         let depth = self.active.len().saturating_sub(keep);
         if depth > MAX_REORG_DEPTH {
@@ -497,7 +533,7 @@ impl ChainStore {
 
         // The state moved, so what the pool holds has to be reconsidered.
         self.prune_pool();
-        self.forget_what_cannot_be_undone();
+        self.forget_what_cannot_change();
         self.forget_unreachable_branches();
 
         if rolled_back.is_empty() {
@@ -561,17 +597,27 @@ impl ChainStore {
         Ok(removed)
     }
 
-    /// Drops undo records for blocks now deeper than [`MAX_REORG_DEPTH`].
+    /// Lets go of blocks now deeper than [`MAX_REORG_DEPTH`].
+    ///
+    /// Past that depth a block can no longer be undone, which is a rule this
+    /// store enforces rather than a hope. So what is held for it is held for
+    /// nothing: the record of how to undo it, and the block itself.
+    ///
+    /// Dropping the block is what keeps a node's memory from growing with the
+    /// chain. A node that kept every block it ever applied would be carrying
+    /// its whole history in memory to answer questions it can answer from
+    /// disk, where the same blocks already sit in order of height.
     ///
     /// One block leaves the window each time one is added, so this is a step
     /// rather than a sweep: what it costs does not depend on how long the
     /// chain has been running.
-    fn forget_what_cannot_be_undone(&mut self) {
+    fn forget_what_cannot_change(&mut self) {
         while self.active.len().saturating_sub(self.undo_from) > MAX_REORG_DEPTH {
             let Some(id) = self.active.get(self.undo_from).copied() else {
                 break;
             };
             self.applied.remove(&id);
+            self.blocks.remove(&id);
             self.undo_from = self.undo_from.saturating_add(1);
         }
     }
