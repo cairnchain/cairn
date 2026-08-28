@@ -353,10 +353,26 @@
       <div class="task">
         <div class="task-what">
           <b>Sortir l'histoire de la mémoire</b>
-          <span>Un nœud garde en mémoire vive chaque bloc validé : 637 Mo pour neuf mois de chaîne, vingt-cinq gigaoctets pour trente ans. Mesuré, pas supposé. C'est le dernier endroit où le coût d'un nœud grandit encore avec la chaîne.</span>
+          <span>Un nœud gardait en mémoire vive chaque bloc validé : vingt-cinq gigaoctets pour trente ans. Il lâche maintenant tout bloc trop ancien pour être annulé et le relit sur son disque si quelqu'un le demande. Mesuré : plus rien ne s'ajoute entre quatre cent mille blocs et huit cent mille.</span>
         </div>
         <div class="who me">moi</div>
-        <div class="cost">quelques jours</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Le dernier octet par bloc</b>
+          <span>Il reste soixante-dix-neuf octets par bloc : l'identifiant de chaque bloc de la branche et l'index qui le retrouve, soit 1,3 Go à trente ans. Ils partent le jour où le message de synchronisation porte les hauteurs, car une position se lira alors sur le disque.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">deux jours</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Un débit par pair</b>
+          <span>Rien ne limite ce qu'un pair peut demander par seconde. Ce n'était que de la mémoire à lire, c'est maintenant du disque. Un nœud ne se bloque plus pour autant, mais un pair peut encore occuper un disque à lui tout seul.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">un jour</div>
       </div>
       <div class="task">
         <div class="task-what">
@@ -603,13 +619,12 @@
   <div class="closing">
     <h2>Ce qui vient maintenant, dans l'ordre</h2>
     <p>
-      <strong>Sortir l'histoire de la mémoire du nœud.</strong> C'est le
-      dernier trou dans la phrase écrite en haut du dépôt. Le grand livre tient
-      sa promesse, plafonné par une règle que personne ne peut contourner. À
-      côté, l'arbre des blocs grossit sans limite : chaque bloc jamais validé
-      reste en mémoire vive, alors qu'il est déjà sur le disque et que le nœud
-      n'ira jamais le relire. Vingt-cinq gigaoctets à trente ans, pour un
-      projet qui promet un coût constant.
+      <strong>Le protocole d'échantillonnage.</strong> C'est ce qui reste de
+      gros, et c'est ce qui décide si un nouveau venu peut rejoindre le réseau
+      sans télécharger trente ans d'histoire. Les en-têtes s'y engagent déjà,
+      le prototype est calibré, le mécanisme lui-même n'est pas écrit. C'est
+      aussi ce qui permettra ensuite à un nœud de ne plus garder l'histoire du
+      tout, ni en mémoire ni sur son disque.
     </p>
     <p>
       <strong>Deux choses attendent un nom de domaine.</strong> Les programmes
@@ -638,8 +653,8 @@
   </div>
 
   <footer>
-    <span>Cairn · route jusqu'au mainnet · v4</span>
-    <span>50 commits · 295 tests</span>
+    <span>Cairn · route jusqu'au mainnet · v5</span>
+    <span>66 commits · 304 tests</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 
