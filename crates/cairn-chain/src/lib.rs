@@ -137,6 +137,12 @@ pub struct ChainStore {
     /// Transfers waiting for a block, keyed by identifier so the order a miner
     /// walks them in does not depend on the order they arrived.
     pool: BTreeMap<Hash32, Transfer>,
+    /// The same transfers by what they pay, cheapest first.
+    ///
+    /// Kept alongside rather than derived, so finding what to make room for
+    /// costs a lookup and not a pass over the pool: a peer sending transfers
+    /// as fast as it can would otherwise decide how much work each one causes.
+    pool_by_fee: BTreeSet<(Amount, Hash32)>,
 }
 
 impl ChainStore {
@@ -166,6 +172,7 @@ impl ChainStore {
             undo_from: 0,
             state,
             pool: BTreeMap::new(),
+            pool_by_fee: BTreeSet::new(),
         }
     }
 
@@ -356,9 +363,6 @@ impl ChainStore {
         if self.pool.contains_key(&id) {
             return Ok(false);
         }
-        if self.pool.len() >= MAX_POOLED {
-            return Ok(false);
-        }
 
         let spent = self.pooled_inputs();
         for input in &transfer.inputs {
@@ -366,7 +370,7 @@ impl ChainStore {
                 return Err(TransferError::UnknownNote(input.note_id));
             }
         }
-        check_transfer(
+        let outcome = check_transfer(
             &transfer,
             &self.state,
             &BTreeSet::new(),
@@ -374,21 +378,54 @@ impl ChainStore {
             &self.params,
         )?;
 
+        // A full pool that refuses everything is a pool anyone can close. Four
+        // thousand transfers paying nothing would hold every place, and a
+        // sender who paid would be turned away behind them, for as long as the
+        // attacker cared to keep it up. So a full pool makes room for whoever
+        // pays more than the least it already holds, and refuses only what
+        // would not improve it.
+        if self.pool.len() >= MAX_POOLED {
+            let Some((cheapest, victim)) = self.pool_by_fee.first().copied() else {
+                return Ok(false);
+            };
+            if outcome.fee <= cheapest {
+                return Ok(false);
+            }
+            self.pool.remove(&victim);
+            self.pool_by_fee.remove(&(cheapest, victim));
+        }
+
         self.pool.insert(id, transfer);
+        self.pool_by_fee.insert((outcome.fee, id));
         Ok(true)
     }
 
     /// Transfers a miner can put in the next block, and the fees they carry.
     ///
-    /// Walked in identifier order and cut off at the first conflict, so two
-    /// nodes holding the same pool build the same block.
+    /// Walked from the best paying down, and within the same fee in identifier
+    /// order, so two nodes holding the same pool build the same block. Order
+    /// is a miner's choice and not a rule: a block is valid whatever order its
+    /// transfers were picked in. But picking by identifier meant a fee bought
+    /// nothing, and a fee that buys nothing is one nobody pays, which leaves a
+    /// pool with no way to tell whose transfer matters when there is not room
+    /// for everyone.
     pub fn selection(&self, limit: usize) -> (Vec<Transfer>, Amount) {
         let mut chosen = Vec::new();
         let mut spent_hot: BTreeSet<NoteId> = BTreeSet::new();
         let mut spent_cold: BTreeMap<NoteId, ColdSpend> = BTreeMap::new();
         let mut fees = Amount::ZERO;
 
-        for transfer in self.pool.values() {
+        // Best paying first. The fee here is what it was worth when it was
+        // admitted, which is a hint rather than a promise: what each one
+        // actually pays is worked out again below, against the state as it
+        // stands now.
+        let ordered = self
+            .pool_by_fee
+            .iter()
+            .rev()
+            .filter_map(|(_, id)| self.pool.get(id));
+
+        for transfer in ordered {
             if chosen.len() >= limit {
                 break;
             }
@@ -428,9 +465,19 @@ impl ChainStore {
     fn prune_pool(&mut self) {
         let params = self.params;
         let state = &self.state;
-        self.pool.retain(|_, transfer| {
-            check_transfer(transfer, state, &BTreeSet::new(), &BTreeMap::new(), &params).is_ok()
+        let mut kept: BTreeSet<(Amount, Hash32)> = BTreeSet::new();
+        self.pool.retain(|id, transfer| {
+            match check_transfer(transfer, state, &BTreeSet::new(), &BTreeMap::new(), &params) {
+                // The fee is read again rather than carried: what a transfer
+                // pays depends on the state, and the state is what moved.
+                Ok(outcome) => {
+                    kept.insert((outcome.fee, *id));
+                    true
+                }
+                Err(_) => false,
+            }
         });
+        self.pool_by_fee = kept;
     }
 
     /// Records a block and follows the heaviest branch it makes available.

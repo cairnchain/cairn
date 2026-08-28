@@ -57,6 +57,44 @@ fn funded(count: usize, miner: &SecretKey) -> (ChainStore, Vec<(NoteId, Note)>) 
     (store, notes)
 }
 
+/// At least `count` spendable notes, paid out several to a block, so a test
+/// can fill the pool without mining a block per transfer.
+fn funded_widely(count: usize, miner: &SecretKey) -> (ChainStore, Vec<(NoteId, Note)>) {
+    let params = params();
+    let per_block = params.max_coinbase_outputs;
+    let mut ledger = LedgerState::new();
+    let mut store = ChainStore::new(params);
+    let mut clock = 1_000u64;
+    let mut notes = Vec::new();
+
+    let each = params.initial_reward.as_pebbles() / per_block as u64;
+    let first = params.initial_reward.as_pebbles() - each * (per_block as u64 - 1);
+
+    while notes.len() < count {
+        let outputs: Vec<Note> = (0..per_block)
+            .map(|index| {
+                let value = if index == 0 { first } else { each };
+                Note::new(Amount::from_pebbles(value).unwrap(), miner.public_key())
+            })
+            .collect();
+
+        let height = ledger.next_height().unwrap();
+        clock += 600;
+        let coinbase = CoinbaseTransaction::new(height, outputs.clone());
+        let block =
+            assemble_block(&ledger, coinbase, Vec::<Transfer>::new(), &params, clock, 0).unwrap();
+        let block = mine_block(block, ATTEMPTS).unwrap();
+        connect_block(&mut ledger, &block, &params, NOW).unwrap();
+        store.add_block(block.clone(), NOW).unwrap();
+
+        for (index, note) in outputs.into_iter().enumerate() {
+            let position = u32::try_from(index).unwrap();
+            notes.push((NoteId::new(block.coinbase.id(), position), note));
+        }
+    }
+    (store, notes)
+}
+
 /// Spends one note, paying `to` and leaving the rest as a fee.
 fn spend(
     params: &ConsensusParams,
@@ -257,21 +295,81 @@ fn a_block_clears_what_it_carried_out_of_the_pool() {
     assert_eq!(store.pool_len(), 1);
 }
 
+/// A full pool that refuses everything is a pool anyone can close.
+///
+/// Filling it costs an attacker nothing: transfers paying no fee, spending
+/// notes back to itself. Everyone who wants to send anything is then behind
+/// them, for as long as the attacker cares to keep it up. So the ceiling
+/// holds, and a transfer worth more than the least the pool already carries
+/// takes that one's place.
 #[test]
-fn the_pool_stops_growing_at_its_ceiling() {
+fn a_full_pool_makes_room_for_whoever_pays_more() {
+    let params = params();
+    let attacker = wallet(1);
+    let (mut store, notes) = funded_widely(MAX_POOLED + 2, &attacker);
+
+    for (id, note) in notes.iter().take(MAX_POOLED) {
+        let transfer = spend(&params, *id, *note, &attacker, &wallet(2), Amount::ZERO);
+        assert!(store.accept_transfer(transfer).unwrap());
+    }
+    assert_eq!(store.pool_len(), MAX_POOLED, "the ceiling is reached");
+
+    // Another that pays nothing has nothing to offer and is turned away.
+    let (id, note) = notes[MAX_POOLED];
+    let free = spend(&params, id, note, &attacker, &wallet(2), Amount::ZERO);
+    assert!(!store.accept_transfer(free).unwrap(), "nothing to displace");
+    assert_eq!(store.pool_len(), MAX_POOLED);
+
+    // One that pays gets in, and the pool stays at its ceiling.
+    let (id, note) = notes[MAX_POOLED + 1];
+    let paying = spend(
+        &params,
+        id,
+        note,
+        &attacker,
+        &wallet(2),
+        Amount::from_pebbles(1).unwrap(),
+    );
+    let wanted = paying.id();
+    assert!(store.accept_transfer(paying).unwrap(), "it pays more");
+    assert_eq!(store.pool_len(), MAX_POOLED, "and took a place, not a seat");
+    assert!(store.pooled(&wanted).is_some());
+}
+
+/// A fee that buys nothing is a fee nobody pays.
+#[test]
+fn a_miner_takes_the_best_paying_transfers_first() {
     let params = params();
     let miner = wallet(1);
-    let (mut store, notes) = funded(3, &miner);
+    let (mut store, notes) = funded_widely(8, &miner);
 
-    // Only three notes exist, so the pool cannot pass three either way. What
-    // matters is that the ceiling is a hard stop rather than advice.
-    for (id, note) in &notes {
-        let transfer = spend(&params, *id, *note, &miner, &wallet(2), Amount::ZERO);
-        store.accept_transfer(transfer).unwrap();
+    // Fees rising with the index, admitted in the opposite order so that no
+    // ordering by arrival could produce this answer by accident.
+    let mut expected: Vec<(u64, cairn_primitives::Hash32)> = Vec::new();
+    for (index, (id, note)) in notes.iter().take(8).enumerate().rev() {
+        let fee = (index as u64 + 1) * 10;
+        let transfer = spend(
+            &params,
+            *id,
+            *note,
+            &miner,
+            &wallet(2),
+            Amount::from_pebbles(fee).unwrap(),
+        );
+        expected.push((fee, transfer.id()));
+        assert!(store.accept_transfer(transfer).unwrap());
     }
-    assert_eq!(store.pool_len(), 3);
-    assert!(
-        store.pool_len() < MAX_POOLED,
-        "the ceiling is a hard stop, not advice"
-    );
+    expected.sort_by(|left, right| right.0.cmp(&left.0));
+
+    let (chosen, fees) = store.selection(3);
+    assert_eq!(chosen.len(), 3);
+    let taken: Vec<cairn_primitives::Hash32> = chosen.iter().map(Transfer::id).collect();
+    let best: Vec<cairn_primitives::Hash32> = expected.iter().take(3).map(|(_, id)| *id).collect();
+    assert_eq!(taken, best, "the three best paying, in that order");
+    let owed: u64 = expected.iter().take(3).map(|(fee, _)| fee).sum();
+    assert_eq!(fees, Amount::from_pebbles(owed).unwrap());
+
+    // And the whole pool still fits in a block that has room for it.
+    let (all, _) = store.selection(64);
+    assert_eq!(all.len(), 8);
 }
