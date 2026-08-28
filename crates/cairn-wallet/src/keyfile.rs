@@ -5,6 +5,8 @@
 //! paper, and an encrypted format that only this program understands would take
 //! that away without adding anything a filesystem permission does not.
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
 
 use cairn_crypto::SecretKey;
@@ -22,13 +24,13 @@ pub(crate) fn read(path: &Path) -> Result<SecretKey, String> {
 ///
 /// Overwriting a key file destroys the only copy of whatever it held, so it is
 /// never done implicitly.
+///
+/// The file is created private and refused if it is already there, both in the
+/// one call that creates it. Writing it first and restricting it afterwards
+/// would leave a moment where anyone with an account on the machine could read
+/// the key, and checking that it is absent before writing would leave a moment
+/// where something else could create it in between.
 pub(crate) fn write(path: &Path, secret: &SecretKey) -> Result<(), String> {
-    if path.exists() {
-        return Err(format!(
-            "{} already exists; move it aside if you really mean to replace it",
-            path.display()
-        ));
-    }
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -36,23 +38,37 @@ pub(crate) fn write(path: &Path, secret: &SecretKey) -> Result<(), String> {
         }
     }
 
+    let mut file = create_private(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            return format!(
+                "{} already exists; move it aside if you really mean to replace it",
+                path.display()
+            );
+        }
+        format!("could not write {}: {error}", path.display())
+    })?;
+
     let text = format!("{}\n", cairn_primitives::hex::encode(&secret.to_bytes()));
-    std::fs::write(path, text)
-        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
-    restrict(path)
+    file.write_all(text.as_bytes())
+        .and_then(|()| file.flush())
+        .map_err(|error| format!("could not write {}: {error}", path.display()))
 }
 
-/// Makes the file readable only by its owner, where the platform has a say.
+/// Creates a file only its owner can read, and only if it is not there yet.
 #[cfg(unix)]
-fn restrict(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|error| format!("could not restrict {}: {error}", path.display()))
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
 }
 
+/// The same, on a platform with no say over the mode a file is created with.
 #[cfg(not(unix))]
-fn restrict(_path: &Path) -> Result<(), String> {
-    Ok(())
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    OpenOptions::new().write(true).create_new(true).open(path)
 }
 
 #[cfg(test)]
@@ -97,6 +113,9 @@ mod tests {
         assert!(read(&directory.join("missing")).is_err());
     }
 
+    /// Never readable by anyone else, including for the instant between being
+    /// created and being restricted. A key that was world readable for one
+    /// moment on a shared machine was world readable.
     #[cfg(unix)]
     #[test]
     fn a_key_file_is_readable_only_by_its_owner() {
@@ -106,5 +125,10 @@ mod tests {
         write(&path, &SecretKey::from_bytes(&[5; 32])).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+
+        // The mode comes from the creation itself, so a umask that would
+        // otherwise widen it has nothing to widen.
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents.trim().len(), 64, "and it still holds the key");
     }
 }
