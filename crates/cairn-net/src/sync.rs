@@ -354,8 +354,10 @@ pub fn on_message(
             reaction
         }
         Message::Block(block) => on_block(local.chain, peer, *block, now),
+        // The clock decides which half of the book rotates into this answer,
+        // so a peer asking twice does not hear the same names twice.
         Message::GetPeers => Reaction::reply(vec![Message::Peers(
-            local.book.sample(MAX_SHARED_ADDRESSES),
+            local.book.sample(MAX_SHARED_ADDRESSES, now),
         )]),
         // The last two arms say nothing for opposite reasons, and collapsing
         // them would bury which is which.

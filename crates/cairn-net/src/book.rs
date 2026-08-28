@@ -22,13 +22,26 @@ pub const PEER_FILE: &str = "peers.txt";
 
 /// Addresses held before new ones are ignored.
 ///
-/// The book is filled by strangers, so it needs a ceiling. Ignoring new
-/// entries once full is the simplest policy that cannot be gamed into
-/// unbounded memory; a real network wants eviction that resists an attacker
-/// flooding the book with addresses it controls. Seeds are outside this
-/// ceiling: they come from the operator, and the ceiling is there against
+/// The book is filled by strangers, so it needs a ceiling. Seeds are outside
+/// it: they come from the operator, and the ceiling is there against
 /// strangers.
 pub const MAX_ADDRESSES: usize = 4_096;
+
+/// Addresses kept from any one neighbourhood of the internet.
+///
+/// A ceiling on its own is not enough. Whoever fills the book decides who a
+/// node can reach, and filling it is cheap for anyone holding a block of
+/// addresses: rent one machine, name four thousand addresses on the same
+/// range, and every real peer learned afterwards is turned away at a full
+/// book. The node then talks only to whoever wrote it, which is the whole
+/// attack, since a node that sees only one view of the chain can be told
+/// anything about it.
+///
+/// Addresses are grouped by the part of them that is expensive to vary. Two
+/// bytes for IPv4 and four for IPv6 is roughly what one operator gets from one
+/// provider, so filling this book now means holding addresses across a hundred
+/// and twenty eight separate neighbourhoods rather than one.
+pub const MAX_PER_GROUP: usize = 32;
 
 /// Failed dials in a row before an address is dropped.
 ///
@@ -104,6 +117,29 @@ impl Known {
 #[derive(Clone, Debug, Default)]
 pub struct AddressBook {
     known: BTreeMap<SocketAddr, Known>,
+    /// How many addresses each neighbourhood holds.
+    ///
+    /// Counted as they go in and out rather than walked for on each insert,
+    /// so a peer naming five hundred addresses in one message costs five
+    /// hundred lookups and not five hundred passes over the book.
+    groups: BTreeMap<Group, usize>,
+}
+
+/// The part of an address that is expensive for one party to vary.
+type Group = [u8; 4];
+
+/// Which neighbourhood an address belongs to.
+fn group_of(address: &SocketAddr) -> Group {
+    match address.ip() {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            [octets[0], octets[1], 0, 0]
+        }
+        IpAddr::V6(ip) => {
+            let octets = ip.octets();
+            [octets[0], octets[1], octets[2], octets[3]]
+        }
+    }
 }
 
 impl AddressBook {
@@ -138,7 +174,13 @@ impl AddressBook {
         if self.known.contains_key(&address) {
             return false;
         }
+        let group = group_of(&address);
+        let held = self.groups.get(&group).copied().unwrap_or(0);
+        if held >= MAX_PER_GROUP {
+            return false;
+        }
         self.known.insert(address, Known::default());
+        self.groups.insert(group, held.saturating_add(1));
         true
     }
 
@@ -151,9 +193,17 @@ impl AddressBook {
         if !is_dialable(&address) {
             return false;
         }
+        let fresh = !self.known.contains_key(&address);
         let entry = self.known.entry(address).or_default();
         let was_seed = entry.seed;
         entry.seed = true;
+        if fresh {
+            // Counted like any other, so a seed does not sit outside the
+            // accounting, but never refused by it: the operator decides.
+            let group = group_of(&address);
+            let held = self.groups.get(&group).copied().unwrap_or(0);
+            self.groups.insert(group, held.saturating_add(1));
+        }
         !was_seed
     }
 
@@ -172,7 +222,19 @@ impl AddressBook {
     }
 
     pub fn remove(&mut self, address: &SocketAddr) -> bool {
-        self.known.remove(address).is_some()
+        if self.known.remove(address).is_none() {
+            return false;
+        }
+        let group = group_of(address);
+        match self.groups.get(&group).copied().unwrap_or(0) {
+            0 | 1 => {
+                self.groups.remove(&group);
+            }
+            held => {
+                self.groups.insert(group, held.saturating_sub(1));
+            }
+        }
+        true
     }
 
     /// Notes that this address introduced itself.
@@ -200,7 +262,7 @@ impl AddressBook {
         if known.misses < MAX_MISSES || known.seed {
             return false;
         }
-        self.known.remove(address);
+        self.remove(address);
         true
     }
 
@@ -256,21 +318,43 @@ impl AddressBook {
         ordered
     }
 
-    /// Addresses to hand to a peer that asked, most recently heard first.
+    /// Addresses to hand to a peer that asked.
     ///
-    /// Passing on the addresses that answered most recently is what stops the
-    /// dead spreading: an address nobody has reached in a while is dropped
-    /// here before it is handed to anyone else.
+    /// Half the places go to the addresses heard from most recently, because
+    /// passing on the ones that answer is what stops the dead spreading. The
+    /// other half rotates with `turn` through everything else, because a book
+    /// that always answers with the same names is a book whose other names
+    /// never reach anyone: a node learns an address, never passes it on, and
+    /// the network stays as connected as it was on the day it started.
     ///
-    /// The same addresses still come back every time. Varying them matters
-    /// against a peer trying to become someone's whole view of the network,
-    /// and belongs with peer scoring rather than here.
-    pub fn sample(&self, max: usize) -> Vec<PeerAddress> {
-        self.candidates()
-            .into_iter()
-            .take(max)
-            .map(PeerAddress)
-            .collect()
+    /// Rotating rather than drawing at random keeps this a pure function of
+    /// the book and the number given, which is what makes it testable. The
+    /// caller passes the clock, so what circulates changes by the second.
+    pub fn sample(&self, max: usize, turn: u64) -> Vec<PeerAddress> {
+        let ordered = self.candidates();
+        if ordered.len() <= max {
+            return ordered.into_iter().map(PeerAddress).collect();
+        }
+
+        let fresh = max / 2;
+        let mut chosen: Vec<SocketAddr> = ordered.get(..fresh).unwrap_or_default().to_vec();
+        let rest = ordered.get(fresh..).unwrap_or_default();
+        if rest.is_empty() {
+            return chosen.into_iter().map(PeerAddress).collect();
+        }
+
+        let span = u64::try_from(rest.len()).unwrap_or(1).max(1);
+        let start = usize::try_from(turn.checked_rem(span).unwrap_or(0)).unwrap_or(0);
+        for step in 0..max.saturating_sub(fresh) {
+            let Some(at) = start.saturating_add(step).checked_rem(rest.len()) else {
+                break;
+            };
+            let Some(address) = rest.get(at) else {
+                break;
+            };
+            chosen.push(*address);
+        }
+        chosen.into_iter().map(PeerAddress).collect()
     }
 
     /// Reads the book from `directory`, treating an unreadable or missing file
@@ -328,6 +412,15 @@ mod tests {
         SocketAddr::from((Ipv4Addr::new(203, 0, 113, last), port))
     }
 
+    /// Addresses spread thinly enough across neighbourhoods that a test
+    /// wanting a full book is not stopped by the per neighbourhood ceiling on
+    /// the way there: a fresh neighbourhood every [`MAX_PER_GROUP`] of them.
+    fn spread(index: usize) -> SocketAddr {
+        let neighbourhood = u8::try_from(index / MAX_PER_GROUP).unwrap_or(0);
+        let within = u8::try_from(index % MAX_PER_GROUP).unwrap_or(0);
+        SocketAddr::from((Ipv4Addr::new(10, neighbourhood, within, 1), 9_000))
+    }
+
     /// Misses far enough apart that the waiting never hides one.
     fn miss_repeatedly(book: &mut AddressBook, address: &SocketAddr, times: u8) {
         for step in 0..u64::from(times) {
@@ -372,17 +465,63 @@ mod tests {
     fn the_book_stops_growing_at_its_ceiling() {
         let mut book = AddressBook::new();
         for index in 0..MAX_ADDRESSES {
-            let port = u16::try_from(index % 60_000)
-                .unwrap_or(1)
-                .saturating_add(1_024);
-            let last = u8::try_from(index / 60_000).unwrap_or(0);
-            book.insert(address(last, port));
+            book.insert(spread(index));
         }
-        let filled = book.len();
-        assert!(filled > 0);
-        book.insert(address(255, 65_535));
-        assert!(book.len() <= MAX_ADDRESSES);
-        assert_eq!(book.len(), filled.min(MAX_ADDRESSES));
+        assert_eq!(book.len(), MAX_ADDRESSES, "the ceiling is reachable");
+        assert!(!book.insert(spread(MAX_ADDRESSES)), "and it holds");
+        assert_eq!(book.len(), MAX_ADDRESSES);
+    }
+
+    /// Whoever fills the book decides who a node can reach.
+    ///
+    /// A ceiling alone would let anyone holding one range of addresses name
+    /// four thousand of them and leave no room for a real peer learned
+    /// afterwards. The node would then talk only to whoever wrote the book,
+    /// and a node that sees one view of the chain can be told anything.
+    #[test]
+    fn no_one_neighbourhood_can_fill_the_book() {
+        let mut book = AddressBook::new();
+
+        // One party, one range, as many ports as it likes.
+        for port in 0..1_000u16 {
+            book.insert(address(1, port.saturating_add(1_024)));
+        }
+        assert_eq!(book.len(), MAX_PER_GROUP, "it got its share and no more");
+
+        // Varying the last byte is the same neighbourhood and buys nothing.
+        for last in 0..255u8 {
+            book.insert(address(last, 9_000));
+        }
+        assert_eq!(book.len(), MAX_PER_GROUP);
+
+        // And a peer somewhere else still gets in.
+        assert!(book.insert(SocketAddr::from((Ipv4Addr::new(198, 51, 100, 7), 9_000))));
+
+        // Room comes back as its addresses go.
+        let held: Vec<SocketAddr> = book
+            .iter()
+            .filter(|entry| group_of(entry) == group_of(&address(1, 1_024)))
+            .collect();
+        for entry in &held {
+            book.remove(entry);
+        }
+        assert!(book.insert(address(1, 1_024)), "the count came back down");
+    }
+
+    /// The operator's own addresses are counted but never refused.
+    #[test]
+    fn a_seed_is_not_turned_away_by_a_crowded_neighbourhood() {
+        let mut book = AddressBook::new();
+        for step in 0..MAX_PER_GROUP {
+            let port = u16::try_from(step).unwrap_or(0).saturating_add(1_024);
+            book.insert(address(1, port));
+        }
+        assert!(!book.insert(address(1, 9_999)), "full for strangers");
+        assert!(
+            book.insert_seed(address(1, 9_999)),
+            "but not for the operator"
+        );
+        assert!(book.is_seed(&address(1, 9_999)));
     }
 
     /// The ceiling is there against strangers, and a seed is not a stranger.
@@ -390,25 +529,24 @@ mod tests {
     fn a_full_book_still_takes_a_seed() {
         let mut book = AddressBook::new();
         for index in 0..MAX_ADDRESSES {
-            let port = u16::try_from(index % 60_000)
-                .unwrap_or(1)
-                .saturating_add(1_024);
-            let last = u8::try_from(index / 60_000).unwrap_or(0);
-            book.insert(address(last, port));
+            book.insert(spread(index));
         }
+        let full = book.len();
         assert!(!book.insert(address(255, 65_535)), "full for strangers");
         assert!(book.insert_seed(address(255, 65_535)));
         assert!(book.is_seed(&address(255, 65_535)));
+        assert_eq!(book.len(), full.saturating_add(1));
     }
 
     #[test]
     fn a_sample_is_bounded() {
         let mut book = AddressBook::new();
-        for port in 1_024..1_100u16 {
-            book.insert(address(1, port));
+        for index in 0..76 {
+            book.insert(spread(index));
         }
-        assert_eq!(book.sample(10).len(), 10);
-        assert_eq!(book.sample(1_000).len(), book.len());
+        assert_eq!(book.len(), 76);
+        assert_eq!(book.sample(10, 0).len(), 10);
+        assert_eq!(book.sample(1_000, 0).len(), book.len());
     }
 
     /// A book that only grows is a book that fills with the dead.
@@ -586,8 +724,58 @@ mod tests {
 
         // And what is passed on follows the same order, so the dead do not
         // spread through the network.
-        let shared: Vec<SocketAddr> = book.sample(2).into_iter().map(|entry| entry.0).collect();
+        let shared: Vec<SocketAddr> = book.sample(2, 0).into_iter().map(|entry| entry.0).collect();
         assert_eq!(shared, vec![address(1, 9000), address(3, 9000)]);
+    }
+
+    /// A book that always answers with the same names is a book whose other
+    /// names never reach anyone.
+    #[test]
+    fn what_is_passed_on_rotates_so_every_address_gets_out() {
+        let mut book = AddressBook::new();
+        for index in 0..40 {
+            book.insert(spread(index));
+        }
+        // A few that answered, so there is something to keep at the front.
+        for index in 0..4 {
+            book.answered(&spread(index), 1_000 + index as u64);
+        }
+
+        let names = |turn: u64| -> Vec<SocketAddr> {
+            book.sample(8, turn)
+                .into_iter()
+                .map(|entry| entry.0)
+                .collect()
+        };
+
+        // The freshest half is the same every time, on purpose: passing on
+        // what answers is what stops the dead spreading.
+        let first = names(0);
+        assert_eq!(first.len(), 8);
+        for turn in 1..20u64 {
+            assert_eq!(names(turn).get(..4), first.get(..4), "the fresh half holds");
+        }
+
+        // And over enough turns, everything in the book has been offered.
+        let mut seen: std::collections::BTreeSet<SocketAddr> = std::collections::BTreeSet::new();
+        for turn in 0..64u64 {
+            for address in names(turn) {
+                seen.insert(address);
+            }
+        }
+        assert_eq!(seen.len(), book.len(), "every address reached someone");
+    }
+
+    /// A book smaller than what is asked for is handed over whole.
+    #[test]
+    fn a_small_book_is_passed_on_entire() {
+        let mut book = AddressBook::new();
+        for index in 0..5 {
+            book.insert(spread(index));
+        }
+        for turn in 0..8u64 {
+            assert_eq!(book.sample(64, turn).len(), 5);
+        }
     }
 
     #[test]
