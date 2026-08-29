@@ -61,6 +61,10 @@ fn run(arguments: &[String]) -> Result<(), String> {
         restored.blocks, restored.addresses
     );
 
+    // The names, not just what they resolved to, so a machine that could not
+    // look anything up at this moment asks again while it runs.
+    node.start_from_names(options.seed_names.clone());
+
     for seed in &options.seeds {
         node.remember_seed(*seed);
         match node.connect(*seed) {

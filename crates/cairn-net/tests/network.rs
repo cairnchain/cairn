@@ -1589,3 +1589,44 @@ fn a_switch_that_fails_puts_back_a_branch_read_off_the_disk() {
     node.shutdown();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A node holds on to the name it starts from, and looks it up again.
+///
+/// The case this exists for is a node whose machine could not resolve anything
+/// at the moment it started: a server that came up before its name server, or
+/// a name that was only added to a zone file a minute ago. Resolved once at
+/// startup and thrown away, such a node has nothing to dial and no way to hear
+/// of anybody, and sits there for as long as it runs looking like a network
+/// that does not exist.
+///
+/// `localhost` is used rather than a real name so this asks nothing of a name
+/// server: it is answered from a file every machine has.
+#[test]
+fn a_node_looks_up_the_name_it_starts_from_while_it_is_running() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(3);
+
+    let seeded = Node::bind(params, loopback()).unwrap();
+    for block in &blocks {
+        seeded.submit_block(block.clone()).unwrap();
+    }
+    assert_eq!(seeded.height(), Some(2));
+
+    // Nothing dialled, nothing remembered, nothing in the book. Only a name,
+    // and it arrives after the node is already up.
+    let fresh = Node::bind(params, loopback()).unwrap();
+    assert_eq!(fresh.peer_count(), 0);
+    assert!(fresh.known_addresses().is_empty());
+    fresh.start_from_names(vec![format!("localhost:{}", seeded.address().port())]);
+
+    wait_for("the name to be looked up and dialled", || {
+        fresh.peer_count() > 0
+    });
+    wait_for("the chain to arrive over that connection", || {
+        fresh.height() == Some(2)
+    });
+
+    seeded.shutdown();
+    fresh.shutdown();
+}

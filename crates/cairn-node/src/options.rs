@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use cairn_crypto::PublicKey;
 use cairn_ledger::validation::ConsensusParams;
-use cairn_net::{seeds, KEEP_BLOCK_BYTES};
+use cairn_net::{seeds, KEEP_BLOCK_BYTES, NAME_LOOKUP_PERIOD};
 
 pub(crate) const CONFIG_FILE: &str = "cairn.conf";
 
@@ -71,6 +71,9 @@ pub(crate) struct Options {
     pub(crate) data: PathBuf,
     pub(crate) listen: SocketAddr,
     pub(crate) seeds: Vec<SocketAddr>,
+    /// The names those addresses came from, kept so the node can ask again if
+    /// none of them resolved at the moment it started.
+    pub(crate) seed_names: Vec<String>,
     /// Whether those seeds were named by the operator or read off the list
     /// written into the program.
     pub(crate) seeds_asked_for: bool,
@@ -202,6 +205,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         .cloned()
         .collect();
     let seeds_asked_for = !asked.is_empty();
+    let seed_names = seeds::names_for(&asked, params.network);
     let seeds = seeds::start_from(&asked, params.network)?;
 
     let mine_to = match setting("mine") {
@@ -235,6 +239,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         data,
         listen,
         seeds,
+        seed_names,
         seeds_asked_for,
         params,
         mine_to,
@@ -305,10 +310,22 @@ pub(crate) fn describe(options: &Options) -> String {
     let _ = writeln!(text, "listen       {}", options.listen);
     let _ = writeln!(text, "block time   {} s", options.params.target_block_time);
     if options.seeds.is_empty() {
-        let _ = writeln!(
-            text,
-            "seeds        none, and none written in for this network"
-        );
+        if options.seed_names.is_empty() {
+            let _ = writeln!(
+                text,
+                "seeds        none, and none written in for this network"
+            );
+        } else {
+            // Not "none written in". The difference between having nowhere to
+            // start and having somewhere this machine could not look up is the
+            // whole diagnosis, and printing the first for the second sends an
+            // operator reading source code instead of checking a resolver.
+            let _ = writeln!(
+                text,
+                "seeds        {} did not resolve; asking again every {NAME_LOOKUP_PERIOD}s",
+                options.seed_names.join(", ")
+            );
+        }
     } else {
         if !options.seeds_asked_for {
             let _ = writeln!(text, "seeds        written into the program, none given");

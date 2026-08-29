@@ -66,6 +66,11 @@ fn run(arguments: &[String]) -> Result<(), String> {
     }
     println!();
 
+    // The names, not just what they resolved to: a node that could not look
+    // anything up at this moment asks again while it runs, rather than sitting
+    // with nothing to dial for as long as it is up.
+    node.start_from_names(options.seed_names.clone());
+
     for seed in &options.seeds {
         // Written down before it is dialled, so a seed that is down right now
         // is tried again later rather than never known at all.

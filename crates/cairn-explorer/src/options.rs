@@ -45,6 +45,9 @@ pub(crate) struct Options {
     pub(crate) listen: SocketAddr,
     pub(crate) http: SocketAddr,
     pub(crate) seeds: Vec<SocketAddr>,
+    /// The names those addresses came from, kept so the node can ask again if
+    /// none of them resolved at the moment it started.
+    pub(crate) seed_names: Vec<String>,
     pub(crate) params: ConsensusParams,
 }
 
@@ -121,6 +124,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
 
     // After the network is settled: an explorer given no seed starts from the
     // ones written into the program, like every other node.
+    let seed_names = seeds::names_for(given.all("seed"), params.network);
     let seeds = seeds::start_from(given.all("seed"), params.network)?;
 
     Ok(Some(Options {
@@ -128,6 +132,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         listen,
         http,
         seeds,
+        seed_names,
         params,
     }))
 }

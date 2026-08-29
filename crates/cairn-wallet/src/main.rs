@@ -321,6 +321,12 @@ fn join(flags: &Flags) -> Result<Wallet, String> {
     let (wallet, blocks) =
         Wallet::open(&flags.key_file()?, params, &data).map_err(|error| error.to_string())?;
 
+    // As a node does: the names are kept, so a wallet opened on a machine
+    // whose name server is not answering yet still joins once it is.
+    wallet
+        .node()
+        .start_from_names(seeds::names_for(flags.values("seed"), params.network));
+
     let mut reached = 0usize;
     for address in seeds::start_from(flags.values("seed"), params.network)? {
         if wallet.reach(address) {

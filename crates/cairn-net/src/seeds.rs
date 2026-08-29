@@ -76,6 +76,22 @@ pub fn resolve_one(text: &str) -> Result<SocketAddr, String> {
         .ok_or_else(|| format!("`{text}` resolved to nothing"))
 }
 
+/// The names to start from, given what the operator asked for.
+///
+/// Kept apart from resolving them because a node holds on to these: a name
+/// that would not resolve at the moment it started is asked again later, and
+/// that is only possible if the name survived the lookup.
+pub fn names_for(asked: &[String], network: NetworkId) -> Vec<String> {
+    if asked.is_empty() {
+        written_in(network)
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect()
+    } else {
+        asked.to_vec()
+    }
+}
+
 /// Every address to start from, given what the operator asked for.
 ///
 /// What they asked for wins outright when they asked for anything, and there a
@@ -84,27 +100,23 @@ pub fn resolve_one(text: &str) -> Result<SocketAddr, String> {
 /// instead would hide it.
 ///
 /// With nothing asked for, the list written in above is used, and there a name
-/// that will not resolve is passed over. A machine whose network is not up yet
-/// at the moment the node starts should come up anyway and try the rest.
+/// that will not resolve is passed over rather than fatal. A machine whose
+/// name server is not up yet at the moment the node starts should come up
+/// anyway; the node asks again once it is running.
 pub fn start_from(asked: &[String], network: NetworkId) -> Result<Vec<SocketAddr>, String> {
+    let strict = !asked.is_empty();
     let mut found: Vec<SocketAddr> = Vec::new();
-    let mut keep = |addresses: Vec<SocketAddr>| {
+
+    for name in names_for(asked, network) {
+        let addresses = match resolve(&name) {
+            Ok(addresses) => addresses,
+            Err(error) if strict => return Err(error),
+            Err(_) => continue,
+        };
         for address in addresses {
             if !found.contains(&address) {
                 found.push(address);
             }
-        }
-    };
-
-    if asked.is_empty() {
-        for name in written_in(network) {
-            if let Ok(addresses) = resolve(name) {
-                keep(addresses);
-            }
-        }
-    } else {
-        for text in asked {
-            keep(resolve(text)?);
         }
     }
     Ok(found)

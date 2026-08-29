@@ -90,6 +90,13 @@ const ACCEPT_POLL: Duration = Duration::from_millis(50);
 /// How often the node looks for peers and saves its address book.
 const MAINTENANCE_PERIOD: Duration = Duration::from_millis(1_000);
 
+/// Seconds between two attempts to look up the names a node starts from.
+///
+/// Only ever reached by a node that has no seed address at all, so this is the
+/// pace of a machine waiting for its name server rather than of anything the
+/// network does.
+pub const NAME_LOOKUP_PERIOD: u64 = 30;
+
 /// Bytes of blocks a node keeps on disk before it writes its ledger down and
 /// drops what is below it.
 ///
@@ -199,6 +206,16 @@ struct Shared {
     /// cycle to break.
     log: Arc<Mutex<Option<Store>>>,
     book: Mutex<AddressBook>,
+    /// Names this node was told to start from, kept as names.
+    ///
+    /// A name is looked up again while the book holds no seed at all, because
+    /// a node started before its machine could resolve anything would
+    /// otherwise sit with nothing to dial and no way to hear of anybody, for
+    /// as long as it ran.
+    seed_names: Mutex<Vec<String>>,
+    /// When those names were last looked up, so a machine with no name server
+    /// asks every so often rather than every round.
+    names_looked_up_at: AtomicU64,
     directory: Option<PathBuf>,
     /// Bytes of blocks this node keeps on disk. `u64::MAX` keeps everything,
     /// which is what a node that offers the history to others does.
@@ -284,6 +301,12 @@ impl Shared {
 
     fn book(&self) -> MutexGuard<'_, AddressBook> {
         self.book.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn seed_names(&self) -> MutexGuard<'_, Vec<String>> {
+        self.seed_names
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     fn threads(&self) -> MutexGuard<'_, Vec<JoinHandle<()>>> {
@@ -779,6 +802,8 @@ impl Node {
             chain: Mutex::new(chain),
             log: Arc::new(Mutex::new(log)),
             book: Mutex::new(book),
+            seed_names: Mutex::new(Vec::new()),
+            names_looked_up_at: AtomicU64::new(0),
             directory,
             keep_bytes: AtomicU64::new(KEEP_BLOCK_BYTES),
             _lock: lock,
@@ -842,6 +867,18 @@ impl Node {
     /// this node starts is still tried again later rather than never known.
     pub fn remember_seed(&self, address: SocketAddr) {
         self.shared.book().insert_seed(address);
+    }
+
+    /// Names to start from, kept as names rather than as the addresses they
+    /// stand for today.
+    ///
+    /// An address resolved once at startup is an address a node has for good,
+    /// including when the name later means something else, and no address at
+    /// all when the lookup happened to fail. Held here, a name is asked again
+    /// while this node has no seed to dial, so one that starts before its
+    /// machine can resolve anything still joins on its own.
+    pub fn start_from_names(&self, names: Vec<String>) {
+        *self.shared.seed_names() = names;
     }
 
     /// Opens a connection to a peer, introduces this node, and remembers the
@@ -1810,6 +1847,7 @@ fn maintenance_loop(shared: &Arc<Shared>) {
         // Asking again matters: a peer that joined after this node introduced
         // itself is only ever learned about by asking a second time.
         shared.broadcast(None, &Message::GetPeers);
+        look_up_seed_names(shared, now);
         dial_from_book(shared, now);
         save_book(shared);
         collect_finished(shared);
@@ -2044,6 +2082,40 @@ fn collect_finished(shared: &Arc<Shared>) {
     }
     for handle in done {
         let _ = handle.join();
+    }
+}
+
+/// Turns the names this node starts from into addresses it can dial.
+///
+/// Only while the book holds no seed at all. That is the case this exists for:
+/// a node whose machine could not resolve anything at the moment it started
+/// has nothing to dial and no way to learn of anybody, and would sit there for
+/// as long as it ran, looking like a network that does not exist. Once one
+/// address lands it is kept for good and the book takes over, so this stops on
+/// its own and never runs again.
+///
+/// A lookup can block, so it is spaced out rather than tried every round.
+fn look_up_seed_names(shared: &Arc<Shared>, now: u64) {
+    if !shared.book().seeds().is_empty() {
+        return;
+    }
+    let last = shared.names_looked_up_at.load(Ordering::Relaxed);
+    if last > 0 && now.saturating_sub(last) < NAME_LOOKUP_PERIOD {
+        return;
+    }
+    shared.names_looked_up_at.store(now, Ordering::Relaxed);
+
+    let names = shared.seed_names().clone();
+    for name in names {
+        // Outside the book lock: a lookup with no name server to answer it
+        // takes seconds, and nothing else should wait on that.
+        let Ok(addresses) = crate::seeds::resolve(&name) else {
+            continue;
+        };
+        let mut book = shared.book();
+        for address in addresses {
+            book.insert_seed(address);
+        }
     }
 }
 
