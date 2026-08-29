@@ -358,7 +358,7 @@
         <div class="who you">toi</div>
         <div class="cost">une dizaine d'euros par an</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Sortir l'histoire de la mémoire</b>
           <span>Un nœud gardait en mémoire vive chaque bloc validé : vingt-cinq gigaoctets pour trente ans. Il lâche maintenant tout bloc trop ancien pour être annulé et le relit sur son disque si quelqu'un le demande. Mesuré : plus rien ne s'ajoute entre quatre cent mille blocs et huit cent mille.</span>
@@ -366,7 +366,7 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Le dernier octet par bloc</b>
           <span>Un nœud gardait l'empreinte de chaque bloc de la branche et l'index qui la retrouve : 1,3 Go à trente ans. Il n'en garde plus qu'une tous les mille vingt-quatre blocs, soit 492 ko, et lit le reste sur son disque. Les positions voyagent désormais sur le réseau, qui passe en version 3.</span>
@@ -374,7 +374,7 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Un débit par pair</b>
           <span>Rien ne limitait ce qu'un pair peut faire coûter à un nœud : deux mille demandes de cent vingt-huit blocs restaient sous le plafond de messages et faisaient un quart de million de lectures disque. Chaque pair a maintenant une allocation par fenêtre, dépensée selon ce que répondre coûte.</span>
@@ -382,7 +382,7 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Les limites qui ne se parlaient pas</b>
           <span>Les règles autorisaient un bloc de 2,3 Go qu'aucun réseau ne porte, et le pool comptait les transferts sans regarder leur poids : deux gigaoctets de mémoire offerts à qui les envoie. Quatre défauts du même type, corrigés le 28 août. Un bloc pèse maintenant 128 ko, un choix qui décide aussi de la mémoire d'un nœud et de la durée de vie d'une note.</span>
@@ -390,7 +390,7 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Rejoindre sans lire trente ans</b>
           <span>Le démarrage échantillonné voyage maintenant sur le réseau et se branche dans le nœud. Un nouveau venu pèse la chaîne sur 512 en-têtes tirés au sort, puis reçoit l'état en une trentaine de morceaux : 12 Mo au lieu de 2 067 Go de lecture. En dessous de mille blocs, lire reste moins cher, et le nœud choisit.</span>
@@ -398,7 +398,7 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Trouver qui peut répondre</b>
           <span>Servir un nouveau venu demande de garder tous les en-têtes ; presque personne ne le fait. Les nœuds annoncent donc s'ils archivent, et un nouveau venu ne demande qu'à celui qui peut répondre, en lisant bloc par bloc auprès des autres. Un nœud qui a reçu l'état ne propose pas de le transmettre : il ne l'a pas lu.</span>
@@ -406,7 +406,7 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Rejoindre marchait sur le papier</b>
           <span>Un nœud sait maintenant dire où il en est quand il rejoint. C'est en l'exigeant dans les tests que six défauts sont apparus : les preuves d'en-têtes étaient construites contre le mauvais arbre, l'identité de la chaîne pesée était perdue entre les deux étapes, un archiviste qui se tait laissait le nœud bloqué à vie, et un nœud qui avait rejoint annonçait zéro travail derrière lui, ce qui lui faisait croire n'importe quelle chaîne plus lourde. Aucun échange n'avait jamais abouti ; la lecture bloc par bloc rattrapait derrière et masquait tout.</span>
@@ -414,7 +414,7 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Un nœud qui a rejoint est un nœud</b>
           <span>Il n'écrivait rien sur son disque : les positions de son journal étaient des hauteurs, et le sien commence là où on le lui a remis. Il validait des blocs que personne ne pouvait lui demander et les perdait à chaque redémarrage. Il garde maintenant l'état reçu et repart dessus tout seul, sans dépendre d'un archiviste joignable à cet instant.</span>
@@ -422,7 +422,7 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Un portefeuille qu'on peut montrer</b>
           <span>Une commande ouvre une page sur ta machine : solde vérifié par toi-même, adresse à recevoir, formulaire d'envoi, où l'argent est posé, et ce qui s'est passé. La clé ne quitte jamais le programme ; le navigateur ne signe rien. Tout ce qui touche à l'argent est dans une bibliothèque à part, ce qui rend une application iPhone possible sans réécrire la partie dangereuse.</span>
@@ -430,7 +430,7 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Un nœud qui a rejoint peut accueillir</b>
           <span>Accueillir demande les en-têtes depuis le premier bloc, qu'un nœud arrivé par transfert n'a pas : la capacité d'accueil serait morte avec les nœuds ayant lu la chaîne entière. Il les réclame maintenant, et n'en croit aucun tant que l'arbre qu'ils forment ne redonne pas l'empreinte que son propre en-tête portait déjà. Le réseau passe en version 5.</span>
@@ -446,7 +446,7 @@
         <div class="who you">toi</div>
         <div class="cost">cinq minutes</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Les papiers décrivent enfin le code</b>
           <span>Un audit lit la spécification puis le code : un écart entre les deux est un signalement avant même qu'on ait regardé quoi que ce soit. Le whitepaper, le document de conception et le README annonçaient encore 813 octets par billet et 107 Mo, présentaient le démarrage échantillonné comme non écrit, et disaient que les archivistes sont payés à la demande. Tout est repris, et la section « limites » dit maintenant ce qui est réellement ouvert.</span>
@@ -454,7 +454,7 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>512, une borne et non un plancher</b>
           <span>Le nombre d'en-têtes qu'un arrivant ouvre était lu dans un tableau de mesures ; le code lui-même appelait ça « la dernière chose avant un protocole sur lequel on peut compter ». Il se déduit de l'hypothèse que la chaîne fait déjà : un faussaire qui détient un tiers du travail mondial doit inventer la moitié de sa chaîne. 512 tirages tiennent contre tout faussaire jusqu'à 45,7 % du travail mondial. Au-delà, aucun nombre ne protègerait : à la moitié, il suffit de miner.</span>
@@ -462,7 +462,7 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Ce qu'un pair hostile envoie</b>
           <span>Un nœud décode des octets choisis par des inconnus, et seule l'enveloppe était éprouvée. Cinq campagnes bombardent maintenant les décodeurs : octets au hasard, message valide tordu, tous les préfixes possibles, longueurs qui mentent, et les vérifications qui reconstruisent un registre entier. Deux exigences : rien ne casse, et ce qui est accepté se ré-encode à l'octet près.</span>
@@ -470,7 +470,7 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>N'importe quel nœud accueille un arrivant</b>
           <span>Accueillir quelqu'un demandait de prouver quel est le poids de la chaîne, ce que seul un archiviste pouvait faire : rejoindre le réseau dépendait donc de quelqu'un qui veuille bien porter un gigaoctet de mémoire. Les en-têtes et leur arbre vivent maintenant sur le disque de tout le monde, 182 octets par bloc, et le nœud annonce ce qu'il sait vraiment faire plutôt que ce qu'il archive. Un nœud ordinaire, qui n'archive rien et a jeté ses vieux blocs, accueille un nouveau venu.</span>
@@ -478,7 +478,7 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Le disque, lui, grandissait sans fin</b>
           <span>Ta thèse était vraie pour la mémoire et fausse pour le disque : rien n'effaçait jamais rien, donc chaque nœud gardait tous les blocs à jamais, soit jusqu'à 2,1 To sur trente ans. Un nœud écrit maintenant son propre état et jette les blocs en dessous. Il en garde un gigaoctet pour rendre service aux autres, et <span class="mono">--keep all</span> les garde tous pour qui veut offrir l'histoire. C'est précisément ce que le démarrage échantillonné a rendu possible.</span>
@@ -486,7 +486,7 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>L'archiviste ne tenait pas la distance</b>
           <span>Répondre à un nouveau venu demande 512 preuves, et chacune relisait tout l'arbre : 82 secondes sur une chaîne d'un million de blocs, alors que la réponse ne vaut que pour un bloc, donc une minute. Rejoindre le réseau aurait cessé de marcher au bout de deux ans, sans que rien ne le signale. Un archiviste garde maintenant les nœuds intermédiaires : cinq microsecondes par preuve, et un hachage de plus à chaque doublement de la chaîne.</span>
@@ -494,7 +494,7 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Et il se figeait en annulant</b>
           <span>Même cause de l'autre côté : défaire un bloc reconstruisait tout l'arbre, une fois par bloc annulé. Six minutes pour une réorganisation complète sur un million de blocs, la chaîne bloquée pendant ce temps, et pire à mesure qu'elle vieillit. C'est devenu une lecture par niveau, soit moins d'une microseconde.</span>
@@ -502,7 +502,7 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>192 octets pour une clé de 32</b>
           <span>Une clé publique était gardée sous sa forme calculée, utile pour vérifier souvent et inutile pour une note qui dort. Mesuré en isolant chaque structure : 192 des 244 octets d'une note. Le tiroir chaud passe de 107 à 68 Mo, contre 16 % sur la vérification d'une signature, soit neuf millisecondes par bloc plein.</span>
@@ -510,29 +510,13 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Compter des blocs ne borne rien</b>
           <span>Un nœud gardait quatre mille blocs concurrents sans regarder leur poids : près d'un gigaoctet offert à qui les envoie. Cinquième défaut de la même famille — deux limites dans deux fichiers dont personne n'avait fait le produit. La borne est maintenant en octets, et un test la relit contre ce qu'un téléphone porte.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
-      </div>
-      <div class="task">
-        <div class="task-what">
-          <b>Sortir de la mémoire les blocs annulables</b>
-          <span>Un nœud garde en mémoire les mille vingt-quatre derniers blocs pour pouvoir les annuler : 186 Mo sur une chaîne pleine, presque trois fois le tiroir chaud. Ils sont déjà sur son disque. Ce qui reste à écrire, c'est de les y lire au lieu de les tenir.</span>
-        </div>
-        <div class="who me">moi</div>
-        <div class="cost">à faire</div>
-      </div>
-      <div class="task">
-        <div class="task-what">
-          <b>Mettre les serveurs à jour</b>
-          <span>Les deux serveurs tournent une version d'avant le 28 août. Ils fonctionnent, mais sans aucune des corrections de ce jour. Une commande sur chacun.</span>
-        </div>
-        <div class="who you">toi</div>
-        <div class="cost">cinq minutes</div>
       </div>
       <div class="task">
         <div class="task-what">
@@ -601,7 +585,7 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Décider quelle chaîne est la plus lourde</b>
           <span>La distribution de FlyClient, le tirage contre le travail plutôt que contre les hauteurs, et le service par les archivistes. Calibré par la mesure : 512 tirages attrapent à coup sûr une chaîne qui surestime son travail de 1 %, pour un mégaoctet.</span>
@@ -609,7 +593,7 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Recevoir le grand livre d'un coup</b>
           <span>Un nouveau venu reçoit l'état entier au tip retenu et le vérifie contre l'en-tête, sans rien croire sur parole. Mesuré : 11 Mo pour une chaîne de n'importe quel âge, contre 2 067 Go à lire et valider autrement.</span>
@@ -617,7 +601,7 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Les deux fenêtres que rien n'engageait</b>
           <span>La fenêtre de grâce et la fenêtre des preuves décident toutes deux quels blocs sont valides, et aucune n'était engagée dans l'en-tête. Un nœud à qui on remet un état aurait refusé ce que tout le réseau accepte. Trouvés en écrivant le transfert, et par rien d'autre. Le réseau repart en testnet-3.</span>
@@ -625,45 +609,45 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>La plomberie qui porte tout ça</b>
-          <span>Les messages réseau, le découpage d'un transfert de 11 Mo en messages d'un, et le branchement dans le nœud pour qu'un démarrage s'en serve vraiment. Pas de question de conception restante : tout ce qui devait être décidé l'est.</span>
+          <span>Les messages réseau, le découpage d'un état de 12 Mo en messages d'un, et le branchement dans le nœud. Écrit et vérifié le 29 août — et c'est en le vérifiant qu'on a découvert que six défauts empêchaient tout échange d'aboutir.</span>
         </div>
         <div class="who me">moi</div>
-        <div class="cost">quelques jours</div>
+        <div class="cost">terminé</div>
       </div>
       <div class="task">
         <div class="task-what">
           <b>Les corps de blocs relus sur le disque</b>
-          <span>Un nœud garde en mémoire les mille blocs sur lesquels il peut encore revenir en arrière, soit 134 Mo. Il n'en a besoin que pour les rejouer, et ils sont déjà sur son disque. Les relire libérerait la taille des blocs de cette contrainte, et donc le débit du réseau.</span>
+          <span>Un nœud garde en mémoire les mille vingt-quatre blocs sur lesquels il peut encore revenir en arrière : 233 Mo au pire de ce que les règles autorisent. Il n'en a besoin que pour les rejouer, et ils sont déjà sur son disque. C'est le dernier poste du protocole, et le seul qui reste à écrire. Il touche au code qui décide des réorganisations, donc il mérite une séance à lui.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">quelques jours</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Alléger le tiroir</b>
-          <span>813 octets par billet aujourd'hui. Il y a de la marge, et chaque octet gagné est du téléphone rendu possible.</span>
+          <span>813 octets par billet, dont 192 pour une clé publique de 32 gardée sous sa forme calculée. C'est 516 aujourd'hui, et le tiroir plein passe de 107 à 68 Mo. Il reste de la marge dans l'arbre, qui pèse maintenant plus de la moitié du total.</span>
         </div>
         <div class="who me">moi</div>
-        <div class="cost">quelques jours</div>
+        <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Spécifier les archivistes</b>
-          <span>L'étude les a fait passer de confort à nécessité : le théorème montre qu'un état succinct impose que quelqu'un tienne les preuves à jour. Comment on les trouve sur le réseau, comment ils sont payés, et comment un portefeuille s'en passe tant qu'il reste à jour.</span>
+          <span>La question était : comment les payer, puisqu'ils portent le seul coût qui grandisse. La réponse a déplacé la question. Ce dont le réseau a besoin, ce sont les en-têtes — 129 Mo par an — donc tout nœud le fait et il n'y a personne à payer. Reste un service de confort, dont le réseau se passe : rendre sa preuve à qui l'a perdue.</span>
         </div>
         <div class="who me">moi</div>
-        <div class="cost">une semaine</div>
+        <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Un portefeuille qui n'est pas un terminal</b>
-          <span>Aujourd'hui il faut taper des commandes. Une application de bureau d'abord, un téléphone ensuite. C'est ce qui sépare un projet technique d'une monnaie utilisable.</span>
+          <span>Une commande ouvre une page sur ta machine : solde, adresse, envoi, historique. La clé ne quitte jamais le programme. Tout ce qui touche à l'argent vit dans une bibliothèque séparée, ce qui rend le téléphone possible sans réécrire la partie dangereuse.</span>
         </div>
         <div class="who me">moi</div>
-        <div class="cost">deux à trois semaines</div>
+        <div class="cost">terminé</div>
       </div>
       <div class="task">
         <div class="task-what">
