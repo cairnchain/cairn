@@ -231,10 +231,10 @@
           <span class="mono">pkill -f "cairnd --network testnet-2"</span>
         </p>
         <p class="resume-note">
-          Les serveurs et le mineur tournent une version d'avant le 28 août.
-          Le protocole est passé en version 3 : la version 2 et la version 3
-          ne se parlent pas, donc les trois machines se mettent à jour
-          ensemble ou pas du tout.
+          Les serveurs et le mineur tournent testnet-2, qui n'existe plus dans
+          le code : le réseau est reparti en testnet-3 après deux corrections
+          de ce à quoi un en-tête s'engage. Les trois machines se mettent à
+          jour ensemble, et repartent d'une chaîne vide.
           <span class="mono">sudo env MINE=… SEED=… sh
           /usr/local/src/cairn/deploy/install.sh</span>
         </p>
@@ -242,16 +242,15 @@
       <div>
         <h3>La prochaine chose que j'écris</h3>
         <p>
-          <b>Le protocole d'échantillonnage.</b> C'est ce qui reste de gros, et
-          ce qui décide si un nouveau venu peut rejoindre le réseau sans
-          télécharger toute son histoire. Les en-têtes s'y engagent déjà depuis
-          le 27 août, le prototype est calibré, le mécanisme lui-même n'est pas
-          écrit.
+          <b>La plomberie du démarrage échantillonné.</b> Le protocole est
+          écrit et vérifié : rejoindre une chaîne de trente ans coûte 12 Mo au
+          lieu de 2 067 Go. Ce qui manque, c'est de le faire voyager sur le
+          réseau et de le brancher dans le nœud, sans nouvelle question de
+          conception.
         </p>
         <p class="resume-note">
-          La mémoire d'un nœud ne grandit plus avec la chaîne : c'est fait, et
-          mesuré. Ensuite : spécifier les archivistes, un portefeuille qui
-          n'est pas un terminal.
+          Ensuite : spécifier les archivistes, un portefeuille qui n'est pas un
+          terminal, alléger le tiroir.
         </p>
       </div>
       <div>
@@ -467,11 +466,35 @@
       </div>
       <div class="task">
         <div class="task-what">
-          <b>Le protocole d'échantillonnage</b>
-          <span>La distribution de FlyClient avec ses paramètres démontrés, les messages réseau, et le service par les archivistes. Le prototype a montré pourquoi il ne faut surtout pas improviser la nôtre : avec un tirage uniforme, vingt blocs falsifiés au bout de la chaîne passent inaperçus neuf fois sur dix.</span>
+          <b>Décider quelle chaîne est la plus lourde</b>
+          <span>La distribution de FlyClient, le tirage contre le travail plutôt que contre les hauteurs, et le service par les archivistes. Calibré par la mesure : 512 tirages attrapent à coup sûr une chaîne qui surestime son travail de 1 %, pour un mégaoctet.</span>
         </div>
         <div class="who me">moi</div>
-        <div class="cost">une à deux semaines</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Recevoir le grand livre d'un coup</b>
+          <span>Un nouveau venu reçoit l'état entier au tip retenu et le vérifie contre l'en-tête, sans rien croire sur parole. Mesuré : 11 Mo pour une chaîne de n'importe quel âge, contre 2 067 Go à lire et valider autrement.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Les deux fenêtres que rien n'engageait</b>
+          <span>La fenêtre de grâce et la fenêtre des preuves décident toutes deux quels blocs sont valides, et aucune n'était engagée dans l'en-tête. Un nœud à qui on remet un état aurait refusé ce que tout le réseau accepte. Trouvés en écrivant le transfert, et par rien d'autre. Le réseau repart en testnet-3.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>La plomberie qui porte tout ça</b>
+          <span>Les messages réseau, le découpage d'un transfert de 11 Mo en messages d'un, et le branchement dans le nœud pour qu'un démarrage s'en serve vraiment. Pas de question de conception restante : tout ce qui devait être décidé l'est.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">quelques jours</div>
       </div>
       <div class="task">
         <div class="task-what">
@@ -677,8 +700,8 @@
   </div>
 
   <footer>
-    <span>Cairn · route jusqu'au mainnet · v7</span>
-    <span>77 commits · 315 tests</span>
+    <span>Cairn · route jusqu'au mainnet · v8</span>
+    <span>88 commits · 346 tests</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 
