@@ -21,6 +21,9 @@ const MAX_LINE_BYTES: usize = 2 * 1024;
 /// queued, so a flood costs threads that are already bounded.
 const MAX_CONNECTIONS: usize = 64;
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bytes a form body may reach. A spend names an address, an amount and a
+/// fee; anything past this is not one.
+const MAX_BODY_BYTES: usize = 4096;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What a caller asked for, once the head has been read.
@@ -32,21 +35,46 @@ pub struct Request {
     pub query: String,
     /// True for HEAD, where the body is computed but not sent.
     pub head_only: bool,
+    /// True for POST, which is how anything that changes something arrives.
+    ///
+    /// A GET that spends money would be a link: something a page could be
+    /// made to follow, and something a browser would keep in its history and
+    /// offer to repeat.
+    pub post: bool,
+    /// The form body of a POST, undecoded. Empty for anything else.
+    pub body: String,
+    /// The Host header as given, so a server can refuse a name it does not
+    /// answer to.
+    pub host: String,
 }
 
 impl Request {
     /// The value of `name` in the query string, percent-decoded.
     pub fn parameter(&self, name: &str) -> Option<String> {
-        self.query.split('&').find_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
-            (key == name).then(|| percent_decode(value))
-        })
+        field(&self.query, name)
+    }
+
+    /// The value of `name` in a form body, percent-decoded.
+    pub fn field(&self, name: &str) -> Option<String> {
+        field(&self.body, name)
     }
 
     /// The path with `prefix` removed, if it starts with it.
     pub fn after(&self, prefix: &str) -> Option<&str> {
         self.path.strip_prefix(prefix)
     }
+}
+
+/// Reads one `name=value` out of a query string or a form body.
+///
+/// Plus signs are spaces in a form, which is the one place this differs from
+/// a path: a caller writing `a+b` in a field means `a b`, and a wallet that
+/// read it as `a+b` would refuse an address it was given correctly.
+fn field(text: &str, name: &str) -> Option<String> {
+    text.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then(|| percent_decode(&value.replace('+', " ")))
+    })
 }
 
 /// What to send back.
@@ -173,10 +201,22 @@ fn read_request<R: io::Read>(reader: &mut R) -> Result<Option<Request>, u16> {
 
     // Drain the header block so the caller sees a complete exchange rather
     // than a reset, and so a request that never ends is cut off by the cap.
+    // Two of them are kept: what host the caller thinks it is talking to, and
+    // how long a body to expect.
+    let mut host = String::new();
+    let mut length = 0usize;
     loop {
         let line = read_line(reader, &mut consumed)?;
         if line.is_empty() {
             break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            let value = value.trim();
+            if name.eq_ignore_ascii_case("host") {
+                value.clone_into(&mut host);
+            } else if name.eq_ignore_ascii_case("content-length") {
+                length = value.parse().map_err(|_| 400u16)?;
+            }
         }
     }
 
@@ -188,9 +228,10 @@ fn read_request<R: io::Read>(reader: &mut R) -> Result<Option<Request>, u16> {
     if !version.starts_with("HTTP/1.") || parts.next().is_some() {
         return Err(400);
     }
-    let head_only = match method {
-        "GET" => false,
-        "HEAD" => true,
+    let (head_only, post) = match method {
+        "GET" => (false, false),
+        "HEAD" => (true, false),
+        "POST" => (false, true),
         _ => return Ok(None),
     };
 
@@ -205,10 +246,25 @@ fn read_request<R: io::Read>(reader: &mut R) -> Result<Option<Request>, u16> {
         return Err(400);
     }
 
+    // Read only for a POST, and only up to what the cap allows, so a caller
+    // announcing a body it never sends costs a timeout rather than memory.
+    let mut body = String::new();
+    if post {
+        if length > MAX_BODY_BYTES {
+            return Err(413);
+        }
+        let mut bytes = vec![0u8; length];
+        reader.read_exact(&mut bytes).map_err(|_| 400u16)?;
+        body = String::from_utf8(bytes).map_err(|_| 400u16)?;
+    }
+
     Ok(Some(Request {
         path,
         query: query.to_owned(),
         head_only,
+        post,
+        body,
+        host,
     }))
 }
 
@@ -345,7 +401,24 @@ mod tests {
             path: path.to_owned(),
             query: query.to_owned(),
             head_only: false,
+            post: false,
+            body: String::new(),
+            host: String::new(),
         }
+    }
+
+    /// A form sends a space as a plus, and a path does not. Reading a field
+    /// the way a path is read would hand back an address with a plus where a
+    /// space belongs, and refuse something the person typed correctly.
+    #[test]
+    fn a_form_field_reads_a_plus_as_a_space() {
+        let mut request = request("/api/send", "");
+        request.post = true;
+        request.body = "to=ab+cd&amount=1.5&note=a%20b".to_owned();
+        assert_eq!(request.field("to").as_deref(), Some("ab cd"));
+        assert_eq!(request.field("amount").as_deref(), Some("1.5"));
+        assert_eq!(request.field("note").as_deref(), Some("a b"));
+        assert_eq!(request.field("missing"), None);
     }
 
     #[test]
@@ -393,7 +466,10 @@ mod tests {
     /// refused rather than half understood.
     #[test]
     fn a_method_this_server_does_not_answer_is_turned_away() {
-        assert!(head("POST /api/status HTTP/1.1\r\n\r\n").unwrap().is_none());
+        // POST is answered now, so the method that is not is one of the rest.
+        assert!(head("PATCH /api/status HTTP/1.1\r\n\r\n")
+            .unwrap()
+            .is_none());
         assert!(head("PUT / HTTP/1.1\r\n\r\n").unwrap().is_none());
         assert!(head("DELETE / HTTP/1.1\r\n\r\n").unwrap().is_none());
     }
