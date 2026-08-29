@@ -37,13 +37,25 @@ that runs correctly and does the wrong thing:
 sudo env SEED=203.0.113.10:9944 sh /usr/local/src/cairn/deploy/install.sh
 ```
 
-## The names
+## The name
 
-`seed.cairnchain.org` and `seed2.cairnchain.org` are what the program looks
-up first, and each should have an `A` record pointing at one of these
-machines. The raw addresses are written in beside them, so a node still
-starts when a name cannot be resolved; the names are there so a machine can
-be replaced by editing a zone file rather than by publishing a release.
+`seed.cairnchain.org` is the one starting point written into every program.
+It should carry an `A` record for each machine that is worth starting from,
+and a node tries all of them.
+
+That is where redundancy lives, and it is deliberate that it lives there and
+not in the source. Adding an entry point is a line in the zone file, taking
+one away is deleting that line, and neither asks anybody to download anything
+again. No address is written into the program: an address is a machine
+somebody rents today and somebody else rents in two years, and a list of them
+in public source would send every fresh node in the world knocking on a
+stranger's door.
+
+The one thing this costs is that a network with a single name has a single
+person who could lose it. The answer is not a fallback address, which would
+be blocked as easily as the name; it is a second name that somebody else
+owns, and it goes into `crates/cairn-net/src/seeds.rs` the day somebody else
+runs a node worth starting from.
 
 ## What the script does
 

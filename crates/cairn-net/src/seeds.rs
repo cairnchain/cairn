@@ -3,8 +3,8 @@
 //! A node with an empty address book has to be told about one machine before
 //! it can be told about the rest, and asking somebody who has just downloaded
 //! a program to go and find an address first is asking them not to run it. So
-//! a short list is written into the program, in the open, exactly as the first
-//! block is.
+//! a starting point is written into the program, in the open, exactly as the
+//! first block is.
 //!
 //! This is the one place the network leans on somebody. It is worth saying
 //! plainly what that does and does not mean. A seed hands over two things:
@@ -14,9 +14,18 @@
 //! has met anybody at all keeps its own book of addresses and never reads this
 //! list again.
 //!
-//! Names come first so the machines behind them can move without anyone
-//! downloading anything again, and the addresses those names point at today
-//! come after, so a node still starts when the name cannot be resolved.
+//! Names, and no addresses behind them. An address written here would be a
+//! machine somebody rents today and somebody else rents in two years, and
+//! every fresh node in the world would go and knock on a stranger's door. It
+//! would also buy less than it looks: against a name that is blocked rather
+//! than merely down, three addresses are no harder to block than one. So
+//! redundancy belongs in the zone file, where a name can carry several
+//! machines and gain another without anybody downloading anything again.
+//!
+//! What that costs is worth naming too. A network whose only starting point
+//! is one name under one domain has one person who could lose it. The answer
+//! is not a fallback address, it is a second name that somebody else owns, and
+//! that goes in here the day somebody else runs a node worth starting from.
 
 use std::net::{SocketAddr, ToSocketAddrs};
 
@@ -26,12 +35,10 @@ use cairn_ledger::note::NetworkId;
 pub const DEFAULT_PORT: u16 = 9944;
 
 /// Where to start on the third test network.
-const TESTNET_3: [&str; 4] = [
-    "seed.cairnchain.org:9944",
-    "seed2.cairnchain.org:9944",
-    "213.32.69.172:9944",
-    "92.222.100.238:9944",
-];
+///
+/// One name, carrying however many machines the zone file says. Adding an
+/// entry point is a line in that file; it is not a release.
+const TESTNET_3: [&str; 1] = ["seed.cairnchain.org:9944"];
 
 /// The starting points written into the program for `network`.
 ///
@@ -47,9 +54,9 @@ pub fn written_in(network: NetworkId) -> &'static [&'static str] {
 
 /// Every address `text` names.
 ///
-/// All of them, not the first: that is what lets one name stand for two
-/// machines, and what lets a machine be replaced by editing a zone file rather
-/// than by cutting a release.
+/// All of them, not the first. That is what carries the redundancy this list
+/// deliberately does not: one name answers with every machine behind it, and
+/// a node tries them all.
 pub fn resolve(text: &str) -> Result<Vec<SocketAddr>, String> {
     let found: Vec<SocketAddr> = text
         .to_socket_addrs()
