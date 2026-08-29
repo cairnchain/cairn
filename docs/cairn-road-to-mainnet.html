@@ -242,12 +242,12 @@
       <div>
         <h3>La prochaine chose que j'écris</h3>
         <p>
-          <b>Sortir de la mémoire les blocs annulables.</b> Un nœud garde
-          jusqu'à 233 Mo de blocs en mémoire pour pouvoir les annuler, alors
-          qu'ils sont déjà sur son disque. C'est borné et ça tient sur un
-          téléphone, donc c'est du confort et non une correction — mais c'est
-          le dernier poste qui reste, et il touche au cœur du système, donc il
-          mérite une séance à lui plutôt que la fin d'une longue.
+          <b>Plus rien d'obligatoire.</b> Le protocole est écrit. Ce qui reste
+          côté code est du choix : rendre le portefeuille plus agréable,
+          préparer le téléphone, ou continuer à chercher des défauts pendant
+          que le réseau tourne — c'est cette dernière qui a le meilleur
+          rendement, puisque chacun trouvé avant l'audit est de l'argent qui
+          reste dans ta poche.
         </p>
         <p class="resume-note">
           Ensuite : un portefeuille qui n'est pas un terminal, et sortir de la
@@ -617,13 +617,13 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Les corps de blocs relus sur le disque</b>
-          <span>Un nœud garde en mémoire les mille vingt-quatre blocs sur lesquels il peut encore revenir en arrière : 233 Mo au pire de ce que les règles autorisent. Il n'en a besoin que pour les rejouer, et ils sont déjà sur son disque. C'est le dernier poste du protocole, et le seul qui reste à écrire. Il touche au code qui décide des réorganisations, donc il mérite une séance à lui.</span>
+          <span>Un nœud gardait le contenu des mille vingt-quatre blocs sur lesquels il peut revenir en arrière : 186 Mo, pour des blocs déjà sur son disque. Il n'en garde plus que soixante-quatre et les en-têtes du reste, soit 12 Mo, et relit un bloc dans le seul cas qui le demande — un changement de branche qui échoue en route et doit remettre l'ancienne. Le dernier poste du protocole.</span>
         </div>
         <div class="who me">moi</div>
-        <div class="cost">quelques jours</div>
+        <div class="cost">terminé</div>
       </div>
       <div class="task finished">
         <div class="task-what">
@@ -826,8 +826,8 @@
   </div>
 
   <footer>
-    <span>Cairn · route jusqu'au mainnet · v15</span>
-    <span>133 commits · 408 tests</span>
+    <span>Cairn · route jusqu'au mainnet · v16</span>
+    <span>139 commits · 410 tests</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 
