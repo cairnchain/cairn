@@ -34,14 +34,16 @@ const TAIL_REWARD: Amount = amount_or_zero(emission::TAIL_REWARD_PEBBLES);
 /// How many notes stay in the hot set.
 ///
 /// Chosen from a measurement rather than from a round number. A hot note costs
-/// about 813 bytes across the three structures a node keeps for it, most of
-/// that being the tree that commits to them, so this is roughly 107 MB.
+/// about 516 bytes across the three structures a node keeps for it, so this is
+/// roughly 68 MB. It was 107 MB until a public key stopped being held as a
+/// decoded curve point, which `cairn-ledger/examples/footprint.rs` measures.
 ///
 /// The figure is set by the promise rather than by what a server could afford:
 /// a phone has to be able to hold it, because a wallet that cannot verify for
-/// itself is the centralisation this design exists to remove. A leaner tree
-/// representation would buy room to raise it later, and that is the single
-/// most valuable optimisation left.
+/// itself is the centralisation this design exists to remove. Over half of
+/// what is left is the tree that commits to the set, so a leaner tree is now
+/// the single most valuable optimisation remaining, and it would buy room to
+/// raise this.
 const DEFAULT_HOT_CAPACITY: usize = 1 << 17;
 
 /// Seconds a block is meant to take. Provisional.

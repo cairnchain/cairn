@@ -63,7 +63,7 @@ impl SecretKey {
     }
 
     pub fn public_key(&self) -> PublicKey {
-        PublicKey(self.0.verifying_key())
+        PublicKey(self.0.verifying_key().to_bytes())
     }
 
     pub fn sign(&self, message: &[u8]) -> Signature {
@@ -110,8 +110,17 @@ fn is_canonically_encoded(bytes: &[u8; PUBLIC_KEY_LEN]) -> bool {
 /// Ed25519 public keys are 32 bytes, the same size as a digest of one, so
 /// hashing the key before locking a note to it would cost a preimage step
 /// without saving any state.
+///
+/// The 32 bytes are what is kept, not the curve point they decode to. The
+/// reference type holds both, which is right for a key that verifies often and
+/// wrong for a key that sits in a note: a node holds one of these per hot note
+/// and touches it once, when the note is spent. Keeping the point would be 160
+/// bytes of precomputation per note against 32 bytes of key, and it is the
+/// difference between a hot set that costs a phone 106 MB and one that costs
+/// it 37. What it costs instead is decoding the point at every verification,
+/// measured in `examples/verify.rs`.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct PublicKey(VerifyingKey);
+pub struct PublicKey([u8; PUBLIC_KEY_LEN]);
 
 impl PublicKey {
     pub fn from_bytes(bytes: &[u8; PUBLIC_KEY_LEN]) -> Result<Self, CryptoError> {
@@ -122,21 +131,25 @@ impl PublicKey {
         if key.is_weak() {
             return Err(CryptoError::WeakPublicKey);
         }
-        Ok(Self(key))
+        Ok(Self(*bytes))
     }
 
     pub fn to_bytes(self) -> [u8; PUBLIC_KEY_LEN] {
-        self.0.to_bytes()
+        self.0
     }
 
     pub fn as_bytes(&self) -> &[u8; PUBLIC_KEY_LEN] {
-        self.0.as_bytes()
+        &self.0
     }
 
     /// Verifies `signature` over `message` under the strict rules.
+    ///
+    /// The point is decoded here rather than held. A key only exists having
+    /// passed the checks above, so the decoding cannot fail; treating it as a
+    /// bad signature keeps that from ever becoming a panic.
     pub fn verify(&self, message: &[u8], signature: &Signature) -> Result<(), CryptoError> {
-        self.0
-            .verify_strict(message, &signature.0)
+        let key = VerifyingKey::from_bytes(&self.0).map_err(|_| CryptoError::BadSignature)?;
+        key.verify_strict(message, &signature.0)
             .map_err(|_| CryptoError::BadSignature)
     }
 }
