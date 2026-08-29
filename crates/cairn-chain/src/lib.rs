@@ -75,6 +75,21 @@ pub const MAX_REORG_DEPTH: usize = 1_024;
 /// to, so holding its blocks is holding history nobody will ask for.
 const MAX_SIDE_BLOCKS: usize = 4_096;
 
+/// Bytes of blocks off the followed branch kept before the oldest are dropped.
+///
+/// A count of blocks does not bound memory, because a block is not a fixed
+/// size. Counting them alone let an adversary offer four thousand blocks at
+/// the largest the rules allow, which is most of a gigabyte held on the word
+/// of a peer. It is the same shape of defect as a pool that counted transfers
+/// rather than bytes: two limits written in two files whose product nobody had
+/// worked out.
+///
+/// Thirty two megabytes is hundreds of full blocks and tens of thousands of
+/// ordinary ones, which is far past any reorganisation a live network
+/// produces. A branch cut short by this is not lost, only forgotten: it is
+/// asked for again if it turns out to matter.
+const MAX_SIDE_BYTES: usize = 32 * 1024 * 1024;
+
 /// Identifiers of blocks known to be invalid, held before the set is cleared.
 ///
 /// Remembering a bad block is what stops it being revalidated every time it
@@ -136,6 +151,12 @@ struct StoredBlock {
     block: Block,
     /// Work of this block plus every block behind it.
     total_work: u128,
+    /// What this block takes on the wire, measured once when it arrives.
+    ///
+    /// Held rather than recomputed because what it bounds is checked on every
+    /// block, and encoding a full one to ask its size would cost more than
+    /// keeping the answer.
+    bytes: usize,
 }
 
 /// Positions a locator may name.
@@ -317,6 +338,9 @@ impl Branch {
 pub struct ChainStore {
     params: ConsensusParams,
     blocks: HashMap<Hash32, StoredBlock>,
+    /// Wire bytes of every block held in `blocks`, so what bounds them can be
+    /// checked without walking the map on each arrival.
+    held_bytes: usize,
     /// Blocks that failed to apply. Kept so the same block is never retried.
     invalid: HashSet<Hash32>,
     /// The branch this node follows, held as far back as it can still change
@@ -371,6 +395,7 @@ impl ChainStore {
         Self {
             params,
             blocks: HashMap::new(),
+            held_bytes: 0,
             invalid: HashSet::new(),
             branch: Branch::default(),
             applied: HashMap::new(),
@@ -901,7 +926,7 @@ impl ChainStore {
             let total_work = self
                 .total_work()
                 .saturating_add(work_of(block.header.difficulty));
-            self.blocks.insert(id, StoredBlock { block, total_work });
+            self.hold(id, block, total_work);
             return self.follow(id, now);
         }
 
@@ -931,7 +956,7 @@ impl ChainStore {
                 .saturating_add(work_of(block.header.difficulty))
         };
 
-        self.blocks.insert(id, StoredBlock { block, total_work });
+        self.hold(id, block, total_work);
 
         if total_work <= self.total_work() {
             // Ties keep the block already followed. Reorganising for no gain in
@@ -1062,9 +1087,108 @@ impl ChainStore {
                 break;
             };
             self.applied.remove(&id);
-            self.blocks.remove(&id);
+            self.release(&id);
             self.undo_from = self.undo_from.saturating_add(1);
         }
+    }
+
+    /// Wire bytes of every block this node is holding in memory.
+    ///
+    /// What bounds a node's memory, and what the ceiling in
+    /// [`MAX_SIDE_BYTES`] is written against.
+    #[must_use]
+    pub fn held_bytes(&self) -> usize {
+        self.held_bytes
+    }
+
+    /// The most this node will ever hold in blocks.
+    ///
+    /// The window it may have to undo, at the largest block the rules allow,
+    /// plus what it keeps of branches it is not on. Anything that raises one
+    /// of the three has to be read against this.
+    #[must_use]
+    pub fn held_bytes_ceiling(params: &ConsensusParams) -> usize {
+        MAX_REORG_DEPTH
+            .saturating_mul(params.max_block_bytes)
+            .saturating_add(MAX_SIDE_BYTES)
+    }
+
+    /// Takes a block into memory, keeping the byte count with it.
+    fn hold(&mut self, id: Hash32, block: Block, total_work: u128) {
+        let bytes = block.encode().len();
+        if let Some(replaced) = self.blocks.insert(
+            id,
+            StoredBlock {
+                block,
+                total_work,
+                bytes,
+            },
+        ) {
+            self.held_bytes = self.held_bytes.saturating_sub(replaced.bytes);
+        }
+        self.held_bytes = self.held_bytes.saturating_add(bytes);
+    }
+
+    /// Drops one block, keeping the byte count with it.
+    fn release(&mut self, id: &Hash32) {
+        if let Some(dropped) = self.blocks.remove(id) {
+            self.held_bytes = self.held_bytes.saturating_sub(dropped.bytes);
+        }
+    }
+
+    /// Recomputes the byte count after a sweep that dropped many at once.
+    fn recount(&mut self) {
+        self.held_bytes = self
+            .blocks
+            .values()
+            .map(|stored| stored.bytes)
+            .fold(0usize, usize::saturating_add);
+    }
+
+    /// Bytes of blocks that are not on the followed branch.
+    fn side_bytes(&self) -> usize {
+        let branch = &self.branch;
+        self.blocks
+            .values()
+            .filter(|stored| branch.height_of(&stored.block.header.id()).is_none())
+            .map(|stored| stored.bytes)
+            .fold(0usize, usize::saturating_add)
+    }
+
+    /// Drops the oldest blocks off the followed branch until what is held off
+    /// it is back under [`MAX_SIDE_BYTES`].
+    ///
+    /// Never touches the branch being followed: those are the blocks a
+    /// reorganisation has to undo, and losing one would leave the node unable
+    /// to do it.
+    fn forget_oldest_side_blocks(&mut self) {
+        let mut over = self.side_bytes();
+        if over <= MAX_SIDE_BYTES {
+            return;
+        }
+        let branch = &self.branch;
+        let mut candidates: Vec<(u64, Hash32, usize)> = self
+            .blocks
+            .values()
+            .filter_map(|stored| {
+                let id = stored.block.header.id();
+                branch.height_of(&id).is_none().then_some((
+                    stored.block.header.height,
+                    id,
+                    stored.bytes,
+                ))
+            })
+            .collect();
+        candidates.sort_unstable_by_key(|(height, id, _)| (*height, *id));
+
+        for (_, id, bytes) in candidates {
+            if over <= MAX_SIDE_BYTES {
+                break;
+            }
+            self.blocks.remove(&id);
+            over = over.saturating_sub(bytes);
+        }
+        self.recount();
     }
 
     /// Drops blocks on branches that can no longer be switched to.
@@ -1080,7 +1204,9 @@ impl ChainStore {
     /// branches accumulated with nothing to clear them.
     fn forget_unreachable_branches(&mut self) {
         let limit = MAX_REORG_DEPTH.saturating_add(MAX_SIDE_BLOCKS);
-        if self.blocks.len() <= limit {
+        let by_count = self.blocks.len() > limit;
+        let by_bytes = self.held_bytes > Self::held_bytes_ceiling(&self.params);
+        if !by_count && !by_bytes {
             return;
         }
         let Some(cutoff) = self
@@ -1094,6 +1220,12 @@ impl ChainStore {
             branch.height_of(id).is_some() || stored.block.header.height >= cutoff
         });
         self.invalid.retain(|id| branch.height_of(id).is_none());
+        self.recount();
+
+        // What is left inside the window can still be more than the window is
+        // worth holding, since a block inside it may be as large as the rules
+        // allow. Dropping by age is what bounds that.
+        self.forget_oldest_side_blocks();
     }
 
     fn apply(&mut self, id: Hash32, now: u64) -> Result<(), ChainError> {

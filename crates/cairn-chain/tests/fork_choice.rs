@@ -15,6 +15,7 @@ use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
+use cairn_primitives::codec::Encode;
 
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
@@ -547,5 +548,58 @@ fn rival_branches_do_not_pile_up_forever() {
     assert!(
         held <= MAX_REORG_DEPTH + 4_096,
         "holding {held} blocks, which is more than the window and its branches"
+    );
+}
+
+/// A count of blocks does not bound memory, because a block is not a fixed
+/// size. What bounds it is the bytes, so the count of those has to follow
+/// every block taken in and every block let go.
+#[test]
+fn what_is_held_is_counted_in_bytes_and_the_count_follows() {
+    let miner = wallet(1);
+    let mut shared = Branch::new(params());
+    let mut store = ChainStore::new(params());
+
+    assert_eq!(store.held_bytes(), 0, "nothing held, nothing counted");
+
+    let blocks = shared.mine_empty(&miner, 12, 600);
+    let sent: usize = blocks.iter().map(|block| block.encode().len()).sum();
+    feed(&mut store, &blocks);
+    assert_eq!(
+        store.held_bytes(),
+        sent,
+        "the count is the blocks, not an estimate of them"
+    );
+
+    // The same block twice is one block, and must not be counted twice.
+    let again = blocks.last().unwrap().clone();
+    let _ = store.add_block(again, NOW);
+    assert_eq!(store.held_bytes(), sent, "and a block seen twice is one");
+
+    // Running past the window drops the oldest, and the count comes down with
+    // them rather than standing still.
+    let far = shared.mine_empty(&miner, MAX_REORG_DEPTH + 8, 600);
+    feed(&mut store, &far);
+    let counted: usize = store.held_bytes();
+    assert!(
+        counted < sent + far.iter().map(|block| block.encode().len()).sum::<usize>(),
+        "blocks left memory and the count stayed behind"
+    );
+}
+
+/// The ceiling is the product of three numbers written in two files, which is
+/// the shape of defect this exists to stop: raising the block size or the
+/// reorganisation window silently raises what a node must hold.
+#[test]
+fn the_most_a_node_will_hold_stays_something_a_phone_has() {
+    let ceiling = ChainStore::held_bytes_ceiling(&params());
+    // Wire bytes, which is what can be counted here. A decoded block costs
+    // about 1.4 times that, measured in `examples/window.rs`, so this ceiling
+    // is roughly 235 MB of memory.
+    assert!(
+        ceiling <= 192 * 1024 * 1024,
+        "a node may be made to hold {ceiling} bytes of blocks, and half again \
+         that in memory, which is past what the promise that it runs on a \
+         phone can carry"
     );
 }
