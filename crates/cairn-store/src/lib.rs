@@ -105,6 +105,16 @@ pub struct Recovered {
     pub discarded_bytes: u64,
 }
 
+/// Opens a scratch file, for holding a handle somewhere harmless.
+fn hold(path: &Path) -> Result<File, StoreError> {
+    Ok(OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?)
+}
+
 /// An append only record of every block a node has accepted.
 ///
 /// Two files: the records themselves, and where each one ends. What this holds
@@ -162,6 +172,7 @@ impl BlockLog {
         // point at nothing, so they go.
         let _ = std::fs::remove_file(directory.join(format!("{BLOCK_LOG}.part")));
         let _ = std::fs::remove_file(directory.join(format!("{BLOCK_INDEX}.part")));
+        let _ = std::fs::remove_file(directory.join(format!("{BLOCK_LOG}.hold")));
 
         let mut log = Self {
             file,
@@ -273,17 +284,28 @@ impl BlockLog {
         // index to be rebuilt.
         let staged_log = self.directory.join(format!("{BLOCK_LOG}.part"));
         let staged_index = self.directory.join(format!("{BLOCK_INDEX}.part"));
+        let index_path = self.directory.join(BLOCK_INDEX);
         std::fs::write(&staged_log, &kept)?;
         std::fs::write(&staged_index, &written)?;
-        std::fs::rename(&staged_log, &self.path)?;
-        std::fs::rename(&staged_index, self.directory.join(BLOCK_INDEX))?;
 
-        // The handles held here still point at the files that were replaced.
+        // Both handles are let go of before the move. Unix renames over an
+        // open file happily; Windows refuses, and a node is meant to run on
+        // both. They point at a scratch file for the two lines it takes, since
+        // a `File` closes when it is dropped and there is no other way to say
+        // so.
+        let scratch = self.directory.join(format!("{BLOCK_LOG}.hold"));
+        self.file = hold(&scratch)?;
+        self.index = hold(&scratch)?;
+
+        std::fs::rename(&staged_log, &self.path)?;
+        std::fs::rename(&staged_index, &index_path)?;
+
         self.file = OpenOptions::new().read(true).write(true).open(&self.path)?;
         self.index = OpenOptions::new()
             .read(true)
             .write(true)
-            .open(self.directory.join(BLOCK_INDEX))?;
+            .open(&index_path)?;
+        let _ = std::fs::remove_file(&scratch);
 
         self.count = ends.len();
         self.first = height;
