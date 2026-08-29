@@ -494,14 +494,35 @@ impl Shared {
 ///
 /// A network without one pinned leaves this alone, which is what tests and
 /// unnamed networks do.
-fn open_the_chain(chain: &mut ChainStore, params: ConsensusParams, now: u64) {
+///
+/// It goes into the log as well as into memory. The log is the followed branch
+/// in order of height with nothing left out, and a first block held only in
+/// memory breaks that on the very first restart: the log would start at height
+/// one, which is a log this node cannot replay, so it would set aside every
+/// block it had and start over. A node mining a real network lost its chain
+/// every time it was restarted, and every test here ran on a network with no
+/// first block to pin, so nothing said so.
+fn open_the_chain(
+    chain: &mut ChainStore,
+    log: Option<&mut BlockLog>,
+    params: ConsensusParams,
+    now: u64,
+) {
     // Only for a network that pins its first block. An unnamed one, which is
     // what tests use, starts from whatever it is given.
     if params.genesis.is_none() || !chain.is_empty() {
         return;
     }
-    if let Some(block) = genesis::block(params.network) {
-        let _ = chain.add_block(block, now);
+    let Some(block) = genesis::block(params.network) else {
+        return;
+    };
+    if chain.add_block(block.clone(), now).is_err() {
+        return;
+    }
+    if let Some(log) = log {
+        if log.is_empty() {
+            let _ = log.append(&block);
+        }
     }
 }
 
@@ -607,7 +628,6 @@ impl Node {
             chain.watch_owner(*owner);
         }
         let now = unix_now();
-        open_the_chain(&mut chain, params, now);
         // One block at a time, straight off the disk. Reading them all into a
         // vector first would make the largest allocation this process ever
         // performs out of a chain it looks at once and in order.
@@ -678,6 +698,13 @@ impl Node {
             log.keep_from(start)?;
         }
 
+        // The network's first block, for a node that has nothing. After the
+        // replay rather than before it: a chain that already holds the first
+        // block turns the first record replayed into a duplicate, which is not
+        // an extension, which ends the replay and sets aside everything this
+        // node had.
+        open_the_chain(&mut chain, Some(&mut log), params, now);
+
         // Headers are kept whatever happens to the blocks. A node updated from
         // a version that had no header log has an empty one and a chain, so it
         // is filled in from the blocks that are still there. Everything older
@@ -746,8 +773,13 @@ impl Node {
         });
 
         {
+            // Chain first and log second, here as everywhere. A node started
+            // with no directory has no log to write the first block to, which
+            // is what `Node::bind` does and what tests use.
             let mut chain = shared.chain();
-            open_the_chain(&mut chain, params, unix_now());
+            let mut log = shared.log.lock().unwrap_or_else(PoisonError::into_inner);
+            let blocks = log.as_mut().map(|store| &mut store.blocks);
+            open_the_chain(&mut chain, blocks, params, unix_now());
         }
 
         let accepting = Arc::clone(&shared);

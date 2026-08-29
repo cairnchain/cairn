@@ -1250,3 +1250,45 @@ fn an_ordinary_node_can_take_in_a_newcomer() {
     host.shutdown();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A real network pins its first block, and every test above runs on one that
+/// does not. That gap hid a defect that cost a mining node its whole chain at
+/// every restart: the first block was laid into memory and not into the log,
+/// so the log began at height one, which is a log a node cannot replay, so it
+/// set aside every block it had and started over.
+#[test]
+fn a_node_on_a_network_with_a_pinned_first_block_keeps_its_chain() {
+    let params = ConsensusParams::for_network("devnet").expect("devnet is a network");
+    let root = std::env::temp_dir().join(format!("cairn-pinned-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let directory = root.join("node");
+
+    let (node, restored) = Node::open(params, loopback(), &directory).unwrap();
+    assert_eq!(restored.blocks, 0, "there was nothing on disk to restore");
+    assert_eq!(node.height(), Some(0), "and the first block was laid down");
+    assert!(
+        node.archived_at(0).is_some(),
+        "written, not only held: a log missing its first block cannot be \
+         replayed at all"
+    );
+    let first = node.with_chain(cairn_chain::ChainStore::tip);
+    node.shutdown();
+    drop(node);
+
+    let (again, restored) = Node::open(params, loopback(), &directory).unwrap();
+    assert!(
+        !restored.rejoining,
+        "a log starting at the first block is one this node can read"
+    );
+    assert_eq!(restored.blocks, 1, "the first block came back off the disk");
+    assert_eq!(restored.refused, 0, "and nothing was set aside");
+    assert_eq!(again.height(), Some(0));
+    assert_eq!(
+        again.with_chain(cairn_chain::ChainStore::tip),
+        first,
+        "on the same chain it started"
+    );
+
+    again.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
+}
