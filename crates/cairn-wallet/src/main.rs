@@ -151,7 +151,7 @@ fn show_balance(arguments: &[String]) -> Result<(), String> {
     let secret = keyfile::read(&flags.key_file()?)?;
     let mine = secret.public_key();
     let node = join(&flags, mine)?;
-    let held = owned_notes(&node, mine);
+    let (held, stranded) = owned_notes(&node, mine);
     let total = Amount::checked_sum(held.iter().map(|owned| owned.note.value))
         .ok_or_else(|| "the notes held add up past the monetary ceiling".to_owned())?;
     let fallen = held.iter().filter(|owned| owned.fallen.is_some()).count();
@@ -168,6 +168,13 @@ fn show_balance(arguments: &[String]) -> Result<(), String> {
         held.len()
     );
     println!("balance   {total}");
+    if stranded > Amount::ZERO {
+        println!();
+        println!("Another {stranded} sits in notes this node cannot prove. They are");
+        println!("yours and they are not lost, but spending one takes a proof, and");
+        println!("rebuilding a proof takes an archivist. Ask one, or run this wallet");
+        println!("against a node started with --archive.");
+    }
     if held.is_empty() {
         println!();
         println!("Nothing here yet. If this key should hold something, check that the");
@@ -205,9 +212,15 @@ fn spend(arguments: &[String]) -> Result<(), String> {
 
     let mine = secret.public_key();
     let node = join(&flags, mine)?;
-    let held = owned_notes(&node, mine);
+    let (held, stranded) = owned_notes(&node, mine);
 
-    let (spending, gathered) = select(&held, needed)?;
+    let (spending, gathered) = select(&held, needed).map_err(|short| {
+        if stranded > Amount::ZERO {
+            format!("{short}. Another {stranded} sits in notes this node cannot prove")
+        } else {
+            short
+        }
+    })?;
     let change = gathered
         .checked_sub(needed)
         .ok_or_else(|| "not enough after all".to_owned())?;
@@ -292,31 +305,41 @@ struct Owned {
 }
 
 /// Everything this key owns: what the nodes still hold, and what has fallen.
-fn owned_notes(node: &Node, mine: PublicKey) -> Vec<Owned> {
+/// What this key holds, and what it holds that cannot be spent right now.
+///
+/// The second is money, not a rounding error. A note that has fallen to the
+/// cold set is spent by presenting a proof, and a wallet that cannot get one
+/// holds something it cannot move until an archivist rebuilds it. Reporting
+/// the total without it would show a balance that quietly went down, which is
+/// the worst thing a wallet can tell anyone.
+fn owned_notes(node: &Node, mine: PublicKey) -> (Vec<Owned>, Amount) {
     node.with_chain(|chain| {
         let state = chain.state();
-        let hot = state
+        let mut owned: Vec<Owned> = state
             .hot_notes()
             .filter(|(_, entry)| entry.note.owner == mine)
             .map(|(id, entry)| Owned {
                 id,
                 note: entry.note,
                 fallen: None,
-            });
+            })
+            .collect();
 
-        let cold = state
-            .watched_notes()
-            .filter(|(_, _, note)| note.owner == mine)
-            .filter_map(|(id, position, note)| {
-                let proof = state.cold().proof_of(position)?;
-                Some(Owned {
+        let mut unprovable = Amount::ZERO;
+        for (id, position, note) in state.watched_notes() {
+            if note.owner != mine {
+                continue;
+            }
+            match state.cold().proof_of(position) {
+                Some(proof) => owned.push(Owned {
                     id,
                     note,
                     fallen: Some((position, proof)),
-                })
-            });
-
-        hot.chain(cold).collect()
+                }),
+                None => unprovable = unprovable.checked_add(note.value).unwrap_or(unprovable),
+            }
+        }
+        (owned, unprovable)
     })
 }
 
