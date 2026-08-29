@@ -259,6 +259,9 @@ pub fn local_handshake(chain: &ChainStore, listen: u16, nonce: u64) -> Handshake
         tip: chain.tip().unwrap_or(Hash32::ZERO),
         height: chain.height().unwrap_or_default(),
         total_work: chain.total_work(),
+        // Keeping the cold set and keeping the headers are one decision, so
+        // one answer covers both services an archivist offers.
+        archives: chain.is_archiving(),
         listen,
         nonce,
     }
@@ -337,19 +340,24 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
         )));
     }
     if theirs.total_work > local.chain.total_work() {
-        if local.chain.is_empty() {
-            // Nothing at all, so ask to be shown what stands behind this
-            // peer's chain rather than reading it a block at a time. A peer
-            // that cannot answer says nothing, and the question is asked again
-            // of whoever else is around.
+        // Two ways to catch up, and they are not a race: whichever is asked
+        // for arrives first on a short chain and last on a long one, so the
+        // choice is made rather than run.
+        //
+        // Being handed a ledger costs about twelve megabytes whatever the
+        // chain's age, and reading one costs what the chain weighs. Below the
+        // crossing point reading is simply cheaper, and above it the gap only
+        // widens. Only an archivist can hand one over.
+        if local.chain.is_empty() && theirs.archives && theirs.height >= JOIN_RATHER_THAN_READ {
             reaction.reply.push(Message::GetJoin {
                 what: Joining::Weight,
                 part: 0,
             });
+        } else {
+            reaction.reply.push(Message::GetChain {
+                locator: local.chain.locator(),
+            });
         }
-        reaction.reply.push(Message::GetChain {
-            locator: local.chain.locator(),
-        });
     }
     reaction.reply.push(Message::GetPeers);
     reaction
@@ -358,6 +366,23 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
 /// How long a batch of blocks may be outstanding before the node gives up on
 /// it and asks again.
 pub const BATCH_PATIENCE: u64 = 60;
+
+/// The chain length past which being handed a ledger beats reading one.
+///
+/// A handover is about twelve megabytes whatever the chain's age. Reading a
+/// chain costs what the chain weighs, which is its length times what its
+/// blocks carry, and a node deciding has no idea what the blocks it has not
+/// read carry. So the crossing point cannot be worked out exactly: on an empty
+/// chain it is tens of thousands of blocks, and on a full one it is under a
+/// hundred.
+///
+/// A thousand is inside that range and wrong in the cheap direction at both
+/// ends. Below it a node reads a chain that would have been a little quicker
+/// to be handed; above it, on a chain of empty blocks, it accepts twelve
+/// megabytes where a few would have done. Either mistake costs seconds, once,
+/// and what matters is that a node chooses rather than starting both and
+/// taking whichever finishes.
+pub const JOIN_RATHER_THAN_READ: u64 = 1_024;
 
 /// Asks for a stretch of a peer's branch, starting at `from`.
 fn request_range(peer: &mut PeerState, from: u64, count: u64, now: u64) -> Reaction {

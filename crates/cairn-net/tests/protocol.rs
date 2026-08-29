@@ -184,6 +184,7 @@ fn a_message_roundtrips_through_the_wire_format() {
             total_work: u128::MAX,
             listen: 4242,
             nonce: 99,
+            archives: false,
         }),
     ];
 

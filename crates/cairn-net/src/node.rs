@@ -159,14 +159,21 @@ struct Shared {
     peers: Mutex<HashMap<PeerId, Peer>>,
     /// Peers turned away for a while, for something they did earlier.
     refusals: Mutex<Refusals>,
-    /// The last join answer built, kept so a newcomer asking for its pieces in
-    /// turn is answered from one build rather than from twenty two.
+    /// The last join answer built of each kind, kept so a newcomer asking for
+    /// its pieces in turn is answered from one build rather than from twenty
+    /// two.
     ///
-    /// One answer, not one per peer: building a ledger is megabytes, and this
-    /// is the difference between a node that can be joined and a node anybody
-    /// can make spend its memory. A second newcomer asking about a different
-    /// tip replaces it, which costs the first one a rebuild and no more.
-    joined: Mutex<Option<Prepared>>,
+    /// One of each kind and not one per peer: building a ledger is megabytes,
+    /// and this is the difference between a node that can be joined and a node
+    /// anybody can make spend its memory. Both kinds are held because a
+    /// newcomer weighs a chain before it asks for the ledger, so two arriving
+    /// a moment apart are each in a different half of that; with one slot
+    /// between them they would take turns throwing away the other's build, and
+    /// every piece would be built again from the disk.
+    ///
+    /// A newcomer asking about a different tip replaces its kind, which costs
+    /// the one it displaced a rebuild and no more.
+    joined: Mutex<[Option<Prepared>; 2]>,
     /// How far this node is through joining a chain it was not on.
     joining: Mutex<Progress>,
     threads: Mutex<Vec<JoinHandle<()>>>,
@@ -543,7 +550,7 @@ impl Node {
             _lock: lock,
             peers: Mutex::new(HashMap::new()),
             refusals: Mutex::new(Refusals::new()),
-            joined: Mutex::new(None),
+            joined: Mutex::new([None, None]),
             joining: Mutex::new(Progress::Idle),
             threads: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(0),
@@ -789,7 +796,9 @@ fn take_join_part(
         }
         Progress::Weighing(mut collecting) => {
             if !collecting.take(what, at, part, bytes) {
-                return None;
+                // The pieces held cannot be completed, so the attempt is
+                // dropped and this node falls back to reading the chain.
+                return Some(give_up(&mut joining, shared));
             }
             step(&mut joining, collecting, None)
         }
@@ -798,7 +807,7 @@ fn take_join_part(
             mut collecting,
         } => {
             if !collecting.take(what, at, part, bytes) {
-                return None;
+                return Some(give_up(&mut joining, shared));
             }
             step(&mut joining, collecting, Some(tip))
         }
@@ -809,10 +818,14 @@ fn take_join_part(
 
     match what {
         Joining::Weight => {
-            let start = SampledStart::decode(&whole).ok()?;
+            let weighed = SampledStart::decode(&whole)
+                .ok()
+                .filter(|start| check_start(start, SAMPLES).is_ok());
+            let Some(start) = weighed else {
+                return Some(give_up(&mut joining, shared));
+            };
             // What this settles is which chain is heaviest and nothing else.
             // The ledger at that chain's tip is the next thing to ask for.
-            check_start(&start, SAMPLES).ok()?;
             *joining = Progress::Weighed { tip: start.tip };
             Some(Message::GetJoin {
                 what: Joining::Ledger,
@@ -824,19 +837,36 @@ fn take_join_part(
                 Progress::Fetching { tip, .. } | Progress::Weighed { tip } => tip.id(),
                 _ => return None,
             };
-            let handover = Handover::decode(&whole).ok()?;
-            // The ledger has to belong to the chain that was weighed. A peer
-            // that weighed one and handed over another would otherwise have
-            // its second answer taken on the strength of the first.
-            if handover.at.id() != expected {
-                *joining = Progress::Idle;
-                return None;
+            let landed = Handover::decode(&whole)
+                .ok()
+                // The ledger has to belong to the chain that was weighed. A
+                // peer that weighed one and handed over another would
+                // otherwise have its second answer taken on the strength of
+                // the first.
+                .filter(|handover| handover.at.id() == expected)
+                .and_then(|handover| {
+                    let state = accept(&handover, shared.params.hot_capacity).ok()?;
+                    shared.chain().adopt(state, &handover.recent).ok()?;
+                    Some(())
+                });
+            if landed.is_none() {
+                return Some(give_up(&mut joining, shared));
             }
-            let state = accept(&handover, shared.params.hot_capacity).ok()?;
-            shared.chain().adopt(state, &handover.recent).ok()?;
             *joining = Progress::Landed;
             None
         }
+    }
+}
+
+/// Abandons a join and asks for the chain the long way instead.
+///
+/// A node that asked to be handed a ledger and did not get one still has to
+/// end up on the chain. Nothing about a failed handover says the peer is at
+/// fault, so it is asked the ordinary question rather than dropped.
+fn give_up(joining: &mut Progress, shared: &Arc<Shared>) -> Message {
+    *joining = Progress::Idle;
+    Message::GetChain {
+        locator: shared.chain().locator(),
     }
 }
 
@@ -878,17 +908,15 @@ impl Shared {
         let mut held = self.joined.lock().unwrap_or_else(PoisonError::into_inner);
         let tip = self.chain().tip()?;
 
-        let fresh = held
-            .as_ref()
-            .is_none_or(|ready| ready.what != what || ready.at != tip);
-        if fresh {
-            *held = Some(Prepared {
+        let slot = held.get_mut(what.slot())?;
+        if slot.as_ref().is_none_or(|ready| ready.at != tip) {
+            *slot = Some(Prepared {
                 what,
                 at: tip,
                 bytes: self.build_join(what)?,
             });
         }
-        let ready = held.as_ref()?;
+        let ready = slot.as_ref()?;
 
         let parts = ready.bytes.len().div_ceil(JOIN_PART_BYTES).max(1);
         let index = usize::try_from(part).ok()?;
@@ -906,11 +934,23 @@ impl Shared {
     }
 
     /// Builds the whole of what a newcomer asked for.
+    ///
+    /// Both answers reach for headers all over the chain, and a node holds the
+    /// bodies of only the ones it could still undo, so everything older is
+    /// read from the log. Chain first and log second, as everywhere.
     fn build_join(&self, what: Joining) -> Option<Vec<u8>> {
         let chain = self.chain();
+        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        let header_at = |height: u64| -> Option<BlockHeader> {
+            if let Some(block) = chain.block_at(height) {
+                return Some(block.header);
+            }
+            let index = usize::try_from(height).ok()?;
+            Some(log.as_ref()?.read(index).ok()??.header)
+        };
+
         let state = chain.state();
-        let tip_id = chain.tip()?;
-        let tip = chain.block(&tip_id).map(|block| block.header)?;
+        let tip = header_at(chain.height()?)?;
 
         match what {
             Joining::Weight => {
@@ -918,7 +958,7 @@ impl Shared {
                     &tip,
                     state.headers_before_tip(),
                     SAMPLES,
-                    |height| chain.block_at(height).map(|block| block.header),
+                    header_at,
                     |height| state.prove_header(height),
                 )?;
                 Some(start.encode())
@@ -931,7 +971,7 @@ impl Shared {
                     .saturating_sub(u64::try_from(RECENT_HEADERS.saturating_sub(1)).unwrap_or(0));
                 let mut recent = Vec::with_capacity(RECENT_HEADERS);
                 for height in from..=tip.height {
-                    recent.push(chain.block_at(height).map(|block| block.header)?);
+                    recent.push(header_at(height)?);
                 }
                 Some(state.handover(tip, recent).encode())
             }

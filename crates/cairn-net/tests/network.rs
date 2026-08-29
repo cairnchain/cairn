@@ -366,6 +366,7 @@ fn a_peer_that_sends_a_bad_block_is_dropped() {
         total_work: 0,
         listen: 1,
         nonce: 424_242,
+        archives: false,
     });
     write_message(&mut rude, params().network, &hello).unwrap();
     write_message(
@@ -622,8 +623,10 @@ fn a_node_partway_along_catches_up_with_one_far_ahead() {
 fn a_node_joins_a_chain_it_never_read() {
     let params = params();
     let mut forge = Forge::new(params);
-    // Long enough that reading it block by block is the thing being avoided.
-    let blocks = forge.mine_many(cairn_ledger::pow::RECENT_HEADERS + 60);
+    // Past the length where a node chooses to be handed a ledger rather than
+    // read one, since being handed one is what this tests.
+    let blocks =
+        forge.mine_many(usize::try_from(cairn_net::sync::JOIN_RATHER_THAN_READ).unwrap() + 40);
     let top = (blocks.len() - 1) as u64;
 
     let directory = std::env::temp_dir().join(format!("cairn-join-{}", std::process::id()));
@@ -663,4 +666,68 @@ fn a_node_joins_a_chain_it_never_read() {
     newcomer.shutdown();
     keeper.shutdown();
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// A newcomer asks the node that can answer, and only that one.
+///
+/// Showing what work stands behind a chain takes a path through the header
+/// forest, and only a node that kept the headers can build one. Everyone else
+/// holds sixty four hashes, which is enough to check such a path and not
+/// enough to make it. So a node with nothing asks an archivist, and reads
+/// blocks one at a time from anybody else, rather than asking everyone and
+/// waiting on the ones that will never answer.
+#[test]
+fn a_newcomer_joins_through_an_archivist_and_reads_from_the_rest() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    // Past the point where being handed a ledger beats reading one, since
+    // that is the choice being tested.
+    let blocks =
+        forge.mine_many(usize::try_from(cairn_net::sync::JOIN_RATHER_THAN_READ).unwrap() + 40);
+    let top = (blocks.len() - 1) as u64;
+
+    let root = std::env::temp_dir().join(format!("cairn-archivist-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+
+    // One node that kept everything, and one that validated and no more.
+    let (keeper, _) = Node::open_archiving(params, loopback(), root.join("keeper")).unwrap();
+    let (plain, _) = Node::open(params, loopback(), root.join("plain")).unwrap();
+    for block in &blocks {
+        keeper.submit_block(block.clone()).unwrap();
+        plain.submit_block(block.clone()).unwrap();
+    }
+
+    // Reaching only the plain node, a newcomer still gets there, the long way.
+    let reader = Node::bind(params, loopback()).unwrap();
+    reader.connect(plain.address()).unwrap();
+    wait_for("the reader to catch up block by block", || {
+        reader.height() == Some(top)
+    });
+    assert_eq!(
+        reader.with_chain(|chain| chain.state().state_root()),
+        plain.with_chain(|chain| chain.state().state_root()),
+    );
+
+    // Reaching the archivist, another newcomer is handed the whole thing.
+    let joiner = Node::bind(params, loopback()).unwrap();
+    joiner.connect(keeper.address()).unwrap();
+    wait_for("the joiner to be handed a ledger", || {
+        joiner.height() == Some(top)
+    });
+    assert_eq!(
+        joiner.with_chain(|chain| chain.state().state_root()),
+        keeper.with_chain(|chain| chain.state().state_root()),
+    );
+
+    // The one that was handed a ledger holds no history, and says so rather
+    // than pretending: it can follow the chain and cannot vouch for its past.
+    assert!(
+        joiner.with_chain(|chain| chain.block_at(0).is_none()),
+        "a node that was not there does not hold what happened before it"
+    );
+
+    for node in [reader, joiner, plain, keeper] {
+        node.shutdown();
+    }
+    let _ = std::fs::remove_dir_all(&root);
 }

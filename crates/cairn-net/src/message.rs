@@ -16,7 +16,7 @@ use cairn_primitives::Hash32;
 
 /// Bumped when the meaning of a message changes. Peers on another version are
 /// refused rather than misunderstood.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Identifiers one announcement may carry.
 pub const MAX_ANNOUNCED: usize = 512;
@@ -92,6 +92,19 @@ pub struct Handshake {
     /// number the node drew for itself can. Seeing your own means the
     /// connection is your own.
     pub nonce: u64,
+    /// Whether this node kept the history, and can therefore prove things
+    /// about it.
+    ///
+    /// Only a node that kept the headers can show a newcomer what work stands
+    /// behind a chain, and only one that kept the cold set can rebuild a proof
+    /// for a wallet that lost one. Both are the same service and the same
+    /// bargain, so they are one answer.
+    ///
+    /// A claim, not a fact, and it costs nothing to make. Nothing is taken on
+    /// the strength of it: everything an archivist hands over is checked
+    /// against what a header commits to. What it saves is asking the wrong
+    /// node and waiting.
+    pub archives: bool,
 }
 
 impl Encode for Handshake {
@@ -104,6 +117,7 @@ impl Encode for Handshake {
         self.total_work.encode_to(out);
         self.listen.encode_to(out);
         self.nonce.encode_to(out);
+        u8::from(self.archives).encode_to(out);
     }
 }
 
@@ -118,6 +132,17 @@ impl Decode for Handshake {
             total_work: u128::decode_from(reader)?,
             listen: u16::decode_from(reader)?,
             nonce: u64::decode_from(reader)?,
+            // Anything but zero or one is a node saying something this version
+            // does not understand, and taking it for true would be guessing.
+            archives: match u8::decode_from(reader)? {
+                0 => false,
+                1 => true,
+                _ => {
+                    return Err(CodecError::InvalidValue {
+                        type_name: "Handshake",
+                    })
+                }
+            },
         })
     }
 }
@@ -197,6 +222,15 @@ pub enum Joining {
 }
 
 impl Joining {
+    /// Which of the two answers this is, so a node can keep one of each.
+    #[must_use]
+    pub const fn slot(self) -> usize {
+        match self {
+            Self::Weight => 0,
+            Self::Ledger => 1,
+        }
+    }
+
     const fn tag(self) -> u8 {
         match self {
             Self::Weight => 0,
