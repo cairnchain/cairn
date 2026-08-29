@@ -36,7 +36,7 @@ const ATTEMPTS: u64 = 1 << 20;
 
 /// Heights to measure at, each roughly double the last, so the marginal cost
 /// is measured over a stretch as long as everything before it.
-const HEIGHTS: [usize; 6] = [25_000, 50_000, 100_000, 200_000, 400_000, 800_000];
+const HEIGHTS: [usize; 5] = [25_000, 50_000, 100_000, 200_000, 400_000];
 
 fn main() {
     let params = ConsensusParams::testnet();

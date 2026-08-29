@@ -561,3 +561,52 @@ fn a_reorganisation_leaves_the_log_matching_the_branch() {
 
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// A node partway along catches up with one far ahead.
+///
+/// The case that is easy to get wrong once a node stops holding an identifier
+/// for every height. The node behind names the heights it has, and the node
+/// ahead no longer holds identifiers for most of them: without reading its own
+/// log to answer, the only position both could agree on is the last milestone,
+/// and the node behind would be told to start again from there, receive what
+/// it already has, and creep forward a block at a time.
+#[test]
+fn a_node_partway_along_catches_up_with_one_far_ahead() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    // Comfortably past the window on both sides, so the heights the node
+    // behind names are ones the node ahead has long since let go of.
+    let blocks = forge.mine_many(cairn_chain::MAX_REORG_DEPTH + 400);
+    let top = (blocks.len() - 1) as u64;
+
+    let root = std::env::temp_dir().join(format!("cairn-partway-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+
+    let (ahead, _) = Node::open(params, loopback(), root.join("ahead")).unwrap();
+    for block in &blocks {
+        ahead.submit_block(block.clone()).unwrap();
+    }
+    assert_eq!(ahead.height(), Some(top));
+
+    // Partway along, and past its own window, so it is not simply a fresh node.
+    let (behind, _) = Node::open(params, loopback(), root.join("behind")).unwrap();
+    for block in blocks.iter().take(cairn_chain::MAX_REORG_DEPTH + 100) {
+        behind.submit_block(block.clone()).unwrap();
+    }
+    let started = behind.height().expect("it has a chain of its own");
+    assert!(started < top, "and it is behind");
+
+    behind.connect(ahead.address()).unwrap();
+    wait_for("the node behind to catch up", || {
+        behind.height() == Some(top)
+    });
+
+    assert_eq!(
+        behind.with_chain(|chain| chain.state().state_root()),
+        ahead.with_chain(|chain| chain.state().state_root()),
+    );
+
+    behind.shutdown();
+    ahead.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
+}
