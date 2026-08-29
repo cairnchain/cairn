@@ -186,7 +186,7 @@
 <div class="page">
 
   <header class="top">
-    <p class="eyebrow">Cairn · état des lieux · 28 août 2026</p>
+    <p class="eyebrow">Cairn · état des lieux · 29 août 2026</p>
     <h1>La route jusqu'au mainnet</h1>
     <p class="sub">
       Ce qui est fait, ce qui reste, qui le fait, ce que ça coûte. Sans
@@ -198,8 +198,8 @@
     <div class="answer-row">
       <div>
         <h3>Le réseau</h3>
-        <p class="big">En ligne</p>
-        <p class="note">Deux serveurs chez deux hébergeurs, un mineur, une chaîne qui avance.</p>
+        <p class="big">Public</p>
+        <p class="note">cairnchain.org, trois serveurs chez trois hébergeurs, les programmes téléchargeables.</p>
       </div>
       <div>
         <h3>Prêt pour du vrai argent</h3>
@@ -220,52 +220,55 @@
       <div>
         <h3>Ce qui tourne en ce moment</h3>
         <ul>
-          <li><span class="mono">213.32.69.172:9944</span> serveur, permanent</li>
-          <li><span class="mono">92.222.100.238:9944</span> serveur, permanent</li>
-          <li>Un mineur sur le Mac, à arrêter ou à laisser</li>
-          <li>La chaîne avance, un bloc à la minute</li>
+          <li><span class="mono">cairnchain.org</span> le site, sous certificat</li>
+          <li>Trois serveurs chez trois hébergeurs</li>
+          <li>Un mineur, la chaîne avance à un bloc la minute</li>
+          <li>Les programmes publiés, cinq systèmes</li>
         </ul>
         <p class="resume-note">
-          Arrêter le mineur ne détruit rien : les serveurs gardent les blocs et
-          la chaîne repart au prochain mineur.
-          <span class="mono">pkill -f "cairnd --network testnet-2"</span>
+          Le nom <span class="mono">seed.cairnchain.org</span> est le point de
+          départ écrit dans chaque programme. Y ajouter une machine est une
+          ligne dans la zone DNS : le nœud récupère toutes les adresses d'un
+          nom et les essaie toutes, sans que personne n'ait à retélécharger
+          quoi que ce soit.
         </p>
         <p class="resume-note">
-          Les serveurs et le mineur tournent testnet-2, qui n'existe plus dans
-          le code : le réseau est reparti en testnet-3 après deux corrections
-          de ce à quoi un en-tête s'engage. Les trois machines se mettent à
-          jour ensemble, et repartent d'une chaîne vide.
-          <span class="mono">sudo env MINE=… SEED=… sh
-          /usr/local/src/cairn/deploy/install.sh</span>
+          Mettre une machine à jour, en <span class="mono">root</span> :
+          <span class="mono">sh /usr/local/src/cairn/deploy/install.sh</span>.
+          Une mise à jour qui ferait taire un mineur en silence refuse de
+          partir et dit comment aller dans les deux sens.
         </p>
       </div>
       <div>
         <h3>La prochaine chose que j'écris</h3>
         <p>
-          <b>Plus rien d'obligatoire.</b> Le protocole est écrit. Ce qui reste
-          côté code est du choix : rendre le portefeuille plus agréable,
-          préparer le téléphone, ou continuer à chercher des défauts pendant
-          que le réseau tourne — c'est cette dernière qui a le meilleur
-          rendement, puisque chacun trouvé avant l'audit est de l'argent qui
-          reste dans ta poche.
+          <b>Plus rien d'obligatoire.</b> Rien de ce qui reste sur cette page
+          n'est du code. Ce que je peux encore faire est du choix : rendre le
+          portefeuille plus agréable, préparer le téléphone, ou continuer à
+          chercher des défauts pendant que le réseau tourne — c'est cette
+          dernière qui a le meilleur rendement, puisque chacun trouvé avant
+          l'audit est de l'argent qui reste dans ta poche.
         </p>
         <p class="resume-note">
-          Ensuite : un portefeuille qui n'est pas un terminal, et sortir de la
-          mémoire les blocs qu'un nœud garde pour pouvoir les annuler.
+          Les deux derniers défauts ont été trouvés en lançant le programme,
+          pas en le testant : un nœud qui ne savait pas où aller, puis un nœud
+          qui ne redemandait jamais. C'est ce que le réseau qui tourne rapporte
+          et qu'aucune suite de tests ne donne.
         </p>
       </div>
       <div>
         <h3>La prochaine chose qui t'appartient</h3>
         <p>
-          <b>Acheter <span class="mono">cairnchain.org</span>.</b> Deux choses
-          attendent ce nom : mettre l'explorateur en ligne, et publier les
-          programmes téléchargeables. Les deux sont écrits, testés et prêts à
-          partir ; il leur manque une adresse et un certificat.
+          <b>Inviter des gens.</b> Le nom est acheté, le site est en ligne, les
+          programmes se téléchargent. Il ne manque plus que des inconnus qui
+          lancent un nœud : c'est la seule chose qui distingue un réseau des
+          machines d'une seule personne, et c'est la seule que je ne peux pas
+          écrire.
         </p>
         <p class="resume-note">
-          Puis : montrer le papier à quelqu'un du domaine, et inviter des gens
-          à lancer un nœud. Ce sont les seuls points de cette page sur lesquels
-          je ne peux rien.
+          Puis : montrer le papier à quelqu'un du domaine, et décider de la
+          date. Ce sont les seuls points de cette page sur lesquels je ne peux
+          rien.
         </p>
       </div>
     </div>
@@ -293,19 +296,19 @@
     <div class="phase-head">
       <span class="phase-n">Phase 1</span>
       <h2>Ouvrir le testnet</h2>
-      <span class="phase-when">faite dans la nuit du 27 au 28</span>
+      <span class="phase-when">faite, du 27 au 29 août</span>
     </div>
     <p class="phase-why">
-      Le réseau existe. Deux serveurs chez deux hébergeurs, le code public,
-      un mineur, une chaîne qui avance. Il reste deux choses, et l'une des
-      deux ne dépend que de toi.
+      Le réseau existe et il est public. Trois serveurs chez trois hébergeurs,
+      le code ouvert, les programmes téléchargeables, le site sous certificat,
+      un mineur, une chaîne qui avance. Cette phase est faite.
     </p>
 
     <div class="tasks">
       <div class="task finished">
         <div class="task-what">
           <b>Le protocole et les programmes</b>
-          <span>Nœud, portefeuille, explorateur, site. Le premier bloc de testnet-2 est miné et inscrit dans le code.</span>
+          <span>Nœud, portefeuille, explorateur, site. Le premier bloc de testnet-3 est miné et inscrit dans le code.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
@@ -320,8 +323,8 @@
       </div>
       <div class="task finished">
         <div class="task-what">
-          <b>Deux serveurs allumés en permanence</b>
-          <span>213.32.69.172 et 92.222.100.238, chez deux hébergeurs différents. Un nouveau venu n'a besoin que d'une des deux adresses : le réseau lui apprend l'autre tout seul, ce qui a été vérifié en direct.</span>
+          <b>Trois serveurs allumés en permanence</b>
+          <span>Chez trois hébergeurs différents : deux qui font nœud, un qui sert le site et fait nœud aussi. Un nouveau venu n'a besoin d'aucune adresse — le nom inscrit dans le programme suffit — et le réseau lui apprend les autres tout seul, ce qui a été vérifié en direct.</span>
         </div>
         <div class="who you">toi</div>
         <div class="cost real">quelques € / mois</div>
@@ -342,21 +345,37 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Des programmes téléchargeables</b>
-          <span>Compilés en public pour Mac, Linux et Windows, avec leurs empreintes et une attestation signée par GitHub qui relie chaque fichier au code qui l'a produit. Écrit et vérifié à blanc : les cinq programmes se construisent, il ne reste qu'à appuyer.</span>
+          <span>Publiés le 29 août : cinq systèmes, Mac Apple et Intel, Linux 64 bits et ARM, Windows. Compilés par GitHub sur ses propres machines, avec une attestation qui relie chaque fichier au commit et à la procédure qui l'ont produit — un lecteur vérifie auprès de GitHub, pas auprès de nous. Vérifié en le faisant : l'archive téléchargée, son empreinte comparée à celle publiée, et le nœud lancé sans un seul argument. Il a trouvé le réseau et rattrapé 474 blocs en dix secondes.</span>
         </div>
         <div class="who me">moi</div>
-        <div class="cost">prêt</div>
+        <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>L'explorateur en ligne</b>
-          <span>Le site public, derrière un certificat, sur un nom que les gens peuvent partager. Écrit aussi : un script installe le nœud, le site et le certificat. Il attend <span class="mono">cairnchain.org</span>.</span>
+          <span><span class="mono">cairnchain.org</span> est en ligne, derrière un certificat, sur un troisième serveur chez un troisième hébergeur. La page ne charge rien qui vienne d'ailleurs et le dit au navigateur, qui l'y oblige : un site qui affiche qui possède quoi ne doit pas pouvoir être réécrit par ce qu'il va chercher. Nom acheté par toi, machine louée par toi, le reste installé par un script.</span>
         </div>
         <div class="who you">toi</div>
-        <div class="cost">une dizaine d'euros par an</div>
+        <div class="cost real">une dizaine d'euros par an</div>
+      </div>
+      <div class="task finished">
+        <div class="task-what">
+          <b>Trouver le réseau sans qu'on le lui dise</b>
+          <span>Un programme téléchargé ne connaissait aucune adresse : il fallait lui en donner une à la main, sinon il ne trouvait rien. Un seul nom est maintenant inscrit dans le programme, comme le premier bloc, et la redondance vit dans la zone DNS — ajouter une machine au réseau est une ligne dans un fichier, pas une nouvelle version à publier. Aucune adresse en dur : celle qu'on loue aujourd'hui appartient à un inconnu dans deux ans, et le monde entier irait toquer chez lui.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task finished">
+        <div class="task-what">
+          <b>Et il redemande quand ça n'a pas répondu</b>
+          <span>Trouvé en le lançant contre le nom qui venait d'être créé : la machine gardait encore la réponse négative d'avant, et le nœud restait à zéro pair pour toujours, sans rien dire. Résoudre une fois au démarrage, c'est un serveur allumé avant son serveur de noms qui ne rejoint jamais, et qui ressemble de l'extérieur à un réseau qui n'existe pas. Le nom est gardé et redemandé toutes les trente secondes tant qu'il n'y a personne à appeler. La ligne d'état mentait aussi : elle disait « rien d'inscrit » là où il fallait lire « rien résolu ».</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
       </div>
       <div class="task finished">
         <div class="task-what">
@@ -800,10 +819,13 @@
       choisit, non payés, dont le réseau se passe.
     </p>
     <p>
-      <strong>Deux choses attendent un nom de domaine.</strong> Les programmes
-      téléchargeables et l'explorateur en ligne sont écrits, testés, prêts à
-      partir. Ce qui leur manque est <span class="mono">cairnchain.org</span>
-      et un certificat, pas du travail.
+      <strong>Le projet est sorti.</strong> <span class="mono">cairnchain.org</span>
+      sert le site sous certificat, les programmes se téléchargent pour cinq
+      systèmes, et un nœud lancé sans un seul argument trouve le réseau tout
+      seul. Vérifié en le faisant plutôt qu'en le supposant : l'archive
+      téléchargée depuis la page, son empreinte comparée à celle publiée, le
+      programme lancé, 474 blocs rattrapés en dix secondes. Plus rien de ce qui
+      reste sur cette page n'est du code.
     </p>
     <p>
       <strong>Puis le temps fait son travail.</strong> Le reste du code, dans
