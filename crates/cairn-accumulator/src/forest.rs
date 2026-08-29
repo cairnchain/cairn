@@ -549,6 +549,21 @@ impl fmt::Debug for Forest {
 pub struct Archive {
     forest: Forest,
     leaves: Vec<Hash32>,
+    /// The inner nodes, by height, so a proof does not have to hash them all
+    /// again.
+    ///
+    /// `inner[h][i]` is the node covering leaves `i << (h + 1)` through
+    /// `(i + 1) << (h + 1)`, and it is only there once every one of those
+    /// leaves is. Without it a proof costs a pass over everything the archive
+    /// holds, which on a chain of a million blocks is eighty seconds for the
+    /// five hundred and twelve a newcomer asks for: longer than the tip it was
+    /// built for lasts, so the answer would never be finished. With it a proof
+    /// is one hash per level.
+    ///
+    /// It costs another thirty two bytes a block, on top of the thirty two the
+    /// leaves already cost. That is the archivist's own bargain and nobody
+    /// else's, which is the point of the role.
+    inner: Vec<Vec<Hash32>>,
 }
 
 impl Archive {
@@ -575,7 +590,98 @@ impl Archive {
     pub fn add(&mut self, leaf: Hash32) -> Option<(u64, ForestProof)> {
         let added = self.forest.add(leaf)?;
         self.leaves.push(leaf);
+        self.close_nodes_ending_at(self.leaves.len());
         Some(added)
+    }
+
+    /// Records every inner node that the leaf count `filled` has just
+    /// completed.
+    ///
+    /// A node of height `h` is complete exactly when the count is a multiple
+    /// of `2^h`, and they complete from the bottom up, so this walks upward
+    /// and stops at the first height that is not.
+    fn close_nodes_ending_at(&mut self, filled: usize) {
+        for height in 1..MAX_HEIGHT {
+            let Some(span) = 1usize.checked_shl(u32::try_from(height).unwrap_or(u32::MAX)) else {
+                return;
+            };
+            if span == 0 || filled % span != 0 {
+                return;
+            }
+            let Some(start) = filled.checked_sub(span) else {
+                return;
+            };
+            let start = u64::try_from(start).unwrap_or(u64::MAX);
+            let half = u64::try_from(span / 2).unwrap_or(0);
+            let value = node_hash(
+                self.subtree(start, height.saturating_sub(1)),
+                self.subtree(start.saturating_add(half), height.saturating_sub(1)),
+            );
+            let level = height.saturating_sub(1);
+            while self.inner.len() <= level {
+                self.inner.push(Vec::new());
+            }
+            // Nodes of one height complete in order, so this is the next slot
+            // in its row. Written at its own index all the same, since a
+            // rebuild walks the same rows a second time.
+            let index = (filled / span).saturating_sub(1);
+            if let Some(row) = self.inner.get_mut(level) {
+                match row.len().cmp(&index) {
+                    std::cmp::Ordering::Equal => row.push(value),
+                    std::cmp::Ordering::Greater => {
+                        if let Some(slot) = row.get_mut(index) {
+                            *slot = value;
+                        }
+                    }
+                    std::cmp::Ordering::Less => {
+                        row.resize(index, empty_leaf());
+                        row.push(value);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Recomputes every inner node standing above `position`.
+    ///
+    /// For a leaf that changed rather than one that arrived. Only the nodes
+    /// that are complete are held, so only those are rebuilt.
+    fn refresh_above(&mut self, position: u64) {
+        let filled = self.leaves.len();
+        for height in 1..MAX_HEIGHT {
+            let Some(span) = 1u64.checked_shl(u32::try_from(height).unwrap_or(u32::MAX)) else {
+                return;
+            };
+            if span == 0 {
+                return;
+            }
+            let start = position.saturating_sub(position % span);
+            let Some(end) = start.checked_add(span) else {
+                return;
+            };
+            if end > u64::try_from(filled).unwrap_or(u64::MAX) {
+                return;
+            }
+            let half = span / 2;
+            let value = node_hash(
+                self.subtree(start, height.saturating_sub(1)),
+                self.subtree(start.saturating_add(half), height.saturating_sub(1)),
+            );
+            let level = height.saturating_sub(1);
+            let index = usize::try_from(start / span).unwrap_or(usize::MAX);
+            if let Some(slot) = self.inner.get_mut(level).and_then(|row| row.get_mut(index)) {
+                *slot = value;
+            }
+        }
+    }
+
+    /// Builds every inner node from the leaves, for the paths that cannot
+    /// update them in place.
+    fn rebuild_inner(&mut self) {
+        self.inner.clear();
+        for filled in 1..=self.leaves.len() {
+            self.close_nodes_ending_at(filled);
+        }
     }
 
     /// Takes the last leaf back off, as though it had never been added.
@@ -598,6 +704,7 @@ impl Archive {
             rebuilt.add(*leaf);
         }
         self.forest = rebuilt;
+        self.rebuild_inner();
         true
     }
 
@@ -618,7 +725,21 @@ impl Archive {
         {
             *slot = empty_leaf();
         }
+        self.refresh_above(position);
         true
+    }
+
+    /// The inner node at `start` of this height, if it is one that is held.
+    fn held_node(&self, start: u64, height: usize) -> Option<Hash32> {
+        let span = 1u64.checked_shl(u32::try_from(height).ok()?)?;
+        if span == 0 || start % span != 0 {
+            return None;
+        }
+        if start.checked_add(span)? > u64::try_from(self.leaves.len()).ok()? {
+            return None;
+        }
+        let index = usize::try_from(start / span).ok()?;
+        self.inner.get(height.checked_sub(1)?)?.get(index).copied()
     }
 
     /// Where a leaf sits, if it is still standing.
@@ -695,11 +816,22 @@ impl Archive {
             }
         }
         self.forest = before.clone();
+        // Leaves both left and changed, so the nodes above them are built
+        // again rather than patched. This is the rare path, and getting it
+        // wrong would mean serving proofs of a chain that was undone.
+        self.rebuild_inner();
     }
 
     fn subtree(&self, start: u64, height: usize) -> Hash32 {
         if height == 0 {
             return self.leaf_at(start).unwrap_or_else(empty_leaf);
+        }
+        // Held whenever every leaf under it is here, which is every node a
+        // proof asks for. The walk below is what answers for the rest: a
+        // subtree reaching past the last leaf, which only the paths that
+        // rebuild use.
+        if let Some(held) = self.held_node(start, height) {
+            return held;
         }
         let Some(lower) = height.checked_sub(1) else {
             return empty_leaf();

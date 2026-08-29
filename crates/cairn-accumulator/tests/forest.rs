@@ -492,3 +492,58 @@ fn a_forest_whose_roots_contradict_its_count_is_refused() {
     bytes[8] = 99;
     assert!(Forest::decode(&bytes).is_err());
 }
+
+/// The proofs an archive builds must not depend on how it came to hold what it
+/// holds. It keeps its inner nodes so a proof costs one hash per level rather
+/// than a pass over everything, and every path that changes a leaf has to
+/// leave those nodes saying what the leaves say.
+#[test]
+fn a_rebuilt_archive_proves_exactly_what_a_grown_one_does() {
+    let mut grown = Archive::new();
+    for index in 0..300u64 {
+        grown.add(leaf(index));
+    }
+
+    // The same leaves, reached by undoing past them and putting them back,
+    // which is the path a reorganisation takes.
+    let mut rewound = Archive::new();
+    let before = {
+        let mut at = Archive::new();
+        for index in 0..280u64 {
+            at.add(leaf(index));
+        }
+        at.forest().clone()
+    };
+    for index in 0..280u64 {
+        rewound.add(leaf(index));
+    }
+    for index in 280..340u64 {
+        rewound.add(leaf(index));
+    }
+    rewound.rewind(&before, 60, &[]);
+    for index in 280..300u64 {
+        rewound.add(leaf(index));
+    }
+
+    assert_eq!(grown.commitment(), rewound.commitment());
+    for position in [0u64, 1, 7, 63, 128, 255, 299] {
+        assert_eq!(
+            grown.prove(position).map(|proof| proof.siblings),
+            rewound.prove(position).map(|proof| proof.siblings),
+            "the proof for {position} depends on how the archive got here"
+        );
+    }
+
+    // And a leaf taken out changes the proofs above it, in both.
+    assert!(grown.remove(100));
+    assert!(rewound.remove(100));
+    assert_eq!(grown.commitment(), rewound.commitment());
+    for position in [99u64, 101, 255] {
+        assert_eq!(
+            grown.prove(position).map(|proof| proof.siblings),
+            rewound.prove(position).map(|proof| proof.siblings),
+        );
+        let proof = grown.prove(position).unwrap();
+        assert!(grown.forest().verify(position, leaf(position), &proof));
+    }
+}
