@@ -242,15 +242,16 @@
       <div>
         <h3>La prochaine chose que j'écris</h3>
         <p>
-          <b>La plomberie du démarrage échantillonné.</b> Le protocole est
-          écrit et vérifié : rejoindre une chaîne de trente ans coûte 12 Mo au
-          lieu de 2 067 Go. Ce qui manque, c'est de le faire voyager sur le
-          réseau et de le brancher dans le nœud, sans nouvelle question de
-          conception.
+          <b>Ce que gagne un archiviste.</b> Rejoindre le réseau en 12 Mo
+          marche, et un nouveau venu sait maintenant reconnaître le nœud
+          capable de le servir. Mais rien ne récompense encore celui qui rend
+          ce service, et il est le seul à porter un coût qui grandit. C'est la
+          dernière question de conception ouverte, et le reste du protocole
+          s'appuie dessus.
         </p>
         <p class="resume-note">
-          Ensuite : spécifier les archivistes, un portefeuille qui n'est pas un
-          terminal, alléger le tiroir.
+          Ensuite : un portefeuille qui n'est pas un terminal, et sortir de la
+          mémoire les blocs qu'un nœud garde pour pouvoir les annuler.
         </p>
       </div>
       <div>
@@ -388,6 +389,46 @@
         </div>
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Rejoindre sans lire trente ans</b>
+          <span>Le démarrage échantillonné voyage maintenant sur le réseau et se branche dans le nœud. Un nouveau venu pèse la chaîne sur 512 en-têtes tirés au sort, puis reçoit l'état en une trentaine de morceaux : 12 Mo au lieu de 2 067 Go de lecture. En dessous de mille blocs, lire reste moins cher, et le nœud choisit.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Trouver qui peut répondre</b>
+          <span>Servir un nouveau venu demande de garder tous les en-têtes ; presque personne ne le fait. Les nœuds annoncent donc s'ils archivent, et un nouveau venu ne demande qu'à celui qui peut répondre, en lisant bloc par bloc auprès des autres. Un nœud qui a reçu l'état ne propose pas de le transmettre : il ne l'a pas lu.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>192 octets pour une clé de 32</b>
+          <span>Une clé publique était gardée sous sa forme calculée, utile pour vérifier souvent et inutile pour une note qui dort. Mesuré en isolant chaque structure : 192 des 244 octets d'une note. Le tiroir chaud passe de 107 à 68 Mo, contre 16 % sur la vérification d'une signature, soit neuf millisecondes par bloc plein.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Compter des blocs ne borne rien</b>
+          <span>Un nœud gardait quatre mille blocs concurrents sans regarder leur poids : près d'un gigaoctet offert à qui les envoie. Cinquième défaut de la même famille — deux limites dans deux fichiers dont personne n'avait fait le produit. La borne est maintenant en octets, et un test la relit contre ce qu'un téléphone porte.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Sortir de la mémoire les blocs annulables</b>
+          <span>Un nœud garde en mémoire les mille vingt-quatre derniers blocs pour pouvoir les annuler : 186 Mo sur une chaîne pleine, presque trois fois le tiroir chaud. Ils sont déjà sur son disque. Ce qui reste à écrire, c'est de les y lire au lieu de les tenir.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">à faire</div>
       </div>
       <div class="task">
         <div class="task-what">
@@ -666,12 +707,13 @@
   <div class="closing">
     <h2>Ce qui vient maintenant, dans l'ordre</h2>
     <p>
-      <strong>Le protocole d'échantillonnage.</strong> C'est ce qui reste de
-      gros, et c'est ce qui décide si un nouveau venu peut rejoindre le réseau
-      sans télécharger trente ans d'histoire. Les en-têtes s'y engagent déjà,
-      le prototype est calibré, le mécanisme lui-même n'est pas écrit. C'est
-      aussi ce qui permettra ensuite à un nœud de ne plus garder l'histoire du
-      tout, ni en mémoire ni sur son disque.
+      <strong>Ce que gagne un archiviste.</strong> Le démarrage échantillonné
+      est écrit, branché et vérifié : un nouveau venu rejoint le réseau en
+      12 Mo au lieu de trente ans d'histoire, et sait reconnaître le nœud
+      capable de le servir. Ce qui manque n'est plus du mécanisme mais une
+      décision : celui qui rend ce service porte le seul coût du réseau qui
+      grandisse, et rien ne le lui rend. C'est la dernière question de
+      conception ouverte.
     </p>
     <p>
       <strong>Deux choses attendent un nom de domaine.</strong> Les programmes
@@ -700,8 +742,8 @@
   </div>
 
   <footer>
-    <span>Cairn · route jusqu'au mainnet · v8</span>
-    <span>88 commits · 346 tests</span>
+    <span>Cairn · route jusqu'au mainnet · v9</span>
+    <span>95 commits · 355 tests</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 
