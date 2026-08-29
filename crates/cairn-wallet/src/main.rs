@@ -6,7 +6,6 @@
 //! ordinary hardware, so it would be strange to build the wallet any other way.
 
 use std::collections::BTreeMap;
-use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -14,6 +13,7 @@ use std::time::Duration;
 
 use cairn_crypto::{PublicKey, SecretKey};
 use cairn_ledger::validation::ConsensusParams;
+use cairn_net::seeds;
 use cairn_primitives::Amount;
 use cairn_wallet::{keyfile, serve, Wallet};
 
@@ -40,7 +40,8 @@ Network options
   --data <directory>   where this wallet keeps its copy of the chain
                        (default: cairn-wallet-data, and it must not be the
                        same directory a node is using)
-  --seed <address>     a peer to start from; repeat for more
+  --seed <address>     a peer to start from; repeat for more. Without one,
+                       the addresses written into the program are used
   --network <name>     testnet-3 or devnet (default: testnet-3); it has to
                        be the same network the node is on
   --wait <seconds>     how long to spend catching up (default: 30)
@@ -321,12 +322,7 @@ fn join(flags: &Flags) -> Result<Wallet, String> {
         Wallet::open(&flags.key_file()?, params, &data).map_err(|error| error.to_string())?;
 
     let mut reached = 0usize;
-    for seed in flags.values("seed") {
-        let address = seed
-            .to_socket_addrs()
-            .map_err(|error| format!("`{seed}` is not an address: {error}"))?
-            .next()
-            .ok_or_else(|| format!("`{seed}` resolved to nothing"))?;
+    for address in seeds::start_from(flags.values("seed"), params.network)? {
         if wallet.reach(address) {
             reached = reached.saturating_add(1);
         }

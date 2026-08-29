@@ -133,14 +133,17 @@ That asks GitHub rather than us, which is the point. Your operating system
 will still warn you, because these programs carry no paid certificate. The
 check above is worth more than one.
 
-Join the network with either seed:
+Then run it:
 
 ```
-cairnd --seed 213.32.69.172:9944 --seed 92.222.100.238:9944
+cairnd
 ```
 
-To run one of those addresses yourself, `deploy/` has an installer and the
-notes that go with it.
+The addresses it starts from are written into the program, exactly as the
+first block is, so a node that was just unpacked finds the network on its own.
+`--seed <address>` starts somewhere else instead, replacing that list. To put
+one of those addresses on a machine of your own, `deploy/` has an installer
+and the notes that go with it.
 
 ## Layout
 

@@ -9,7 +9,7 @@
 #
 # Run it as root, after install.sh has run on the same machine:
 #
-#     sudo env DOMAIN=explorer.example.org sh explorer.sh
+#     sudo env DOMAIN=cairnchain.org sh explorer.sh
 #
 # DOMAIN is what the certificate is issued for, and it has to already point at
 # this machine. Without one the site is served over plain HTTP, which is fine
@@ -109,8 +109,14 @@ if ! command -v caddy >/dev/null 2>&1; then
     apt-get install -y -qq caddy
 fi
 
+WWW=""
 if [ -n "$DOMAIN" ]; then
     SITE="$DOMAIN"
+    # An apex like cairnchain.org gets www.cairnchain.org pointed back at it,
+    # because people type it. A name that is already a subdomain does not.
+    if [ "$(echo "$DOMAIN" | tr -cd '.' | wc -c)" -eq 1 ]; then
+        WWW="www.$DOMAIN"
+    fi
 else
     SITE=":80"
 fi
@@ -122,7 +128,12 @@ $SITE {
     reverse_proxy $HTTP
 
     # The site loads nothing from anywhere else, so nothing else is allowed.
+    # Said here rather than only in a comment: a page that fetched a script
+    # from somewhere could be made to show a balance that is not the chain's,
+    # and the reader would have no way to tell. The one exception is the
+    # favicon, which is drawn inline as a data URI rather than fetched.
     header {
+        Content-Security-Policy "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
         Strict-Transport-Security "max-age=31536000"
         X-Content-Type-Options nosniff
         Referrer-Policy no-referrer
@@ -130,6 +141,18 @@ $SITE {
     }
 }
 CADDY
+
+# One address for the site. A second name that answers the same pages is a
+# second thing to keep a certificate for and a second address for a link to
+# be written with, so it redirects rather than serves.
+if [ -n "$WWW" ]; then
+    cat >> /etc/caddy/Caddyfile <<CADDY
+
+$WWW {
+    redir https://$DOMAIN{uri} permanent
+}
+CADDY
+fi
 
 systemctl restart caddy
 
@@ -149,6 +172,9 @@ systemctl --no-pager --lines=5 status cairn-explorer || true
 if [ -n "$DOMAIN" ]; then
     echo
     echo "The site is at https://$DOMAIN/ once the certificate is issued,"
+    if [ -n "$WWW" ]; then
+        echo "and https://$WWW/ redirects to it."
+    fi
     echo "which takes a few seconds the first time. Watch it with:"
     echo "  journalctl -u caddy -f"
 else

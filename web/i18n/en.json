@@ -516,8 +516,8 @@
     "title": "Run a node",
     "lede": {
       "plain": ["A node is the program that checks the chain for you. Running one means you stop taking anyone at their word, including this website. It needs no special hardware and no permission from anybody."],
-      "curious": ["A full validating node, with a bounded state, on ordinary hardware. Build it from source; there is no installer yet."],
-      "technical": ["Build from source. No prebuilt binaries yet, and none will be published without a signature and a reproducible build."]
+      "curious": ["A full validating node, with a bounded state, on ordinary hardware. Download it below, or build it from source at the end of this page."],
+      "technical": ["Built in the open by GitHub from a tagged commit, with an attestation tying every file to the commit and the workflow that produced it. The check is made against GitHub, not against us."]
     },
     "warning": {
       "title": "Read this first",
@@ -527,44 +527,90 @@
         "Cairn has not been audited. Do not put anything you care about on it."
       ]
     },
-    "build": {
-      "title": "Build it",
+    "get": {
+      "title": "Download",
       "body": {
-        "plain": ["You need Rust installed, which is a free programming toolchain. These three commands fetch the source and build it. It takes a couple of minutes."],
-        "curious": ["Rust 1.87 or later. Nothing else is needed: the dependency tree is five crates and no asynchronous runtime."],
-        "technical": ["Rust 1.87. Workspace lints deny unsafe code, arithmetic side effects, indexing and slicing, unwrap, expect and panic. The release profile enables overflow checks."]
-      }
+        "plain": ["Three programs in one folder. There is nothing to install: you unpack it, you run it, and if you delete the folder afterwards nothing of it is left on your machine."],
+        "curious": ["A node, a wallet, and this website, each a single file with no runtime to install alongside it. The Linux builds are linked against musl, so they start on machines older than the one that built them."],
+        "technical": ["Five targets, built on GitHub runners from the toolchain this repository pins and the dependency versions in Cargo.lock, with build provenance attested. The archive name carries no version, so this link is permanent; the version is in the folder inside it, in a VERSION file, and in what each program prints when it starts."]
+      },
+      "action": "Download for {platform}",
+      "newest": "the newest release",
+      "else": "Another machine",
+      "all": "Every machine",
+      "unknown": "Your machine was not recognised, so nothing is picked out for you. The whole list is below.",
+      "phone": "These are programs for a computer. A wallet you can carry in your pocket is not built yet; when it is, it will be a node too.",
+      "every": "Every release",
+      "sums": "SHA256SUMS",
+      "inside": "Inside: a node, a wallet, the explorer that serves this site, both licences, and a short text saying what to do with them."
+    },
+    "platform": {
+      "macos-apple-silicon": { "name": "Mac, Apple silicon", "note": "2020 or later" },
+      "macos-intel": { "name": "Mac, Intel", "note": "before 2020" },
+      "linux-x86_64": { "name": "Linux, 64-bit", "note": "an ordinary desktop or server" },
+      "linux-arm64": { "name": "Linux, ARM", "note": "an ARM server, or a Raspberry Pi" },
+      "windows-x86_64": { "name": "Windows", "note": "64-bit" }
+    },
+    "check": {
+      "title": "Check what you downloaded",
+      "body": {
+        "plain": ["A program is the one thing on this site you cannot read for yourself. Here is what to do instead of believing us: ask GitHub which commit produced this exact file. The answer comes from GitHub's own records, and there is nothing we could do to change it."],
+        "curious": ["The first command needs the GitHub command line tool and checks the build provenance attestation. The second prints the hash of the file, which you compare against the SHA256SUMS published beside it."],
+        "technical": ["Provenance is recorded in a public transparency log and names the repository, the commit and the workflow. A file that verifies came out of that workflow on a runner nobody here controls. It says nothing about whether the source is good, only that the binary came from the source you can read."]
+      },
+      "warning": [
+        "Your operating system will warn you about these programs. macOS will say it cannot check them for malicious software, and Windows will say it blocked an unrecognised app. Both are saying the same true thing: nobody bought a certificate, so there is no name to show you.",
+        "On macOS, tell it where the files came from: xattr -d com.apple.quarantine cairnd cairn-wallet cairn-explorer",
+        "That warning deserves more attention than it usually gets. If you would rather not run somebody else's binary at all, the last section on this page builds the same three programs from source in one command."
+      ]
     },
     "node": {
       "title": "Run it",
       "body": {
-        "plain": ["That is the whole thing. It will find other computers on the network, download the chain, and check every rule itself. It prints a line every ten seconds telling you where it stands."],
-        "curious": ["It starts from the pinned first block written into the source, finds peers, syncs, and validates. Nothing about the rules can be set on the command line: they come from the network name only."],
-        "technical": ["Add --archive to keep the cold set and be able to rebuild proofs for others, which costs a set that grows. Add --seed to point at a known peer. An unknown option is a hard error rather than being ignored."]
+        "plain": ["That is the whole thing. It already knows where to start, so it finds other computers by itself, downloads the chain, and checks every rule as it goes. It prints a line every ten seconds saying where it stands. Stop it with Ctrl-C; start it again and it picks up where it left off."],
+        "curious": ["The addresses it starts from are written into the program, exactly as the first block is. It resolves them, asks whoever answers for more addresses, and from then on keeps its own book and never needs that list again. Nothing about the rules can be set on the command line: they come from the network name only."],
+        "technical": ["Add --archive to keep the cold set and be able to rebuild proofs for other people, which costs a set that grows. Add --seed to start somewhere else, which replaces the written-in list rather than adding to it. --keep bounds the blocks held on disk, one gigabyte by default. An unknown option is a hard error rather than something quietly ignored."]
       }
     },
     "wallet": {
       "title": "Make a wallet",
       "body": {
-        "plain": ["This makes a secret key on your own machine and shows you the address that goes with it. The secret never leaves your computer, and it is never sent to this website or to anyone else. If you lose it, the money is gone: nobody can recover it for you."],
-        "curious": ["The key file is written with restrictive permissions and is never overwritten. The wallet keeps its own inclusion proofs for notes that have fallen to the cold set."],
-        "technical": ["Ed25519. The wallet tracks positions for its fallen notes and refreshes proofs as the forest grows, so a cold spend needs no third party."]
+        "plain": ["The first command makes a secret key on your own machine. The second shows the address people pay you at. The third opens the wallet as a page in your browser, served by your own computer. The secret never leaves it, and it is never sent to this website or to anybody else. If you lose that file the money is gone: nobody, including us, can give it back."],
+        "curious": ["The wallet is a node. It does not ask a server what it owns; it joins the network, verifies the chain itself, and reads its balance out of the ledger it validated. The page it opens is served on the loopback and nowhere else, behind a secret carried in the address."],
+        "technical": ["Ed25519. The key file is written with restrictive permissions and is never overwritten. The wallet keeps its own inclusion proofs for notes that have fallen to the cold set and refreshes them as the forest grows, so a cold spend needs no third party."]
       }
     },
     "mine": {
+      "placeholder": "<your address>",
       "title": "Mine",
       "body": {
-        "plain": ["This is how you get CAIRN on a test network. Your computer starts trying to find blocks, and when it finds one, the reward goes to your address. There is no other way to get any: nobody has a stock to hand out."],
-        "curious": ["Single-threaded mining on the node, which is enough for a test network. Rewards go to the key you name."],
-        "technical": ["The genesis difficulty of testnet-2 is 2^27, calibrated so the first block takes roughly the target block time on one ordinary core, at a measured 2.29 million hashes per second."]
+        "plain": ["This is how you get CAIRN on a test network. Your computer starts looking for blocks, and when it finds one the reward goes to your address. There is no other way to get any: nobody has a stock to hand out."],
+        "curious": ["Single-threaded mining inside the node, which is enough for a test network. Rewards go to the key you name, and that key can live anywhere: the node is told an address and never sees the secret behind it."],
+        "technical": ["The opening difficulty of testnet-3 is 2^27, calibrated so the first block takes roughly the target block time on one ordinary core, at a measured 2.29 million hashes per second."]
+      }
+    },
+    "server": {
+      "title": "Leave one running",
+      "body": {
+        "plain": ["A network needs computers that stay on. If you rent a server, this puts a node on it as a service: it starts again by itself after a reboot, and it keeps running when you close the terminal."],
+        "curious": ["Debian or Ubuntu with systemd, which is what almost every rented server runs. It builds from source rather than downloading a binary, so what runs on your machine is what you can read, creates an unprivileged user with no shell, and opens the port if ufw is there."],
+        "technical": ["Read install.sh before running it; it is short and it says what it does. No wallet key ever goes on a machine like this. Mining does not break that rule: the node is given a public address and nothing else, and the key that spends the rewards stays wherever you keep it."]
       }
     },
     "explorer": {
       "title": "Run this site yourself",
       "body": {
-        "plain": ["This website is itself a program you can run. It serves these exact pages from your own machine, reading your own node. Nothing here needs to be taken on trust either."],
+        "plain": ["This website is one of the three programs in the folder you downloaded. It serves these exact pages from your own machine, reading your own node. Nothing here needs to be taken on trust either."],
         "curious": ["The explorer is a node that also builds an index and serves the site. The index is a cost that grows with the chain, which is precisely why it lives here and not in the node everybody runs."],
         "technical": ["The site is compiled into the binary; nothing is read from disk at runtime. The HTTP layer is standard library only, one thread per connection, GET and HEAD, no request body."]
+      }
+    },
+    "build": {
+      "title": "Or build it yourself",
+      "body": {
+        "plain": ["You need Rust, which is a free programming toolchain. These three commands fetch the source and build it, and take a couple of minutes. What you end up with is the same three programs, built by you."],
+        "curious": ["Rust 1.89, which the repository pins so that everybody builds with the same one. Six direct dependencies and no asynchronous runtime."],
+        "technical": ["Rust 1.89. The workspace forbids unsafe code and denies arithmetic side effects, indexing, slicing, unwrap, expect and panic. The release profile keeps overflow checks on."]
       }
     }
   },

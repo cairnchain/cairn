@@ -633,6 +633,68 @@ a.hash:hover { color: var(--accent-ink); }
   margin: 0;
 }
 
+/* ---- downloading ---- */
+
+/*
+  One clear way down and every other way listed under it. The machine reading
+  the page is guessed from what the browser says about itself and nothing more,
+  so the guess is often right and never certain: the rest of the list is right
+  there, at the same weight as each other, and nothing is hidden behind the
+  guess.
+*/
+
+.get { display: grid; gap: 1rem; }
+
+.get-main { display: grid; gap: 0.4rem; justify-items: start; }
+
+.get-action {
+  padding: 0.75rem 1.4rem;
+  font-size: 0.98rem;
+}
+
+.get-else {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin: 0;
+}
+
+.get-list {
+  display: grid;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.get-row {
+  display: grid;
+  grid-template-columns: minmax(0, 12rem) minmax(0, 1fr) auto;
+  gap: 0.3rem 1.1rem;
+  align-items: baseline;
+  padding: 0.7rem 1rem;
+  border-top: 1px solid var(--rule);
+  text-decoration: none;
+  color: var(--ink);
+}
+.get-row:first-child { border-top: 0; }
+.get-row:hover { background: var(--accent-soft); }
+
+.get-name { font-size: 0.92rem; }
+.get-note { color: var(--ink-3); font-size: 0.82rem; }
+.get-file {
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 46rem) {
+  .get-row { grid-template-columns: 1fr; gap: 0.1rem; }
+}
+
 /* ---- pagination and empties ---- */
 
 .more { display: flex; justify-content: center; padding-top: 1rem; }

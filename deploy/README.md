@@ -37,6 +37,19 @@ SEED="203.0.113.10:9944" sh /usr/local/src/cairn/deploy/install.sh
 After that they find each other on their own: a node asks its peers who else
 they know, so one address is enough to join and none at all to rejoin.
 
+A machine that is not one of the first will not need `SEED` at all. The
+addresses in `crates/cairn-net/src/seeds.rs` are written into every program,
+so anything unpacked anywhere finds the network by itself. Those entries are
+what the names below have to resolve to.
+
+## The names
+
+`seed.cairnchain.org` and `seed2.cairnchain.org` are what the program looks
+up first, and each should have an `A` record pointing at one of these
+machines. The raw addresses are written in beside them, so a node still
+starts when a name cannot be resolved; the names are there so a machine can
+be replaced by editing a zone file rather than by publishing a release.
+
 ## What the script does
 
 It installs Rust, builds `cairnd` from source, creates a `cairn` system user
@@ -134,12 +147,17 @@ It needs a name that already points at the machine, because a page saying who
 owns what has to arrive unaltered, and that means a certificate:
 
 ```
-sudo env DOMAIN=explorer.example.org SEED=213.32.69.172:9944     sh /usr/local/src/cairn/deploy/explorer.sh
+sudo env DOMAIN=cairnchain.org sh /usr/local/src/cairn/deploy/explorer.sh
 ```
 
 That builds the explorer, runs it on loopback, installs Caddy in front of it,
-and asks for a certificate. Without `DOMAIN` the site is served over plain
-HTTP, which is fine for looking at and wrong for publishing.
+and asks for a certificate. A bare name like `cairnchain.org` also gets
+`www.cairnchain.org` redirected to it, because people type it. Without
+`DOMAIN` the site is served over plain HTTP, which is fine for looking at and
+wrong for publishing.
+
+No seed has to be named: the addresses a node starts from are written into
+the program.
 
 Unlike a plain node, the explorer keeps the whole cold set and an index from
 owners to their notes. That is a cost which grows with the chain, and it is

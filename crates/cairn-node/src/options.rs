@@ -10,12 +10,12 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use cairn_crypto::PublicKey;
 use cairn_ledger::validation::ConsensusParams;
-use cairn_net::KEEP_BLOCK_BYTES;
+use cairn_net::{seeds, KEEP_BLOCK_BYTES};
 
 pub(crate) const CONFIG_FILE: &str = "cairn.conf";
 
@@ -37,7 +37,10 @@ cairnd, a Cairn node
                          (default: cairn-data)
   --listen <address>     address to accept connections on
                          (default: 0.0.0.0:9944)
-  --seed <address>       a peer to start from; repeat for more
+  --seed <address>       a peer to start from; repeat for more. Without
+                         one, the addresses written into the program for
+                         this network are used, which is why a node that
+                         was just downloaded finds the network on its own
   --network <name>       testnet-3 or devnet (default: testnet-3)
                          devnet has the same rules with a five second block
                          time and a tiny hot set, for one machine.
@@ -68,6 +71,9 @@ pub(crate) struct Options {
     pub(crate) data: PathBuf,
     pub(crate) listen: SocketAddr,
     pub(crate) seeds: Vec<SocketAddr>,
+    /// Whether those seeds were named by the operator or read off the list
+    /// written into the program.
+    pub(crate) seeds_asked_for: bool,
     pub(crate) params: ConsensusParams,
     pub(crate) mine_to: Option<PublicKey>,
     pub(crate) status_period: u64,
@@ -153,13 +159,6 @@ fn parse_config(text: &str) -> Result<Given, String> {
     Ok(given)
 }
 
-fn resolve(text: &str) -> Result<SocketAddr, String> {
-    text.to_socket_addrs()
-        .map_err(|error| format!("`{text}` is not an address: {error}"))?
-        .next()
-        .ok_or_else(|| format!("`{text}` resolved to nothing"))
-}
-
 /// Reads the command line, then the configuration file the command line points
 /// at, and settles every setting.
 pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, String> {
@@ -179,12 +178,8 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
             .map(str::to_owned)
     };
 
-    let listen = resolve(&setting("listen").unwrap_or_else(|| DEFAULT_LISTEN.to_owned()))?;
-
-    let mut seeds = Vec::new();
-    for text in command_line.all("seed").iter().chain(config.all("seed")) {
-        seeds.push(resolve(text)?);
-    }
+    let listen =
+        seeds::resolve_one(&setting("listen").unwrap_or_else(|| DEFAULT_LISTEN.to_owned()))?;
 
     let name = setting("network").unwrap_or_else(|| "testnet".to_owned());
     // Every consensus rule comes from the name, and none of them can be set
@@ -197,6 +192,17 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
             format!("unknown network `{name}`, try testnet-3 or devnet")
         }
     })?;
+
+    // After the network is settled, because a node given no seed starts from
+    // the ones written into the program for the network it is on.
+    let asked: Vec<String> = command_line
+        .all("seed")
+        .iter()
+        .chain(config.all("seed"))
+        .cloned()
+        .collect();
+    let seeds_asked_for = !asked.is_empty();
+    let seeds = seeds::start_from(&asked, params.network)?;
 
     let mine_to = match setting("mine") {
         None => None,
@@ -229,6 +235,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         data,
         listen,
         seeds,
+        seeds_asked_for,
         params,
         mine_to,
         status_period,
@@ -298,8 +305,14 @@ pub(crate) fn describe(options: &Options) -> String {
     let _ = writeln!(text, "listen       {}", options.listen);
     let _ = writeln!(text, "block time   {} s", options.params.target_block_time);
     if options.seeds.is_empty() {
-        let _ = writeln!(text, "seeds        none given");
+        let _ = writeln!(
+            text,
+            "seeds        none, and none written in for this network"
+        );
     } else {
+        if !options.seeds_asked_for {
+            let _ = writeln!(text, "seeds        written into the program, none given");
+        }
         for seed in &options.seeds {
             let _ = writeln!(text, "seed         {seed}");
         }
@@ -350,7 +363,16 @@ mod tests {
         assert_eq!(options.params.network_name(), "testnet-3");
         assert_eq!(options.params.target_block_time, 60);
         assert!(options.mine_to.is_none());
-        assert!(options.seeds.is_empty());
+        // Every seed written in that needs no name server is dialled, so a
+        // program somebody just downloaded finds the network on its own.
+        let literal: Vec<SocketAddr> = seeds::written_in(options.params.network)
+            .iter()
+            .filter_map(|name| name.parse().ok())
+            .collect();
+        assert!(!literal.is_empty(), "the network has a seed written in");
+        for address in literal {
+            assert!(options.seeds.contains(&address), "{address} is a seed");
+        }
         assert!(
             !options.archive,
             "a node validates without archiving by default"

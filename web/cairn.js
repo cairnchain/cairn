@@ -942,36 +942,170 @@ function learn() {
   );
 }
 
+/* ---------- downloading ---------- */
+
+/*
+  Where the programs are.
+
+  The name carries no version, so this link never has to be edited: GitHub
+  hands over whatever the newest release is. Every release also keeps its own
+  copy under its own tag, so an older one stays reachable for good.
+*/
+const RELEASES = 'https://github.com/cairnchain/cairn/releases';
+const NEWEST = RELEASES + '/latest/download/';
+
+const BUILDS = [
+  { key: 'macos-apple-silicon', file: 'cairn-macos-apple-silicon.tar.gz', tar: true },
+  { key: 'macos-intel', file: 'cairn-macos-intel.tar.gz', tar: true },
+  { key: 'linux-x86_64', file: 'cairn-linux-x86_64.tar.gz', tar: true },
+  { key: 'linux-arm64', file: 'cairn-linux-arm64.tar.gz', tar: true },
+  { key: 'windows-x86_64', file: 'cairn-windows-x86_64.zip', tar: false },
+];
+
+/*
+  Which build this machine would run.
+
+  Read from what the browser volunteers about itself and nothing more. There
+  is a way to tell an Apple silicon Mac from an Intel one, by asking a graphics
+  context which chip drew it, and it is not used here: a page about a chain
+  that asks you to trust nobody should not fingerprint the person reading it.
+  Both Macs are offered, newest first, with the year that separates them.
+*/
+function thisMachine() {
+  const agent = (navigator.userAgent || '').toLowerCase();
+  const platform = ((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '').toLowerCase();
+  const touch = navigator.maxTouchPoints || 0;
+
+  // A phone or a tablet runs none of these, and an iPad says it is a Mac.
+  if (/android|iphone|ipad|ipod/.test(agent) || (platform.startsWith('mac') && touch > 1)) return 'phone';
+
+  if (platform.includes('win') || agent.includes('windows')) return 'windows-x86_64';
+  if (platform.includes('mac') || agent.includes('mac os')) return 'macos-apple-silicon';
+  if (platform.includes('linux') || agent.includes('linux')) {
+    return /aarch64|arm64/.test(agent) ? 'linux-arm64' : 'linux-x86_64';
+  }
+  return null;
+}
+
+function outward(href, text, extra) {
+  return el('a', Object.assign({ href, rel: 'noreferrer', text }, extra || {}));
+}
+
+/* How a program in the unpacked folder is run, which the shell decides. */
+function invoke(key, program) {
+  return key === 'windows-x86_64' ? program + '.exe' : './' + program;
+}
+
+function unpack(build) {
+  if (!build || !build.tar) return null;
+  return 'tar xzf ' + build.file + '\ncd cairn-*-' + build.key;
+}
+
 function download() {
   clear(view);
-  const network = state.status && state.status.network ? state.status.network.name : 'testnet-2';
+  const network = state.status && state.status.network ? state.status.network.name : 'testnet-3';
+  const here = thisMachine();
+  const mine = BUILDS.find((build) => build.key === here) || null;
+  const rest = BUILDS.filter((build) => build !== mine);
+  const run = (program) => invoke(mine ? mine.key : 'linux-x86_64', program);
+  const archive = mine ? mine.file : 'cairn-linux-x86_64.tar.gz';
+  const opening = unpack(mine);
+
+  const choice = el(
+    'div',
+    { class: 'get-list' },
+    rest.map((build) =>
+      el(
+        'a',
+        { class: 'get-row', href: NEWEST + build.file, rel: 'noreferrer' },
+        el('span', { class: 'get-name', text: t('run.platform.' + build.key + '.name') }),
+        el('span', { class: 'get-note', text: t('run.platform.' + build.key + '.note') }),
+        el('span', { class: 'get-file', text: build.file })
+      )
+    )
+  );
+
   view.append(
     el(
       'div',
       { class: 'stack' },
       el('section', null, el('p', { class: 'eyebrow', text: t('run.eyebrow') }), el('h1', { text: t('run.title') }), prose('run.lede')),
       panel(t('run.warning.title'), el('div', { class: 'note-aside' }, paragraphs('run.warning.body').map((text) => el('p', { text })))),
+
+      panel(
+        t('run.get.title'),
+        prose('run.get.body'),
+        el(
+          'div',
+          { class: 'get' },
+          mine
+            ? el(
+                'div',
+                { class: 'get-main' },
+                outward(NEWEST + mine.file, t('run.get.action', { platform: t('run.platform.' + mine.key + '.name') }), {
+                  class: 'action primary get-action',
+                }),
+                el('p', { class: 'small dim', text: mine.file + ' · ' + t('run.get.newest') })
+              )
+            : el('div', { class: 'note-aside' }, el('p', { text: t(here === 'phone' ? 'run.get.phone' : 'run.get.unknown') })),
+          el('p', { class: 'get-else', text: mine ? t('run.get.else') : t('run.get.all') }),
+          choice,
+          el(
+            'p',
+            { class: 'small dim' },
+            outward(RELEASES, t('run.get.every')),
+            document.createTextNode(' · '),
+            outward(NEWEST + 'SHA256SUMS', t('run.get.sums'))
+          )
+        ),
+        el('div', { class: 'note-aside' }, el('p', { text: t('run.get.inside') }))
+      ),
+
+      panel(
+        t('run.check.title'),
+        prose('run.check.body'),
+        el('pre', { class: 'code', text: 'gh attestation verify ' + archive + ' --repo cairnchain/cairn' }),
+        el('pre', {
+          class: 'code',
+          text: mine && mine.key === 'windows-x86_64' ? 'certutil -hashfile ' + archive + ' SHA256' : 'shasum -a 256 ' + archive,
+        }),
+        el('div', { class: 'note-aside' }, paragraphs('run.check.warning').map((text) => el('p', { text })))
+      ),
+
+      panel(
+        t('run.node.title'),
+        prose('run.node.body'),
+        el('pre', { class: 'code', text: (opening ? opening + '\n' : '') + run('cairnd') })
+      ),
+
+      panel(
+        t('run.wallet.title'),
+        prose('run.wallet.body'),
+        el('pre', {
+          class: 'code',
+          text: [
+            run('cairn-wallet') + ' new mine.key',
+            run('cairn-wallet') + ' address mine.key',
+            run('cairn-wallet') + ' open mine.key',
+          ].join('\n'),
+        })
+      ),
+
+      panel(t('run.mine.title'), prose('run.mine.body'), el('pre', { class: 'code', text: run('cairnd') + ' --mine ' + t('run.mine.placeholder') })),
+
+      panel(
+        t('run.server.title'),
+        prose('run.server.body'),
+        el('pre', { class: 'code', text: 'git clone https://github.com/cairnchain/cairn /usr/local/src/cairn\nsh /usr/local/src/cairn/deploy/install.sh' })
+      ),
+
+      panel(t('run.explorer.title'), prose('run.explorer.body'), el('pre', { class: 'code', text: run('cairn-explorer') + ' --network ' + network })),
+
       panel(
         t('run.build.title'),
         prose('run.build.body'),
         el('pre', { class: 'code', text: 'git clone https://github.com/cairnchain/cairn\ncd cairn\ncargo build --release' })
-      ),
-      panel(
-        t('run.node.title'),
-        prose('run.node.body'),
-        el('pre', { class: 'code', text: './target/release/cairnd --network ' + network })
-      ),
-      panel(
-        t('run.wallet.title'),
-        prose('run.wallet.body'),
-        el('pre', { class: 'code', text: './target/release/cairn-wallet new\n./target/release/cairn-wallet address\n./target/release/cairn-wallet balance' })
-      ),
-      panel(
-        t('run.mine.title'),
-        prose('run.mine.body'),
-        el('pre', { class: 'code', text: './target/release/cairnd --network ' + network + ' --mine <your address>' })
-      ),
-      panel(t('run.explorer.title'), prose('run.explorer.body'), el('pre', { class: 'code', text: './target/release/cairn-explorer --network ' + network }))
+      )
     )
   );
 }

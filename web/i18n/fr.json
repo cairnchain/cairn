@@ -516,8 +516,8 @@
     "title": "Lancer un nœud",
     "lede": {
       "plain": ["Un nœud est le programme qui vérifie la chaîne pour vous. En lancer un, c'est cesser de croire qui que ce soit sur parole, y compris ce site. Il ne demande ni matériel particulier ni autorisation de personne."],
-      "curious": ["Un nœud de validation complet, à état borné, sur du matériel ordinaire. À compiler depuis les sources, il n'y a pas encore d'installateur."],
-      "technical": ["Compilation depuis les sources. Pas encore de binaires précompilés, et aucun ne sera publié sans signature ni compilation reproductible."]
+      "curious": ["Un nœud de validation complet, à état borné, sur du matériel ordinaire. À télécharger ci-dessous, ou à compiler depuis les sources en bas de cette page."],
+      "technical": ["Compilé au grand jour par GitHub depuis un commit étiqueté, avec une attestation qui rattache chaque fichier au commit et à la procédure qui l'a produit. La vérification se fait auprès de GitHub, pas auprès de nous."]
     },
     "warning": {
       "title": "À lire d'abord",
@@ -527,44 +527,90 @@
         "Cairn n'a pas été auditée. N'y mettez rien qui compte pour vous."
       ]
     },
-    "build": {
-      "title": "Compiler",
+    "get": {
+      "title": "Télécharger",
       "body": {
-        "plain": ["Il vous faut Rust, une chaîne d'outils de programmation gratuite. Ces trois commandes récupèrent le code source et le compilent. Cela prend deux ou trois minutes."],
-        "curious": ["Rust 1.87 ou plus récent. Rien d'autre n'est nécessaire : l'arbre de dépendances tient en cinq bibliothèques et il n'y a pas de moteur asynchrone."],
-        "technical": ["Rust 1.87. Les lints du workspace interdisent le code non sûr, les effets de bord arithmétiques, l'indexation directe, unwrap, expect et panic. Le profil release active les contrôles de débordement."]
-      }
+        "plain": ["Trois programmes dans un dossier. Il n'y a rien à installer : vous décompressez, vous lancez, et si vous supprimez le dossier ensuite il ne reste rien de tout cela sur votre machine."],
+        "curious": ["Un nœud, un portefeuille et ce site, chacun en un seul fichier, sans moteur d'exécution à installer à côté. Les versions Linux sont liées à musl, elles démarrent donc sur des machines plus anciennes que celle qui les a compilées."],
+        "technical": ["Cinq cibles, compilées sur les machines de GitHub avec la chaîne d'outils que ce dépôt fixe et les versions de dépendances inscrites dans Cargo.lock, avec attestation de provenance. Le nom de l'archive ne porte pas de version, ce lien est donc permanent ; la version est dans le dossier qu'elle contient, dans un fichier VERSION, et dans ce que chaque programme affiche au démarrage."]
+      },
+      "action": "Télécharger pour {platform}",
+      "newest": "la version la plus récente",
+      "else": "Une autre machine",
+      "all": "Toutes les machines",
+      "unknown": "Votre machine n'a pas été reconnue, rien n'est donc mis en avant. La liste complète est ci-dessous.",
+      "phone": "Ce sont des programmes pour un ordinateur. Un portefeuille que l'on garde dans sa poche n'existe pas encore ; le jour où il existera, ce sera un nœud lui aussi.",
+      "every": "Toutes les versions",
+      "sums": "SHA256SUMS",
+      "inside": "Dedans : un nœud, un portefeuille, l'explorateur qui sert ce site, les deux licences, et un texte court qui dit quoi en faire."
+    },
+    "platform": {
+      "macos-apple-silicon": { "name": "Mac, puce Apple", "note": "2020 ou plus récent" },
+      "macos-intel": { "name": "Mac, Intel", "note": "avant 2020" },
+      "linux-x86_64": { "name": "Linux, 64 bits", "note": "un ordinateur ou un serveur ordinaire" },
+      "linux-arm64": { "name": "Linux, ARM", "note": "un serveur ARM, ou un Raspberry Pi" },
+      "windows-x86_64": { "name": "Windows", "note": "64 bits" }
+    },
+    "check": {
+      "title": "Vérifier ce que vous avez téléchargé",
+      "body": {
+        "plain": ["Un programme est la seule chose sur ce site que vous ne pouvez pas lire vous-même. Voici quoi faire plutôt que de nous croire : demandez à GitHub quel commit a produit exactement ce fichier. La réponse vient des registres de GitHub, et nous n'avons aucun moyen de la modifier."],
+        "curious": ["La première commande demande l'outil en ligne de commande de GitHub et vérifie l'attestation de provenance. La seconde affiche l'empreinte du fichier, que vous comparez au fichier SHA256SUMS publié à côté."],
+        "technical": ["La provenance est inscrite dans un registre de transparence public et nomme le dépôt, le commit et la procédure. Un fichier qui se vérifie est bien sorti de cette procédure, sur une machine que personne ici ne contrôle. Cela ne dit rien de la qualité du code source, seulement que le binaire vient du code source que vous pouvez lire."]
+      },
+      "warning": [
+        "Votre système d'exploitation va vous mettre en garde contre ces programmes. macOS dira qu'il ne peut pas vérifier s'ils contiennent un logiciel malveillant, Windows dira qu'il a bloqué une application inconnue. Tous deux disent la même chose, et elle est vraie : personne n'a acheté de certificat, il n'y a donc pas de nom à vous montrer.",
+        "Sur macOS, indiquez-lui d'où viennent les fichiers : xattr -d com.apple.quarantine cairnd cairn-wallet cairn-explorer",
+        "Cet avertissement mérite plus d'attention qu'on ne lui en accorde d'habitude. Si vous préférez ne pas lancer le binaire de quelqu'un d'autre, la dernière section de cette page compile les mêmes trois programmes depuis les sources, en une commande."
+      ]
     },
     "node": {
       "title": "Le lancer",
       "body": {
-        "plain": ["C'est tout. Il va trouver d'autres ordinateurs sur le réseau, télécharger la chaîne, et vérifier chaque règle lui-même. Il affiche une ligne toutes les dix secondes pour dire où il en est."],
-        "curious": ["Il part du premier bloc inscrit dans le code source, trouve des pairs, se synchronise et valide. Aucune règle ne peut être réglée en ligne de commande : elles viennent uniquement du nom du réseau."],
-        "technical": ["Ajoutez --archive pour garder l'ensemble froid et pouvoir reconstruire des preuves pour autrui, ce qui coûte un ensemble qui grandit. Ajoutez --seed pour désigner un pair connu. Une option inconnue est une erreur fatale plutôt qu'ignorée."]
+        "plain": ["C'est tout. Il sait déjà par où commencer : il trouve d'autres ordinateurs tout seul, télécharge la chaîne, et vérifie chaque règle au fur et à mesure. Il affiche une ligne toutes les dix secondes pour dire où il en est. Arrêtez-le avec Ctrl-C ; relancez-le et il reprend là où il s'était arrêté."],
+        "curious": ["Les adresses de départ sont écrites dans le programme, exactement comme le premier bloc. Il les résout, demande d'autres adresses à qui lui répond, et à partir de là il tient son propre carnet et n'a plus jamais besoin de cette liste. Aucune règle ne se règle en ligne de commande : elles viennent uniquement du nom du réseau."],
+        "technical": ["Ajoutez --archive pour garder l'ensemble froid et pouvoir reconstruire des preuves pour autrui, ce qui coûte un ensemble qui grandit. Ajoutez --seed pour partir d'ailleurs, ce qui remplace la liste écrite dans le programme au lieu de s'y ajouter. --keep borne les blocs gardés sur le disque, un gigaoctet par défaut. Une option inconnue est une erreur fatale plutôt qu'une chose ignorée en silence."]
       }
     },
     "wallet": {
       "title": "Créer un portefeuille",
       "body": {
-        "plain": ["Ceci crée une clé secrète sur votre machine et affiche l'adresse qui va avec. Le secret ne quitte jamais votre ordinateur, et il n'est jamais envoyé à ce site ni à personne. Si vous le perdez, l'argent est perdu : personne ne peut vous le rendre."],
-        "curious": ["Le fichier de clé est écrit avec des permissions restrictives et n'est jamais écrasé. Le portefeuille conserve lui-même les preuves d'inclusion des billets tombés dans l'ensemble froid."],
-        "technical": ["Ed25519. Le portefeuille suit les positions de ses billets tombés et rafraîchit les preuves à mesure que la forêt grandit, si bien qu'une dépense froide ne demande aucun tiers."]
+        "plain": ["La première commande crée une clé secrète sur votre machine. La deuxième affiche l'adresse à laquelle on vous paie. La troisième ouvre le portefeuille comme une page dans votre navigateur, servie par votre propre ordinateur. Le secret ne le quitte jamais, et il n'est jamais envoyé à ce site ni à personne. Si vous perdez ce fichier, l'argent est perdu : personne, nous compris, ne peut vous le rendre."],
+        "curious": ["Le portefeuille est un nœud. Il ne demande pas à un serveur ce qu'il possède : il rejoint le réseau, vérifie lui-même la chaîne, et lit son solde dans le registre qu'il a validé. La page qu'il ouvre est servie sur la boucle locale et nulle part ailleurs, derrière un secret porté par l'adresse."],
+        "technical": ["Ed25519. Le fichier de clé est écrit avec des permissions restrictives et n'est jamais écrasé. Le portefeuille conserve lui-même les preuves d'inclusion de ses billets tombés dans l'ensemble froid et les rafraîchit à mesure que la forêt grandit, si bien qu'une dépense froide ne demande aucun tiers."]
       }
     },
     "mine": {
+      "placeholder": "<votre adresse>",
       "title": "Miner",
       "body": {
-        "plain": ["C'est comme cela qu'on obtient des CAIRN sur un réseau de test. Votre ordinateur se met à chercher des blocs, et quand il en trouve un, la récompense va à votre adresse. Il n'y a aucun autre moyen d'en obtenir : personne n'a de stock à distribuer."],
-        "curious": ["Minage sur un seul fil d'exécution dans le nœud, ce qui suffit pour un réseau de test. Les récompenses vont à la clé que vous indiquez."],
-        "technical": ["La difficulté de genèse de testnet-2 est 2^27, calibrée pour que le premier bloc prenne à peu près le temps de bloc visé sur un cœur ordinaire, à 2,29 millions d'empreintes par seconde mesurées."]
+        "plain": ["C'est ainsi qu'on obtient des CAIRN sur un réseau de test. Votre ordinateur se met à chercher des blocs, et quand il en trouve un, la récompense va à votre adresse. Il n'y a aucun autre moyen d'en obtenir : personne n'a de stock à distribuer."],
+        "curious": ["Minage sur un seul fil d'exécution dans le nœud, ce qui suffit pour un réseau de test. Les récompenses vont à la clé que vous indiquez, et cette clé peut vivre n'importe où : le nœud reçoit une adresse et ne voit jamais le secret qui est derrière."],
+        "technical": ["La difficulté d'ouverture de testnet-3 est 2^27, calibrée pour que le premier bloc prenne à peu près le temps de bloc visé sur un cœur ordinaire, à 2,29 millions d'empreintes par seconde mesurées."]
+      }
+    },
+    "server": {
+      "title": "En laisser un allumé",
+      "body": {
+        "plain": ["Un réseau a besoin d'ordinateurs qui restent allumés. Si vous louez un serveur, ceci y installe un nœud comme un service : il redémarre tout seul après un redémarrage de la machine, et il continue de tourner quand vous fermez le terminal."],
+        "curious": ["Debian ou Ubuntu avec systemd, ce que fait tourner presque tout serveur loué. Le script compile depuis les sources plutôt que de télécharger un binaire, si bien que ce qui tourne sur votre machine est ce que vous pouvez lire ; il crée un utilisateur sans privilèges ni interpréteur de commandes, et ouvre le port si ufw est présent."],
+        "technical": ["Lisez install.sh avant de le lancer ; il est court et il dit ce qu'il fait. Aucune clé de portefeuille ne va jamais sur une machine pareille. Le minage ne rompt pas cette règle : le nœud reçoit une adresse publique et rien d'autre, et la clé qui dépense les récompenses reste là où vous la gardez."]
       }
     },
     "explorer": {
       "title": "Faire tourner ce site vous-même",
       "body": {
-        "plain": ["Ce site est lui-même un programme que vous pouvez lancer. Il sert exactement ces pages depuis votre machine, en lisant votre propre nœud. Rien ici non plus n'a besoin d'être pris sur parole."],
+        "plain": ["Ce site est l'un des trois programmes du dossier que vous avez téléchargé. Il sert exactement ces pages depuis votre machine, en lisant votre propre nœud. Rien ici non plus n'a besoin d'être pris sur parole."],
         "curious": ["L'explorateur est un nœud qui construit en plus un index et sert le site. Cet index est un coût qui grandit avec la chaîne, et c'est précisément pour cela qu'il vit ici et pas dans le nœud que tout le monde fait tourner."],
         "technical": ["Le site est compilé dans le binaire, rien n'est lu sur le disque à l'exécution. La couche HTTP n'utilise que la bibliothèque standard, un fil par connexion, GET et HEAD, sans corps de requête."]
+      }
+    },
+    "build": {
+      "title": "Ou le compiler vous-même",
+      "body": {
+        "plain": ["Il vous faut Rust, une chaîne d'outils de programmation gratuite. Ces trois commandes récupèrent le code source et le compilent, en deux ou trois minutes. Vous obtenez les trois mêmes programmes, compilés par vous."],
+        "curious": ["Rust 1.89, que le dépôt fixe pour que tout le monde compile avec la même version. Six dépendances directes et aucun moteur asynchrone."],
+        "technical": ["Rust 1.89. Le workspace interdit le code non sûr et refuse les effets de bord arithmétiques, l'indexation, le découpage, unwrap, expect et panic. Le profil release garde les contrôles de débordement actifs."]
       }
     }
   },

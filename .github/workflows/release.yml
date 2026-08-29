@@ -7,6 +7,13 @@
 # each file. `gh attestation verify` checks that against GitHub rather than
 # against us, so trusting the download does not mean trusting us.
 #
+# Archive names carry no version, so
+# https://github.com/cairnchain/cairn/releases/latest/download/cairn-linux-x86_64.tar.gz
+# is a link that always hands over the newest release and can be written into
+# the website once. The version is inside: in the folder name, in a VERSION
+# file, and in what each program prints. Every release keeps its own copy of
+# the files under its own tag, so an old one stays reachable for good.
+#
 # Run it by pushing a tag:
 #
 #     git tag -a v0.1.0 -m "..." && git push origin v0.1.0
@@ -58,6 +65,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A tag that disagrees with the version in Cargo.toml produces programs
+      # that report one number while the release is named another. Cheaper to
+      # refuse here than to explain later.
+      - name: Check the tag against the version
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match version $version in Cargo.toml" >&2
+            exit 1
+          fi
+
       - name: Install the toolchain this repository pins
         run: rustup show
 
@@ -70,7 +90,7 @@ jobs:
       # --locked so the release is built from the dependency versions in
       # Cargo.lock and not from whatever resolved newest this morning.
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }} --bin cairnd --bin cairn-wallet
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin cairnd --bin cairn-wallet --bin cairn-explorer
 
       - name: Gather what goes in the archive
         shell: bash
@@ -79,26 +99,30 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             version="${{ inputs.version }}"
           fi
+          # The folder carries the version; the archive does not, so the
+          # link on the website never has to be edited again.
           folder="cairn-${version}-${{ matrix.name }}"
           echo "FOLDER=$folder" >> "$GITHUB_ENV"
+          echo "ARCHIVE=cairn-${{ matrix.name }}" >> "$GITHUB_ENV"
           mkdir "$folder"
           suffix=""
           if [ "${{ runner.os }}" = "Windows" ]; then
             suffix=".exe"
           fi
-          for program in cairnd cairn-wallet; do
+          for program in cairnd cairn-wallet cairn-explorer; do
             cp "target/${{ matrix.target }}/release/${program}${suffix}" "$folder/"
           done
           cp LICENSE-MIT LICENSE-APACHE "$folder/"
           cp deploy/DOWNLOAD.txt "$folder/README.txt"
+          printf '%s\n' "$version" > "$folder/VERSION"
 
       - name: Archive
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a "${FOLDER}.zip" "$FOLDER" > /dev/null
+            7z a "${ARCHIVE}.zip" "$FOLDER" > /dev/null
           else
-            tar czf "${FOLDER}.tar.gz" "$FOLDER"
+            tar czf "${ARCHIVE}.tar.gz" "$FOLDER"
           fi
 
       - uses: actions/upload-artifact@v4

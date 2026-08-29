@@ -5,10 +5,11 @@
 //! dependency tree of a program people are invited to read.
 
 use std::collections::BTreeMap;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use cairn_ledger::validation::ConsensusParams;
+use cairn_net::seeds;
 
 /// Every name this program understands.
 ///
@@ -28,7 +29,8 @@ cairn-explorer, a Cairn node that also serves a website
                          (default: 0.0.0.0:9945)
   --http <address>       address to serve the website on
                          (default: 127.0.0.1:8080)
-  --seed <address>       a peer to start from; repeat for more
+  --seed <address>       a peer to start from; repeat for more. Without one,
+                       the addresses written into the program are used
   --network <name>       testnet-3 or devnet (default: testnet-3)
   --help                 print this and stop
 
@@ -98,13 +100,6 @@ fn parse_arguments(arguments: &[String]) -> Result<Given, String> {
     Ok(given)
 }
 
-fn resolve(text: &str) -> Result<SocketAddr, String> {
-    text.to_socket_addrs()
-        .map_err(|error| format!("`{text}` is not an address: {error}"))?
-        .next()
-        .ok_or_else(|| format!("`{text}` resolved to nothing"))
-}
-
 pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, String> {
     let given = parse_arguments(arguments)?;
     if given.has("help") {
@@ -112,13 +107,8 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
     }
 
     let data = PathBuf::from(given.first("data").unwrap_or(DEFAULT_DATA));
-    let listen = resolve(given.first("listen").unwrap_or(DEFAULT_LISTEN))?;
-    let http = resolve(given.first("http").unwrap_or(DEFAULT_HTTP))?;
-
-    let mut seeds = Vec::new();
-    for text in given.all("seed") {
-        seeds.push(resolve(text)?);
-    }
+    let listen = seeds::resolve_one(given.first("listen").unwrap_or(DEFAULT_LISTEN))?;
+    let http = seeds::resolve_one(given.first("http").unwrap_or(DEFAULT_HTTP))?;
 
     let name = given.first("network").unwrap_or("testnet");
     let params = ConsensusParams::for_network(name).ok_or_else(|| {
@@ -128,6 +118,10 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
             format!("unknown network `{name}`, try testnet-3 or devnet")
         }
     })?;
+
+    // After the network is settled: an explorer given no seed starts from the
+    // ones written into the program, like every other node.
+    let seeds = seeds::start_from(given.all("seed"), params.network)?;
 
     Ok(Some(Options {
         data,
