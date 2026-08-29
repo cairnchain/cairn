@@ -154,7 +154,8 @@ notes that go with it.
 | `cairn-net` | The wire protocol, block propagation, syncing over TCP, and peer discovery |
 | `cairn-store` | The append only block log a node replays on start |
 | `cairn-node` | `cairnd`, a node |
-| `cairn-wallet` | `cairn-wallet`, a wallet that is itself a node |
+| `cairn-wallet` | the wallet: a library that holds the key, and `cairn-wallet` on top of it |
+| `cairn-http` | the small HTTP server and JSON writer the wallet and the explorer share |
 | `cairn-explorer` | `cairn-explorer`, a node that indexes the chain and serves `web/` |
 
 The website itself is in `web/`, kept out of the protocol crates. It is plain
@@ -175,9 +176,22 @@ Make a key, and start a node that mines to it on a throwaway network:
     --mine $(./target/release/cairn-wallet address alice.key)
 ```
 
-From another terminal, read what that key holds and pay someone with it. The
-wallet joins the network as a node of its own and verifies the chain before it
-answers, so it needs its own directory:
+From another terminal, open the wallet. It joins the network as a node of its
+own and verifies the chain before it answers anything, so it needs its own
+directory:
+
+```
+./target/release/cairn-wallet open alice.key \
+    --network devnet --data wallet --seed 127.0.0.1:9944
+```
+
+That prints an address to open in a browser: the balance, the address to be
+paid at, a form to spend from, and where the money sits. It is served on the
+loopback and nowhere else, the address carries a secret drawn for that run, and
+a request naming another host or carrying another page's origin is refused. The
+key stays in the process that read it; nothing the browser holds can sign.
+
+The same things without a browser, for scripts and for servers:
 
 ```
 ./target/release/cairn-wallet balance alice.key \
@@ -187,6 +201,10 @@ answers, so it needs its own directory:
     --amount 12.5 --fee 0.25 \
     --network devnet --data wallet --seed 127.0.0.1:9944
 ```
+
+Everything that touches money lives in the library, and both of those are faces
+on top of it. That is what makes a native application on a phone a matter of
+writing a face rather than writing spending a second time.
 
 Watch the same network in a browser, with the explorer alongside the node:
 
