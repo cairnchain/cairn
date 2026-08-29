@@ -10,6 +10,7 @@ pub mod emission;
 pub mod genesis;
 pub mod note;
 pub mod pow;
+pub mod sampling;
 pub mod state;
 pub mod transaction;
 pub mod validation;

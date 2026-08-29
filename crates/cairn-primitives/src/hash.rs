@@ -69,6 +69,7 @@ pub enum Domain {
     ForestNode,
     ForestRoots,
     HeaderHistoryLeaf,
+    SamplingSeed,
 }
 
 impl Domain {
@@ -93,6 +94,7 @@ impl Domain {
             Self::ForestNode => "cairn v1 forest node",
             Self::ForestRoots => "cairn v1 forest roots",
             Self::HeaderHistoryLeaf => "cairn v1 header history leaf",
+            Self::SamplingSeed => "cairn v1 sampling seed",
         }
     }
 }
@@ -121,6 +123,7 @@ struct DomainKeys {
     forest_node: [u8; HASH_LEN],
     forest_roots: [u8; HASH_LEN],
     header_history_leaf: [u8; HASH_LEN],
+    sampling_seed: [u8; HASH_LEN],
 }
 
 fn domain_keys() -> &'static DomainKeys {
@@ -145,6 +148,7 @@ fn domain_keys() -> &'static DomainKeys {
         forest_node: blake3::derive_key(Domain::ForestNode.context(), &[]),
         forest_roots: blake3::derive_key(Domain::ForestRoots.context(), &[]),
         header_history_leaf: blake3::derive_key(Domain::HeaderHistoryLeaf.context(), &[]),
+        sampling_seed: blake3::derive_key(Domain::SamplingSeed.context(), &[]),
     })
 }
 
@@ -170,6 +174,7 @@ fn key_for(domain: Domain) -> &'static [u8; HASH_LEN] {
         Domain::ForestNode => &keys.forest_node,
         Domain::ForestRoots => &keys.forest_roots,
         Domain::HeaderHistoryLeaf => &keys.header_history_leaf,
+        Domain::SamplingSeed => &keys.sampling_seed,
     }
 }
 
