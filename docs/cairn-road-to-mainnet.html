@@ -408,6 +408,22 @@
       </div>
       <div class="task">
         <div class="task-what">
+          <b>Rejoindre marchait sur le papier</b>
+          <span>Un nœud sait maintenant dire où il en est quand il rejoint. C'est en l'exigeant dans les tests que six défauts sont apparus : les preuves d'en-têtes étaient construites contre le mauvais arbre, l'identité de la chaîne pesée était perdue entre les deux étapes, un archiviste qui se tait laissait le nœud bloqué à vie, et un nœud qui avait rejoint annonçait zéro travail derrière lui, ce qui lui faisait croire n'importe quelle chaîne plus lourde. Aucun échange n'avait jamais abouti ; la lecture bloc par bloc rattrapait derrière et masquait tout.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Un nœud qui a rejoint est un nœud</b>
+          <span>Il n'écrivait rien sur son disque : les positions de son journal étaient des hauteurs, et le sien commence là où on le lui a remis. Il validait des blocs que personne ne pouvait lui demander et les perdait à chaque redémarrage. Il garde maintenant l'état reçu et repart dessus tout seul, sans dépendre d'un archiviste joignable à cet instant.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
           <b>192 octets pour une clé de 32</b>
           <span>Une clé publique était gardée sous sa forme calculée, utile pour vérifier souvent et inutile pour une note qui dort. Mesuré en isolant chaque structure : 192 des 244 octets d'une note. Le tiroir chaud passe de 107 à 68 Mo, contre 16 % sur la vérification d'une signature, soit neuf millisecondes par bloc plein.</span>
         </div>
@@ -708,12 +724,12 @@
     <h2>Ce qui vient maintenant, dans l'ordre</h2>
     <p>
       <strong>Ce que gagne un archiviste.</strong> Le démarrage échantillonné
-      est écrit, branché et vérifié : un nouveau venu rejoint le réseau en
-      12 Mo au lieu de trente ans d'histoire, et sait reconnaître le nœud
-      capable de le servir. Ce qui manque n'est plus du mécanisme mais une
-      décision : celui qui rend ce service porte le seul coût du réseau qui
-      grandisse, et rien ne le lui rend. C'est la dernière question de
-      conception ouverte.
+      est écrit, branché et vérifié pour de bon : un nouveau venu rejoint le
+      réseau en 12 Mo au lieu de trente ans d'histoire, reconnaît le nœud
+      capable de le servir, et redémarre ensuite sans avoir besoin de lui. Ce
+      qui manque n'est plus du mécanisme mais une décision : celui qui rend ce
+      service porte le seul coût du réseau qui grandisse, et rien ne le lui
+      rend. C'est la dernière question de conception ouverte.
     </p>
     <p>
       <strong>Deux choses attendent un nom de domaine.</strong> Les programmes
@@ -742,8 +758,8 @@
   </div>
 
   <footer>
-    <span>Cairn · route jusqu'au mainnet · v9</span>
-    <span>95 commits · 355 tests</span>
+    <span>Cairn · route jusqu'au mainnet · v10</span>
+    <span>101 commits · 361 tests</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 
