@@ -67,17 +67,20 @@ across a set no node holds.
 
 Every header commits to two things beyond its own block: the work behind the
 whole chain, and every header that came before it, held as sixty four hashes
-like the cold set. Neither changes what a node does today. What they buy is the
-only way to join this chain without downloading all of it: someone starting
-from nothing can be handed a sample of old headers, check each is really where
-it claims to be, and work out what stands behind the tip without reading the
-millions in between. That is roughly three hundred kilobytes and the hundred
-megabytes of state, against the tens of gigabytes it takes to read everything.
+like the cold set. What they buy is the only way to join this chain without
+downloading all of it. Someone starting from nothing draws 512 old headers
+against accumulated work rather than height, checks each is really where it
+claims to be in the tip's own commitment, and works out what stands behind the
+tip without reading the millions in between. Then they are handed the ledger.
+Twelve megabytes for a thirty year chain, against 2 067 GB of reading.
 
-The mechanism that uses them is not written yet. The fields are, because they
-could not have been added later: changing the shape of a header invalidates
-every block already mined, so a chain that ever carries value can never gain
-one.
+Any node can answer, because the headers and the forest they make are kept on
+disk by every node at 182 bytes each. Joining does not depend on anyone
+volunteering to carry the history.
+
+Those fields had to be in the header from the first day: changing the shape of
+a header invalidates every block already mined, so a chain that ever carries
+value can never gain one.
 
 Each network starts from a block written into the source, so two nodes that
 have never met are on the same chain by construction and neither has to take a
