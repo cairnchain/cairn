@@ -8,6 +8,7 @@
 pub mod block;
 pub mod emission;
 pub mod genesis;
+pub mod handover;
 pub mod note;
 pub mod pow;
 pub mod sampling;

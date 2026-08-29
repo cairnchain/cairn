@@ -509,6 +509,9 @@ pub struct BlockUndo {
     /// The header forest from just before the block, for the same reason the
     /// cold roots are kept: an append cannot be undone from the roots left.
     headers_before: Forest,
+    /// And the one before that, which the state keeps alongside so a node can
+    /// hand over a forest its own tip vouches for.
+    headers_before_before_tip: Forest,
 }
 
 /// Replays a transition onto a hot tree and a cold set.
@@ -594,6 +597,15 @@ pub struct LedgerState {
     /// blocks so that undoing one is exact.
     grace: VecDeque<Vec<(NoteId, u64, Note)>>,
     grace_index: BTreeMap<NoteId, (u64, Note)>,
+    /// The same forest as it stood before the tip was added.
+    ///
+    /// Sixty four more hashes, kept because nothing else commits to the forest
+    /// as it stands now: a header's `history` commits to everything before it,
+    /// so the forest a node currently holds is only vouched for by the block
+    /// that comes next. A node handing its ledger to a newcomer sends this one
+    /// instead, which the tip's own header vouches for, and the newcomer adds
+    /// the tip back itself.
+    headers_before_tip: Forest,
     /// Every header this chain has carried, as sixty four hashes.
     ///
     /// The same append-only forest the cold set uses, holding one leaf per
@@ -658,6 +670,115 @@ impl LedgerState {
     /// one once anything has been applied.
     pub fn headers_committed(&self) -> u64 {
         self.headers.len()
+    }
+
+    /// The header forest as it stood before the tip, which the tip commits to.
+    #[must_use]
+    pub fn headers_before_tip(&self) -> Forest {
+        self.headers_before_tip.clone()
+    }
+
+    /// What fell in each of the last few blocks, oldest first.
+    #[must_use]
+    pub fn grace_window(&self) -> Vec<Vec<(NoteId, u64, Note)>> {
+        self.grace.iter().cloned().collect()
+    }
+
+    /// Keeps a proof for every note the grace window holds.
+    ///
+    /// Only for a ledger being rebuilt from a handover. Each proof is checked
+    /// against the cold commitment first, so nothing is kept on the word of
+    /// whoever sent it, and every note in the window has to have one: the
+    /// window exists so a note that fell moments ago can be spent without a
+    /// proof from the spender, which only works if the node holds one.
+    pub(crate) fn take_grace_proofs(
+        &mut self,
+        proofs: &[(u64, ForestProof)],
+    ) -> Result<(), crate::handover::HandoverError> {
+        for (position, proof) in proofs {
+            let Some(leaf) = self.grace_leaf_at(*position) else {
+                continue;
+            };
+            if !self.cold.now.verify(*position, leaf, proof) {
+                return Err(crate::handover::HandoverError::BadGraceProof {
+                    position: *position,
+                });
+            }
+            self.cold.now.watch(*position, proof.clone());
+        }
+        for (_, position, _) in self.grace.iter().flatten() {
+            if self.cold.now.proof_of(*position).is_none() {
+                return Err(crate::handover::HandoverError::MissingGraceProof {
+                    position: *position,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The cold leaf the grace window expects at `position`.
+    fn grace_leaf_at(&self, position: u64) -> Option<Hash32> {
+        self.grace
+            .iter()
+            .flatten()
+            .find(|(_, at, _)| *at == position)
+            .map(|(id, _, note)| cold_leaf(id, note))
+    }
+
+    /// The cold set as this node holds it, roots only.
+    #[must_use]
+    pub fn cold_roots(&self) -> Forest {
+        self.cold.now.snapshot()
+    }
+
+    /// A ledger built from pieces rather than from replaying a chain.
+    ///
+    /// Nothing here is checked. It is what [`crate::handover::accept`] builds
+    /// before comparing the result against the header that commits to it,
+    /// which is the only thing that makes a rebuilt ledger worth anything.
+    #[must_use]
+    pub(crate) fn rebuilt(
+        hot: Vec<(NoteId, HotEntry)>,
+        cold: Forest,
+        grace: VecDeque<Vec<(NoteId, u64, Note)>>,
+        headers_before_tip: Forest,
+        recent: Vec<HeaderSummary>,
+        at: &BlockHeader,
+    ) -> Self {
+        let mut state = Self {
+            cold: ColdTier {
+                now: ColdSet::Roots(cold),
+                bygone: VecDeque::new(),
+            },
+            recent,
+            headers_before_tip: headers_before_tip.clone(),
+            headers: headers_before_tip,
+            tip: Some(Tip {
+                id: at.id(),
+                height: at.height,
+                timestamp: at.timestamp,
+                total_work: at.total_work,
+            }),
+            ..Self::default()
+        };
+        // The tip belongs in the forest, and the forest handed over is the one
+        // from before it, because that is the one the tip vouches for.
+        state.headers.add(header_leaf(&at.id()));
+
+        for (id, entry) in hot {
+            state
+                .hot_tree
+                .insert(note_key(&id), hot_value(&entry.note, entry.height));
+            state.hot_by_age.insert((entry.height, id));
+            state.hot.insert(id, entry);
+        }
+        for block in &grace {
+            for (id, position, note) in block {
+                state.grace_index.insert(*id, (*position, *note));
+            }
+        }
+        state.grace = grace;
+        state
     }
 
     /// Work behind the followed branch, as the tip's own header states it.
@@ -838,6 +959,7 @@ impl LedgerState {
             previous_tip: self.tip,
             cold_before: self.cold.now.snapshot(),
             headers_before: self.headers.clone(),
+            headers_before_before_tip: self.headers_before_tip.clone(),
             ..BlockUndo::default()
         };
         // File the state away before the block moves it, so a spender whose
@@ -894,6 +1016,7 @@ impl LedgerState {
         let id = header.id();
         // Appended after the block is committed, so `history` on the next
         // header commits to this one and every one before it.
+        self.headers_before_tip = self.headers.clone();
         self.headers.add(header_leaf(&id));
         self.tip = Some(Tip {
             id,
@@ -945,6 +1068,7 @@ impl LedgerState {
         debug_assert_eq!(self.hot.len(), self.hot_by_age.len());
 
         self.headers = undo.headers_before.clone();
+        self.headers_before_tip = undo.headers_before_before_tip.clone();
         self.tip = undo.previous_tip;
     }
 
