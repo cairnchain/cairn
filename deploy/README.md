@@ -132,6 +132,11 @@ sh /usr/local/src/cairn/deploy/install.sh   # rebuilds and restarts
 whatever `SEED` and `MINE` were set to on the last run is what the unit says.
 Pass them again on an update, or edit `/etc/systemd/system/cairnd.service`.
 
+An update that would silently stop a node from mining refuses to run and
+prints both ways out: the same `MINE` again to keep it, or `MINE=off` to
+actually turn it off. A miner that quietly stopped is how a test network goes
+still without anybody noticing.
+
 A node killed outright, or a server that loses power, comes back on its own:
 the data directory lock is held by the kernel on an open file and is released
 when the process dies, however it dies. Nothing has to be cleaned up by hand.

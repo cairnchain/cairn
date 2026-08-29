@@ -8,6 +8,9 @@
 #     less install.sh          # read it before running it, always
 #     sh install.sh
 #
+# It needs no address to start from: the ones a node begins with are written
+# into the program. SEED still works, and names a peer to try first.
+#
 # It builds from source rather than fetching a binary, so what runs is what
 # you can read. That takes a few minutes and a little memory; see the note
 # about swap below if the build is killed partway.
@@ -39,6 +42,27 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+UNIT=/etc/systemd/system/cairnd.service
+STOP_MINING=""
+
+# A node that was mining and is updated without MINE would come back not
+# mining, correctly and silently, and on a test network that stops the chain
+# for everybody. So an update that would drop it stops here and says how to go
+# either way, rather than choosing for the operator.
+if [ -z "$MINE" ] && [ -f "$UNIT" ]; then
+    was=$(sed -n 's/.*--mine \([0-9a-fA-F]*\).*/\1/p' "$UNIT" | head -n 1)
+    if [ -n "$was" ]; then
+        echo "this node is mining and this run did not say to keep it" >&2
+        echo "  to keep mining:  sudo env MINE=$was sh $0" >&2
+        echo "  to stop mining:  sudo env MINE=off sh $0" >&2
+        exit 1
+    fi
+fi
+if [ "$MINE" = "off" ]; then
+    MINE=""
+    STOP_MINING=1
+fi
+
 # A key that is not a key produces a service that will not start, and systemd
 # reports that as a failure to launch rather than as a bad argument.
 if [ -n "$MINE" ]; then
@@ -59,9 +83,11 @@ fi
 # before anything is built rather than after it is running.
 echo "network  $NETWORK"
 echo "port     $PORT"
-echo "seeds    ${SEED:-none}"
+echo "seeds    ${SEED:-none given, the written-in ones are used}"
 if [ -n "$MINE" ]; then
     echo "mining   to $MINE"
+elif [ -n "$STOP_MINING" ]; then
+    echo "mining   off, and this run turns it off"
 else
     echo "mining   off"
 fi
@@ -147,13 +173,12 @@ chown cairn:cairn "$DATA"
 chmod 0750 "$DATA"
 
 say "Service"
-UNIT=/etc/systemd/system/cairnd.service
 cp "$SRC/deploy/cairnd.service" "$UNIT"
 
 # The unit ships with the defaults; rewrite the line if this run asked for
 # something else, so every server ends up with a unit that says what it does.
 if [ "$NETWORK" != "testnet-3" ] || [ "$PORT" != "9944" ] ||
-   [ -n "$SEED" ] || [ -n "$MINE" ]; then
+   [ -n "$SEED" ] || [ -n "$MINE" ] || [ -n "$STOP_MINING" ]; then
     ARGS="--network $NETWORK --data $DATA --listen 0.0.0.0:$PORT --status 60"
     for peer in $SEED; do
         ARGS="$ARGS --seed $peer"
