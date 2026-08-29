@@ -289,3 +289,64 @@ fn the_address_is_the_key_file_and_nothing_else() {
     wallet.shutdown();
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// The history is the wallet's own account of its money, and it has to survive
+/// the wallet being closed. A wallet that rebuilt it from nothing every time
+/// would lose everything older than the blocks it still keeps.
+#[test]
+fn the_history_is_written_down_and_read_back() {
+    let directory = scratch("history");
+    std::fs::create_dir_all(&directory).unwrap();
+    let key_file = directory.join("key");
+    let secret = SecretKey::from_bytes(&[11; 32]);
+    cairn_wallet::keyfile::write(&key_file, &secret).unwrap();
+    let data = directory.join("data");
+
+    let recipient = SecretKey::from_bytes(&[9; 32]).public_key();
+    let (wallet, _) = Wallet::open(&key_file, params(), &data).unwrap();
+    let mut forge = Forge::new();
+    for _ in 0..4 {
+        let block = forge.mine(&secret.public_key(), Vec::new());
+        wallet.node().submit_block(block).unwrap();
+    }
+
+    // Mined four times, then spent once, and the spend lands in a block.
+    wallet.send(recipient, cairn("60"), cairn("1")).unwrap();
+    let carried: Vec<Transfer> = wallet.node().with_chain(|chain| {
+        chain
+            .pooled_transfers()
+            .map(|(_, transfer)| transfer.clone())
+            .collect()
+    });
+    let block = forge.mine(&recipient, carried);
+    wallet.node().submit_block(block).unwrap();
+
+    let movements = wallet.history();
+    assert_eq!(movements.len(), 5, "four mined and one sent");
+    assert_eq!(
+        movements[0].direction,
+        cairn_wallet::history::Direction::Sent
+    );
+    assert_eq!(
+        movements[0].amount,
+        cairn("61"),
+        "what left is what was sent and what was paid to carry it"
+    );
+    assert!(movements[1..]
+        .iter()
+        .all(|m| m.direction == cairn_wallet::history::Direction::Mined));
+    assert_eq!(wallet.history_from(), Some(0));
+    wallet.shutdown();
+    drop(wallet);
+
+    // Opened again, it remembers rather than starting over.
+    let (again, _) = Wallet::open(&key_file, params(), &data).unwrap();
+    let remembered = again.history();
+    assert_eq!(remembered.len(), 5, "it was written down");
+    assert_eq!(remembered[0].amount, cairn("61"));
+    assert_eq!(remembered[0].id, movements[0].id, "the same transfer");
+    assert_eq!(again.history_from(), Some(0));
+
+    again.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+}

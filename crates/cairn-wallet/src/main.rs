@@ -187,6 +187,32 @@ fn show_balance(arguments: &[String]) -> Result<(), String> {
         println!("Nothing here yet. If this key should hold something, check that the");
         println!("wallet reached a peer and caught up to the height you expect.");
     }
+
+    let movements = wallet.history();
+    if !movements.is_empty() {
+        println!();
+        println!("What happened, newest first:");
+        println!();
+        for movement in movements.iter().take(20) {
+            println!(
+                "  {:<9} {}{:<22} block {}",
+                movement.direction.as_str(),
+                if movement.direction == cairn_wallet::history::Direction::Sent {
+                    "-"
+                } else {
+                    "+"
+                },
+                movement.amount.to_string(),
+                movement.height,
+            );
+        }
+        if let Some(from) = wallet.history_from() {
+            if from > 0 {
+                println!();
+                println!("As far back as block {from}: this wallet did not read what came before.");
+            }
+        }
+    }
     wallet.shutdown();
     Ok(())
 }
