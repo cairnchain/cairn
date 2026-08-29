@@ -34,7 +34,7 @@ use cairn_ledger::validation::TransferError;
 use cairn_ledger::LedgerState;
 use cairn_primitives::codec::{Decode, Encode};
 use cairn_primitives::Hash32;
-use cairn_store::{BlockLog, DirectoryLock, StoreError, HANDED_LEDGER};
+use cairn_store::{BlockLog, DirectoryLock, HeaderLog, StoreError, HANDED_LEDGER};
 
 use crate::book::AddressBook;
 use crate::joining::{Collecting, Joined, Progress};
@@ -192,7 +192,7 @@ struct Shared {
     nonce: u64,
     chain: Mutex<ChainStore>,
     /// Absent when the node keeps its chain only in memory.
-    log: Mutex<Option<BlockLog>>,
+    log: Mutex<Option<Store>>,
     book: Mutex<AddressBook>,
     directory: Option<PathBuf>,
     /// Bytes of blocks this node keeps on disk. `u64::MAX` keeps everything,
@@ -311,7 +311,8 @@ impl Shared {
         let over = {
             let keep = self.keep_bytes.load(Ordering::Relaxed);
             let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-            log.as_ref().is_some_and(|log| log.bytes() > keep)
+            log.as_ref()
+                .is_some_and(|store| store.blocks.bytes() > keep)
         };
         if !over {
             return;
@@ -342,8 +343,8 @@ impl Shared {
             // A log that no longer reaches that height was rewritten by a
             // reorganisation between the two checks above, and emptying it
             // here would throw away blocks this node still holds.
-            if log.holds(at.height) {
-                let _ = log.keep_from(at.height.saturating_add(1));
+            if log.blocks.holds(at.height) {
+                let _ = log.blocks.keep_from(at.height.saturating_add(1));
             }
         }
     }
@@ -402,7 +403,7 @@ impl Shared {
             let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
             let log = log.as_ref()?;
             locator.iter().find_map(|entry| {
-                let block = log.read_at(entry.height).ok().flatten()?;
+                let block = log.blocks.read_at(entry.height).ok().flatten()?;
                 (block.id() == entry.id).then_some(entry.height)
             })
         });
@@ -437,7 +438,7 @@ impl Shared {
         if let Some(log) = log.as_ref() {
             for (slot, height) in found.iter_mut().zip(heights.iter()) {
                 if slot.is_none() {
-                    *slot = log.read_at(*height).ok().flatten();
+                    *slot = log.blocks.read_at(*height).ok().flatten();
                 }
             }
         }
@@ -676,6 +677,18 @@ impl Node {
             log.keep_from(start)?;
         }
 
+        // Headers are kept whatever happens to the blocks. A node updated from
+        // a version that had no header log has an empty one and a chain, so it
+        // is filled in from the blocks that are still there. Everything older
+        // than those is gone, which costs this node the ability to answer a
+        // newcomer about that stretch and nothing else.
+        let mut headers = HeaderLog::open(&directory)?;
+        catch_up_headers(&mut headers, &log)?;
+        let log = Store {
+            blocks: log,
+            headers,
+        };
+
         let book = AddressBook::load(&directory);
         let restored = Restored {
             blocks: applied,
@@ -701,7 +714,7 @@ impl Node {
         params: ConsensusParams,
         address: SocketAddr,
         chain: ChainStore,
-        log: Option<BlockLog>,
+        log: Option<Store>,
         book: AddressBook,
         directory: Option<PathBuf>,
         lock: Option<DirectoryLock>,
@@ -809,7 +822,7 @@ impl Node {
             .log
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        log.as_ref()?.read_at(height).ok().flatten()
+        log.as_ref()?.blocks.read_at(height).ok().flatten()
     }
 
     pub fn height(&self) -> Option<u64> {
@@ -841,7 +854,7 @@ impl Node {
             .log
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        log.as_ref().map_or(0, BlockLog::bytes)
+        log.as_ref().map_or(0, |store| store.blocks.bytes())
     }
 
     /// How far this node is through joining a chain it was not on.
@@ -1121,6 +1134,18 @@ fn step(
     (asking, whole)
 }
 
+/// What a node keeps on disk, under one lock.
+///
+/// Two files with two different lifetimes: the blocks, which a node drops once
+/// it has written down the ledger they add up to, and the headers, which it
+/// keeps because they are what a newcomer is shown. Held together so there is
+/// no order between them to get wrong.
+#[derive(Debug)]
+struct Store {
+    blocks: BlockLog,
+    headers: HeaderLog,
+}
+
 /// A join answer, built once and handed out in pieces.
 struct Prepared {
     what: Joining,
@@ -1177,7 +1202,14 @@ impl Shared {
             if let Some(block) = chain.block_at(height) {
                 return Some(block.header);
             }
-            Some(log.as_ref()?.read_at(height).ok()??.header)
+            let store = log.as_ref()?;
+            // The header log first: a node keeps every header and only the
+            // most recent blocks, so this is the one that answers about the
+            // far end of the chain.
+            if let Ok(Some(header)) = store.headers.read_at(height) {
+                return Some(header);
+            }
+            Some(store.blocks.read_at(height).ok()??.header)
         };
 
         let state = chain.state();
@@ -1210,7 +1242,14 @@ impl Shared {
             if let Some(block) = chain.block_at(height) {
                 return Some(block.header);
             }
-            Some(log.as_ref()?.read_at(height).ok()??.header)
+            let store = log.as_ref()?;
+            // The header log first: a node keeps every header and only the
+            // most recent blocks, so this is the one that answers about the
+            // far end of the chain.
+            if let Ok(Some(header)) = store.headers.read_at(height) {
+                return Some(header);
+            }
+            Some(store.blocks.read_at(height).ok()??.header)
         };
         let state = chain.state();
         let tip = header_at(chain.height()?)?;
@@ -1233,7 +1272,64 @@ impl Shared {
 ///
 /// A failure here costs blocks on the next restart, not the chain this node is
 /// following, so it does not stop the node.
-fn write_branch(log: &mut BlockLog, accepted: &Accepted, chain: &ChainStore) {
+fn write_branch(store: &mut Store, accepted: &Accepted, chain: &ChainStore) {
+    write_headers(&mut store.headers, chain);
+    write_blocks(&mut store.blocks, accepted, chain);
+}
+
+/// Brings the header log in line with the branch this node follows.
+///
+/// Headers are kept whatever happens to the blocks, because they are what a
+/// newcomer is shown to settle which chain carries the most work. A node that
+/// dropped them could no longer answer, and would still be saying it can.
+///
+/// A reorganisation takes the tail off and the new branch is written over the
+/// same ground, which is the same shape as the block log and bounded the same
+/// way.
+fn write_headers(headers: &mut HeaderLog, chain: &ChainStore) {
+    let Some(tip) = chain.height() else { return };
+    let reaches = tip.saturating_add(1);
+
+    // Where the log and the branch part company. Walking back from the tip
+    // rather than trusting the log, since a reorganisation may have replaced
+    // headers the log still holds without shortening it.
+    let mut common = headers.reaches().min(reaches);
+    while common > headers.first_height() {
+        let at = common.saturating_sub(1);
+        let held = headers.read_at(at).ok().flatten().map(|header| header.id());
+        let now = chain
+            .block_at(at)
+            .map(|block| block.header.id())
+            .or_else(|| chain.id_at(at));
+        match (held, now) {
+            (Some(held), Some(now)) if held == now => break,
+            // Nothing to compare against this far back: the chain no longer
+            // holds an identifier for it, and what is written stands.
+            (_, None) => break,
+            _ => common = at,
+        }
+    }
+    if headers.reaches() > common && headers.keep_below(common).is_err() {
+        return;
+    }
+
+    let mut height = if headers.is_empty() {
+        chain.branch_start().unwrap_or(0)
+    } else {
+        headers.reaches()
+    };
+    while height < reaches {
+        let Some(header) = chain.block_at(height).map(|block| block.header) else {
+            break;
+        };
+        if headers.append(&header).is_err() {
+            break;
+        }
+        height = height.saturating_add(1);
+    }
+}
+
+fn write_blocks(log: &mut BlockLog, accepted: &Accepted, chain: &ChainStore) {
     let added = match accepted {
         Accepted::Duplicate | Accepted::SideBranch => return,
         // The block just applied is the tip, and the log ends one short.
@@ -1420,6 +1516,39 @@ fn build_ledger(
         recent.push(header_at(height)?);
     }
     Some(state.handover(*tip, recent))
+}
+
+/// Fills the header log in from the blocks, for the stretch it is missing.
+///
+/// For a node updated from a version that kept no headers, and for one whose
+/// header log was lost. Both are the same case: what the blocks can still show
+/// is written, and what they cannot is gone.
+fn catch_up_headers(headers: &mut HeaderLog, blocks: &BlockLog) -> Result<(), StoreError> {
+    if blocks.is_empty() {
+        return Ok(());
+    }
+    let from = if headers.is_empty() {
+        blocks.first_height()
+    } else {
+        headers.reaches()
+    };
+    if from < blocks.first_height() {
+        // A gap nothing can fill: the headers stop before the blocks start.
+        // Starting again from the blocks is the most that can be said.
+        headers.keep_below(0)?;
+        return catch_up_from(headers, blocks, blocks.first_height());
+    }
+    catch_up_from(headers, blocks, from)
+}
+
+fn catch_up_from(headers: &mut HeaderLog, blocks: &BlockLog, from: u64) -> Result<(), StoreError> {
+    for height in from..blocks.reaches() {
+        let Some(block) = blocks.read_at(height)? else {
+            break;
+        };
+        headers.append(&block.header)?;
+    }
+    Ok(())
 }
 
 /// Reads back the ledger a node was handed, if it kept one.
@@ -1874,24 +2003,36 @@ mod tests {
 
         let directory = std::env::temp_dir().join(format!("cairn-behind-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
-        let (mut log, _) = BlockLog::open(&directory).unwrap();
+        let (blocks_log, _) = BlockLog::open(&directory).unwrap();
+        let mut store = Store {
+            blocks: blocks_log,
+            headers: HeaderLog::open(&directory).unwrap(),
+        };
 
         let mut chain = ChainStore::new(params);
         for block in &blocks[..5] {
             chain.add_block(block.clone(), 2_000_000_000).unwrap();
         }
         // What a failed write leaves: a chain of five, a log of two.
-        log.append(&blocks[0]).unwrap();
-        log.append(&blocks[1]).unwrap();
+        store.blocks.append(&blocks[0]).unwrap();
+        store.blocks.append(&blocks[1]).unwrap();
 
         let accepted = chain.add_block(blocks[5].clone(), 2_000_000_000).unwrap();
         assert_eq!(accepted, Accepted::Extended);
-        write_branch(&mut log, &accepted, &chain);
+        write_branch(&mut store, &accepted, &chain);
 
-        assert_eq!(log.len(), 6, "the log caught up rather than skipping ahead");
+        assert_eq!(
+            store.blocks.len(),
+            6,
+            "the log caught up rather than skipping ahead"
+        );
+        assert_eq!(store.headers.reaches(), 6, "and so did the headers");
         for (height, want) in blocks.iter().enumerate() {
-            let found = log.read(height).unwrap().unwrap();
+            let at = u64::try_from(height).unwrap();
+            let found = store.blocks.read_at(at).unwrap().unwrap();
             assert_eq!(found.id(), want.id(), "record {height} is not that height");
+            let header = store.headers.read_at(at).unwrap().unwrap();
+            assert_eq!(header.id(), want.id(), "header {height} is not that height");
         }
 
         let _ = std::fs::remove_dir_all(&directory);

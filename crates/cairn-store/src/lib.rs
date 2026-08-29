@@ -8,6 +8,8 @@
 //! when it is replayed, which catches anything a checksum would and a great
 //! deal more.
 
+pub mod headers;
+
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -43,6 +45,8 @@ pub const LOCK_FILE: &str = "lock";
 /// moment, which would make every node that ever joined depend on the archive
 /// service staying up for the rest of its life.
 pub const HANDED_LEDGER: &str = "ledger.dat";
+
+pub use headers::{HeaderLog, HEADER_BYTES, HEADER_LOG};
 
 /// Largest record the log will read or write.
 ///

@@ -1075,7 +1075,7 @@ fn a_node_that_dropped_blocks_can_still_change_branches() {
     }
     assert_eq!(node.height(), Some(47), "it took the heavier branch");
     assert_eq!(
-        node.with_chain(|chain| chain.tip()),
+        node.with_chain(cairn_chain::ChainStore::tip),
         Some(rival.last().unwrap().id()),
         "and is on it, not on a mixture of the two"
     );
@@ -1092,10 +1092,62 @@ fn a_node_that_dropped_blocks_can_still_change_branches() {
         restored.rejoining
     );
     assert_eq!(
-        again.with_chain(|chain| chain.tip()),
+        again.with_chain(cairn_chain::ChainStore::tip),
         Some(rival.last().unwrap().id()),
     );
 
     again.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Headers are kept whatever happens to the blocks. They are what a newcomer
+/// is shown to settle which chain carries the most work, and at 182 bytes each
+/// that is 129 MB a year: small enough that every node carries it rather than
+/// the few that volunteer to keep whole blocks.
+#[test]
+fn a_node_keeps_its_headers_after_it_has_dropped_the_blocks() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(50);
+    let top = (blocks.len() - 1) as u64;
+
+    let root = std::env::temp_dir().join(format!("cairn-headers-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let directory = root.join("node");
+
+    let (node, _) = Node::open(params, loopback(), &directory).unwrap();
+    for block in &blocks {
+        node.submit_block(block.clone()).unwrap();
+    }
+
+    node.keep_blocks(1);
+    wait_for("the node to drop what it no longer needs", || {
+        node.archived_at(0).is_none()
+    });
+    node.shutdown();
+    drop(node);
+
+    // The blocks are gone from disk and the headers are all still there.
+    let headers = cairn_store::HeaderLog::open(&directory).unwrap();
+    assert_eq!(headers.first_height(), 0, "back to the first block");
+    assert_eq!(headers.reaches(), top + 1, "and up to the tip");
+    for height in [0u64, 1, 25, top] {
+        let held = headers.read_at(height).unwrap().expect("held");
+        assert_eq!(
+            held.id(),
+            blocks[usize::try_from(height).unwrap()].header.id()
+        );
+    }
+    drop(headers);
+
+    // And a restart neither loses them nor writes them twice.
+    let (again, _) = Node::open(params, loopback(), &directory).unwrap();
+    assert_eq!(again.height(), Some(top));
+    again.shutdown();
+    drop(again);
+    let headers = cairn_store::HeaderLog::open(&directory).unwrap();
+    assert_eq!(headers.reaches(), top + 1);
+    assert_eq!(headers.first_height(), 0);
+
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -18,6 +18,7 @@ use cairn_ledger::note::Note;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
+use cairn_primitives::codec::Encode;
 use cairn_store::{BlockLog, StoreError, BLOCK_LOG};
 
 const NOW: u64 = 2_000_000_000;
@@ -385,7 +386,7 @@ fn dropping_the_front_of_the_log_is_all_or_nothing() {
     for height in 12..20u64 {
         let found = log.read_at(height).unwrap().expect("still held");
         assert_eq!(found.header.height, height, "at its own height");
-        assert_eq!(found.id(), blocks[height as usize].id());
+        assert_eq!(found.id(), blocks[usize::try_from(height).unwrap()].id());
     }
 
     // Read back by a second process, which is what a restart is.
@@ -413,6 +414,73 @@ fn dropping_the_front_of_the_log_is_all_or_nothing() {
     again.append(&blocks[5]).unwrap();
     assert_eq!(again.first_height(), 5);
     assert_eq!(again.read_at(5).unwrap().unwrap().id(), blocks[5].id());
+
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Positions in the header log are heights, with no index beside it, which
+/// works only because a header encodes to the same number of bytes every time.
+/// If that ever stops being true this is where it is noticed, rather than in a
+/// node answering about the wrong header.
+#[test]
+fn a_header_is_a_fixed_size_record() {
+    let blocks = chain(6);
+    for block in &blocks {
+        assert_eq!(
+            block.header.encode().len(),
+            cairn_store::HEADER_BYTES,
+            "a header at height {} is not the size the log assumes",
+            block.header.height
+        );
+    }
+}
+
+#[test]
+fn headers_are_read_back_by_height_and_cut_back_by_reorganisation() {
+    let directory = scratch("headers");
+    let blocks = chain(12);
+    {
+        let mut log = cairn_store::HeaderLog::open(&directory).unwrap();
+        assert!(log.is_empty());
+        for block in &blocks {
+            log.append(&block.header).unwrap();
+        }
+        assert_eq!(log.first_height(), 0);
+        assert_eq!(log.reaches(), 12);
+
+        // A header that does not follow on is refused rather than written at a
+        // position that is not its height.
+        assert!(matches!(
+            log.append(&blocks[3].header),
+            Err(cairn_store::StoreError::OutOfOrder { .. })
+        ));
+
+        for height in 0..12u64 {
+            let found = log.read_at(height).unwrap().expect("held");
+            assert_eq!(
+                found.id(),
+                blocks[usize::try_from(height).unwrap()].header.id()
+            );
+        }
+        assert!(log.read_at(12).unwrap().is_none());
+    }
+
+    // Reopened, it knows what it holds without being told.
+    let mut log = cairn_store::HeaderLog::open(&directory).unwrap();
+    assert_eq!(log.len(), 12);
+    assert_eq!(log.reaches(), 12);
+    assert_eq!(
+        log.read_at(11).unwrap().unwrap().id(),
+        blocks[11].header.id()
+    );
+
+    // A reorganisation takes the tail off, and the next branch is written over
+    // the same ground.
+    log.keep_below(9).unwrap();
+    assert_eq!(log.reaches(), 9);
+    assert!(log.read_at(9).unwrap().is_none());
+    log.append(&blocks[9].header).unwrap();
+    assert_eq!(log.reaches(), 10);
 
     let _ = std::fs::remove_dir_all(&directory);
 }

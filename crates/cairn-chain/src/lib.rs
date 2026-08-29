@@ -503,6 +503,18 @@ impl ChainStore {
     /// The identifier the followed branch carries at `height`, when this node
     /// still holds it: everything inside the reorganisation window, and one
     /// height in every [`MILESTONE`] before that.
+    /// The lowest height this node still holds a block for.
+    ///
+    /// Zero for a node that read its chain from the first block, and the
+    /// height it was handed for a node that joined. What a log written from
+    /// what this node holds has to start at.
+    pub fn branch_start(&self) -> Option<u64> {
+        if self.branch.is_empty() {
+            return None;
+        }
+        Some(self.branch.from)
+    }
+
     pub fn id_at(&self, height: u64) -> Option<Hash32> {
         self.branch.id_at(height)
     }
