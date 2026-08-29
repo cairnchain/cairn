@@ -225,7 +225,8 @@ impl BlockLog {
 
         // Read what is kept before anything is written, so a failure partway
         // leaves the log as it was rather than half moved.
-        let mut kept = Vec::with_capacity(self.end.saturating_sub(start) as usize);
+        let room = usize::try_from(self.end.saturating_sub(start)).unwrap_or(0);
+        let mut kept = Vec::with_capacity(room);
         let mut file = &self.file;
         file.seek(SeekFrom::Start(start))?;
         file.read_to_end(&mut kept)?;

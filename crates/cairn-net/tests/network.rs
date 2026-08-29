@@ -945,3 +945,38 @@ fn a_node_writes_its_ledger_down_and_stops_keeping_every_block() {
     again.shutdown();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// An archivist reads the headers it proves things about out of the blocks it
+/// kept, so trimming those would leave it unable to answer a newcomer while
+/// still telling everyone it can. It keeps them all instead.
+#[test]
+fn an_archivist_keeps_the_blocks_it_proves_things_from() {
+    let params = params();
+    let root = std::env::temp_dir().join(format!("cairn-keeps-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+
+    let (keeper, _) = Node::open_archiving(params, loopback(), root.join("keeper")).unwrap();
+    let (plain, _) = Node::open(params, loopback(), root.join("plain")).unwrap();
+
+    let mut forge = Forge::new(params);
+    for block in forge.mine_many(40) {
+        keeper.submit_block(block.clone()).unwrap();
+        plain.submit_block(block).unwrap();
+    }
+
+    // The plain node lets blocks go once it has written its ledger down; the
+    // archivist cannot, because proving where a header sits means reading it.
+    plain.keep_blocks(1);
+    wait_for("the plain node to drop what it no longer needs", || {
+        plain.archived_at(0).is_none()
+    });
+    assert!(
+        keeper.archived_at(0).is_some(),
+        "an archivist that dropped these could not answer a newcomer, and \
+         would still be saying it can"
+    );
+
+    keeper.shutdown();
+    plain.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
+}
