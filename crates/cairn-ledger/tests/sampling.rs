@@ -87,7 +87,7 @@ impl Keeper {
             .map(|header| (header.height, header.total_work, header.difficulty))
             .collect();
 
-        let samples = draw(seed_of(&tip), count, work_before(&tip))
+        let samples = draw(seed_of(&tip), count, work_before(&tip), tip.height)
             .into_iter()
             .map(|work| {
                 let height = covering(&ledger, work).expect("some block spans it");
@@ -151,7 +151,7 @@ fn a_tip_that_overstates_its_work_is_caught() {
         .rev()
         .map(|header| (header.height, header.total_work, header.difficulty))
         .collect();
-    let samples = draw(seed_of(&forged), 64, work_before(&forged))
+    let samples = draw(seed_of(&forged), 64, work_before(&forged), forged.height)
         .into_iter()
         .map(|work| {
             let height = covering(&ledger, work).unwrap_or(HEIGHT - 2);
@@ -237,7 +237,12 @@ fn a_header_that_does_not_span_the_work_drawn_is_refused() {
     let mut start = keeper.open(16);
 
     // A real header from this very chain, at the wrong place for this draw.
-    let wanted = draw(seed_of(&start.tip), 16, work_before(&start.tip));
+    let wanted = draw(
+        seed_of(&start.tip),
+        16,
+        work_before(&start.tip),
+        start.tip.height,
+    );
     let elsewhere = keeper
         .headers
         .iter()

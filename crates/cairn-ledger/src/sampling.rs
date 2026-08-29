@@ -35,13 +35,26 @@ use crate::state::header_leaf;
 
 /// Headers opened when a newcomer is deciding between chains.
 ///
-/// Measured rather than argued: `cargo run --release -p cairn-ledger --example
-/// sampled_start` forges chains that overstate their work by a given share and
-/// counts how often this many draws catch one. The number here is where that
-/// measurement stops finding a forgery it misses.
-pub const SAMPLES: usize = 128;
+/// Measured rather than argued. `cargo run --release -p cairn-ledger --example
+/// sampled_start` puts the question two ways: it forges real chains and watches
+/// them fail, and it asks the draw alone how often it lands in the work a
+/// forger had to invent, at the size a chain reaches in thirty years. At this
+/// count a chain overstating its work by one per cent is caught every time,
+/// and one overstating by a tenth of a per cent is not.
+///
+/// A tenth of a per cent is left uncaught deliberately, because catching it
+/// would cost four times the traffic to refuse a claim worth a tenth of a per
+/// cent of a chain. Where that line belongs is an economic question rather
+/// than a statistical one: what a forger stands to gain against the work it
+/// would have to redo. Until that is answered this is a floor taken from
+/// measurement, not a bound derived from a threat, and it is the last thing
+/// between this and a protocol that can be relied on.
+///
+/// At roughly two kilobytes an opened header this is about a megabyte, which
+/// is more than one message carries: a proof travels in several.
+pub const SAMPLES: usize = 512;
 
-/// Halvings of the remaining work the draw spreads its samples over.
+/// Fewest halvings the draw ever spreads its samples over.
 ///
 /// The distribution has to be denser towards the tip, because that is where an
 /// adversary who cannot afford real work has to put the lie: everything behind
@@ -51,9 +64,11 @@ pub const SAMPLES: usize = 128;
 /// proportional to one over the distance from the tip, the distribution
 /// `FlyClient` proves its bound for.
 ///
-/// Forty levels reaches a millionth of a millionth of the work, far past any
-/// chain that will exist.
-const LEVELS: u32 = 40;
+/// How far down to go is decided by the chain rather than fixed, since halving
+/// past the width of one block puts every draw at that level into the same
+/// block: draws spent on a question already asked. `FlyClient` sets the same
+/// bound and calls it delta, at one over the number of blocks.
+const FEWEST_LEVELS: u32 = 1;
 
 /// One header a prover opened, and the proof that it sits where it says.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,16 +140,27 @@ pub fn seed_of(tip: &BlockHeader) -> Hash32 {
     hash(Domain::SamplingSeed, &tip.id().encode())
 }
 
-/// The work values a newcomer asks about, given a tip's total.
+/// Halvings worth making on a chain of `blocks` blocks.
+///
+/// One per halving until a band is narrower than a block, since a band inside
+/// one block cannot ask a question the band around it did not already ask.
+fn levels_for(blocks: u64) -> u32 {
+    let significant = u64::BITS.saturating_sub(blocks.max(1).leading_zeros());
+    significant.max(FEWEST_LEVELS)
+}
+
+/// The work values a newcomer asks about, given a tip's total and how many
+/// blocks stand behind it.
 ///
 /// Whole numbers throughout, because both sides have to draw exactly the same
 /// list and floating point is not the same everywhere. The halving that makes
 /// the distribution is done on the work itself rather than on a fraction of it.
 #[must_use]
-pub fn draw(seed: Hash32, count: usize, total_work: u128) -> Vec<u128> {
+pub fn draw(seed: Hash32, count: usize, total_work: u128, blocks: u64) -> Vec<u128> {
     if total_work == 0 || count == 0 {
         return Vec::new();
     }
+    let levels = levels_for(blocks);
 
     let mut drawn = Vec::with_capacity(count);
     for index in 0..count {
@@ -150,7 +176,9 @@ pub fn draw(seed: Hash32, count: usize, total_work: u128) -> Vec<u128> {
         let bytes = hash(Domain::SamplingSeed, &material);
         let bytes = bytes.as_bytes();
 
-        let level = u32::from(bytes.first().copied().unwrap_or(0)) % LEVELS;
+        let level = u32::from(bytes.first().copied().unwrap_or(0))
+            .checked_rem(levels)
+            .unwrap_or(0);
         let within = u128::from_le_bytes(
             bytes
                 .get(8..24)
@@ -204,7 +232,7 @@ pub fn check_start(start: &SampledStart, count: usize) -> Result<Weighed, StartE
     // is not in its own history, so there would be nothing to open for a draw
     // that landed in it, and nothing needs opening: the tip arrives whole and
     // its own work is checked directly.
-    let wanted = draw(seed_of(tip), count, work_before(tip));
+    let wanted = draw(seed_of(tip), count, work_before(tip), tip.height);
     if start.samples.len() != wanted.len() {
         return Err(StartError::WrongCount {
             wanted: wanted.len(),
@@ -269,7 +297,7 @@ mod tests {
     #[test]
     fn a_draw_asks_about_work_that_exists() {
         let total = 1_000_000u128;
-        for value in draw(seed(1), 256, total) {
+        for value in draw(seed(1), 256, total, 1_000) {
             assert!(value < total, "drew {value}, past a total of {total}");
         }
     }
@@ -278,12 +306,12 @@ mod tests {
     /// prover is answering a list the verifier never asked for.
     #[test]
     fn a_draw_is_the_same_every_time() {
-        let first = draw(seed(7), 64, 9_999_991);
-        let second = draw(seed(7), 64, 9_999_991);
+        let first = draw(seed(7), 64, 9_999_991, 10_000);
+        let second = draw(seed(7), 64, 9_999_991, 10_000);
         assert_eq!(first, second);
         assert_ne!(
             first,
-            draw(seed(8), 64, 9_999_991),
+            draw(seed(8), 64, 9_999_991, 10_000),
             "and it turns on the seed"
         );
     }
@@ -293,7 +321,7 @@ mod tests {
     #[test]
     fn a_draw_leans_towards_the_tip() {
         let total = 1_000_000u128;
-        let drawn = draw(seed(3), 4_096, total);
+        let drawn = draw(seed(3), 4_096, total, 100_000);
         let near = drawn.iter().filter(|value| **value > total / 2).count();
         let far = drawn.len().saturating_sub(near);
         assert!(
@@ -312,8 +340,8 @@ mod tests {
 
     #[test]
     fn nothing_is_drawn_from_a_chain_with_no_work() {
-        assert!(draw(seed(1), 64, 0).is_empty());
-        assert!(draw(seed(1), 0, 1_000).is_empty());
+        assert!(draw(seed(1), 64, 0, 100).is_empty());
+        assert!(draw(seed(1), 0, 1_000, 100).is_empty());
     }
 
     /// The block a draw lands in is the one whose own work spans it.
