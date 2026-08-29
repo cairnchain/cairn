@@ -1439,3 +1439,153 @@ fn invented_headers_are_refused_however_well_formed_they_are() {
     joined.shutdown();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The bodies of blocks a node could still undo are hundreds of megabytes on a
+/// full chain, and they are already on its disk. It lets go of the old ones
+/// and reads them back when a reorganisation reaches that far.
+#[test]
+fn a_node_lets_go_of_block_bodies_and_reads_them_back() {
+    let params = params();
+    let mut shared_chain = Forge::new(params);
+    // Past the window of bodies kept warm, so letting go has something to do
+    // and a deep enough switch has to read.
+    let common = shared_chain.mine_many(200);
+
+    let mut theirs = shared_chain.clone();
+    // Same reason: without this the two forges mine the same chain.
+    theirs.clock += 1;
+    let ours = shared_chain.mine_many(80);
+    let rival = theirs.mine_many(82);
+
+    let root = std::env::temp_dir().join(format!("cairn-bodies-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let directory = root.join("node");
+
+    let (node, _) = Node::open(params, loopback(), &directory).unwrap();
+    for block in common.iter().chain(ours.iter()) {
+        node.submit_block(block.clone()).unwrap();
+    }
+    let top = 279;
+    assert_eq!(node.height(), Some(top));
+
+    // It holds the bodies of the recent blocks and not of the rest, while the
+    // headers of all of them stay.
+    let bodies = node.with_chain(cairn_chain::ChainStore::bodies_held);
+    assert!(
+        bodies < 100,
+        "holding {bodies} bodies of 280: nothing was let go of"
+    );
+    assert!(bodies >= 64, "holding {bodies}: the recent ones went too");
+    assert_eq!(
+        node.with_chain(cairn_chain::ChainStore::len),
+        280,
+        "and every block is still known by its header"
+    );
+    assert!(
+        node.archived_at(0).is_some(),
+        "what it let go of is on disk"
+    );
+
+    // A switch reaching eighty blocks back, past everything held warm, so the
+    // bodies it undoes and puts back have to come off the disk.
+    for block in &rival {
+        let _ = node.submit_block(block.clone());
+    }
+    assert_eq!(node.height(), Some(281), "it took the heavier branch");
+    assert_eq!(
+        node.with_chain(cairn_chain::ChainStore::tip),
+        Some(rival.last().unwrap().id()),
+        "and is on it, not on a mixture of the two"
+    );
+
+    // And it comes back on that branch after a restart.
+    node.shutdown();
+    drop(node);
+    let (again, _) = Node::open(params, loopback(), &directory).unwrap();
+    assert_eq!(again.height(), Some(281));
+    assert_eq!(
+        again.with_chain(cairn_chain::ChainStore::tip),
+        Some(rival.last().unwrap().id()),
+    );
+
+    again.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Reading a body back matters in one place: a switch that fails partway.
+/// Everything already applied has to be put back, and on a deep enough fork
+/// those bodies are on the disk rather than in memory. A node that could not
+/// read them would be left holding neither branch.
+#[test]
+fn a_switch_that_fails_puts_back_a_branch_read_off_the_disk() {
+    let params = params();
+    let mut shared_chain = Forge::new(params);
+    let common = shared_chain.mine_many(200);
+
+    let mut theirs = shared_chain.clone();
+    // A clone of a forge mines the same blocks, because everything about it is
+    // deterministic. Moving its clock is what makes this a second branch
+    // rather than the same one twice.
+    theirs.clock += 1;
+    let ours = shared_chain.mine_many(80);
+    // The same length as ours, so it is held as a branch and not switched to:
+    // ties keep the branch already followed. Only its last block makes it
+    // heavier, and that one is a lie — the work is real and the height follows
+    // on, so it is taken into memory, and it fails when the ledger is asked to
+    // apply it. So the whole switch happens at once, and fails at the end.
+    let mut rival = theirs.mine_many(81);
+    let last = rival.last_mut().unwrap();
+    last.header.state_root = cairn_primitives::Hash32::from_bytes([9; 32]);
+    *last = mine_block(last.clone(), ATTEMPTS).unwrap();
+
+    let root = std::env::temp_dir().join(format!("cairn-restore-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let directory = root.join("node");
+
+    let (node, _) = Node::open(params, loopback(), &directory).unwrap();
+    for block in common.iter().chain(ours.iter()) {
+        node.submit_block(block.clone()).unwrap();
+    }
+    let ours_tip = node.with_chain(cairn_chain::ChainStore::tip);
+    assert_eq!(node.height(), Some(279));
+    assert!(
+        node.with_chain(cairn_chain::ChainStore::bodies_held) < 100,
+        "the old bodies are on the disk, which is what makes this a test"
+    );
+
+    // The heavier branch arrives and is taken up to its last block, which the
+    // ledger refuses. Everything applied comes off and the old branch goes
+    // back on, eighty blocks of it read from the disk.
+    let mut sides = 0usize;
+    for block in &rival {
+        if matches!(
+            node.submit_block(block.clone()),
+            Ok(cairn_chain::Accepted::SideBranch)
+        ) {
+            sides += 1;
+        }
+    }
+    assert_eq!(
+        sides, 80,
+        "the rival was held as a branch, not applied one by one"
+    );
+    assert_eq!(
+        node.height(),
+        Some(279),
+        "it is back where it was, not stranded partway up a branch it refused"
+    );
+    assert_eq!(
+        node.with_chain(cairn_chain::ChainStore::tip),
+        ours_tip,
+        "and on exactly the branch it was following"
+    );
+
+    // What it put back is what the ledger agrees with: the next block on that
+    // branch still applies.
+    let next = shared_chain.mine();
+    node.submit_block(next).unwrap();
+    assert_eq!(node.height(), Some(280));
+
+    node.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
+}

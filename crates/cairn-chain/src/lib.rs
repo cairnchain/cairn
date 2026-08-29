@@ -11,8 +11,8 @@
 //! has to be all or nothing. A switch that fails halfway would leave a node
 //! following neither branch, with a state matching no block anyone agrees on.
 
-use std::sync::Arc;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::note::NoteId;
@@ -472,6 +472,17 @@ impl ChainStore {
                 }
             }
         }
+    }
+
+    /// How many blocks this node still holds the body of.
+    ///
+    /// What `release_bodies` changes, and the only way to see that it did.
+    #[must_use]
+    pub fn bodies_held(&self) -> usize {
+        self.blocks
+            .values()
+            .filter(|stored| stored.body.is_some())
+            .count()
     }
 
     /// Says where bodies can be read back from.
@@ -1234,7 +1245,11 @@ impl ChainStore {
 
     /// Drops one block, keeping the byte count with it.
     fn release(&mut self, id: &Hash32) {
-        if let Some(dropped) = self.blocks.remove(id).filter(|stored| stored.body.is_some()) {
+        if let Some(dropped) = self
+            .blocks
+            .remove(id)
+            .filter(|stored| stored.body.is_some())
+        {
             self.held_bytes = self.held_bytes.saturating_sub(dropped.bytes);
         }
     }
@@ -1283,11 +1298,10 @@ impl ChainStore {
             .values()
             .filter_map(|stored| {
                 let id = stored.header.id();
-                branch.height_of(&id).is_none().then_some((
-                    stored.header.height,
-                    id,
-                    stored.bytes,
-                ))
+                branch
+                    .height_of(&id)
+                    .is_none()
+                    .then_some((stored.header.height, id, stored.bytes))
             })
             .collect();
         candidates.sort_unstable_by_key(|(height, id, _)| (*height, *id));
@@ -1327,9 +1341,8 @@ impl ChainStore {
             return;
         };
         let branch = &self.branch;
-        self.blocks.retain(|id, stored| {
-            branch.height_of(id).is_some() || stored.header.height >= cutoff
-        });
+        self.blocks
+            .retain(|id, stored| branch.height_of(id).is_some() || stored.header.height >= cutoff);
         self.invalid.retain(|id| branch.height_of(id).is_none());
         self.recount();
 

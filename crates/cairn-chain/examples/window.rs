@@ -35,6 +35,11 @@ use cairn_primitives::codec::Encode;
 use cairn_primitives::hash::{hash, Domain};
 use cairn_primitives::{Amount, Hash32};
 
+/// Bodies a node keeps warm behind its tip, from `cairn_chain`.
+const WARM_BODIES: u64 = 64;
+/// What a header takes, which is what is left once a body is let go of.
+const HEADER_BYTES: u64 = 182;
+
 /// Copies held at once, enough for the measurement to rise above the noise.
 const COPIES: usize = 256;
 
@@ -69,8 +74,17 @@ fn main() {
     );
     println!(
         "{:>28}  {:>14}",
-        "the window, in memory",
+        "the window, if all held",
         format_bytes(each.saturating_mul(MAX_REORG_DEPTH as u64))
+    );
+    // What a node with a disk behind it actually holds: the bodies of the
+    // recent blocks, and the headers of the rest.
+    let warm = each.saturating_mul(WARM_BODIES);
+    let cold = HEADER_BYTES.saturating_mul(MAX_REORG_DEPTH as u64 - WARM_BODIES);
+    println!(
+        "{:>28}  {:>14}",
+        "what it holds",
+        format_bytes(warm.saturating_add(cold))
     );
 
     // What is held is not only the window: branches offered and not taken are
@@ -79,17 +93,18 @@ fn main() {
     let in_memory = (ceiling as f64 * each as f64 / encoded as f64) as u64;
     println!(
         "{:>28}  {:>14}",
-        "with rival branches",
-        format_bytes(in_memory)
+        "rival branches on top",
+        format_bytes(in_memory.saturating_sub(each.saturating_mul(MAX_REORG_DEPTH as u64)))
     );
     println!("{:>28}  {:>14}", "the hot set, at its own", "68 MB");
 
     println!(
-        "\nBoth are bounded and neither grows with the chain, which is the whole\n\
-         claim. What this says is which of the two the claim rests on: the blocks\n\
-         a node holds so it can undo them cost several times what the notes do.\n\
-         They sit on the disk as well, so the reading that would replace them is\n\
-         written; what is not written is asking the disk for them.",
+        "\nAll of it is bounded and none of it grows with the chain, which is the\n\
+         whole claim. The window used to be the largest of the three by some way,\n\
+         because a node held the body of every block it might have to undo. It\n\
+         holds the recent ones now and the headers of the rest, and reads a body\n\
+         back off its own disk on the one occasion that needs it: a switch to\n\
+         another branch that fails partway and has to put this one back.",
     );
 }
 
