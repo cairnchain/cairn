@@ -71,6 +71,7 @@ pub enum Domain {
     HeaderHistoryLeaf,
     SamplingSeed,
     GraceWindow,
+    ProofWindow,
 }
 
 impl Domain {
@@ -97,6 +98,7 @@ impl Domain {
             Self::HeaderHistoryLeaf => "cairn v1 header history leaf",
             Self::SamplingSeed => "cairn v1 sampling seed",
             Self::GraceWindow => "cairn v1 grace window",
+            Self::ProofWindow => "cairn v1 proof window",
         }
     }
 }
@@ -127,6 +129,7 @@ struct DomainKeys {
     header_history_leaf: [u8; HASH_LEN],
     sampling_seed: [u8; HASH_LEN],
     grace_window: [u8; HASH_LEN],
+    proof_window: [u8; HASH_LEN],
 }
 
 fn domain_keys() -> &'static DomainKeys {
@@ -153,6 +156,7 @@ fn domain_keys() -> &'static DomainKeys {
         header_history_leaf: blake3::derive_key(Domain::HeaderHistoryLeaf.context(), &[]),
         sampling_seed: blake3::derive_key(Domain::SamplingSeed.context(), &[]),
         grace_window: blake3::derive_key(Domain::GraceWindow.context(), &[]),
+        proof_window: blake3::derive_key(Domain::ProofWindow.context(), &[]),
     })
 }
 
@@ -180,6 +184,7 @@ fn key_for(domain: Domain) -> &'static [u8; HASH_LEN] {
         Domain::HeaderHistoryLeaf => &keys.header_history_leaf,
         Domain::SamplingSeed => &keys.sampling_seed,
         Domain::GraceWindow => &keys.grace_window,
+        Domain::ProofWindow => &keys.proof_window,
     }
 }
 

@@ -26,7 +26,7 @@ use cairn_primitives::Hash32;
 use crate::block::{BlockHeader, HeaderSummary};
 use crate::note::{Note, NoteId};
 use crate::pow::{meets_target, RECENT_HEADERS};
-use crate::state::{HotEntry, LedgerState, GRACE_BLOCKS, GRACE_NOTES};
+use crate::state::{HotEntry, LedgerState, GRACE_BLOCKS, GRACE_NOTES, PROOF_WINDOW};
 
 /// What fell in one block: the note, where it landed, and what it was.
 pub type Fallen = (NoteId, u64, Note);
@@ -42,6 +42,16 @@ pub struct Handover {
     pub hot: Vec<(NoteId, HotEntry)>,
     /// The cold set as sixty four hashes.
     pub cold: Forest,
+    /// The cold set as it stood at each of the last few blocks, with what each
+    /// of those blocks emptied.
+    ///
+    /// A proof describes the cold set at the moment it was taken, and the set
+    /// moves with every block, so a spender who took one a few blocks ago has
+    /// not done anything wrong and a handful of recent states are kept to
+    /// check against. A node handed a ledger holds none of them unless it is
+    /// handed these too, and would refuse every proof not taken at the exact
+    /// tip. The header commits to them, so a sender cannot invent them.
+    pub bygone: Vec<(Forest, Vec<u64>)>,
     /// What fell in each of the last few blocks, oldest first.
     pub grace: Vec<Vec<Fallen>>,
     /// A proof for every note in that window.
@@ -106,6 +116,7 @@ impl LedgerState {
             at,
             hot: self.hot_notes().collect(),
             cold: self.cold_roots(),
+            bygone: self.proof_window(),
             grace,
             grace_proofs,
             headers: self.headers_before_tip(),
@@ -142,6 +153,7 @@ pub fn accept(handover: &Handover, hot_capacity: usize) -> Result<LedgerState, H
         handover.hot.clone(),
         handover.cold.clone(),
         VecDeque::from(handover.grace.clone()),
+        handover.bygone.clone(),
         handover.headers.clone(),
         summaries(&handover.recent),
         at,
@@ -217,6 +229,14 @@ impl Encode for Handover {
         self.cold.encode_to(out);
         self.headers.encode_to(out);
 
+        u32::try_from(self.bygone.len())
+            .unwrap_or(u32::MAX)
+            .encode_to(out);
+        for (roots, emptied) in &self.bygone {
+            roots.encode_to(out);
+            emptied.encode_to(out);
+        }
+
         u32::try_from(self.hot.len())
             .unwrap_or(u32::MAX)
             .encode_to(out);
@@ -265,6 +285,7 @@ impl Decode for Handover {
 
         // Every count is checked before anything is reserved for it, because
         // all of them are chosen by whoever sent this.
+        let bygone = decode_bygone(reader)?;
         let hot = decode_hot(reader)?;
         let grace = decode_grace(reader)?;
         let grace_proofs = decode_proofs(reader)?;
@@ -274,12 +295,29 @@ impl Decode for Handover {
             at,
             hot,
             cold,
+            bygone,
             grace,
             grace_proofs,
             headers,
             recent,
         })
     }
+}
+
+fn decode_bygone(reader: &mut Reader<'_>) -> Result<Vec<(Forest, Vec<u64>)>, CodecError> {
+    let count = usize::try_from(u32::decode_from(reader)?).unwrap_or(usize::MAX);
+    if count > PROOF_WINDOW {
+        return Err(CodecError::InvalidValue {
+            type_name: "Handover proof window",
+        });
+    }
+    let mut bygone = Vec::with_capacity(count.min(PROOF_WINDOW));
+    for _ in 0..count {
+        let roots = Forest::decode_from(reader)?;
+        let emptied = Vec::<u64>::decode_from(reader)?;
+        bygone.push((roots, emptied));
+    }
+    Ok(bygone)
 }
 
 /// The most notes a hot set may hold on any network this code knows.
