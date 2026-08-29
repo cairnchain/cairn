@@ -8,12 +8,14 @@
 use std::collections::BTreeMap;
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Duration;
 
 use cairn_crypto::{PublicKey, SecretKey};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_primitives::Amount;
-use cairn_wallet::{keyfile, Wallet};
+use cairn_wallet::{keyfile, serve, Wallet};
 
 const HELP: &str = "\
 cairn-wallet, a Cairn wallet that is itself a node
@@ -30,6 +32,9 @@ cairn-wallet, a Cairn wallet that is itself a node
   cairn-wallet send <key file> --to <public key> --amount <cairn> [options]
       spend, and hand the transfer to the network
 
+  cairn-wallet open <key file> [network options]
+      open the wallet as a page on this machine, and print its address
+
 Network options
 
   --data <directory>   where this wallet keeps its copy of the chain
@@ -39,7 +44,14 @@ Network options
   --network <name>     testnet-3 or devnet (default: testnet-3); it has to
                        be the same network the node is on
   --wait <seconds>     how long to spend catching up (default: 30)
-  --fee <cairn>        what to pay to be carried (default: 0)";
+  --fee <cairn>        what to pay to be carried (default: 0)
+
+Options for `open`
+
+  --port <number>      port to serve the page on (default: one the system
+                       picks). It is served on 127.0.0.1 and nowhere else,
+                       and the address carries a secret without which the
+                       wallet answers nothing.";
 
 fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -65,6 +77,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
         "address" => show_address(rest),
         "balance" => show_balance(rest),
         "send" => spend(rest),
+        "open" => open_page(rest),
         other => Err(format!("unknown command `{other}`; try `help`")),
     }
 }
@@ -240,6 +253,40 @@ fn rules_of(flags: &Flags) -> Result<ConsensusParams, String> {
 /// The node is told which owner to watch before it replays anything, because
 /// where a note falls is learned as it falls. That is what lets this wallet
 /// spend from the cold set without asking an archivist for anything.
+/// Serves the wallet as a page on this machine, until it is stopped.
+fn open_page(arguments: &[String]) -> Result<(), String> {
+    let flags = Flags::parse(arguments)?;
+    let port: u16 = match flags.value("port") {
+        None => 0,
+        Some(text) => text
+            .parse()
+            .map_err(|_| format!("`{text}` is not a port"))?,
+    };
+
+    let wallet = Arc::new(join(&flags)?);
+    let (listener, opened) = serve::open(port)?;
+    let opened = Arc::new(opened);
+    let running = Arc::new(AtomicBool::new(true));
+
+    println!();
+    println!("address   {}", wallet.address());
+    println!("open      {}", opened.url());
+    println!();
+    println!("That address carries a secret drawn for this run. Anyone with it can");
+    println!("spend from this wallet, so it goes no further than your own browser,");
+    println!("and it stops working the moment this command does.");
+    println!();
+    println!("Press Ctrl+C to close the wallet.");
+
+    // Ctrl+C ends the process, as it does for the node and the explorer.
+    // Nothing is lost by that: every block this wallet accepted was written
+    // as it arrived, and a transfer it handed over is with the network rather
+    // than here.
+    serve::run(&wallet, &listener, &opened, &running);
+    wallet.shutdown();
+    Ok(())
+}
+
 /// Opens the wallet and brings it up to the chain the network is on.
 fn join(flags: &Flags) -> Result<Wallet, String> {
     let params = rules_of(flags)?;

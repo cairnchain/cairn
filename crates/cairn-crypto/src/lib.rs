@@ -46,6 +46,19 @@ pub enum CryptoError {
 /// so the key material can never reach a log through a derived formatter.
 pub struct SecretKey(SigningKey);
 
+/// Draws `N` bytes from the operating system entropy source.
+///
+/// For the things that are not keys and must still be unguessable: the secret
+/// a wallet puts in the address of the page it serves, so that a page loaded
+/// from anywhere else cannot ask it anything. Here rather than in the caller
+/// because this is where entropy already comes from, and a second way of
+/// asking for randomness is a second way of getting it wrong.
+pub fn random_bytes<const N: usize>() -> Result<[u8; N], CryptoError> {
+    let mut bytes = [0u8; N];
+    getrandom::fill(&mut bytes).map_err(|_| CryptoError::NoEntropy)?;
+    Ok(bytes)
+}
+
 impl SecretKey {
     /// Draws a fresh key from the operating system entropy source.
     pub fn generate() -> Result<Self, CryptoError> {

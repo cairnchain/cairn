@@ -46,6 +46,13 @@ pub struct Request {
     /// The Host header as given, so a server can refuse a name it does not
     /// answer to.
     pub host: String,
+    /// The Origin header as given, empty when there was none.
+    ///
+    /// A browser sends one when a page makes the request and none when the
+    /// person navigated there. A server that only ever wants to be reached by
+    /// the second can refuse everything with an origin, which is what stops a
+    /// page open in another tab from speaking to a wallet.
+    pub origin: String,
 }
 
 impl Request {
@@ -204,6 +211,7 @@ fn read_request<R: io::Read>(reader: &mut R) -> Result<Option<Request>, u16> {
     // Two of them are kept: what host the caller thinks it is talking to, and
     // how long a body to expect.
     let mut host = String::new();
+    let mut origin = String::new();
     let mut length = 0usize;
     loop {
         let line = read_line(reader, &mut consumed)?;
@@ -214,6 +222,8 @@ fn read_request<R: io::Read>(reader: &mut R) -> Result<Option<Request>, u16> {
             let value = value.trim();
             if name.eq_ignore_ascii_case("host") {
                 value.clone_into(&mut host);
+            } else if name.eq_ignore_ascii_case("origin") {
+                value.clone_into(&mut origin);
             } else if name.eq_ignore_ascii_case("content-length") {
                 length = value.parse().map_err(|_| 400u16)?;
             }
@@ -265,6 +275,7 @@ fn read_request<R: io::Read>(reader: &mut R) -> Result<Option<Request>, u16> {
         post,
         body,
         host,
+        origin,
     }))
 }
 
@@ -404,6 +415,7 @@ mod tests {
             post: false,
             body: String::new(),
             host: String::new(),
+            origin: String::new(),
         }
     }
 

@@ -12,6 +12,8 @@
 //! leaves it — no face is ever handed one, and none can sign.
 
 pub mod keyfile;
+pub mod page;
+pub mod serve;
 
 use std::net::SocketAddr;
 use std::path::Path;
