@@ -9,6 +9,10 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[lib]
+name = "cairn_wallet"
+path = "src/lib.rs"
+
 [[bin]]
 name = "cairn-wallet"
 path = "src/main.rs"
@@ -19,4 +23,6 @@ cairn-chain.workspace = true
 cairn-crypto.workspace = true
 cairn-ledger.workspace = true
 cairn-net.workspace = true
+cairn-http.workspace = true
 cairn-primitives.workspace = true
+thiserror.workspace = true

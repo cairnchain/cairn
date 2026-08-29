@@ -12,7 +12,7 @@ use std::path::Path;
 use cairn_crypto::SecretKey;
 
 /// Reads a key file.
-pub(crate) fn read(path: &Path) -> Result<SecretKey, String> {
+pub fn read(path: &Path) -> Result<SecretKey, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| format!("could not read {}: {error}", path.display()))?;
     let bytes = cairn_primitives::hex::decode_array::<32>(text.trim())
@@ -30,7 +30,7 @@ pub(crate) fn read(path: &Path) -> Result<SecretKey, String> {
 /// would leave a moment where anyone with an account on the machine could read
 /// the key, and checking that it is absent before writing would leave a moment
 /// where something else could create it in between.
-pub(crate) fn write(path: &Path, secret: &SecretKey) -> Result<(), String> {
+pub fn write(path: &Path, secret: &SecretKey) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)

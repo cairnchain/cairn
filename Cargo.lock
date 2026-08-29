@@ -146,9 +146,11 @@ dependencies = [
  "cairn-accumulator",
  "cairn-chain",
  "cairn-crypto",
+ "cairn-http",
  "cairn-ledger",
  "cairn-net",
  "cairn-primitives",
+ "thiserror",
 ]
 
 [[package]]
