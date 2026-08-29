@@ -76,6 +76,19 @@ pub const HTML: &str = r#"<!doctype html>
   </div>
 
   <section class="card notes">
+    <h2>What happened</h2>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr><th class="where">Way</th><th>Amount</th><th>Block</th></tr>
+        </thead>
+        <tbody id="moves"></tbody>
+      </table>
+    </div>
+    <p class="note-line" id="moves-line">Reading the chain.</p>
+  </section>
+
+  <section class="card notes">
     <h2>Where it sits</h2>
     <div class="scroll">
       <table>
@@ -200,6 +213,10 @@ pub const CSS: &str = r#"  :root{
     font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
   .tag.held{background:var(--held-soft);color:var(--held)}
   .tag.fallen{background:var(--fallen-soft);color:var(--fallen)}
+  .tag.sent{background:#241A14;color:var(--warn)}
+  .tag.received,.tag.mined{background:var(--held-soft);color:var(--held)}
+  td.when{color:var(--ink-3);font-size:.72rem;white-space:nowrap;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
   td.src{color:var(--ink-3);font-size:.72rem;word-break:break-all;
     font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 
@@ -208,7 +225,10 @@ pub const CSS: &str = r#"  :root{
 "#;
 
 /// The script, for the same reason.
-pub const JS: &str = r#""use strict";
+///
+/// Hashed twice, because it writes a block number as `"#" + height` and one
+/// hash would end the string there.
+pub const JS: &str = r##""use strict";
 // The secret that came in the address. Kept in memory and put back on every
 // request; the wallet answers nothing without it.
 const KEY = new URLSearchParams(location.search).get("k") || "";
@@ -262,6 +282,34 @@ async function refresh() {
     row.append(where, value, src);
     rows.append(row);
   }
+
+  const moves = $("moves");
+  moves.replaceChildren();
+  for (const movement of state.movements) {
+    const row = document.createElement("tr");
+    const way = document.createElement("td");
+    way.className = "where";
+    const tag = document.createElement("span");
+    tag.className = "tag " + movement.way;
+    tag.textContent = movement.way;
+    way.append(tag);
+    const value = document.createElement("td");
+    value.className = "value";
+    value.textContent = (movement.way === "sent" ? "\u2212 " : "+ ") + movement.amount;
+    const when = document.createElement("td");
+    when.className = "when";
+    when.textContent = "#" + movement.height + " · " +
+      new Date(movement.at * 1000).toLocaleString();
+    row.append(way, value, when);
+    moves.append(row);
+  }
+  text("moves-line", state.movements.length === 0
+    ? (state.history_from === null
+        ? "Nothing yet."
+        : "Nothing since block " + state.history_from + ", which is as far back as this wallet can see.")
+    : (state.history_from > 0
+        ? "As far back as block " + state.history_from + ": this wallet did not read what came before."
+        : ""));
 
   const held = state.held;
   const fallen = state.notes.filter((n) => n.cold).length;
@@ -330,4 +378,4 @@ $("send").addEventListener("submit", async (event) => {
 
 refresh();
 setInterval(refresh, 2000);
-"#;
+"##;

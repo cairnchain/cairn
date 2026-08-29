@@ -11,14 +11,17 @@
 //! are rewritten; this is not. A key is read into this process and never
 //! leaves it — no face is ever handed one, and none can sign.
 
+pub mod history;
 pub mod keyfile;
 pub mod page;
 pub mod serve;
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::history::{History, Movement};
 use cairn_accumulator::ForestProof;
 use cairn_crypto::{PublicKey, SecretKey};
 use cairn_ledger::note::{Note, NoteId};
@@ -144,6 +147,16 @@ pub struct Sent {
     pub handed_on: bool,
 }
 
+/// What the history is written to, inside the wallet's own directory.
+const HISTORY_FILE: &str = "history.dat";
+
+/// Blocks read into the history in one go.
+///
+/// A wallet catching up on a long absence reads them in batches rather than
+/// holding the chain while it walks the lot, so the page stays answerable and
+/// the next block still arrives.
+const CATCH_UP_BATCH: u64 = 512;
+
 /// A key, and the node that verifies the chain it lives on.
 ///
 /// Deliberately says nothing about itself when printed. A key that reached a
@@ -153,6 +166,11 @@ pub struct Wallet {
     node: Node,
     secret: SecretKey,
     params: ConsensusParams,
+    /// This key's own account of what happened to it, kept beside the chain
+    /// rather than in it.
+    history: Mutex<History>,
+    /// Where that account is written down.
+    history_file: PathBuf,
 }
 
 impl std::fmt::Debug for Wallet {
@@ -178,11 +196,15 @@ impl Wallet {
             .map_err(|_| WalletError::CouldNotStart("bad listen address".to_owned()))?;
         let (node, restored) = Node::open_watching(params, listen, data, &[mine])
             .map_err(|error| WalletError::CouldNotStart(error.to_string()))?;
+        let history_file = data.join(HISTORY_FILE);
+        let history = History::load(&history_file);
         Ok((
             Self {
                 node,
                 secret,
                 params,
+                history: Mutex::new(history),
+                history_file,
             },
             restored.blocks,
         ))
@@ -245,6 +267,71 @@ impl Wallet {
                 still_since = Instant::now();
             }
         }
+    }
+
+    /// Reads the blocks the history has not seen yet, and writes it down.
+    ///
+    /// Returns how many it took. Called as often as anything wants to look at
+    /// the history: it costs nothing when there is nothing new.
+    ///
+    /// A wallet that cannot read the block it is waiting for has either
+    /// dropped it or was handed a ledger that starts past it. Neither is a
+    /// fault, and neither can be read around, so the history starts from where
+    /// the wallet can actually see.
+    pub fn follow(&self) -> usize {
+        let Some(tip) = self.node.height() else {
+            return 0;
+        };
+        let mine = self.address();
+        let mut history = self
+            .history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let mut taken = 0usize;
+        let stop = tip.saturating_add(1);
+        while history.next() < stop && (taken as u64) < CATCH_UP_BATCH {
+            let height = history.next();
+            let Some(block) = self.node.archived_at(height) else {
+                // Nothing to read here. If the wallet holds later blocks, the
+                // history begins where they do rather than staying stuck.
+                let first = self.node.with_chain(cairn_chain::ChainStore::branch_start);
+                match first {
+                    Some(first) if first > height => history.skip_to(first),
+                    _ => break,
+                }
+                continue;
+            };
+            history.take(&block, mine);
+            taken = taken.saturating_add(1);
+        }
+
+        if taken > 0 {
+            let _ = history.save(&self.history_file);
+        }
+        taken
+    }
+
+    /// This key's own account of what happened to it, newest first.
+    #[must_use]
+    pub fn history(&self) -> Vec<Movement> {
+        self.follow();
+        self.history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .movements()
+            .copied()
+            .collect()
+    }
+
+    /// The first height the history could see, so a face can say what it does
+    /// not cover rather than implying it covers everything.
+    #[must_use]
+    pub fn history_from(&self) -> Option<u64> {
+        self.history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .from()
     }
 
     /// Everything this key owns, and what part of it cannot move.

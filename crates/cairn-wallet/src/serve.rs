@@ -35,6 +35,9 @@ const SECRET_BYTES: usize = 24;
 /// list that grows with the wallet.
 const NOTES_SHOWN: usize = 200;
 
+/// Movements listed on the page, newest first.
+const MOVEMENTS_SHOWN: usize = 100;
+
 /// A running wallet page.
 #[derive(Debug)]
 pub struct Opened {
@@ -184,6 +187,25 @@ fn state(wallet: &Wallet) -> Response {
         json.end_object();
     }
     json.end_array();
+
+    // What happened, newest first. Read from the wallet's own account of it
+    // rather than from the chain, which does not keep one.
+    json.key("movements");
+    json.begin_array();
+    for movement in wallet.history().iter().take(MOVEMENTS_SHOWN) {
+        json.begin_object();
+        json.field_u64("height", movement.height);
+        json.field_u64("at", movement.at);
+        json.field_str("way", movement.direction.as_str());
+        json.field_str("amount", &movement.amount.to_string());
+        json.field_str("id", &movement.id.to_string());
+        json.end_object();
+    }
+    json.end_array();
+    match wallet.history_from() {
+        Some(from) => json.field_u64("history_from", from),
+        None => json.field_null("history_from"),
+    }
     json.end_object();
     json_response(200, json)
 }
