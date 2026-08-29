@@ -11,6 +11,7 @@
 //! has to be all or nothing. A switch that fails halfway would leave a node
 //! following neither branch, with a state matching no block anyone agrees on.
 
+use std::sync::Arc;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use cairn_ledger::block::{Block, BlockHeader};
@@ -90,6 +91,15 @@ const MAX_SIDE_BLOCKS: usize = 4_096;
 /// asked for again if it turns out to matter.
 const MAX_SIDE_BYTES: usize = 32 * 1024 * 1024;
 
+/// Blocks whose bodies stay in memory behind the tip.
+///
+/// A reorganisation reads the bodies of everything it undoes, so keeping the
+/// recent ones is keeping every reorganisation a live network actually
+/// produces off the disk. Beyond this a switch costs some reading, which is
+/// the right trade for an event that deep: it is rare, and the alternative is
+/// holding hundreds of megabytes against it.
+const WARM_BODIES: u64 = 64;
+
 /// Identifiers of blocks known to be invalid, held before the set is cleared.
 ///
 /// Remembering a bad block is what stops it being revalidated every time it
@@ -148,7 +158,16 @@ pub enum Accepted {
 
 #[derive(Clone, Debug)]
 struct StoredBlock {
-    block: Block,
+    /// Kept whatever happens to the body: it is what the fork choice, the
+    /// branch walk and the sweeps all read, and it is 182 bytes against as
+    /// much as 128 kB.
+    header: BlockHeader,
+    /// The body, while this node still holds it.
+    ///
+    /// Let go of once the block is on disk and far enough back that no
+    /// ordinary reorganisation would reach it. Everything that needs one
+    /// again reads it from there.
+    body: Option<Block>,
     /// Work of this block plus every block behind it.
     total_work: u128,
     /// What this block takes on the wire, measured once when it arrives.
@@ -334,6 +353,21 @@ impl Branch {
 
 /// Every block a node knows, the branch it currently follows, and the ledger
 /// state that branch produces.
+/// Where a chain reads back the body of a block it let go of.
+///
+/// A node holds the bodies of the blocks it could still have to undo, which on
+/// a chain running at the limit is hundreds of megabytes for something already
+/// written to its disk. Handed one of these, it keeps the recent ones in
+/// memory and reads the rest.
+///
+/// Answers by height, on the branch this node follows, because that is what a
+/// log is: records in order of height. What comes back is checked against the
+/// identifier it was asked for, so a log that has moved on cannot pass the
+/// wrong block off as the right one.
+pub trait Bodies: std::fmt::Debug + Send + Sync {
+    fn body(&self, height: u64) -> Option<Block>;
+}
+
 #[derive(Debug)]
 pub struct ChainStore {
     params: ConsensusParams,
@@ -341,6 +375,10 @@ pub struct ChainStore {
     /// Wire bytes of every block held in `blocks`, so what bounds them can be
     /// checked without walking the map on each arrival.
     held_bytes: usize,
+    /// Where bodies are read back from, for a node that has somewhere to read
+    /// them. Without one it keeps every body it may still need, which is what
+    /// a chain with no disk behind it does.
+    bodies: Option<Arc<dyn Bodies>>,
     /// Blocks that failed to apply. Kept so the same block is never retried.
     invalid: HashSet<Hash32>,
     /// The branch this node follows, held as far back as it can still change
@@ -396,6 +434,7 @@ impl ChainStore {
             params,
             blocks: HashMap::new(),
             held_bytes: 0,
+            bodies: None,
             invalid: HashSet::new(),
             branch: Branch::default(),
             applied: HashMap::new(),
@@ -405,6 +444,42 @@ impl ChainStore {
             pool_bytes: 0,
             pool_by_fee: BTreeSet::new(),
         }
+    }
+
+    /// Lets go of the bodies of blocks written down and old enough that no
+    /// ordinary reorganisation would reach them.
+    ///
+    /// `written` is the height the caller has on disk, exclusive. Nothing
+    /// above it is touched: a body let go of before it was written is a body
+    /// nobody has.
+    ///
+    /// Only for a chain that was told where to read them back. Without that
+    /// this does nothing, because it would be throwing them away.
+    pub fn release_bodies(&mut self, written: u64) {
+        if self.bodies.is_none() {
+            return;
+        }
+        let Some(tip) = self.height() else { return };
+        let keep_from = tip.saturating_sub(WARM_BODIES);
+        let below = written.min(keep_from);
+        for height in self.undo_from..below {
+            let Some(id) = self.branch.id_at(height) else {
+                continue;
+            };
+            if let Some(stored) = self.blocks.get_mut(&id) {
+                if stored.body.take().is_some() {
+                    self.held_bytes = self.held_bytes.saturating_sub(stored.bytes);
+                }
+            }
+        }
+    }
+
+    /// Says where bodies can be read back from.
+    ///
+    /// Set once, before anything is applied. Without it this chain keeps every
+    /// body it might still need, which is correct and costs memory.
+    pub fn reads_bodies_from(&mut self, bodies: Arc<dyn Bodies>) {
+        self.bodies = Some(bodies);
     }
 
     /// Asks to be told where this owner's notes go when they fall, and to
@@ -460,7 +535,7 @@ impl ChainStore {
     }
 
     pub fn block(&self, id: &Hash32) -> Option<&Block> {
-        self.blocks.get(id).map(|stored| &stored.block)
+        self.blocks.get(id).and_then(|stored| stored.body.as_ref())
     }
 
     pub fn contains(&self, id: &Hash32) -> bool {
@@ -966,10 +1041,10 @@ impl ChainStore {
                 .blocks
                 .get(&block.header.previous)
                 .ok_or(ChainError::UnknownParent(block.header.previous))?;
-            let expected_height = parent.block.header.height.saturating_add(1);
+            let expected_height = parent.header.height.saturating_add(1);
             if block.header.height != expected_height {
                 return Err(ChainError::BrokenHeight {
-                    parent: parent.block.header.height,
+                    parent: parent.header.height,
                     found: block.header.height,
                 });
             }
@@ -1061,11 +1136,11 @@ impl ChainStore {
             if self.invalid.contains(&cursor) {
                 return Err(ChainError::InvalidBlock {
                     id: cursor,
-                    source: BlockError::UnsupportedVersion(stored.block.header.version),
+                    source: BlockError::UnsupportedVersion(stored.header.version),
                 });
             }
             branch.push(cursor);
-            if stored.block.header.height == 0 {
+            if stored.header.height == 0 {
                 if self.branch.is_empty() {
                     branch.reverse();
                     return Ok((None, branch));
@@ -1074,7 +1149,7 @@ impl ChainStore {
                 // followed, so there is no branch point between them.
                 return Err(ChainError::NotGenesis);
             }
-            cursor = stored.block.header.previous;
+            cursor = stored.header.previous;
         }
     }
 
@@ -1142,10 +1217,12 @@ impl ChainStore {
     /// Takes a block into memory, keeping the byte count with it.
     fn hold(&mut self, id: Hash32, block: Block, total_work: u128) {
         let bytes = block.encode().len();
+        let header = block.header;
         if let Some(replaced) = self.blocks.insert(
             id,
             StoredBlock {
-                block,
+                header,
+                body: Some(block),
                 total_work,
                 bytes,
             },
@@ -1157,16 +1234,23 @@ impl ChainStore {
 
     /// Drops one block, keeping the byte count with it.
     fn release(&mut self, id: &Hash32) {
-        if let Some(dropped) = self.blocks.remove(id) {
+        if let Some(dropped) = self.blocks.remove(id).filter(|stored| stored.body.is_some()) {
             self.held_bytes = self.held_bytes.saturating_sub(dropped.bytes);
         }
     }
 
     /// Recomputes the byte count after a sweep that dropped many at once.
+    /// Recomputes what is held, counting only the blocks whose body is still
+    /// here.
+    ///
+    /// One definition of what this counts, used by every path that changes it,
+    /// so a body let go of and an entry dropped cannot both subtract the same
+    /// bytes.
     fn recount(&mut self) {
         self.held_bytes = self
             .blocks
             .values()
+            .filter(|stored| stored.body.is_some())
             .map(|stored| stored.bytes)
             .fold(0usize, usize::saturating_add);
     }
@@ -1176,7 +1260,8 @@ impl ChainStore {
         let branch = &self.branch;
         self.blocks
             .values()
-            .filter(|stored| branch.height_of(&stored.block.header.id()).is_none())
+            .filter(|stored| stored.body.is_some())
+            .filter(|stored| branch.height_of(&stored.header.id()).is_none())
             .map(|stored| stored.bytes)
             .fold(0usize, usize::saturating_add)
     }
@@ -1197,9 +1282,9 @@ impl ChainStore {
             .blocks
             .values()
             .filter_map(|stored| {
-                let id = stored.block.header.id();
+                let id = stored.header.id();
                 branch.height_of(&id).is_none().then_some((
-                    stored.block.header.height,
+                    stored.header.height,
                     id,
                     stored.bytes,
                 ))
@@ -1243,7 +1328,7 @@ impl ChainStore {
         };
         let branch = &self.branch;
         self.blocks.retain(|id, stored| {
-            branch.height_of(id).is_some() || stored.block.header.height >= cutoff
+            branch.height_of(id).is_some() || stored.header.height >= cutoff
         });
         self.invalid.retain(|id| branch.height_of(id).is_none());
         self.recount();
@@ -1255,17 +1340,27 @@ impl ChainStore {
     }
 
     fn apply(&mut self, id: Hash32, now: u64) -> Result<(), ChainError> {
-        let block = self
-            .blocks
-            .get(&id)
-            .ok_or(ChainError::Corrupt)?
-            .block
-            .clone();
+        let block = self.body_of(&id).ok_or(ChainError::Corrupt)?;
         let connected = connect_block(&mut self.state, &block, &self.params, now)
             .map_err(|source| ChainError::InvalidBlock { id, source })?;
         self.branch.push(id);
         self.applied.insert(id, connected);
         Ok(())
+    }
+
+    /// The body of a block this node accepted, from memory or from wherever
+    /// bodies are read back.
+    ///
+    /// A body read back is checked against the identifier it was asked for.
+    /// Reading by height is asking the disk which block sits there now, and
+    /// what sits there is not always what sat there when this was called.
+    fn body_of(&self, id: &Hash32) -> Option<Block> {
+        let stored = self.blocks.get(id)?;
+        if let Some(body) = stored.body.as_ref() {
+            return Some(body.clone());
+        }
+        let read = self.bodies.as_ref()?.body(stored.header.height)?;
+        (read.id() == *id).then_some(read)
     }
 
     /// Puts the node back on the branch it was following before a failed

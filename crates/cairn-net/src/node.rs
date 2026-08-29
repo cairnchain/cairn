@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use cairn_chain::{Accepted, ChainError, ChainStore, Located};
+use cairn_chain::{Accepted, Bodies, ChainError, ChainStore, Located};
 use cairn_crypto::PublicKey;
 use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::genesis;
@@ -193,7 +193,11 @@ struct Shared {
     nonce: u64,
     chain: Mutex<ChainStore>,
     /// Absent when the node keeps its chain only in memory.
-    log: Mutex<Option<Store>>,
+    ///
+    /// Behind an `Arc` because the chain reads block bodies back through it:
+    /// it holds one of these too, and neither owns the other, so there is no
+    /// cycle to break.
+    log: Arc<Mutex<Option<Store>>>,
     book: Mutex<AddressBook>,
     directory: Option<PathBuf>,
     /// Bytes of blocks this node keeps on disk. `u64::MAX` keeps everything,
@@ -294,10 +298,17 @@ impl Shared {
     ///
     /// For callers that hold the chain and nothing else. Where the log is
     /// already held, call [`write_branch`] with it.
-    fn persist(&self, accepted: &Accepted, chain: &ChainStore) {
+    /// Writes what a block did, and lets go of the bodies it makes safe to
+    /// let go of.
+    ///
+    /// The chain is passed in already held, and taken mutably because the
+    /// second half changes it: what it may stop keeping in memory depends on
+    /// what has just reached the disk, so the two belong together.
+    fn persist(&self, accepted: &Accepted, chain: &mut ChainStore) {
         let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(log) = log.as_mut() {
             write_branch(log, accepted, chain);
+            chain.release_bodies(log.blocks.reaches());
         }
     }
 
@@ -766,7 +777,7 @@ impl Node {
             address,
             nonce: fresh_nonce(),
             chain: Mutex::new(chain),
-            log: Mutex::new(log),
+            log: Arc::new(Mutex::new(log)),
             book: Mutex::new(book),
             directory,
             keep_bytes: AtomicU64::new(KEEP_BLOCK_BYTES),
@@ -785,9 +796,19 @@ impl Node {
             // with no directory has no log to write the first block to, which
             // is what `Node::bind` does and what tests use.
             let mut chain = shared.chain();
-            let mut log = shared.log.lock().unwrap_or_else(PoisonError::into_inner);
-            let blocks = log.as_mut().map(|store| &mut store.blocks);
-            open_the_chain(&mut chain, blocks, params, unix_now());
+            let has_log = {
+                let mut log = shared.log.lock().unwrap_or_else(PoisonError::into_inner);
+                let blocks = log.as_mut().map(|store| &mut store.blocks);
+                let present = blocks.is_some();
+                open_the_chain(&mut chain, blocks, params, unix_now());
+                present
+            };
+            // A chain with a log behind it may let go of the bodies it has
+            // written; one without has nowhere to read them back from, so it
+            // keeps every one it might still need.
+            if has_log {
+                chain.reads_bodies_from(Arc::new(FromLog(Arc::clone(&shared.log))));
+            }
         }
 
         let accepting = Arc::clone(&shared);
@@ -927,7 +948,7 @@ impl Node {
             let accepted = chain.add_block(block, unix_now())?;
             // Written while the chain is still held, so the log cannot record
             // a branch the chain has already moved off.
-            self.shared.persist(&accepted, &chain);
+            self.shared.persist(&accepted, &mut chain);
             accepted
         };
         if matches!(accepted, Accepted::Extended | Accepted::Reorganised { .. }) {
@@ -1182,6 +1203,22 @@ fn step(
     };
     let asking = wanted.map(|part| Message::GetJoin { what, part });
     (asking, whole)
+}
+
+/// Reads block bodies back off the log, for the chain that let go of them.
+///
+/// Holds the same lock the node does rather than a second copy of anything, so
+/// what it reads is what the node has. Everything that calls into this already
+/// holds the chain, and this takes the log: chain first and log second, as
+/// everywhere else.
+#[derive(Debug)]
+struct FromLog(Arc<Mutex<Option<Store>>>);
+
+impl Bodies for FromLog {
+    fn body(&self, height: u64) -> Option<Block> {
+        let log = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        log.as_ref()?.blocks.read_at(height).ok()?
+    }
 }
 
 /// Where headers being filled in are kept until they check out.
@@ -1901,12 +1938,17 @@ fn decide(
     // take these two the other way round from each other.
     let mut chain = shared.chain();
     let book = shared.book().clone();
-    let mut log = shared.log.lock().unwrap_or_else(PoisonError::into_inner);
 
+    // The log is taken twice rather than held across the decision, because the
+    // decision may itself read a block body off it: a chain that let go of a
+    // body reads it back through this same lock, and holding it here would be
+    // this thread waiting on itself.
     let reaches = chain.height().map_or(0, |tip| tip.saturating_add(1));
-    let shows = log
-        .as_ref()
-        .is_some_and(|store| store.can_show_the_chain(reaches));
+    let shows = {
+        let log = shared.log.lock().unwrap_or_else(PoisonError::into_inner);
+        log.as_ref()
+            .is_some_and(|store| store.can_show_the_chain(reaches))
+    };
     let mut local = Local {
         chain: &mut chain,
         book: &book,
@@ -1918,8 +1960,15 @@ fn decide(
 
     // Written while the chain is still held, so the log cannot record a branch
     // the chain has already moved off.
-    if let (Some(accepted), Some(log)) = (reaction.applied.as_ref(), log.as_mut()) {
-        write_branch(log, accepted, &chain);
+    if let Some(accepted) = reaction.applied.as_ref() {
+        let mut log = shared.log.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(log) = log.as_mut() {
+            write_branch(log, accepted, &chain);
+            // Bodies now on disk, and far enough back that no ordinary
+            // reorganisation reads them. Said after writing, never before: a
+            // body let go of before it was written is a body nobody has.
+            chain.release_bodies(log.blocks.reaches());
+        }
     }
     let passing: Vec<Transfer> = reaction
         .relayed
