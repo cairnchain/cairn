@@ -242,11 +242,12 @@
       <div>
         <h3>La prochaine chose que j'écris</h3>
         <p>
-          <b>Un portefeuille qui n'est pas un terminal.</b> Le protocole tient
-          debout tout seul depuis aujourd'hui : n'importe quel nœud accueille
-          un arrivant, personne n'a besoin d'être payé, et le disque ne
-          grandit plus sans fin. Ce qui manque maintenant est du côté des
-          gens : se servir de Cairn demande encore de taper des commandes.
+          <b>Sortir de la mémoire les blocs annulables.</b> Un nœud garde
+          jusqu'à 233 Mo de blocs en mémoire pour pouvoir les annuler, alors
+          qu'ils sont déjà sur son disque. C'est borné et ça tient sur un
+          téléphone, donc c'est du confort et non une correction — mais c'est
+          le dernier poste qui reste, et il touche au cœur du système, donc il
+          mérite une séance à lui plutôt que la fin d'une longue.
         </p>
         <p class="resume-note">
           Ensuite : un portefeuille qui n'est pas un terminal, et sortir de la
@@ -420,6 +421,30 @@
         </div>
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Un portefeuille qu'on peut montrer</b>
+          <span>Une commande ouvre une page sur ta machine : solde vérifié par toi-même, adresse à recevoir, formulaire d'envoi, où l'argent est posé, et ce qui s'est passé. La clé ne quitte jamais le programme ; le navigateur ne signe rien. Tout ce qui touche à l'argent est dans une bibliothèque à part, ce qui rend une application iPhone possible sans réécrire la partie dangereuse.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Un nœud qui a rejoint peut accueillir</b>
+          <span>Accueillir demande les en-têtes depuis le premier bloc, qu'un nœud arrivé par transfert n'a pas : la capacité d'accueil serait morte avec les nœuds ayant lu la chaîne entière. Il les réclame maintenant, et n'en croit aucun tant que l'arbre qu'ils forment ne redonne pas l'empreinte que son propre en-tête portait déjà. Le réseau passe en version 5.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Remettre les serveurs à jour</b>
+          <span>Le protocole est passé en version 5 : les nœuds d'hier et ceux d'aujourd'hui ne se parlent plus. Les trois machines se mettent à jour ensemble, sans effacer les données cette fois — la chaîne et les blocs restent valides.</span>
+        </div>
+        <div class="who you">toi</div>
+        <div class="cost">cinq minutes</div>
       </div>
       <div class="task">
         <div class="task-what">
@@ -817,8 +842,8 @@
   </div>
 
   <footer>
-    <span>Cairn · route jusqu'au mainnet · v14</span>
-    <span>119 commits · 384 tests</span>
+    <span>Cairn · route jusqu'au mainnet · v15</span>
+    <span>133 commits · 408 tests</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 
