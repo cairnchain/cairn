@@ -362,3 +362,57 @@ fn any_single_block_can_be_read_back_by_position() {
     // And the log is still readable in order afterwards.
     assert_eq!(read_back(&log), blocks);
 }
+
+/// Dropping the front of the log rewrites both files. A machine that stops
+/// partway must not leave a log holding the front of the new one and the back
+/// of the old, with an index pointing into offsets that no longer mean
+/// anything: a node would then serve blocks that are not the ones it names.
+#[test]
+fn dropping_the_front_of_the_log_is_all_or_nothing() {
+    let directory = scratch("keep-from");
+    let (mut log, _) = BlockLog::open(&directory).unwrap();
+    let blocks = chain(20);
+    for block in &blocks {
+        log.append(block).unwrap();
+    }
+    assert_eq!(log.first_height(), 0);
+    assert_eq!(log.reaches(), 20);
+
+    log.keep_from(12).unwrap();
+    assert_eq!(log.first_height(), 12, "it starts where it was told to");
+    assert_eq!(log.reaches(), 20, "and still reaches the tip");
+    assert!(log.read_at(11).unwrap().is_none(), "what went is gone");
+    for height in 12..20u64 {
+        let found = log.read_at(height).unwrap().expect("still held");
+        assert_eq!(found.header.height, height, "at its own height");
+        assert_eq!(found.id(), blocks[height as usize].id());
+    }
+
+    // Read back by a second process, which is what a restart is.
+    drop(log);
+    let (again, recovered) = BlockLog::open(&directory).unwrap();
+    assert_eq!(recovered.blocks, 8);
+    assert_eq!(
+        again.first_height(),
+        12,
+        "where it starts survives a restart"
+    );
+    assert_eq!(again.reaches(), 20);
+    assert_eq!(again.read_at(19).unwrap().unwrap().id(), blocks[19].id());
+    assert!(
+        !directory.join("blocks.log.part").exists(),
+        "nothing was left half moved"
+    );
+
+    // And past the end, which empties it and leaves it ready for whatever
+    // height comes next.
+    drop(again);
+    let (mut again, _) = BlockLog::open(&directory).unwrap();
+    again.keep_from(99).unwrap();
+    assert!(again.is_empty());
+    again.append(&blocks[5]).unwrap();
+    assert_eq!(again.first_height(), 5);
+    assert_eq!(again.read_at(5).unwrap().unwrap().id(), blocks[5].id());
+
+    let _ = std::fs::remove_dir_all(&directory);
+}

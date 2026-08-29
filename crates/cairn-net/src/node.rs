@@ -316,23 +316,49 @@ impl Shared {
         if !over {
             return;
         }
-        let Some(bytes) = self.own_ledger() else {
+        let Some(at) = self.write_ledger() else {
             return;
         };
-        let Some(at) = Handover::decode(&bytes).ok().map(|held| held.at.height) else {
-            return;
-        };
-        if !self.keep_ledger(&bytes) {
+
+        // The chain is not held across writing the ledger, which is megabytes
+        // and would stop the node for as long as it took. So it may have
+        // reorganised in between, and the ledger just written would then stand
+        // for a branch this node is no longer on. Dropping blocks against it
+        // would leave a node believing an abandoned chain on its next start.
+        //
+        // Asked again here, and if it moved nothing is dropped: the next round
+        // of upkeep writes a ledger for wherever the chain ended up.
+        if !self.chain().agrees_with(&at) {
             return;
         }
+
         let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(log) = log.as_mut() {
             // Everything below the ledger, which is everything the ledger now
             // stands for. The block at that height stays: the ledger is what
             // the chain looked like once it had been applied, so replaying
             // starts at the one after it.
-            let _ = log.keep_from(at.saturating_add(1));
+            //
+            // A log that no longer reaches that height was rewritten by a
+            // reorganisation between the two checks above, and emptying it
+            // here would throw away blocks this node still holds.
+            if log.holds(at.height) {
+                let _ = log.keep_from(at.height.saturating_add(1));
+            }
         }
+    }
+
+    /// Writes this node's ledger down, returning the height it stands for.
+    ///
+    /// Separate from dropping the blocks below it, because the two are two
+    /// steps and a machine can stop between them. Writing first is what makes
+    /// that survivable: what is left is a ledger and more blocks than needed,
+    /// rather than neither.
+    fn write_ledger(&self) -> Option<Located> {
+        let bytes = self.own_ledger()?;
+        let at = Handover::decode(&bytes).ok()?.at;
+        self.keep_ledger(&bytes)
+            .then(|| Located::new(at.height, at.id()))
     }
 
     /// Keeps the ledger this node was handed, so it can start again without
@@ -605,28 +631,49 @@ impl Node {
             .and_then(|recent| recent.last())
             .map(|tip| tip.height.saturating_add(1));
 
-        // A log that starts somewhere other than where the ledger leaves off
-        // is one this process cannot use: either it was handed a ledger whose
-        // file is gone, or it read the chain and the log does not begin at the
-        // first block.
-        let rejoining = !log.is_empty() && log.first_height() != from.unwrap_or(0);
+        // Where the replay has to start: after the ledger if there is one, and
+        // at the first block if there is not.
+        let start = from.unwrap_or(0);
+
+        // The log has to reach the point the ledger leaves off. It may begin
+        // before it, which is what a node that was stopped between writing its
+        // ledger and dropping the blocks below it looks like: those blocks are
+        // simply passed over. It may not begin after it, because then nothing
+        // joins the two and there is no chain to be had.
+        let rejoining = !log.is_empty() && log.first_height() > start;
         let mut applied = 0usize;
         if !rejoining {
             for block in log.replay() {
                 let Ok(block) = block else { break };
+                // Already in the ledger this node started from.
+                if block.header.height < start {
+                    continue;
+                }
                 if !matches!(chain.add_block(block, now), Ok(Accepted::Extended)) {
                     break;
                 }
                 applied = applied.saturating_add(1);
             }
         }
+        let reached = start.saturating_add(applied as u64);
         let refused = if rejoining {
             0
         } else {
-            recovered.blocks.saturating_sub(applied)
+            // Only the records at or past where the replay began were ever
+            // going to be applied. The ones before it were passed over, and
+            // passing over is not refusing.
+            usize::try_from(log.reaches().saturating_sub(start.max(log.first_height())))
+                .unwrap_or(0)
+                .saturating_sub(applied)
         };
         if refused > 0 || rejoining {
-            log.keep_below(from.unwrap_or(0).saturating_add(applied as u64))?;
+            log.keep_below(reached)?;
+        }
+        // Blocks the ledger already stands for, still on disk because this
+        // node was stopped before it could drop them. Dropped now, so the
+        // next start does not walk them again.
+        if !rejoining && log.first_height() < start {
+            log.keep_from(start)?;
         }
 
         let book = AddressBook::load(&directory);
@@ -767,6 +814,15 @@ impl Node {
 
     pub fn height(&self) -> Option<u64> {
         self.with_chain(ChainStore::height)
+    }
+
+    /// Writes this node's ledger to its directory, so a restart begins there
+    /// rather than at the first block.
+    ///
+    /// Done on its own schedule as the log grows. This is for an operator
+    /// about to stop a node, and for tests.
+    pub fn write_ledger(&self) -> bool {
+        self.shared.write_ledger().is_some()
     }
 
     /// Sets how many bytes of blocks this node keeps on disk.

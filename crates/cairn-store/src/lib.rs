@@ -107,6 +107,9 @@ pub struct BlockLog {
     file: File,
     index: File,
     path: PathBuf,
+    /// Where the log and its index live, so both can be written beside
+    /// themselves and moved into place.
+    directory: PathBuf,
     /// Records held.
     count: usize,
     /// Height of the first record, so a record's position and a block's height
@@ -147,10 +150,16 @@ impl BlockLog {
             .truncate(false)
             .open(directory.join(BLOCK_INDEX))?;
 
+        // A move that never finished leaves these behind. They are derived and
+        // point at nothing, so they go.
+        let _ = std::fs::remove_file(directory.join(format!("{BLOCK_LOG}.part")));
+        let _ = std::fs::remove_file(directory.join(format!("{BLOCK_INDEX}.part")));
+
         let mut log = Self {
             file,
             index,
             path,
+            directory: directory.to_path_buf(),
             count: 0,
             first: 0,
             end: 0,
@@ -240,20 +249,33 @@ impl BlockLog {
             offset = offset.saturating_add(to.saturating_sub(from));
             ends.push(offset);
         }
-
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.write_all(&kept)?;
-        self.file.set_len(offset)?;
-        self.file.flush()?;
-
         let mut written = Vec::with_capacity(ends.len().saturating_mul(8));
         for end in &ends {
             written.extend_from_slice(&end.to_le_bytes());
         }
-        self.index.set_len(0)?;
-        self.index.seek(SeekFrom::Start(0))?;
-        self.index.write_all(&written)?;
-        self.index.flush()?;
+
+        // Written beside the log and moved into place, rather than over it.
+        // Writing over it would leave, on a machine that stopped partway, a
+        // file holding the front of the new log and the back of the old one,
+        // with an index still pointing into the old offsets: a node would
+        // serve blocks that are not the ones it names, confidently.
+        //
+        // The log moves first. Stopping between the two moves leaves an index
+        // reaching past the log, which the next start already treats as an
+        // index to be rebuilt.
+        let staged_log = self.directory.join(format!("{BLOCK_LOG}.part"));
+        let staged_index = self.directory.join(format!("{BLOCK_INDEX}.part"));
+        std::fs::write(&staged_log, &kept)?;
+        std::fs::write(&staged_index, &written)?;
+        std::fs::rename(&staged_log, &self.path)?;
+        std::fs::rename(&staged_index, self.directory.join(BLOCK_INDEX))?;
+
+        // The handles held here still point at the files that were replaced.
+        self.file = OpenOptions::new().read(true).write(true).open(&self.path)?;
+        self.index = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(self.directory.join(BLOCK_INDEX))?;
 
         self.count = ends.len();
         self.first = height;

@@ -39,6 +39,7 @@ fn loopback() -> SocketAddr {
 }
 
 /// Builds blocks off to the side, so a node can be handed a ready made chain.
+#[derive(Clone)]
 struct Forge {
     params: ConsensusParams,
     state: LedgerState,
@@ -978,5 +979,123 @@ fn an_archivist_keeps_the_blocks_it_proves_things_from() {
 
     keeper.shutdown();
     plain.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Writing the ledger down and dropping the blocks below it are two steps, and
+/// a machine can stop between them. What is left is a ledger and a log that
+/// starts before it, which is not a fault: the blocks the ledger already
+/// stands for are passed over, and the rest is replayed.
+#[test]
+fn a_node_stopped_between_writing_its_ledger_and_dropping_blocks_comes_back() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(60);
+    let top = (blocks.len() - 1) as u64;
+
+    let root = std::env::temp_dir().join(format!("cairn-halfway-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let directory = root.join("node");
+
+    let (node, _) = Node::open(params, loopback(), &directory).unwrap();
+    for block in &blocks {
+        node.submit_block(block.clone()).unwrap();
+    }
+    let root_before = node.with_chain(|chain| chain.state().state_root());
+    node.shutdown();
+    drop(node);
+
+    // The ledger is written and the blocks are all still there, which is
+    // exactly the state a stop between the two steps leaves behind.
+    let (node, _) = Node::open(params, loopback(), &directory).unwrap();
+    assert!(node.write_ledger(), "the ledger went down");
+    assert!(
+        node.archived_at(0).is_some(),
+        "and every block is still there"
+    );
+    node.shutdown();
+    drop(node);
+    assert!(directory.join(cairn_store::HANDED_LEDGER).exists());
+
+    let (again, restored) = Node::open(params, loopback(), &directory).unwrap();
+    assert!(
+        !restored.rejoining,
+        "a log reaching further back than the ledger is not a broken log"
+    );
+    assert_eq!(restored.refused, 0, "and nothing was refused");
+    assert_eq!(again.height(), Some(top));
+    assert_eq!(
+        again.with_chain(|chain| chain.state().state_root()),
+        root_before,
+        "on exactly the ledger it had"
+    );
+    assert!(
+        again.archived_at(0).is_none(),
+        "and the blocks the ledger stands for are dropped rather than walked again"
+    );
+
+    again.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Dropping old blocks must not cost a node its ability to change branches.
+/// Undoing reads what a block did, which is held in memory, not the block; but
+/// a node that trimmed and then reorganised also has to leave its log and its
+/// written ledger saying the same thing as the branch it ended up on.
+#[test]
+fn a_node_that_dropped_blocks_can_still_change_branches() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let common = forge.mine_many(40);
+
+    // Two branches from the same point, the second one heavier by two blocks.
+    let mut theirs = forge.clone();
+    let ours = forge.mine_many(6);
+    let rival = theirs.mine_many(8);
+
+    let root = std::env::temp_dir().join(format!("cairn-reorg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let directory = root.join("node");
+
+    let (node, _) = Node::open(params, loopback(), &directory).unwrap();
+    for block in common.iter().chain(ours.iter()) {
+        node.submit_block(block.clone()).unwrap();
+    }
+    assert_eq!(node.height(), Some(45));
+
+    // It writes its ledger down and lets the oldest blocks go.
+    node.keep_blocks(1);
+    wait_for("the node to drop what it no longer needs", || {
+        node.archived_at(0).is_none()
+    });
+
+    // Then the heavier branch arrives and it has to switch.
+    for block in &rival {
+        let _ = node.submit_block(block.clone());
+    }
+    assert_eq!(node.height(), Some(47), "it took the heavier branch");
+    assert_eq!(
+        node.with_chain(|chain| chain.tip()),
+        Some(rival.last().unwrap().id()),
+        "and is on it, not on a mixture of the two"
+    );
+
+    // And what it wrote down still agrees with where it ended up.
+    node.shutdown();
+    drop(node);
+    let (again, restored) = Node::open(params, loopback(), &directory).unwrap();
+    assert_eq!(
+        again.height(),
+        Some(47),
+        "restored: {} blocks, rejoining {}",
+        restored.blocks,
+        restored.rejoining
+    );
+    assert_eq!(
+        again.with_chain(|chain| chain.tip()),
+        Some(rival.last().unwrap().id()),
+    );
+
+    again.shutdown();
     let _ = std::fs::remove_dir_all(&root);
 }
