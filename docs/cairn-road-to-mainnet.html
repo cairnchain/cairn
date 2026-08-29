@@ -424,6 +424,22 @@
       </div>
       <div class="task">
         <div class="task-what">
+          <b>L'archiviste ne tenait pas la distance</b>
+          <span>Répondre à un nouveau venu demande 512 preuves, et chacune relisait tout l'arbre : 82 secondes sur une chaîne d'un million de blocs, alors que la réponse ne vaut que pour un bloc, donc une minute. Rejoindre le réseau aurait cessé de marcher au bout de deux ans, sans que rien ne le signale. Un archiviste garde maintenant les nœuds intermédiaires : cinq microsecondes par preuve, et un hachage de plus à chaque doublement de la chaîne.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Et il se figeait en annulant</b>
+          <span>Même cause de l'autre côté : défaire un bloc reconstruisait tout l'arbre, une fois par bloc annulé. Six minutes pour une réorganisation complète sur un million de blocs, la chaîne bloquée pendant ce temps, et pire à mesure qu'elle vieillit. C'est devenu une lecture par niveau, soit moins d'une microseconde.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
           <b>192 octets pour une clé de 32</b>
           <span>Une clé publique était gardée sous sa forme calculée, utile pour vérifier souvent et inutile pour une note qui dort. Mesuré en isolant chaque structure : 192 des 244 octets d'une note. Le tiroir chaud passe de 107 à 68 Mo, contre 16 % sur la vérification d'une signature, soit neuf millisecondes par bloc plein.</span>
         </div>
@@ -758,8 +774,8 @@
   </div>
 
   <footer>
-    <span>Cairn · route jusqu'au mainnet · v10</span>
-    <span>101 commits · 361 tests</span>
+    <span>Cairn · route jusqu'au mainnet · v11</span>
+    <span>105 commits · 363 tests</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 
