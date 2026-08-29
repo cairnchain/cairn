@@ -97,6 +97,15 @@ pub struct ConsensusParams {
     ///
     /// It has to stay comfortably under what the wire carries, and it is the
     /// wire's business to be the larger of the two.
+    ///
+    /// It decides three things at once, which is why the number is small.
+    /// A node holds the blocks it could still reorganise away, so this times
+    /// the reorganisation depth is memory every node must have: a megabyte a
+    /// block would be a gigabyte, and this project's whole claim is that a
+    /// node stays affordable. It also decides how fast the hot set turns over,
+    /// since every payment nets a note, and with it how long the grace on a
+    /// fallen note really lasts. And it decides how many people can be paid in
+    /// a minute, which is the only one of the three anybody asks about.
     pub max_block_bytes: usize,
     /// How far ahead of the receiving node's clock a timestamp may sit.
     pub max_timestamp_drift: u64,
@@ -173,7 +182,7 @@ impl ConsensusParams {
             max_inputs_per_transfer: 256,
             max_outputs_per_transfer: 256,
             max_coinbase_outputs: 16,
-            max_block_bytes: 1024 * 1024,
+            max_block_bytes: 128 * 1024,
             max_timestamp_drift: 2 * 60 * 60,
         }
     }

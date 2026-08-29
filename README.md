@@ -73,6 +73,13 @@ Each network starts from a block written into the source, so two nodes that
 have never met are on the same chain by construction and neither has to take a
 stranger's word for where the story begins.
 
+A block holds 128 kilobytes, which is about 686 ordinary payments, or eleven a
+second. That number decides three things at once and is small because of the
+first two: a node holds the blocks it could still reorganise away, so it is
+134 MB of memory every node must have; it sets how fast the hot set turns over
+and with it how long a fallen note stays spendable without a proof; and it is
+how many people can be paid in a minute.
+
 | Network | Starts from | Opens at | Block time |
 | --- | --- | --- | --- |
 | `testnet-2` | `0000001b9876...` | 1787820378 | 60 s |

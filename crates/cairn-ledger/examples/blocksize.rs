@@ -29,11 +29,15 @@ use cairn_primitives::{Amount, Hash32};
 
 /// What the wire carries, kept here as a plain number so this example does not
 /// have to reach into the networking crate.
-const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
+const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 /// Hashes a cold proof carries. The forest commits to the whole cold set in
 /// sixty four, so a path through it is at most that long.
 const PROOF_HASHES: usize = 64;
+
+/// Blocks a node holds because it could still reorganise them away, kept here
+/// as a plain number so this example does not reach into the chain crate.
+const REORG_DEPTH: usize = 1024;
 
 fn main() {
     let params = ConsensusParams::testnet();
@@ -95,10 +99,19 @@ fn main() {
 
     println!(
         "\nAn ordinary payment, one note in and two out, takes {each} bytes, so\n\
-         a block holds about {} of them, or {} counting the ceiling on how\n\
-         many transfers a block may carry.",
-        with_commas(params.max_block_bytes / each),
+         a block holds about {} of them: {:.0} a second, at a block a minute.",
         with_commas(per_block),
+        per_block as f64 / params.target_block_time as f64,
+    );
+
+    // The number the block size decides that nobody sees. A node holds the
+    // blocks it could still reorganise away, so this is memory every node must
+    // have, whatever else it is doing.
+    println!(
+        "\nA node holds the {} blocks it could still reorganise away, so a full\n\
+         one of those is {} of memory every node must have.",
+        with_commas(REORG_DEPTH),
+        format_bytes(REORG_DEPTH * params.max_block_bytes),
     );
 
     // Which decides something the byte limit does not say out loud: how long a
@@ -122,11 +135,11 @@ fn main() {
         );
     }
     println!(
-        "\nThe hot set holds {} notes. A note that falls out is not lost: it\n\
-         is spent by presenting a proof, which its owner keeps current out of\n\
-         what every block already carries. But it is the number that decides\n\
-         how often that happens, and it comes from the block size rather than\n\
-         from anything anyone chose on purpose.",
+        "\nThe hot set holds {} notes. A note that falls out is not lost: it is\n\
+         spent by presenting a proof, which its owner keeps current out of what\n\
+         every block already carries. But how often that happens follows from\n\
+         the block size, which is one of the three things that number decides\n\
+         and the reason it is not larger.",
         with_commas(params.hot_capacity),
     );
 
@@ -135,6 +148,17 @@ fn main() {
 
 fn line(name: &str, bytes: usize) {
     println!("{name:>26}  {:>14}", with_commas(bytes));
+}
+
+/// Bytes in whatever unit reads plainly.
+fn format_bytes(bytes: usize) -> String {
+    if bytes >= 1_000_000_000 {
+        return format!("{:.1} GB", bytes as f64 / 1e9);
+    }
+    if bytes >= 1_000_000 {
+        return format!("{} MB", bytes / 1_000_000);
+    }
+    format!("{} kB", bytes / 1_000)
 }
 
 /// A block carrying as many copies of `transfer` as the rules allow.
