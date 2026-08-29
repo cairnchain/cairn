@@ -618,12 +618,27 @@
       headers against accumulated work rather than height, with a
       Fiat-Shamir seed taken from the tip, and each opened header is checked
       against the tip's own commitment. Joining a thirty year chain costs 12 MB
-      against 2 067 GB of reading. Measurement decides the count rather than
-      argument, and it also shows why the distribution must be taken and not
-      improvised: under a uniform draw, a forger who keeps the real chain and
-      fakes only the last twenty blocks goes unnoticed 88% of the time, which
-      is precisely why FlyClient samples the recent end of the chain more
-      densely.
+      against 2 067 GB of reading.
+    </p>
+    <p>
+      The count follows from the assumption the chain already makes. A forger
+      cannot mine what it did not mine, so a chain heavier than the honest one,
+      presented by a party holding a share <em>s</em> of the world's work, has
+      at least <em>1 &minus; s/(1&minus;s)</em> of itself invented: work no
+      block of it spans. At a third of the world's work that is half the chain.
+      Each draw lands in invented work with that probability, so 512 draws miss
+      with probability at most 2<sup>-128</sup> for every share up to 45.7%.
+      Beyond that the count would have to grow without bound, and at half the
+      work there is nothing left to invent — which is the point at which proof
+      of work stops protecting anything.
+    </p>
+    <p>
+      Measurement checks the derivation the other way, by forging chains and
+      watching them fail, and it also shows why the distribution must be taken
+      and not improvised: under a uniform draw, a forger who keeps the real
+      chain and fakes only the last twenty blocks goes unnoticed 88% of the
+      time, which is precisely why FlyClient samples the recent end of the
+      chain more densely.
     </p>
     <p>
       Serving that sample takes the headers and the forest they make, which a
@@ -829,14 +844,12 @@
       currency is worthless by design and which will be reset.
     </p>
     <p>
-      <strong>The sample count is a floor, not a bound.</strong> A newcomer
-      opens 512 headers, at which a chain overstating its work by one per cent
-      is caught every time and one overstating by a tenth of a per cent is not.
-      That figure comes from measurement. Where the line belongs is an economic
-      question — what a forger stands to gain against the work it would have to
-      redo — and until that is answered the count is chosen rather than
-      derived. It is the last thing between this and a protocol that can be
-      relied on.
+      <strong>The sample count rests on the majority assumption and nothing
+      weaker.</strong> A newcomer opens 512 headers, which holds against any
+      forger up to 45.7% of the world's work at 2<sup>-128</sup>. Past that no
+      count would do: a forger at half the work has nothing left to invent and
+      can simply mine the chain. The margin between 45.7% and 50% is the price
+      of a bounded proof, and doubling the count moves it only to 47.8%.
     </p>
     <p>
       <strong>A node that joined cannot take in a newcomer.</strong> Showing

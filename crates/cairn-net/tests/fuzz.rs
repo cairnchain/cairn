@@ -59,14 +59,17 @@ impl Rng {
     }
 
     fn byte(&mut self) -> u8 {
-        (self.next() >> 24) as u8
+        u8::try_from(self.next() >> 56).unwrap_or(0)
     }
 
     fn below(&mut self, limit: usize) -> usize {
-        if limit == 0 {
+        let Ok(span) = u64::try_from(limit) else {
+            return 0;
+        };
+        if span == 0 {
             return 0;
         }
-        (self.next() % limit as u64) as usize
+        usize::try_from(self.next() % span).unwrap_or(0)
     }
 
     fn bytes(&mut self, len: usize) -> Vec<u8> {
@@ -352,7 +355,7 @@ fn valid_messages() -> Vec<Vec<u8>> {
     let handover = state.handover(tip.header, vec![tip.header]);
 
     vec![
-        Message::Hello(handshake.clone()).encode(),
+        Message::Hello(handshake).encode(),
         Message::Welcome(handshake).encode(),
         Message::GetPeers.encode(),
         Message::Block(Box::new(tip.clone())).encode(),

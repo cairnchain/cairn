@@ -159,14 +159,83 @@ fn at_full_size() {
         println!();
     }
 
+    from_the_threat();
+}
+
+/// What the count has to be, derived from the assumption the chain already
+/// makes rather than read off the table above.
+///
+/// The table says how large a lie a given number of draws catches. It does not
+/// say how large a lie a forger has to tell, and that is the question that
+/// settles the count.
+///
+/// A forger holding a share of the world's work presents a chain heavier than
+/// the honest one. It cannot mine what it did not mine, so the difference is
+/// invented: work no block of its chain spans. If it holds `share` of the
+/// total and the honest network holds the rest, then to pass the honest chain
+/// it must claim more than `1 - share` while having done `share`, so at least
+///
+///     lie = 1 - share / (1 - share)
+///
+/// of what it presents is invented. That is not a small number for any share
+/// the chain's own security assumption allows: at a third of the world's work
+/// it is half the chain, and it only approaches zero as the share approaches
+/// the half at which proof of work stops protecting anything at all.
+///
+/// Every draw lands in invented work with probability `lie`, so `count` draws
+/// miss with probability `(1 - lie)^count`. Turned around, `count` draws hold
+/// against every share up to the one where that probability reaches 2^-128.
+fn from_the_threat() {
+    println!("\n\nWhat a forger has to lie about, given what it holds:\n");
     println!(
-        "\nThis is where {} comes from. What it does not settle is the smallest\n\
-         lie worth telling, which is an economic question rather than a\n\
-         statistical one: what a forger stands to gain against what the work it\n\
-         would have to redo costs. Until that is answered the count here is a\n\
-         floor chosen from measurement, not a bound derived from a threat.",
-        cairn_ledger::sampling::SAMPLES,
+        "{:>16}  {:>14}  {:>22}  {:>16}",
+        "forger holds", "must invent", "draws for 2^-128", "at 512 draws"
     );
+    println!("{}", "-".repeat(76));
+
+    for share in [0.10f64, 0.20, 0.30, 0.40, 0.45, 0.49] {
+        let lie = 1.0 - share / (1.0 - share);
+        // count * -log2(1 - lie) >= 128
+        let needed = (128.0 / -(1.0 - lie).log2()).ceil();
+        let missed = (1.0 - lie).powi(512);
+        println!(
+            "{:>15.0}%  {:>13.1}%  {:>22.0}  {:>16}",
+            share * 100.0,
+            lie * 100.0,
+            needed,
+            if missed <= 2f64.powi(-128) {
+                "holds".to_owned()
+            } else {
+                format!("2^{:.0}", missed.log2())
+            },
+        );
+    }
+
+    // The share at which the count stops reaching 2^-128.
+    let share = margin(i32::try_from(cairn_ledger::sampling::SAMPLES).unwrap_or(512));
+    println!(
+        "\n{} draws hold against any forger up to {:.1}% of the world's work, at\n\
+         2^-128. Past that the count would have to grow without bound, because a\n\
+         forger at half the work has nothing left to invent: it can simply mine\n\
+         the chain. That is the same assumption the chain itself rests on, so\n\
+         this is not a weaker one, and the margin between {:.1}% and 50% is what\n\
+         the count buys.",
+        cairn_ledger::sampling::SAMPLES,
+        share * 100.0,
+        share * 100.0,
+    );
+    println!(
+        "\nDoubling the count buys very little of that margin: 1024 draws reach\n\
+         {:.1}% and 2048 reach {:.1}%. The cost is a megabyte against two, once.",
+        margin(1024) * 100.0,
+        margin(2048) * 100.0,
+    );
+}
+
+/// The largest share of the world's work `count` draws hold against, at 2^-128.
+fn margin(count: i32) -> f64 {
+    let lie = 1.0 - 2f64.powf(-128.0 / f64::from(count));
+    (1.0 - lie) / (2.0 - lie)
 }
 
 /// How a forger arranges the work it never did.

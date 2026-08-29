@@ -35,20 +35,33 @@ use crate::state::header_leaf;
 
 /// Headers opened when a newcomer is deciding between chains.
 ///
-/// Measured rather than argued. `cargo run --release -p cairn-ledger --example
-/// sampled_start` puts the question two ways: it forges real chains and watches
-/// them fail, and it asks the draw alone how often it lands in the work a
-/// forger had to invent, at the size a chain reaches in thirty years. At this
-/// count a chain overstating its work by one per cent is caught every time,
-/// and one overstating by a tenth of a per cent is not.
+/// Derived from the assumption the chain already makes, and then measured.
 ///
-/// A tenth of a per cent is left uncaught deliberately, because catching it
-/// would cost four times the traffic to refuse a claim worth a tenth of a per
-/// cent of a chain. Where that line belongs is an economic question rather
-/// than a statistical one: what a forger stands to gain against the work it
-/// would have to redo. Until that is answered this is a floor taken from
-/// measurement, not a bound derived from a threat, and it is the last thing
-/// between this and a protocol that can be relied on.
+/// A forger cannot mine what it did not mine. To present a chain heavier than
+/// the honest one while holding a share `s` of the world's work, it has to
+/// invent the difference: work no block of its chain spans. It has done `s`
+/// and must claim more than `1 - s`, so at least
+///
+/// ```text
+/// lie = 1 - s / (1 - s)
+/// ```
+///
+/// of what it presents is invented. That is a large number for every share
+/// proof of work is supposed to survive: a third of the world's work still
+/// means inventing half the chain. It only approaches zero as `s` approaches
+/// the half at which mining the chain outright is cheaper than forging it.
+///
+/// Each draw lands in invented work with probability `lie`, so `count` draws
+/// miss with probability `(1 - lie)^count`. At 512 that reaches 2^-128 for
+/// every forger up to 45.7% of the world's work. Past that the count would
+/// have to grow without bound, and no count protects a chain against a
+/// majority: this rests on the same assumption the chain does, not a stronger
+/// one. Doubling to 1024 reaches 47.8%, which is a megabyte more traffic for
+/// two points of a margin that ends at 50% whatever is spent.
+///
+/// `cargo run --release -p cairn-ledger --example sampled_start` prints the
+/// derivation and then checks it the other way, by forging chains and watching
+/// them fail.
 ///
 /// At roughly two kilobytes an opened header this is about a megabyte, which
 /// is more than one message carries: a proof travels in several.
@@ -404,6 +417,47 @@ mod tests {
 
     fn seed(byte: u8) -> Hash32 {
         Hash32::from_bytes([byte; 32])
+    }
+
+    /// The count is derived rather than chosen, so the derivation is checked
+    /// here: changing `SAMPLES` without meaning to would change what the chain
+    /// withstands, and nothing else would say so.
+    ///
+    /// A forger holding share `s` of the world's work has to invent
+    /// `1 - s / (1 - s)` of the chain it presents. `count` draws miss that
+    /// with probability `(1 - lie)^count`, and the count is set so this
+    /// reaches 2^-128 for every share the chain's own assumption allows.
+    #[test]
+    fn the_sample_count_holds_against_the_share_it_claims_to() {
+        let missed = |share: f64, count: i32| {
+            let lie = 1.0 - share / (1.0 - share);
+            (1.0 - lie).powi(count)
+        };
+        let count = i32::try_from(SAMPLES).expect("a count that fits");
+
+        // Every share short of the majority the chain already assumes nobody
+        // holds. A third of the world's work is still half a chain to invent.
+        for share in [0.10, 0.20, 0.30, 0.40, 0.45] {
+            assert!(
+                missed(share, count) <= 2f64.powi(-128),
+                "a forger at {share} of the work is missed more often than \
+                 one in 2^128"
+            );
+        }
+
+        // And the claim is not idle: just past that, it stops holding, which
+        // is what makes 45.7% a boundary rather than a round number.
+        assert!(
+            missed(0.46, count) > 2f64.powi(-128),
+            "the count would hold further than the comment says it does"
+        );
+
+        // No count protects against a majority. A forger at half the work has
+        // nothing to invent, so every draw lands in work it really did.
+        assert!(
+            (missed(0.5, count) - 1.0).abs() < 1e-12,
+            "at half the world's work there is no lie left to catch"
+        );
     }
 
     #[test]
