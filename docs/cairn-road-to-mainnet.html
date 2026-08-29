@@ -242,12 +242,12 @@
       <div>
         <h3>La prochaine chose que j'écris</h3>
         <p>
-          <b>Ce que gagne un archiviste.</b> Rejoindre le réseau en 12 Mo
-          marche, et un nouveau venu sait maintenant reconnaître le nœud
-          capable de le servir. Mais rien ne récompense encore celui qui rend
-          ce service, et il est le seul à porter un coût qui grandit. C'est la
-          dernière question de conception ouverte, et le reste du protocole
-          s'appuie dessus.
+          <b>Séparer les en-têtes des blocs.</b> Un nœud qui a jeté ses vieux
+          blocs ne peut plus servir un nouveau venu, parce qu'il y lisait ses
+          en-têtes. Gardés à part, ils coûtent 182 octets par bloc au lieu
+          d'un bloc entier : tout nœud pourrait alors accueillir un nouveau
+          venu, et le rôle d'archiviste cesserait d'être une dépendance du
+          réseau.
         </p>
         <p class="resume-note">
           Ensuite : un portefeuille qui n'est pas un terminal, et sortir de la
@@ -418,6 +418,14 @@
         <div class="task-what">
           <b>Un nœud qui a rejoint est un nœud</b>
           <span>Il n'écrivait rien sur son disque : les positions de son journal étaient des hauteurs, et le sien commence là où on le lui a remis. Il validait des blocs que personne ne pouvait lui demander et les perdait à chaque redémarrage. Il garde maintenant l'état reçu et repart dessus tout seul, sans dépendre d'un archiviste joignable à cet instant.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Le disque, lui, grandissait sans fin</b>
+          <span>Ta thèse était vraie pour la mémoire et fausse pour le disque : rien n'effaçait jamais rien, donc chaque nœud gardait tous les blocs à jamais, soit jusqu'à 2,1 To sur trente ans. Un nœud écrit maintenant son propre état et jette les blocs en dessous. Il en garde un gigaoctet pour rendre service aux autres, et <span class="mono">--keep all</span> les garde tous pour qui veut offrir l'histoire. C'est précisément ce que le démarrage échantillonné a rendu possible.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
@@ -739,13 +747,17 @@
   <div class="closing">
     <h2>Ce qui vient maintenant, dans l'ordre</h2>
     <p>
-      <strong>Ce que gagne un archiviste.</strong> Le démarrage échantillonné
-      est écrit, branché et vérifié pour de bon : un nouveau venu rejoint le
-      réseau en 12 Mo au lieu de trente ans d'histoire, reconnaît le nœud
-      capable de le servir, et redémarre ensuite sans avoir besoin de lui. Ce
-      qui manque n'est plus du mécanisme mais une décision : celui qui rend ce
-      service porte le seul coût du réseau qui grandisse, et rien ne le lui
-      rend. C'est la dernière question de conception ouverte.
+      <strong>Que personne n'ait besoin d'être payé.</strong> La question était
+      : comment rémunérer celui qui garde l'histoire, puisqu'il porte le seul
+      coût du réseau qui grandisse. En cherchant, la réponse s'est déplacée.
+      Ce dont le réseau a réellement besoin pour qu'un nouveau venu arrive,
+      ce ne sont pas les blocs — le démarrage échantillonné les a rendus
+      inutiles — ce sont les en-têtes : 129 Mo par an, contre 50 Go par an
+      pour Bitcoin. À ce prix, tout nœud peut le faire, et il n'y a personne
+      à payer ni à recruter. Reste à séparer les en-têtes des blocs pour que
+      ce soit vrai partout. Garder tous les blocs et archiver les notes
+      tombées restent des rôles qu'on choisit, non payés, dont le réseau
+      peut se passer.
     </p>
     <p>
       <strong>Deux choses attendent un nom de domaine.</strong> Les programmes
@@ -774,8 +786,8 @@
   </div>
 
   <footer>
-    <span>Cairn · route jusqu'au mainnet · v11</span>
-    <span>105 commits · 363 tests</span>
+    <span>Cairn · route jusqu'au mainnet · v12</span>
+    <span>109 commits · 367 tests</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 
