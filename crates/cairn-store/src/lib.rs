@@ -36,6 +36,14 @@ const OFFSET_BYTES: u64 = 8;
 /// The name of the file that marks a directory as in use.
 pub const LOCK_FILE: &str = "lock";
 
+/// The ledger a node was handed, as it stood when it was handed over.
+///
+/// Only a node that joined a chain rather than reading it has one. Without it
+/// such a node cannot start at all unless an archivist is reachable at that
+/// moment, which would make every node that ever joined depend on the archive
+/// service staying up for the rest of its life.
+pub const HANDED_LEDGER: &str = "ledger.dat";
+
 /// Largest record the log will read or write.
 ///
 /// A length read from disk is not necessarily a length this process wrote, so

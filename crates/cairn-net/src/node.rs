@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -31,9 +31,10 @@ use cairn_ledger::sampling::{check_start, open_start, SampledStart, SAMPLES};
 use cairn_ledger::transaction::Transfer;
 use cairn_ledger::validation::ConsensusParams;
 use cairn_ledger::validation::TransferError;
+use cairn_ledger::LedgerState;
 use cairn_primitives::codec::{Decode, Encode};
 use cairn_primitives::Hash32;
-use cairn_store::{BlockLog, DirectoryLock, StoreError};
+use cairn_store::{BlockLog, DirectoryLock, StoreError, HANDED_LEDGER};
 
 use crate::book::AddressBook;
 use crate::joining::{Collecting, Joined, Progress};
@@ -272,6 +273,25 @@ impl Shared {
         let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(log) = log.as_mut() {
             write_branch(log, accepted, chain);
+        }
+    }
+
+    /// Keeps the ledger this node was handed, so it can start again without
+    /// one.
+    ///
+    /// Written whole, to a name beside the old one, and moved into place. A
+    /// process that stops partway leaves the previous file untouched rather
+    /// than half of a new one, which for a file a node cannot start without is
+    /// the difference between an interrupted write and a node that never comes
+    /// back.
+    fn keep_handed_ledger(&self, bytes: &[u8]) {
+        let Some(directory) = self.directory.as_ref() else {
+            return;
+        };
+        let target = directory.join(HANDED_LEDGER);
+        let partial = directory.join(format!("{HANDED_LEDGER}.part"));
+        if std::fs::write(&partial, bytes).is_ok() {
+            let _ = std::fs::rename(&partial, &target);
         }
     }
 
@@ -515,11 +535,24 @@ impl Node {
         // partial resync once, on a node whose log was written before this
         // rule existed or interrupted in the middle of a reorganisation.
         //
-        // A log that does not start at the first block is not replayed at all.
-        // It belongs to a node that was handed a ledger, and the blocks in it
-        // build on a ledger this process no longer has. Such a node joins
-        // again rather than pretending it can read its way back.
-        let rejoining = !log.is_empty() && log.first_height() != 0;
+        // A node handed a ledger cannot read its way back to it, because the
+        // blocks it holds build on a ledger it never applied. So it keeps the
+        // ledger it was handed, and starts from that. Without it such a node
+        // could only start while an archivist happened to be reachable, which
+        // would tie every node that ever joined to the archive service staying
+        // up for the rest of its life.
+        let handed = read_handed_ledger(&directory, &params)
+            .and_then(|(state, recent)| chain.adopt(state, &recent).ok().map(|()| recent));
+        let from = handed
+            .as_ref()
+            .and_then(|recent| recent.last())
+            .map(|tip| tip.height.saturating_add(1));
+
+        // A log that starts somewhere other than where the ledger leaves off
+        // is one this process cannot use: either it was handed a ledger whose
+        // file is gone, or it read the chain and the log does not begin at the
+        // first block.
+        let rejoining = !log.is_empty() && log.first_height() != from.unwrap_or(0);
         let mut applied = 0usize;
         if !rejoining {
             for block in log.replay() {
@@ -536,7 +569,7 @@ impl Node {
             recovered.blocks.saturating_sub(applied)
         };
         if refused > 0 || rejoining {
-            log.keep_first(applied)?;
+            log.keep_below(from.unwrap_or(0).saturating_add(applied as u64))?;
         }
 
         let book = AddressBook::load(&directory);
@@ -901,6 +934,10 @@ fn take_join_part(
                 .and_then(|handover| {
                     let state = accept(&handover, shared.params.hot_capacity).ok()?;
                     shared.chain().adopt(state, &handover.recent).ok()?;
+                    // Kept only once it has been taken, so what is on disk is
+                    // a ledger this node checked and adopted rather than one
+                    // it merely received.
+                    shared.keep_handed_ledger(&whole);
                     Some(())
                 });
             if landed.is_none() {
@@ -1214,6 +1251,22 @@ fn maintenance_loop(shared: &Arc<Shared>) {
         abandon_stalled_join(shared, now);
         shared.refusals().forget_expired(now);
     }
+}
+
+/// Reads back the ledger a node was handed, if it kept one.
+///
+/// Checked again on the way in, exactly as it was when it arrived over the
+/// network. A node does not believe its own disk any more than it believes a
+/// stranger, and what this costs is one pass over a file it only has if it
+/// joined.
+fn read_handed_ledger(
+    directory: &Path,
+    params: &ConsensusParams,
+) -> Option<(LedgerState, Vec<BlockHeader>)> {
+    let bytes = std::fs::read(directory.join(HANDED_LEDGER)).ok()?;
+    let handover = Handover::decode(&bytes).ok()?;
+    let state = accept(&handover, params.hot_capacity).ok()?;
+    Some((state, handover.recent))
 }
 
 /// Whether the gap between two rounds of maintenance means the machine was not

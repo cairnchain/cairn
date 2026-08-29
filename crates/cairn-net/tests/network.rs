@@ -839,22 +839,46 @@ fn a_node_that_joined_writes_and_serves_what_it_validates() {
         "and nothing it was only handed"
     );
 
-    // And it comes back: the log cannot be replayed against a ledger it never
-    // built, so it is set aside and the node joins again rather than pretending.
+    // And it comes back on its own. It kept the ledger it was handed, so it
+    // starts from that and replays its own blocks over it, with nobody to ask.
     joiner.shutdown();
     drop(joiner);
     let (again, restored) = Node::open(params, loopback(), root.join("joiner")).unwrap();
-    assert!(restored.rejoining, "the log started partway up the chain");
+    assert!(
+        !restored.rejoining,
+        "it had the ledger it was handed, so nothing was set aside"
+    );
+    assert_eq!(restored.blocks, 3, "the blocks it validated came back");
+    assert_eq!(restored.refused, 0);
+    assert_eq!(
+        again.height(),
+        Some(top + 3),
+        "back where it was, without asking anyone"
+    );
+    assert_eq!(
+        again.with_chain(|chain| chain.state().state_root()),
+        keeper.with_chain(|chain| chain.state().state_root()),
+        "and on the same ledger, not an approximation of it"
+    );
+    assert_eq!(again.total_work(), keeper.total_work());
+
+    // Losing that file is what used to be the only case: it cannot read its
+    // way back, so it says so and joins again.
+    again.shutdown();
+    drop(again);
+    std::fs::remove_file(root.join("joiner").join(cairn_store::HANDED_LEDGER)).unwrap();
+    let (bare, restored) = Node::open(params, loopback(), root.join("joiner")).unwrap();
+    assert!(restored.rejoining, "the log starts partway up the chain");
     assert_eq!(restored.blocks, 0);
     assert_eq!(restored.refused, 0, "set aside is not the same as refused");
-    assert_eq!(again.height(), None, "so it starts from nothing again");
+    assert_eq!(bare.height(), None);
 
-    again.connect(keeper.address()).unwrap();
+    bare.connect(keeper.address()).unwrap();
     wait_for("the joiner to be handed a ledger a second time", || {
-        again.height() == Some(top + 3)
+        bare.height() == Some(top + 3)
     });
 
-    again.shutdown();
+    bare.shutdown();
     keeper.shutdown();
     let _ = std::fs::remove_dir_all(&root);
 }
