@@ -10,37 +10,32 @@ every rented server runs.
 
 ## The short version
 
-On each server, as root. If you reach root through `sudo`, pass the settings
-with `sudo env`, because `sudo` clears the environment and a setting that goes
-missing produces a node that runs correctly and does the wrong thing:
+On each server, as root. A minimal cloud image has no `git`, and the installer
+cannot fetch itself, so that one package comes first:
 
 ```
-sudo env SEED=203.0.113.10:9944 sh /usr/local/src/cairn/deploy/install.sh
-```
-
-Otherwise:
-
-```
+apt install -y git
 git clone https://github.com/cairnchain/cairn /usr/local/src/cairn
 sh /usr/local/src/cairn/deploy/install.sh
 ```
 
-Read `install.sh` before running it. It is short and it says what it does.
+Read `install.sh` before running it. It is short and it says what it does. It
+installs everything else it needs, including Rust.
 
-The first server starts alone. Every later one should be told about an
-earlier one, so the network is connected from the first minute:
+Nothing has to be said about where to start: the addresses a node begins with
+are written into the program, in `crates/cairn-net/src/seeds.rs`, exactly as
+the first block is. A machine unpacked anywhere finds the network by itself,
+and after one conversation it keeps its own book of addresses.
+
+`SEED` still exists, and names a peer to try instead of that list. It is what
+the very first machine of a new network needs, and what a private network
+needs. If you reach root through `sudo`, pass it with `sudo env`, because
+`sudo` clears the environment and a setting that goes missing produces a node
+that runs correctly and does the wrong thing:
 
 ```
-SEED="203.0.113.10:9944" sh /usr/local/src/cairn/deploy/install.sh
+sudo env SEED=203.0.113.10:9944 sh /usr/local/src/cairn/deploy/install.sh
 ```
-
-After that they find each other on their own: a node asks its peers who else
-they know, so one address is enough to join and none at all to rejoin.
-
-A machine that is not one of the first will not need `SEED` at all. The
-addresses in `crates/cairn-net/src/seeds.rs` are written into every program,
-so anything unpacked anywhere finds the network by itself. Those entries are
-what the names below have to resolve to.
 
 ## The names
 

@@ -143,7 +143,13 @@ The addresses it starts from are written into the program, exactly as the
 first block is, so a node that was just unpacked finds the network on its own.
 `--seed <address>` starts somewhere else instead, replacing that list. To put
 one of those addresses on a machine of your own, `deploy/` has an installer
-and the notes that go with it.
+and the notes that go with it. On a bare server that is three lines:
+
+```
+apt install -y git
+git clone https://github.com/cairnchain/cairn /usr/local/src/cairn
+sh /usr/local/src/cairn/deploy/install.sh
+```
 
 ## Layout
 

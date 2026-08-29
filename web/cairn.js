@@ -1096,7 +1096,7 @@ function download() {
       panel(
         t('run.server.title'),
         prose('run.server.body'),
-        el('pre', { class: 'code', text: 'git clone https://github.com/cairnchain/cairn /usr/local/src/cairn\nsh /usr/local/src/cairn/deploy/install.sh' })
+        el('pre', { class: 'code', text: 'apt install -y git\ngit clone https://github.com/cairnchain/cairn /usr/local/src/cairn\nsh /usr/local/src/cairn/deploy/install.sh' })
       ),
 
       panel(t('run.explorer.title'), prose('run.explorer.body'), el('pre', { class: 'code', text: run('cairn-explorer') + ' --network ' + network })),
