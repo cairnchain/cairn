@@ -37,7 +37,7 @@ cairnd, a Cairn node
   --listen <address>     address to accept connections on
                          (default: 0.0.0.0:9944)
   --seed <address>       a peer to start from; repeat for more
-  --network <name>       testnet-2 or devnet (default: testnet-2)
+  --network <name>       testnet-3 or devnet (default: testnet-3)
                          devnet has the same rules with a five second block
                          time and a tiny hot set, for one machine.
                          mainnet does not exist yet: a network exists once
@@ -184,7 +184,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         if name == "mainnet" {
             "mainnet does not exist yet: its first block has not been mined".to_owned()
         } else {
-            format!("unknown network `{name}`, try testnet-2 or devnet")
+            format!("unknown network `{name}`, try testnet-3 or devnet")
         }
     })?;
 
@@ -285,7 +285,7 @@ mod tests {
         let options = resolve_options(&[]).unwrap().unwrap();
         assert_eq!(options.data, PathBuf::from(DEFAULT_DATA));
         assert_eq!(options.listen.port(), 9_944);
-        assert_eq!(options.params.network_name(), "testnet-2");
+        assert_eq!(options.params.network_name(), "testnet-3");
         assert_eq!(options.params.target_block_time, 60);
         assert!(options.mine_to.is_none());
         assert!(options.seeds.is_empty());
@@ -376,12 +376,12 @@ mod tests {
         assert_eq!(options.seeds.len(), 1);
         assert_eq!(options.status_period, 3);
 
-        let options = resolve_options(&args(&["--data", &data, "--network", "testnet-2"]))
+        let options = resolve_options(&args(&["--data", &data, "--network", "testnet-3"]))
             .unwrap()
             .unwrap();
         assert_eq!(
             options.params.network_name(),
-            "testnet-2",
+            "testnet-3",
             "the command line wins"
         );
     }

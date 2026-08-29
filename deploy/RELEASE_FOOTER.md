@@ -34,5 +34,5 @@ shasum -a 256 <the archive>
 
 ## This is a test network
 
-`testnet-2` money is worth nothing, is meant to be worth nothing, and the
+`testnet-3` money is worth nothing, is meant to be worth nothing, and the
 network will be reset. Nothing on it carries over.

@@ -148,6 +148,6 @@ program everybody runs.
 
 ## What this network is
 
-`testnet-2` is a test network. Its money is worth nothing, it is meant to be
+`testnet-3` is a test network. Its money is worth nothing, it is meant to be
 worth nothing, and the network will be reset. When it is, every balance on it
 disappears and nothing carries over. Say so to anyone you invite.

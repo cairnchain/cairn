@@ -30,8 +30,21 @@ impl NetworkId {
     /// cost nothing this time, and it is exactly the change that could not
     /// have been made after a network had value on it.
     pub const TESTNET_2: Self = Self(0x4341_5255);
+    /// The third, which exists because the state root now commits to the grace
+    /// window as well as to the two tiers.
+    ///
+    /// The window decides what can be spent without a proof. With nothing
+    /// committing to it, a node handed a state rather than building its own
+    /// would start with an empty window and refuse, for the next sixty four
+    /// blocks, spends the rest of the network accepts: a fork with nobody at
+    /// fault. Found while writing the exchange that hands a newcomer a state,
+    /// which is the only thing that would have found it.
+    ///
+    /// Changing what a header commits to invalidates every block mined under
+    /// the old rule, so the network starts over and takes the next number.
+    pub const TESTNET_3: Self = Self(0x4341_5256);
     /// Kept as the name of whichever test network is current.
-    pub const TESTNET: Self = Self::TESTNET_2;
+    pub const TESTNET: Self = Self::TESTNET_3;
     /// A throwaway network with the same rules but a much shorter block time,
     /// for running the software on one machine.
     pub const DEVNET: Self = Self(0x4341_5244);

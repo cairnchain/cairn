@@ -70,6 +70,7 @@ pub enum Domain {
     ForestRoots,
     HeaderHistoryLeaf,
     SamplingSeed,
+    GraceWindow,
 }
 
 impl Domain {
@@ -95,6 +96,7 @@ impl Domain {
             Self::ForestRoots => "cairn v1 forest roots",
             Self::HeaderHistoryLeaf => "cairn v1 header history leaf",
             Self::SamplingSeed => "cairn v1 sampling seed",
+            Self::GraceWindow => "cairn v1 grace window",
         }
     }
 }
@@ -124,6 +126,7 @@ struct DomainKeys {
     forest_roots: [u8; HASH_LEN],
     header_history_leaf: [u8; HASH_LEN],
     sampling_seed: [u8; HASH_LEN],
+    grace_window: [u8; HASH_LEN],
 }
 
 fn domain_keys() -> &'static DomainKeys {
@@ -149,6 +152,7 @@ fn domain_keys() -> &'static DomainKeys {
         forest_roots: blake3::derive_key(Domain::ForestRoots.context(), &[]),
         header_history_leaf: blake3::derive_key(Domain::HeaderHistoryLeaf.context(), &[]),
         sampling_seed: blake3::derive_key(Domain::SamplingSeed.context(), &[]),
+        grace_window: blake3::derive_key(Domain::GraceWindow.context(), &[]),
     })
 }
 
@@ -175,6 +179,7 @@ fn key_for(domain: Domain) -> &'static [u8; HASH_LEN] {
         Domain::ForestRoots => &keys.forest_roots,
         Domain::HeaderHistoryLeaf => &keys.header_history_leaf,
         Domain::SamplingSeed => &keys.sampling_seed,
+        Domain::GraceWindow => &keys.grace_window,
     }
 }
 

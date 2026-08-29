@@ -62,13 +62,80 @@ pub fn cold_leaf(id: &NoteId, note: &Note) -> Hash32 {
 /// Both counts are committed to, so the boundary between the tiers is itself
 /// part of the commitment and a node cannot quietly hold more or fewer notes
 /// hot than the rules allow.
-fn compose_state_root(hot_root: Hash32, hot_len: u64, cold_root: Hash32, cold_len: u64) -> Hash32 {
+fn compose_state_root(
+    hot_root: Hash32,
+    hot_len: u64,
+    cold_root: Hash32,
+    cold_len: u64,
+    grace_root: Hash32,
+) -> Hash32 {
     let mut hasher = Hasher::new(Domain::StateCommitment);
     hasher.update(hot_root.as_bytes());
     hasher.update(&hot_len.encode());
     hasher.update(cold_root.as_bytes());
     hasher.update(&cold_len.encode());
+    hasher.update(grace_root.as_bytes());
     hasher.finalize()
+}
+
+/// The grace window, as one hash.
+///
+/// A block header commits to this along with the two tiers, and it has to.
+/// The window decides what can be spent without a proof, so two nodes
+/// disagreeing about it disagree about which blocks are valid. That matters
+/// most for a node that did not build its own state but was handed one: with
+/// nothing committing to the window, it would start with an empty one and
+/// refuse, for the next sixty four blocks, spends the rest of the network
+/// accepts. A fork with nobody at fault.
+fn compose_grace_root(grace: &VecDeque<Vec<(NoteId, u64, Note)>>) -> Hash32 {
+    let mut hasher = Hasher::new(Domain::GraceWindow);
+    hasher.update(&u64::try_from(grace.len()).unwrap_or(u64::MAX).encode());
+    for block in grace {
+        hasher.update(&u64::try_from(block.len()).unwrap_or(u64::MAX).encode());
+        for (id, position, note) in block {
+            hasher.update(&id.encode());
+            hasher.update(&position.encode());
+            hasher.update(&note.encode());
+        }
+    }
+    hasher.finalize()
+}
+
+/// The grace window after a block, given what fell in it.
+///
+/// Pure, so that what a block is checked against and what applying it produces
+/// cannot drift apart. Both bounds are here: the window holds a fixed number
+/// of blocks and a fixed number of notes, whichever runs out first.
+fn advance_grace(
+    grace: &VecDeque<Vec<(NoteId, u64, Note)>>,
+    landed: Vec<(NoteId, u64, Note)>,
+) -> VecDeque<Vec<(NoteId, u64, Note)>> {
+    let mut next = grace.clone();
+    let mut held: usize = next.iter().map(Vec::len).sum();
+    held = held.saturating_add(landed.len());
+    next.push_back(landed);
+
+    while next.len() > GRACE_BLOCKS || held > GRACE_NOTES {
+        let Some(oldest) = next.pop_front() else {
+            break;
+        };
+        held = held.saturating_sub(oldest.len());
+    }
+    next
+}
+
+/// The notes a block sent to the cold set, with where each one landed.
+fn landing(fallen: &[(NoteId, u64)], transition: &StateTransition) -> Vec<(NoteId, u64, Note)> {
+    fallen
+        .iter()
+        .filter_map(|(id, position)| {
+            transition
+                .evicted
+                .iter()
+                .find(|(other, _)| other == id)
+                .map(|(_, note)| (*id, *position, *note))
+        })
+        .collect()
 }
 
 /// A note in the hot set, with the height that decides when it falls.
@@ -675,7 +742,13 @@ impl LedgerState {
             self.hot_tree.len() as u64,
             self.cold.commitment(),
             self.cold.len(),
+            compose_grace_root(&self.grace),
         )
+    }
+
+    /// The grace window as one hash, which a header commits to.
+    pub fn grace_root(&self) -> Hash32 {
+        compose_grace_root(&self.grace)
     }
 
     /// Picks the notes that fall to the cold set once this block is applied.
@@ -740,12 +813,17 @@ impl LedgerState {
     pub fn project(&self, transition: &StateTransition, height: u64) -> Hash32 {
         let mut hot_tree = self.hot_tree.clone();
         let mut cold = ColdSet::Roots(self.cold.now.snapshot());
-        replay(&mut hot_tree, &mut cold, transition, height);
+        let fallen = replay(&mut hot_tree, &mut cold, transition, height);
+        // The same window applying this block would leave behind, worked out
+        // the same way, so a block's projection and its application cannot
+        // disagree about what is spendable without a proof.
+        let grace = advance_grace(&self.grace, landing(&fallen, transition));
         compose_state_root(
             hot_tree.root(),
             hot_tree.len() as u64,
             cold.commitment(),
             cold.len(),
+            compose_grace_root(&grace),
         )
     }
 
@@ -797,16 +875,7 @@ impl LedgerState {
             self.watched_notes.remove(&spend.id);
         }
 
-        let landed: Vec<(NoteId, u64, Note)> = recently_fallen
-            .iter()
-            .filter_map(|(id, position)| {
-                transition
-                    .evicted
-                    .iter()
-                    .find(|(other, _)| other == id)
-                    .map(|(_, note)| (*id, *position, *note))
-            })
-            .collect();
+        let landed = landing(&recently_fallen, transition);
         undo.grace_dropped = self.remember_grace(landed);
 
         for id in &transition.spent_hot {
@@ -907,10 +976,19 @@ impl LedgerState {
         for (id, position, note) in &landed {
             self.grace_index.insert(*id, (*position, *note));
         }
-        self.grace.push_back(landed);
+        // Worked out by the same function the projection uses, so the window a
+        // block was checked against is the window it leaves behind.
+        let kept = advance_grace(&self.grace, landed);
+        let leaving = self
+            .grace
+            .len()
+            .saturating_add(1)
+            .saturating_sub(kept.len());
 
+        // The blocks that left, so the index and the watches follow them out
+        // and an undo can put them back.
         let mut dropped = Vec::new();
-        while self.grace.len() > GRACE_BLOCKS || self.grace_index.len() > GRACE_NOTES {
+        for _ in 0..leaving {
             let Some(oldest) = self.grace.pop_front() else {
                 break;
             };
@@ -922,6 +1000,7 @@ impl LedgerState {
             }
             dropped.push(oldest);
         }
+        self.grace = kept;
         dropped
     }
 

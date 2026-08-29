@@ -19,7 +19,7 @@
 
 set -eu
 
-NETWORK="${NETWORK:-testnet-2}"
+NETWORK="${NETWORK:-testnet-3}"
 PORT="${PORT:-9944}"
 SEED="${SEED:-}"
 # A public key to pay block rewards to. Mining needs the address money goes to
@@ -152,7 +152,7 @@ cp "$SRC/deploy/cairnd.service" "$UNIT"
 
 # The unit ships with the defaults; rewrite the line if this run asked for
 # something else, so every server ends up with a unit that says what it does.
-if [ "$NETWORK" != "testnet-2" ] || [ "$PORT" != "9944" ] ||
+if [ "$NETWORK" != "testnet-3" ] || [ "$PORT" != "9944" ] ||
    [ -n "$SEED" ] || [ -n "$MINE" ]; then
     ARGS="--network $NETWORK --data $DATA --listen 0.0.0.0:$PORT --status 60"
     for peer in $SEED; do

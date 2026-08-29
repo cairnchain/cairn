@@ -868,3 +868,43 @@ fn spend_oldest(
     }
     Some(spend_cold(state, params, *id, *note, owner, to))
 }
+
+/// The state root has to commit to the grace window.
+///
+/// The window decides what can be spent without a proof. Two nodes that
+/// disagree about it disagree about which blocks are valid, and nothing in a
+/// header would say so: the tiers would match, the roots would match, and one
+/// of them would refuse a block the other accepted.
+///
+/// It matters for exactly one party, and that party is the reason this exists:
+/// a node handed a state rather than building its own. Everything else in the
+/// state can be checked against the header that commits to it. Without this,
+/// the window could not be, so a newcomer would start with an empty one and
+/// spend the next sixty four blocks refusing what everyone else takes.
+#[test]
+fn two_states_that_differ_only_in_their_grace_window_have_different_roots() {
+    let params = params().with_hot_capacity(4);
+    let miner = wallet(1);
+
+    // One chain, sampled at two points far enough apart that what has recently
+    // fallen is not the same, and run on until the tiers themselves match.
+    let mut state = LedgerState::archiving();
+    mine_empty(&mut state, &params, &miner, 8);
+    let early = state.clone();
+    mine_empty(&mut state, &params, &miner, GRACE_BLOCKS as u64 + 4);
+    let late = state.clone();
+
+    assert_ne!(
+        early.grace_root(),
+        late.grace_root(),
+        "different blocks fell recently, so the windows differ"
+    );
+    assert_ne!(early.state_root(), late.state_root());
+
+    // And the commitment tracks the window rather than merely the height: a
+    // state rewound to where it was commits to what it committed to then.
+    let mut rewound = late.clone();
+    let root_before = rewound.state_root();
+    mine_empty(&mut rewound, &params, &miner, 1);
+    assert_ne!(rewound.state_root(), root_before, "a block moved it");
+}

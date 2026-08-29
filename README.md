@@ -21,7 +21,7 @@ what it borrows and what limit it accepts.
 
 ## Status
 
-Pre-alpha, and running in public. `testnet-2` has been up since 27 August 2026
+Pre-alpha, and running in public. `testnet-3` has been up since 27 August 2026
 on two seed nodes at two hosts in two countries. Its money is worth nothing,
 is meant to be worth nothing, and the network will be reset.
 
@@ -85,7 +85,7 @@ how many people can be paid in a minute.
 
 | Network | Starts from | Opens at | Block time |
 | --- | --- | --- | --- |
-| `testnet-2` | `0000001b9876...` | 1787820378 | 60 s |
+| `testnet-3` | `0000001b9876...` | 1787820378 | 60 s |
 | `devnet` | `00000139ffc6...` | 1787820357 | 5 s |
 | `mainnet` | not made yet | | |
 

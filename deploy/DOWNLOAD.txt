@@ -8,7 +8,7 @@ Two programs are in this folder.
   cairn-wallet    a wallet. It is a node too, so it also takes nobody's
                   word for what you own.
 
-This is testnet-2, a test network. Its money is worth nothing, it is meant
+This is testnet-3, a test network. Its money is worth nothing, it is meant
 to be worth nothing, and the network will be reset. Nothing on it carries
 over to anything.
 
