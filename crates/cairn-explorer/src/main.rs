@@ -8,9 +8,7 @@
 
 mod api;
 mod assets;
-mod http;
 mod index;
-mod json;
 mod options;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -72,7 +70,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
     }
 
     let listener =
-        http::bind(options.http).map_err(|error| format!("could not serve HTTP: {error}"))?;
+        cairn_http::bind(options.http).map_err(|error| format!("could not serve HTTP: {error}"))?;
     let served = listener
         .local_addr()
         .map_err(|error| format!("could not read the HTTP address: {error}"))?;
@@ -105,7 +103,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
     println!();
 
     let answering = Arc::clone(&explorer);
-    http::serve(&listener, &running, move |request| {
+    cairn_http::serve(&listener, &running, move |request| {
         answering
             .answer(request)
             .unwrap_or_else(|| assets::answer(request))

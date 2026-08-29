@@ -19,9 +19,9 @@ use cairn_net::Node;
 use cairn_primitives::codec::Encode;
 use cairn_primitives::{hex, Amount, Hash32};
 
-use crate::http::{Request, Response};
 use crate::index::{Index, NoteRecord};
-use crate::json::Writer;
+use cairn_http::Writer;
+use cairn_http::{Request, Response};
 
 /// Blocks listed per page.
 const PAGE: usize = 25;

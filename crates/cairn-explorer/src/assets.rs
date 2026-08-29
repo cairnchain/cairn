@@ -4,7 +4,7 @@
 //! request can name and no directory an operator has to remember to ship. The
 //! binary is the site.
 
-use crate::http::{Request, Response};
+use cairn_http::{Request, Response};
 
 const INDEX: &str = include_str!("../../../web/index.html");
 const STYLE: &str = include_str!("../../../web/cairn.css");
@@ -53,7 +53,7 @@ pub(crate) fn answer(request: &Request) -> Response {
 
 /// What the language menu is built from.
 fn languages() -> String {
-    let mut json = crate::json::Writer::new();
+    let mut json = cairn_http::Writer::new();
     json.begin_array();
     for (code, name, _) in LOCALES {
         json.begin_object();

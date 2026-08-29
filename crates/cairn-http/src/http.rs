@@ -25,18 +25,18 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What a caller asked for, once the head has been read.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Request {
+pub struct Request {
     /// Percent-decoded path, always starting with a slash.
-    pub(crate) path: String,
+    pub path: String,
     /// Everything after the first question mark, undecoded.
-    pub(crate) query: String,
+    pub query: String,
     /// True for HEAD, where the body is computed but not sent.
-    pub(crate) head_only: bool,
+    pub head_only: bool,
 }
 
 impl Request {
     /// The value of `name` in the query string, percent-decoded.
-    pub(crate) fn parameter(&self, name: &str) -> Option<String> {
+    pub fn parameter(&self, name: &str) -> Option<String> {
         self.query.split('&').find_map(|pair| {
             let (key, value) = pair.split_once('=')?;
             (key == name).then(|| percent_decode(value))
@@ -44,23 +44,23 @@ impl Request {
     }
 
     /// The path with `prefix` removed, if it starts with it.
-    pub(crate) fn after(&self, prefix: &str) -> Option<&str> {
+    pub fn after(&self, prefix: &str) -> Option<&str> {
         self.path.strip_prefix(prefix)
     }
 }
 
 /// What to send back.
 #[derive(Clone, Debug)]
-pub(crate) struct Response {
-    pub(crate) status: u16,
-    pub(crate) content_type: &'static str,
+pub struct Response {
+    pub status: u16,
+    pub content_type: &'static str,
     /// Value of the Cache-Control header.
-    pub(crate) cache: &'static str,
-    pub(crate) body: Vec<u8>,
+    pub cache: &'static str,
+    pub body: Vec<u8>,
 }
 
 impl Response {
-    pub(crate) fn json(body: String) -> Self {
+    pub fn json(body: String) -> Self {
         Self {
             status: 200,
             content_type: "application/json; charset=utf-8",
@@ -69,7 +69,7 @@ impl Response {
         }
     }
 
-    pub(crate) fn asset(content_type: &'static str, body: &'static str) -> Self {
+    pub fn asset(content_type: &'static str, body: &'static str) -> Self {
         Self {
             status: 200,
             content_type,
@@ -81,7 +81,7 @@ impl Response {
         }
     }
 
-    pub(crate) fn error(status: u16, message: &str) -> Self {
+    pub fn error(status: u16, message: &str) -> Self {
         let mut json = crate::json::Writer::new();
         json.begin_object();
         json.field_str("error", message);
@@ -104,7 +104,7 @@ impl Response {
 /// because an operator restarting one should not wait on a stranger; a website
 /// is stopped by stopping the process, and the explorer keeps nothing in
 /// memory that is not already on disk.
-pub(crate) fn serve<F>(listener: &TcpListener, running: &Arc<AtomicBool>, answer: F)
+pub fn serve<F>(listener: &TcpListener, running: &Arc<AtomicBool>, answer: F)
 where
     F: Fn(&Request) -> Response + Send + Sync + 'static,
 {
@@ -330,7 +330,7 @@ fn nibble(byte: u8) -> Option<u8> {
 }
 
 /// Where the listener ended up, so a caller can print it.
-pub(crate) fn bind(address: SocketAddr) -> io::Result<TcpListener> {
+pub fn bind(address: SocketAddr) -> io::Result<TcpListener> {
     TcpListener::bind(address)
 }
 

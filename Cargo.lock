@@ -73,10 +73,15 @@ version = "0.1.0"
 dependencies = [
  "cairn-chain",
  "cairn-crypto",
+ "cairn-http",
  "cairn-ledger",
  "cairn-net",
  "cairn-primitives",
 ]
+
+[[package]]
+name = "cairn-http"
+version = "0.1.0"
 
 [[package]]
 name = "cairn-ledger"

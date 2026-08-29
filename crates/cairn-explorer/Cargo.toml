@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 cairn-chain.workspace = true
 cairn-crypto.workspace = true
+cairn-http.workspace = true
 cairn-ledger.workspace = true
 cairn-net.workspace = true
 cairn-primitives.workspace = true

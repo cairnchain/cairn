@@ -12,14 +12,14 @@ use std::fmt::Write as _;
 /// Commas and nesting are tracked here rather than left to the caller, so a
 /// missing separator cannot produce a document that parses as something else.
 #[derive(Debug, Default)]
-pub(crate) struct Writer {
+pub struct Writer {
     out: String,
     /// One entry per open container, true while it is still empty.
     empty: Vec<bool>,
 }
 
 impl Writer {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
@@ -34,24 +34,24 @@ impl Writer {
         }
     }
 
-    pub(crate) fn begin_object(&mut self) {
+    pub fn begin_object(&mut self) {
         self.separate();
         self.out.push('{');
         self.empty.push(true);
     }
 
-    pub(crate) fn end_object(&mut self) {
+    pub fn end_object(&mut self) {
         self.empty.pop();
         self.out.push('}');
     }
 
-    pub(crate) fn begin_array(&mut self) {
+    pub fn begin_array(&mut self) {
         self.separate();
         self.out.push('[');
         self.empty.push(true);
     }
 
-    pub(crate) fn end_array(&mut self) {
+    pub fn end_array(&mut self) {
         self.empty.pop();
         self.out.push(']');
     }
@@ -61,7 +61,7 @@ impl Writer {
     /// The value that follows belongs to this member rather than being a
     /// sibling of it, so the enclosing container is marked empty again for
     /// exactly one value and no comma is emitted before it.
-    pub(crate) fn key(&mut self, name: &str) {
+    pub fn key(&mut self, name: &str) {
         self.separate();
         escape_into(name, &mut self.out);
         self.out.push(':');
@@ -70,57 +70,57 @@ impl Writer {
         }
     }
 
-    pub(crate) fn string(&mut self, value: &str) {
+    pub fn string(&mut self, value: &str) {
         self.separate();
         escape_into(value, &mut self.out);
     }
 
-    pub(crate) fn u64(&mut self, value: u64) {
+    pub fn u64(&mut self, value: u64) {
         self.separate();
         let _ = write!(self.out, "{value}");
     }
 
-    pub(crate) fn usize(&mut self, value: usize) {
+    pub fn usize(&mut self, value: usize) {
         self.separate();
         let _ = write!(self.out, "{value}");
     }
 
-    pub(crate) fn bool(&mut self, value: bool) {
+    pub fn bool(&mut self, value: bool) {
         self.separate();
         self.out.push_str(if value { "true" } else { "false" });
     }
 
-    pub(crate) fn null(&mut self) {
+    pub fn null(&mut self) {
         self.separate();
         self.out.push_str("null");
     }
 
-    pub(crate) fn field_str(&mut self, name: &str, value: &str) {
+    pub fn field_str(&mut self, name: &str, value: &str) {
         self.key(name);
         self.string(value);
     }
 
-    pub(crate) fn field_u64(&mut self, name: &str, value: u64) {
+    pub fn field_u64(&mut self, name: &str, value: u64) {
         self.key(name);
         self.u64(value);
     }
 
-    pub(crate) fn field_usize(&mut self, name: &str, value: usize) {
+    pub fn field_usize(&mut self, name: &str, value: usize) {
         self.key(name);
         self.usize(value);
     }
 
-    pub(crate) fn field_bool(&mut self, name: &str, value: bool) {
+    pub fn field_bool(&mut self, name: &str, value: bool) {
         self.key(name);
         self.bool(value);
     }
 
-    pub(crate) fn field_null(&mut self, name: &str) {
+    pub fn field_null(&mut self, name: &str) {
         self.key(name);
         self.null();
     }
 
-    pub(crate) fn finish(self) -> String {
+    pub fn finish(self) -> String {
         self.out
     }
 }
