@@ -578,6 +578,29 @@ impl Archive {
         Some(added)
     }
 
+    /// Takes the last leaf back off, as though it had never been added.
+    ///
+    /// For an archive of headers rather than of notes. A note is emptied where
+    /// it sits and its place is never reused, but a header that a
+    /// reorganisation undid was never part of the chain at all, so the forest
+    /// has to be the one from before it.
+    ///
+    /// The forest is built again from the leaves that are left, because an
+    /// append cannot be undone from roots. That is one pass over everything
+    /// the archive holds, which is the price of an event that happens rarely
+    /// and to at most a thousand blocks at a time.
+    pub fn remove_last(&mut self) -> bool {
+        if self.leaves.pop().is_none() {
+            return false;
+        }
+        let mut rebuilt = Forest::new();
+        for leaf in &self.leaves {
+            rebuilt.add(*leaf);
+        }
+        self.forest = rebuilt;
+        true
+    }
+
     /// Removes the leaf at `position`, building the proof itself.
     pub fn remove(&mut self, position: u64) -> bool {
         let Some(leaf) = self.leaf_at(position) else {

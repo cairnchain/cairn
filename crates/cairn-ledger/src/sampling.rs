@@ -320,6 +320,67 @@ pub fn check_start(start: &SampledStart, count: usize) -> Result<Weighed, StartE
     })
 }
 
+/// Builds the answer to a newcomer's draw, for a node that kept the headers.
+///
+/// `header_at` reads one header of the followed branch by height, which is a
+/// seek in a log rather than anything held in memory. `prove` is what only an
+/// archivist can do: a path through the header forest, which cannot be built
+/// from the sixty four hashes everybody else keeps.
+///
+/// `None` when this node cannot answer, which is the honest reply from a node
+/// that validates and nothing more.
+pub fn open_start(
+    tip: &BlockHeader,
+    history: Forest,
+    count: usize,
+    header_at: impl Fn(u64) -> Option<BlockHeader>,
+    prove: impl Fn(u64) -> Option<ForestProof>,
+) -> Option<SampledStart> {
+    let wanted = draw(seed_of(tip), count, work_before(tip), tip.height);
+    let mut samples = Vec::with_capacity(wanted.len());
+
+    // Where each draw lands, found by walking back from the tip. A chain is
+    // ordered by work as well as by height, so this is a search over something
+    // already sorted rather than a scan.
+    for work in wanted {
+        let height = height_covering(tip, work, &header_at)?;
+        let header = header_at(height)?;
+        let proof = prove(height)?;
+        samples.push(Sample { header, proof });
+    }
+    Some(SampledStart {
+        tip: *tip,
+        history,
+        samples,
+    })
+}
+
+/// The height whose header spans `work`, by halving.
+///
+/// Work rises with height and every block adds its own, so the heights are
+/// ordered by the work behind them and the block spanning a given value is
+/// found the way any sorted thing is searched.
+fn height_covering(
+    tip: &BlockHeader,
+    work: u128,
+    header_at: &impl Fn(u64) -> Option<BlockHeader>,
+) -> Option<u64> {
+    let mut low = 0u64;
+    let mut high = tip.height.checked_sub(1)?;
+    while low <= high {
+        let middle = low.saturating_add(high.saturating_sub(low) / 2);
+        let header = header_at(middle)?;
+        if header.total_work <= work {
+            low = middle.checked_add(1)?;
+        } else if work_before(&header) > work {
+            high = middle.checked_sub(1)?;
+        } else {
+            return Some(middle);
+        }
+    }
+    None
+}
+
 /// The height whose header covers `work` on a chain, for a prover answering a
 /// draw.
 ///

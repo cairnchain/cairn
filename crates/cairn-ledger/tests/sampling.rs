@@ -14,7 +14,7 @@ use cairn_ledger::block::BlockHeader;
 use cairn_ledger::note::Note;
 use cairn_ledger::pow::work_of;
 use cairn_ledger::sampling::{
-    check_start, covering, draw, seed_of, work_before, Sample, SampledStart, StartError,
+    check_start, covering, draw, open_start, seed_of, work_before, Sample, SampledStart, StartError,
 };
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
@@ -288,4 +288,67 @@ fn a_history_shorter_than_the_tip_is_refused() {
         ),
         "the history holds one leaf per block before the tip, and no fewer"
     );
+}
+
+/// A keeper builds the answer, and a newcomer takes it.
+///
+/// The two halves of the exchange, run against each other rather than each
+/// against a hand written expectation: whatever the draw asks, the keeper
+/// finds, and the newcomer accepts what the keeper found. Neither side was
+/// told what the questions would be.
+#[test]
+fn a_keeper_answers_a_draw_it_did_not_choose() {
+    let keeper = Keeper::build(HEIGHT);
+    let tip = keeper.tip();
+    let by_height: Vec<BlockHeader> = keeper.headers.clone();
+
+    let start = open_start(
+        &tip,
+        keeper.before_tip.forest().roots_only(),
+        64,
+        |height| by_height.get(usize::try_from(height).ok()?).copied(),
+        |height| keeper.before_tip.prove(height),
+    )
+    .expect("a keeper can answer");
+
+    assert_eq!(start.samples.len(), 64);
+    let weighed = check_start(&start, 64).expect("and the answer stands up");
+    assert_eq!(weighed.total_work, tip.total_work);
+
+    // The heights it opened are the ones the draw asked about, found by
+    // halving rather than by walking, which is the only way this scales.
+    let wanted = draw(seed_of(&tip), 64, work_before(&tip), tip.height);
+    for (sample, work) in start.samples.iter().zip(wanted) {
+        assert_eq!(
+            covering(
+                &keeper
+                    .headers
+                    .iter()
+                    .take(keeper.headers.len() - 1)
+                    .rev()
+                    .map(|h| (h.height, h.total_work, h.difficulty))
+                    .collect::<Vec<_>>(),
+                work
+            ),
+            Some(sample.header.height),
+        );
+    }
+}
+
+/// A node that validates and nothing more says so rather than guessing.
+#[test]
+fn a_node_that_did_not_keep_the_headers_cannot_answer() {
+    let keeper = Keeper::build(HEIGHT);
+    let tip = keeper.tip();
+    let by_height: Vec<BlockHeader> = keeper.headers.clone();
+
+    let start = open_start(
+        &tip,
+        keeper.before_tip.forest().roots_only(),
+        16,
+        |height| by_height.get(usize::try_from(height).ok()?).copied(),
+        // Sixty four hashes is enough to check a proof and not to build one.
+        |_| None,
+    );
+    assert!(start.is_none(), "an honest no beats a made up yes");
 }

@@ -12,6 +12,7 @@
     clippy::unwrap_used,
     clippy::arithmetic_side_effects,
     clippy::cast_precision_loss,
+    clippy::indexing_slicing,
     clippy::print_stdout
 )]
 
