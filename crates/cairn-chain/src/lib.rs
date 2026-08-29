@@ -778,8 +778,15 @@ impl ChainStore {
     ///
     /// Only when there are enough of them to be worth the walk, because this
     /// one does have to look at every block it holds.
+    ///
+    /// What is held is the window a reorganisation may reach back over, plus
+    /// whatever branches were offered inside it. It used to be measured
+    /// against the height of the chain, which was the same number back when a
+    /// node kept every block it had ever applied. It is not any more, and a
+    /// ceiling that grew with the chain was one this never reached: side
+    /// branches accumulated with nothing to clear them.
     fn forget_unreachable_branches(&mut self) {
-        let limit = self.active.len().saturating_add(MAX_SIDE_BLOCKS);
+        let limit = MAX_REORG_DEPTH.saturating_add(MAX_SIDE_BLOCKS);
         if self.blocks.len() <= limit {
             return;
         }

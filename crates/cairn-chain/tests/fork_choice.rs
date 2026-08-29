@@ -497,3 +497,55 @@ fn the_chain_and_its_headers_agree_on_the_work() {
     // disk lands on it too.
     assert_eq!(store.state().total_work(), store.total_work());
 }
+
+/// Branches that can no longer be switched to are let go of.
+///
+/// A node keeps rival branches because one that loses today can win tomorrow,
+/// and lets them go once they are too deep to switch to. What decides when to
+/// look is how much it is holding, and that used to be compared against the
+/// height of the chain, which was the same number back when a node kept every
+/// block it had ever applied. Since it does not, a ceiling that grew with the
+/// chain was one this never reached, and rival branches piled up with nothing
+/// to clear them.
+#[test]
+fn rival_branches_do_not_pile_up_forever() {
+    let miner = wallet(1);
+    let rival = wallet(2);
+
+    let mut shared = Branch::new(params());
+    let common = shared.mine_empty(&miner, 8, 600);
+
+    let mut store = ChainStore::new(params());
+    feed(&mut store, &common);
+
+    // The branch this node follows, run on past where the rivals will hang.
+    let at_fork = shared.clone();
+    let ours = shared.mine_empty(&miner, 6, 600);
+    feed(&mut store, &ours);
+    assert_eq!(store.height(), Some(13));
+
+    // Rival branches from that fork, none of them heavy enough to win. Each is
+    // a block a node has to hold in case its branch grows.
+    let mut offered = 0usize;
+    for seed in 0..24u8 {
+        let mut side = at_fork.clone();
+        for block in side.mine_empty(&wallet(seed.saturating_add(3)), 2, 600) {
+            if store.add_block(block, NOW).is_ok() {
+                offered = offered.saturating_add(1);
+            }
+        }
+    }
+    assert!(offered > 0, "the rivals were taken");
+    assert_eq!(store.height(), Some(13), "and none of them won");
+
+    // Now bury them: the followed branch runs past what a reorganisation can
+    // reach back over, so nothing hanging off that fork can be switched to.
+    let far = shared.mine_empty(&rival, MAX_REORG_DEPTH + 8, 600);
+    feed(&mut store, &far);
+
+    let held = store.len();
+    assert!(
+        held <= MAX_REORG_DEPTH + 4_096,
+        "holding {held} blocks, which is more than the window and its branches"
+    );
+}

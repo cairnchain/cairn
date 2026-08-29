@@ -21,6 +21,7 @@ use cairn_accumulator::forest::ForestProof;
 use cairn_crypto::{SecretKey, Signature};
 use cairn_ledger::block::Block;
 use cairn_ledger::note::{Note, NoteId};
+use cairn_ledger::state::{GRACE_BLOCKS, GRACE_NOTES};
 use cairn_ledger::transaction::{CoinbaseTransaction, ColdWitness, Input, Transfer, Witness};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_primitives::codec::Encode;
@@ -128,6 +129,8 @@ fn main() {
          from anything anyone chose on purpose.",
         with_commas(params.hot_capacity),
     );
+
+    grace(per_block);
 }
 
 fn line(name: &str, bytes: usize) {
@@ -174,6 +177,40 @@ fn cold_input(owner: cairn_crypto::PublicKey) -> Input {
         })),
         signature: Signature::unsigned(),
     }
+}
+
+/// How long the grace on a fallen note actually lasts.
+///
+/// The other place the block size decides something quietly. A note that has
+/// just fallen stays spendable without a proof for whichever comes first: a
+/// number of blocks, or a number of notes. On a busy enough chain the second
+/// arrives inside a single block, and the sixty four the first promises never
+/// happen.
+fn grace(per_block: usize) {
+    println!("\nHow long the grace on a fallen note actually lasts:\n");
+    println!(
+        "{:>10}  {:>14}  {:>16}  {:>10}",
+        "block is", "notes fallen", "grace lasts", "promised"
+    );
+    println!("{}", "-".repeat(58));
+    for share in [1.0f64, 0.5, 0.1, 0.01, 0.001] {
+        let per = ((per_block as f64) * share).max(1.0);
+        let by_notes = (GRACE_NOTES as f64 / per).max(1.0);
+        let lasts = by_notes.min(GRACE_BLOCKS as f64);
+        println!(
+            "{:>9.1}%  {:>14}  {:>16}  {:>10}",
+            share * 100.0,
+            with_commas(per as usize),
+            format!("{lasts:.0} block(s)"),
+            format!("{GRACE_BLOCKS} blocks"),
+        );
+    }
+    println!(
+        "\nBoth bounds are deliberate and the tighter one is meant to win. What\n\
+         is worth knowing is which one that is: the grace exists so a transfer\n\
+         written against the chain as it stands does not lose its race with the\n\
+         next block, and on a busy chain it is spent inside that same block."
+    );
 }
 
 /// A duration in whatever unit reads plainly.
