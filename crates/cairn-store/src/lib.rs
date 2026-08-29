@@ -205,6 +205,78 @@ impl BlockLog {
         self.keep_first(usize::try_from(keep).unwrap_or(usize::MAX))
     }
 
+    /// Drops everything below `height`, so the log starts there.
+    ///
+    /// For a node that has written down the ledger those blocks add up to and
+    /// no longer needs them to reach it. The records that stay are moved to
+    /// the front of the file and the index is written again, which is one pass
+    /// over what is kept rather than over what is dropped.
+    pub fn keep_from(&mut self, height: u64) -> Result<(), StoreError> {
+        if height <= self.first || self.count == 0 {
+            return Ok(());
+        }
+        if height >= self.reaches() {
+            return self.clear();
+        }
+        let dropped = usize::try_from(height.saturating_sub(self.first)).unwrap_or(self.count);
+        let Some((start, _)) = self.bounds(dropped)? else {
+            return Ok(());
+        };
+
+        // Read what is kept before anything is written, so a failure partway
+        // leaves the log as it was rather than half moved.
+        let mut kept = Vec::with_capacity(self.end.saturating_sub(start) as usize);
+        let mut file = &self.file;
+        file.seek(SeekFrom::Start(start))?;
+        file.read_to_end(&mut kept)?;
+
+        let mut ends = Vec::new();
+        let mut offset = 0u64;
+        for index in dropped..self.count {
+            let Some((from, to)) = self.bounds(index)? else {
+                break;
+            };
+            offset = offset.saturating_add(to.saturating_sub(from));
+            ends.push(offset);
+        }
+
+        self.file.seek(SeekFrom::Start(0))?;
+        self.file.write_all(&kept)?;
+        self.file.set_len(offset)?;
+        self.file.flush()?;
+
+        let mut written = Vec::with_capacity(ends.len().saturating_mul(8));
+        for end in &ends {
+            written.extend_from_slice(&end.to_le_bytes());
+        }
+        self.index.set_len(0)?;
+        self.index.seek(SeekFrom::Start(0))?;
+        self.index.write_all(&written)?;
+        self.index.flush()?;
+
+        self.count = ends.len();
+        self.first = height;
+        self.end = offset;
+        Ok(())
+    }
+
+    /// Drops everything, leaving a log that starts wherever the next block does.
+    pub fn clear(&mut self) -> Result<(), StoreError> {
+        self.index.set_len(0)?;
+        self.index.flush()?;
+        self.file.set_len(0)?;
+        self.file.flush()?;
+        self.count = 0;
+        self.first = 0;
+        self.end = 0;
+        Ok(())
+    }
+
+    /// Bytes the records take on disk.
+    pub fn bytes(&self) -> u64 {
+        self.end
+    }
+
     /// Adds one block to the end of the log.
     ///
     /// The record goes down before the offset that points at it. Dying between

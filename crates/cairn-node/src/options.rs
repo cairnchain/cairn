@@ -15,6 +15,7 @@ use std::path::PathBuf;
 
 use cairn_crypto::PublicKey;
 use cairn_ledger::validation::ConsensusParams;
+use cairn_net::KEEP_BLOCK_BYTES;
 
 pub(crate) const CONFIG_FILE: &str = "cairn.conf";
 
@@ -23,8 +24,8 @@ pub(crate) const CONFIG_FILE: &str = "cairn.conf";
 /// An unknown name stops the node rather than being passed over. A setting
 /// that is silently ignored is how an operator ends up running rules they did
 /// not choose, which on a chain means following a different one.
-const KNOWN: [&str; 9] = [
-    "data", "listen", "seed", "network", "mine", "status", "run-for", "archive", "help",
+const KNOWN: [&str; 10] = [
+    "data", "listen", "seed", "network", "mine", "status", "run-for", "archive", "keep", "help",
 ];
 const DEFAULT_DATA: &str = "cairn-data";
 const DEFAULT_LISTEN: &str = "0.0.0.0:9944";
@@ -47,6 +48,13 @@ cairnd, a Cairn node
   --archive              keep the cold set, so this node can rebuild a proof
                          for a wallet that lost its own. Costs a set that
                          grows; without it a node keeps sixty four hashes
+  --keep <size|all>      how much of the chain to keep on disk, in bytes, or
+                         `all` to keep every block ever accepted (default:
+                         1GB). A node does not need old blocks: it keeps the
+                         ledger they add up to. They are kept for other
+                         people, so a peer a little behind can read them
+                         rather than being handed a whole ledger. Accepts
+                         suffixes: 512MB, 8GB
   --status <seconds>     how often to print a status line (default: 10)
   --run-for <seconds>    stop after this long, for tests and demonstrations
   --help                 print this and stop
@@ -68,6 +76,8 @@ pub(crate) struct Options {
     pub(crate) run_for: Option<u64>,
     /// Whether to keep the cold set and be able to prove things about it.
     pub(crate) archive: bool,
+    /// Bytes of blocks to keep on disk. `u64::MAX` keeps everything.
+    pub(crate) keep: u64,
 }
 
 /// Named values, each of which may have been given more than once.
@@ -210,6 +220,11 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
 
     let archive = command_line.has("archive") || config.has("archive");
 
+    let keep = match setting("keep") {
+        None => KEEP_BLOCK_BYTES,
+        Some(text) => parse_size(&text)?,
+    };
+
     Ok(Some(Options {
         data,
         listen,
@@ -219,7 +234,45 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         status_period,
         run_for,
         archive,
+        keep,
     }))
+}
+
+/// Reads a size in bytes, with the suffixes an operator would reach for.
+///
+/// `all` is spelled out rather than being a number, because a node keeping
+/// every block is a decision and not a large setting.
+fn parse_size(text: &str) -> Result<u64, String> {
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case("all") {
+        return Ok(u64::MAX);
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let (digits, scale) = if let Some(rest) = lower.strip_suffix("gb") {
+        (rest, 1_000_000_000u64)
+    } else if let Some(rest) = lower.strip_suffix("mb") {
+        (rest, 1_000_000)
+    } else if let Some(rest) = lower.strip_suffix("kb") {
+        (rest, 1_000)
+    } else {
+        (lower.as_str(), 1)
+    };
+    let count: u64 = digits
+        .trim()
+        .parse()
+        .map_err(|_| format!("`{text}` is not a size; try 1GB, 512MB, or all"))?;
+    Ok(count.saturating_mul(scale))
+}
+
+/// A size as an operator would read it back.
+fn size(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{} GB", bytes / 1_000_000_000)
+    } else if bytes >= 1_000_000 {
+        format!("{} MB", bytes / 1_000_000)
+    } else {
+        format!("{bytes} bytes")
+    }
 }
 
 fn parse_key(text: &str) -> Result<PublicKey, String> {
@@ -258,6 +311,15 @@ pub(crate) fn describe(options: &Options) -> String {
             "the whole cold set (archivist)"
         } else {
             "sixty four hashes"
+        }
+    );
+    let _ = writeln!(
+        text,
+        "blocks       {}",
+        if options.keep == u64::MAX {
+            "every one ever accepted".to_owned()
+        } else {
+            format!("{} on disk, older ones dropped", size(options.keep))
         }
     );
     match options.mine_to {
@@ -402,5 +464,28 @@ mod tests {
             devnet.params.target_block_time
         );
         assert!(resolve_options(&args(&["--block-time", "5"])).is_err());
+    }
+
+    #[test]
+    fn a_size_is_read_the_way_an_operator_writes_one() {
+        assert_eq!(parse_size("all").unwrap(), u64::MAX);
+        assert_eq!(parse_size("ALL").unwrap(), u64::MAX);
+        assert_eq!(parse_size("1GB").unwrap(), 1_000_000_000);
+        assert_eq!(parse_size("512mb").unwrap(), 512_000_000);
+        assert_eq!(parse_size(" 4 kb ").unwrap(), 4_000);
+        assert_eq!(parse_size("2048").unwrap(), 2_048);
+        assert!(parse_size("plenty").is_err());
+        assert!(parse_size("").is_err());
+    }
+
+    /// A node that says nothing must not sign up for a disk that grows with
+    /// the chain, which is the one thing this design exists not to do.
+    #[test]
+    fn how_much_of_the_chain_to_keep_has_a_default_and_can_be_set() {
+        let options = resolve_options(&args(&[])).unwrap().unwrap();
+        assert_eq!(options.keep, KEEP_BLOCK_BYTES);
+
+        let options = resolve_options(&args(&["--keep", "all"])).unwrap().unwrap();
+        assert_eq!(options.keep, u64::MAX, "and can be told to keep the lot");
     }
 }

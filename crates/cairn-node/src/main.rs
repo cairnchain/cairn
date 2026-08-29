@@ -38,6 +38,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
     };
     let (node, restored) = started(options.params, options.listen, &options.data)
         .map_err(|error| format!("could not start: {error}"))?;
+    node.keep_blocks(options.keep);
     let node = Arc::new(node);
 
     println!("listening    {}", node.address());

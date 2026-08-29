@@ -89,6 +89,24 @@ const ACCEPT_POLL: Duration = Duration::from_millis(50);
 /// How often the node looks for peers and saves its address book.
 const MAINTENANCE_PERIOD: Duration = Duration::from_millis(1_000);
 
+/// Bytes of blocks a node keeps on disk before it writes its ledger down and
+/// drops what is below it.
+///
+/// A node does not need the blocks it has already applied. It needs the ledger
+/// they add up to, which is a fixed size, and the window it could still undo,
+/// which it holds in memory anyway. What the rest is for is other people: a
+/// peer a little behind reads them rather than being handed a whole ledger.
+///
+/// So this is not a cost the design has to carry, it is a service, and a
+/// gigabyte is a generous amount of it. On a busy chain that is five days of
+/// blocks; on a quiet one it is years. A node that wants to keep everything
+/// says so and keeps everything.
+///
+/// Without this a node's disk grew with the chain for ever, which is the one
+/// thing this design exists not to do: two terabytes at thirty years, on a
+/// chain running at the limit.
+pub const KEEP_BLOCK_BYTES: u64 = 1_000_000_000;
+
 /// Seconds a join may go without a piece arriving before it is given up on.
 ///
 /// Being handed a ledger is the one exchange a node cannot finish on its own,
@@ -177,6 +195,12 @@ struct Shared {
     log: Mutex<Option<BlockLog>>,
     book: Mutex<AddressBook>,
     directory: Option<PathBuf>,
+    /// Bytes of blocks this node keeps on disk. `u64::MAX` keeps everything,
+    /// which is what a node that offers the history to others does.
+    ///
+    /// Settable while running, because it is an operator's choice about disk
+    /// rather than anything the rules have an opinion on.
+    keep_bytes: AtomicU64,
     /// Held for as long as the node runs, so no second process writes to the
     /// same directory.
     _lock: Option<DirectoryLock>,
@@ -276,6 +300,41 @@ impl Shared {
         }
     }
 
+    /// Writes this node's ledger down and drops the blocks below it, when the
+    /// log has grown past what this node keeps.
+    ///
+    /// The ledger goes down first. A process that stops between the two leaves
+    /// a log longer than it needed to be, which costs a slower start; the
+    /// other order would leave a node with neither the blocks nor the ledger
+    /// that replaces them.
+    fn trim_history(&self) {
+        let over = {
+            let keep = self.keep_bytes.load(Ordering::Relaxed);
+            let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+            log.as_ref().is_some_and(|log| log.bytes() > keep)
+        };
+        if !over {
+            return;
+        }
+        let Some(bytes) = self.own_ledger() else {
+            return;
+        };
+        let Some(at) = Handover::decode(&bytes).ok().map(|held| held.at.height) else {
+            return;
+        };
+        if !self.keep_ledger(&bytes) {
+            return;
+        }
+        let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(log) = log.as_mut() {
+            // Everything below the ledger, which is everything the ledger now
+            // stands for. The block at that height stays: the ledger is what
+            // the chain looked like once it had been applied, so replaying
+            // starts at the one after it.
+            let _ = log.keep_from(at.saturating_add(1));
+        }
+    }
+
     /// Keeps the ledger this node was handed, so it can start again without
     /// one.
     ///
@@ -284,15 +343,13 @@ impl Shared {
     /// than half of a new one, which for a file a node cannot start without is
     /// the difference between an interrupted write and a node that never comes
     /// back.
-    fn keep_handed_ledger(&self, bytes: &[u8]) {
+    fn keep_ledger(&self, bytes: &[u8]) -> bool {
         let Some(directory) = self.directory.as_ref() else {
-            return;
+            return false;
         };
         let target = directory.join(HANDED_LEDGER);
         let partial = directory.join(format!("{HANDED_LEDGER}.part"));
-        if std::fs::write(&partial, bytes).is_ok() {
-            let _ = std::fs::rename(&partial, &target);
-        }
+        std::fs::write(&partial, bytes).is_ok() && std::fs::rename(&partial, &target).is_ok()
     }
 
     /// How far this node's branch runs past the last position in `locator` it
@@ -613,6 +670,7 @@ impl Node {
             log: Mutex::new(log),
             book: Mutex::new(book),
             directory,
+            keep_bytes: AtomicU64::new(KEEP_BLOCK_BYTES),
             _lock: lock,
             peers: Mutex::new(HashMap::new()),
             refusals: Mutex::new(Refusals::new()),
@@ -701,6 +759,25 @@ impl Node {
 
     pub fn height(&self) -> Option<u64> {
         self.with_chain(ChainStore::height)
+    }
+
+    /// Sets how many bytes of blocks this node keeps on disk.
+    ///
+    /// `u64::MAX` keeps every block ever accepted, which is what a node
+    /// offering the history to others does and what the disk cost of the chain
+    /// is measured against.
+    pub fn keep_blocks(&self, bytes: u64) {
+        self.shared.keep_bytes.store(bytes, Ordering::Relaxed);
+    }
+
+    /// How many bytes of blocks this node is holding on disk.
+    pub fn kept_bytes(&self) -> u64 {
+        let log = self
+            .shared
+            .log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        log.as_ref().map_or(0, BlockLog::bytes)
     }
 
     /// How far this node is through joining a chain it was not on.
@@ -937,7 +1014,7 @@ fn take_join_part(
                     // Kept only once it has been taken, so what is on disk is
                     // a ledger this node checked and adopted rather than one
                     // it merely received.
-                    shared.keep_handed_ledger(&whole);
+                    shared.keep_ledger(&whole);
                     Some(())
                 });
             if landed.is_none() {
@@ -1053,19 +1130,27 @@ impl Shared {
                 )?;
                 Some(start.encode())
             }
-            Joining::Ledger => {
-                // The headers the difficulty rule reads, in full, which the
-                // asker checks are consecutive and end at this tip.
-                let from = tip
-                    .height
-                    .saturating_sub(u64::try_from(RECENT_HEADERS.saturating_sub(1)).unwrap_or(0));
-                let mut recent = Vec::with_capacity(RECENT_HEADERS);
-                for height in from..=tip.height {
-                    recent.push(header_at(height)?);
-                }
-                Some(state.handover(tip, recent).encode())
-            }
+            Joining::Ledger => build_ledger(state, &tip, header_at).map(|held| held.encode()),
         }
+    }
+
+    /// This node's own ledger, written down so it can start from it.
+    ///
+    /// The same thing it would hand a newcomer, kept for itself. A node that
+    /// has one does not have to read its way back from the first block, which
+    /// is what lets it stop keeping every block it ever accepted.
+    fn own_ledger(&self) -> Option<Vec<u8>> {
+        let chain = self.chain();
+        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        let header_at = |height: u64| -> Option<BlockHeader> {
+            if let Some(block) = chain.block_at(height) {
+                return Some(block.header);
+            }
+            Some(log.as_ref()?.read_at(height).ok()??.header)
+        };
+        let state = chain.state();
+        let tip = header_at(chain.height()?)?;
+        build_ledger(state, &tip, header_at).map(|held| held.encode())
     }
 }
 
@@ -1248,9 +1333,29 @@ fn maintenance_loop(shared: &Arc<Shared>) {
         dial_from_book(shared, now);
         save_book(shared);
         collect_finished(shared);
+        shared.trim_history();
         abandon_stalled_join(shared, now);
         shared.refusals().forget_expired(now);
     }
+}
+
+/// The ledger at `tip`, with the headers the difficulty rule reads.
+///
+/// The run of recent headers travels in full, and whoever takes it checks that
+/// they are consecutive and end at this tip.
+fn build_ledger(
+    state: &LedgerState,
+    tip: &BlockHeader,
+    header_at: impl Fn(u64) -> Option<BlockHeader>,
+) -> Option<Handover> {
+    let from = tip
+        .height
+        .saturating_sub(u64::try_from(RECENT_HEADERS.saturating_sub(1)).unwrap_or(0));
+    let mut recent = Vec::with_capacity(RECENT_HEADERS);
+    for height in from..=tip.height {
+        recent.push(header_at(height)?);
+    }
+    Some(state.handover(*tip, recent))
 }
 
 /// Reads back the ledger a node was handed, if it kept one.

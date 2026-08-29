@@ -882,3 +882,66 @@ fn a_node_that_joined_writes_and_serves_what_it_validates() {
     keeper.shutdown();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A node's disk must not grow with the chain. It keeps the ledger its blocks
+/// add up to and drops the blocks, which is what the sampled start made
+/// possible: a newcomer no longer reads the history, so nobody has to keep it
+/// for them.
+#[test]
+fn a_node_writes_its_ledger_down_and_stops_keeping_every_block() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(300);
+    let top = (blocks.len() - 1) as u64;
+
+    let root = std::env::temp_dir().join(format!("cairn-trim-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+
+    let (node, _) = Node::open(params, loopback(), root.join("node")).unwrap();
+    for block in &blocks {
+        node.submit_block(block.clone()).unwrap();
+    }
+    let whole = node.kept_bytes();
+    assert!(whole > 0, "it wrote the blocks it validated");
+    assert!(node.archived_at(0).is_some(), "including the first");
+
+    // Told to keep almost nothing, it writes the ledger down and lets the
+    // blocks go on the next round of upkeep.
+    node.keep_blocks(1);
+    wait_for("the node to drop what it no longer needs", || {
+        node.kept_bytes() < whole
+    });
+    assert!(
+        node.archived_at(0).is_none(),
+        "the oldest blocks are gone from disk"
+    );
+    assert_eq!(node.height(), Some(top), "and the chain is where it was");
+
+    // What it dropped it can no longer serve, and what it kept it still can.
+    let mined = forge.mine();
+    let at = mined.header.height;
+    node.submit_block(mined).unwrap();
+    assert_eq!(
+        node.archived_at(at).map(|block| block.header.height),
+        Some(at),
+        "blocks it validates after the trim are written at their own height"
+    );
+
+    // And it starts again from the ledger rather than from the first block.
+    node.shutdown();
+    drop(node);
+    let (again, restored) = Node::open(params, loopback(), root.join("node")).unwrap();
+    assert!(
+        !restored.rejoining,
+        "it had written its own ledger down, so nothing was set aside"
+    );
+    assert_eq!(
+        again.height(),
+        Some(at),
+        "back where it was, holding almost none of the chain"
+    );
+    assert!(again.kept_bytes() < whole);
+
+    again.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
+}
