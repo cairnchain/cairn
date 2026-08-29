@@ -5,6 +5,7 @@
 //! is the plumbing that carries them over TCP and does not decide anything.
 
 pub mod book;
+pub mod joining;
 pub mod message;
 pub mod node;
 pub mod refusal;

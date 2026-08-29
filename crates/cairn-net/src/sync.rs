@@ -15,7 +15,7 @@ use cairn_primitives::Hash32;
 
 use crate::book::AddressBook;
 use crate::message::{
-    Handshake, Message, PeerAddress, MAX_ANNOUNCED, MAX_REQUESTED, MAX_SHARED_ADDRESSES,
+    Handshake, Joining, Message, PeerAddress, MAX_ANNOUNCED, MAX_REQUESTED, MAX_SHARED_ADDRESSES,
     PROTOCOL_VERSION,
 };
 
@@ -107,6 +107,12 @@ const COST_CHAIN: u32 = 8;
 const COST_TRANSFER: u32 = 4;
 const COST_BLOCK: u32 = 8;
 const COST_PER_BLOCK_SERVED: u32 = 1;
+/// What one piece of a join answer costs to build and send.
+///
+/// An eighth of a window, so a newcomer collecting twenty two pieces takes
+/// three windows and a peer asking for nothing else is spending everything it
+/// has on it.
+const COST_JOIN: u32 = ALLOWANCE / 8;
 
 impl PeerState {
     /// A peer just connected, reached at `remote`.
@@ -198,6 +204,11 @@ pub struct Reaction {
     /// with no chain at all sends an empty locator, and that is exactly the
     /// node most in need of an answer.
     pub locate: Option<Vec<Located>>,
+    /// A piece of a join answer a peer asked for.
+    ///
+    /// Named rather than built here. Building one means encoding a ledger,
+    /// which is megabytes, and this runs with the chain held.
+    pub join: Option<(Joining, u32)>,
     /// Heights on the followed branch a peer asked for.
     ///
     /// Named rather than read here, because most of them are read off a disk
@@ -458,6 +469,11 @@ pub fn on_message(
     // and it asks again a moment later against a fresh window.
     let cost = match &message {
         Message::GetChain { .. } => COST_CHAIN,
+        // The largest thing a peer can ask for, and the only one that is worth
+        // more to it than it costs this node, so it is charged accordingly: a
+        // peer joining gets through in a handful of windows and one asking
+        // over and over gets nowhere.
+        Message::GetJoin { .. } => COST_JOIN,
         Message::Block(block) => {
             if peer.awaiting.contains(&block.header.height) {
                 COST_TRIVIAL
@@ -477,9 +493,12 @@ pub fn on_message(
     }
 
     match message {
-        // A pong needs no answer, and a second introduction was already refused
-        // above, so neither reaches here with anything to say.
-        Message::Pong(_) | Message::Hello(_) | Message::Welcome(_) => Reaction::idle(),
+        // A pong needs no answer, a second introduction was already refused
+        // above, and a piece of a join answer belongs to whoever is collecting
+        // them rather than here. None of the three has anything to say back.
+        Message::Pong(_) | Message::Hello(_) | Message::Welcome(_) | Message::JoinPart { .. } => {
+            Reaction::idle()
+        }
         Message::Ping(nonce) => Reaction::reply(vec![Message::Pong(nonce)]),
         Message::GetChain { locator } => Reaction {
             locate: Some(locator),
@@ -519,6 +538,13 @@ pub fn on_message(
         Message::Block(block) => on_block(local.chain, peer, *block, now),
         // The clock decides which half of the book rotates into this answer,
         // so a peer asking twice does not hear the same names twice.
+        // Both answers are megabytes, so building one runs after the chain is
+        // let go of, and the cost is charged as though it were the largest
+        // thing a peer can ask for, because it is.
+        Message::GetJoin { what, part } => Reaction {
+            join: Some((what, part)),
+            ..Reaction::idle()
+        },
         Message::GetPeers => Reaction::reply(vec![Message::Peers(
             local.book.sample(MAX_SHARED_ADDRESSES, now),
         )]),

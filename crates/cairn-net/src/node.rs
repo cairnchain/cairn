@@ -25,13 +25,17 @@ use cairn_crypto::PublicKey;
 use cairn_ledger::block::Block;
 use cairn_ledger::genesis;
 use cairn_ledger::note::NetworkId;
+use cairn_ledger::pow::RECENT_HEADERS;
+use cairn_ledger::sampling::{open_start, SAMPLES};
 use cairn_ledger::transaction::Transfer;
 use cairn_ledger::validation::ConsensusParams;
 use cairn_ledger::validation::TransferError;
+use cairn_primitives::codec::Encode;
+use cairn_primitives::Hash32;
 use cairn_store::{BlockLog, DirectoryLock, StoreError};
 
 use crate::book::AddressBook;
-use crate::message::{Message, MAX_CHAIN};
+use crate::message::{Joining, Message, JOIN_PART_BYTES, MAX_CHAIN};
 use crate::refusal::{can_be_refused, Refusals};
 use crate::sync::{local_handshake, on_message, Local, PeerState, Reaction};
 use crate::wire::{read_message, write_message, Incoming, WireError};
@@ -153,6 +157,14 @@ struct Shared {
     peers: Mutex<HashMap<PeerId, Peer>>,
     /// Peers turned away for a while, for something they did earlier.
     refusals: Mutex<Refusals>,
+    /// The last join answer built, kept so a newcomer asking for its pieces in
+    /// turn is answered from one build rather than from twenty two.
+    ///
+    /// One answer, not one per peer: building a ledger is megabytes, and this
+    /// is the difference between a node that can be joined and a node anybody
+    /// can make spend its memory. A second newcomer asking about a different
+    /// tip replaces it, which costs the first one a rebuild and no more.
+    joined: Mutex<Option<Joined>>,
     threads: Mutex<Vec<JoinHandle<()>>>,
     next_id: AtomicU64,
     running: AtomicBool,
@@ -527,6 +539,7 @@ impl Node {
             _lock: lock,
             peers: Mutex::new(HashMap::new()),
             refusals: Mutex::new(Refusals::new()),
+            joined: Mutex::new(None),
             threads: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(0),
             running: AtomicBool::new(true),
@@ -695,6 +708,86 @@ impl std::fmt::Debug for Node {
     }
 }
 
+/// A join answer, built once and handed out in pieces.
+struct Joined {
+    what: Joining,
+    at: Hash32,
+    bytes: Vec<u8>,
+}
+
+impl Shared {
+    /// One piece of what a newcomer asked for, building the whole only if the
+    /// last one built is not it.
+    ///
+    /// `None` when this node cannot answer, which is the honest reply from one
+    /// that validates and nothing more: proving where a header sits takes a
+    /// path through the header forest, and everybody else holds sixty four
+    /// hashes.
+    fn serve_join(&self, what: Joining, part: u32) -> Option<Message> {
+        let mut held = self.joined.lock().unwrap_or_else(PoisonError::into_inner);
+        let tip = self.chain().tip()?;
+
+        let fresh = held
+            .as_ref()
+            .is_none_or(|ready| ready.what != what || ready.at != tip);
+        if fresh {
+            *held = Some(Joined {
+                what,
+                at: tip,
+                bytes: self.build_join(what)?,
+            });
+        }
+        let ready = held.as_ref()?;
+
+        let parts = ready.bytes.len().div_ceil(JOIN_PART_BYTES).max(1);
+        let index = usize::try_from(part).ok()?;
+        let start = index.checked_mul(JOIN_PART_BYTES)?;
+        let end = start.saturating_add(JOIN_PART_BYTES).min(ready.bytes.len());
+        let bytes = ready.bytes.get(start..end)?.to_vec();
+
+        Some(Message::JoinPart {
+            what: ready.what,
+            at: ready.at,
+            part,
+            parts: u32::try_from(parts).unwrap_or(u32::MAX),
+            bytes,
+        })
+    }
+
+    /// Builds the whole of what a newcomer asked for.
+    fn build_join(&self, what: Joining) -> Option<Vec<u8>> {
+        let chain = self.chain();
+        let state = chain.state();
+        let tip_id = chain.tip()?;
+        let tip = chain.block(&tip_id).map(|block| block.header)?;
+
+        match what {
+            Joining::Weight => {
+                let start = open_start(
+                    &tip,
+                    state.headers_before_tip(),
+                    SAMPLES,
+                    |height| chain.block_at(height).map(|block| block.header),
+                    |height| state.prove_header(height),
+                )?;
+                Some(start.encode())
+            }
+            Joining::Ledger => {
+                // The headers the difficulty rule reads, in full, which the
+                // asker checks are consecutive and end at this tip.
+                let from = tip
+                    .height
+                    .saturating_sub(u64::try_from(RECENT_HEADERS.saturating_sub(1)).unwrap_or(0));
+                let mut recent = Vec::with_capacity(RECENT_HEADERS);
+                for height in from..=tip.height {
+                    recent.push(chain.block_at(height).map(|block| block.header)?);
+                }
+                Some(state.handover(tip, recent).encode())
+            }
+        }
+    }
+}
+
 /// Brings the log in line with the branch the chain now follows.
 ///
 /// The log holds the followed branch in order of height, and nothing else. It
@@ -771,6 +864,15 @@ fn answer_deferred(
     for block in shared.blocks_at(&reaction.fetch) {
         if outbound.try_send(Message::Block(Box::new(block))).is_err() {
             return false;
+        }
+    }
+    // A piece of a join answer, built now that nothing is held. A node that
+    // cannot answer says nothing rather than answering badly.
+    if let Some((what, part)) = reaction.join {
+        if let Some(piece) = shared.serve_join(what, part) {
+            if outbound.try_send(piece).is_err() {
+                return false;
+            }
         }
     }
     true

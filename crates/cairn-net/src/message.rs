@@ -161,7 +161,86 @@ pub enum Message {
     Peers(Vec<PeerAddress>),
     /// A transfer looking for a block. Boxed for the same reason a block is.
     Transaction(Box<Transfer>),
+    /// Show me which chain you follow is the heaviest, or hand me the ledger
+    /// at its tip.
+    ///
+    /// `part` is which piece of the answer is wanted. Both answers are larger
+    /// than one message carries, so they arrive in pieces and the asker puts
+    /// them back together; whether the pieces belong together is settled by
+    /// checking the whole, not by trusting the labels on it.
+    GetJoin {
+        what: Joining,
+        part: u32,
+    },
+    /// One piece of an answer to [`Message::GetJoin`].
+    ///
+    /// `at` is the tip the answer describes, so an asker can tell that every
+    /// piece came from the same moment: a node that mined a block partway
+    /// through is answering about a different ledger, and the pieces would not
+    /// go together.
+    JoinPart {
+        what: Joining,
+        at: Hash32,
+        part: u32,
+        parts: u32,
+        bytes: Vec<u8>,
+    },
 }
+
+/// What a newcomer is asking to be shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Joining {
+    /// The sampled headers that say what work stands behind a tip.
+    Weight,
+    /// The ledger at that tip.
+    Ledger,
+}
+
+impl Joining {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Weight => 0,
+            Self::Ledger => 1,
+        }
+    }
+
+    const fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            0 => Some(Self::Weight),
+            1 => Some(Self::Ledger),
+            _ => None,
+        }
+    }
+}
+
+impl Encode for Joining {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        self.tag().encode_to(out);
+    }
+}
+
+impl Decode for Joining {
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        Self::from_tag(u8::decode_from(reader)?).ok_or(CodecError::InvalidValue {
+            type_name: "Joining",
+        })
+    }
+}
+
+/// Bytes one piece of a join answer carries.
+///
+/// Comfortably under what the wire takes, so a piece and its labels together
+/// always fit. Smaller pieces mean more round trips on an exchange that
+/// happens once in a node's life; larger ones would not fit.
+pub const JOIN_PART_BYTES: usize = 512 * 1024;
+
+/// Pieces one answer may be cut into.
+///
+/// A ledger is eleven megabytes at the largest hot set the rules allow, and a
+/// sampled weight is one. This is several times either, and it is here so a
+/// reader can refuse an answer that claims to be enormous before it starts
+/// collecting one.
+pub const MAX_JOIN_PARTS: u32 = 64;
 
 impl Message {
     /// A short name for logs and errors.
@@ -179,6 +258,8 @@ impl Message {
             Self::GetPeers => "get peers",
             Self::Peers(_) => "peers",
             Self::Transaction(_) => "transaction",
+            Self::GetJoin { .. } => "get join",
+            Self::JoinPart { .. } => "join part",
         }
     }
 
@@ -196,6 +277,8 @@ impl Message {
             Self::GetPeers => 9,
             Self::Peers(_) => 10,
             Self::Transaction(_) => 11,
+            Self::GetJoin { .. } => 12,
+            Self::JoinPart { .. } => 13,
         }
     }
 }
@@ -239,6 +322,23 @@ impl Encode for Message {
             Self::GetPeers => {}
             Self::Peers(addresses) => addresses.encode_to(out),
             Self::Transaction(transfer) => transfer.encode_to(out),
+            Self::GetJoin { what, part } => {
+                what.encode_to(out);
+                part.encode_to(out);
+            }
+            Self::JoinPart {
+                what,
+                at,
+                part,
+                parts,
+                bytes,
+            } => {
+                what.encode_to(out);
+                at.encode_to(out);
+                part.encode_to(out);
+                parts.encode_to(out);
+                bytes.encode_to(out);
+            }
         }
     }
 }
@@ -277,6 +377,36 @@ impl Decode for Message {
                 Ok(Self::Peers(addresses))
             }
             11 => Ok(Self::Transaction(Box::new(Transfer::decode_from(reader)?))),
+            12 => Ok(Self::GetJoin {
+                what: Joining::decode_from(reader)?,
+                part: u32::decode_from(reader)?,
+            }),
+            13 => {
+                let what = Joining::decode_from(reader)?;
+                let at = Hash32::decode_from(reader)?;
+                let part = u32::decode_from(reader)?;
+                let parts = u32::decode_from(reader)?;
+                // Checked before the bytes are read, since both are named by
+                // whoever sent this and one of them decides an allocation.
+                if parts > MAX_JOIN_PARTS || part >= parts {
+                    return Err(CodecError::InvalidValue {
+                        type_name: "JoinPart",
+                    });
+                }
+                let bytes = Vec::<u8>::decode_from(reader)?;
+                if bytes.len() > JOIN_PART_BYTES {
+                    return Err(CodecError::InvalidValue {
+                        type_name: "JoinPart",
+                    });
+                }
+                Ok(Self::JoinPart {
+                    what,
+                    at,
+                    part,
+                    parts,
+                    bytes,
+                })
+            }
             _ => Err(CodecError::InvalidValue {
                 type_name: "Message",
             }),
