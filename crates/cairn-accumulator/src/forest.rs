@@ -42,7 +42,12 @@ pub fn empty_leaf() -> Hash32 {
     hash(Domain::ForestLeaf, &[])
 }
 
-fn node_hash(left: Hash32, right: Hash32) -> Hash32 {
+/// Hashes two children into the node above them.
+///
+/// Public for the same reason as `tree_of`: a forest kept on disk has to
+/// produce the same hashes as one kept in memory, and there must be one
+/// definition of that rather than two.
+pub fn node_hash(left: Hash32, right: Hash32) -> Hash32 {
     let mut hasher = Hasher::new(Domain::ForestNode);
     hasher.update(left.as_bytes());
     hasher.update(right.as_bytes());
@@ -51,10 +56,14 @@ fn node_hash(left: Hash32, right: Hash32) -> Hash32 {
 
 /// Which tree holds `position`, and where that tree starts.
 ///
+/// Public because a forest kept on disk rather than in memory has to lay its
+/// nodes out the same way, and there must be one answer to this rather than
+/// two that agree until they do not.
+///
 /// Trees are laid out largest first, so the oldest leaves sit in the biggest
 /// tree and a merge only ever extends a tree upward. Positions therefore keep
 /// their order for good.
-fn tree_of(leaves: u64, position: u64) -> Option<(usize, u64)> {
+pub fn tree_of(leaves: u64, position: u64) -> Option<(usize, u64)> {
     if position >= leaves {
         return None;
     }

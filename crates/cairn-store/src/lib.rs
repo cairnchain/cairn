@@ -8,6 +8,7 @@
 //! when it is replayed, which catches anything a checksum would and a great
 //! deal more.
 
+pub mod header_tree;
 pub mod headers;
 
 use std::fs::{File, OpenOptions, TryLockError};
@@ -46,6 +47,7 @@ pub const LOCK_FILE: &str = "lock";
 /// service staying up for the rest of its life.
 pub const HANDED_LEDGER: &str = "ledger.dat";
 
+pub use header_tree::{HeaderTree, HEADER_TREE};
 pub use headers::{HeaderLog, HEADER_BYTES, HEADER_LOG};
 
 /// Largest record the log will read or write.
@@ -80,6 +82,8 @@ pub enum StoreError {
     },
     #[error("the log reaches height {expected} and was handed height {found}")]
     OutOfOrder { expected: u64, found: u64 },
+    #[error("the header forest has no node of height {height} at {start}")]
+    MissingNode { height: usize, start: u64 },
 }
 
 /// What opening a log found on disk.

@@ -1203,3 +1203,50 @@ fn a_newcomer_joins_through_an_archivist_that_kept_no_blocks() {
     keeper.shutdown();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// What all of this was for: a node that archives nothing, keeps no old
+/// blocks, and was never asked to do anything special can still show a
+/// newcomer which chain carries the most work and hand over the ledger.
+///
+/// That is what makes the archive service something the network can do
+/// without, rather than something it depends on and would have to pay for.
+#[test]
+fn an_ordinary_node_can_take_in_a_newcomer() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks =
+        forge.mine_many(usize::try_from(cairn_net::sync::JOIN_RATHER_THAN_READ).unwrap() + 40);
+    let top = (blocks.len() - 1) as u64;
+
+    let root = std::env::temp_dir().join(format!("cairn-ordinary-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+
+    // Opened the plain way: no cold set, nothing kept beyond the default.
+    let (host, _) = Node::open(params, loopback(), root.join("host")).unwrap();
+    for block in &blocks {
+        host.submit_block(block.clone()).unwrap();
+    }
+    assert!(
+        !host.with_chain(cairn_chain::ChainStore::is_archiving),
+        "it is not an archivist"
+    );
+    host.keep_blocks(1);
+    wait_for("the host to drop its blocks", || {
+        host.archived_at(0).is_none()
+    });
+
+    let joiner = Node::bind(params, loopback()).unwrap();
+    joiner.connect(host.address()).unwrap();
+    wait_for("the joiner to be handed a ledger", || {
+        joiner.height() == Some(top)
+    });
+    assert_eq!(joiner.joining(), Joined::Done);
+    assert_eq!(
+        joiner.with_chain(|chain| chain.state().state_root()),
+        host.with_chain(|chain| chain.state().state_root()),
+    );
+
+    joiner.shutdown();
+    host.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -144,6 +144,7 @@ fn resolve(reaction: cairn_net::sync::Reaction, chain: &ChainStore) -> Vec<Messa
 fn solo_as(chain: &mut ChainStore, nonce: u64) -> Local<'_> {
     static EMPTY: std::sync::OnceLock<AddressBook> = std::sync::OnceLock::new();
     Local {
+        shows_the_chain: true,
         nonce,
         chain,
         book: EMPTY.get_or_init(AddressBook::new),
@@ -259,7 +260,7 @@ fn an_introduction_is_answered_and_the_shorter_chain_asks_for_more() {
     let reaction = on_message(
         &mut solo(&mut behind),
         &mut peer,
-        Message::Hello(local_handshake(&ahead, 4242, 7)),
+        Message::Hello(local_handshake(&ahead, true, 4242, 7)),
         NOW,
     );
 
@@ -286,7 +287,7 @@ fn the_longer_chain_does_not_ask_the_shorter_one_for_anything() {
     let reaction = on_message(
         &mut solo(&mut ahead),
         &mut peer,
-        Message::Hello(local_handshake(&behind, 4242, 7)),
+        Message::Hello(local_handshake(&behind, true, 4242, 7)),
         NOW,
     );
 
@@ -306,7 +307,7 @@ fn a_peer_on_another_network_or_version_or_chain_is_dropped() {
     let mut forge = Forge::new(params);
     let blocks = forge.mine_many(3);
     let mut store = store_with(params, &blocks);
-    let sound = local_handshake(&store, 4242, 7);
+    let sound = local_handshake(&store, true, 4242, 7);
 
     let cases: Vec<(Handshake, DropReason)> = vec![
         (
@@ -375,7 +376,7 @@ fn introducing_yourself_twice_is_refused() {
     let mut forge = Forge::new(params);
     let blocks = forge.mine_many(2);
     let mut store = store_with(params, &blocks);
-    let handshake = local_handshake(&store, 4242, 7);
+    let handshake = local_handshake(&store, true, 4242, 7);
 
     let mut peer = PeerState::default();
     on_message(
@@ -572,7 +573,7 @@ fn a_full_exchange_carries_one_chain_to_the_other_node() {
 
     // Play the conversation out until nothing more is said.
     // Two nodes, two nonces, as on a real network.
-    let mut pending = vec![Message::Hello(local_handshake(&ahead, 4242, 2))];
+    let mut pending = vec![Message::Hello(local_handshake(&ahead, true, 4242, 2))];
     let mut rounds = 0;
     while !pending.is_empty() {
         rounds += 1;
@@ -598,7 +599,7 @@ fn an_introduction_asks_the_peer_who_else_it_knows() {
     let mut forge = Forge::new(params);
     let blocks = forge.mine_many(2);
     let mut store = store_with(params, &blocks);
-    let handshake = local_handshake(&store, 4242, 7);
+    let handshake = local_handshake(&store, true, 4242, 7);
 
     let mut peer = PeerState::default();
     let reaction = on_message(
@@ -628,6 +629,7 @@ fn a_request_for_peers_is_answered_from_the_book() {
 
     let mut peer = greeted_peer(0, 0);
     let mut local = Local {
+        shows_the_chain: true,
         chain: &mut store,
         book: &book,
         listen: 4242,
@@ -678,7 +680,7 @@ fn a_peer_is_placed_at_the_address_its_connection_came_from() {
     // anything the peer says, so one node cannot advertise another.
     let claimed = Handshake {
         listen: 5_555,
-        ..local_handshake(&store, 4242, 7)
+        ..local_handshake(&store, true, 4242, 7)
     };
     let seen_from = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9));
 
@@ -709,7 +711,7 @@ fn a_peer_that_does_not_listen_is_not_advertised() {
 
     let quiet = Handshake {
         listen: 0,
-        ..local_handshake(&store, 4242, 7)
+        ..local_handshake(&store, true, 4242, 7)
     };
     let mut peer = PeerState {
         remote: Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9))),
@@ -842,7 +844,7 @@ fn a_node_that_reaches_itself_says_so_and_hangs_up() {
     let ours = 0x0BAD_C0DE_0BAD_C0DE;
 
     // Our own introduction, arriving back at us.
-    let mine = local_handshake(&store, 4242, ours);
+    let mine = local_handshake(&store, true, 4242, ours);
     let mut peer = PeerState {
         remote: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
             203, 0, 113, 9,
@@ -880,7 +882,7 @@ fn a_node_that_reaches_itself_says_so_and_hangs_up() {
 fn a_peer_that_is_not_us_is_greeted_normally() {
     let params = params();
     let mut store = ChainStore::new(params);
-    let theirs = local_handshake(&store, 5000, 0x1111_1111_1111_1111);
+    let theirs = local_handshake(&store, true, 5000, 0x1111_1111_1111_1111);
 
     let mut peer = PeerState {
         remote: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(

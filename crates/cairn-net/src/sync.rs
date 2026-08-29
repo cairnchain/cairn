@@ -24,6 +24,14 @@ use crate::message::{
 pub struct Local<'a> {
     pub chain: &'a mut ChainStore,
     pub book: &'a AddressBook,
+    /// Whether this node holds the whole header forest, and so can show a
+    /// newcomer which chain carries the most work.
+    ///
+    /// Not the same question as archiving the cold set. That is a service for
+    /// a wallet that lost a proof; this is what lets anyone join at all, and
+    /// it costs 182 bytes a block rather than a set that grows with every note
+    /// ever spent. Almost every node can answer yes.
+    pub shows_the_chain: bool,
     /// The port this node listens on, so peers can pass its address along.
     pub listen: u16,
     /// What this node calls itself on the wire, so it can recognise its own
@@ -251,7 +259,12 @@ impl Reaction {
 }
 
 /// What this node says about itself.
-pub fn local_handshake(chain: &ChainStore, listen: u16, nonce: u64) -> Handshake {
+pub fn local_handshake(
+    chain: &ChainStore,
+    shows_the_chain: bool,
+    listen: u16,
+    nonce: u64,
+) -> Handshake {
     Handshake {
         version: PROTOCOL_VERSION,
         network: chain.params().network,
@@ -259,9 +272,7 @@ pub fn local_handshake(chain: &ChainStore, listen: u16, nonce: u64) -> Handshake
         tip: chain.tip().unwrap_or(Hash32::ZERO),
         height: chain.height().unwrap_or_default(),
         total_work: chain.total_work(),
-        // Keeping the cold set and keeping the headers are one decision, so
-        // one answer covers both services an archivist offers.
-        archives: chain.is_archiving(),
+        archives: shows_the_chain,
         listen,
         nonce,
     }
@@ -335,6 +346,7 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
     if answer {
         reaction.reply.push(Message::Welcome(local_handshake(
             local.chain,
+            local.shows_the_chain,
             local.listen,
             local.nonce,
         )));

@@ -416,15 +416,15 @@ impl ChainStore {
         self.state.watch_owner(owner);
     }
 
-    /// Whether this node can answer with proofs.
+    /// Whether this node keeps the cold set, and can therefore rebuild the
+    /// proof of a note whose owner lost theirs.
     ///
-    /// Archiving is one role and not two, so this asks for both halves of it:
-    /// the cold set, which rebuilds the proof of a note somebody lost, and the
-    /// headers, which prove to a newcomer which chain carries the most work.
-    /// A node builds them together, and this is what keeps a node that somehow
-    /// held one from telling the network it offers the other.
+    /// This used to be half of a larger role, the other half being the headers
+    /// a newcomer is shown. Those live on disk now and every node keeps them,
+    /// so what is left here is one service and not two: a cost that grows with
+    /// every note ever spent, carried by whoever offers it.
     pub fn is_archiving(&self) -> bool {
-        self.state.cold().is_archiving() && self.state.keeps_headers()
+        self.state.cold().is_archiving()
     }
 
     pub fn params(&self) -> &ConsensusParams {

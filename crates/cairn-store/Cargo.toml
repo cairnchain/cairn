@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 cairn-ledger.workspace = true
+cairn-accumulator.workspace = true
 cairn-primitives.workspace = true
 thiserror.workspace = true
 

@@ -28,13 +28,14 @@ use cairn_ledger::handover::{accept, Handover};
 use cairn_ledger::note::NetworkId;
 use cairn_ledger::pow::RECENT_HEADERS;
 use cairn_ledger::sampling::{check_start, open_start, SampledStart, SAMPLES};
+use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::Transfer;
 use cairn_ledger::validation::ConsensusParams;
 use cairn_ledger::validation::TransferError;
 use cairn_ledger::LedgerState;
 use cairn_primitives::codec::{Decode, Encode};
 use cairn_primitives::Hash32;
-use cairn_store::{BlockLog, DirectoryLock, HeaderLog, StoreError, HANDED_LEDGER};
+use cairn_store::{BlockLog, DirectoryLock, HeaderLog, HeaderTree, StoreError, HANDED_LEDGER};
 
 use crate::book::AddressBook;
 use crate::joining::{Collecting, Joined, Progress};
@@ -684,9 +685,12 @@ impl Node {
         // newcomer about that stretch and nothing else.
         let mut headers = HeaderLog::open(&directory)?;
         catch_up_headers(&mut headers, &log)?;
+        let mut forest = HeaderTree::open(&directory)?;
+        grow_forest(&mut forest, &headers);
         let log = Store {
             blocks: log,
             headers,
+            forest,
         };
 
         let book = AddressBook::load(&directory);
@@ -1136,6 +1140,24 @@ fn step(
 struct Store {
     blocks: BlockLog,
     headers: HeaderLog,
+    /// The forest those headers make, so this node can prove where one sits
+    /// rather than only check somebody else's proof.
+    forest: HeaderTree,
+}
+
+impl Store {
+    /// Whether this node holds the whole header forest, back to the first
+    /// block.
+    ///
+    /// What it takes to show a newcomer which chain carries the most work. A
+    /// node that joined a chain rather than reading it holds the headers from
+    /// where it was handed on, which is not enough to prove anything about
+    /// what came before.
+    fn can_show_the_chain(&self, reaches: u64) -> bool {
+        self.headers.first_height() == 0
+            && self.headers.reaches() >= reaches
+            && self.forest.len() >= reaches
+    }
 }
 
 /// A join answer, built once and handed out in pieces.
@@ -1182,6 +1204,19 @@ impl Shared {
         })
     }
 
+    /// Whether this node can show a newcomer which chain carries the most
+    /// work.
+    ///
+    /// The chain is passed in because the caller already holds it, and taking
+    /// it twice is how two threads end up holding these two the other way
+    /// round from each other.
+    fn shows_the_chain(&self, chain: &ChainStore) -> bool {
+        let reaches = chain.height().map_or(0, |tip| tip.saturating_add(1));
+        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        log.as_ref()
+            .is_some_and(|store| store.can_show_the_chain(reaches))
+    }
+
     /// Builds the whole of what a newcomer asked for.
     ///
     /// Both answers reach for headers all over the chain, and a node holds the
@@ -1209,13 +1244,14 @@ impl Shared {
 
         match what {
             Joining::Weight => {
-                let start = open_start(
-                    &tip,
-                    state.headers_before_tip(),
-                    SAMPLES,
-                    header_at,
-                    |height| state.prove_header(height),
-                )?;
+                // Proved against the forest from before the tip, which is the
+                // one the tip's own header vouches for, and read from disk
+                // rather than from memory: holding it in memory would be a
+                // gigabyte at thirty years.
+                let before_tip = tip.height;
+                let prove = |height: u64| log.as_ref()?.forest.prove_in(height, before_tip).ok()?;
+                let start =
+                    open_start(&tip, state.headers_before_tip(), SAMPLES, header_at, prove)?;
                 Some(start.encode())
             }
             Joining::Ledger => build_ledger(state, &tip, header_at).map(|held| held.encode()),
@@ -1266,7 +1302,54 @@ impl Shared {
 /// following, so it does not stop the node.
 fn write_branch(store: &mut Store, accepted: &Accepted, chain: &ChainStore) {
     write_headers(&mut store.headers, chain);
+    grow_forest(&mut store.forest, &store.headers);
     write_blocks(&mut store.blocks, accepted, chain);
+}
+
+/// Brings the header forest in line with the header log.
+///
+/// The forest is what the log says it is, so it follows rather than being
+/// written alongside: one place decides which headers this node is on, and the
+/// other agrees with it.
+///
+/// Only a log that starts at the first block can make a forest at all. A node
+/// handed a ledger has headers from where it was handed on, and no path
+/// through what came before them exists to be built.
+fn grow_forest(forest: &mut HeaderTree, headers: &HeaderLog) {
+    if headers.first_height() != 0 {
+        return;
+    }
+    if forest.len() > headers.reaches() && forest.keep_first(headers.reaches()).is_err() {
+        return;
+    }
+    // Where the two part company, walked back from the end. A reorganisation
+    // replaces headers without shortening the log, so the lengths agreeing is
+    // not the same as the contents agreeing.
+    let mut common = forest.len().min(headers.reaches());
+    while common > 0 {
+        let at = common.saturating_sub(1);
+        let held = forest.leaf_at(at).ok().flatten();
+        let now = headers
+            .read_at(at)
+            .ok()
+            .flatten()
+            .map(|header| header_leaf(&header.id()));
+        if held.is_some() && held == now {
+            break;
+        }
+        common = at;
+    }
+    if forest.len() > common && forest.keep_first(common).is_err() {
+        return;
+    }
+    for height in forest.len()..headers.reaches() {
+        let Some(header) = headers.read_at(height).ok().flatten() else {
+            break;
+        };
+        if forest.append(header_leaf(&header.id())).is_err() {
+            break;
+        }
+    }
 }
 
 /// Brings the header log in line with the branch this node follows.
@@ -1753,7 +1836,13 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, initiator: bool) {
     if initiator {
         let hello = {
             let chain = shared.chain();
-            Message::Hello(local_handshake(&chain, shared.address.port(), shared.nonce))
+            let shows = shared.shows_the_chain(&chain);
+            Message::Hello(local_handshake(
+                &chain,
+                shows,
+                shared.address.port(),
+                shared.nonce,
+            ))
         };
         let _ = outbound.try_send(hello);
     }
@@ -1845,9 +1934,13 @@ fn read_loop(
             let book = shared.book().clone();
             let mut log = shared.log.lock().unwrap_or_else(PoisonError::into_inner);
 
+            let shows = log.as_ref().is_some_and(|store| {
+                store.can_show_the_chain(chain.height().map_or(0, |tip| tip.saturating_add(1)))
+            });
             let mut local = Local {
                 chain: &mut chain,
                 book: &book,
+                shows_the_chain: shows,
                 listen: shared.address.port(),
                 nonce: shared.nonce,
             };
@@ -1999,6 +2092,7 @@ mod tests {
         let mut store = Store {
             blocks: blocks_log,
             headers: HeaderLog::open(&directory).unwrap(),
+            forest: HeaderTree::open(&directory).unwrap(),
         };
 
         let mut chain = ChainStore::new(params);
@@ -2019,6 +2113,7 @@ mod tests {
             "the log caught up rather than skipping ahead"
         );
         assert_eq!(store.headers.reaches(), 6, "and so did the headers");
+        assert_eq!(store.forest.len(), 6, "and the forest they make");
         for (height, want) in blocks.iter().enumerate() {
             let at = u64::try_from(height).unwrap();
             let found = store.blocks.read_at(at).unwrap().unwrap();

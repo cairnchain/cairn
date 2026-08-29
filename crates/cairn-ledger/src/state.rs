@@ -654,16 +654,6 @@ pub struct LedgerState {
     /// what is kept is enough to say whether a header handed over later was
     /// really at the position it claims.
     headers: Forest,
-    /// The same forest with its leaves kept, for a node that archives.
-    ///
-    /// Saying a header sits where it claims takes sixty four hashes; proving
-    /// it to somebody else takes a path, and a path cannot be rebuilt from
-    /// roots. So the node that answers a newcomer asking which chain is
-    /// heaviest is an archivist, and this is what it holds to answer with:
-    /// thirty two bytes a block, half a gigabyte at thirty years, which is
-    /// exactly the growing cost the protocol refuses to put on everybody and
-    /// puts on whoever offers the service instead.
-    header_leaves: Option<Archive>,
 }
 
 impl LedgerState {
@@ -673,40 +663,18 @@ impl LedgerState {
     }
 
     /// A node that also keeps the cold set, so it can rebuild a proof for
-    /// someone who lost theirs, and the headers, so it can prove to a newcomer
-    /// which chain is heaviest.
+    /// someone who lost theirs.
     ///
-    /// Both are the same bargain: a cost that grows with the chain, carried by
-    /// whoever offers the service rather than by everybody.
+    /// A cost that grows with the chain, carried by whoever offers the service
+    /// rather than by everybody. The headers used to be kept here too, for the
+    /// other half of what an archivist did; they are on disk now, held by
+    /// every node, which is what stopped joining a chain from depending on
+    /// somebody volunteering.
     pub fn archiving() -> Self {
         Self {
             cold: ColdTier::archiving(),
-            header_leaves: Some(Archive::new()),
             ..Self::default()
         }
-    }
-
-    /// Whether this node can prove where a header sits, rather than only check
-    /// a proof somebody else built.
-    #[must_use]
-    pub fn keeps_headers(&self) -> bool {
-        self.header_leaves.is_some()
-    }
-
-    /// The proof that the header at `height` is the one this chain carries.
-    ///
-    /// Only an archivist can answer. Everyone else holds sixty four hashes,
-    /// which is enough to check such a proof and not enough to build one.
-    ///
-    /// Built against the forest from before the tip, which is the one the
-    /// tip's own header vouches for and so the one a newcomer checks against.
-    /// The archive holds the tip as well, and a proof built against that
-    /// checks out nowhere.
-    #[must_use]
-    pub fn prove_header(&self, height: u64) -> Option<ForestProof> {
-        self.header_leaves
-            .as_ref()?
-            .prove_in(height, self.headers_before_tip.leaves())
     }
 
     /// Asks to be told where this owner's notes go when they fall.
@@ -1132,9 +1100,6 @@ impl LedgerState {
         // header commits to this one and every one before it.
         self.headers_before_tip = self.headers.clone();
         self.headers.add(header_leaf(&id));
-        if let Some(leaves) = self.header_leaves.as_mut() {
-            leaves.add(header_leaf(&id));
-        }
         self.tip = Some(Tip {
             id,
             height,
@@ -1186,9 +1151,6 @@ impl LedgerState {
 
         self.headers = undo.headers_before.clone();
         self.headers_before_tip = undo.headers_before_before_tip.clone();
-        if let Some(leaves) = self.header_leaves.as_mut() {
-            leaves.remove_last();
-        }
         self.tip = undo.previous_tip;
     }
 
