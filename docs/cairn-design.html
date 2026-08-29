@@ -319,7 +319,7 @@
             <span class="small">Ce qui dort. Un nœud n'en garde que <b>64 empreintes</b>, quel qu'en soit le contenu. Y toucher demande une preuve, que le porteur a gardée ou qu'un archiviste reconstitue.</span>
           </div>
         </div>
-        <p class="foot">Le coût d'un nœud, c'est <b>le tiroir seul</b> : 131 072 billets, environ 107 Mo. La cave, elle, tient en 64 empreintes chez chaque nœud, à jamais. Ce n'est pas une figure de style : y ajouter un billet ne demande que ces empreintes, jamais le contenu, et c'est cette propriété précise qui fait que le coût d'un nœud est plafonné pour de bon.</p>
+        <p class="foot">Ce qu'un nœud doit tenir pour valider est plafonné par les règles : <b>68 Mo</b> de tiroir, et au pire de ce que les règles autorisent 233 Mo de blocs qu'il pourrait encore avoir à annuler. La cave, elle, tient en 64 empreintes chez chaque nœud, à jamais. Ce n'est pas une figure de style : y ajouter un billet ne demande que ces empreintes, jamais le contenu, et c'est cette propriété précise qui fait que le coût d'un nœud est plafonné pour de bon.</p>
       </div>
 
       <p style="margin-top:1.6rem">La friction ne tombe ainsi que sur ce qui dort depuis des années : exactement le bon endroit où la mettre.</p>
@@ -344,8 +344,8 @@
         </div>
         <div class="dec">
           <span class="q">Conservation de la cave</span>
-          <span class="a">Des archivistes, ouverts à tous, payés à la demande</span>
-          <span class="why">Rien n'est jamais réellement perdu : tout est reconstituable depuis l'historique complet de la chaîne. Il faut seulement que quelqu'un le conserve. On en fait un rôle ouvert et rémunéré — garder une copie, se faire payer pour refabriquer une preuve. Sans permission, sans privilège. Bitcoin et Ethereum survivent déjà exactement ainsi, à ceci près qu'ils ne le disent pas et ne rémunèrent personne.</span>
+          <span class="a">Des archivistes, ouverts à tous, que personne ne paie</span>
+          <span class="why">Rien n'est jamais réellement perdu : tout est reconstituable depuis l'historique complet de la chaîne. Il faut seulement que quelqu'un le conserve. On en fait un rôle ouvert, non rémunéré, et surtout dont le réseau ne dépend pas : accueillir un nouveau venu ne demande que les en-têtes, que tout nœud garde, et un portefeuille tient ses propres preuves à jour. L'archiviste sert celui qui a perdu les siennes. Sans permission, sans privilège. Bitcoin et Ethereum reposent sur des archives que personne ne paie non plus, à ceci près que chez eux l'archive est l'histoire entière et qu'un nouveau venu en dépend. Ici il n'en dépend pas.</span>
         </div>
         <div class="dec">
           <span class="q">Mécanisme du sceau</span>
@@ -359,8 +359,8 @@
         </div>
         <div class="dec">
           <span class="q">Taille du tiroir</span>
-          <span class="a">131 072 billets, soit environ 107 Mo</span>
-          <span class="why">Mesuré, pas estimé : un billet chaud coûte environ 813 octets à travers les trois structures qu'un nœud tient pour lui, et l'essentiel de ce coût est l'arbre qui les engage, pas les billets eux-mêmes. Le chiffre découle de la promesse et non de ce qu'un serveur pourrait se permettre : un téléphone doit pouvoir le tenir, sinon le portefeuille redevient dépendant d'un serveur, c'est-à-dire exactement la centralisation que ce projet existe pour supprimer. Conséquence à assumer : à ce format, un billet inactif descend à la cave en quelques semaines, parfois en quelques jours si le réseau est très actif. La cave n'est pas une perte, mais cela rend le suivi des preuves par le portefeuille indispensable et non optionnel.</span>
+          <span class="a">131 072 billets, soit environ 68 Mo</span>
+          <span class="why">Mesuré, pas estimé : un billet chaud coûte 516 octets à travers les trois structures qu'un nœud tient pour lui, dont un peu plus de la moitié pour l'arbre qui les engage. Le chiffre découle de la promesse et non de ce qu'un serveur pourrait se permettre : un téléphone doit pouvoir le tenir, sinon le portefeuille redevient dépendant d'un serveur, c'est-à-dire exactement la centralisation que ce projet existe pour supprimer. Conséquence à assumer : à ce format, un billet inactif descend à la cave en quelques semaines, parfois en quelques jours si le réseau est très actif. La cave n'est pas une perte, mais cela rend le suivi des preuves par le portefeuille indispensable et non optionnel.</span>
         </div>
         <div class="dec">
           <span class="q">Émission</span>

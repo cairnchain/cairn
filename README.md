@@ -40,19 +40,26 @@ none at all to rejoin one.
 There is a node and there is a wallet, and money moves between people on a
 network running on one machine. Every consensus rule is settled, including the
 two that were open longest: the hot set holds 131072 notes, measured at roughly
-107 MB so that a phone can hold it, and the reward halves every two years until
+68 MB so that a phone can hold it, and the reward halves every two years until
 it reaches a floor it then keeps forever.
 
 A node keeps the hot set in full and the cold set as sixty four hashes, so what
-it costs to run does not grow with the chain. It also lets go of any block too
-deep to be undone, and of the branch behind it: what it holds of its own
-history is the stretch a reorganisation could still reach, and one identifier
-every 1024 heights before that, which is 492 kB over thirty years. Everything
-else is read from its log, where the branch sits in order of height. Measured:
-two megabytes are added between two hundred thousand blocks and four hundred
-thousand, against seventy eight for the two hundred thousand before them. An
-archivist keeps the whole cold set and is the only party that can rebuild a
-proof for someone who lost theirs.
+it costs to validate does not grow with the chain. It also lets go of any block
+too deep to be undone, and of the branch behind it: what it holds in memory is
+the stretch a reorganisation could still reach, and one identifier every 1024
+heights before that, which is 492 kB over thirty years.
+
+On disk it keeps the ledger those blocks add up to, which is a fixed size, and
+a bounded amount of recent blocks for peers a little behind. Everything older
+is dropped. What it does keep for good is the headers, at 182 bytes each, and
+the forest they make: 129 MB a year, against 50 GB a year for Bitcoin and 200
+for Ethereum. That is what lets any node show a newcomer which chain carries
+the most work, which is in turn what stops joining a chain from depending on
+anyone volunteering to carry its history.
+
+An archivist keeps the whole cold set and is the only party that can rebuild
+the proof of a note whose owner lost theirs. That service costs a set that
+grows, it is chosen rather than paid for, and the network runs without it.
 
 A wallet keeps its own proofs current out of what every block already carries,
 so it spends a fallen note without asking anyone. Money moves between people
@@ -213,6 +220,11 @@ cargo run --release -p cairn-ledger --example collapse   losing most of the mine
 cargo run --release -p cairn-ledger --example sampled_start   catching a forged chain
 cargo run --release -p cairn-ledger --example blocksize    what a block may take
 cargo run --release -p cairn-chain --example weight    what a node holds in memory
+cargo run --release -p cairn-chain --example window     what a full block costs held
+cargo run --release -p cairn-chain --example archivist   what each role carries
+cargo run --release -p cairn-ledger --example footprint      what a hot note costs
+cargo run --release -p cairn-accumulator --example proving   what proving costs
+cargo run --release -p cairn-crypto --example verify   what a signature costs
 ```
 
 ## How this is built
@@ -236,12 +248,15 @@ can fill is bounded. A reorganisation deeper than `MAX_REORG_DEPTH` is refused
 rather than kept possible by holding undo records forever; that is a local
 safety policy, not a consensus rule, and it is written down as such.
 
-One cost still grows with the chain: a node holds every block of the followed
-branch in memory, which is the history rather than the validation state. What
-a node must hold to validate is capped and always will be; what it currently
-holds to serve its own history is not. The header commitment is what makes it
-possible to stop holding it, and that work is named in the design document
-rather than left for someone to discover.
+What a node must hold to validate is capped by the rules: 68 MB of hot notes
+and, in the worst case the rules allow, 233 MB of blocks it could still have to
+undo. Neither grows with the chain.
+
+One cost does grow, and it is small and named: the headers, at 129 MB a year.
+A node keeps them so that anyone can join through it. Keeping every block, and
+archiving every note that ever fell out of the hot set, are the two costs that
+grow without bound, and both are chosen work the network does not depend on.
+`cargo run --release -p cairn-chain --example archivist` prints all four.
 
 ## Licence
 

@@ -232,7 +232,7 @@
   </p>
   <p>
     Cairn caps that cost by rule. A bounded hot set of 131 072 notes is held in
-    full by every node, measured at 813 bytes each, about 107 MB, and that
+    full by every node, measured at 516 bytes each, about 68 MB, and that
     figure is a ceiling rather than an average. Everything older lives in an
     append-only Merkle forest which a node carries as sixty four hashes,
     whatever its size. Spending from it takes an inclusion proof supplied by the
@@ -339,7 +339,7 @@
             Notes that have moved recently, in a sparse Merkle tree, capped at
             131 072 entries. When the cap is reached, the oldest are evicted at
             block boundaries by a rule every node applies identically.
-            <span class="tier-figure">131 072 notes · 813 bytes each measured · 107 MB at capacity</span>
+            <span class="tier-figure">131 072 notes · 516 bytes each measured · 68 MB at capacity</span>
           </div>
         </div>
         <div class="tier-row cold">
@@ -366,9 +366,9 @@
       A sparse Merkle tree, persistent through structural sharing so that a
       reorganisation restores the previous root without a rebuild. Eviction is
       by age, oldest first, in batches at block boundaries. The measured cost is
-      813 bytes per note, which is the note, its identifier, and its share of
-      the tree. A leaner representation is the clearest remaining optimisation
-      and changes no rule.
+      516 bytes per note, which is the note, its identifier, and its share of
+      the tree. Rather more than half of that is the tree, which makes a leaner
+      tree the clearest remaining optimisation; it changes no rule.
     </p>
 
     <h3><span class="sub">3.2</span>The cold set</h3>
@@ -464,8 +464,12 @@
     <p>
       A wallet keeps its own proofs current from what every block already
       carries, and asks nobody. A wallet that has been offline long enough, or
-      that has lost its records, needs someone who kept the cold set. Archivists
-      are optional nodes that do, and are paid on request.
+      that has lost its records, needs someone who kept the cold set.
+      Archivists are optional nodes that do. Nobody pays them, and the network
+      does not depend on them: joining a chain takes the headers, which every
+      node keeps at 182 bytes each, and a wallet that kept its own proofs asks
+      no one. What an archivist offers is recovery for a wallet that lost
+      theirs.
     </p>
     <p>
       They were in the design from the first day, for an intuition. Section 8
@@ -564,7 +568,7 @@
     <p>
       On this implementation, at one block per minute with blocks carrying 64
       transfers, thirty years of chain is 48 GB to download and 5.3 hours to
-      revalidate on one core, to arrive at a validation state weighing 107 MB.
+      revalidate on one core, to arrive at a validation state weighing 68 MB.
       The wall is bandwidth, not computation.
     </p>
 
@@ -609,15 +613,26 @@
       construction to follow.
     </p>
     <p>
-      Cairn will adopt the published construction with its proven parameters
-      rather than devise its own. A prototype measured on a chain of 20 000
-      blocks confirms the fields suffice: 128 sampled headers with their
-      inclusion proofs come to 76 kB, against 3.5 MB to read every header. The
-      same prototype demonstrates why the distribution must be taken and not
-      improvised. Under a uniform draw, a forger who keeps the real chain and
+      Cairn takes the published construction with its proven distribution
+      rather than devising its own. It is implemented: a newcomer draws 512
+      headers against accumulated work rather than height, with a
+      Fiat-Shamir seed taken from the tip, and each opened header is checked
+      against the tip's own commitment. Joining a thirty year chain costs 12 MB
+      against 2 067 GB of reading. Measurement decides the count rather than
+      argument, and it also shows why the distribution must be taken and not
+      improvised: under a uniform draw, a forger who keeps the real chain and
       fakes only the last twenty blocks goes unnoticed 88% of the time, which
       is precisely why FlyClient samples the recent end of the chain more
       densely.
+    </p>
+    <p>
+      Serving that sample takes the headers and the forest they make, which a
+      node keeps on disk at 182 bytes a header: 129 MB a year, against 50 GB a
+      year for Bitcoin and 200 for Ethereum. Every node keeps them, so joining
+      a chain does not depend on anyone volunteering to carry its history.
+      Blocks a node has already applied are dropped once it has written down
+      the ledger they add up to, which is what stops a node's disk from growing
+      with the chain.
     </p>
     <p>
       One practical note in Cairn's favour. A production study of FlyClient
@@ -658,8 +673,17 @@
       state and producing current witnesses for others, as the natural
       relaxation, and call for work on how such parties would be compensated.
       Those are Cairn's archivists. They were included for an intuition and
-      turn out to be structural, and the open question about their economics is
-      open for everyone rather than for this design in particular.
+      turn out to be structural.
+    </p>
+    <p>
+      Cairn does not answer the compensation question; it narrows what rests on
+      it. Two services were bundled under the name: showing a newcomer which
+      chain carries the most work, which the network cannot do without, and
+      rebuilding the proof of a note whose owner lost theirs, which it can. The
+      first was separated out and made small enough that every node performs
+      it — 182 bytes a header, 129 MB a year — so nothing in the protocol now
+      depends on a party being paid. What is left is recovery for a wallet that
+      kept no records, and a wallet that keeps its own needs no one.
     </p>
   </div>
 </section>
@@ -713,8 +737,8 @@
 
     <div class="params">
       <div><span class="k">Hot set capacity</span><span class="v">131 072 notes</span></div>
-      <div><span class="k">Bytes per hot note, measured</span><span class="v">813</span></div>
-      <div><span class="k">Hot set at capacity</span><span class="v">107 MB</span></div>
+      <div><span class="k">Bytes per hot note, measured</span><span class="v">516</span></div>
+      <div><span class="k">Hot set at capacity</span><span class="v">68 MB</span></div>
       <div><span class="k">Cold set carried by a node</span><span class="v">64 hashes, 2 kB</span></div>
       <div><span class="k">Proof window</span><span class="v">32 blocks</span></div>
       <div><span class="k">Grace window</span><span class="v">64 blocks, 8 192 notes</span></div>
@@ -760,8 +784,18 @@
           </tr>
           <tr class="us">
             <td>Validation state a node holds</td>
-            <td class="n">107 MB</td>
+            <td class="n">68 MB</td>
             <td>Yes, by consensus rule</td>
+          </tr>
+          <tr class="us">
+            <td>Blocks a node may hold to undo</td>
+            <td class="n">233 MB</td>
+            <td>Yes, by the block size and window</td>
+          </tr>
+          <tr class="us">
+            <td>Headers a node keeps on disk</td>
+            <td class="n">3.9 GB</td>
+            <td>No, 129 MB a year</td>
           </tr>
           <tr class="us">
             <td>Cold set a node carries</td>
@@ -777,10 +811,10 @@
       </table>
     </div>
     <p class="fig-note">
-      The first three rows are the cost of arriving; the last three are the cost
-      of participating. Section 7 is about turning the first group into
-      something closer to the second, and the header commitments that make it
-      possible are already in place.
+      The first three rows are what arriving used to cost, and section 7 is
+      how it stopped costing that: a newcomer is handed 12 MB rather than
+      reading any of it. The rows below are the cost of participating, and only
+      one of them grows.
     </p>
   </div>
 </section>
@@ -795,29 +829,36 @@
       currency is worthless by design and which will be reset.
     </p>
     <p>
-      <strong>Arrival is still unbounded in practice.</strong> The headers
-      commit to what a sampled start requires; the protocol that serves the
-      sample is not written. Until it is, joining means downloading and
-      revalidating everything.
+      <strong>The sample count is a floor, not a bound.</strong> A newcomer
+      opens 512 headers, at which a chain overstating its work by one per cent
+      is caught every time and one overstating by a tenth of a per cent is not.
+      That figure comes from measurement. Where the line belongs is an economic
+      question — what a forger stands to gain against the work it would have to
+      redo — and until that is answered the count is chosen rather than
+      derived. It is the last thing between this and a protocol that can be
+      relied on.
     </p>
     <p>
-      <strong>A node holds the history it follows in memory.</strong> This is
-      the history, not the validation state, and it is the last quantity that
-      grows with the chain. The same header commitment is what will allow a
-      node to stop carrying it.
+      <strong>A node that joined cannot take in a newcomer.</strong> Showing
+      which chain carries the most work takes the headers from the first block,
+      and a node handed a ledger has them only from where it was handed on. It
+      can become one by reading the chain; nothing else is lost.
     </p>
     <p>
-      <strong>The theorem's cost is real.</strong> A wallet offline long enough
-      must ask an archivist, and the economics of archivists are unspecified.
-      This is an open question in the literature, not only here.
+      <strong>The theorem's cost is real.</strong> A wallet offline long enough,
+      or one that lost its records, must ask an archivist. Nobody is paid for
+      that service and the network runs without it, which bounds the problem
+      rather than solving it: a wallet in that position depends on someone
+      having chosen to keep the cold set.
     </p>
     <p>
       <strong>Smaller.</strong> An archivist rebuilds a proof in time
-      proportional to the set it holds. The hot tree representation has clear
-      room at 813 bytes per note.
+      proportional to the depth of the set rather than its size. Over half of
+      what a hot note costs is the tree that commits to it, which is where the
+      room left is.
     </p>
     <p>
-      The implementation is roughly 19 000 lines of Rust with 287 tests, no
+      The implementation is roughly 28 600 lines of Rust with 378 tests, no
       unsafe code, no asynchronous runtime, and five dependencies. Arithmetic
       side effects, slice indexing, and panicking helpers are denied at the
       workspace level. It is small enough to be read, which is the point: a
