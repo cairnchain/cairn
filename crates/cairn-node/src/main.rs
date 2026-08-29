@@ -45,6 +45,12 @@ fn run(arguments: &[String]) -> Result<(), String> {
         "restored     {} blocks, {} addresses",
         restored.blocks, restored.addresses
     );
+    if restored.rejoining {
+        println!(
+            "             the stored blocks start partway up the chain, so this \
+             node joins again rather than reading its way back"
+        );
+    }
     if restored.refused > 0 {
         println!(
             "             {} stored blocks were set aside; they will be asked for again",

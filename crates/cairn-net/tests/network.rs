@@ -780,3 +780,81 @@ fn an_archivist_says_so_when_it_introduces_itself() {
     plain.shutdown();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A node handed a ledger has to become an ordinary node: one that writes what
+/// it validates, serves it, and comes back after a restart.
+///
+/// It cannot write from the first block, because it never had one. Its log
+/// starts at the height it was handed, and everything about reading a block
+/// back by height has to work from there.
+#[test]
+fn a_node_that_joined_writes_and_serves_what_it_validates() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks =
+        forge.mine_many(usize::try_from(cairn_net::sync::JOIN_RATHER_THAN_READ).unwrap() + 40);
+    let top = (blocks.len() - 1) as u64;
+
+    let root = std::env::temp_dir().join(format!("cairn-writes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+
+    let (keeper, _) = Node::open_archiving(params, loopback(), root.join("keeper")).unwrap();
+    for block in &blocks {
+        keeper.submit_block(block.clone()).unwrap();
+    }
+
+    let (joiner, _) = Node::open(params, loopback(), root.join("joiner")).unwrap();
+    joiner.connect(keeper.address()).unwrap();
+    wait_for("the joiner to be handed a ledger", || {
+        joiner.height() == Some(top)
+    });
+    assert_eq!(joiner.joining(), Joined::Done);
+    assert!(
+        joiner.archived_at(top).is_none(),
+        "it wrote nothing yet, having validated nothing yet"
+    );
+
+    // Blocks it validates itself, which are the ones it can vouch for.
+    for _ in 0..3 {
+        let next = forge.mine();
+        let at = next.header.height;
+        keeper.submit_block(next).unwrap();
+        wait_for("the next block to reach the joiner", || {
+            joiner.height() == Some(at)
+        });
+    }
+
+    let written = joiner.archived_at(top + 1).expect("the first it validated");
+    assert_eq!(
+        written.header.height,
+        top + 1,
+        "at its own height, not at 0"
+    );
+    assert_eq!(
+        joiner.archived_at(top + 3).map(|block| block.header.height),
+        Some(top + 3),
+    );
+    assert!(
+        joiner.archived_at(top).is_none(),
+        "and nothing it was only handed"
+    );
+
+    // And it comes back: the log cannot be replayed against a ledger it never
+    // built, so it is set aside and the node joins again rather than pretending.
+    joiner.shutdown();
+    drop(joiner);
+    let (again, restored) = Node::open(params, loopback(), root.join("joiner")).unwrap();
+    assert!(restored.rejoining, "the log started partway up the chain");
+    assert_eq!(restored.blocks, 0);
+    assert_eq!(restored.refused, 0, "set aside is not the same as refused");
+    assert_eq!(again.height(), None, "so it starts from nothing again");
+
+    again.connect(keeper.address()).unwrap();
+    wait_for("the joiner to be handed a ledger a second time", || {
+        again.height() == Some(top + 3)
+    });
+
+    again.shutdown();
+    keeper.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
+}

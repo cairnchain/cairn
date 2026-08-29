@@ -137,6 +137,16 @@ pub struct Restored {
     pub refused: usize,
     /// Bytes dropped from the end of the log because a write never finished.
     pub discarded_bytes: u64,
+    /// Whether the log was set aside because it does not start at the first
+    /// block of the chain.
+    ///
+    /// A node handed a ledger writes its log from the height it was handed.
+    /// Replaying means applying each block to a ledger built from the one
+    /// before it, and this node never had those, so there is nothing to replay
+    /// against. It joins again, which costs it twelve megabytes and costs the
+    /// log the blocks it had written. Not a fault, and worth telling apart
+    /// from one.
+    pub rejoining: bool,
     /// Addresses read back from the address book.
     pub addresses: usize,
 }
@@ -289,8 +299,7 @@ impl Shared {
             let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
             let log = log.as_ref()?;
             locator.iter().find_map(|entry| {
-                let index = usize::try_from(entry.height).ok()?;
-                let block = log.read(index).ok().flatten()?;
+                let block = log.read_at(entry.height).ok().flatten()?;
                 (block.id() == entry.id).then_some(entry.height)
             })
         });
@@ -325,9 +334,7 @@ impl Shared {
         if let Some(log) = log.as_ref() {
             for (slot, height) in found.iter_mut().zip(heights.iter()) {
                 if slot.is_none() {
-                    *slot = usize::try_from(*height)
-                        .ok()
-                        .and_then(|index| log.read(index).ok().flatten());
+                    *slot = log.read_at(*height).ok().flatten();
                 }
             }
         }
@@ -507,16 +514,28 @@ impl Node {
         // the log is cut there and the rest is asked for again. It costs a
         // partial resync once, on a node whose log was written before this
         // rule existed or interrupted in the middle of a reorganisation.
+        //
+        // A log that does not start at the first block is not replayed at all.
+        // It belongs to a node that was handed a ledger, and the blocks in it
+        // build on a ledger this process no longer has. Such a node joins
+        // again rather than pretending it can read its way back.
+        let rejoining = !log.is_empty() && log.first_height() != 0;
         let mut applied = 0usize;
-        for block in log.replay() {
-            let Ok(block) = block else { break };
-            if !matches!(chain.add_block(block, now), Ok(Accepted::Extended)) {
-                break;
+        if !rejoining {
+            for block in log.replay() {
+                let Ok(block) = block else { break };
+                if !matches!(chain.add_block(block, now), Ok(Accepted::Extended)) {
+                    break;
+                }
+                applied = applied.saturating_add(1);
             }
-            applied = applied.saturating_add(1);
         }
-        let refused = recovered.blocks.saturating_sub(applied);
-        if refused > 0 {
+        let refused = if rejoining {
+            0
+        } else {
+            recovered.blocks.saturating_sub(applied)
+        };
+        if refused > 0 || rejoining {
             log.keep_first(applied)?;
         }
 
@@ -525,6 +544,7 @@ impl Node {
             blocks: applied,
             refused,
             discarded_bytes: recovered.discarded_bytes,
+            rejoining,
             addresses: book.len(),
         };
 
@@ -638,13 +658,12 @@ impl Node {
     /// old blocks is in: it has already asked the chain, which no longer holds
     /// the bodies of blocks too deep to be undone, and is now asking the disk.
     pub fn archived_at(&self, height: u64) -> Option<Block> {
-        let index = usize::try_from(height).ok()?;
         let log = self
             .shared
             .log
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        log.as_ref()?.read(index).ok().flatten()
+        log.as_ref()?.read_at(height).ok().flatten()
     }
 
     pub fn height(&self) -> Option<u64> {
@@ -980,8 +999,7 @@ impl Shared {
             if let Some(block) = chain.block_at(height) {
                 return Some(block.header);
             }
-            let index = usize::try_from(height).ok()?;
-            Some(log.as_ref()?.read(index).ok()??.header)
+            Some(log.as_ref()?.read_at(height).ok()??.header)
         };
 
         let state = chain.state();
@@ -1046,15 +1064,23 @@ fn write_branch(log: &mut BlockLog, accepted: &Accepted, chain: &ChainStore) {
     // would serve the wrong blocks, confidently, to everyone catching up.
     let Some(tip) = chain.height() else { return };
     let reaches = tip.saturating_add(1);
-    let common = usize::try_from(reaches)
-        .unwrap_or(usize::MAX)
-        .saturating_sub(added);
-    if log.len() > common && log.keep_first(common).is_err() {
+    let common = reaches.saturating_sub(added as u64);
+    if log.reaches() > common && log.keep_below(common).is_err() {
         return;
     }
     // Everything the branch carries beyond what the log holds. Usually one
     // block; more if a write failed earlier and the log fell behind.
-    let mut height = u64::try_from(log.len()).unwrap_or(u64::MAX);
+    //
+    // A log that holds nothing starts wherever the first block this node can
+    // still produce sits, which for a node handed a ledger is the height it
+    // was handed rather than zero. Counting from the log's own length instead
+    // would look for a block at position zero, which such a node has never had
+    // and never will, and it would write nothing for the rest of its life.
+    let mut height = if log.is_empty() {
+        reaches.saturating_sub(added as u64)
+    } else {
+        log.reaches()
+    };
     while height < reaches {
         // A block the chain has already let go of cannot be written, so the
         // log stays short and the rest is asked for again after a restart.

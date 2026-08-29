@@ -66,6 +66,8 @@ pub enum StoreError {
         #[source]
         source: CodecError,
     },
+    #[error("the log reaches height {expected} and was handed height {found}")]
+    OutOfOrder { expected: u64, found: u64 },
 }
 
 /// What opening a log found on disk.
@@ -99,6 +101,17 @@ pub struct BlockLog {
     path: PathBuf,
     /// Records held.
     count: usize,
+    /// Height of the first record, so a record's position and a block's height
+    /// are not the same number.
+    ///
+    /// They were, back when every node read its chain from the first block. A
+    /// node handed a ledger starts writing at the height it was handed, and a
+    /// log that assumed otherwise wrote nothing at all: it looked for the block
+    /// at position zero, which that node has never had and never will.
+    ///
+    /// Learned from the first record rather than stored beside it, because a
+    /// second place to write it down is a second place for it to be wrong.
+    first: u64,
     /// Byte offset just past the last record.
     end: u64,
 }
@@ -131,6 +144,7 @@ impl BlockLog {
             index,
             path,
             count: 0,
+            first: 0,
             end: 0,
         };
         let recovered = log.recover()?;
@@ -149,6 +163,40 @@ impl BlockLog {
         self.count == 0
     }
 
+    /// Height of the first block held, or zero when nothing is held.
+    pub fn first_height(&self) -> u64 {
+        self.first
+    }
+
+    /// The height just past the last block held.
+    ///
+    /// What a node compares its branch against to know what is left to write.
+    pub fn reaches(&self) -> u64 {
+        self.first.saturating_add(self.count as u64)
+    }
+
+    /// Whether this log holds the block at `height`.
+    pub fn holds(&self, height: u64) -> bool {
+        self.count > 0 && height >= self.first && height < self.reaches()
+    }
+
+    /// Reads the block at `height`, rather than at a position.
+    pub fn read_at(&self, height: u64) -> Result<Option<Block>, StoreError> {
+        if !self.holds(height) {
+            return Ok(None);
+        }
+        let Ok(index) = usize::try_from(height.saturating_sub(self.first)) else {
+            return Ok(None);
+        };
+        self.read(index)
+    }
+
+    /// Cuts the log back so that it holds nothing at `height` or past it.
+    pub fn keep_below(&mut self, height: u64) -> Result<(), StoreError> {
+        let keep = height.saturating_sub(self.first).min(self.count as u64);
+        self.keep_first(usize::try_from(keep).unwrap_or(usize::MAX))
+    }
+
     /// Adds one block to the end of the log.
     ///
     /// The record goes down before the offset that points at it. Dying between
@@ -157,6 +205,17 @@ impl BlockLog {
     /// for again, which is what a torn write has always cost here. The other
     /// order would leave an offset pointing at bytes that were never written.
     pub fn append(&mut self, block: &Block) -> Result<(), StoreError> {
+        // A log whose positions do not line up with heights would serve the
+        // wrong block to everyone catching up, confidently. The first block
+        // sets where the log starts; every one after it has to follow on.
+        if self.count == 0 {
+            self.first = block.header.height;
+        } else if block.header.height != self.reaches() {
+            return Err(StoreError::OutOfOrder {
+                expected: self.reaches(),
+                found: block.header.height,
+            });
+        }
         let body = block.encode();
         if body.len() > MAX_RECORD_BYTES {
             return Err(StoreError::BlockTooLarge);
@@ -283,6 +342,9 @@ impl BlockLog {
         self.file.flush()?;
         self.count = count;
         self.end = end;
+        if count == 0 {
+            self.first = 0;
+        }
         Ok(())
     }
 
@@ -314,6 +376,7 @@ impl BlockLog {
             // is not. Only the second needs the walk.
             if logged == 0 {
                 self.count = 0;
+                self.first = 0;
                 self.end = 0;
                 return Ok(Recovered::default());
             }
@@ -343,10 +406,22 @@ impl BlockLog {
             self.file.set_len(end)?;
             self.file.flush()?;
         }
+        self.first = self.height_of_first()?;
         Ok(Recovered {
             blocks: count,
             discarded_bytes: discarded,
         })
+    }
+
+    /// Reads back the height the log starts at.
+    ///
+    /// One record decoded when a node starts, which is what it costs not to
+    /// keep this written down anywhere it could disagree with the log itself.
+    fn height_of_first(&self) -> Result<u64, StoreError> {
+        if self.count == 0 {
+            return Ok(0);
+        }
+        Ok(self.read(0)?.map_or(0, |block| block.header.height))
     }
 
     /// Reads every complete record, cutting the file back at the first one that
@@ -410,6 +485,7 @@ impl BlockLog {
         self.index.seek(SeekFrom::Start(0))?;
         self.index.write_all(&written)?;
         self.index.flush()?;
+        self.first = self.height_of_first()?;
         Ok(recovered)
     }
 }
