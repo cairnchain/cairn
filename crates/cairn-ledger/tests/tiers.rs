@@ -9,6 +9,8 @@
     clippy::arithmetic_side_effects
 )]
 
+use std::collections::BTreeMap;
+
 use cairn_accumulator::ForestProof;
 use cairn_crypto::SecretKey;
 use cairn_ledger::note::{Note, NoteId};
@@ -741,4 +743,128 @@ fn a_block_creating_more_notes_than_the_drawer_holds_still_agrees() {
     connect_block(&mut theirs, &block, &params, NOW).unwrap();
     assert_eq!(state.state_root(), theirs.state_root());
     assert_eq!(state.hot_len(), theirs.hot_len());
+}
+
+/// Nothing is created and nothing is lost, across both tiers.
+///
+/// The two tests that guard value one transfer at a time say a transfer cannot
+/// pay out more than it spends and a coinbase cannot claim more than the
+/// schedule allows. Neither says anything about what happens when a note falls
+/// out of the hot set, is spent out of the cold one with a proof, or is caught
+/// by the grace window on the way past. That is the part of this design nobody
+/// else has built, so it is the part where a leak would hide.
+///
+/// Every note is tracked here as it is created and spent, and the total is
+/// compared against what the emission schedule says has been paid out. They
+/// have to agree after every single block.
+#[test]
+fn nothing_is_created_and_nothing_is_lost() {
+    let params = params().with_hot_capacity(24);
+    let miner = wallet(1);
+    let payee = wallet(2);
+    let other = wallet(3);
+
+    let mut state = LedgerState::archiving();
+    // Every note alive right now, whichever tier it sits in, and where it sits
+    // if it has fallen. The chain itself keeps no such thing: this is the
+    // outside view a test is allowed and a node is not.
+    let mut alive: BTreeMap<NoteId, (Note, Option<()>)> = BTreeMap::new();
+    let mut paid_out = Amount::ZERO;
+    let mut clock = 1_000u64;
+    let mut spent_from_cold = 0usize;
+
+    for round in 0..40u64 {
+        let height = state.next_height().expect("the chain has room");
+        clock += 600;
+
+        // Spend something every few blocks, alternating who is paid, so notes
+        // are created faster than they are spent and the hot set overflows.
+        let mut transfers = Vec::new();
+        if round > 2 && round % 3 == 0 {
+            let paid_to = if round % 2 == 0 { &payee } else { &other };
+            if let Some(transfer) = spend_oldest(&params, &state, &alive, &miner, paid_to) {
+                transfers.push(transfer);
+            }
+        }
+
+        let reward = params.reward_at(height);
+        let coinbase =
+            CoinbaseTransaction::new(height, vec![Note::new(reward, miner.public_key())]);
+        let block = assemble_block(&state, coinbase, transfers, &params, clock, 0).expect("valid");
+        let connected = connect_block(&mut state, &block, &params, NOW).expect("it connects");
+
+        // What the block did, applied to the outside view.
+        for id in &connected.transition.spent_hot {
+            alive.remove(id);
+        }
+        for spend in &connected.transition.spent_cold {
+            alive.remove(&spend.id);
+            spent_from_cold = spent_from_cold.saturating_add(1);
+        }
+        for (id, note) in &connected.transition.created {
+            alive.insert(*id, (*note, None));
+        }
+        // A note that fell keeps its value and gains a place in the forest.
+        for (id, note) in &connected.transition.evicted {
+            alive.insert(*id, (*note, Some(())));
+        }
+
+        paid_out = paid_out
+            .checked_add(reward)
+            .expect("the schedule does not overflow");
+
+        let held = alive
+            .values()
+            .try_fold(Amount::ZERO, |sum, (note, _)| sum.checked_add(note.value))
+            .expect("no overflow");
+        assert_eq!(
+            held, paid_out,
+            "after block {height}: the money alive is not what was paid out"
+        );
+    }
+
+    // And the exercise was worth running. A sum that never leaves one tier
+    // proves nothing about two, so this asserts that the run went through
+    // every case it was built to cover.
+    assert!(
+        alive.values().any(|(_, fallen)| fallen.is_some()),
+        "the hot set should have overflowed by now"
+    );
+    assert!(state.cold_len() > 0, "and the cold set should hold them");
+    assert!(
+        spent_from_cold > 0,
+        "and something should have been spent back out of it"
+    );
+}
+
+/// A transfer spending the oldest note this owner still holds, cold or hot.
+fn spend_oldest(
+    params: &ConsensusParams,
+    state: &LedgerState,
+    alive: &BTreeMap<NoteId, (Note, Option<()>)>,
+    owner: &SecretKey,
+    to: &SecretKey,
+) -> Option<Transfer> {
+    // A fallen note first, since spending one of those is the case worth
+    // exercising; otherwise whatever this owner still holds in the hot set.
+    let (id, (note, fallen)) = alive
+        .iter()
+        .find(|(id, (note, fallen))| {
+            note.owner == owner.public_key() && fallen.is_some() && state.hot_note(id).is_none()
+        })
+        .or_else(|| {
+            alive.iter().find(|(id, (note, _))| {
+                note.owner == owner.public_key() && state.hot_note(id).is_some()
+            })
+        })?;
+
+    if fallen.is_none() {
+        let mut transfer = Transfer::new(
+            vec![Input::hot(*id)],
+            vec![Note::new(note.value, to.public_key())],
+        );
+        transfer.sign_input(params.network, 0, note, owner);
+        return Some(transfer);
+    }
+    Some(spend_cold(state, params, *id, *note, owner, to))
 }
