@@ -230,20 +230,26 @@
           la chaîne repart au prochain mineur.
           <span class="mono">pkill -f "cairnd --network testnet-2"</span>
         </p>
+        <p class="resume-note">
+          Les deux serveurs tournent une version d'avant le 28 août. Ils
+          fonctionnent, mais n'ont aucune des neuf corrections de ce jour.
+          <span class="mono">sudo env MINE=… SEED=… sh
+          /usr/local/src/cairn/deploy/install.sh</span>
+        </p>
       </div>
       <div>
         <h3>La prochaine chose que j'écris</h3>
         <p>
-          <b>Sortir l'histoire de la mémoire du nœud.</b> Un nœud garde en
-          mémoire vive chaque bloc qu'il a validé. Mesuré : neuf mois de chaîne
-          coûtent 637 Mo, trente ans en coûteraient vingt-cinq gigaoctets. Il
-          n'en a besoin que d'un millier, plus l'état ; le reste est déjà sur
-          son disque. C'est le dernier trou dans la phrase écrite en haut du
-          dépôt.
+          <b>Les soixante-dix-neuf derniers octets.</b> Un nœud ne garde plus
+          les blocs anciens, mais il retient encore l'empreinte de chacun et
+          l'index qui la retrouve : 1,3 Go à trente ans. Ils partent le jour où
+          le message de synchronisation porte les hauteurs, car une position se
+          lira alors sur le disque. C'est le dernier endroit où la mémoire d'un
+          nœud grandit avec la chaîne.
         </p>
         <p class="resume-note">
-          Ensuite, dans l'ordre qui t'arrange : le protocole d'échantillonnage,
-          spécifier les archivistes, un portefeuille qui n'est pas un terminal.
+          Ensuite : le protocole d'échantillonnage, spécifier les archivistes,
+          un portefeuille qui n'est pas un terminal.
         </p>
       </div>
       <div>
@@ -369,10 +375,26 @@
       <div class="task">
         <div class="task-what">
           <b>Un débit par pair</b>
-          <span>Rien ne limite ce qu'un pair peut demander par seconde. Ce n'était que de la mémoire à lire, c'est maintenant du disque. Un nœud ne se bloque plus pour autant, mais un pair peut encore occuper un disque à lui tout seul.</span>
+          <span>Rien ne limitait ce qu'un pair peut faire coûter à un nœud : deux mille demandes de cent vingt-huit blocs restaient sous le plafond de messages et faisaient un quart de million de lectures disque. Chaque pair a maintenant une allocation par fenêtre, dépensée selon ce que répondre coûte.</span>
         </div>
         <div class="who me">moi</div>
-        <div class="cost">un jour</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Les limites qui ne se parlaient pas</b>
+          <span>Les règles autorisaient un bloc de 2,3 Go qu'aucun réseau ne porte, et le pool comptait les transferts sans regarder leur poids : deux gigaoctets de mémoire offerts à qui les envoie. Quatre défauts du même type, corrigés le 28 août. Un bloc pèse maintenant 128 ko, un choix qui décide aussi de la mémoire d'un nœud et de la durée de vie d'une note.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task">
+        <div class="task-what">
+          <b>Mettre les serveurs à jour</b>
+          <span>Les deux serveurs tournent une version d'avant le 28 août. Ils fonctionnent, mais sans aucune des corrections de ce jour. Une commande sur chacun.</span>
+        </div>
+        <div class="who you">toi</div>
+        <div class="cost">cinq minutes</div>
       </div>
       <div class="task">
         <div class="task-what">
@@ -451,11 +473,11 @@
       </div>
       <div class="task">
         <div class="task-what">
-          <b>Sortir l'histoire de la mémoire</b>
-          <span>Un nœud garde encore tous les blocs qu'il suit en mémoire vive. C'est la dernière chose qui grandit avec la chaîne.</span>
+          <b>Les corps de blocs relus sur le disque</b>
+          <span>Un nœud garde en mémoire les mille blocs sur lesquels il peut encore revenir en arrière, soit 134 Mo. Il n'en a besoin que pour les rejouer, et ils sont déjà sur son disque. Les relire libérerait la taille des blocs de cette contrainte, et donc le débit du réseau.</span>
         </div>
         <div class="who me">moi</div>
-        <div class="cost">une semaine</div>
+        <div class="cost">quelques jours</div>
       </div>
       <div class="task">
         <div class="task-what">
@@ -653,8 +675,8 @@
   </div>
 
   <footer>
-    <span>Cairn · route jusqu'au mainnet · v5</span>
-    <span>66 commits · 304 tests</span>
+    <span>Cairn · route jusqu'au mainnet · v6</span>
+    <span>74 commits · 314 tests</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 
