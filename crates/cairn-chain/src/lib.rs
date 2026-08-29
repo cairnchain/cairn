@@ -392,8 +392,14 @@ impl ChainStore {
     }
 
     /// Whether this node can answer with proofs.
+    ///
+    /// Archiving is one role and not two, so this asks for both halves of it:
+    /// the cold set, which rebuilds the proof of a note somebody lost, and the
+    /// headers, which prove to a newcomer which chain carries the most work.
+    /// A node builds them together, and this is what keeps a node that somehow
+    /// held one from telling the network it offers the other.
     pub fn is_archiving(&self) -> bool {
-        self.state.cold().is_archiving()
+        self.state.cold().is_archiving() && self.state.keeps_headers()
     }
 
     pub fn params(&self) -> &ConsensusParams {

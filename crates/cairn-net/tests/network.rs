@@ -725,6 +725,11 @@ fn a_newcomer_joins_through_an_archivist_and_reads_from_the_rest() {
         joiner.with_chain(|chain| chain.block_at(0).is_none()),
         "a node that was not there does not hold what happened before it"
     );
+    assert!(
+        !joiner.with_chain(cairn_chain::ChainStore::is_archiving),
+        "and so it does not offer to hand the chain on, which is why the role \
+         belongs to nodes that read it from the first block"
+    );
 
     for node in [reader, joiner, plain, keeper] {
         node.shutdown();
