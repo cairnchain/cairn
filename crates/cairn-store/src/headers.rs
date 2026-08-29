@@ -47,9 +47,19 @@ impl HeaderLog {
     /// back. Nothing is decoded: a header that cannot be read is found when it
     /// is read, and the file is the same length either way.
     pub fn open(directory: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::open_named(directory, HEADER_LOG)
+    }
+
+    /// The same, under another name.
+    ///
+    /// For the second log a node keeps while it fills in the headers from
+    /// before it arrived: those are not its headers until they have been
+    /// checked, and writing them into the real one before that would be
+    /// believing a stranger.
+    pub fn open_named(directory: impl AsRef<Path>, name: &str) -> Result<Self, StoreError> {
         let directory = directory.as_ref();
         std::fs::create_dir_all(directory)?;
-        let path = directory.join(HEADER_LOG);
+        let path = directory.join(name);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -134,6 +144,15 @@ impl HeaderLog {
             return Ok(None);
         }
         self.read(height.saturating_sub(self.first))
+    }
+
+    /// Empties it, leaving a log that starts wherever the next header does.
+    pub fn clear(&mut self) -> Result<(), StoreError> {
+        self.file.set_len(0)?;
+        self.file.flush()?;
+        self.count = 0;
+        self.first = 0;
+        Ok(())
     }
 
     /// Cuts the log back so it holds nothing at `height` or past it.

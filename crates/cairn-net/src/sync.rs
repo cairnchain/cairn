@@ -15,8 +15,8 @@ use cairn_primitives::Hash32;
 
 use crate::book::AddressBook;
 use crate::message::{
-    Handshake, Joining, Message, PeerAddress, MAX_ANNOUNCED, MAX_REQUESTED, MAX_SHARED_ADDRESSES,
-    PROTOCOL_VERSION,
+    Handshake, Joining, Message, PeerAddress, MAX_ANNOUNCED, MAX_HEADERS, MAX_REQUESTED,
+    MAX_SHARED_ADDRESSES, PROTOCOL_VERSION,
 };
 
 /// Everything of the surrounding node this layer is allowed to see.
@@ -217,6 +217,11 @@ pub struct Reaction {
     /// Named rather than built here. Building one means encoding a ledger,
     /// which is megabytes, and this runs with the chain held.
     pub join: Option<(Joining, u32)>,
+    /// A run of headers a peer asked for: where to start, and how many.
+    ///
+    /// Named rather than read here, for the same reason blocks are: they come
+    /// off a disk, and this runs with the chain held.
+    pub headers: Option<(u64, u64)>,
     /// Heights on the followed branch a peer asked for.
     ///
     /// Named rather than read here, because most of them are read off a disk
@@ -541,14 +546,20 @@ pub fn on_message(
 
     match message {
         // A pong needs no answer, a second introduction was already refused
-        // above, and a piece of a join answer belongs to whoever is collecting
-        // them rather than here. None of the three has anything to say back.
-        Message::Pong(_) | Message::Hello(_) | Message::Welcome(_) | Message::JoinPart { .. } => {
-            Reaction::idle()
-        }
+        // above, and a piece of a join answer, or a run of headers, belongs to
+        // whoever asked for it rather than here.
+        Message::Pong(_)
+        | Message::Hello(_)
+        | Message::Welcome(_)
+        | Message::JoinPart { .. }
+        | Message::Headers { .. } => Reaction::idle(),
         Message::Ping(nonce) => Reaction::reply(vec![Message::Pong(nonce)]),
         Message::GetChain { locator } => Reaction {
             locate: Some(locator),
+            ..Reaction::idle()
+        },
+        Message::GetHeaders { from, count } => Reaction {
+            headers: Some((from, count.min(MAX_HEADERS as u64))),
             ..Reaction::idle()
         },
         Message::Chain { from, count } => {

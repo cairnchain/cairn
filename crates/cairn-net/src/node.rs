@@ -39,7 +39,7 @@ use cairn_store::{BlockLog, DirectoryLock, HeaderLog, HeaderTree, StoreError, HA
 
 use crate::book::AddressBook;
 use crate::joining::{Collecting, Joined, Progress};
-use crate::message::{Joining, Message, JOIN_PART_BYTES, MAX_CHAIN};
+use crate::message::{Joining, Message, JOIN_PART_BYTES, MAX_CHAIN, MAX_HEADERS};
 use crate::refusal::{can_be_refused, Refusals};
 use crate::sync::{local_handshake, on_message, Local, PeerState, Reaction};
 use crate::wire::{read_message, write_message, Incoming, WireError};
@@ -714,10 +714,18 @@ impl Node {
         catch_up_headers(&mut headers, &log)?;
         let mut forest = HeaderTree::open(&directory)?;
         grow_forest(&mut forest, &headers);
+        let mut filling = HeaderLog::open_named(&directory, FILLING_LOG)?;
+        // What was being collected is only useful while it leads up to the
+        // oldest header held. A restart in the middle of a reorganisation, or
+        // after the chain moved on, can leave it pointing nowhere.
+        if headers.first_height() == 0 || filling.first_height() != 0 {
+            let _ = filling.clear();
+        }
         let log = Store {
             blocks: log,
             headers,
             forest,
+            filling,
         };
 
         let book = AddressBook::load(&directory);
@@ -883,6 +891,15 @@ impl Node {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         log.as_ref().map_or(0, |store| store.blocks.bytes())
+    }
+
+    /// Offers this node a run of headers as the ones from before it arrived.
+    ///
+    /// For tests. The node checks them exactly as it checks a run that came
+    /// off the network, which is the point: there is no way in that skips the
+    /// check, here or anywhere.
+    pub fn take_offered_headers(&self, from: u64, headers: &[BlockHeader]) {
+        self.shared.take_headers(from, headers);
     }
 
     /// How far this node is through joining a chain it was not on.
@@ -1120,6 +1137,11 @@ fn take_join_part(
                     // a ledger this node checked and adopted rather than one
                     // it merely received.
                     shared.keep_ledger(&whole);
+                    // The run of headers the ledger came with, written down.
+                    // Without them this node has no oldest header of its own,
+                    // and so nothing to check a filled-in run against: it
+                    // would never be able to take anyone in.
+                    shared.seed_headers(&handover.recent);
                     Some(())
                 });
             if landed.is_none() {
@@ -1162,6 +1184,9 @@ fn step(
     (asking, whole)
 }
 
+/// Where headers being filled in are kept until they check out.
+const FILLING_LOG: &str = "headers.filling";
+
 /// What a node keeps on disk, under one lock.
 ///
 /// Two files with two different lifetimes: the blocks, which a node drops once
@@ -1175,6 +1200,12 @@ struct Store {
     /// The forest those headers make, so this node can prove where one sits
     /// rather than only check somebody else's proof.
     forest: HeaderTree,
+    /// Headers from before this node arrived, while they are being collected.
+    ///
+    /// Kept apart from the real log until they check out, because until then
+    /// they are a stranger's word. A node that wrote them straight in would be
+    /// taking that word, which is the one thing this design does not do.
+    filling: HeaderLog,
 }
 
 impl Store {
@@ -1247,6 +1278,141 @@ impl Shared {
         let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
         log.as_ref()
             .is_some_and(|store| store.can_show_the_chain(reaches))
+    }
+
+    /// Writes down the headers a handover came with.
+    ///
+    /// They are the tail of the chain that was weighed, so they are as
+    /// vouched for as the ledger itself, and they are what everything filled
+    /// in afterwards is checked against.
+    fn seed_headers(&self, recent: &[BlockHeader]) {
+        let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(store) = log.as_mut() else {
+            return;
+        };
+        if !store.headers.is_empty() {
+            return;
+        }
+        for header in recent {
+            if store.headers.append(header).is_err() {
+                let _ = store.headers.clear();
+                return;
+            }
+        }
+    }
+
+    /// The next run of headers this node is missing from before it arrived,
+    /// or `None` when it is missing none.
+    fn wants_headers(&self) -> Option<Message> {
+        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        let store = log.as_ref()?;
+        if store.headers.first_height() == 0 {
+            return None;
+        }
+        let from = if store.filling.is_empty() {
+            0
+        } else {
+            store.filling.reaches()
+        };
+        if from >= store.headers.first_height() {
+            return None;
+        }
+        Some(Message::GetHeaders {
+            from,
+            count: MAX_HEADERS as u64,
+        })
+    }
+
+    /// Takes a run of headers offered as the ones from before this node
+    /// arrived.
+    ///
+    /// Nothing here is believed. They are written to a log of their own, and
+    /// only once they reach the oldest header this node holds is the forest
+    /// they make compared with the commitment that header already carries. A
+    /// sender that invented any of them is caught there; one that sent a
+    /// truthful run out of order, or with a gap, is caught by the log itself.
+    fn take_headers(&self, from: u64, headers: &[BlockHeader]) {
+        let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(store) = log.as_mut() else {
+            return;
+        };
+        let oldest = store.headers.first_height();
+        if oldest == 0 || headers.is_empty() {
+            return;
+        }
+        let expected = if store.filling.is_empty() {
+            0
+        } else {
+            store.filling.reaches()
+        };
+        if from != expected {
+            return;
+        }
+
+        for header in headers {
+            if header.height >= oldest {
+                break;
+            }
+            if store.filling.append(header).is_err() {
+                let _ = store.filling.clear();
+                return;
+            }
+        }
+        if store.filling.reaches() < oldest {
+            return;
+        }
+
+        // Everything that came before the oldest header held is here. The one
+        // question left is whether it is the truth, and that header answers
+        // it: what it carries is the commitment to every header before it.
+        let Ok(Some(anchor)) = store.headers.read_at(oldest) else {
+            return;
+        };
+        let mut forest = cairn_accumulator::Archive::new();
+        for height in 0..oldest {
+            let Ok(Some(header)) = store.filling.read_at(height) else {
+                let _ = store.filling.clear();
+                return;
+            };
+            forest.add(header_leaf(&header.id()));
+        }
+        if forest.commitment() != anchor.history {
+            // Somebody made them up, or sent the wrong chain's. Start over
+            // rather than keep any of it.
+            let _ = store.filling.clear();
+            return;
+        }
+
+        // Only now are they this node's own headers. Written in front of what
+        // it had, and the forest built again over the whole.
+        if !join_logs(&mut store.headers, &store.filling) {
+            return;
+        }
+        let _ = store.filling.clear();
+        grow_forest(&mut store.forest, &store.headers);
+    }
+
+    /// A run of headers off the disk, for a node filling in what came before
+    /// it arrived.
+    ///
+    /// Read from the header log, which every node keeps whole whatever it does
+    /// with its blocks, so this is an answer almost any node can give.
+    fn headers_from(&self, from: u64, count: u64) -> Vec<BlockHeader> {
+        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(store) = log.as_ref() else {
+            return Vec::new();
+        };
+        let stop = from
+            .saturating_add(count.min(MAX_HEADERS as u64))
+            .min(store.headers.reaches());
+        let mut headers = Vec::new();
+        for height in from..stop {
+            let Ok(Some(header)) = store.headers.read_at(height) else {
+                break;
+            };
+            headers.push(header);
+        }
+        headers
     }
 
     /// Builds the whole of what a newcomer asked for.
@@ -1516,6 +1682,16 @@ fn answer_deferred(
             }
         }
     }
+    if let Some((from, count)) = reaction.headers {
+        let headers = shared.headers_from(from, count);
+        if !headers.is_empty()
+            && outbound
+                .try_send(Message::Headers { from, headers })
+                .is_err()
+        {
+            return false;
+        }
+    }
     true
 }
 
@@ -1601,6 +1777,13 @@ fn maintenance_loop(shared: &Arc<Shared>) {
         save_book(shared);
         collect_finished(shared);
         shared.trim_history();
+        // Headers from before this node arrived, if it joined a chain rather
+        // than reading one. Asked of everybody: any node that read the chain
+        // can answer, and the answer is checked rather than trusted, so there
+        // is nobody in particular to ask.
+        if let Some(asking) = shared.wants_headers() {
+            shared.broadcast(None, &asking);
+        }
         abandon_stalled_join(shared, now);
         shared.refusals().forget_expired(now);
     }
@@ -1656,6 +1839,35 @@ fn catch_up_from(headers: &mut HeaderLog, blocks: &BlockLog, from: u64) -> Resul
         headers.append(&block.header)?;
     }
     Ok(())
+}
+
+/// Puts `front` in front of `log`, leaving one run from the older of the two.
+///
+/// Every record is rewritten, which is a pass over the headers and happens
+/// once in the life of a node that joined a chain.
+fn join_logs(log: &mut HeaderLog, front: &HeaderLog) -> bool {
+    let mut all = Vec::new();
+    for height in front.first_height()..front.reaches() {
+        let Ok(Some(header)) = front.read_at(height) else {
+            return false;
+        };
+        all.push(header);
+    }
+    for height in log.first_height()..log.reaches() {
+        let Ok(Some(header)) = log.read_at(height) else {
+            return false;
+        };
+        all.push(header);
+    }
+    if log.clear().is_err() {
+        return false;
+    }
+    for header in &all {
+        if log.append(header).is_err() {
+            return false;
+        }
+    }
+    true
 }
 
 /// Reads back the ledger a node was handed, if it kept one.
@@ -1992,6 +2204,13 @@ fn read_loop(
             }
         };
 
+        // Headers from before this node arrived belong to whoever asked for
+        // them, which is this node rather than the layer that reads messages.
+        if let Message::Headers { from, headers } = &message {
+            shared.take_headers(*from, headers);
+            continue;
+        }
+
         // A piece of a join answer belongs to whoever is collecting one, which
         // is this node rather than the layer that reads messages.
         let message = match join_piece(shared, message, outbound) {
@@ -2138,6 +2357,7 @@ mod tests {
             blocks: blocks_log,
             headers: HeaderLog::open(&directory).unwrap(),
             forest: HeaderTree::open(&directory).unwrap(),
+            filling: HeaderLog::open_named(&directory, FILLING_LOG).unwrap(),
         };
 
         let mut chain = ChainStore::new(params);

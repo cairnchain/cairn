@@ -19,7 +19,7 @@ use std::path::Path;
 
 use cairn_crypto::PublicKey;
 use cairn_ledger::block::Block;
-use cairn_ledger::note::{Note, NoteId};
+use cairn_ledger::note::NoteId;
 use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
 use cairn_primitives::{Amount, Hash32};
 
@@ -160,7 +160,6 @@ impl History {
     }
 
     /// Movements, newest first.
-    #[must_use]
     pub fn movements(&self) -> impl Iterator<Item = &Movement> {
         self.movements.iter().rev()
     }
@@ -375,12 +374,16 @@ impl Decode for History {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use cairn_crypto::SecretKey;
     use cairn_ledger::block::BlockHeader;
-    use cairn_ledger::note::NetworkId;
+    use cairn_ledger::note::{NetworkId, Note};
     use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 
     fn key(seed: u8) -> PublicKey {
@@ -401,7 +404,7 @@ mod tests {
                 state_root: Hash32::ZERO,
                 transactions_root: Hash32::ZERO,
                 history: Hash32::ZERO,
-                timestamp: 1_000 + height,
+                timestamp: 1_000_u64.saturating_add(height),
                 difficulty: 1,
                 total_work: u128::from(height),
                 nonce: 0,

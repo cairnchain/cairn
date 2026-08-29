@@ -8,7 +8,7 @@
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use cairn_chain::{Located, MAX_LOCATOR};
-use cairn_ledger::block::Block;
+use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::note::NetworkId;
 use cairn_ledger::transaction::Transfer;
 use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
@@ -26,6 +26,14 @@ pub const MAX_CHAIN: u64 = 2_000;
 pub const MAX_REQUESTED: usize = 128;
 /// Addresses one answer may carry.
 pub const MAX_SHARED_ADDRESSES: usize = 64;
+
+/// Headers one answer carries.
+///
+/// A node that joined a chain fills in the headers from before it arrived, so
+/// it can take in a newcomer of its own. At 182 bytes each this is 93 kB an
+/// answer, which is under what the wire carries and enough that filling in a
+/// long chain is thousands of exchanges rather than millions.
+pub const MAX_HEADERS: usize = 512;
 
 /// A peer's listening address, in a form the wire can carry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -197,6 +205,27 @@ pub enum Message {
         what: Joining,
         part: u32,
     },
+    /// Send me the headers from this height, on the branch you follow.
+    ///
+    /// For a node that was handed a ledger and so has no headers from before
+    /// it arrived. Without them it can follow the chain perfectly well and can
+    /// take in nobody, which would make the ability to join a chain die out
+    /// with the nodes that read one from the first block.
+    GetHeaders {
+        from: u64,
+        count: u64,
+    },
+    /// Headers in order, starting at `from`.
+    ///
+    /// Nothing about them is taken on the sender's word. Each one names what
+    /// it was built on, so the run proves its own order, and the forest they
+    /// make has to produce the commitment the asker's own tip already carries.
+    /// A sender that made any of them up is caught by that, not by being
+    /// trusted less.
+    Headers {
+        from: u64,
+        headers: Vec<BlockHeader>,
+    },
     /// One piece of an answer to [`Message::GetJoin`].
     ///
     /// `at` is the tip the answer describes, so an asker can tell that every
@@ -294,6 +323,8 @@ impl Message {
             Self::Transaction(_) => "transaction",
             Self::GetJoin { .. } => "get join",
             Self::JoinPart { .. } => "join part",
+            Self::GetHeaders { .. } => "get headers",
+            Self::Headers { .. } => "headers",
         }
     }
 
@@ -313,6 +344,8 @@ impl Message {
             Self::Transaction(_) => 11,
             Self::GetJoin { .. } => 12,
             Self::JoinPart { .. } => 13,
+            Self::GetHeaders { .. } => 14,
+            Self::Headers { .. } => 15,
         }
     }
 }
@@ -346,7 +379,7 @@ impl Encode for Message {
             Self::Hello(handshake) | Self::Welcome(handshake) => handshake.encode_to(out),
             Self::Ping(nonce) | Self::Pong(nonce) => nonce.encode_to(out),
             Self::GetChain { locator } => locator.encode_to(out),
-            Self::Chain { from, count } => {
+            Self::Chain { from, count } | Self::GetHeaders { from, count } => {
                 from.encode_to(out);
                 count.encode_to(out);
             }
@@ -372,6 +405,10 @@ impl Encode for Message {
                 part.encode_to(out);
                 parts.encode_to(out);
                 bytes.encode_to(out);
+            }
+            Self::Headers { from, headers } => {
+                from.encode_to(out);
+                headers.encode_to(out);
             }
         }
     }
@@ -440,6 +477,20 @@ impl Decode for Message {
                     parts,
                     bytes,
                 })
+            }
+            14 => Ok(Self::GetHeaders {
+                from: u64::decode_from(reader)?,
+                count: u64::decode_from(reader)?,
+            }),
+            15 => {
+                let from = u64::decode_from(reader)?;
+                let headers = Vec::<BlockHeader>::decode_from(reader)?;
+                if headers.len() > MAX_HEADERS {
+                    return Err(CodecError::InvalidValue {
+                        type_name: "Headers",
+                    });
+                }
+                Ok(Self::Headers { from, headers })
             }
             _ => Err(CodecError::InvalidValue {
                 type_name: "Message",

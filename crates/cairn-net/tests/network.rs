@@ -48,10 +48,17 @@ struct Forge {
 
 impl Forge {
     fn new(params: ConsensusParams) -> Self {
+        Self::starting_at(params, 1_000)
+    }
+
+    /// The same, from another moment, so two forges produce two chains rather
+    /// than the same one twice. Everything here is deterministic: same key,
+    /// same clock, same blocks.
+    fn starting_at(params: ConsensusParams, clock: u64) -> Self {
         Self {
             params,
             state: LedgerState::new(),
-            clock: 1_000,
+            clock,
         }
     }
 
@@ -1290,5 +1297,145 @@ fn a_node_on_a_network_with_a_pinned_first_block_keeps_its_chain() {
     );
 
     again.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A node that joined a chain has to be able to take in a newcomer of its own,
+/// or the ability to join would die out with the nodes that read a chain from
+/// the first block. It fills in the headers from before it arrived, and
+/// believes none of them until the forest they make produces the commitment
+/// its own oldest header already carries.
+#[test]
+fn a_node_that_joined_fills_in_the_headers_and_can_then_take_someone_in() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks =
+        forge.mine_many(usize::try_from(cairn_net::sync::JOIN_RATHER_THAN_READ).unwrap() + 40);
+    let top = (blocks.len() - 1) as u64;
+
+    let root = std::env::temp_dir().join(format!("cairn-relay-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+
+    let (host, _) = Node::open(params, loopback(), root.join("host")).unwrap();
+    for block in &blocks {
+        host.submit_block(block.clone()).unwrap();
+    }
+
+    // One that joined rather than read, so it starts with no headers from
+    // before it arrived.
+    let (joined, _) = Node::open(params, loopback(), root.join("joined")).unwrap();
+    joined.connect(host.address()).unwrap();
+    wait_for("the node to be handed a ledger", || {
+        joined.height() == Some(top)
+    });
+    assert_eq!(joined.joining(), Joined::Done);
+
+    // It fills them in on its own, from the peer it already has.
+    wait_for("the headers from before it arrived", || {
+        cairn_store::HeaderLog::open(root.join("joined"))
+            .map(|log| log.first_height() == 0 && log.reaches() >= top)
+            .unwrap_or(false)
+    });
+
+    // And now a newcomer can join through it rather than through the one node
+    // that read the chain.
+    host.shutdown();
+    let newcomer = Node::bind(params, loopback()).unwrap();
+    newcomer.connect(joined.address()).unwrap();
+    wait_for("a newcomer to join through the node that joined", || {
+        newcomer.height() == Some(top)
+    });
+    assert_eq!(
+        newcomer.joining(),
+        Joined::Done,
+        "handed a ledger by a node that was handed one itself"
+    );
+    assert_eq!(
+        newcomer.with_chain(|chain| chain.state().state_root()),
+        joined.with_chain(|chain| chain.state().state_root()),
+    );
+
+    newcomer.shutdown();
+    joined.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Headers offered as the ones from before this node arrived are not believed
+/// because of who sent them. The forest they make has to produce the
+/// commitment the node's own oldest header already carries, and a run that
+/// does not is thrown away rather than kept.
+#[test]
+fn invented_headers_are_refused_however_well_formed_they_are() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let real =
+        forge.mine_many(usize::try_from(cairn_net::sync::JOIN_RATHER_THAN_READ).unwrap() + 40);
+    let top = (real.len() - 1) as u64;
+
+    let root = std::env::temp_dir().join(format!("cairn-invent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+
+    let (host, _) = Node::open(params, loopback(), root.join("host")).unwrap();
+    for block in &real {
+        host.submit_block(block.clone()).unwrap();
+    }
+
+    let (joined, _) = Node::open(params, loopback(), root.join("joined")).unwrap();
+    joined.connect(host.address()).unwrap();
+    wait_for("the node to be handed a ledger", || {
+        joined.height() == Some(top)
+    });
+
+    // Put back the state a node is in the moment it has been handed a ledger:
+    // the tail of the headers and nothing before it. Left to itself it fills
+    // them in from its peer within the second, and what is being tested here
+    // is what happens when the run it is offered is not this chain's.
+    joined.shutdown();
+    drop(joined);
+    host.shutdown();
+    let oldest = top.saturating_sub(8);
+    {
+        let mut log = cairn_store::HeaderLog::open(root.join("joined")).unwrap();
+        let tail: Vec<_> = (oldest..=top)
+            .map(|height| real[usize::try_from(height).unwrap()].header)
+            .collect();
+        log.clear().unwrap();
+        for header in &tail {
+            log.append(header).unwrap();
+        }
+    }
+    let (joined, _) = Node::open(params, loopback(), root.join("joined")).unwrap();
+    assert_eq!(
+        cairn_store::HeaderLog::open(root.join("joined"))
+            .unwrap()
+            .first_height(),
+        oldest,
+        "it arrived partway up and knows it"
+    );
+
+    // A second chain, mined properly and entirely elsewhere, and exactly long
+    // enough to fill the gap. Every header carries real work and follows on
+    // from the one before it, and the run is the right length and starts in
+    // the right place: nothing but the commitment can tell it apart.
+    let mut other = Forge::starting_at(params, 500_000);
+    let elsewhere = other.mine_many(usize::try_from(oldest).unwrap());
+    assert_ne!(
+        elsewhere[0].id(),
+        real[0].id(),
+        "the two chains have to actually differ"
+    );
+    let offered: Vec<_> = elsewhere.iter().map(|block| block.header).collect();
+    for chunk in offered.chunks(cairn_net::message::MAX_HEADERS) {
+        joined.take_offered_headers(chunk[0].height, chunk);
+    }
+
+    // It keeps them nowhere: what it holds still starts where it arrived.
+    let log = cairn_store::HeaderLog::open(root.join("joined")).unwrap();
+    assert!(
+        log.first_height() > 0,
+        "a run that does not lead to this chain is not this chain's"
+    );
+
+    joined.shutdown();
     let _ = std::fs::remove_dir_all(&root);
 }
