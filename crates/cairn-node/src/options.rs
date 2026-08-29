@@ -50,11 +50,11 @@ cairnd, a Cairn node
                          grows; without it a node keeps sixty four hashes
   --keep <size|all>      how much of the chain to keep on disk, in bytes, or
                          `all` to keep every block ever accepted (default:
-                         1GB, or all with --archive). A node does not need old
-                         blocks: it keeps the ledger they add up to. They are
-                         kept for other people, so a peer a little behind can
-                         read them rather than being handed a whole ledger.
-                         Accepts suffixes: 512MB, 8GB
+                         1GB). A node does not need old blocks: it keeps the
+                         ledger they add up to, and the headers apart from
+                         them. They are kept for other people, so a peer a
+                         little behind can read them rather than being handed
+                         a whole ledger. Accepts suffixes: 512MB, 8GB
   --status <seconds>     how often to print a status line (default: 10)
   --run-for <seconds>    stop after this long, for tests and demonstrations
   --help                 print this and stop
@@ -220,12 +220,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
 
     let archive = command_line.has("archive") || config.has("archive");
 
-    // An archivist proves things about headers by reading them out of the
-    // blocks it kept, so saying nothing about how much to keep means keeping
-    // all of it. Saying something wins, including saying something smaller,
-    // which is an operator's business.
     let keep = match setting("keep") {
-        None if archive => u64::MAX,
         None => KEEP_BLOCK_BYTES,
         Some(text) => parse_size(&text)?,
     };
@@ -495,17 +490,8 @@ mod tests {
 
         let options = resolve_options(&args(&["--archive"])).unwrap().unwrap();
         assert_eq!(
-            options.keep,
-            u64::MAX,
-            "an archivist proves things by reading its blocks, so it keeps them"
-        );
-
-        let options = resolve_options(&args(&["--archive", "--keep", "1GB"]))
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            options.keep, 1_000_000_000,
-            "and an operator that says otherwise is obeyed"
+            options.keep, KEEP_BLOCK_BYTES,
+            "archiving is about headers and fallen notes, not about blocks"
         );
     }
 }

@@ -947,11 +947,12 @@ fn a_node_writes_its_ledger_down_and_stops_keeping_every_block() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// An archivist reads the headers it proves things about out of the blocks it
-/// kept, so trimming those would leave it unable to answer a newcomer while
-/// still telling everyone it can. It keeps them all instead.
+/// An archivist no longer has to carry the blocks. What it proves things about
+/// is headers, and those are kept in their own log now, so a node offering the
+/// archive service pays for the headers and the fallen notes rather than for
+/// every block that ever went by.
 #[test]
-fn an_archivist_keeps_the_blocks_it_proves_things_from() {
+fn an_archivist_does_not_have_to_keep_the_blocks() {
     let params = params();
     let root = std::env::temp_dir().join(format!("cairn-keeps-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -967,14 +968,17 @@ fn an_archivist_keeps_the_blocks_it_proves_things_from() {
 
     // The plain node lets blocks go once it has written its ledger down; the
     // archivist cannot, because proving where a header sits means reading it.
-    plain.keep_blocks(1);
-    wait_for("the plain node to drop what it no longer needs", || {
-        plain.archived_at(0).is_none()
-    });
+    for node in [&plain, &keeper] {
+        node.keep_blocks(1);
+    }
+    for node in [&plain, &keeper] {
+        wait_for("the node to drop what it no longer needs", || {
+            node.archived_at(0).is_none()
+        });
+    }
     assert!(
-        keeper.archived_at(0).is_some(),
-        "an archivist that dropped these could not answer a newcomer, and \
-         would still be saying it can"
+        keeper.with_chain(cairn_chain::ChainStore::is_archiving),
+        "and it is still an archivist, having dropped them"
     );
 
     keeper.shutdown();
@@ -1149,5 +1153,53 @@ fn a_node_keeps_its_headers_after_it_has_dropped_the_blocks() {
     assert_eq!(headers.reaches(), top + 1);
     assert_eq!(headers.first_height(), 0);
 
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The point of keeping headers apart from blocks: a node that has dropped
+/// every block it applied can still show a newcomer which chain carries the
+/// most work, and still hand over the ledger.
+#[test]
+fn a_newcomer_joins_through_an_archivist_that_kept_no_blocks() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks =
+        forge.mine_many(usize::try_from(cairn_net::sync::JOIN_RATHER_THAN_READ).unwrap() + 40);
+    let top = (blocks.len() - 1) as u64;
+
+    let root = std::env::temp_dir().join(format!("cairn-lean-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+
+    let (keeper, _) = Node::open_archiving(params, loopback(), root.join("keeper")).unwrap();
+    for block in &blocks {
+        keeper.submit_block(block.clone()).unwrap();
+    }
+
+    keeper.keep_blocks(1);
+    wait_for("the archivist to drop its blocks", || {
+        keeper.archived_at(0).is_none()
+    });
+    assert!(
+        keeper.archived_at(top / 2).is_none(),
+        "it kept none of the middle of the chain either"
+    );
+
+    let joiner = Node::bind(params, loopback()).unwrap();
+    joiner.connect(keeper.address()).unwrap();
+    wait_for("the joiner to be handed a ledger", || {
+        joiner.height() == Some(top)
+    });
+    assert_eq!(
+        joiner.joining(),
+        Joined::Done,
+        "handed over, not read block by block from a node holding no blocks"
+    );
+    assert_eq!(
+        joiner.with_chain(|chain| chain.state().state_root()),
+        keeper.with_chain(|chain| chain.state().state_root()),
+    );
+
+    joiner.shutdown();
+    keeper.shutdown();
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -721,7 +721,6 @@ impl Node {
     ) -> Result<Self, NodeError> {
         let listener = TcpListener::bind(address)?;
         let address = listener.local_addr()?;
-        let archiving = chain.is_archiving();
 
         let shared = Arc::new(Shared {
             params,
@@ -731,14 +730,7 @@ impl Node {
             log: Mutex::new(log),
             book: Mutex::new(book),
             directory,
-            // An archivist reads the headers it proves things about out of the
-            // blocks it kept, so it keeps them all. Everyone else keeps a
-            // bounded amount and lets the rest go.
-            keep_bytes: AtomicU64::new(if archiving {
-                u64::MAX
-            } else {
-                KEEP_BLOCK_BYTES
-            }),
+            keep_bytes: AtomicU64::new(KEEP_BLOCK_BYTES),
             _lock: lock,
             peers: Mutex::new(HashMap::new()),
             refusals: Mutex::new(Refusals::new()),
