@@ -1642,6 +1642,49 @@ fn read_handed_ledger(
     Some((state, handover.recent))
 }
 
+/// Works out what to do about one message, and writes down anything it
+/// changed.
+///
+/// Everything that needs the chain happens here and nowhere else, so it is
+/// held once and let go before a single byte is sent: a slow peer must never
+/// be able to stall the chain for everyone.
+fn decide(
+    shared: &Arc<Shared>,
+    peer: &mut PeerState,
+    message: Message,
+) -> (Reaction, Vec<Transfer>) {
+    // Chain first and log second, here and everywhere, so two threads never
+    // take these two the other way round from each other.
+    let mut chain = shared.chain();
+    let book = shared.book().clone();
+    let mut log = shared.log.lock().unwrap_or_else(PoisonError::into_inner);
+
+    let reaches = chain.height().map_or(0, |tip| tip.saturating_add(1));
+    let shows = log
+        .as_ref()
+        .is_some_and(|store| store.can_show_the_chain(reaches));
+    let mut local = Local {
+        chain: &mut chain,
+        book: &book,
+        shows_the_chain: shows,
+        listen: shared.address.port(),
+        nonce: shared.nonce,
+    };
+    let reaction = on_message(&mut local, peer, message, unix_now());
+
+    // Written while the chain is still held, so the log cannot record a branch
+    // the chain has already moved off.
+    if let (Some(accepted), Some(log)) = (reaction.applied.as_ref(), log.as_mut()) {
+        write_branch(log, accepted, &chain);
+    }
+    let passing: Vec<Transfer> = reaction
+        .relayed
+        .iter()
+        .filter_map(|id| chain.pooled(id).cloned())
+        .collect();
+    (reaction, passing)
+}
+
 /// Whether the gap between two rounds of maintenance means the machine was not
 /// running, or not on the network, while it passed.
 ///
@@ -1927,37 +1970,7 @@ fn read_loop(
 
         // The chain is held for the decision and for writing the log, and let
         // go before anything is sent, so a slow peer never stalls the chain.
-        let (mut reaction, passing) = {
-            // Chain first and log second, here and everywhere, so two threads
-            // never take these two the other way round from each other.
-            let mut chain = shared.chain();
-            let book = shared.book().clone();
-            let mut log = shared.log.lock().unwrap_or_else(PoisonError::into_inner);
-
-            let shows = log.as_ref().is_some_and(|store| {
-                store.can_show_the_chain(chain.height().map_or(0, |tip| tip.saturating_add(1)))
-            });
-            let mut local = Local {
-                chain: &mut chain,
-                book: &book,
-                shows_the_chain: shows,
-                listen: shared.address.port(),
-                nonce: shared.nonce,
-            };
-            let reaction = on_message(&mut local, &mut peer, message, unix_now());
-
-            // Written while the chain is still held, so the log cannot record
-            // a branch the chain has already moved off.
-            if let (Some(accepted), Some(log)) = (reaction.applied.as_ref(), log.as_mut()) {
-                write_branch(log, accepted, &chain);
-            }
-            let passing: Vec<Transfer> = reaction
-                .relayed
-                .iter()
-                .filter_map(|id| chain.pooled(id).cloned())
-                .collect();
-            (reaction, passing)
-        };
+        let (mut reaction, passing) = decide(shared, &mut peer, message);
 
         shared.remember(&reaction.learned);
         shared.forget(&reaction.forget);

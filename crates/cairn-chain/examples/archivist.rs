@@ -1,14 +1,17 @@
 //! What each role in the network carries, over thirty years.
 //!
-//! Three services, and they are not the same job:
+//! Four services, and they are not the same job:
 //!
 //! - Following the chain. Validating blocks as they arrive and answering about
 //!   the tip. Every node does this.
+//! - Taking in newcomers. Holding every header and the forest they make, so
+//!   somebody arriving can be shown which chain carries the most work. Every
+//!   node does this too, which is what stops joining a chain from depending on
+//!   anyone volunteering.
 //! - Keeping the history. Holding every block ever accepted, so a node that
 //!   reads the chain the long way has somebody to read it from.
-//! - Archiving. Holding every header and every fallen note, so a newcomer can
-//!   be shown which chain is heaviest and a wallet that lost a proof can be
-//!   given it back.
+//! - Archiving. Holding every note that ever fell out of the hot set, so a
+//!   wallet that lost its proof can be given it back.
 //!
 //! What this computes is what each of them costs at thirty years, from the
 //! sizes the rules actually impose rather than from guesses. It exists because
@@ -36,10 +39,10 @@ const PAYMENT_BYTES: u64 = 191;
 /// Notes such a payment leaves behind, net of the one it spends.
 const NOTES_PER_PAYMENT: u64 = 1;
 
-/// A leaf and the inner node above it, which is what an archive holds per item.
+/// A leaf and the inner node above it, which is what a forest holds per item.
 const ARCHIVED_BYTES: u64 = 64;
-/// What a header costs an archivist, which is the same bargain.
-const HEADER_BYTES: u64 = 64;
+/// What a header takes on disk, which is what it takes on the wire.
+const HEADER_BYTES: u64 = 182;
 
 fn main() {
     let params = ConsensusParams::testnet();
@@ -49,10 +52,10 @@ fn main() {
     println!("A block a minute, {BLOCKS} blocks, at three ways a chain can be used.\n");
 
     println!(
-        "{:>14}  {:>14}  {:>14}  {:>14}  {:>14}",
-        "chain is", "payments/s", "follows only", "keeps history", "archives"
+        "{:>10}  {:>11}  {:>12}  {:>12}  {:>13}  {:>10}",
+        "chain is", "payments/s", "follows", "takes in", "keeps history", "archives"
     );
-    println!("{}", "-".repeat(78));
+    println!("{}", "-".repeat(80));
 
     for share in [0.01f64, 0.10, 1.00] {
         let block = (full as f64 * share) as u64;
@@ -65,31 +68,38 @@ fn main() {
         // Keeping the history: every block ever accepted, on disk.
         let history = BLOCKS * block;
 
-        // Archiving: every header, and every note that ever fell out of the
-        // hot set, both held so a path through them can be built.
+        // Taking in newcomers: every header, and the forest they make, both
+        // on disk. The same figure whatever the chain carries, since a header
+        // is the same size whether its block is full or empty.
+        let taking_in = BLOCKS * (HEADER_BYTES + ARCHIVED_BYTES);
+
+        // Archiving: every note that ever fell out of the hot set, held so a
+        // path through them can be built.
         let fallen = (BLOCKS * notes).saturating_sub(params.hot_capacity as u64);
-        let archive = BLOCKS * HEADER_BYTES + fallen * ARCHIVED_BYTES;
+        let archive = fallen * ARCHIVED_BYTES;
 
         println!(
-            "{:>13.0}%  {:>14.1}  {:>14}  {:>14}  {:>14}",
+            "{:>9.0}%  {:>11.1}  {:>12}  {:>12}  {:>13}  {:>10}",
             share * 100.0,
             payments as f64 / 60.0,
             bytes(follows),
+            bytes(taking_in),
             bytes(history),
             bytes(archive),
         );
     }
 
     println!(
-        "\nOnly the first of the three is bounded. It is the one the design set out\n\
-         to bound, and the sampled start is what lets a node do it and nothing\n\
-         else: a newcomer no longer has to read the history to join, so a node no\n\
-         longer has to keep it for them.\n"
+        "\nA node does the first two. The first is bounded by the rules and does not\n\
+         grow at all; the second grows, at 129 MB a year, which is the price of\n\
+         not needing anybody's permission to join. Bitcoin's equivalent promise\n\
+         costs 50 GB a year and Ethereum's 200.\n"
     );
     println!(
-        "Today every node keeps all three whether it meant to or not: nothing\n\
-         trims the log, so a node's disk grows with the chain even though its\n\
-         memory does not."
+        "The last two are chosen work, and the network runs without them. That is\n\
+         the whole of what was decided here: rather than find a way to pay for a\n\
+         service nobody could do without, make the service nobody can do without\n\
+         small enough that everybody does it."
     );
 }
 
