@@ -93,6 +93,7 @@ dependencies = [
 name = "cairn-net"
 version = "0.1.0"
 dependencies = [
+ "cairn-accumulator",
  "cairn-chain",
  "cairn-crypto",
  "cairn-ledger",
