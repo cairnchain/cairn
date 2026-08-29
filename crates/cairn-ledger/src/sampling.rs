@@ -25,7 +25,7 @@
 //! header this sampling just accepted.
 
 use cairn_accumulator::forest::{Forest, ForestProof};
-use cairn_primitives::codec::Encode;
+use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
 use cairn_primitives::hash::{hash, Domain};
 use cairn_primitives::Hash32;
 
@@ -112,6 +112,57 @@ pub enum StartError {
     WrongPlace { index: usize },
     #[error("the header opened at draw {index} states more work than the tip")]
     PastTheTip { index: usize },
+}
+
+impl Encode for Sample {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        self.header.encode_to(out);
+        self.proof.encode_to(out);
+    }
+}
+
+impl Decode for Sample {
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        let header = BlockHeader::decode_from(reader)?;
+        let proof = ForestProof::decode_from(reader)?;
+        Ok(Self { header, proof })
+    }
+}
+
+impl Encode for SampledStart {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        self.tip.encode_to(out);
+        self.history.encode_to(out);
+        u32::try_from(self.samples.len())
+            .unwrap_or(u32::MAX)
+            .encode_to(out);
+        for sample in &self.samples {
+            sample.encode_to(out);
+        }
+    }
+}
+
+impl Decode for SampledStart {
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        let tip = BlockHeader::decode_from(reader)?;
+        let history = Forest::decode_from(reader)?;
+        let count = usize::try_from(u32::decode_from(reader)?).unwrap_or(usize::MAX);
+        // Bounded before anything is reserved, since a sender picks it.
+        if count > SAMPLES {
+            return Err(CodecError::InvalidValue {
+                type_name: "SampledStart",
+            });
+        }
+        let mut samples = Vec::with_capacity(count.min(64));
+        for _ in 0..count {
+            samples.push(Sample::decode_from(reader)?);
+        }
+        Ok(Self {
+            tip,
+            history,
+            samples,
+        })
+    }
 }
 
 /// What a chain is worth, once its sampling has been checked.

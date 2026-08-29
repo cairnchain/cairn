@@ -125,6 +125,90 @@ impl Decode for ForestProof {
     }
 }
 
+impl Encode for Forest {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        self.leaves.encode_to(out);
+        self.live.encode_to(out);
+        // One byte of height per root, so a mostly empty forest is small and
+        // the reader knows which tree each root belongs to.
+        let held: Vec<(u8, Hash32)> = self
+            .roots
+            .iter()
+            .enumerate()
+            .filter_map(|(height, root)| Some((u8::try_from(height).ok()?, (*root)?)))
+            .collect();
+        u32::try_from(held.len()).unwrap_or(u32::MAX).encode_to(out);
+        for (height, root) in held {
+            height.encode_to(out);
+            root.encode_to(out);
+        }
+    }
+}
+
+impl Decode for Forest {
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        let leaves = u64::decode_from(reader)?;
+        let live = u64::decode_from(reader)?;
+        let count = usize::try_from(u32::decode_from(reader)?).unwrap_or(usize::MAX);
+        if count > MAX_HEIGHT {
+            return Err(CodecError::InvalidValue {
+                type_name: "Forest",
+            });
+        }
+        let mut held = Vec::with_capacity(count);
+        for _ in 0..count {
+            let height = u8::decode_from(reader)?;
+            let root = Hash32::decode_from(reader)?;
+            held.push((height, root));
+        }
+
+        let mut roots = vec![None; MAX_HEIGHT];
+        for (height, root) in held {
+            let Some(slot) = roots.get_mut(usize::from(height)) else {
+                return Err(CodecError::InvalidValue {
+                    type_name: "Forest",
+                });
+            };
+            if slot.is_some() {
+                // One root per height, or a reader could be handed two and
+                // have to choose.
+                return Err(CodecError::InvalidValue {
+                    type_name: "Forest",
+                });
+            }
+            *slot = Some(root);
+        }
+
+        // The trees a forest holds are the set bits of its leaf count, so the
+        // roots and the count check each other. What is decoded here has to be
+        // a forest something could have produced, not merely a well formed
+        // message.
+        for (height, root) in roots.iter().enumerate() {
+            let shift = u32::try_from(height).unwrap_or(u32::MAX);
+            let expected = leaves.checked_shr(shift).unwrap_or(0) & 1 == 1;
+            if root.is_some() != expected {
+                return Err(CodecError::InvalidValue {
+                    type_name: "Forest",
+                });
+            }
+        }
+        if live > leaves {
+            return Err(CodecError::InvalidValue {
+                type_name: "Forest",
+            });
+        }
+
+        Ok(Self {
+            roots,
+            leaves,
+            live,
+            // Proofs are not part of a forest on the wire. Whoever needs one
+            // is handed it separately and checks it against these roots.
+            watched: BTreeMap::new(),
+        })
+    }
+}
+
 /// The whole cold set, as a node holds it.
 ///
 /// At most sixty four hashes and two counters, whatever the forest contains.

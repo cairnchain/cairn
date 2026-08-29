@@ -453,3 +453,42 @@ fn watching_nothing_costs_nothing() {
     assert_eq!(plain.watched_count(), 0);
     assert_eq!(watching.watched_count(), 100);
 }
+
+/// A forest crosses the wire and comes back the same.
+#[test]
+fn a_forest_survives_a_round_trip() {
+    let mut forest = Forest::new();
+    for index in 0..37u64 {
+        forest.add(forest_leaf(&index.to_le_bytes()));
+    }
+    let commitment = forest.commitment();
+
+    let bytes = forest.encode();
+    let read_back = Forest::decode(&bytes).expect("a forest it wrote reads back");
+    assert_eq!(read_back.commitment(), commitment);
+    assert_eq!(read_back.len(), forest.len());
+}
+
+/// Roots that do not match the leaf count are not a forest anything produced.
+///
+/// The trees a forest holds are the set bits of its leaf count, so the two
+/// check each other. Without that a sender could hand over roots of its own
+/// choosing and a commitment computed from them, and the pair would agree with
+/// itself while describing nothing.
+#[test]
+fn a_forest_whose_roots_contradict_its_count_is_refused() {
+    let mut forest = Forest::new();
+    for index in 0..8u64 {
+        forest.add(forest_leaf(&index.to_le_bytes()));
+    }
+    let mut bytes = forest.encode();
+    // Eight leaves is one tree of height three. Say nine instead, which would
+    // take two trees, and the single root no longer accounts for it.
+    bytes[0] = 9;
+    assert!(Forest::decode(&bytes).is_err());
+
+    // And a forest that says more of its leaves are live than it ever held.
+    let mut bytes = forest.encode();
+    bytes[8] = 99;
+    assert!(Forest::decode(&bytes).is_err());
+}

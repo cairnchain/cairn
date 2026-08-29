@@ -287,3 +287,52 @@ fn a_hot_set_past_the_cap_is_refused_before_it_is_built() {
         "how much work a handover costs is not for its sender to decide"
     );
 }
+
+/// A handover crosses the wire and is still the same ledger.
+#[test]
+fn a_handover_survives_a_round_trip() {
+    let params = params();
+    let miner = wallet(1);
+    let mut node = Node::new();
+    node.mine_empty(&miner, RECENT_HEADERS + 20);
+
+    let handover = node.handover();
+    let bytes = cairn_primitives::codec::Encode::encode(&handover);
+    let read_back = <Handover as cairn_primitives::codec::Decode>::decode(&bytes)
+        .expect("what it wrote, it reads");
+
+    let rebuilt = accept(&read_back, params.hot_capacity).expect("and it still checks out");
+    assert_eq!(rebuilt.state_root(), node.state.state_root());
+    assert_eq!(rebuilt.hot_len(), node.state.hot_len());
+    assert_eq!(rebuilt.grace_len(), node.state.grace_len());
+
+    println!(
+        "a handover of {} blocks takes {} bytes",
+        node.headers.len(),
+        bytes.len()
+    );
+}
+
+/// Sizes a reader reserves for are the sender's to name, so each is capped.
+#[test]
+fn a_handover_that_names_absurd_sizes_is_refused_while_reading() {
+    let miner = wallet(1);
+    let mut node = Node::new();
+    node.mine_empty(&miner, RECENT_HEADERS + 4);
+
+    let handover = node.handover();
+    let good = cairn_primitives::codec::Encode::encode(&handover);
+
+    // The hot set count sits right after the two forests, and the forests are
+    // fixed width for a given shape, so the count is found by reading up to it.
+    // Rather than compute the offset, every prefix is truncated and fed back:
+    // a reader that reserves before checking would run out of memory on one of
+    // them rather than returning an error.
+    for cut in (8..good.len()).step_by(good.len() / 20 + 1) {
+        let outcome = <Handover as cairn_primitives::codec::Decode>::decode(&good[..cut]);
+        assert!(
+            outcome.is_err(),
+            "a message cut short at {cut} should not read as a whole one"
+        );
+    }
+}

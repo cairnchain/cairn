@@ -20,12 +20,16 @@
 use std::collections::VecDeque;
 
 use cairn_accumulator::forest::{Forest, ForestProof};
+use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
 use cairn_primitives::Hash32;
 
 use crate::block::{BlockHeader, HeaderSummary};
 use crate::note::{Note, NoteId};
 use crate::pow::{meets_target, RECENT_HEADERS};
-use crate::state::{HotEntry, LedgerState};
+use crate::state::{HotEntry, LedgerState, GRACE_BLOCKS, GRACE_NOTES};
+
+/// What fell in one block: the note, where it landed, and what it was.
+pub type Fallen = (NoteId, u64, Note);
 
 /// A ledger as it stood at one header, and everything needed to check it.
 #[derive(Clone, Debug)]
@@ -39,7 +43,7 @@ pub struct Handover {
     /// The cold set as sixty four hashes.
     pub cold: Forest,
     /// What fell in each of the last few blocks, oldest first.
-    pub grace: Vec<Vec<(NoteId, u64, Note)>>,
+    pub grace: Vec<Vec<Fallen>>,
     /// A proof for every note in that window.
     ///
     /// Spending a note that fell moments ago takes no proof from the spender,
@@ -205,6 +209,160 @@ fn summaries(headers: &[BlockHeader]) -> Vec<HeaderSummary> {
             difficulty: header.difficulty,
         })
         .collect()
+}
+
+impl Encode for Handover {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        self.at.encode_to(out);
+        self.cold.encode_to(out);
+        self.headers.encode_to(out);
+
+        u32::try_from(self.hot.len())
+            .unwrap_or(u32::MAX)
+            .encode_to(out);
+        for (id, entry) in &self.hot {
+            id.encode_to(out);
+            entry.note.encode_to(out);
+            entry.height.encode_to(out);
+        }
+
+        u32::try_from(self.grace.len())
+            .unwrap_or(u32::MAX)
+            .encode_to(out);
+        for block in &self.grace {
+            u32::try_from(block.len())
+                .unwrap_or(u32::MAX)
+                .encode_to(out);
+            for (id, position, note) in block {
+                id.encode_to(out);
+                position.encode_to(out);
+                note.encode_to(out);
+            }
+        }
+
+        u32::try_from(self.grace_proofs.len())
+            .unwrap_or(u32::MAX)
+            .encode_to(out);
+        for (position, proof) in &self.grace_proofs {
+            position.encode_to(out);
+            proof.encode_to(out);
+        }
+
+        u32::try_from(self.recent.len())
+            .unwrap_or(u32::MAX)
+            .encode_to(out);
+        for header in &self.recent {
+            header.encode_to(out);
+        }
+    }
+}
+
+impl Decode for Handover {
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        let at = BlockHeader::decode_from(reader)?;
+        let cold = Forest::decode_from(reader)?;
+        let headers = Forest::decode_from(reader)?;
+
+        // Every count is checked before anything is reserved for it, because
+        // all of them are chosen by whoever sent this.
+        let hot = decode_hot(reader)?;
+        let grace = decode_grace(reader)?;
+        let grace_proofs = decode_proofs(reader)?;
+        let recent = decode_recent(reader)?;
+
+        Ok(Self {
+            at,
+            hot,
+            cold,
+            grace,
+            grace_proofs,
+            headers,
+            recent,
+        })
+    }
+}
+
+/// The most notes a hot set may hold on any network this code knows.
+///
+/// The rules a chain runs under decide the real cap, and `accept` checks
+/// against that. This is the ceiling on what will be read off a wire at all,
+/// so a sender cannot make a reader reserve for a hot set no network allows.
+const MAX_HOT: usize = 1 << 20;
+
+fn decode_hot(reader: &mut Reader<'_>) -> Result<Vec<(NoteId, HotEntry)>, CodecError> {
+    let count = usize::try_from(u32::decode_from(reader)?).unwrap_or(usize::MAX);
+    if count > MAX_HOT {
+        return Err(CodecError::InvalidValue {
+            type_name: "Handover hot set",
+        });
+    }
+    let mut hot = Vec::with_capacity(count.min(1024));
+    for _ in 0..count {
+        let id = NoteId::decode_from(reader)?;
+        let note = Note::decode_from(reader)?;
+        let height = u64::decode_from(reader)?;
+        hot.push((id, HotEntry { note, height }));
+    }
+    Ok(hot)
+}
+
+fn decode_grace(reader: &mut Reader<'_>) -> Result<Vec<Vec<Fallen>>, CodecError> {
+    let blocks = usize::try_from(u32::decode_from(reader)?).unwrap_or(usize::MAX);
+    if blocks > GRACE_BLOCKS {
+        return Err(CodecError::InvalidValue {
+            type_name: "Handover grace window",
+        });
+    }
+    let mut grace = Vec::with_capacity(blocks.min(GRACE_BLOCKS));
+    let mut held = 0usize;
+    for _ in 0..blocks {
+        let count = usize::try_from(u32::decode_from(reader)?).unwrap_or(usize::MAX);
+        held = held.saturating_add(count);
+        if held > GRACE_NOTES {
+            return Err(CodecError::InvalidValue {
+                type_name: "Handover grace window",
+            });
+        }
+        let mut block = Vec::with_capacity(count.min(1024));
+        for _ in 0..count {
+            let id = NoteId::decode_from(reader)?;
+            let position = u64::decode_from(reader)?;
+            let note = Note::decode_from(reader)?;
+            block.push((id, position, note));
+        }
+        grace.push(block);
+    }
+    Ok(grace)
+}
+
+fn decode_proofs(reader: &mut Reader<'_>) -> Result<Vec<(u64, ForestProof)>, CodecError> {
+    let count = usize::try_from(u32::decode_from(reader)?).unwrap_or(usize::MAX);
+    if count > GRACE_NOTES {
+        return Err(CodecError::InvalidValue {
+            type_name: "Handover grace proofs",
+        });
+    }
+    let mut proofs = Vec::with_capacity(count.min(1024));
+    for _ in 0..count {
+        let position = u64::decode_from(reader)?;
+        let proof = ForestProof::decode_from(reader)?;
+        proofs.push((position, proof));
+    }
+    Ok(proofs)
+}
+
+fn decode_recent(reader: &mut Reader<'_>) -> Result<Vec<BlockHeader>, CodecError> {
+    let count = usize::try_from(u32::decode_from(reader)?).unwrap_or(usize::MAX);
+    if count > RECENT_HEADERS {
+        return Err(CodecError::InvalidValue {
+            type_name: "Handover recent headers",
+        });
+    }
+    let mut recent = Vec::with_capacity(count.min(RECENT_HEADERS));
+    for _ in 0..count {
+        recent.push(BlockHeader::decode_from(reader)?);
+    }
+    Ok(recent)
 }
 
 /// The identifier of the header a handover belongs to.
