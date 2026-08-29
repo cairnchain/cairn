@@ -587,6 +587,36 @@ fn what_is_held_is_counted_in_bytes_and_the_count_follows() {
     );
 }
 
+/// A node handed a ledger holds no block and is on a chain all the same. Every
+/// question about whether it has one has to answer from the branch, or it
+/// spends its life asking to be handed another.
+#[test]
+fn a_node_handed_a_ledger_knows_it_is_on_a_chain() {
+    let miner = wallet(1);
+    let mut shared = Branch::new(params());
+    let blocks = shared.mine_empty(&miner, 6, 600);
+
+    let mut source = ChainStore::new(params());
+    feed(&mut source, &blocks);
+    let recent: Vec<_> = blocks.iter().map(|block| block.header).collect();
+    let state = source.state().clone();
+    let work = source.total_work();
+
+    let mut joined = ChainStore::new(params());
+    assert!(joined.is_empty(), "it starts on nothing");
+    joined.adopt(state, &recent).unwrap();
+
+    assert!(!joined.is_empty(), "and it is on a chain, holding no block");
+    assert_eq!(joined.len(), 0);
+    assert_eq!(joined.held_bytes(), 0, "and counts none");
+    assert_eq!(joined.height(), source.height());
+    assert_eq!(
+        joined.total_work(),
+        work,
+        "with the work behind it, or every branch would look heavier"
+    );
+}
+
 /// The ceiling is the product of three numbers written in two files, which is
 /// the shape of defect this exists to stop: raising the block size or the
 /// reorganisation window silently raises what a node must hold.

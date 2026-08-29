@@ -3,7 +3,11 @@
 //!
 //! Run with `cargo run --release -p cairn-crypto --example verify`.
 
-#![allow(clippy::unwrap_used, clippy::cast_precision_loss)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::cast_precision_loss,
+    clippy::arithmetic_side_effects
+)]
 
 use std::time::Instant;
 

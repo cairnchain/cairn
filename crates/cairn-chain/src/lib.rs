@@ -476,9 +476,14 @@ impl ChainStore {
         self.blocks.len()
     }
 
-    /// Whether this node holds no block at all, which means it has no chain.
+    /// Whether this node is on no chain at all.
+    ///
+    /// Asked of the branch and not of the blocks held for it. A node handed a
+    /// ledger holds no block and is very much on a chain, and reading this
+    /// from the blocks told it otherwise: it would have asked to be handed a
+    /// ledger again at every peer it met.
     pub fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
+        self.branch.is_empty()
     }
 
     /// Whether `id` is on the part of the followed branch held in full.
@@ -883,6 +888,7 @@ impl ChainStore {
         self.undo_from = self.branch.len();
         self.applied.clear();
         self.blocks.clear();
+        self.held_bytes = 0;
         Ok(())
     }
 
