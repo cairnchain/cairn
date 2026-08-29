@@ -66,9 +66,40 @@ fn main() {
          what turns a pass over the whole archive into one hash per level, and\n\
          it costs the archivist another thirty two bytes a block."
     );
+    undoing();
+
     println!(
         "\nWhat is left grows with the depth of the forest rather than its size,\n\
          which is one more hash for every doubling of the chain. Thirty years\n\
          of a block a minute is four doublings past the last row here."
     );
+}
+
+/// What it costs an archivist to undo blocks, which a reorganisation makes it
+/// do once per block.
+fn undoing() {
+    println!("\n\nWhat one archivist spends undoing one block.\n");
+    println!(
+        "{:>12}  {:>16}  {:>18}",
+        "blocks", "one undone", "a window of 1024"
+    );
+    println!("{}", "-".repeat(50));
+
+    for size in [8_192u64, 65_536, 262_144, 1_048_576] {
+        let mut archive = Archive::new();
+        for index in 0..size {
+            archive.add(forest_leaf(&index.to_le_bytes()));
+        }
+        let started = Instant::now();
+        for _ in 0..8 {
+            assert!(archive.remove_last());
+        }
+        let each = started.elapsed().as_secs_f64() / 8.0;
+        println!(
+            "{:>12}  {:>14.1}us  {:>16.4}s",
+            size,
+            each * 1e6,
+            each * 1024.0
+        );
+    }
 }

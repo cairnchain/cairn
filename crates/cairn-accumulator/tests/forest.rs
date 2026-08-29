@@ -547,3 +547,44 @@ fn a_rebuilt_archive_proves_exactly_what_a_grown_one_does() {
         assert!(grown.forest().verify(position, leaf(position), &proof));
     }
 }
+
+/// Undoing an append has to leave exactly the archive that never had it. It is
+/// done one block at a time through a reorganisation, so it reads the inner
+/// nodes rather than building every one again, and reading the wrong thing
+/// would put an archivist on a chain of its own.
+#[test]
+fn undoing_an_append_leaves_what_was_there_before() {
+    let mut before = Archive::new();
+    for index in 0..200u64 {
+        before.add(leaf(index));
+    }
+
+    let mut after = Archive::new();
+    for index in 0..200u64 {
+        after.add(leaf(index));
+    }
+    for index in 200..260u64 {
+        after.add(leaf(index));
+    }
+    for _ in 0..60 {
+        assert!(after.remove_last());
+    }
+
+    assert_eq!(after.commitment(), before.commitment());
+    assert_eq!(after.len(), before.len());
+    for position in [0u64, 1, 3, 64, 127, 128, 199] {
+        assert_eq!(
+            after.prove(position).map(|proof| proof.siblings),
+            before.prove(position).map(|proof| proof.siblings),
+            "the proof for {position} is not the one from before the appends"
+        );
+    }
+
+    // Right down to nothing, which is where the counting is easiest to get
+    // wrong.
+    for _ in 0..200 {
+        assert!(after.remove_last());
+    }
+    assert!(!after.remove_last(), "and it stops at empty");
+    assert_eq!(after.commitment(), Archive::new().commitment());
+}

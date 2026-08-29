@@ -58,8 +58,8 @@ fn main() {
     let mut rows = Vec::new();
     for size in SIZES {
         let mut measured = [0u64; 3];
-        for (slot, part) in PARTS.iter().enumerate() {
-            measured[slot] = measure(part, size);
+        for (slot, part) in measured.iter_mut().zip(PARTS.iter()) {
+            *slot = measure(part, size);
         }
         let [all, map, tree] = measured;
         rows.push((size, all, map, tree));
