@@ -618,11 +618,19 @@ impl ChainStore {
             &self.params,
         )?;
 
+        // A transfer larger than a block can carry would wait in the pool for
+        // a block that can never be built, while whoever sent it believes it
+        // is on its way. Refused here, so the refusal reaches them.
+        //
+        // Measured against the whole block rather than against a block minus
+        // its header, because the exact margin belongs to whoever assembles
+        // one; what matters here is that the impossible is turned away.
         let bytes = transfer.encode().len();
-        if bytes > MAX_POOL_BYTES {
-            // Nothing this large can be held whatever else is dropped, and
-            // nothing this large fits in a block either.
-            return Ok(false);
+        if bytes > self.params.max_block_bytes {
+            return Err(TransferError::TooLargeForABlock {
+                bytes,
+                limit: self.params.max_block_bytes,
+            });
         }
 
         // A full pool that refuses everything is a pool anyone can close. Four

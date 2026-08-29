@@ -19,6 +19,7 @@ use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::transaction::{Input, Transfer};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_net::Node;
+use cairn_primitives::codec::Encode;
 use cairn_primitives::Amount;
 
 const HELP: &str = "\
@@ -216,7 +217,8 @@ fn spend(arguments: &[String]) -> Result<(), String> {
         outputs.push(Note::new(change, mine));
     }
 
-    let network = rules_of(&flags)?.network;
+    let rules = rules_of(&flags)?;
+    let network = rules.network;
     let inputs = spending
         .iter()
         .map(|owned| match &owned.fallen {
@@ -228,6 +230,22 @@ fn spend(arguments: &[String]) -> Result<(), String> {
     for (index, owned) in spending.iter().enumerate() {
         let index = u32::try_from(index).map_err(|_| "too many notes".to_owned())?;
         transfer.sign_input(network, index, &owned.note, &secret);
+    }
+
+    // A transfer no block can carry would be refused by the network, and it is
+    // better to say so here than to have the refusal come back as a rule
+    // nobody outside the protocol has heard of. It happens when a wallet holds
+    // its money in many small fallen notes, each of which travels with its own
+    // proof: sending less at a time, more than once, is the way through.
+    let bulk = transfer.encode().len();
+    if bulk > rules.max_block_bytes {
+        return Err(format!(
+            "this spend gathers {} notes and takes {bulk} bytes, more than the \
+             {} a block carries. Send a smaller amount, more than once: each \
+             one leaves fewer notes behind.",
+            spending.len(),
+            rules.max_block_bytes,
+        ));
     }
 
     let id = transfer.id();

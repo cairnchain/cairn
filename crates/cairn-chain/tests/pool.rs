@@ -430,3 +430,51 @@ fn the_pool_is_bounded_by_weight_as_well_as_by_count() {
         "and it filled up on weight long before it filled up on count"
     );
 }
+
+/// A transfer no block can carry is turned away rather than kept waiting.
+///
+/// The pool holds what is waiting for a block. A transfer too large for any
+/// block is not waiting for one, it is waiting for one that cannot be built,
+/// and it would sit there until something displaced it while whoever sent it
+/// believed it was on its way. The refusal is what tells them otherwise.
+#[test]
+fn a_transfer_too_large_for_a_block_is_refused_outright() {
+    let mut params = params();
+    // Small enough that an ordinary wide spend passes it, so this test builds
+    // a transfer rather than a megabyte.
+    params.max_block_bytes = 4096;
+    let owner = wallet(1);
+    let (store, notes) = funded_widely(2, &owner);
+
+    let (id, note) = notes[0];
+    let wide = wide_spend(&params, id, note, &owner, &wallet(2));
+    let bytes = cairn_primitives::codec::Encode::encode(&wide).len();
+    assert!(
+        bytes > params.max_block_bytes,
+        "the transfer has to be over it"
+    );
+
+    // The store built by `funded_widely` carries the ordinary rules, so it is
+    // rebuilt here with the tighter limit in force.
+    let mut tight = ChainStore::new(params);
+    for height in 0.. {
+        match store.block_at(height) {
+            Some(block) => tight.add_block(block.clone(), NOW).unwrap(),
+            None => break,
+        };
+    }
+
+    match tight.accept_transfer(wide) {
+        Err(TransferError::TooLargeForABlock { bytes: got, limit }) => {
+            assert_eq!(got, bytes);
+            assert_eq!(limit, params.max_block_bytes);
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert_eq!(tight.pool_len(), 0, "and nothing was kept");
+
+    // One that fits is taken as before.
+    let (id, note) = notes[1];
+    let ordinary = spend(&params, id, note, &owner, &wallet(2), Amount::ZERO);
+    assert!(tight.accept_transfer(ordinary).unwrap());
+}

@@ -217,6 +217,8 @@ pub enum TransferError {
     TooManyInputs { count: usize, limit: usize },
     #[error("transfer creates {count} notes, limit is {limit}")]
     TooManyOutputs { count: usize, limit: usize },
+    #[error("transfer takes {bytes} bytes, more than the {limit} a block carries")]
+    TooLargeForABlock { bytes: usize, limit: usize },
     #[error("note {0:?} is spent twice in the same transfer")]
     DuplicateInput(NoteId),
     #[error("note {0:?} is unknown or already spent")]
