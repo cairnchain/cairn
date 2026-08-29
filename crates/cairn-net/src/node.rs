@@ -36,7 +36,7 @@ use cairn_primitives::Hash32;
 use cairn_store::{BlockLog, DirectoryLock, StoreError};
 
 use crate::book::AddressBook;
-use crate::joining::{Collecting, Progress};
+use crate::joining::{Collecting, Joined, Progress};
 use crate::message::{Joining, Message, JOIN_PART_BYTES, MAX_CHAIN};
 use crate::refusal::{can_be_refused, Refusals};
 use crate::sync::{local_handshake, on_message, Local, PeerState, Reaction};
@@ -87,6 +87,19 @@ const OUTBOUND_QUEUE: usize = 256;
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
 /// How often the node looks for peers and saves its address book.
 const MAINTENANCE_PERIOD: Duration = Duration::from_millis(1_000);
+
+/// Seconds a join may go without a piece arriving before it is given up on.
+///
+/// Being handed a ledger is the one exchange a node cannot finish on its own,
+/// and the only signal that the peer serving it has stopped answering is that
+/// nothing arrives. Without this a newcomer whose archivist hangs up waits for
+/// ever, holding no chain and asking nobody else, which is the worst state the
+/// software can be in: running, connected, and permanently useless.
+///
+/// Thirty seconds is many times what a piece takes on any link that could
+/// carry the exchange at all, and the cost of being wrong is one round of
+/// reading the chain instead.
+const JOIN_PATIENCE: u64 = 30;
 /// A gap between two rounds of maintenance that means the machine was away.
 ///
 /// A round takes a second. Thirty of them passing at once is not a busy
@@ -638,6 +651,18 @@ impl Node {
         self.with_chain(ChainStore::height)
     }
 
+    /// How far this node is through joining a chain it was not on.
+    ///
+    /// A node being handed a ledger shows no height until the whole of it has
+    /// arrived, which without this reads as a node doing nothing.
+    pub fn joining(&self) -> Joined {
+        self.shared
+            .joining
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reported()
+    }
+
     pub fn total_work(&self) -> u128 {
         self.with_chain(ChainStore::total_work)
     }
@@ -769,6 +794,7 @@ fn take_join_part(
     parts: u32,
     bytes: Vec<u8>,
 ) -> Option<Message> {
+    let now = unix_now();
     let mut joining = shared
         .joining
         .lock()
@@ -784,18 +810,24 @@ fn take_join_part(
     // What state this piece leaves the attempt in, and what to ask next.
     let (next, whole) = match std::mem::take(&mut *joining) {
         Progress::Landed => return None,
-        // The first piece of whichever exchange is in hand.
-        Progress::Idle | Progress::Weighed { .. } => {
-            let held = std::mem::replace(&mut *joining, Progress::Idle);
-            let tip = match held {
-                Progress::Weighed { tip } => Some(tip),
-                _ => None,
+        // The first piece of the weighing, which is where a join starts.
+        Progress::Idle => {
+            let Some(started) = Collecting::started(what, at, part, parts, bytes, now) else {
+                return Some(give_up(&mut joining, shared));
             };
-            let started = Collecting::started(what, at, part, parts, bytes)?;
-            step(&mut joining, started, tip)
+            step(&mut joining, started, None)
+        }
+        // The first piece of the ledger. The tip carries over from the
+        // weighing, because the ledger has to be the one belonging to the
+        // chain that was weighed.
+        Progress::Weighed { tip, .. } => {
+            let Some(started) = Collecting::started(what, at, part, parts, bytes, now) else {
+                return Some(give_up(&mut joining, shared));
+            };
+            step(&mut joining, started, Some(tip))
         }
         Progress::Weighing(mut collecting) => {
-            if !collecting.take(what, at, part, bytes) {
+            if !collecting.take(what, at, part, bytes, now) {
                 // The pieces held cannot be completed, so the attempt is
                 // dropped and this node falls back to reading the chain.
                 return Some(give_up(&mut joining, shared));
@@ -806,7 +838,7 @@ fn take_join_part(
             tip,
             mut collecting,
         } => {
-            if !collecting.take(what, at, part, bytes) {
+            if !collecting.take(what, at, part, bytes, now) {
                 return Some(give_up(&mut joining, shared));
             }
             step(&mut joining, collecting, Some(tip))
@@ -826,7 +858,10 @@ fn take_join_part(
             };
             // What this settles is which chain is heaviest and nothing else.
             // The ledger at that chain's tip is the next thing to ask for.
-            *joining = Progress::Weighed { tip: start.tip };
+            *joining = Progress::Weighed {
+                tip: start.tip,
+                since: now,
+            };
             Some(Message::GetJoin {
                 what: Joining::Ledger,
                 part: 0,
@@ -834,7 +869,7 @@ fn take_join_part(
         }
         Joining::Ledger => {
             let expected = match &*joining {
-                Progress::Fetching { tip, .. } | Progress::Weighed { tip } => tip.id(),
+                Progress::Fetching { tip, .. } | Progress::Weighed { tip, .. } => tip.id(),
                 _ => return None,
             };
             let landed = Handover::decode(&whole)
@@ -1150,6 +1185,7 @@ fn maintenance_loop(shared: &Arc<Shared>) {
         dial_from_book(shared, now);
         save_book(shared);
         collect_finished(shared);
+        abandon_stalled_join(shared, now);
         shared.refusals().forget_expired(now);
     }
 }
@@ -1161,6 +1197,42 @@ fn maintenance_loop(shared: &Arc<Shared>) {
 /// this node believes about the last few minutes is not to be trusted.
 fn was_away(previous: u64, now: u64) -> bool {
     now < previous || now.saturating_sub(previous) >= AWAY_GAP
+}
+
+/// Gives up on a join nothing has arrived for, and goes back to reading.
+///
+/// The other ways a join ends are all answers: a piece that does not fit, a
+/// weight that does not check out, a ledger that does not match the tip it was
+/// weighed at. Silence is the one that has to be noticed rather than handled,
+/// and it is the likeliest of them, since it is what a peer hanging up looks
+/// like.
+fn abandon_stalled_join(shared: &Arc<Shared>, now: u64) {
+    let asking = {
+        let mut joining = shared
+            .joining
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !has_gone_quiet(joining.moved(), now) {
+            return;
+        }
+        give_up(&mut joining, shared)
+    };
+    // Asked of everyone rather than of the peer that went quiet, which is the
+    // one peer known not to be answering.
+    shared.broadcast(None, &asking);
+}
+
+/// Whether a join that last moved at `moved` has been quiet long enough to be
+/// given up on.
+///
+/// `None` means there is no join to give up on. A clock that went backwards
+/// counts as quiet: what this node believes about how long it has been waiting
+/// is then worth nothing, and reading the chain instead costs one round.
+const fn has_gone_quiet(moved: Option<u64>, now: u64) -> bool {
+    match moved {
+        None => false,
+        Some(moved) => now < moved || now.saturating_sub(moved) >= JOIN_PATIENCE,
+    }
 }
 
 /// Joins the threads of peers that have already gone.
@@ -1470,6 +1542,33 @@ fn read_loop(
         }
     }
     let _ = stream.shutdown(Shutdown::Both);
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod quiet_tests {
+    use super::{has_gone_quiet, JOIN_PATIENCE};
+
+    #[test]
+    fn a_join_is_given_up_on_only_once_it_has_gone_quiet() {
+        assert!(
+            !has_gone_quiet(None, 1_000),
+            "a node that is not joining has nothing to give up on"
+        );
+        assert!(!has_gone_quiet(Some(1_000), 1_000), "a piece just arrived");
+        assert!(
+            !has_gone_quiet(Some(1_000), 1_000 + JOIN_PATIENCE - 1),
+            "still inside what a slow link is allowed"
+        );
+        assert!(
+            has_gone_quiet(Some(1_000), 1_000 + JOIN_PATIENCE),
+            "nothing arrived for as long as this waits"
+        );
+        assert!(
+            has_gone_quiet(Some(1_000), 900),
+            "a clock that went backwards says how long it waited is worthless"
+        );
+    }
 }
 
 #[cfg(test)]

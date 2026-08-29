@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cairn_net::Node;
+use cairn_net::{Joined, Node};
 
 const TICK: Duration = Duration::from_millis(100);
 
@@ -128,6 +128,12 @@ fn watch(node: &Node, options: &options::Options, running: &AtomicBool) {
                 node.cold_len(),
                 node.total_work(),
             );
+            // A node being handed a ledger has no height to show until the
+            // whole of it has arrived, so without this it reads as stuck.
+            match node.joining() {
+                Joined::No | Joined::Done => {}
+                joining => println!("           joining  {joining}"),
+            }
         }
         thread::sleep(TICK);
     }

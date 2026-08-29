@@ -445,10 +445,18 @@ impl ChainStore {
     }
 
     /// Accumulated work behind the followed branch.
+    ///
+    /// Taken from the ledger rather than from the block held for the tip,
+    /// because a node handed a ledger has no such block. It read zero there,
+    /// which is the worst answer this could give: a node that believes no work
+    /// stands behind it accepts any branch at all as heavier.
+    ///
+    /// The two agree everywhere else. A header states the work behind it and
+    /// the rules refuse it unless that is what the chain actually carries, so
+    /// the sum a node accumulates block by block and the figure the tip states
+    /// are the same figure.
     pub fn total_work(&self) -> u128 {
-        self.tip()
-            .and_then(|id| self.blocks.get(&id))
-            .map_or(0, |stored| stored.total_work)
+        self.state.total_work()
     }
 
     pub fn block(&self, id: &Hash32) -> Option<&Block> {

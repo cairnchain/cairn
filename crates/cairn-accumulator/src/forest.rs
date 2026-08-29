@@ -645,7 +645,25 @@ impl Archive {
     /// pass over the forest. An archivist serving many would keep the internal
     /// nodes instead; nothing about the proof it produces would change.
     pub fn prove(&self, position: u64) -> Option<ForestProof> {
-        let (height, offset) = tree_of(self.forest.leaves, position)?;
+        self.prove_in(position, self.forest.leaves)
+    }
+
+    /// Builds the proof for `position` as it stood when the forest held
+    /// `leaves` of them.
+    ///
+    /// A forest of this shape is a list of perfect trees decided by how many
+    /// leaves it holds, so a proof is only valid against the count it was
+    /// built for. What a chain commits to is the forest from before its tip,
+    /// while an archive holds the tip too, and proving against the wrong one
+    /// of those two produces a proof that checks out nowhere.
+    ///
+    /// The tree a position belongs to is contained in the leaves before it, so
+    /// no sibling here reaches past `leaves`.
+    pub fn prove_in(&self, position: u64, leaves: u64) -> Option<ForestProof> {
+        if position >= leaves || leaves > self.forest.leaves {
+            return None;
+        }
+        let (height, offset) = tree_of(leaves, position)?;
         let mut siblings = Vec::with_capacity(height);
         let mut index = position.checked_sub(offset)?;
 

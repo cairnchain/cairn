@@ -22,7 +22,7 @@ use cairn_ledger::validation::{assemble_block, connect_block, mine_block, Consen
 use cairn_ledger::LedgerState;
 use cairn_net::message::{Handshake, Message, PROTOCOL_VERSION};
 use cairn_net::wire::write_message;
-use cairn_net::Node;
+use cairn_net::{Joined, Node};
 use cairn_primitives::codec::Encode;
 use cairn_primitives::Hash32;
 
@@ -644,6 +644,14 @@ fn a_node_joins_a_chain_it_never_read() {
 
     newcomer.connect(keeper.address()).unwrap();
     wait_for("the newcomer to join", || newcomer.height() == Some(top));
+    // Reaching the height says nothing about how: reading the chain block by
+    // block would reach it too, and did, back when the handover was broken and
+    // the fall back to reading covered for it.
+    assert_eq!(
+        newcomer.joining(),
+        Joined::Done,
+        "the ledger was handed over rather than read"
+    );
 
     assert_eq!(
         newcomer.with_chain(|chain| chain.state().state_root()),
@@ -710,21 +718,35 @@ fn a_newcomer_joins_through_an_archivist_and_reads_from_the_rest() {
 
     // Reaching the archivist, another newcomer is handed the whole thing.
     let joiner = Node::bind(params, loopback()).unwrap();
+    assert_eq!(
+        joiner.joining(),
+        Joined::No,
+        "a node that has asked nobody is not joining"
+    );
     joiner.connect(keeper.address()).unwrap();
     wait_for("the joiner to be handed a ledger", || {
         joiner.height() == Some(top)
     });
     assert_eq!(
+        joiner.joining(),
+        Joined::Done,
+        "and it says so, which is what an operator watching a node with no \
+         height yet has to go on"
+    );
+    assert_eq!(
         joiner.with_chain(|chain| chain.state().state_root()),
         keeper.with_chain(|chain| chain.state().state_root()),
     );
 
-    // The one that was handed a ledger holds no history, and says so rather
-    // than pretending: it can follow the chain and cannot vouch for its past.
-    assert!(
-        joiner.with_chain(|chain| chain.block_at(0).is_none()),
-        "a node that was not there does not hold what happened before it"
-    );
+    // Neither of them holds what happened before the window it could still
+    // undo, whichever way it got there. What separates them is the role: only
+    // the one that read the chain from the first block can hand it on.
+    for node in [&reader, &joiner] {
+        assert!(
+            node.with_chain(|chain| chain.block_at(0).is_none()),
+            "a node does not hold what it can no longer undo"
+        );
+    }
     assert!(
         !joiner.with_chain(cairn_chain::ChainStore::is_archiving),
         "and so it does not offer to hand the chain on, which is why the role \
@@ -734,5 +756,27 @@ fn a_newcomer_joins_through_an_archivist_and_reads_from_the_rest() {
     for node in [reader, joiner, plain, keeper] {
         node.shutdown();
     }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_archivist_says_so_when_it_introduces_itself() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(4);
+    let root = std::env::temp_dir().join(format!("cairn-says-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+
+    let (keeper, _) = Node::open_archiving(params, loopback(), root.join("keeper")).unwrap();
+    let (plain, _) = Node::open(params, loopback(), root.join("plain")).unwrap();
+    for block in &blocks {
+        keeper.submit_block(block.clone()).unwrap();
+        plain.submit_block(block.clone()).unwrap();
+    }
+    assert!(keeper.with_chain(cairn_chain::ChainStore::is_archiving));
+    assert!(!plain.with_chain(cairn_chain::ChainStore::is_archiving));
+
+    keeper.shutdown();
+    plain.shutdown();
     let _ = std::fs::remove_dir_all(&root);
 }

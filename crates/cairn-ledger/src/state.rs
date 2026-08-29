@@ -697,9 +697,16 @@ impl LedgerState {
     ///
     /// Only an archivist can answer. Everyone else holds sixty four hashes,
     /// which is enough to check such a proof and not enough to build one.
+    ///
+    /// Built against the forest from before the tip, which is the one the
+    /// tip's own header vouches for and so the one a newcomer checks against.
+    /// The archive holds the tip as well, and a proof built against that
+    /// checks out nowhere.
     #[must_use]
     pub fn prove_header(&self, height: u64) -> Option<ForestProof> {
-        self.header_leaves.as_ref()?.prove(height)
+        self.header_leaves
+            .as_ref()?
+            .prove_in(height, self.headers_before_tip.leaves())
     }
 
     /// Asks to be told where this owner's notes go when they fall.
