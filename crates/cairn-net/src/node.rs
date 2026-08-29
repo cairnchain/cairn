@@ -22,19 +22,21 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cairn_chain::{Accepted, ChainError, ChainStore, Located};
 use cairn_crypto::PublicKey;
-use cairn_ledger::block::Block;
+use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::genesis;
+use cairn_ledger::handover::{accept, Handover};
 use cairn_ledger::note::NetworkId;
 use cairn_ledger::pow::RECENT_HEADERS;
-use cairn_ledger::sampling::{open_start, SAMPLES};
+use cairn_ledger::sampling::{check_start, open_start, SampledStart, SAMPLES};
 use cairn_ledger::transaction::Transfer;
 use cairn_ledger::validation::ConsensusParams;
 use cairn_ledger::validation::TransferError;
-use cairn_primitives::codec::Encode;
+use cairn_primitives::codec::{Decode, Encode};
 use cairn_primitives::Hash32;
 use cairn_store::{BlockLog, DirectoryLock, StoreError};
 
 use crate::book::AddressBook;
+use crate::joining::{Collecting, Progress};
 use crate::message::{Joining, Message, JOIN_PART_BYTES, MAX_CHAIN};
 use crate::refusal::{can_be_refused, Refusals};
 use crate::sync::{local_handshake, on_message, Local, PeerState, Reaction};
@@ -164,7 +166,9 @@ struct Shared {
     /// is the difference between a node that can be joined and a node anybody
     /// can make spend its memory. A second newcomer asking about a different
     /// tip replaces it, which costs the first one a rebuild and no more.
-    joined: Mutex<Option<Joined>>,
+    joined: Mutex<Option<Prepared>>,
+    /// How far this node is through joining a chain it was not on.
+    joining: Mutex<Progress>,
     threads: Mutex<Vec<JoinHandle<()>>>,
     next_id: AtomicU64,
     running: AtomicBool,
@@ -540,6 +544,7 @@ impl Node {
             peers: Mutex::new(HashMap::new()),
             refusals: Mutex::new(Refusals::new()),
             joined: Mutex::new(None),
+            joining: Mutex::new(Progress::Idle),
             threads: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(0),
             running: AtomicBool::new(true),
@@ -708,8 +713,154 @@ impl std::fmt::Debug for Node {
     }
 }
 
+/// What became of a message offered to the join collector.
+enum Taken {
+    /// It was a piece of a join answer, and has been dealt with.
+    Handled,
+    /// It was, and answering it failed, which ends this peer.
+    Failed,
+    /// It was something else entirely.
+    Other(Message),
+}
+
+/// Hands a message to the join collector if that is what it is.
+fn join_piece(shared: &Arc<Shared>, message: Message, outbound: &SyncSender<Message>) -> Taken {
+    let Message::JoinPart {
+        what,
+        at,
+        part,
+        parts,
+        bytes,
+    } = message
+    else {
+        return Taken::Other(message);
+    };
+    let Some(next) = take_join_part(shared, what, at, part, parts, bytes) else {
+        return Taken::Handled;
+    };
+    if outbound.try_send(next).is_err() {
+        return Taken::Failed;
+    }
+    Taken::Handled
+}
+
+/// Takes one piece of a join answer, and says what to ask for next.
+///
+/// A join is two exchanges in sequence: what work stands behind a chain, and
+/// then the ledger at its tip. Each arrives in pieces, and each is checked as
+/// a whole once its pieces are all here, because a piece on its own proves
+/// nothing and a header commits to the whole or to none of it.
+///
+/// Anything that does not check out ends the attempt rather than being argued
+/// with. There is another peer, and a node with no chain has nothing to lose
+/// by starting again.
+fn take_join_part(
+    shared: &Arc<Shared>,
+    what: Joining,
+    at: Hash32,
+    part: u32,
+    parts: u32,
+    bytes: Vec<u8>,
+) -> Option<Message> {
+    let mut joining = shared
+        .joining
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+
+    // A node that already has a chain is not joining one. This arrives when an
+    // answer outlived the question, which costs nothing to ignore.
+    if !shared.chain().is_empty() {
+        *joining = Progress::Landed;
+        return None;
+    }
+
+    // What state this piece leaves the attempt in, and what to ask next.
+    let (next, whole) = match std::mem::take(&mut *joining) {
+        Progress::Landed => return None,
+        // The first piece of whichever exchange is in hand.
+        Progress::Idle | Progress::Weighed { .. } => {
+            let held = std::mem::replace(&mut *joining, Progress::Idle);
+            let tip = match held {
+                Progress::Weighed { tip } => Some(tip),
+                _ => None,
+            };
+            let started = Collecting::started(what, at, part, parts, bytes)?;
+            step(&mut joining, started, tip)
+        }
+        Progress::Weighing(mut collecting) => {
+            if !collecting.take(what, at, part, bytes) {
+                return None;
+            }
+            step(&mut joining, collecting, None)
+        }
+        Progress::Fetching {
+            tip,
+            mut collecting,
+        } => {
+            if !collecting.take(what, at, part, bytes) {
+                return None;
+            }
+            step(&mut joining, collecting, Some(tip))
+        }
+    };
+    let Some(whole) = whole else {
+        return next;
+    };
+
+    match what {
+        Joining::Weight => {
+            let start = SampledStart::decode(&whole).ok()?;
+            // What this settles is which chain is heaviest and nothing else.
+            // The ledger at that chain's tip is the next thing to ask for.
+            check_start(&start, SAMPLES).ok()?;
+            *joining = Progress::Weighed { tip: start.tip };
+            Some(Message::GetJoin {
+                what: Joining::Ledger,
+                part: 0,
+            })
+        }
+        Joining::Ledger => {
+            let expected = match &*joining {
+                Progress::Fetching { tip, .. } | Progress::Weighed { tip } => tip.id(),
+                _ => return None,
+            };
+            let handover = Handover::decode(&whole).ok()?;
+            // The ledger has to belong to the chain that was weighed. A peer
+            // that weighed one and handed over another would otherwise have
+            // its second answer taken on the strength of the first.
+            if handover.at.id() != expected {
+                *joining = Progress::Idle;
+                return None;
+            }
+            let state = accept(&handover, shared.params.hot_capacity).ok()?;
+            shared.chain().adopt(state, &handover.recent).ok()?;
+            *joining = Progress::Landed;
+            None
+        }
+    }
+}
+
+/// Files a collection back where it belongs, and says what is still missing.
+///
+/// Returns what to ask for next, and the whole answer once nothing is missing.
+fn step(
+    joining: &mut Progress,
+    collecting: Collecting,
+    tip: Option<BlockHeader>,
+) -> (Option<Message>, Option<Vec<u8>>) {
+    let wanted = collecting.wanted();
+    let what = collecting.what;
+    let whole = collecting.whole();
+    *joining = match tip {
+        Some(tip) => Progress::Fetching { tip, collecting },
+        None => Progress::Weighing(collecting),
+    };
+    let asking = wanted.map(|part| Message::GetJoin { what, part });
+    (asking, whole)
+}
+
 /// A join answer, built once and handed out in pieces.
-struct Joined {
+struct Prepared {
     what: Joining,
     at: Hash32,
     bytes: Vec<u8>,
@@ -731,7 +882,7 @@ impl Shared {
             .as_ref()
             .is_none_or(|ready| ready.what != what || ready.at != tip);
         if fresh {
-            *held = Some(Joined {
+            *held = Some(Prepared {
                 what,
                 at: tip,
                 bytes: self.build_join(what)?,
@@ -1194,6 +1345,14 @@ fn read_loop(
                 misbehaved = is_peer_fault(&error);
                 break;
             }
+        };
+
+        // A piece of a join answer belongs to whoever is collecting one, which
+        // is this node rather than the layer that reads messages.
+        let message = match join_piece(shared, message, outbound) {
+            Taken::Handled => continue,
+            Taken::Failed => return,
+            Taken::Other(message) => message,
         };
 
         // The chain is held for the decision and for writing the log, and let

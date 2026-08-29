@@ -337,6 +337,16 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
         )));
     }
     if theirs.total_work > local.chain.total_work() {
+        if local.chain.is_empty() {
+            // Nothing at all, so ask to be shown what stands behind this
+            // peer's chain rather than reading it a block at a time. A peer
+            // that cannot answer says nothing, and the question is asked again
+            // of whoever else is around.
+            reaction.reply.push(Message::GetJoin {
+                what: Joining::Weight,
+                part: 0,
+            });
+        }
         reaction.reply.push(Message::GetChain {
             locator: local.chain.locator(),
         });

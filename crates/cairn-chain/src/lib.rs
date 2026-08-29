@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
-use cairn_ledger::block::Block;
+use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::note::NoteId;
 use cairn_ledger::pow::{meets_target, work_of};
 use cairn_ledger::transaction::Transfer;
@@ -109,6 +109,8 @@ pub enum ChainError {
          still reorganise onto"
     )]
     TooOld { height: u64, floor: u64 },
+    #[error("this node already follows a chain, and one is all it may follow")]
+    AlreadyFollowing,
     #[error("the block tree lost a block it had recorded")]
     Corrupt,
 }
@@ -257,6 +259,27 @@ impl Branch {
     /// Where `id` sits, for the part of the branch held in full.
     fn height_of(&self, id: &Hash32) -> Option<u64> {
         self.at.get(id).copied()
+    }
+
+    /// A branch that begins at a run of headers taken from somewhere else.
+    ///
+    /// Oldest first, ending at the tip. There are no milestones: this node
+    /// holds nothing older than what it was handed, so there is nothing to
+    /// point at and it says so by having none.
+    fn from_tail(recent: &[BlockHeader]) -> Self {
+        let Some(first) = recent.first() else {
+            return Self::default();
+        };
+        let mut branch = Self {
+            from: first.height,
+            ..Self::default()
+        };
+        for header in recent {
+            let id = header.id();
+            branch.recent.push_back(id);
+            branch.at.insert(id, header.height);
+        }
+        branch
     }
 
     /// Adds a block to the end of the branch.
@@ -782,6 +805,48 @@ impl ChainStore {
         self.pool_bytes = bytes;
     }
 
+    /// Takes a ledger built somewhere else, at a tip this node was not on.
+    ///
+    /// For a node joining a chain rather than replaying one. What it is handed
+    /// has already been checked against the header that commits to it, and
+    /// that header against the work behind it, so what is left here is putting
+    /// it in place.
+    ///
+    /// Only onto a node with no chain at all. Replacing a chain a node already
+    /// follows would be a reorganisation of unbounded depth, decided by
+    /// whoever offered the replacement, which is the one thing the depth limit
+    /// exists to refuse.
+    ///
+    /// The branch starts from the headers that came with the ledger, so this
+    /// node knows where it is and can be reorganised as far back as those go.
+    /// It holds no milestones, because it has no history to hold: it can say
+    /// what it is following and cannot answer about what came before, which is
+    /// the honest position for a node that was not there.
+    pub fn adopt(&mut self, state: LedgerState, recent: &[BlockHeader]) -> Result<(), ChainError> {
+        if !self.branch.is_empty() {
+            return Err(ChainError::AlreadyFollowing);
+        }
+        let Some(tip) = state.tip() else {
+            return Err(ChainError::Corrupt);
+        };
+        let Some(last) = recent.last() else {
+            return Err(ChainError::Corrupt);
+        };
+        if last.id() != tip.id {
+            return Err(ChainError::Corrupt);
+        }
+
+        self.state = state;
+        self.branch = Branch::from_tail(recent);
+        // Nothing here can be undone: undoing takes the record of what a block
+        // did, and this node was not there when they were done. So the window
+        // starts closed and opens as this node applies blocks of its own.
+        self.undo_from = self.branch.len();
+        self.applied.clear();
+        self.blocks.clear();
+        Ok(())
+    }
+
     /// Records a block and follows the heaviest branch it makes available.
     ///
     /// `now` is this node's clock, in seconds since the Unix epoch.
@@ -812,6 +877,26 @@ impl ChainStore {
                     floor,
                 });
             }
+        }
+
+        // A block that builds straight on the tip needs no parent in memory:
+        // what a parent is read for is the height and the work behind it, and
+        // both of those are what the tip is. That is the ordinary case on a
+        // chain being followed, and the only case at all on a node that was
+        // handed its ledger rather than building it, which holds no blocks.
+        if self.branch.tip() == Some(block.header.previous) {
+            let expected = self.height().and_then(|tip| tip.checked_add(1));
+            if Some(block.header.height) != expected {
+                return Err(ChainError::BrokenHeight {
+                    parent: self.height().unwrap_or(0),
+                    found: block.header.height,
+                });
+            }
+            let total_work = self
+                .total_work()
+                .saturating_add(work_of(block.header.difficulty));
+            self.blocks.insert(id, StoredBlock { block, total_work });
+            return self.follow(id, now);
         }
 
         let total_work = if self.branch.is_empty() {

@@ -610,3 +610,57 @@ fn a_node_partway_along_catches_up_with_one_far_ahead() {
     ahead.shutdown();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A node joins a chain it was never on, without reading it.
+///
+/// The whole point of the two exchanges. One node has a chain; another has
+/// nothing and is handed, first, enough headers to see what work stands behind
+/// that chain, and then the ledger at its tip. It checks both against what the
+/// headers commit to, adopts the result, and carries on as a node that was
+/// there all along.
+#[test]
+fn a_node_joins_a_chain_it_never_read() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    // Long enough that reading it block by block is the thing being avoided.
+    let blocks = forge.mine_many(cairn_ledger::pow::RECENT_HEADERS + 60);
+    let top = (blocks.len() - 1) as u64;
+
+    let directory = std::env::temp_dir().join(format!("cairn-join-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+
+    // The node that answers keeps the headers, which is what proving takes.
+    let (keeper, _) = Node::open_archiving(params, loopback(), &directory).unwrap();
+    for block in &blocks {
+        keeper.submit_block(block.clone()).unwrap();
+    }
+    assert_eq!(keeper.height(), Some(top));
+
+    let newcomer = Node::bind(params, loopback()).unwrap();
+    assert_eq!(newcomer.height(), None, "it starts with nothing at all");
+
+    newcomer.connect(keeper.address()).unwrap();
+    wait_for("the newcomer to join", || newcomer.height() == Some(top));
+
+    assert_eq!(
+        newcomer.with_chain(|chain| chain.state().state_root()),
+        keeper.with_chain(|chain| chain.state().state_root()),
+        "the ledger came across, not a copy of it"
+    );
+    assert_eq!(newcomer.total_work(), keeper.total_work());
+
+    // And it is a node, not a snapshot: the next block lands on it.
+    let next = forge.mine();
+    keeper.submit_block(next.clone()).unwrap();
+    wait_for("the next block to reach the newcomer", || {
+        newcomer.height() == Some(top + 1)
+    });
+    assert_eq!(
+        newcomer.with_chain(|chain| chain.state().state_root()),
+        keeper.with_chain(|chain| chain.state().state_root()),
+    );
+
+    newcomer.shutdown();
+    keeper.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+}

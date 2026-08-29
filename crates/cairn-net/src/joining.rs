@@ -120,14 +120,21 @@ impl Collecting {
 }
 
 /// How far a node is through joining a chain it was not on.
-#[derive(Debug, Default)]
-pub enum Joined {
+#[derive(Clone, Debug, Default)]
+pub enum Progress {
     /// Nothing asked for yet.
     #[default]
     Idle,
     /// Collecting the headers that say what work stands behind a tip.
     Weighing(Collecting),
-    /// That settled, collecting the ledger at the tip it settled on.
+    /// That settled. Waiting on the first piece of the ledger, which is what
+    /// says how many pieces there are.
+    ///
+    /// The tip is held because the ledger has to be the one belonging to the
+    /// chain just weighed. A peer that weighed one chain and handed over the
+    /// ledger of another would otherwise be believed.
+    Weighed { tip: BlockHeader },
+    /// Collecting that ledger.
     Fetching {
         tip: BlockHeader,
         collecting: Collecting,
