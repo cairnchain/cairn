@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use cairn_chain::{Accepted, ChainError, ChainStore};
+use cairn_chain::{Accepted, ChainError, ChainStore, Located};
 use cairn_crypto::PublicKey;
 use cairn_ledger::block::Block;
 use cairn_ledger::genesis;
@@ -31,9 +31,9 @@ use cairn_ledger::validation::TransferError;
 use cairn_store::{BlockLog, DirectoryLock, StoreError};
 
 use crate::book::AddressBook;
-use crate::message::Message;
+use crate::message::{Message, MAX_CHAIN};
 use crate::refusal::{can_be_refused, Refusals};
-use crate::sync::{local_handshake, on_message, Local, PeerState};
+use crate::sync::{local_handshake, on_message, Local, PeerState, Reaction};
 use crate::wire::{read_message, write_message, Incoming, WireError};
 
 /// Connections a node dials for itself.
@@ -229,24 +229,73 @@ impl Shared {
         }
     }
 
-    /// Blocks read from the log, by their heights on the followed branch.
+    /// How far this node's branch runs past the last position in `locator` it
+    /// agrees with.
     ///
-    /// The log lock is taken once for the lot. Called with nothing else held,
-    /// because these are disk reads and a peer may ask for a hundred and
-    /// twenty eight of them in one message.
-    fn archived(&self, heights: &[u64]) -> Vec<Block> {
+    /// Memory first, which answers whenever the peer is anywhere near this
+    /// node's tip. A peer far behind names heights this node no longer holds
+    /// an identifier for, and the answer for those is on the disk: without
+    /// that, the only position both sides could agree on would be one of the
+    /// few this node keeps, and a peer would be told to start again from far
+    /// behind where it had already reached.
+    fn chain_after(&self, locator: &[Located], max: u64) -> (u64, u64) {
+        let (reaches, agreed) = {
+            let chain = self.chain();
+            let reaches = chain.height().map_or(0, |tip| tip.saturating_add(1));
+            let agreed = locator
+                .iter()
+                .find(|entry| chain.agrees_with(entry))
+                .map(|entry| entry.height);
+            (reaches, agreed)
+        };
+
+        let agreed = agreed.or_else(|| {
+            let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+            let log = log.as_ref()?;
+            locator.iter().find_map(|entry| {
+                let index = usize::try_from(entry.height).ok()?;
+                let block = log.read(index).ok().flatten()?;
+                (block.id() == entry.id).then_some(entry.height)
+            })
+        });
+
+        let from = agreed.map_or(0, |height| height.saturating_add(1));
+        (from, reaches.saturating_sub(from).min(max))
+    }
+
+    /// The blocks the followed branch carries at `heights`, in that order.
+    ///
+    /// Two passes, so neither lock is held over the other's work. Memory
+    /// first, with the chain held for the length of a few clones and let go
+    /// before any disk is touched; then the log, which holds the branch in
+    /// order of height and answers for everything older.
+    ///
+    /// Order is the point. A peer catching up applies what arrives as it
+    /// arrives, and a block whose parent has not landed is dropped, so a batch
+    /// delivered out of order is a batch mostly thrown away.
+    fn blocks_at(&self, heights: &[u64]) -> Vec<Block> {
         if heights.is_empty() {
             return Vec::new();
         }
-        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(log) = log.as_ref() else {
-            return Vec::new();
+        let mut found: Vec<Option<Block>> = {
+            let chain = self.chain();
+            heights
+                .iter()
+                .map(|height| chain.block_at(*height).cloned())
+                .collect()
         };
-        heights
-            .iter()
-            .filter_map(|height| usize::try_from(*height).ok())
-            .filter_map(|index| log.read(index).ok().flatten())
-            .collect()
+
+        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(log) = log.as_ref() {
+            for (slot, height) in found.iter_mut().zip(heights.iter()) {
+                if slot.is_none() {
+                    *slot = usize::try_from(*height)
+                        .ok()
+                        .and_then(|index| log.read(index).ok().flatten());
+                }
+            }
+        }
+        found.into_iter().flatten().collect()
     }
 
     /// Takes addresses out of the book, so they are not dialled again.
@@ -571,6 +620,7 @@ impl Node {
     /// Offers a locally produced block to the chain, announcing it if it lands.
     pub fn submit_block(&self, block: Block) -> Result<Accepted, ChainError> {
         let id = block.id();
+        let height = block.header.height;
         let accepted = {
             let mut chain = self.shared.chain();
             let accepted = chain.add_block(block, unix_now())?;
@@ -580,7 +630,8 @@ impl Node {
             accepted
         };
         if matches!(accepted, Accepted::Extended | Accepted::Reorganised { .. }) {
-            self.shared.broadcast(None, &Message::Announce(vec![id]));
+            self.shared
+                .broadcast(None, &Message::Announce(vec![Located::new(height, id)]));
         }
         Ok(accepted)
     }
@@ -667,7 +718,6 @@ fn write_branch(log: &mut BlockLog, accepted: &Accepted, chain: &ChainStore) {
         Accepted::Reorganised { added, .. } => added.len(),
     };
 
-    let branch = chain.active();
     // Where the branch and what the log held part company, counted from the
     // branch rather than from the log. Counting from the log would be right
     // only while the two agree, and a write that failed earlier leaves them
@@ -675,20 +725,55 @@ fn write_branch(log: &mut BlockLog, accepted: &Accepted, chain: &ChainStore) {
     // from the wrong end, and every record past that point would sit at a
     // position that is not its height. A node reading its own log by position
     // would serve the wrong blocks, confidently, to everyone catching up.
-    let common = branch.len().saturating_sub(added);
+    let Some(tip) = chain.height() else { return };
+    let reaches = tip.saturating_add(1);
+    let common = usize::try_from(reaches)
+        .unwrap_or(usize::MAX)
+        .saturating_sub(added);
     if log.len() > common && log.keep_first(common).is_err() {
         return;
     }
     // Everything the branch carries beyond what the log holds. Usually one
     // block; more if a write failed earlier and the log fell behind.
-    for id in branch.get(log.len()..).unwrap_or_default() {
+    let mut height = u64::try_from(log.len()).unwrap_or(u64::MAX);
+    while height < reaches {
         // A block the chain has already let go of cannot be written, so the
         // log stays short and the rest is asked for again after a restart.
-        let Some(block) = chain.block(id) else { break };
+        let Some(block) = chain.block_at(height) else {
+            break;
+        };
         if log.append(block).is_err() {
             break;
         }
+        height = height.saturating_add(1);
     }
+}
+
+/// Answers the questions the sync layer set aside, now that nothing is held.
+///
+/// A locator and a request for blocks both reach the disk for a peer far
+/// enough behind, and both run with the chain held. Returns whether the peer
+/// is still worth writing to.
+fn answer_deferred(
+    shared: &Arc<Shared>,
+    reaction: &Reaction,
+    outbound: &SyncSender<Message>,
+) -> bool {
+    if let Some(locator) = reaction.locate.as_ref() {
+        let (from, count) = shared.chain_after(locator, MAX_CHAIN);
+        if outbound.try_send(Message::Chain { from, count }).is_err() {
+            return false;
+        }
+    }
+    // Gathered in one place so they go out in the order they were asked for: a
+    // peer applies them as they arrive, and one whose parent has not landed is
+    // dropped.
+    for block in shared.blocks_at(&reaction.fetch) {
+        if outbound.try_send(Message::Block(Box::new(block))).is_err() {
+            return false;
+        }
+    }
+    true
 }
 
 fn save_book(shared: &Arc<Shared>) {
@@ -1011,7 +1096,7 @@ fn read_loop(
 
         // The chain is held for the decision and for writing the log, and let
         // go before anything is sent, so a slow peer never stalls the chain.
-        let (reaction, passing) = {
+        let (mut reaction, passing) = {
             // Chain first and log second, here and everywhere, so two threads
             // never take these two the other way round from each other.
             let mut chain = shared.chain();
@@ -1054,19 +1139,17 @@ fn read_loop(
             }
         }
 
-        for reply in reaction.reply {
+        for reply in reaction.reply.drain(..) {
             // A full queue means the peer is not reading what it asked for, so
             // the answer would be stale by the time it arrived.
             if outbound.try_send(reply).is_err() {
                 return;
             }
         }
-        // Blocks this node settled and let go of, read now that nothing is
-        // held. A peer catching up asks for these and almost nothing else.
-        for block in shared.archived(&reaction.fetch) {
-            if outbound.try_send(Message::Block(Box::new(block))).is_err() {
-                return;
-            }
+        // What the sync layer named rather than answered, because answering
+        // either reaches a disk and it runs with the chain held.
+        if !answer_deferred(shared, &reaction, outbound) {
+            return;
         }
         if !reaction.broadcast.is_empty() {
             shared.broadcast(Some(id), &Message::Announce(reaction.broadcast));

@@ -8,14 +8,14 @@
 use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
 
-use cairn_chain::{Accepted, ChainError, ChainStore};
+use cairn_chain::{Accepted, ChainError, ChainStore, Located};
 use cairn_ledger::block::Block;
 use cairn_ledger::note::NetworkId;
 use cairn_primitives::Hash32;
 
 use crate::book::AddressBook;
 use crate::message::{
-    Handshake, Message, PeerAddress, MAX_ANNOUNCED, MAX_CHAIN, MAX_REQUESTED, MAX_SHARED_ADDRESSES,
+    Handshake, Message, PeerAddress, MAX_ANNOUNCED, MAX_REQUESTED, MAX_SHARED_ADDRESSES,
     PROTOCOL_VERSION,
 };
 
@@ -39,9 +39,15 @@ pub struct PeerState {
     pub greeted: bool,
     pub height: u64,
     pub total_work: u128,
-    /// Blocks asked for and not yet received. While this is non empty the node
+    /// Heights asked for and not yet received. While this is non empty the node
     /// is mid batch and does not ask for more.
-    pub awaiting: BTreeSet<Hash32>,
+    ///
+    /// Heights rather than identifiers, because what is asked for is a stretch
+    /// of a branch and a node does not know what a peer holds at a height
+    /// until it arrives. A block that turns up is checked against the chain
+    /// like any other; what this tracks is only whether the question has been
+    /// answered.
+    pub awaiting: BTreeSet<u64>,
     /// When the outstanding batch was asked for.
     ///
     /// A peer that answers everything else but never delivers the blocks it
@@ -179,15 +185,25 @@ pub struct Reaction {
     /// be kept on disk is the branch being followed, not every block that ever
     /// arrived.
     pub applied: Option<Accepted>,
-    /// Blocks newly worth telling every other peer about.
-    pub broadcast: Vec<Hash32>,
-    /// Heights on the followed branch a peer asked for and this node no longer
-    /// holds in memory.
+    /// Blocks newly worth telling every other peer about, with where they sit.
+    pub broadcast: Vec<Located>,
+    /// A locator a peer sent, waiting to be answered.
     ///
-    /// Named rather than read here, because reading them means going to disk,
+    /// Answering it means finding the last position in it this node agrees
+    /// with, and a node no longer holds an identifier for every height: for
+    /// anything older than a reorganisation could reach, the answer is on a
+    /// disk. Named here and resolved once the chain is let go of, for the same
+    /// reason blocks are.
+    /// An option rather than an empty list standing for no question: a node
+    /// with no chain at all sends an empty locator, and that is exactly the
+    /// node most in need of an answer.
+    pub locate: Option<Vec<Located>>,
+    /// Heights on the followed branch a peer asked for.
+    ///
+    /// Named rather than read here, because most of them are read off a disk
     /// and this runs with the chain held. A hundred and twenty eight seeks
     /// under that lock is a peer deciding how long everyone else waits. The
-    /// node reads them once it has let go.
+    /// node gathers them once it has let go, in the order they were asked for.
     pub fetch: Vec<u64>,
     /// Addresses worth adding to the book.
     pub learned: Vec<SocketAddr>,
@@ -322,16 +338,44 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
 /// it and asks again.
 pub const BATCH_PATIENCE: u64 = 60;
 
-/// Asks for the blocks among `ids` this node does not have.
-fn request_missing(chain: &ChainStore, peer: &mut PeerState, ids: &[Hash32], now: u64) -> Reaction {
-    let missing = chain.missing(ids.iter());
-    if missing.is_empty() {
-        return follow_up(chain, peer, now);
+/// Asks for a stretch of a peer's branch, starting at `from`.
+fn request_range(peer: &mut PeerState, from: u64, count: u64, now: u64) -> Reaction {
+    let wanted = usize::try_from(count)
+        .unwrap_or(MAX_REQUESTED)
+        .min(MAX_REQUESTED);
+    if wanted == 0 {
+        return Reaction::idle();
     }
-    let batch: Vec<Hash32> = missing.into_iter().take(MAX_REQUESTED).collect();
+    let batch: Vec<u64> = (0..wanted)
+        .filter_map(|step| u64::try_from(step).ok())
+        .map(|step| from.saturating_add(step))
+        .collect();
     peer.awaiting.extend(batch.iter().copied());
     peer.asked_at = now;
     Reaction::reply(vec![Message::GetBlocks(batch)])
+}
+
+/// Asks for the blocks among `ids` this node does not have.
+///
+/// For blocks a peer announced, which arrive with the height they sit at.
+fn request_announced(
+    chain: &ChainStore,
+    peer: &mut PeerState,
+    ids: &[Located],
+    now: u64,
+) -> Reaction {
+    let wanted: Vec<u64> = ids
+        .iter()
+        .filter(|entry| !chain.contains(&entry.id))
+        .map(|entry| entry.height)
+        .take(MAX_REQUESTED)
+        .collect();
+    if wanted.is_empty() {
+        return follow_up(chain, peer, now);
+    }
+    peer.awaiting.extend(wanted.iter().copied());
+    peer.asked_at = now;
+    Reaction::reply(vec![Message::GetBlocks(wanted)])
 }
 
 /// Once a batch has landed, asks for the next one if this node is still behind.
@@ -360,13 +404,14 @@ fn follow_up(chain: &ChainStore, peer: &mut PeerState, now: u64) -> Reaction {
 #[allow(clippy::match_same_arms)]
 fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64) -> Reaction {
     let id = block.id();
-    peer.awaiting.remove(&id);
+    let height = block.header.height;
+    peer.awaiting.remove(&height);
 
     match chain.add_block(block, now) {
         Ok(accepted @ (Accepted::Extended | Accepted::Reorganised { .. })) => {
             let mut reaction = follow_up(chain, peer, now);
             reaction.applied = Some(accepted);
-            reaction.broadcast.push(id);
+            reaction.broadcast.push(Located::new(height, id));
             reaction
         }
         Ok(Accepted::SideBranch) => follow_up(chain, peer, now),
@@ -414,7 +459,7 @@ pub fn on_message(
     let cost = match &message {
         Message::GetChain { .. } => COST_CHAIN,
         Message::Block(block) => {
-            if peer.awaiting.contains(&block.id()) {
+            if peer.awaiting.contains(&block.header.height) {
                 COST_TRIVIAL
             } else {
                 COST_BLOCK
@@ -436,27 +481,41 @@ pub fn on_message(
         // above, so neither reaches here with anything to say.
         Message::Pong(_) | Message::Hello(_) | Message::Welcome(_) => Reaction::idle(),
         Message::Ping(nonce) => Reaction::reply(vec![Message::Pong(nonce)]),
-        Message::GetChain { locator } => Reaction::reply(vec![Message::Chain(
-            local.chain.chain_after(&locator, MAX_CHAIN),
-        )]),
-        Message::Chain(ids) => request_missing(local.chain, peer, &ids, now),
-        Message::Announce(ids) => {
-            let capped: Vec<Hash32> = ids.into_iter().take(MAX_ANNOUNCED).collect();
-            request_missing(local.chain, peer, &capped, now)
-        }
-        Message::GetBlocks(ids) => {
-            let mut reaction = Reaction::idle();
-            for id in ids.iter().take(MAX_REQUESTED) {
-                if let Some(block) = local.chain.block(id) {
-                    reaction.reply.push(Message::Block(Box::new(block.clone())));
-                } else if let Some(height) = local.chain.height_of(id) {
-                    // Settled, so the body is gone from memory and sits in the
-                    // log at this height. Fetched after the locks are let go.
-                    reaction.fetch.push(height);
-                }
+        Message::GetChain { locator } => Reaction {
+            locate: Some(locator),
+            ..Reaction::idle()
+        },
+        Message::Chain { from, count } => {
+            // What the peer offers, minus what this node already has. A peer
+            // can only agree with a position it was shown, and this node shows
+            // it the heights it still holds identifiers for, so the agreement
+            // can land well behind where this node actually is. Asking from
+            // there would mean receiving what it already holds, one useful
+            // block at a time.
+            let have = local.chain.height().map_or(0, |tip| tip.saturating_add(1));
+            let start = from.max(have);
+            let end = from.saturating_add(count);
+            if start >= end {
+                follow_up(local.chain, peer, now)
+            } else {
+                request_range(peer, start, end.saturating_sub(start), now)
             }
-            reaction
         }
+        Message::Announce(ids) => {
+            let capped: Vec<Located> = ids.into_iter().take(MAX_ANNOUNCED).collect();
+            request_announced(local.chain, peer, &capped, now)
+        }
+        // Named rather than answered here. A peer catching up asks for a run
+        // of consecutive heights and applies them in the order they arrive,
+        // since a block whose parent has not landed yet is dropped. Some of
+        // those sit in memory and some on a disk, and answering the memory
+        // ones here and the disk ones afterwards would deliver them out of
+        // order: the tail of a batch first, refused, then the head. So the
+        // whole batch is gathered in one place, in the order asked for.
+        Message::GetBlocks(heights) => Reaction {
+            fetch: heights.into_iter().take(MAX_REQUESTED).collect(),
+            ..Reaction::idle()
+        },
         Message::Block(block) => on_block(local.chain, peer, *block, now),
         // The clock decides which half of the book rotates into this answer,
         // so a peer asking twice does not hear the same names twice.

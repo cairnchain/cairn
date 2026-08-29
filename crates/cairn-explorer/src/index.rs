@@ -129,36 +129,43 @@ impl Index {
     /// of bugs here: reorganisations are short and rare, and an explorer that
     /// is briefly slow is better than one that is quietly wrong about who
     /// owns what.
-    /// `archived` reaches the blocks the chain no longer holds: a node lets go
-    /// of the bodies of blocks too deep to be undone, and an index built from
-    /// the start of the chain wants exactly those.
-    pub(crate) fn refresh(&mut self, chain: &ChainStore, archived: impl Fn(u64) -> Option<Block>) {
-        let active = chain.active();
-        let mut shared = 0usize;
-        while let (Some(known), Some(current)) = (self.indexed.get(shared), active.get(shared)) {
-            if known != current {
-                break;
+    /// `block_at` reads one block of the followed branch, from wherever it is:
+    /// a node lets go of the bodies of blocks too deep to be undone, and an
+    /// index built from the start of the chain wants exactly those.
+    pub(crate) fn refresh(&mut self, chain: &ChainStore, block_at: impl Fn(u64) -> Option<Block>) {
+        let Some(tip) = chain.height() else {
+            return;
+        };
+
+        // Whether what was indexed last time is still on the branch. Only the
+        // last block has to be checked: everything under it was checked when
+        // it was indexed, and a branch that changed under one of them changed
+        // under this one too.
+        if let Some(last) = u64::try_from(self.indexed.len())
+            .unwrap_or(0)
+            .checked_sub(1)
+        {
+            let index = usize::try_from(last).unwrap_or(usize::MAX);
+            let agrees = match chain.id_at(last) {
+                Some(id) => self.indexed.get(index) == Some(&id),
+                // Past what the chain still holds an identifier for. Nothing
+                // that deep can have changed, so it is taken as agreeing.
+                None => last <= tip,
+            };
+            if !agrees {
+                *self = Self::new();
             }
-            shared = shared.saturating_add(1);
-        }
-        if shared < self.indexed.len() {
-            *self = Self::new();
-            shared = 0;
         }
 
-        let mut position = shared;
         let before = self.indexed.len();
-        while let Some(id) = active.get(position) {
-            let block = chain.block(id).cloned().or_else(|| {
-                let height = u64::try_from(position).ok()?;
-                archived(height)
-            });
-            let Some(block) = block else {
+        let mut height = u64::try_from(self.indexed.len()).unwrap_or(u64::MAX);
+        while height <= tip {
+            let Some(block) = block_at(height) else {
                 break;
             };
+            self.indexed.push(block.id());
             self.apply(&block);
-            self.indexed.push(*id);
-            position = position.saturating_add(1);
+            height = height.saturating_add(1);
         }
         if self.indexed.len() != before {
             self.take_stock();

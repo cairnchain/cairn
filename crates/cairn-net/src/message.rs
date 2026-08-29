@@ -7,6 +7,7 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
+use cairn_chain::{Located, MAX_LOCATOR};
 use cairn_ledger::block::Block;
 use cairn_ledger::note::NetworkId;
 use cairn_ledger::transaction::Transfer;
@@ -15,15 +16,12 @@ use cairn_primitives::Hash32;
 
 /// Bumped when the meaning of a message changes. Peers on another version are
 /// refused rather than misunderstood.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Identifiers one announcement may carry.
 pub const MAX_ANNOUNCED: usize = 512;
-/// Entries a locator may carry. A locator thins out with depth, so this covers
-/// a chain far longer than any that will exist.
-pub const MAX_LOCATOR: usize = 64;
-/// Identifiers one chain answer may carry.
-pub const MAX_CHAIN: usize = 2_000;
+/// Positions one chain answer may name.
+pub const MAX_CHAIN: u64 = 2_000;
 /// Blocks one request may ask for.
 pub const MAX_REQUESTED: usize = 128;
 /// Addresses one answer may carry.
@@ -136,17 +134,27 @@ pub enum Message {
     /// Where do our branches part? The locator runs from the sender's tip
     /// backwards, thinning out with depth.
     GetChain {
-        locator: Vec<Hash32>,
+        locator: Vec<Located>,
     },
-    /// The identifiers that follow, oldest first.
-    Chain(Vec<Hash32>),
-    /// Send me these blocks.
-    GetBlocks(Vec<Hash32>),
+    /// How far the sender's branch runs past the last position in the locator
+    /// it agreed with: a first height, and how many blocks follow it.
+    ///
+    /// Heights rather than identifiers. A node no longer holds an identifier
+    /// for every height it has, and reading them off a disk to fill this would
+    /// be a seek a block to answer a question the blocks themselves answer:
+    /// each one carries what it is built on, so a run of them proves its own
+    /// order as it arrives.
+    Chain {
+        from: u64,
+        count: u64,
+    },
+    /// Send me the blocks at these heights, on the branch you follow.
+    GetBlocks(Vec<u64>),
     /// One block. Boxed because it dwarfs every other variant, and an enum is
     /// as large as its largest one.
     Block(Box<Block>),
     /// I have these, ask if you want them.
-    Announce(Vec<Hash32>),
+    Announce(Vec<Located>),
     /// Who else do you know?
     GetPeers,
     /// Addresses worth trying.
@@ -164,7 +172,7 @@ impl Message {
             Self::Ping(_) => "ping",
             Self::Pong(_) => "pong",
             Self::GetChain { .. } => "get chain",
-            Self::Chain(_) => "chain",
+            Self::Chain { .. } => "chain",
             Self::GetBlocks(_) => "get blocks",
             Self::Block(_) => "block",
             Self::Announce(_) => "announce",
@@ -181,7 +189,7 @@ impl Message {
             Self::Ping(_) => 2,
             Self::Pong(_) => 3,
             Self::GetChain { .. } => 4,
-            Self::Chain(_) => 5,
+            Self::Chain { .. } => 5,
             Self::GetBlocks(_) => 6,
             Self::Block(_) => 7,
             Self::Announce(_) => 8,
@@ -193,8 +201,19 @@ impl Message {
 }
 
 /// Decodes a list of identifiers, refusing one longer than `limit`.
-fn decode_ids(reader: &mut Reader<'_>, limit: usize) -> Result<Vec<Hash32>, CodecError> {
-    let ids = Vec::<Hash32>::decode_from(reader)?;
+/// A bounded list of heights.
+fn decode_heights(reader: &mut Reader<'_>, limit: usize) -> Result<Vec<u64>, CodecError> {
+    let heights = Vec::<u64>::decode_from(reader)?;
+    if heights.len() > limit {
+        return Err(CodecError::InvalidValue {
+            type_name: "height list",
+        });
+    }
+    Ok(heights)
+}
+
+fn decode_ids(reader: &mut Reader<'_>, limit: usize) -> Result<Vec<Located>, CodecError> {
+    let ids = Vec::<Located>::decode_from(reader)?;
     if ids.len() > limit {
         return Err(CodecError::InvalidValue {
             type_name: "identifier list",
@@ -210,7 +229,12 @@ impl Encode for Message {
             Self::Hello(handshake) | Self::Welcome(handshake) => handshake.encode_to(out),
             Self::Ping(nonce) | Self::Pong(nonce) => nonce.encode_to(out),
             Self::GetChain { locator } => locator.encode_to(out),
-            Self::Chain(ids) | Self::GetBlocks(ids) | Self::Announce(ids) => ids.encode_to(out),
+            Self::Chain { from, count } => {
+                from.encode_to(out);
+                count.encode_to(out);
+            }
+            Self::GetBlocks(heights) => heights.encode_to(out),
+            Self::Announce(ids) => ids.encode_to(out),
             Self::Block(block) => block.encode_to(out),
             Self::GetPeers => {}
             Self::Peers(addresses) => addresses.encode_to(out),
@@ -229,8 +253,17 @@ impl Decode for Message {
             4 => Ok(Self::GetChain {
                 locator: decode_ids(reader, MAX_LOCATOR)?,
             }),
-            5 => Ok(Self::Chain(decode_ids(reader, MAX_CHAIN)?)),
-            6 => Ok(Self::GetBlocks(decode_ids(reader, MAX_REQUESTED)?)),
+            5 => {
+                let from = u64::decode_from(reader)?;
+                let count = u64::decode_from(reader)?;
+                if count > MAX_CHAIN {
+                    return Err(CodecError::InvalidValue {
+                        type_name: "chain length",
+                    });
+                }
+                Ok(Self::Chain { from, count })
+            }
+            6 => Ok(Self::GetBlocks(decode_heights(reader, MAX_REQUESTED)?)),
             7 => Ok(Self::Block(Box::new(Block::decode_from(reader)?))),
             8 => Ok(Self::Announce(decode_ids(reader, MAX_ANNOUNCED)?)),
             9 => Ok(Self::GetPeers),

@@ -11,7 +11,7 @@
 //! has to be all or nothing. A switch that fails halfway would leave a node
 //! following neither branch, with a state matching no block anyone agrees on.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use cairn_ledger::block::Block;
 use cairn_ledger::note::NoteId;
@@ -23,7 +23,7 @@ use cairn_ledger::validation::{
 };
 use cairn_ledger::ColdSpend;
 use cairn_ledger::LedgerState;
-use cairn_primitives::codec::Encode;
+use cairn_primitives::codec::{CodecError, Decode, Encode};
 use cairn_primitives::{Amount, Hash32};
 
 /// Transfers held while they wait for a block.
@@ -136,6 +136,158 @@ struct StoredBlock {
     total_work: u128,
 }
 
+/// Positions a locator may name.
+///
+/// A locator thins out with depth, so this covers a chain far longer than any
+/// that will exist. It lives here rather than with the wire format because
+/// what fills a locator is the branch, and what a peer will accept has to be
+/// at least what the branch produces.
+pub const MAX_LOCATOR: usize = 64;
+
+/// Heights between one kept identifier and the next, outside the window.
+///
+/// A node holds the branch it could still reorganise, in full, plus one
+/// identifier every this many heights for everything older. Two nodes
+/// comparing branches then agree on where to look without either holding the
+/// whole of its own, and being out by up to this many blocks costs a few
+/// hundred extra sent once.
+///
+/// A thousand and twenty four of these is thirty two kilobytes over thirty
+/// years, against the gigabyte and a quarter that holding every identifier
+/// would take.
+const MILESTONE: u64 = 1_024;
+
+/// A block, and where it sits on the branch that holds it.
+///
+/// Positions travel between nodes because holding an index from identifier
+/// back to height, for the whole of a chain, is an entry per block for ever on
+/// a design whose claim is that a node's cost does not grow with the chain.
+///
+/// A height that arrives from a peer is a claim rather than a fact. Whoever
+/// receives one checks the identifier against what it holds there, so a wrong
+/// height finds nothing rather than the wrong block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Located {
+    pub height: u64,
+    pub id: Hash32,
+}
+
+impl Located {
+    pub const fn new(height: u64, id: Hash32) -> Self {
+        Self { height, id }
+    }
+}
+
+impl Encode for Located {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        self.height.encode_to(out);
+        self.id.encode_to(out);
+    }
+}
+
+impl Decode for Located {
+    fn decode_from(reader: &mut cairn_primitives::codec::Reader<'_>) -> Result<Self, CodecError> {
+        let height = u64::decode_from(reader)?;
+        let id = Hash32::decode_from(reader)?;
+        Ok(Self { height, id })
+    }
+}
+
+/// The branch a node follows, as much of it as a node has any use for.
+///
+/// In full for as far back as a reorganisation may reach, since that is the
+/// only part that can still change, and one identifier every [`MILESTONE`]
+/// heights before that. Everything in between is on disk, in a log that holds
+/// the branch in order of height, and is read from there when it is wanted.
+#[derive(Clone, Debug, Default)]
+struct Branch {
+    /// The most recent identifiers, oldest first.
+    recent: VecDeque<Hash32>,
+    /// The height the first entry of `recent` sits at.
+    from: u64,
+    /// Identifier back to height, for what `recent` holds and nothing else.
+    at: HashMap<Hash32, u64>,
+    /// One identifier every [`MILESTONE`] heights, oldest first, so entry `n`
+    /// is the block at height `n * MILESTONE`.
+    milestones: Vec<Hash32>,
+}
+
+/// Identifiers kept in full.
+///
+/// One more than a reorganisation may undo, so the block a branch is rewound
+/// to is always still here to be rewound onto.
+const WINDOW: usize = MAX_REORG_DEPTH + 1;
+
+impl Branch {
+    /// Blocks on the branch, which is one more than the height of its tip.
+    fn len(&self) -> u64 {
+        self.from
+            .saturating_add(u64::try_from(self.recent.len()).unwrap_or(0))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.recent.is_empty()
+    }
+
+    fn tip(&self) -> Option<Hash32> {
+        self.recent.back().copied()
+    }
+
+    fn genesis(&self) -> Option<Hash32> {
+        self.milestones.first().copied()
+    }
+
+    /// The identifier at `height`, when this node still holds it.
+    ///
+    /// Present for everything inside the window, and for one height in every
+    /// [`MILESTONE`] before that. Absent otherwise, which is not the same as
+    /// saying the branch has no block there.
+    fn id_at(&self, height: u64) -> Option<Hash32> {
+        if height >= self.from {
+            let index = usize::try_from(height.saturating_sub(self.from)).ok()?;
+            return self.recent.get(index).copied();
+        }
+        if height % MILESTONE != 0 {
+            return None;
+        }
+        let index = usize::try_from(height / MILESTONE).ok()?;
+        self.milestones.get(index).copied()
+    }
+
+    /// Where `id` sits, for the part of the branch held in full.
+    fn height_of(&self, id: &Hash32) -> Option<u64> {
+        self.at.get(id).copied()
+    }
+
+    /// Adds a block to the end of the branch.
+    fn push(&mut self, id: Hash32) {
+        let height = self.len();
+        if height % MILESTONE == 0 {
+            self.milestones.push(id);
+        }
+        self.recent.push_back(id);
+        self.at.insert(id, height);
+
+        while self.recent.len() > WINDOW {
+            if let Some(gone) = self.recent.pop_front() {
+                self.at.remove(&gone);
+                self.from = self.from.saturating_add(1);
+            }
+        }
+    }
+
+    /// Takes the last block off, returning it.
+    fn pop(&mut self) -> Option<Hash32> {
+        let id = self.recent.pop_back()?;
+        self.at.remove(&id);
+        // The height it sat at is the one after what is left.
+        if self.len() % MILESTONE == 0 {
+            self.milestones.pop();
+        }
+        Some(id)
+    }
+}
+
 /// Every block a node knows, the branch it currently follows, and the ledger
 /// state that branch produces.
 #[derive(Debug)]
@@ -144,18 +296,18 @@ pub struct ChainStore {
     blocks: HashMap<Hash32, StoredBlock>,
     /// Blocks that failed to apply. Kept so the same block is never retried.
     invalid: HashSet<Hash32>,
-    /// The followed branch, genesis first.
-    active: Vec<Hash32>,
-    positions: HashMap<Hash32, usize>,
+    /// The branch this node follows, held as far back as it can still change
+    /// and sampled before that.
+    branch: Branch,
     /// What it took to apply each block on the active branch, so each can be
     /// undone without replaying the chain. Held for the most recent
     /// [`MAX_REORG_DEPTH`] blocks only.
     applied: HashMap<Hash32, ConnectedBlock>,
-    /// Index in `active` of the oldest block whose undo record is still held.
+    /// Height of the oldest block whose undo record is still held.
     ///
     /// Kept as a cursor rather than recomputed, so trimming one block off the
     /// back costs the same whether the chain is a day or a decade old.
-    undo_from: usize,
+    undo_from: u64,
     state: LedgerState,
     /// Transfers waiting for a block, keyed by identifier so the order a miner
     /// walks them in does not depend on the order they arrived.
@@ -197,8 +349,7 @@ impl ChainStore {
             params,
             blocks: HashMap::new(),
             invalid: HashSet::new(),
-            active: Vec::new(),
-            positions: HashMap::new(),
+            branch: Branch::default(),
             applied: HashMap::new(),
             undo_from: 0,
             state,
@@ -232,7 +383,7 @@ impl ChainStore {
     }
 
     pub fn tip(&self) -> Option<Hash32> {
-        self.active.last().copied()
+        self.branch.tip()
     }
 
     pub fn height(&self) -> Option<u64> {
@@ -268,43 +419,59 @@ impl ChainStore {
         self.blocks.is_empty()
     }
 
-    /// Whether `id` is on the branch currently followed.
+    /// Whether `id` is on the part of the followed branch held in full.
+    ///
+    /// False for a block further back than a reorganisation could reach, which
+    /// is not the same as saying it is not on the branch. Ask by height for
+    /// those.
     pub fn is_active(&self, id: &Hash32) -> bool {
-        self.positions.contains_key(id)
+        self.branch.height_of(id).is_some()
     }
 
-    /// The height `id` sits at on the followed branch.
-    ///
-    /// A node forgets the bodies of blocks it can no longer undo but keeps
-    /// knowing where they were, which is what lets it fetch one back from a
-    /// log that holds the branch in order of height.
+    /// The height `id` sits at, for the part of the branch held in full.
     pub fn height_of(&self, id: &Hash32) -> Option<u64> {
-        self.positions
-            .get(id)
-            .and_then(|index| u64::try_from(*index).ok())
+        self.branch.height_of(id)
     }
 
-    /// The followed branch, genesis first.
-    ///
-    /// Read only. Nothing outside this module decides what the branch is; an
-    /// explorer or a status page only needs to walk what was decided here.
-    pub fn active(&self) -> &[Hash32] {
-        &self.active
+    /// The identifier the followed branch carries at `height`, when this node
+    /// still holds it: everything inside the reorganisation window, and one
+    /// height in every [`MILESTONE`] before that.
+    pub fn id_at(&self, height: u64) -> Option<Hash32> {
+        self.branch.id_at(height)
     }
 
-    /// The block the followed branch carries at `height`.
+    /// Whether the branch carries `entry.id` at `entry.height`.
     ///
-    /// Heights index the branch directly because the first block sits at
-    /// height zero and every block since has added exactly one.
+    /// The answer to a position claimed by a peer. `false` covers both a
+    /// height this node holds something else at and one it no longer holds an
+    /// identifier for, which is why a peer's locator names heights this node
+    /// is sure to have kept.
+    pub fn agrees_with(&self, entry: &Located) -> bool {
+        self.branch.id_at(entry.height) == Some(entry.id)
+    }
+
+    /// The identifiers this node holds for the followed branch, oldest first.
+    ///
+    /// Only what it still holds: the window a reorganisation may reach, and
+    /// one identifier every [`MILESTONE`] heights before that. Everything else
+    /// is on disk. Callers wanting the branch in order should walk heights and
+    /// read a log, which is what an explorer does.
+    pub fn held_ids(&self) -> Vec<Hash32> {
+        let mut ids: Vec<Hash32> = self.branch.milestones.clone();
+        ids.extend(self.branch.recent.iter().copied());
+        ids
+    }
+
+    /// The block the followed branch carries at `height`, when this node still
+    /// holds its body.
     pub fn block_at(&self, height: u64) -> Option<&Block> {
-        let index = usize::try_from(height).ok()?;
-        let id = self.active.get(index)?;
-        self.block(id)
+        let id = self.branch.id_at(height)?;
+        self.block(&id)
     }
 
     /// The first block of the followed branch.
     pub fn genesis(&self) -> Option<Hash32> {
-        self.active.first().copied()
+        self.branch.genesis()
     }
 
     /// Which of `ids` this node has never seen.
@@ -322,46 +489,73 @@ impl ChainStore {
     /// either sending its whole history. Recent blocks are sampled densely
     /// because that is where branches usually part; deep blocks are sampled
     /// rarely because agreement there is almost certain.
-    pub fn locator(&self) -> Vec<Hash32> {
+    ///
+    /// Every height named here is one this node is sure to still hold, so a
+    /// peer comparing the two is comparing like with like: inside the window
+    /// any height will do, and outside it only the milestones exist, so the
+    /// walk steps back to one whenever it would land between them. Both sides
+    /// keep milestones at the same heights, which is what makes them meet.
+    pub fn locator(&self) -> Vec<Located> {
         let mut locator = Vec::new();
-        let Some(mut index) = self.active.len().checked_sub(1) else {
+        let Some(mut height) = self.height() else {
             return locator;
         };
-        let mut step = 1usize;
+
+        let mut step = 1u64;
         let mut dense = 0usize;
         loop {
-            if let Some(id) = self.active.get(index) {
-                locator.push(*id);
+            if let Some(id) = self.branch.id_at(height) {
+                locator.push(Located::new(height, id));
             }
-            if index == 0 {
+            if height == 0 || locator.len() >= MAX_LOCATOR {
                 break;
             }
             dense = dense.saturating_add(1);
             if dense > 10 {
                 step = step.saturating_mul(2);
             }
-            index = index.saturating_sub(step);
+            height = self.step_back(height, step);
         }
         locator
     }
 
-    /// The followed branch beyond the first block of `locator` this node knows,
-    /// oldest first, capped at `max`.
+    /// The next height back from `height`, landing on something this node
+    /// still holds and always moving.
+    fn step_back(&self, height: u64, step: u64) -> u64 {
+        let wanted = height.saturating_sub(step);
+        if wanted >= self.branch.from || wanted == 0 {
+            return wanted;
+        }
+        // Outside the window only the milestones are left, so round down to
+        // one. Rounding can land back on `height` itself, so a step that would
+        // not move goes one milestone further.
+        let rounded = wanted.saturating_sub(wanted % MILESTONE);
+        if rounded < height {
+            return rounded;
+        }
+        rounded.saturating_sub(MILESTONE)
+    }
+
+    /// How far this node's branch runs past the last position in `locator` it
+    /// agrees with, as a first height and how many blocks follow it.
     ///
-    /// When none of the locator is recognised the answer starts at genesis,
+    /// Heights rather than identifiers, because a node no longer holds an
+    /// identifier for every height and reading them off a disk to answer this
+    /// would be a seek per block. What a peer does with them is ask for blocks
+    /// at those heights and check each one as it arrives, which it has to do
+    /// regardless: a block carries what it is built on, so a chain of them
+    /// proves its own order.
+    ///
+    /// When nothing in the locator is recognised the answer starts at zero,
     /// which is what a node syncing from scratch needs.
-    pub fn chain_after(&self, locator: &[Hash32], max: usize) -> Vec<Hash32> {
+    pub fn chain_after(&self, locator: &[Located], max: u64) -> (u64, u64) {
         let common = locator
             .iter()
-            .find_map(|id| self.positions.get(id).copied());
-        let from = common.map_or(0, |index| index.saturating_add(1));
-        self.active
-            .get(from..)
-            .unwrap_or_default()
-            .iter()
-            .take(max)
-            .copied()
-            .collect()
+            .find(|entry| self.agrees_with(entry))
+            .map(|entry| entry.height);
+        let from = common.map_or(0, |height| height.saturating_add(1));
+        let count = self.branch.len().saturating_sub(from).min(max);
+        (from, count)
     }
 
     /// Undo records held, which is bounded by [`MAX_REORG_DEPTH`].
@@ -612,7 +806,7 @@ impl ChainStore {
             }
         }
 
-        let total_work = if self.active.is_empty() {
+        let total_work = if self.branch.is_empty() {
             if block.header.height != 0 || block.header.previous != Hash32::ZERO {
                 return Err(ChainError::NotGenesis);
             }
@@ -660,8 +854,8 @@ impl ChainStore {
         // is below the floor `add_block` refuses at. This stays as the last
         // word on the rule it enforces, rather than as a check that happens to
         // be unreachable today.
-        let keep = fork_position.map_or(0, |index| index.saturating_add(1));
-        let depth = self.active.len().saturating_sub(keep);
+        let keep = fork_position.map_or(0, |height| height.saturating_add(1));
+        let depth = usize::try_from(self.branch.len().saturating_sub(keep)).unwrap_or(usize::MAX);
         if depth > MAX_REORG_DEPTH {
             return Err(ChainError::ForkTooDeep { depth });
         }
@@ -702,13 +896,13 @@ impl ChainStore {
     ///
     /// `None` for that position means the branch starts from nothing, which
     /// happens only while the node has no chain at all.
-    fn branch_to(&self, target: Hash32) -> Result<(Option<usize>, Vec<Hash32>), ChainError> {
+    fn branch_to(&self, target: Hash32) -> Result<(Option<u64>, Vec<Hash32>), ChainError> {
         let mut branch = Vec::new();
         let mut cursor = target;
         loop {
-            if let Some(position) = self.positions.get(&cursor) {
+            if let Some(height) = self.branch.height_of(&cursor) {
                 branch.reverse();
-                return Ok((Some(*position), branch));
+                return Ok((Some(height), branch));
             }
             let stored = self
                 .blocks
@@ -722,7 +916,7 @@ impl ChainStore {
             }
             branch.push(cursor);
             if stored.block.header.height == 0 {
-                if self.active.is_empty() {
+                if self.branch.is_empty() {
                     branch.reverse();
                     return Ok((None, branch));
                 }
@@ -735,17 +929,16 @@ impl ChainStore {
     }
 
     /// Undoes every applied block above `position`, newest first.
-    fn rewind_to(&mut self, position: Option<usize>) -> Result<Vec<Hash32>, ChainError> {
-        let keep = position.map_or(0, |index| index.saturating_add(1));
+    fn rewind_to(&mut self, position: Option<u64>) -> Result<Vec<Hash32>, ChainError> {
+        let keep = position.map_or(0, |height| height.saturating_add(1));
         let mut removed = Vec::new();
-        while self.active.len() > keep {
-            let id = self.active.pop().ok_or(ChainError::Corrupt)?;
+        while self.branch.len() > keep {
+            let id = self.branch.pop().ok_or(ChainError::Corrupt)?;
             let connected = self.applied.remove(&id).ok_or(ChainError::Corrupt)?;
             disconnect_block(&mut self.state, &connected);
-            self.positions.remove(&id);
             removed.push(id);
         }
-        self.undo_from = self.undo_from.min(self.active.len());
+        self.undo_from = self.undo_from.min(self.branch.len());
         Ok(removed)
     }
 
@@ -764,8 +957,9 @@ impl ChainStore {
     /// rather than a sweep: what it costs does not depend on how long the
     /// chain has been running.
     fn forget_what_cannot_change(&mut self) {
-        while self.active.len().saturating_sub(self.undo_from) > MAX_REORG_DEPTH {
-            let Some(id) = self.active.get(self.undo_from).copied() else {
+        let window = u64::try_from(MAX_REORG_DEPTH).unwrap_or(u64::MAX);
+        while self.branch.len().saturating_sub(self.undo_from) > window {
+            let Some(id) = self.branch.id_at(self.undo_from) else {
                 break;
             };
             self.applied.remove(&id);
@@ -796,11 +990,11 @@ impl ChainStore {
         else {
             return;
         };
-        let positions = &self.positions;
+        let branch = &self.branch;
         self.blocks.retain(|id, stored| {
-            positions.contains_key(id) || stored.block.header.height >= cutoff
+            branch.height_of(id).is_some() || stored.block.header.height >= cutoff
         });
-        self.invalid.retain(|id| !positions.contains_key(id));
+        self.invalid.retain(|id| branch.height_of(id).is_none());
     }
 
     fn apply(&mut self, id: Hash32, now: u64) -> Result<(), ChainError> {
@@ -812,8 +1006,7 @@ impl ChainStore {
             .clone();
         let connected = connect_block(&mut self.state, &block, &self.params, now)
             .map_err(|source| ChainError::InvalidBlock { id, source })?;
-        self.positions.insert(id, self.active.len());
-        self.active.push(id);
+        self.branch.push(id);
         self.applied.insert(id, connected);
         Ok(())
     }
@@ -828,10 +1021,9 @@ impl ChainStore {
         now: u64,
     ) -> Result<(), ChainError> {
         for _ in partial {
-            let id = self.active.pop().ok_or(ChainError::Corrupt)?;
+            let id = self.branch.pop().ok_or(ChainError::Corrupt)?;
             let connected = self.applied.remove(&id).ok_or(ChainError::Corrupt)?;
             disconnect_block(&mut self.state, &connected);
-            self.positions.remove(&id);
         }
         // `rolled_back` came off the tip newest first, so it goes back on in
         // the opposite order.

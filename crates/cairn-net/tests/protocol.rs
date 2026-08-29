@@ -9,6 +9,7 @@
 )]
 
 use cairn_chain::ChainStore;
+use cairn_chain::Located;
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::Block;
 use cairn_ledger::note::{NetworkId, Note};
@@ -16,7 +17,7 @@ use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
 use cairn_net::book::AddressBook;
-use cairn_net::message::{Handshake, Message, PeerAddress, PROTOCOL_VERSION};
+use cairn_net::message::{Handshake, Message, PeerAddress, MAX_CHAIN, PROTOCOL_VERSION};
 use cairn_net::sync::{local_handshake, on_message, DropReason, Local, PeerState};
 use cairn_net::wire::{read_message, write_message, Incoming, WireError, MAX_FRAME_BYTES};
 use cairn_primitives::codec::{Decode, Encode};
@@ -87,6 +88,55 @@ fn solo(chain: &mut ChainStore) -> Local<'_> {
     solo_as(chain, 1)
 }
 
+/// Everything a node would send back, including what it resolves after letting
+/// go of the chain.
+///
+/// A node answers a locator and a request for blocks once the chain lock is
+/// released, because both reach a disk for anything older than a
+/// reorganisation could undo. Here there is no disk and no lock, so this
+/// stands in for that step and lets a test read one answer rather than two
+/// halves of one.
+fn answer(
+    chain: &mut ChainStore,
+    peer: &mut PeerState,
+    message: Message,
+    now: u64,
+) -> Vec<Message> {
+    resolve(on_message(&mut solo(chain), peer, message, now), chain)
+}
+
+/// The same, for a node that has to be told which of the two it is.
+fn exchange(
+    chain: &mut ChainStore,
+    peer: &mut PeerState,
+    nonce: u64,
+    message: Message,
+) -> Vec<Message> {
+    let kind = message.kind();
+    let reaction = on_message(&mut solo_as(chain, nonce), peer, message, NOW);
+    assert!(
+        reaction.drop_peer.is_none(),
+        "dropped on {kind}: {:?}",
+        reaction.drop_peer
+    );
+    resolve(reaction, chain)
+}
+
+/// What a node would send, once it has resolved what it deferred.
+fn resolve(reaction: cairn_net::sync::Reaction, chain: &ChainStore) -> Vec<Message> {
+    let mut out = reaction.reply;
+    if let Some(locator) = reaction.locate.as_ref() {
+        let (from, count) = chain.chain_after(locator, MAX_CHAIN);
+        out.push(Message::Chain { from, count });
+    }
+    for height in &reaction.fetch {
+        if let Some(block) = chain.block_at(*height) {
+            out.push(Message::Block(Box::new(block.clone())));
+        }
+    }
+    out
+}
+
 /// The same, for a test that needs two nodes to be distinguishable.
 ///
 /// Two nodes sharing a nonce would each take the other for itself, which is
@@ -119,11 +169,11 @@ fn a_message_roundtrips_through_the_wire_format() {
         Message::Ping(42),
         Message::Pong(42),
         Message::GetChain {
-            locator: vec![block.id(), Hash32::ZERO],
+            locator: vec![Located::new(0, block.id()), Located::new(9, Hash32::ZERO)],
         },
-        Message::Chain(vec![block.id()]),
-        Message::GetBlocks(vec![block.id()]),
-        Message::Announce(vec![block.id()]),
+        Message::Chain { from: 7, count: 12 },
+        Message::GetBlocks(vec![0, 1, 2]),
+        Message::Announce(vec![Located::new(0, block.id())]),
         Message::Block(Box::new(block.clone())),
         Message::Hello(Handshake {
             version: PROTOCOL_VERSION,
@@ -362,8 +412,8 @@ fn a_locator_is_answered_with_what_follows_it() {
     let behind = store_with(params, &blocks[..2]);
 
     let mut peer = greeted_peer(2, 1);
-    let reaction = on_message(
-        &mut solo(&mut ahead),
+    let replies = answer(
+        &mut ahead,
         &mut peer,
         Message::GetChain {
             locator: behind.locator(),
@@ -371,14 +421,14 @@ fn a_locator_is_answered_with_what_follows_it() {
         NOW,
     );
 
-    let ids = match reaction.reply.first() {
-        Some(Message::Chain(ids)) => ids.clone(),
+    let (from, count) = match replies.first() {
+        Some(Message::Chain { from, count }) => (*from, *count),
         other => panic!("expected a chain, got {other:?}"),
     };
-    let expected: Vec<_> = blocks[2..].iter().map(Block::id).collect();
     assert_eq!(
-        ids, expected,
-        "exactly the blocks the other side lacks, oldest first"
+        (from, count),
+        (2, 4),
+        "exactly the stretch the other side lacks, oldest first"
     );
 }
 
@@ -390,20 +440,18 @@ fn only_the_missing_blocks_are_asked_for() {
     let mut behind = store_with(params, &blocks[..2]);
 
     let mut peer = greeted_peer(5, 4);
-    let announced: Vec<_> = blocks.iter().map(Block::id).collect();
     let reaction = on_message(
         &mut solo(&mut behind),
         &mut peer,
-        Message::Chain(announced),
+        Message::Chain { from: 2, count: 3 },
         NOW,
     );
 
     let asked = match reaction.reply.first() {
-        Some(Message::GetBlocks(ids)) => ids.clone(),
+        Some(Message::GetBlocks(heights)) => heights.clone(),
         other => panic!("expected a request, got {other:?}"),
     };
-    let expected: Vec<_> = blocks[2..].iter().map(Block::id).collect();
-    assert_eq!(asked, expected);
+    assert_eq!(asked, vec![2, 3, 4]);
     assert_eq!(
         peer.awaiting.len(),
         3,
@@ -419,27 +467,20 @@ fn a_request_is_answered_with_the_blocks_that_are_held() {
     let mut store = store_with(params, &blocks);
 
     let mut peer = greeted_peer(3, 2);
-    let asked = vec![blocks[0].id(), Hash32::from_bytes([9; 32]), blocks[2].id()];
-    let reaction = on_message(
-        &mut solo(&mut store),
+    let replies = answer(
+        &mut store,
         &mut peer,
-        Message::GetBlocks(asked),
+        Message::GetBlocks(vec![0, 99, 2]),
         NOW,
     );
 
     assert_eq!(
-        reaction.reply.len(),
+        replies.len(),
         2,
-        "the unknown identifier is simply not answered"
+        "the height nothing sits at is simply not answered"
     );
-    assert_eq!(
-        reaction.reply[0],
-        Message::Block(Box::new(blocks[0].clone()))
-    );
-    assert_eq!(
-        reaction.reply[1],
-        Message::Block(Box::new(blocks[2].clone()))
-    );
+    assert_eq!(replies[0], Message::Block(Box::new(blocks[0].clone())));
+    assert_eq!(replies[1], Message::Block(Box::new(blocks[2].clone())));
 }
 
 #[test]
@@ -450,7 +491,7 @@ fn a_block_that_lands_is_worth_telling_everyone_about() {
     let mut behind = store_with(params, &blocks[..2]);
 
     let mut peer = greeted_peer(3, 2);
-    peer.awaiting.insert(blocks[2].id());
+    peer.awaiting.insert(2);
     let reaction = on_message(
         &mut solo(&mut behind),
         &mut peer,
@@ -458,7 +499,7 @@ fn a_block_that_lands_is_worth_telling_everyone_about() {
         NOW,
     );
 
-    assert_eq!(reaction.broadcast, vec![blocks[2].id()]);
+    assert_eq!(reaction.broadcast, vec![Located::new(2, blocks[2].id())]);
     assert!(reaction.drop_peer.is_none());
     assert_eq!(behind.height(), Some(2));
     assert!(peer.awaiting.is_empty());
@@ -538,24 +579,10 @@ fn a_full_exchange_carries_one_chain_to_the_other_node() {
 
         let mut answers = Vec::new();
         for message in pending.drain(..) {
-            let kind = message.kind();
-            let reaction = on_message(&mut solo_as(&mut behind, 1), &mut peer, message, NOW);
-            assert!(
-                reaction.drop_peer.is_none(),
-                "behind dropped on {kind}: {:?}",
-                reaction.drop_peer
-            );
-            answers.extend(reaction.reply);
+            answers.extend(exchange(&mut behind, &mut peer, 1, message));
         }
         for message in answers {
-            let kind = message.kind();
-            let reaction = on_message(&mut solo_as(&mut ahead, 2), &mut mirror, message, NOW);
-            assert!(
-                reaction.drop_peer.is_none(),
-                "ahead dropped on {kind}: {:?}",
-                reaction.drop_peer
-            );
-            pending.extend(reaction.reply);
+            pending.extend(exchange(&mut ahead, &mut mirror, 2, message));
         }
     }
 
@@ -900,7 +927,7 @@ fn a_peer_cannot_decide_how_much_answering_it_costs() {
     }
 
     let mut peer = greeted_peer(0, 0);
-    let wanted: Vec<Hash32> = blocks.iter().map(Block::id).collect();
+    let wanted: Vec<u64> = (0..blocks.len() as u64).collect();
 
     // Asking for everything it can, over and over, inside one window.
     let mut answered = 0usize;
@@ -908,7 +935,7 @@ fn a_peer_cannot_decide_how_much_answering_it_costs() {
     for _ in 0..4_000 {
         let asking = Message::GetBlocks(wanted.clone());
         let reaction = on_message(&mut solo(&mut store), &mut peer, asking, NOW);
-        if reaction.reply.is_empty() {
+        if reaction.fetch.is_empty() {
             refused = refused.saturating_add(1);
         } else {
             answered = answered.saturating_add(1);
@@ -927,7 +954,7 @@ fn a_peer_cannot_decide_how_much_answering_it_costs() {
         Message::GetBlocks(wanted.clone()),
         NOW + 30,
     );
-    assert!(!later.reply.is_empty(), "a fresh window answers again");
+    assert!(!later.fetch.is_empty(), "a fresh window answers again");
 }
 
 /// Taking delivery of what you asked for is not something to be charged for.
@@ -940,8 +967,8 @@ fn blocks_this_node_asked_for_do_not_use_up_its_allowance() {
     let mut peer = greeted_peer(0, 0);
     // As though this node had just asked for all three.
     peer.asked_at = NOW;
-    for block in &blocks {
-        peer.awaiting.insert(block.id());
+    for height in 0..blocks.len() as u64 {
+        peer.awaiting.insert(height);
     }
 
     for block in &blocks {

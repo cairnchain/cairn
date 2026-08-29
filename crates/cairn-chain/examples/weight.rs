@@ -85,16 +85,13 @@ fn main() {
     // again rather than asking for more. What is still growing is countable,
     // so it is counted rather than measured.
     let per_id = std::mem::size_of::<cairn_primitives::Hash32>() as u64;
-    // A hash map entry is a key, a value, one byte of control, and the room
-    // hashbrown leaves so it never fills past seven eighths.
-    let per_entry = (per_id + std::mem::size_of::<usize>() as u64 + 1) * 8 / 7;
-    let per_block = per_id + per_entry;
-    let thirty_years = 30 * 365 * 24 * 60;
+    let thirty_years: u64 = 30 * 365 * 24 * 60;
+    // One identifier every so often, and nothing else per block.
+    let milestones = thirty_years / 1_024;
     println!(
-        "\nStill growing, counted rather than measured:\n\
-         {per_id} B for the identifier on the branch, {per_entry} B for the entry\n\
-         that finds it, so {per_block} B per block and {} in thirty years.",
-        format_bytes(per_block * thirty_years)
+        "\nStill growing, counted rather than measured: one identifier every\n\
+         1024 heights, {per_id} bytes each, so {} over thirty years.",
+        format_bytes(milestones * per_id)
     );
 
     println!(
@@ -102,9 +99,9 @@ fn main() {
          four hashes, so neither appears above. A node also lets go of the body\n\
          of any block too deep to be undone, and reads it back from its log if\n\
          anyone asks. What is left growing is the list of the branch it follows\n\
-         and the index into it: an identifier and a position per block, and\n\
-         nothing else. Both go the same way the bodies did once a locator\n\
-         carries heights, since then a position can be read from the log."
+         only as far back as one could still be undone, and one identifier\n\
+         every 1024 heights before that. Everything else is read from the log,\n\
+         where the branch sits in order of height."
     );
 }
 

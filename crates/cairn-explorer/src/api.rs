@@ -73,8 +73,14 @@ impl Explorer {
     /// Reads whatever the chain has added since the last call.
     pub(crate) fn refresh(&self) {
         let mut index = self.index();
-        self.node
-            .with_chain(|chain| index.refresh(chain, |height| self.node.archived_at(height)));
+        self.node.with_chain(|chain| {
+            index.refresh(chain, |height| {
+                chain
+                    .block_at(height)
+                    .cloned()
+                    .or_else(|| self.node.archived_at(height))
+            });
+        });
     }
 
     /// Routes one request, or reports that nothing here answers it.

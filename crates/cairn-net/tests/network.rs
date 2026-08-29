@@ -463,14 +463,23 @@ fn a_node_serves_blocks_it_has_forgotten() {
     let top = (depth - 1) as u64;
     assert_eq!(seeded.height(), Some(top));
 
-    // The first block is out of memory, and the node still knows where it was.
+    // The first block is out of memory, and so is the index that would say
+    // where it was: a node holds neither for what it can no longer undo. What
+    // it does hold is one identifier every so often, and height zero is one of
+    // them, which is how a peer's locator finds a point both sides agree on.
     let genesis = blocks[0].id();
     seeded.with_chain(|chain| {
         assert!(
             chain.block(&genesis).is_none(),
             "a settled block should not still be held in memory"
         );
-        assert_eq!(chain.height_of(&genesis), Some(0), "but its place is known");
+        assert_eq!(chain.height_of(&genesis), None, "nor its place");
+        assert_eq!(chain.id_at(0), Some(genesis), "but the milestone is kept");
+        // A height that is neither inside the window nor a milestone.
+        assert!(
+            chain.block_at(100).is_none(),
+            "and an early height is not held either"
+        );
     });
 
     // A node starting from nothing has to be given all of it, forgotten or not.
