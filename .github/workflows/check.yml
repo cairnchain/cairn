@@ -22,7 +22,7 @@ jobs:
   style:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the toolchain this repository pins
         run: rustup show
       - run: cargo fmt --all --check
@@ -38,10 +38,25 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the toolchain this repository pins
         run: rustup show
       - run: cargo test --workspace --release
+
+  # The same tests again, in a debug build, because the release job above
+  # compiles every debug_assert out of existence. Some of those stand on
+  # invariants whose first visible sign of failure would otherwise be a node
+  # disagreeing with the network: what undoing a block restores, what the hot
+  # set and the index over it agree on. An assertion nothing ever runs is a
+  # comment. One machine is enough — what this catches is not platform
+  # specific.
+  assertions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the toolchain this repository pins
+        run: rustup show
+      - run: cargo test --workspace
 
   # A node has to build for the machines people actually run servers on, and
   # those are not the machines this is developed on.
@@ -54,7 +69,7 @@ jobs:
           - x86_64-unknown-linux-musl
           - x86_64-pc-windows-gnu
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the toolchain this repository pins
         run: rustup show
       - run: rustup target add ${{ matrix.target }}

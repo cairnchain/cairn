@@ -29,16 +29,19 @@ on:
         description: Version to build, for a dry run
         required: true
 
+# Granted per job rather than here. Everything this file does apart from the
+# last step is a build, and a build that can write releases and mint an OIDC
+# token is a build whose every dependency can too.
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -63,7 +66,7 @@ jobs:
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # A tag that disagrees with the version in Cargo.toml produces programs
       # that report one number while the release is named another. Cheaper to
@@ -125,7 +128,7 @@ jobs:
             tar czf "${ARCHIVE}.tar.gz" "$FOLDER"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.name }}
           path: |
@@ -136,14 +139,20 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
+    # The only job that writes anything: the release, and the attestation that
+    # says which build produced it.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # The tag message becomes the release notes, so the tag has to
           # arrive with its annotation rather than as a bare ref.
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: downloads
           merge-multiple: true
@@ -160,7 +169,7 @@ jobs:
       # Verified with:
       #   gh attestation verify <file> --repo ${{ github.repository }}
       # Recorded in a public transparency log, so only for a real release.
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         if: github.event_name == 'push'
         with:
           subject-path: "downloads/*.tar.gz, downloads/*.zip"

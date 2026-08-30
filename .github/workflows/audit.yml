@@ -1,0 +1,44 @@
+# Whether anything we depend on has become a known problem.
+#
+# A dependency does not have to change to start being one: an advisory
+# published against a version already pinned in Cargo.lock makes it one
+# overnight, without a commit and without anyone touching the code. So this
+# runs on a schedule as well as on changes to the lockfile — a check that only
+# fires when somebody pushes is not a watch.
+#
+# Kept out of check.yml deliberately: a weekly run of that file would build on
+# three operating systems and two cross targets to answer a question none of
+# them are asked.
+
+name: audit
+
+on:
+  push:
+    branches: [main]
+    paths: ["**/Cargo.toml", "Cargo.lock", ".github/workflows/audit.yml"]
+  pull_request:
+    paths: ["**/Cargo.toml", "Cargo.lock", ".github/workflows/audit.yml"]
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+# Nothing here writes anything.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  advisories:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the toolchain this repository pins
+        run: rustup show
+      # Built from source rather than fetched by a third-party action: this
+      # job exists to say something about supply chain, and reaching for one
+      # more action to do it would be answering the question with the problem.
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - run: cargo audit
