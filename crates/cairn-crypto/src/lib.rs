@@ -46,6 +46,12 @@ pub enum CryptoError {
 /// so the key material can never reach a log through a derived formatter.
 pub struct SecretKey(SigningKey);
 
+// Nothing here wipes the key on the way out, and it does not have to: the
+// workspace builds ed25519-dalek with its `zeroize` feature, so the
+// `SigningKey` inside clears itself when it is dropped. Said out loud because
+// the absence of a `Drop` on a type holding a private key is the first thing
+// worth asking about, and the answer is a line in a manifest.
+
 /// Draws `N` bytes from the operating system entropy source.
 ///
 /// For the things that are not keys and must still be unguessable: the secret

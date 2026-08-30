@@ -87,6 +87,15 @@ fn measure(transfers_each: usize) -> (usize, f64, f64) {
     )
 }
 
+/// What one hot note costs a node, measured rather than guessed.
+///
+/// `examples/footprint.rs` builds the structures and reads the resident memory
+/// back: 237 bytes for the map and the ordering, 279 for the tree. It was 813
+/// before a public key stopped being kept in the form it is verified in, which
+/// is where the figure below used to come from and why it is named here rather
+/// than written into two format strings.
+const HOT_BYTES_PER_NOTE: f64 = 516.0;
+
 fn main() {
     let params = ConsensusParams::testnet();
     let (header_bytes, empty_size, empty_cost) = measure(0);
@@ -152,7 +161,7 @@ fn main() {
     println!(
         "For comparison, the validation state a node holds is capped at {} notes, {:.0} MB.",
         params.hot_capacity,
-        params.hot_capacity as f64 * 813.0 / 1_048_576.0
+        params.hot_capacity as f64 * HOT_BYTES_PER_NOTE / 1_000_000.0
     );
     println!();
     println!("What the header commitment costs, and what it is for:");
@@ -163,7 +172,7 @@ fn main() {
         "  sampled start, 30 years {:.0} sampled headers, {:.0} kB, plus {:.0} MB of state",
         128.0,
         128.0 * header_bytes as f64 * 12.0 / 1_024.0,
-        params.hot_capacity as f64 * 813.0 / 1_048_576.0
+        params.hot_capacity as f64 * HOT_BYTES_PER_NOTE / 1_000_000.0
     );
     println!();
     println!("The sampled figure is what the field makes possible, not what is");

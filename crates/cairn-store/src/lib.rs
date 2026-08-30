@@ -142,7 +142,11 @@ fn sync_directory(path: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
+// The signature has to match the Unix one, which can fail. Clippy sees a
+// function that never does and asks for the `Result` to go, which would only
+// move the difference between the platforms into every caller.
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
 fn sync_directory(_path: &Path) -> Result<(), StoreError> {
     Ok(())
 }
