@@ -12,7 +12,7 @@ use cairn_primitives::{Amount, Hash32};
 
 use crate::emission;
 
-use crate::block::{Block, BlockHeader, BLOCK_VERSION};
+use crate::block::{Activation, Block, BlockHeader, BLOCK_VERSION};
 use crate::note::{NetworkId, Note, NoteId};
 use crate::pow::{median_time_past, meets_target, next_difficulty, work_of, MIN_DIFFICULTY};
 use crate::state::{cold_leaf, BlockUndo, ColdSpend, LedgerState, StateTransition};
@@ -111,6 +111,13 @@ pub struct ConsensusParams {
     pub max_block_bytes: usize,
     /// How far ahead of the receiving node's clock a timestamp may sit.
     pub max_timestamp_drift: u64,
+    /// The rule changes this network has scheduled, oldest first.
+    ///
+    /// Consensus like every other field here, and for the same reason: two
+    /// nodes with different schedules disagree about which blocks are valid
+    /// while believing they are on the same chain. The first entry is what the
+    /// network opened under.
+    pub activations: &'static [Activation],
 }
 
 impl ConsensusParams {
@@ -186,7 +193,25 @@ impl ConsensusParams {
             max_coinbase_outputs: 16,
             max_block_bytes: 128 * 1024,
             max_timestamp_drift: 2 * 60 * 60,
+            // Nothing has changed yet, so the schedule says only what the
+            // network opened under. A rule that changes appends to this.
+            activations: &[Activation {
+                height: 0,
+                version: BLOCK_VERSION,
+            }],
         }
+    }
+
+    /// The block version the rules require at `height`.
+    ///
+    /// The last activation at or below it, so a block is judged by the rules
+    /// in force where it sits rather than by today's.
+    pub fn version_at(&self, height: u64) -> u16 {
+        self.activations
+            .iter()
+            .rev()
+            .find(|activation| height >= activation.height)
+            .map_or(BLOCK_VERSION, |activation| activation.version)
     }
 
     /// What a block at `height` pays whoever produced it.
@@ -250,6 +275,15 @@ pub enum TransferError {
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum BlockError {
+    #[error(
+        "the rules at height {height} are block version {required}, and this software \
+         knows only version {known}: it is too old to follow this chain"
+    )]
+    SoftwareTooOld {
+        height: u64,
+        required: u16,
+        known: u16,
+    },
     #[error("block version {0} is not supported")]
     UnsupportedVersion(u16),
     #[error("coinbase version {0} is not supported")]
@@ -627,8 +661,17 @@ pub fn assemble_block(
 
     let effect = evaluate_block_body(state, &coinbase, &transfers, params)?;
     let difficulty = expected_difficulty(state, params);
+    let version = params.version_at(height);
+    if version > BLOCK_VERSION {
+        return Err(BlockError::SoftwareTooOld {
+            height,
+            required: version,
+            known: BLOCK_VERSION,
+        });
+    }
+
     let header = BlockHeader {
-        version: BLOCK_VERSION,
+        version,
         network: params.network,
         height,
         previous: state.expected_parent(),
@@ -670,9 +713,6 @@ fn check_header(
     header: &BlockHeader,
     params: &ConsensusParams,
 ) -> Result<(), BlockError> {
-    if header.version != BLOCK_VERSION {
-        return Err(BlockError::UnsupportedVersion(header.version));
-    }
     if header.network != params.network {
         return Err(BlockError::WrongNetwork {
             expected: params.network,
@@ -690,6 +730,25 @@ fn check_header(
     }
 
     let expected_height = state.next_height().ok_or(BlockError::HeightOverflow)?;
+
+    // Which rules judge this block is decided by where it sits, and where it
+    // sits is decided by the state rather than by what the block says about
+    // itself — its own claim about its height is checked further down, and a
+    // block that lied about it would otherwise pick the rules it is judged by.
+    let required = params.version_at(expected_height);
+    if required > BLOCK_VERSION {
+        // Not a bad block. A height whose rules this software does not have,
+        // which is this software's problem and nobody else's.
+        return Err(BlockError::SoftwareTooOld {
+            height: expected_height,
+            required,
+            known: BLOCK_VERSION,
+        });
+    }
+    if header.version != required {
+        return Err(BlockError::UnsupportedVersion(header.version));
+    }
+
     if expected_height == 0 {
         if let Some(expected) = params.genesis {
             let found = header.id();

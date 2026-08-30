@@ -8,7 +8,40 @@ use cairn_primitives::Hash32;
 use crate::note::NetworkId;
 use crate::transaction::{CoinbaseTransaction, Transfer};
 
+/// The highest block version this software knows how to judge.
+///
+/// Not the version every block carries: which version a block must carry is
+/// decided by its height, through the network's [`Activation`] schedule. This
+/// is what this binary can answer for, and a height whose rules need more than
+/// this is a height it must not pretend to follow.
 pub const BLOCK_VERSION: u16 = 1;
+
+/// A rule change, and the first height judged under it.
+///
+/// This is the whole of the upgrade mechanism, and the shortness is the point.
+/// A rule that changes takes the next version and the height it starts at.
+/// Blocks before that height go on being judged by the rule that judged them,
+/// so nothing already mined becomes invalid and no balance is thrown away —
+/// which is the difference between changing a rule and renumbering the
+/// network, and the difference only matters once the chain carries something.
+///
+/// Nobody votes. The height is in the code, published long before it arrives,
+/// and a node that disagrees with it is running different software rather than
+/// casting a ballot. Miner signalling was considered and refused: it would
+/// hand whoever mines a veto over the rules, which is the authority this chain
+/// refuses to grant anyone, and refusing it to miners is the same objection it
+/// already makes to proof of stake.
+///
+/// What this does not solve, because nothing does: a node that has not updated
+/// by the height follows a chain the rest of the network has left. The remedy
+/// is the notice, and a node that says so and stops rather than pretending.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Activation {
+    /// First height judged under `version`.
+    pub height: u64,
+    /// The block version those rules are written under.
+    pub version: u16,
+}
 
 /// Everything a node needs to follow the chain without the block body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

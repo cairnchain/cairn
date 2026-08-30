@@ -633,3 +633,54 @@ fn the_most_a_node_will_hold_stays_something_a_phone_has() {
          phone can carry"
     );
 }
+
+/// A node that has not updated must not mistake the network for a liar.
+///
+/// The block is well formed and every peer that has updated is sending it.
+/// What is out of date is this node, and the two call for opposite reactions:
+/// refusing the block as bad drops every updated peer and leaves this one
+/// following whoever has not updated either. So the refusal is told apart, and
+/// the node stops on it rather than banning its way onto a minority chain.
+#[test]
+fn a_block_from_rules_this_build_lacks_is_named_as_such_and_not_as_a_bad_block() {
+    let miner = wallet(1);
+    let plain = params();
+
+    let mut branch = Branch::new(plain);
+    let blocks = branch.mine_empty(&miner, 6, 600);
+
+    // The same node, told that height five is judged by rules it does not have.
+    let announced = ConsensusParams {
+        activations: &[
+            cairn_ledger::block::Activation {
+                height: 0,
+                version: cairn_ledger::block::BLOCK_VERSION,
+            },
+            cairn_ledger::block::Activation {
+                height: 5,
+                version: cairn_ledger::block::BLOCK_VERSION + 1,
+            },
+        ],
+        ..plain
+    };
+    let mut store = ChainStore::new(announced);
+
+    for block in &blocks[..5] {
+        store
+            .add_block(block.clone(), NOW)
+            .expect("everything below the change is judged as it always was");
+    }
+
+    let refused = store.add_block(blocks[5].clone(), NOW).unwrap_err();
+    let outdated = refused
+        .outdated()
+        .expect("named as rules this build lacks, not as a bad block");
+
+    assert_eq!(outdated.height, 5);
+    assert_eq!(outdated.required, cairn_ledger::block::BLOCK_VERSION + 1);
+    assert_eq!(outdated.known, cairn_ledger::block::BLOCK_VERSION);
+
+    // And every ordinary refusal still says nothing of the sort.
+    assert!(ChainError::NotGenesis.outdated().is_none());
+    assert!(ChainError::Corrupt.outdated().is_none());
+}

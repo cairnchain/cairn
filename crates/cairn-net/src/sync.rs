@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
 
-use cairn_chain::{Accepted, ChainError, ChainStore, Located};
+use cairn_chain::{Accepted, ChainError, ChainStore, Located, Outdated};
 use cairn_ledger::block::Block;
 use cairn_ledger::note::NetworkId;
 use cairn_primitives::Hash32;
@@ -241,6 +241,14 @@ pub struct Reaction {
     pub relayed: Vec<Hash32>,
     /// Set when the connection should be closed.
     pub drop_peer: Option<DropReason>,
+    /// Set when the block that arrived is judged by rules this software does
+    /// not have.
+    ///
+    /// The node stops on this rather than carrying on. Carrying on would mean
+    /// refusing every peer that had updated and following whoever had not,
+    /// which is worse than not running: a wallet reading a balance off an
+    /// abandoned chain is answered confidently and wrongly.
+    pub outdated: Option<Outdated>,
 }
 
 impl Reaction {
@@ -483,6 +491,12 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
         // simply has not caught up to where it hangs. Asking again from a fresh
         // locator resolves it.
         Err(ChainError::UnknownParent(_) | ChainError::NotGenesis) => follow_up(chain, peer, now),
+        // The peer did nothing wrong and this node cannot judge what it sent.
+        // Named rather than counted against the peer, and the node stops.
+        Err(error) if error.outdated().is_some() => Reaction {
+            outdated: error.outdated(),
+            ..Reaction::idle()
+        },
         Err(_) => Reaction::close(DropReason::BadBlock { id }),
     }
 }

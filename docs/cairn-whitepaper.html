@@ -665,6 +665,21 @@
       review of this design should start.
     </p>
     <p>
+      <strong>A rule changes at a height, and a node that has not updated by
+      then is on another chain.</strong> Renumbering the network, which is what
+      the test networks did three times, throws every balance away with the
+      chain; on a network carrying value that is not a mechanism but a loss. So
+      a rule that changes names the height it takes effect at, and blocks below
+      it go on being judged by the rule that judged them: nothing already mined
+      becomes invalid. Nobody votes on it. The height is in the software,
+      published long before it arrives, and miner signalling is refused for the
+      reason proof of stake is — it would hand whoever mines a veto over the
+      rules. What none of that fixes is the node that did not update: it is
+      following a chain the network has left. It is told which version it
+      lacks, and stops, because a wallet reading a balance off an abandoned
+      chain answers confidently and wrongly.
+    </p>
+    <p>
       <strong>A node that joined cannot take in a newcomer.</strong> Showing
       which chain carries the most work takes the headers from the first block,
       and a node handed a ledger has them only from where it was handed on. It

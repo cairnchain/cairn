@@ -113,9 +113,18 @@ peer does decides how much memory this node spends. The data directory is held
 by a lock the operating system releases when the process ends, so a machine
 that loses power comes straight back up.
 
-What is left before a network worth trusting: the sampling protocol that uses
-the header commitments, an outside audit, and enough people running nodes that
-no single one of them matters.
+A rule can change without the chain being thrown away. A change names the
+height it takes effect at, and blocks below it go on being judged by the rule
+that judged them, so nothing already mined becomes invalid and no balance is
+destroyed. Nobody votes on it: the height is in the software, and miner
+signalling is refused for the reason proof of stake is. A node that reaches a
+height whose rules it does not have says which version it needs and stops,
+rather than treating every updated peer as a liar and following whoever did not
+update either.
+
+What is left before a network worth trusting: a proof of the sampling bound,
+which is ours and unreviewed, an outside audit, and enough people running nodes
+that no single one of them matters.
 
 ## Getting it
 

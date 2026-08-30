@@ -140,6 +140,46 @@ pub enum ChainError {
     Corrupt,
 }
 
+/// A height whose rules this software does not have.
+///
+/// Told apart from every other refusal on purpose. A node that reaches this
+/// has not met a bad peer: it has met the network moving on without it, and
+/// the two call for opposite reactions. Treating it as a bad peer would drop
+/// every node that had updated and leave this one following whoever had not,
+/// which is a minority chain believed to be the chain — the one outcome a
+/// scheduled rule change has to avoid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Outdated {
+    /// Where the rules this software lacks take effect.
+    pub height: u64,
+    /// The block version they are written under.
+    pub required: u16,
+    /// The highest version this software knows.
+    pub known: u16,
+}
+
+impl ChainError {
+    /// The rules this node lacks, when that is why the block was refused.
+    pub fn outdated(&self) -> Option<Outdated> {
+        match self {
+            Self::InvalidBlock {
+                source:
+                    BlockError::SoftwareTooOld {
+                        height,
+                        required,
+                        known,
+                    },
+                ..
+            } => Some(Outdated {
+                height: *height,
+                required: *required,
+                known: *known,
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// What accepting a block did to the node's view of the chain.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Accepted {

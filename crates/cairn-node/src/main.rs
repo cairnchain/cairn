@@ -122,6 +122,21 @@ fn watch(node: &Node, options: &options::Options, running: &AtomicBool) {
     let mut next = Duration::ZERO;
 
     while running.load(Ordering::SeqCst) {
+        // A rule took effect at a height this build has no rules for. Going on
+        // would mean refusing every peer that had updated and following
+        // whoever had not, so the node says which version it needs and stops.
+        if let Some(outdated) = node.outdated() {
+            println!(
+                "[{:>8}] stopping: the rules at height {} are block version {}, and this \
+                 build knows only version {}. Update and start again; the chain on disk \
+                 is kept and nothing is lost.",
+                stamp(started),
+                outdated.height,
+                outdated.required,
+                outdated.known,
+            );
+            return;
+        }
         if let Some(limit) = limit {
             if started.elapsed() >= limit {
                 return;

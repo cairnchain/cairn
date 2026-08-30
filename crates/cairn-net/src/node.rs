@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use cairn_chain::{Accepted, Bodies, ChainError, ChainStore, Located};
+use cairn_chain::{Accepted, Bodies, ChainError, ChainStore, Located, Outdated};
 use cairn_crypto::PublicKey;
 use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::genesis;
@@ -249,6 +249,12 @@ struct Shared {
     threads: Mutex<Vec<JoinHandle<()>>>,
     next_id: AtomicU64,
     running: AtomicBool,
+    /// Set once, if this node ever meets a height it has no rules for.
+    ///
+    /// Kept rather than only acted on, so whatever started the node can say
+    /// why it stopped. Running on would mean following the chain of whoever
+    /// had not updated either.
+    outdated: Mutex<Option<Outdated>>,
 }
 
 impl Shared {
@@ -814,6 +820,7 @@ impl Node {
             threads: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(0),
             running: AtomicBool::new(true),
+            outdated: Mutex::new(None),
         });
 
         {
@@ -1019,6 +1026,16 @@ impl Node {
     /// Transfers waiting for a block.
     pub fn pool_len(&self) -> usize {
         self.shared.chain().pool_len()
+    }
+
+    /// The rules this node turned out not to have, if it met any.
+    ///
+    /// Set when a block arrived from a height whose rules are newer than this
+    /// software. The node has stopped following the chain at that point, on
+    /// purpose: the alternative is to refuse every updated peer and go on
+    /// answering from a chain the network has left.
+    pub fn outdated(&self) -> Option<Outdated> {
+        self.shared.outdated.lock().ok().and_then(|held| *held)
     }
 
     /// Closes every connection, stops the listener, and saves what is worth
@@ -2376,6 +2393,15 @@ fn read_loop(
         }
         for transfer in passing {
             shared.broadcast(Some(id), &Message::Transaction(Box::new(transfer)));
+        }
+        // Not this peer's fault and not something to disconnect over: every
+        // peer that has updated would send the same block. The node stops.
+        if let Some(outdated) = reaction.outdated {
+            if let Ok(mut held) = shared.outdated.lock() {
+                held.get_or_insert(outdated);
+            }
+            shared.running.store(false, Ordering::SeqCst);
+            break;
         }
         if let Some(reason) = reaction.drop_peer {
             misbehaved = reason.is_misbehaviour();
