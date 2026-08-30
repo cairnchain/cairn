@@ -122,15 +122,23 @@ height whose rules it does not have says which version it needs and stops,
 rather than treating every updated peer as a liar and following whoever did not
 update either.
 
-What is left before a network worth trusting: the sampling count, an outside
-audit, and enough people running nodes that no single one of them matters. The
-count is the pressing one. 512 headers were derived on the assumption that a
-forger's invented work is spread evenly over a chain drawn from evenly; the
-draw is denser towards the tip on purpose, a forger picks how deep to fork, and
-measuring the placement that suits it best puts 512 draws at 2^-128 only up to
-roughly 7% of the world's work rather than the 45.7% claimed. The mechanism
-stands and the number does not. `cargo run --release -p cairn-ledger --example
-adversarial_placement` is the measurement.
+A newcomer joins by opening 4 096 headers drawn against accumulated work, about
+eight megabytes against the forty-eight gigabytes of reading it replaces. That
+holds against a forger up to 40% of the world's work, and what it guarantees is
+a depth: such a forger cannot put a newcomer on a branch differing from the real
+one by more than about 1 240 blocks, twenty hours. Inside that it can, as can a
+slow peer — it is where any node sits for its first blocks after connecting, and
+it is shallower than the deepest reorganisation a node would accept anyway.
+
+Those numbers are measured rather than proved, and the first version of them was
+wrong: 512 draws and 45.7% were derived assuming the draw is uniform over the
+chain, when it is deliberately denser towards the tip, and a forger picks how
+deep to fork. `cargo run --release -p cairn-ledger --example
+adversarial_placement` is the measurement, and it checks itself against
+forgeries that were actually built.
+
+What is left before a network worth trusting: an outside eye on that bound, an
+audit, and enough people running nodes that no single one of them matters.
 
 ## Getting it
 

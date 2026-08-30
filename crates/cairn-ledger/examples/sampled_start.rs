@@ -11,6 +11,15 @@
 //! So the number of draws is chosen against the smallest lie worth telling,
 //! not against the largest.
 //!
+//! **The derivation this prints is the one that set the count at 512, and its
+//! second half is wrong.** It assumes a draw lands in invented work with the
+//! same probability as the share invented, which holds for a uniform draw and
+//! not for this one. What that costs, and the count that replaces it, is in
+//! `adversarial_placement`. Kept because the first half — how much a forger
+//! has to invent, given what it holds — is sound and is what the correction
+//! builds on, and because a table of measured catch rates is worth having
+//! beside it.
+//!
 //! Run with `cargo run --release -p cairn-ledger --example sampled_start`.
 
 #![allow(

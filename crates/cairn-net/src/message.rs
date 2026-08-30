@@ -16,7 +16,7 @@ use cairn_primitives::Hash32;
 
 /// Bumped when the meaning of a message changes. Peers on another version are
 /// refused rather than misunderstood.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Identifiers one announcement may carry.
 pub const MAX_ANNOUNCED: usize = 512;
@@ -300,7 +300,7 @@ pub const JOIN_PART_BYTES: usize = 512 * 1024;
 /// Pieces one answer may be cut into.
 ///
 /// A ledger is eleven megabytes at the largest hot set the rules allow, and a
-/// sampled weight is one. This is several times either, and it is here so a
+/// sampled weight is eight. This is several times either, and it is here so a
 /// reader can refuse an answer that claims to be enormous before it starts
 /// collecting one.
 pub const MAX_JOIN_PARTS: u32 = 64;

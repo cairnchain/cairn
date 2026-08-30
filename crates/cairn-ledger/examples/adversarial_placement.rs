@@ -78,14 +78,12 @@ fn main() {
         let claimed = f64::from(u32::try_from(SAMPLES).unwrap()) * (1.0 - lie).log2();
 
         let mut worst = Worst::none();
-        // How deep to fork, as a fraction of the chain. Swept rather than
-        // solved: the trade-off between inventing less and inventing where the
-        // draw is thin has no closed form worth trusting here.
-        for step in 1..=2_000u64 {
-            let depth = BLOCKS * step / 2_000;
-            if depth == 0 {
-                continue;
-            }
+        // How deep to fork. Swept rather than solved: the trade-off between
+        // inventing less and inventing where the draw is thin has no closed
+        // form worth trusting here. Logarithmic, because a linear sweep of a
+        // chain this long never looks at the shallow forks at all, and those
+        // are where a forger with real hash power would start.
+        for depth in depths() {
             let abandoned = u128::from(depth) * PER_BLOCK;
             // To outweigh the honest chain having given up `abandoned`, and
             // having done `share/(1-share)` of it for real, this much has to be
@@ -120,7 +118,7 @@ fn main() {
          same gap as a share of what the derivation assumed it would have to be."
     );
 
-    at_the_edge(total, &drawn);
+    depth_guaranteed(total, &drawn);
     built_and_checked();
 }
 
@@ -310,40 +308,105 @@ fn build(count: u64) -> Vec<BlockHeader> {
 
 const NOW: u64 = 2_000_000_000;
 
-/// What the count would have to be for the worst placement to reach 2^-128.
-fn at_the_edge(total: u128, drawn: &[u128]) {
-    println!("\n\nWhat the worst placement costs, in draws:\n");
+/// How far a forgery has to reach before the draw stops letting it through.
+///
+/// The honest question, once the draw resolves no finer than [`SHALLOWEST`]:
+/// not "what is the chance", which is near one for a forgery shallow enough,
+/// but "how deep does a forgery have to be before the chance is gone". That
+/// depth is the guarantee. Below it a newcomer can be put on the wrong branch,
+/// exactly as a node that just reconnected can be; above it, not.
+fn depth_guaranteed(total: u128, drawn: &[u128]) {
+    println!("\n\nHow deep a forgery has to be before the draw stops it:\n");
     println!(
-        "{:>8} {:>14} {:>16}",
-        "share", "512 gives", "needs for 2^-128"
+        "{:>8} {:>14} {:>16} {:>14}",
+        "share", "blocks", "of the chain", "in time"
     );
-    println!("{}", "-".repeat(42));
+    println!("{}", "-".repeat(56));
 
-    for share in [0.01f64, 0.02, 0.05, 0.10, 0.25, 0.333, 0.40, 0.457] {
+    for share in [0.05f64, 0.10, 0.25, 0.333, 0.40, 0.43, 0.44, 0.457] {
         let lie = 1.0 - share / (1.0 - share);
-        let mut worst = Worst::none();
-        for step in 1..=2_000u64 {
-            let depth = BLOCKS * step / 2_000;
-            if depth == 0 {
-                continue;
-            }
+        let count = i32::try_from(SAMPLES).unwrap();
+
+        // The deepest fork that still gets through, not the shallowest that does
+        // not. Depth does not simply help the defender: the density is a
+        // staircase, so a deeper fork can land in a thinner band than a
+        // shallower one. Taking the first depth that holds would report a
+        // guarantee that deeper forgeries walk straight past.
+        let mut answer = None;
+        for depth in depths() {
             let abandoned = u128::from(depth) * PER_BLOCK;
             let gap = (abandoned as f64 * lie) as u128;
             if gap == 0 {
                 continue;
             }
             let from = total - abandoned;
-            worst.keep(landing_in(drawn, from, from + gap), depth, gap, total);
+            let hit = landing_in(drawn, from, from + gap);
+            if hit <= 0.0 || (1.0 - hit).powi(count) > 2f64.powi(-128) {
+                answer = Some(depth);
+            }
         }
-        let per_draw = (1.0 - worst.hit).log2();
-        let gives = f64::from(u32::try_from(SAMPLES).unwrap()) * per_draw;
-        let needed = if per_draw < 0.0 {
-            (-128.0 / per_draw).ceil()
-        } else {
-            f64::INFINITY
-        };
-        println!("{:>7.1}% {:>13.1} {:>16.0}", share * 100.0, gives, needed);
+        // One past the deepest that gets through.
+        let answer = answer.map(|deepest| deepest.saturating_add(1));
+
+        match answer {
+            Some(depth) if depth < BLOCKS => println!(
+                "{:>7.1}% {:>14} {:>15.3}% {:>13}",
+                share * 100.0,
+                depth,
+                depth as f64 / BLOCKS as f64 * 100.0,
+                spell(depth),
+            ),
+            Some(_) => println!(
+                "{:>7.1}% {:>14} {:>16} {:>14}",
+                share * 100.0,
+                "no depth",
+                "-",
+                "-"
+            ),
+            None => println!(
+                "{:>7.1}% {:>14} {:>16} {:>14}",
+                share * 100.0,
+                "every depth",
+                "-",
+                "-"
+            ),
+        }
     }
+
+    println!(
+        "\nA newcomer can be put on a branch that differs by less than this, which\n\
+         is the position any node is in for its first blocks after connecting. It\n\
+         cannot be put on one that differs by more."
+    );
+}
+
+/// A block count as the time it stands for, at a block a minute.
+fn spell(blocks: u64) -> String {
+    let minutes = blocks;
+    if minutes < 60 * 48 {
+        format!("{} h", minutes / 60)
+    } else if minutes < 60 * 24 * 90 {
+        format!("{} days", minutes / (60 * 24))
+    } else {
+        format!("{:.1} years", minutes as f64 / (60.0 * 24.0 * 365.0))
+    }
+}
+
+/// Fork depths worth trying, from the shallowest the draw still separates up
+/// to the whole chain, spread evenly in ratio rather than in blocks.
+///
+/// Logarithmic because a linear sweep of a chain this long never looks at the
+/// shallow forks at all, and those are where a forger with real hash power
+/// would start.
+fn depths() -> Vec<u64> {
+    let mut depths = Vec::new();
+    let mut depth = 512u64;
+    while depth < BLOCKS {
+        depths.push(depth);
+        depth = (depth * 1_020) / 1_000;
+    }
+    depths.push(BLOCKS);
+    depths
 }
 
 struct Worst {

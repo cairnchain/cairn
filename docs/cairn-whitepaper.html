@@ -410,11 +410,11 @@
     </p>
     <p>
       Cairn takes the published construction with its proven distribution
-      rather than devising its own. It is implemented: a newcomer draws 512
-      headers against accumulated work rather than height, with a
-      Fiat-Shamir seed taken from the tip, and each opened header is checked
-      against the tip's own commitment. Joining a thirty year chain costs 12 MB
-      against 2 067 GB of reading.
+      rather than devising its own. It is implemented: a newcomer draws 4 096
+      headers against accumulated work rather than height, with a Fiat-Shamir
+      seed taken from the tip, and each opened header is checked against the
+      tip's own commitment. Joining a thirty year chain costs about 8 MB
+      against the forty-eight gigabytes of reading it replaces.
     </p>
     <p>
       The count follows from the assumption the chain already makes. A forger
@@ -422,34 +422,44 @@
       presented by a party holding a share <em>s</em> of the world's work, has
       at least <em>1 &minus; s/(1&minus;s)</em> of itself invented: work no
       block of it spans. At a third of the world's work that is half the chain.
-      Each draw lands in invented work with that probability, so 512 draws miss
-      with probability at most 2<sup>-128</sup> for every share up to 45.7%.
-      Beyond that the count would have to grow without bound, and at half the
-      work there is nothing left to invent — which is the point at which proof
-      of work stops protecting anything.
+      What does not follow — and an earlier version of this paper said it did —
+      is that a draw lands in that invented part with the same probability. It
+      would if the draw were uniform, and it is deliberately not: the density is
+      one over the distance from the tip. That is what makes the bound
+      indifferent to how deep a forger forks, and its price is a factor of the
+      number of halvings on every draw. A draw lands in the gap with probability
+      <em>ln(1/(1&minus;lie)) / levels</em>, not <em>lie</em>, and that factor is
+      the whole of the correction.
     </p>
     <p>
-      <strong>That last step does not survive measurement, and 45.7% is not the
-      number.</strong> It holds only if the invented work is spread evenly over
-      a chain that is drawn from evenly, and this draw is deliberately not even:
-      it is denser towards the tip. A forger chooses how deep to fork, and
-      forking deep puts its gap where the draw is thin — inventing more of the
-      chain, but being asked about it less. Measured against the function this
-      implementation actually ships, the placement that suits a forger best
-      leaves 512 draws reaching 2<sup>-128</sup> only up to roughly 7% of the
-      world's work. At 45.7% it gives 2<sup>-5.8</sup>, and 2<sup>-128</sup>
-      there would take about 11 300 draws — twenty megabytes to join a chain,
-      where the whole point was one.
+      Setting the count from the real expression gives 4 096 draws, holding
+      against every forger up to 43% of the world's work over a thirty year
+      chain — measured against the function this implementation ships, and
+      against forgeries built and put through the check. This paper claims 40%,
+      keeping three points for the difference between a staircase of halvings
+      and the smooth density it stands for. Past 50% nothing helps: a forger at
+      half the work has nothing left to invent and can mine the chain.
     </p>
     <p>
-      The mechanism is not what is wrong here; the count is. Reaching
-      2<sup>-128</sup> against the share this paper claims needs a much larger
-      count, or a draw whose density matches the theorem it means to instantiate
-      rather than approximating it in whole halvings, or a smaller claim
-      honestly stated. Which of those is a protocol decision, and it has not
-      been taken. Nor is any of this a proof in the other direction: the figure
-      above is a measurement of one family of placements, arrived at without
-      the outside review this most needs.
+      <strong>The guarantee is a depth, and it is worth stating as one.</strong>
+      The draw stops resolving 1 024 blocks from the tip, deliberately, because
+      resolving finer would cost a third of the count again to separate chains
+      the fork choice does not separate either. So a forger at 40% cannot put a
+      newcomer on a branch differing from the real one by more than about
+      1 240 blocks — twenty hours. Inside that it can, and so can a slow peer:
+      it is where any node sits for its first blocks after connecting, and it is
+      shallower than the deepest reorganisation this node would accept anyway.
+    </p>
+    <p>
+      The first version of this paper claimed 512 draws and 45.7%, on the
+      assumption that a draw lands in invented work with probability
+      <em>lie</em>. Measured against the shipped function, the placement that
+      suits a forger best left that at 2<sup>-5.8</sup> rather than
+      2<sup>-128</sup>. The count and the density above are the correction; the
+      claim went from 45.7% to 40% and the cost from one megabyte to eight.
+      None of this is a proof in the other direction: it is a measurement over
+      one family of placements, made in-house, and it is the part of this design
+      that most wants an outside eye.
     </p>
     <p>
       Measurement checks the derivation the other way, by forging chains and
@@ -663,16 +673,15 @@
       currency is worthless by design and which will be reset.
     </p>
     <p>
-      <strong>512 headers do not buy what this paper claimed they buy.</strong>
-      The count was derived on the assumption that a forger's invented work is
-      spread evenly over a chain drawn from evenly. The draw is denser towards
-      the tip on purpose, a forger picks how deep to fork, and measuring the
-      placement that suits it best puts 512 draws at 2<sup>-128</sup> only up to
-      roughly 7% of the world's work rather than 45.7%. At 45.7% the same
-      measurement gives 2<sup>-5.8</sup>. The mechanism stands; the number does
-      not, and correcting it is a protocol decision nobody has taken. This is
-      the most important thing on this page, it was found by us and not by
-      anyone independent, and it is where an outside review should start.
+      <strong>The sampling bound is measured, not proved.</strong> 4 096 draws
+      hold to 40% of the world's work and a depth of about 1 240 blocks, and
+      both figures come from measuring the placement a forger would choose
+      rather than from a theorem. The first version of this claimed 512 draws
+      and 45.7% from a derivation that assumed a uniform draw; measurement put
+      it at 2<sup>-5.8</sup> instead of 2<sup>-128</sup>, which is how the
+      correction was found. That the same thing is not still hiding one level
+      down is exactly what nobody outside this project has checked, and it is
+      where an outside review should start.
     </p>
     <p>
       <strong>A rule changes at a height, and a node that has not updated by

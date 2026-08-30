@@ -51,34 +51,57 @@ use crate::state::header_leaf;
 /// means inventing half the chain. It only approaches zero as `s` approaches
 /// the half at which mining the chain outright is cheaper than forging it.
 ///
-/// The derivation then says each draw lands in invented work with probability
-/// `lie`, so `count` draws miss with probability `(1 - lie)^count`, which at
-/// 512 reaches 2^-128 for every forger up to 45.7% of the world's work.
+/// The derivation stops there, and an earlier version of this did not notice.
+/// It went on to say that each draw lands in invented work with probability
+/// `lie`, so `count` draws miss with `(1 - lie)^count`, which at 512 reached
+/// 2^-128 at 45.7%. That step assumes the draw is uniform over the chain. It
+/// is not, and it is not on purpose.
 ///
-/// **That second step is measurably wrong, and 45.7% is not the number.** It
-/// holds only if the invented work is spread evenly over a chain drawn from
-/// evenly, and this draw is deliberately not even: it is denser towards the
-/// tip. A forger picks how deep to fork, and forking deep puts its gap where
-/// the draw is thin. Measured against this very function, the placement that
-/// suits a forger best leaves 512 draws reaching 2^-128 only up to **roughly
-/// 7%** of the world's work; at 45.7% it gives 2^-5.8, and 2^-128 there would
-/// take about 11 300 draws.
+/// The density is one over the distance from the tip, which is what makes the
+/// bound indifferent to how deep a forger forks: a fork at any depth leaves a
+/// gap covering the same share of its own stretch, and a `1/x` density gives
+/// every stretch the same weight. Without that, a forger simply forks deep,
+/// invents more of the chain in absolute terms, and puts all of it where a
+/// tip-heavy draw hardly ever looks. Measured, that placement took 512 draws
+/// from the claimed 2^-128 at 45.7% down to 2^-5.8.
 ///
-/// So 512 is what the chain ships and what the derivation asked for, and the
-/// derivation was not asking the right question. Reaching 2^-128 against the
-/// share this project claims needs either a much larger count, a draw whose
-/// density matches the theorem it means to instantiate rather than approximating
-/// it in whole halvings, or a smaller claim. That is a protocol decision and it
-/// has not been taken.
+/// The price of the density is a factor of `levels` on every draw: it spreads
+/// the questions over every scale of depth, so each one is worth `1/levels` of
+/// what a uniform draw would be worth against a fixed placement. A draw lands
+/// in the gap with probability `ln(1/(1-lie)) / levels` rather than `lie`, and
+/// missing that factor is the whole of the error.
+///
+/// So the count is set from the real thing:
+///
+/// ```text
+/// (1 - ln(1/(1-lie))/levels)^count <= 2^-128
+/// ```
+///
+/// At 4096 draws over a thirty year chain that holds against every forger up
+/// to **43%** of the world's work, measured against this very function and
+/// against forgeries built and put through [`check_start`]. The papers claim
+/// **40%**, which leaves three points of margin for the difference between a
+/// staircase of halvings and the smooth density it stands for.
+///
+/// What that costs is eight megabytes to join a chain rather than one, against
+/// the forty-eight gigabytes it replaces. What it buys back is [`SHALLOWEST`]:
+/// the draw stops resolving 1024 blocks from the tip, which cuts `levels` from
+/// twenty-four to fourteen and the count with it.
+///
+/// **The guarantee is a depth, and it is worth stating as one.** A forger at
+/// 40% cannot put a newcomer on a branch differing from the real one by more
+/// than about 1240 blocks — twenty hours. Inside that, it can, and so can a
+/// slow peer: it is where any node sits for its first blocks after connecting,
+/// and it is shallower than the reorganisation this node would accept anyway.
+///
+/// Past 50% nothing here helps, and nothing anywhere else does either: a
+/// forger at half the work has nothing left to invent and can mine the chain.
 ///
 /// `cargo run --release -p cairn-ledger --example sampled_start` prints the
 /// derivation and forges chains against it;
-/// `--example adversarial_placement` is where the number above comes from, and
+/// `--example adversarial_placement` is where the numbers above come from, and
 /// it checks its own model against forgeries that were actually built.
-///
-/// At roughly two kilobytes an opened header this is about a megabyte, which
-/// is more than one message carries: a proof travels in several.
-pub const SAMPLES: usize = 512;
+pub const SAMPLES: usize = 4_096;
 
 /// Fewest halvings the draw ever spreads its samples over.
 ///
@@ -95,6 +118,25 @@ pub const SAMPLES: usize = 512;
 /// block: draws spent on a question already asked. `FlyClient` sets the same
 /// bound and calls it delta, at one over the number of blocks.
 const FEWEST_LEVELS: u32 = 1;
+
+/// How close to the tip the draw stops resolving, in blocks.
+///
+/// Halving all the way down to a single block is what the first version did,
+/// and it is what made the count so expensive. The density that survives a
+/// forger choosing its fork depth is one over the distance from the tip, and
+/// the price of that density is a factor of `ln(1/delta)` on the number of
+/// draws, where delta is the shallowest fork it still separates. Resolving to
+/// one block in thirty years means paying that factor twenty-four times over,
+/// to tell apart chains that differ by one block.
+///
+/// Which is not worth buying, because nothing else in this node pretends to
+/// tell those apart either: a node refuses to reorganise deeper than
+/// `MAX_REORG_DEPTH`, the same 1024 blocks, and below that it changes its mind
+/// freely. So the guarantee the sampling offers is stated to match the one the
+/// fork choice already offers — a newcomer cannot be put on the wrong chain by
+/// more than this, and within it, it is in the same position as any node that
+/// just reconnected.
+const SHALLOWEST: u64 = 1_024;
 
 /// One header a prover opened, and the proof that it sits where it says.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -219,10 +261,12 @@ pub fn seed_of(tip: &BlockHeader) -> Hash32 {
 
 /// Halvings worth making on a chain of `blocks` blocks.
 ///
-/// One per halving until a band is narrower than a block, since a band inside
-/// one block cannot ask a question the band around it did not already ask.
+/// One per halving until a band is narrower than [`SHALLOWEST`], since past
+/// that the draw would be separating chains that the fork choice does not
+/// separate either, at a cost paid by every draw at every level.
 fn levels_for(blocks: u64) -> u32 {
-    let significant = u64::BITS.saturating_sub(blocks.max(1).leading_zeros());
+    let separable = blocks / SHALLOWEST;
+    let significant = u64::BITS.saturating_sub(separable.max(1).leading_zeros());
     significant.max(FEWEST_LEVELS)
 }
 
@@ -432,52 +476,55 @@ mod tests {
         Hash32::from_bytes([byte; 32])
     }
 
-    /// The arithmetic 512 was chosen by, pinned so it cannot drift unnoticed.
+    /// What the count is for, pinned so it cannot drift unnoticed.
     ///
-    /// **This does not say the chain withstands what the arithmetic says it
-    /// does, and it used to be named as though it did.** What it pins is the
-    /// derivation: a forger holding share `s` has to invent `1 - s / (1 - s)`
-    /// of the chain it presents, `count` draws miss that with probability
-    /// `(1 - lie)^count`, and 512 is where that reaches 2^-128 at 45.7%.
+    /// A forger holding share `s` of the world's work cannot mine what it did
+    /// not mine, so to present a chain heavier than the honest one it has to
+    /// invent `1 - s/(1-s)` of what it shows. That part is arithmetic and it
+    /// holds.
     ///
-    /// The second step of that derivation is measurably wrong — it assumes the
-    /// invented work is spread evenly over a chain drawn from evenly, and a
-    /// forger chooses a placement where it is not. Measured, 512 holds to
-    /// roughly 7% rather than 45.7%; see the note on [`SAMPLES`] and
-    /// `examples/adversarial_placement.rs`.
+    /// What does not follow, and what an earlier version of this assumed, is
+    /// that a draw lands in the invented part with that same probability. It
+    /// would if the draw were uniform. It is not: it is one over the distance
+    /// from the tip, which is what makes it indifferent to how deep a forger
+    /// forks — and the price of that indifference is a factor of the number of
+    /// halvings on every draw. Missing it is what put the count at 512.
     ///
-    /// Kept, and kept passing, because the number in the code should not move
-    /// by accident while what to replace it with is being decided. A test that
-    /// pins arithmetic has to say that is all it pins.
+    /// So: a draw lands in the gap with probability `ln(1/(1-lie)) / levels`
+    /// in nats, and `count` of them miss with `(1 - that)^count`.
     #[test]
-    fn the_arithmetic_the_count_was_chosen_by_is_the_one_written_down() {
-        let missed = |share: f64, count: i32| {
-            let lie = 1.0 - share / (1.0 - share);
-            (1.0 - lie).powi(count)
-        };
+    fn the_count_holds_to_the_share_the_papers_claim() {
+        // Thirty years at a block a minute, which is the size every figure in
+        // the papers is quoted at.
+        let levels = f64::from(levels_for(30 * 365 * 24 * 60));
         let count = i32::try_from(SAMPLES).expect("a count that fits");
+        let missed = |share: f64| {
+            let lie = 1.0 - share / (1.0 - share);
+            let per_draw = (1.0 / (1.0 - lie)).ln() / (levels * 2f64.ln());
+            (1.0 - per_draw).powi(count)
+        };
 
-        // Every share short of the majority the chain already assumes nobody
-        // holds. A third of the world's work is still half a chain to invent.
-        for share in [0.10, 0.20, 0.30, 0.40, 0.45] {
+        // The share the papers claim, and everything under it.
+        for share in [0.05, 0.10, 0.20, 0.30, 0.35, 0.40] {
             assert!(
-                missed(share, count) <= 2f64.powi(-128),
-                "the derivation still says what it said about {share}"
+                missed(share) <= 2f64.powi(-128),
+                "a forger at {share} of the work gets through more often than \
+                 one in 2^128"
             );
         }
 
-        // And the arithmetic is not idle: just past that, it stops, which is
-        // what made 45.7% a boundary rather than a round number — in the
-        // derivation, which is not the same as in the chain.
+        // And the claim is not idle. It stops holding a few points above what
+        // is claimed, which is where the margin is: 4096 draws are measured to
+        // hold to 43%, and 40% is what is said out loud.
         assert!(
-            missed(0.46, count) > 2f64.powi(-128),
-            "the count would hold further than the comment says it does"
+            missed(0.46) > 2f64.powi(-128),
+            "the count holds further than the papers say, so one of them is wrong"
         );
 
-        // No count protects against a majority. A forger at half the work has
-        // nothing to invent, so every draw lands in work it really did.
+        // No count protects against a majority. At half the world's work there
+        // is nothing left to invent.
         assert!(
-            (missed(0.5, count) - 1.0).abs() < 1e-12,
+            (missed(0.5) - 1.0).abs() < 1e-12,
             "at half the world's work there is no lie left to catch"
         );
     }
@@ -517,12 +564,21 @@ mod tests {
             "the top half of the work drew {near} and everything below it {far}"
         );
 
-        // And the very end is reached, which a uniform draw would need a
-        // million samples to manage.
-        let last_thousandth = total - total / 1_000;
+        // And it stops resolving before the tip rather than at it. On a chain
+        // of a hundred thousand blocks the finest band is a hundred and
+        // twenty-eight of them wide, so the last stretch is never drawn from
+        // at all. That is deliberate: see SHALLOWEST. What it costs is stated
+        // as a depth rather than hidden, and what it buys is a count that is
+        // eight megabytes instead of a hundred.
+        let bands = levels_for(100_000);
+        let unresolved = total >> bands;
         assert!(
-            drawn.iter().any(|value| *value > last_thousandth),
-            "nothing landed in the last thousandth of the work"
+            !drawn.iter().any(|value| *value > total - unresolved),
+            "the draw resolves past where it says it stops"
+        );
+        assert!(
+            drawn.iter().any(|value| *value > total - unresolved * 4),
+            "and stops close to it, not far short"
         );
     }
 

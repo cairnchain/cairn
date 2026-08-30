@@ -412,7 +412,7 @@
       <div class="task finished">
         <div class="task-what">
           <b>Rejoindre sans lire trente ans</b>
-          <span>Le démarrage échantillonné voyage maintenant sur le réseau et se branche dans le nœud. Un nouveau venu pèse la chaîne sur 512 en-têtes tirés au sort, puis reçoit l'état en une trentaine de morceaux : 12 Mo au lieu de 2 067 Go de lecture. En dessous de mille blocs, lire reste moins cher, et le nœud choisit.</span>
+          <span>Le démarrage échantillonné voyage maintenant sur le réseau et se branche dans le nœud. Un nouveau venu pèse la chaîne sur des en-têtes tirés au sort — cinq cent douze à l'époque, quatre mille quatre-vingt-seize depuis que le compte a été corrigé — puis reçoit l'état en une trentaine de morceaux : quelques mégaoctets au lieu de quarante-huit gigaoctets de lecture. En dessous de mille blocs, lire reste moins cher, et le nœud choisit.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
@@ -476,7 +476,7 @@
       <div class="task finished">
         <div class="task-what">
           <b>512, une borne et non un plancher</b>
-          <span>Le nombre d'en-têtes qu'un arrivant ouvre était lu dans un tableau de mesures ; le code lui-même appelait ça « la dernière chose avant un protocole sur lequel on peut compter ». Il se déduit de l'hypothèse que la chaîne fait déjà : un faussaire qui détient un tiers du travail mondial doit inventer la moitié de sa chaîne. 512 tirages tiennent contre tout faussaire jusqu'à 45,7 % du travail mondial. Au-delà, aucun nombre ne protègerait : à la moitié, il suffit de miner.</span>
+          <span>Le nombre d'en-têtes qu'un arrivant ouvre était lu dans un tableau de mesures ; le code lui-même appelait ça « la dernière chose avant un protocole sur lequel on peut compter ». Il se déduit de l'hypothèse que la chaîne fait déjà : un faussaire qui détient un tiers du travail mondial doit inventer la moitié de sa chaîne. Le calcul donnait alors cinq cent douze tirages contre tout faussaire jusqu'à 45,7 % du travail mondial. <b>Ce calcul était faux</b> : il supposait le tirage uniforme alors qu'il est délibérément plus dense près du sommet, ce dont un faussaire profite en choisissant sa profondeur de fork. Corrigé plus bas dans cette page. Au-delà de la moitié, aucun nombre ne protègerait : il suffit de miner.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
@@ -545,13 +545,13 @@
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
       </div>
-      <div class="task">
+      <div class="task finished">
         <div class="task-what">
           <b>Corriger le nombre d'en-têtes qu'un nouveau venu ouvre</b>
           <span>Cinq cent douze avait été calculé en supposant que le travail inventé par un faussaire est réparti uniformément sur une chaîne qu'on tire uniformément. Le tirage est délibérément plus dense près du sommet, et un faussaire choisit à quelle profondeur forker : forker profond l'oblige à inventer davantage, mais place son mensonge là où l'on tire peu. Ce compromis n'était nulle part dans le calcul. Mesuré contre la fonction de tirage réellement livrée, et vérifié contre des forgeries effectivement minées et passées à la vraie vérification, cinq cent douze tirages ne tiennent qu'à sept pour cent de la puissance mondiale au lieu des quarante-cinq annoncés. Le mécanisme tient, le nombre non. Trois issues : un compte beaucoup plus grand — onze mille, soit vingt mégaoctets pour rejoindre une chaîne dont l'argument entier est qu'il en faut un —, une densité de tirage conforme au théorème qu'elle prétend appliquer plutôt qu'approchée par halvings entiers, ou une revendication réduite et honnêtement énoncée. C'est la seule chose de cette page qui touche au cœur de la thèse.</span>
         </div>
         <div class="who me">moi</div>
-        <div class="cost">à trancher</div>
+        <div class="cost">terminé</div>
       </div>
       <div class="task">
         <div class="task-what">
@@ -865,7 +865,7 @@
 
   <footer>
     <span>Cairn · route jusqu'au mainnet · v16</span>
-    <span>148 commits · 427 tests</span>
+    <span>149 commits · 427 tests</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 
