@@ -616,6 +616,10 @@
   },
 
   "foot": {
+    "whitepaper": "Le papier",
+    "design": "Comment c’est construit",
+    "priorArt": "Ce qui existait avant",
+    "source": "Le code source",
     "watching": "Cette page ne fait que lire. Elle ne détient aucune clé, elle ne peut rien signer, et elle ne vous en demandera jamais.",
     "node": "{network} · {blocks} blocs indexés · depuis {genesis}"
   }

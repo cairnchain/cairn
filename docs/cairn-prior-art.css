@@ -1,0 +1,284 @@
+  :root{
+    --paper:#F7F8F6; --surface:#FFFFFF; --sunk:#EFF1EC;
+    --ink:#171A17; --ink-2:#4A524C; --ink-3:#7C847E;
+    --rule:#DDE0D9; --rule-firm:#C2C7BC;
+
+    /* Two accents, because the document is about one distinction:
+       what is taken from elsewhere, and what is ours. */
+    --borrowed:#3D5665; --borrowed-soft:#E4EAEE; --borrowed-line:#B6C6D0;
+    --ours:#5F7017; --ours-soft:#E6EBCF; --ours-line:#B9C583;
+    --caution:#8A5411; --caution-soft:#F3E7D6;
+  }
+
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --paper:#12150F; --surface:#191D16; --sunk:#1F241C;
+      --ink:#E8EBE1; --ink-2:#A7B0A4; --ink-3:#78807A;
+      --rule:#2A2F27; --rule-firm:#3B4237;
+      --borrowed:#8FB2C6; --borrowed-soft:#1A2630; --borrowed-line:#33495A;
+      --ours:#AFC454; --ours-soft:#232B12; --ours-line:#495620;
+      --caution:#D2A05C; --caution-soft:#2C2113;
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#12150F; --surface:#191D16; --sunk:#1F241C;
+    --ink:#E8EBE1; --ink-2:#A7B0A4; --ink-3:#78807A;
+    --rule:#2A2F27; --rule-firm:#3B4237;
+    --borrowed:#8FB2C6; --borrowed-soft:#1A2630; --borrowed-line:#33495A;
+    --ours:#AFC454; --ours-soft:#232B12; --ours-line:#495620;
+    --caution:#D2A05C; --caution-soft:#2C2113;
+  }
+
+  *{box-sizing:border-box}
+
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:"Spectral",Georgia,"Times New Roman",serif;
+    font-size:17px;
+    line-height:1.62;
+    font-weight:400;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  .sheet{max-width:70rem;margin:0 auto;padding:0 clamp(1.1rem,4vw,3rem) 7rem}
+
+  /* ---- masthead ---- */
+
+  .head{
+    padding:clamp(3rem,8vw,6rem) 0 2rem;
+    border-bottom:2px solid var(--ink);
+  }
+  .kicker{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;
+    color:var(--ink-3);margin:0 0 1.4rem;
+  }
+  h1{
+    font-size:clamp(2.1rem,6vw,3.4rem);
+    font-weight:700;line-height:1.06;letter-spacing:-.022em;
+    margin:0 0 1rem;max-width:18ch;text-wrap:balance;
+  }
+  .standfirst{
+    font-size:clamp(1.05rem,2.2vw,1.24rem);
+    line-height:1.5;color:var(--ink-2);max-width:56ch;
+    font-weight:300;margin:0;
+  }
+  .stamp{
+    display:flex;flex-wrap:wrap;gap:.4rem 1.6rem;
+    margin-top:1.8rem;
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.68rem;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);
+  }
+
+  /* ---- verdict panel ---- */
+
+  .verdict{
+    margin-top:2.5rem;
+    display:grid;
+    grid-template-columns:minmax(0,1fr);
+    gap:1px;
+    background:var(--rule-firm);
+    border:1px solid var(--rule-firm);
+  }
+  @media (min-width:52rem){
+    .verdict{grid-template-columns:repeat(3,minmax(0,1fr))}
+  }
+  .verdict > div{background:var(--surface);padding:1.15rem 1.25rem}
+  .verdict dt{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.64rem;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--ink-3);margin:0 0 .5rem;
+  }
+  .verdict dd{margin:0;font-size:.95rem;line-height:1.5;color:var(--ink-2)}
+  .verdict dd b{color:var(--ink);font-weight:600}
+
+  /* ---- sections ---- */
+
+  section{
+    display:grid;
+    grid-template-columns:minmax(0,1fr);
+    gap:1.1rem;
+    padding:3.4rem 0 .6rem;
+    border-bottom:1px solid var(--rule);
+  }
+  @media (min-width:62rem){
+    section{grid-template-columns:9rem minmax(0,66ch);gap:0 3rem}
+  }
+  section:last-of-type{border-bottom:0}
+
+  .rail{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.66rem;letter-spacing:.13em;text-transform:uppercase;
+    color:var(--ink-3);
+    display:flex;flex-direction:column;gap:.4rem;align-items:flex-start;
+    padding-top:.55rem;
+  }
+  .rail .n{
+    font-family:"Spectral",Georgia,serif;font-size:1.5rem;font-weight:300;
+    color:var(--ink-3);line-height:1;letter-spacing:0;
+  }
+
+  .body > * + *{margin-top:1.05em}
+  .body > h2{margin-top:0}
+  .body > .card + .card{margin-top:.9rem}
+
+  h2{
+    font-size:clamp(1.4rem,3vw,1.85rem);font-weight:600;line-height:1.16;
+    letter-spacing:-.014em;margin:0 0 1rem;text-wrap:balance;
+  }
+  h3{
+    font-size:1.06rem;font-weight:600;margin:2.2rem 0 .5rem;
+    letter-spacing:-.004em;
+  }
+  p{margin:0}
+  strong{font-weight:600}
+  em{font-style:italic}
+  a{color:inherit;text-decoration:underline;text-decoration-color:var(--rule-firm);text-underline-offset:.18em}
+  a:hover{text-decoration-color:currentColor}
+  a:focus-visible{outline:2px solid var(--ours);outline-offset:2px}
+
+  .lede{font-size:1.1rem;line-height:1.55;color:var(--ink-2);font-weight:300}
+
+  /* ---- the survey cards ---- */
+
+  .card{
+    border:1px solid var(--rule);
+    border-left:3px solid var(--borrowed);
+    background:var(--surface);
+    padding:1.05rem 1.2rem;
+  }
+  .card.ours{border-left-color:var(--ours)}
+  .card.caution{border-left-color:var(--caution)}
+
+  .card-top{
+    display:flex;flex-wrap:wrap;align-items:baseline;gap:.45rem .8rem;
+    margin-bottom:.55rem;
+  }
+  .card-name{font-weight:600;font-size:1.02rem;letter-spacing:-.005em}
+  .card-where{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.66rem;letter-spacing:.07em;color:var(--ink-3);
+  }
+  .card p{font-size:.95rem;line-height:1.55;color:var(--ink-2)}
+  .card p + p{margin-top:.5rem}
+  .card .split{
+    margin-top:.75rem;padding-top:.7rem;border-top:1px solid var(--rule);
+    display:grid;gap:.45rem;
+  }
+  .split div{
+    display:grid;grid-template-columns:5.4rem minmax(0,1fr);gap:.2rem .8rem;
+    font-size:.9rem;line-height:1.5;
+  }
+  @media (max-width:34rem){
+    .split div{grid-template-columns:1fr;gap:.05rem}
+  }
+  .split .lbl{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.62rem;letter-spacing:.11em;text-transform:uppercase;
+    padding-top:.28rem;
+  }
+  .split .take .lbl{color:var(--borrowed)}
+  .split .apart .lbl{color:var(--ours)}
+  .split .val{color:var(--ink-2)}
+
+  /* ---- theorem ---- */
+
+  .theorem{
+    border:1px solid var(--caution);
+    background:var(--caution-soft);
+    padding:1.2rem 1.3rem;
+  }
+  .theorem .tag{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--caution);display:block;margin-bottom:.6rem;
+  }
+  .theorem .claim{
+    font-size:1.1rem;line-height:1.45;font-weight:400;color:var(--ink);
+    font-style:italic;
+  }
+  .theorem p:not(.claim){font-size:.95rem;color:var(--ink-2);margin-top:.7rem}
+
+  /* ---- table ---- */
+
+  .scroll{overflow-x:auto;margin-top:1.4rem;border:1px solid var(--rule)}
+  table{border-collapse:collapse;width:100%;min-width:44rem;font-size:.88rem;background:var(--surface)}
+  caption{
+    caption-side:top;text-align:left;padding:.85rem 1rem;
+    background:var(--sunk);border-bottom:1px solid var(--rule);
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.64rem;letter-spacing:.13em;text-transform:uppercase;color:var(--ink-3);
+  }
+  th,td{text-align:left;padding:.6rem .9rem;border-bottom:1px solid var(--rule);vertical-align:top}
+  thead th{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-weight:500;
+    font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);
+    border-bottom:1px solid var(--rule-firm);white-space:nowrap;
+  }
+  tbody tr:last-child td{border-bottom:0}
+  td.num{font-family:"IBM Plex Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums;white-space:nowrap}
+  tr.us td{background:var(--ours-soft)}
+  tr.us td:first-child{font-weight:600}
+
+  .yes{color:var(--ours);font-weight:600}
+  .no{color:var(--ink-3)}
+
+  /* ---- ledger of what is borrowed and what is ours ---- */
+
+  .ledger{display:grid;gap:1px;background:var(--rule-firm);border:1px solid var(--rule-firm);margin-top:1.4rem}
+  .ledger > div{background:var(--surface);padding:1rem 1.15rem}
+  .ledger h4{
+    margin:0 0 .6rem;font-size:.95rem;font-weight:600;
+    display:flex;align-items:center;gap:.5rem;
+  }
+  .ledger h4::before{content:"";width:9px;height:9px;flex:none;border-radius:1px}
+  .ledger .taken h4::before{background:var(--borrowed)}
+  .ledger .mine h4::before{background:var(--ours)}
+  .ledger ul{margin:0;padding-left:1.1rem;display:grid;gap:.45rem}
+  .ledger li{font-size:.93rem;line-height:1.5;color:var(--ink-2)}
+  .ledger li b{color:var(--ink);font-weight:600}
+
+  /* ---- next steps ---- */
+
+  ol.next{list-style:none;padding:0;margin:1.3rem 0 0;display:grid;gap:1.05rem;counter-reset:s}
+  ol.next li{counter-increment:s;display:grid;grid-template-columns:1.7rem minmax(0,1fr);gap:.9rem;align-items:baseline}
+  ol.next li::before{
+    content:counter(s);
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.78rem;
+    color:var(--ours);padding-top:.15rem;
+  }
+  ol.next b{font-weight:600;display:block}
+  ol.next span{display:block;color:var(--ink-2);font-size:.94rem;margin-top:.15rem;line-height:1.55}
+
+  /* ---- sources ---- */
+
+  .sources{margin-top:1.2rem;display:grid;gap:.7rem}
+  .src{
+    display:grid;grid-template-columns:auto minmax(0,1fr);gap:.2rem .9rem;
+    font-size:.88rem;line-height:1.5;
+  }
+  @media (max-width:40rem){.src{grid-template-columns:1fr;gap:.1rem}}
+  .src .who{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.64rem;letter-spacing:.08em;color:var(--ink-3);
+    text-transform:uppercase;padding-top:.28rem;white-space:nowrap;
+  }
+  .src .what{color:var(--ink-2)}
+  .src .what a{color:var(--ink)}
+
+  footer{
+    margin-top:3.5rem;padding-top:1.4rem;border-top:2px solid var(--ink);
+    display:flex;flex-wrap:wrap;gap:.4rem 1.8rem;
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.66rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);
+  }
+
+  @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+
+  /* Spacing that used to sit in a style attribute. The site
+     forbids those, and a rule that is silently dropped is worse
+     than a rule that is written down. */
+  .push{margin-top:1.4rem}
+  .tail-note{margin-top:1.6rem;font-size:.9rem;color:var(--ink-3)}

@@ -723,6 +723,17 @@ a.hash:hover { color: var(--accent-ink); }
 .foot-line + .foot-line { margin-top: 0.3rem; }
 .foot-line.dim { color: var(--ink-3); font-family: var(--mono); font-size: 0.72rem; }
 
+/* The papers, reachable from every page. They are served whole rather than
+   drawn by the script, so these are ordinary links and not routed ones. */
+.foot-line.papers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1.1rem;
+  margin-top: 0.55rem;
+}
+.foot-line.papers a { color: var(--ink-2); text-decoration: none; }
+.foot-line.papers a:hover { color: var(--accent-ink); text-decoration: underline; }
+
 /* ---- welcome ---- */
 
 .welcome {

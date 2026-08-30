@@ -616,6 +616,10 @@
   },
 
   "foot": {
+    "whitepaper": "The paper",
+    "design": "How it is built",
+    "priorArt": "What came before",
+    "source": "The source",
     "watching": "This page only reads. It holds no key, it can sign nothing, and it will never ask you for one.",
     "node": "{network} · {blocks} blocks indexed · from {genesis}"
   }

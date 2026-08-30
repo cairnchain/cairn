@@ -1,209 +1,5 @@
 <title>The Cairn Protocol</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,300..700;1,8..60,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
-
-<style>
-  :root{
-    color-scheme: light;
-    --paper:#FCFCFD; --card:#FFFFFF; --sunk:#F3F4F7;
-    --ink:#14171C; --ink-2:#4E555F; --ink-3:#828A94;
-    --rule:#E1E4E9; --rule-firm:#C4C9D1;
-    --accent:#5F7017; --accent-ink:#4B5A12;
-    --hot:#5F7017; --hot-soft:#EBEFDC;
-    --cold:#3D5665; --cold-soft:#E4EBEF;
-    --measure:66ch;
-  }
-  @media (prefers-color-scheme: dark){
-    :root:not([data-theme="light"]){
-      color-scheme: dark;
-      --paper:#0F1216; --card:#151A1F; --sunk:#1A2027;
-      --ink:#E7EAEE; --ink-2:#A3ABB5; --ink-3:#79818B;
-      --rule:#252B33; --rule-firm:#38404A;
-      --accent:#AFC454; --accent-ink:#C2D471;
-      --hot:#AFC454; --hot-soft:#20270F;
-      --cold:#8CAFC4; --cold-soft:#16222A;
-    }
-  }
-  :root[data-theme="dark"]{
-    color-scheme: dark;
-    --paper:#0F1216; --card:#151A1F; --sunk:#1A2027;
-    --ink:#E7EAEE; --ink-2:#A3ABB5; --ink-3:#79818B;
-    --rule:#252B33; --rule-firm:#38404A;
-    --accent:#AFC454; --accent-ink:#C2D471;
-    --hot:#AFC454; --hot-soft:#20270F;
-    --cold:#8CAFC4; --cold-soft:#16222A;
-  }
-
-  *{box-sizing:border-box}
-  body{
-    margin:0;background:var(--paper);color:var(--ink);
-    font-family:"Source Serif 4",Georgia,"Times New Roman",serif;
-    font-size:17.5px;line-height:1.6;font-weight:380;
-    -webkit-font-smoothing:antialiased;
-    font-variant-numeric:oldstyle-nums;
-  }
-  .paper{max-width:74rem;margin:0 auto;padding:0 clamp(1.1rem,4vw,3rem) 7rem}
-
-  /* ---- title block ---- */
-  .title{padding:clamp(3rem,9vw,6.5rem) 0 2.2rem;border-bottom:1px solid var(--ink)}
-  .title h1{
-    font-size:clamp(2.1rem,5.4vw,3.2rem);font-weight:600;line-height:1.05;
-    letter-spacing:-.02em;margin:0 0 .7rem;max-width:20ch;text-wrap:balance;
-    font-variant-numeric:lining-nums;
-  }
-  .title .strap{
-    font-size:clamp(1.05rem,2.3vw,1.28rem);color:var(--ink-2);font-weight:300;
-    max-width:58ch;margin:0 0 1.6rem;line-height:1.45;
-  }
-  .byline{
-    display:flex;flex-wrap:wrap;gap:.4rem 2rem;
-    font-family:"IBM Plex Mono",ui-monospace,monospace;
-    font-size:.68rem;letter-spacing:.11em;text-transform:uppercase;color:var(--ink-3);
-  }
-  .byline a{color:inherit}
-
-  /* ---- abstract ---- */
-  .abstract{
-    margin-top:2.4rem;padding:1.4rem 1.6rem;background:var(--sunk);
-    border-left:2px solid var(--accent);
-  }
-  .abstract h2{
-    font-family:"IBM Plex Mono",ui-monospace,monospace;
-    font-size:.66rem;letter-spacing:.16em;text-transform:uppercase;
-    color:var(--ink-3);margin:0 0 .8rem;font-weight:500;
-  }
-  .abstract p{font-size:1.02rem;line-height:1.6;color:var(--ink-2);max-width:70ch}
-  .abstract p + p{margin-top:.8rem}
-
-  /* ---- sections ---- */
-  section{
-    display:grid;grid-template-columns:minmax(0,1fr);gap:.9rem;
-    padding:3rem 0 .4rem;
-  }
-  @media (min-width:64rem){
-    section{grid-template-columns:4.5rem minmax(0,var(--measure));gap:0 3.2rem}
-  }
-  .num{
-    font-family:"IBM Plex Mono",ui-monospace,monospace;
-    font-size:.78rem;color:var(--ink-3);padding-top:.55rem;
-    font-variant-numeric:lining-nums;
-  }
-  .body > * + *{margin-top:1.05em}
-  .body > h2{margin-top:0}
-
-  h2{
-    font-size:clamp(1.35rem,2.9vw,1.72rem);font-weight:600;line-height:1.18;
-    letter-spacing:-.014em;margin:0 0 1rem;text-wrap:balance;
-  }
-  h3{
-    font-size:1.06rem;font-weight:600;margin:2.1rem 0 .5rem;letter-spacing:-.004em;
-  }
-  h3 .sub{
-    font-family:"IBM Plex Mono",ui-monospace,monospace;font-weight:400;
-    font-size:.7rem;letter-spacing:.09em;color:var(--ink-3);margin-right:.6rem;
-    font-variant-numeric:lining-nums;
-  }
-  p{margin:0}
-  strong{font-weight:600}
-  em{font-style:italic}
-  a{color:var(--accent-ink);text-decoration:underline;text-decoration-color:var(--rule-firm);text-underline-offset:.16em}
-  a:hover{text-decoration-color:currentColor}
-  a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-  code,.mono{
-    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.85em;
-    font-variant-numeric:lining-nums;
-  }
-  sup a{text-decoration:none;font-size:.72em;padding:0 .1em;font-variant-numeric:lining-nums}
-
-  /* ---- figures ---- */
-  figure{margin:1.8rem 0 0;padding:0}
-  figcaption{
-    font-family:"IBM Plex Mono",ui-monospace,monospace;
-    font-size:.66rem;letter-spacing:.1em;text-transform:uppercase;
-    color:var(--ink-3);margin-bottom:.7rem;
-  }
-  .fig-note{font-size:.86rem;color:var(--ink-3);margin-top:.7rem;line-height:1.5}
-
-  .tiers{border:1px solid var(--rule-firm);background:var(--card)}
-  .tier-row{display:grid;grid-template-columns:minmax(0,1fr);border-bottom:1px solid var(--rule)}
-  @media (min-width:40rem){.tier-row{grid-template-columns:9.5rem minmax(0,1fr)}}
-  .tier-row:last-child{border-bottom:0}
-  .tier-label{
-    padding:1rem 1.1rem;font-family:"IBM Plex Mono",ui-monospace,monospace;
-    font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;
-    border-right:1px solid var(--rule);
-  }
-  .tier-row.hot .tier-label{color:var(--hot);background:var(--hot-soft)}
-  .tier-row.cold .tier-label{color:var(--cold);background:var(--cold-soft)}
-  .tier-body{padding:1rem 1.15rem;font-size:.94rem;color:var(--ink-2);line-height:1.55}
-  .tier-body b{color:var(--ink);font-weight:600;display:block;margin-bottom:.25rem;font-size:1rem}
-  .tier-figure{
-    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.78rem;
-    color:var(--ink-3);margin-top:.5rem;display:block;
-    font-variant-numeric:lining-nums;
-  }
-
-  /* ---- tables ---- */
-  .scroll{overflow-x:auto;border:1px solid var(--rule-firm);margin-top:1.5rem}
-  table{border-collapse:collapse;width:100%;min-width:34rem;font-size:.9rem;background:var(--card)}
-  caption{
-    caption-side:top;text-align:left;padding:.8rem 1rem;background:var(--sunk);
-    border-bottom:1px solid var(--rule-firm);
-    font-family:"IBM Plex Mono",ui-monospace,monospace;
-    font-size:.64rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);
-  }
-  th,td{text-align:left;padding:.55rem .9rem;border-bottom:1px solid var(--rule);vertical-align:top}
-  thead th{
-    font-family:"IBM Plex Mono",ui-monospace,monospace;font-weight:500;
-    font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);
-    white-space:nowrap;
-  }
-  tbody tr:last-child td{border-bottom:0}
-  td.n,th.n{font-family:"IBM Plex Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums lining-nums;white-space:nowrap;text-align:right}
-  tr.us td{background:var(--hot-soft)}
-
-  /* ---- pull statement ---- */
-  .claim{
-    border-left:2px solid var(--accent);padding:.2rem 0 .2rem 1.3rem;
-    font-size:1.12rem;line-height:1.45;color:var(--ink);
-  }
-
-  /* ---- parameter block ---- */
-  .params{
-    margin-top:1.5rem;border:1px solid var(--rule-firm);background:var(--card);
-    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.8rem;
-    font-variant-numeric:lining-nums;
-  }
-  .params div{
-    display:grid;grid-template-columns:minmax(0,1fr) auto;gap:1rem;
-    padding:.45rem .95rem;border-bottom:1px solid var(--rule);
-  }
-  .params div:last-child{border-bottom:0}
-  .params .k{color:var(--ink-2)}
-  .params .v{color:var(--ink);white-space:nowrap}
-
-  /* ---- references ---- */
-  ol.refs{list-style:none;counter-reset:r;padding:0;margin:1.3rem 0 0;display:grid;gap:.75rem}
-  ol.refs li{
-    counter-increment:r;display:grid;grid-template-columns:2rem minmax(0,1fr);
-    gap:.8rem;font-size:.9rem;line-height:1.5;color:var(--ink-2);
-  }
-  ol.refs li::before{
-    content:"[" counter(r) "]";
-    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.72rem;
-    color:var(--ink-3);padding-top:.2rem;font-variant-numeric:lining-nums;
-  }
-
-  footer{
-    margin-top:3.5rem;padding-top:1.3rem;border-top:1px solid var(--ink);
-    display:flex;flex-wrap:wrap;gap:.4rem 2rem;
-    font-family:"IBM Plex Mono",ui-monospace,monospace;
-    font-size:.64rem;letter-spacing:.11em;text-transform:uppercase;color:var(--ink-3);
-  }
-  @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
-</style>
-
+<link rel="stylesheet" href="cairn-whitepaper.css">
 <div class="paper">
 
 <header class="title">
@@ -214,9 +10,9 @@
     carried in sixty four hashes.
   </p>
   <div class="byline">
-    <span>Draft, 28 August 2026</span>
+    <span>Draft, 29 August 2026</span>
     <span><a href="https://github.com/cairnchain/cairn">github.com/cairnchain/cairn</a></span>
-    <span>testnet-2, no mainnet exists</span>
+    <span>testnet-3, no mainnet exists</span>
   </div>
 </header>
 
@@ -950,7 +746,7 @@
 </section>
 
 <footer>
-  <span>Cairn · draft whitepaper · 28 August 2026</span>
+  <span>Cairn · draft whitepaper · 29 August 2026</span>
   <span>Nothing here is investment advice</span>
   <span>No mainnet exists</span>
 </footer>
