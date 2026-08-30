@@ -680,6 +680,19 @@ fn a_block_from_rules_this_build_lacks_is_named_as_such_and_not_as_a_bad_block()
     assert_eq!(outdated.required, cairn_ledger::block::BLOCK_VERSION + 1);
     assert_eq!(outdated.known, cairn_ledger::block::BLOCK_VERSION);
 
+    // Offered again it is simply already known, which is the node declining to
+    // judge twice rather than judging differently. What must not happen is
+    // that the first refusal put it in the set of blocks known to be bad: a
+    // block this software cannot judge becomes valid the moment the node is
+    // updated, and remembering it as bad would outlive the update and come
+    // back through `branch_to` as an ordinary refusal — the peer blamed for
+    // this node being old. That the set is untouched is pinned by the unit
+    // test on `branch_to` in the crate itself, where the set is reachable.
+    assert_eq!(
+        store.add_block(blocks[5].clone(), NOW),
+        Ok(Accepted::Duplicate)
+    );
+
     // And every ordinary refusal still says nothing of the sort.
     assert!(ChainError::NotGenesis.outdated().is_none());
     assert!(ChainError::Corrupt.outdated().is_none());

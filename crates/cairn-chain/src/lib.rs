@@ -136,6 +136,8 @@ pub enum ChainError {
     TooOld { height: u64, floor: u64 },
     #[error("this node already follows a chain, and one is all it may follow")]
     AlreadyFollowing,
+    #[error("block {id} was refused once already, and every branch through it with it")]
+    KnownBad { id: Hash32 },
     #[error("the block tree lost a block it had recorded")]
     Corrupt,
 }
@@ -366,7 +368,16 @@ impl Branch {
     fn push(&mut self, id: Hash32) {
         let height = self.len();
         if height % MILESTONE == 0 {
-            self.milestones.push(id);
+            // Only when this is the milestone the list is actually missing.
+            // A branch handed a tail holds none at all, by design, and the
+            // list is read by index: appending to an empty one would file a
+            // block from height five thousand where height zero is looked up,
+            // and `locator` would then offer a peer a position this node
+            // cannot stand behind.
+            let index = usize::try_from(height / MILESTONE).unwrap_or(usize::MAX);
+            if index == self.milestones.len() {
+                self.milestones.push(id);
+            }
         }
         self.recent.push_back(id);
         self.at.insert(id, height);
@@ -1143,10 +1154,19 @@ impl ChainStore {
             match self.apply(*id, now) {
                 Ok(()) => added.push(*id),
                 Err(error) => {
-                    if self.invalid.len() >= MAX_INVALID {
-                        self.invalid.clear();
+                    // A block whose rules this software does not have is not a
+                    // block known to be bad: the same block becomes valid the
+                    // moment the node is updated. Remembering it as bad would
+                    // outlive the update, and would come back through
+                    // `branch_to` as an ordinary refusal — the peer blamed for
+                    // this node being old, which is the one outcome the
+                    // scheduled rule change exists to avoid.
+                    if error.outdated().is_none() {
+                        if self.invalid.len() >= MAX_INVALID {
+                            self.invalid.clear();
+                        }
+                        self.invalid.insert(*id);
                     }
-                    self.invalid.insert(*id);
                     self.restore(&added, &rolled_back, now)?;
                     return Err(error);
                 }
@@ -1185,10 +1205,12 @@ impl ChainStore {
                 .get(&cursor)
                 .ok_or(ChainError::UnknownParent(cursor))?;
             if self.invalid.contains(&cursor) {
-                return Err(ChainError::InvalidBlock {
-                    id: cursor,
-                    source: BlockError::UnsupportedVersion(stored.header.version),
-                });
+                // What is remembered is that this block failed, not why: the
+                // set holds identifiers and nothing else. Naming a cause here
+                // would mean inventing one, and an invented cause is worse
+                // than none — it is read by whoever has to tell a bad peer
+                // from a node that is out of date.
+                return Err(ChainError::KnownBad { id: cursor });
             }
             branch.push(cursor);
             if stored.header.height == 0 {
@@ -1436,5 +1458,660 @@ impl ChainStore {
             self.apply(*id, now)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+mod tests {
+    use cairn_ledger::block::BLOCK_VERSION;
+    use cairn_ledger::note::NetworkId;
+    use cairn_ledger::transaction::CoinbaseTransaction;
+
+    use super::*;
+
+    fn params() -> ConsensusParams {
+        ConsensusParams::testnet()
+    }
+
+    /// A count of blocks read as a height, which is how a branch counts.
+    fn as_height(count: usize) -> u64 {
+        u64::try_from(count).unwrap_or(u64::MAX)
+    }
+
+    /// A stand-in identifier, distinct per number and nothing else.
+    fn id(n: u64) -> Hash32 {
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&n.to_le_bytes());
+        Hash32::from_bytes(bytes)
+    }
+
+    /// An empty block, built rather than mined.
+    ///
+    /// Nothing reached from here weighs work or judges validity: what these
+    /// tests exercise is the bookkeeping around a block, and mining one apiece
+    /// would spend seconds a run proving what `tests/fork_choice.rs` already
+    /// proves against real ones.
+    fn block_at(height: u64, previous: Hash32, nonce: u64) -> Block {
+        Block {
+            header: BlockHeader {
+                version: BLOCK_VERSION,
+                network: NetworkId::TESTNET,
+                height,
+                previous,
+                transactions_root: Hash32::ZERO,
+                state_root: Hash32::ZERO,
+                history: Hash32::ZERO,
+                timestamp: 0,
+                difficulty: 1,
+                total_work: 0,
+                nonce,
+            },
+            coinbase: CoinbaseTransaction::new(height, Vec::new()),
+            transfers: Vec::new(),
+        }
+    }
+
+    /// A run of blocks each building on the last, oldest first.
+    fn run_from(previous: Hash32, heights: std::ops::Range<u64>, nonce: u64) -> Vec<Block> {
+        let mut previous = previous;
+        heights
+            .map(|height| {
+                let block = block_at(height, previous, nonce);
+                previous = block.id();
+                block
+            })
+            .collect()
+    }
+
+    /// Somewhere to read bodies back from, holding whatever a test put there.
+    #[derive(Debug)]
+    struct Shelf(HashMap<u64, Block>);
+
+    impl Shelf {
+        fn holding(block: Block) -> Self {
+            Self(HashMap::from([(block.header.height, block)]))
+        }
+    }
+
+    impl Bodies for Shelf {
+        fn body(&self, height: u64) -> Option<Block> {
+            self.0.get(&height).cloned()
+        }
+    }
+
+    /// Records a block of a stated size, as `hold` would had it encoded one.
+    ///
+    /// The sizes are stated because what is under test is the accounting, and
+    /// building the tens of megabytes it takes to reach the ceiling would cost
+    /// a second of every run to prove something about the encoder instead.
+    fn shelve(store: &mut ChainStore, height: u64, nonce: u64, bytes: usize) -> Hash32 {
+        let block = block_at(height, Hash32::ZERO, nonce);
+        let header = block.header;
+        let id = header.id();
+        store.blocks.insert(
+            id,
+            StoredBlock {
+                header,
+                body: Some(block),
+                total_work: 0,
+                bytes,
+            },
+        );
+        store.held_bytes = store.held_bytes.saturating_add(bytes);
+        id
+    }
+
+    /// A node holds the branch it could still reorganise in full and one
+    /// identifier every [`MILESTONE`] heights before that, which is what keeps
+    /// the memory it spends on history a fixed thirty two kilobytes over
+    /// decades instead of a gigabyte and a quarter.
+    /// A branch handed a tail never claims a height it was not handed.
+    ///
+    /// It holds no milestones, by design and by its own documentation, and the
+    /// list they live in is read by index. Appending to an empty one would put
+    /// the first block this node happened to see past a milestone boundary
+    /// where height zero is looked up — and `locator` would then offer a peer
+    /// `height 0, id <a block from five thousand>`, a position this node has
+    /// never held and cannot defend.
+    #[test]
+    fn a_branch_handed_a_tail_does_not_invent_a_genesis() {
+        let handed: Vec<BlockHeader> = (5_000..5_002)
+            .map(|height| block_at(height, id(height - 1), 0).header)
+            .collect();
+        let mut branch = Branch::from_tail(&handed);
+
+        assert_eq!(branch.genesis(), None, "it was handed no first block");
+        assert_eq!(branch.id_at(0), None);
+
+        // Past the next milestone boundary, which is where the list used to
+        // gain its first entry.
+        for height in 5_002..=(MILESTONE * 6) {
+            branch.push(id(height));
+        }
+        assert!(branch.len() > MILESTONE * 5);
+
+        assert_eq!(
+            branch.genesis(),
+            None,
+            "crossing a boundary did not hand it a first block either"
+        );
+        assert_eq!(
+            branch.id_at(0),
+            None,
+            "and height zero is still a height this node cannot answer for"
+        );
+        assert_eq!(branch.id_at(MILESTONE), None);
+    }
+
+    #[test]
+    fn a_branch_keeps_one_identifier_every_thousand_and_twenty_four_heights() {
+        let mut branch = Branch::default();
+        let count = MILESTONE * 3 + 10;
+        for n in 0..count {
+            branch.push(id(n));
+        }
+
+        assert_eq!(branch.len(), count);
+        assert_eq!(branch.tip(), Some(id(count - 1)));
+        assert_eq!(branch.genesis(), Some(id(0)));
+        assert_eq!(
+            branch.milestones.len(),
+            4,
+            "one for height zero and one for each thousand and twenty four after it"
+        );
+
+        // Below the window the milestones are the whole of what is left, and
+        // they answer for the heights they sit at.
+        for level in 0..3 {
+            let height = MILESTONE * level;
+            assert_eq!(branch.id_at(height), Some(id(height)));
+        }
+
+        // Everything between two of them is gone, which is not the same as the
+        // branch having no block there: a caller wanting one reads the log.
+        assert_eq!(branch.id_at(1), None);
+        assert_eq!(branch.id_at(MILESTONE + 1), None);
+        assert_eq!(
+            branch.height_of(&id(0)),
+            None,
+            "and a milestone is an identifier at a height, not a height for an identifier"
+        );
+    }
+
+    /// What a branch holds in full is a window that slides, not a history that
+    /// accumulates. A node whose memory grew with the chain would be a node
+    /// whose cost grew with the chain, which is the one thing this design says
+    /// it does not do.
+    #[test]
+    fn the_identifiers_a_branch_holds_in_full_are_a_window_and_not_a_history() {
+        let mut branch = Branch::default();
+        let past = 500u64;
+        let count = as_height(WINDOW) + past;
+        for n in 0..count {
+            branch.push(id(n));
+        }
+
+        assert_eq!(branch.recent.len(), WINDOW);
+        assert_eq!(
+            branch.at.len(),
+            WINDOW,
+            "the index holds what the window does"
+        );
+        assert_eq!(branch.from, past);
+        assert_eq!(
+            branch.len(),
+            count,
+            "and the branch is still as long as it is"
+        );
+
+        assert_eq!(branch.height_of(&id(past)), Some(past));
+        assert_eq!(branch.height_of(&id(count - 1)), Some(count - 1));
+        assert_eq!(
+            branch.height_of(&id(past - 1)),
+            None,
+            "the block below the window left the index with it"
+        );
+    }
+
+    /// The window is one longer than the deepest rewind on purpose: the block
+    /// a branch is rewound *onto* has to still be there to be rewound onto.
+    /// One short and the deepest legal reorganisation would leave the node
+    /// unable to name the branch point it had just agreed to.
+    #[test]
+    fn the_window_outlasts_the_deepest_rewind_the_store_will_perform() {
+        assert_eq!(WINDOW, MAX_REORG_DEPTH + 1);
+
+        let mut branch = Branch::default();
+        let count = as_height(WINDOW) + 3;
+        for n in 0..count {
+            branch.push(id(n));
+        }
+        let anchor = branch.from;
+
+        for _ in 0..MAX_REORG_DEPTH {
+            assert!(
+                branch.pop().is_some(),
+                "the rewind ran out of identifiers before it ran out of depth"
+            );
+        }
+
+        assert_eq!(branch.tip(), Some(id(anchor)));
+        assert_eq!(branch.height_of(&id(anchor)), Some(anchor));
+        assert_eq!(branch.len(), anchor + 1);
+    }
+
+    /// A rewind that crosses a milestone has to let go of it, or the branch
+    /// would keep pointing at a block it no longer carries and tell a peer so.
+    #[test]
+    fn a_rewind_past_a_milestone_lets_go_of_it_and_a_push_puts_it_back() {
+        let mut branch = Branch::default();
+        for n in 0..=MILESTONE {
+            branch.push(id(n));
+        }
+        assert_eq!(branch.milestones, vec![id(0), id(MILESTONE)]);
+
+        assert_eq!(branch.pop(), Some(id(MILESTONE)));
+        assert_eq!(
+            branch.milestones,
+            vec![id(0)],
+            "the milestone went with the block it named"
+        );
+        assert_eq!(branch.id_at(MILESTONE), None);
+
+        branch.push(id(MILESTONE));
+        assert_eq!(branch.milestones, vec![id(0), id(MILESTONE)]);
+        assert_eq!(branch.id_at(MILESTONE), Some(id(MILESTONE)));
+
+        // And a branch rewound to nothing says so rather than pretending.
+        while branch.pop().is_some() {}
+        assert!(branch.is_empty());
+        assert_eq!(branch.pop(), None);
+        assert_eq!(branch.genesis(), None);
+    }
+
+    /// A node handed a ledger was not there for the history behind it, and the
+    /// honest answer about a height it never saw is that it has none. Claiming
+    /// otherwise would put a position in a locator that this node cannot stand
+    /// behind.
+    #[test]
+    fn a_branch_taken_from_a_run_of_headers_claims_nothing_about_what_came_before() {
+        let joined_at = MILESTONE * 4;
+        let headers: Vec<BlockHeader> = run_from(Hash32::ZERO, joined_at..joined_at + 6, 1)
+            .iter()
+            .map(|block| block.header)
+            .collect();
+
+        let branch = Branch::from_tail(&headers);
+        assert_eq!(branch.from, joined_at);
+        assert_eq!(branch.len(), joined_at + 6);
+        assert_eq!(branch.tip(), Some(headers[5].id()));
+        assert_eq!(branch.height_of(&headers[0].id()), Some(joined_at));
+        assert_eq!(branch.id_at(joined_at + 5), Some(headers[5].id()));
+
+        assert_eq!(branch.id_at(joined_at - 1), None);
+        assert_eq!(
+            branch.id_at(MILESTONE),
+            None,
+            "a milestone height it never saw is still a height it never saw"
+        );
+        assert_eq!(
+            branch.genesis(),
+            None,
+            "and it does not name a first block it was not there for"
+        );
+
+        assert!(Branch::from_tail(&[]).is_empty());
+    }
+
+    /// Every height a locator names has to be one this node is sure it still
+    /// holds, or the peer comparing the two is handed a gap and reads it as
+    /// disagreement.
+    #[test]
+    fn stepping_back_always_lands_on_a_height_this_node_still_holds() {
+        let window_from = MILESTONE * 4;
+        let headers: Vec<BlockHeader> = run_from(Hash32::ZERO, window_from..window_from + 5, 1)
+            .iter()
+            .map(|block| block.header)
+            .collect();
+        let mut store = ChainStore::new(params());
+        store.branch = Branch::from_tail(&headers);
+
+        // Inside the window every height is held, so a step lands where it aimed.
+        assert_eq!(store.step_back(window_from + 400, 10), window_from + 390);
+        assert_eq!(store.step_back(window_from + 4, 4), window_from);
+
+        // Below it only the milestones exist, so a step that would land between
+        // two of them rounds down to one rather than naming a height this node
+        // no longer has an identifier for.
+        assert_eq!(store.step_back(window_from + 4, 1_000), MILESTONE * 3);
+        assert_eq!(store.step_back(3_000, 1), MILESTONE * 2);
+
+        // A walk that stopped moving would never reach the genesis block it has
+        // to end at, and a locator that never ended would be sent forever.
+        let mut height = window_from + 4;
+        let mut step = 1u64;
+        for _ in 0..MAX_LOCATOR {
+            if height == 0 {
+                break;
+            }
+            let next = store.step_back(height, step);
+            assert!(next < height, "the walk stalled at {height}");
+            assert!(
+                next >= store.branch.from || next % MILESTONE == 0,
+                "the walk named height {next}, which this node no longer holds"
+            );
+            height = next;
+            step = step.saturating_mul(2);
+        }
+        assert_eq!(height, 0, "and it reached the first block");
+    }
+
+    /// Rounding down to a milestone can land back on the height it started
+    /// from, and a locator naming the same height twice is a locator asking a
+    /// peer the same question until it runs out of room.
+    #[test]
+    fn a_step_that_would_not_move_goes_one_milestone_further() {
+        let window_from = MILESTONE * 4;
+        let headers: Vec<BlockHeader> = run_from(Hash32::ZERO, window_from..window_from + 2, 1)
+            .iter()
+            .map(|block| block.header)
+            .collect();
+        let mut store = ChainStore::new(params());
+        store.branch = Branch::from_tail(&headers);
+
+        assert_eq!(store.step_back(MILESTONE * 2, 0), MILESTONE);
+        assert_eq!(
+            store.step_back(3_000, 0),
+            MILESTONE * 2,
+            "a height between two milestones already moves when it rounds down"
+        );
+    }
+
+    /// The walk that a switch is built from: everything between the followed
+    /// branch and the block being considered, in the order it has to be
+    /// applied, and the position on the branch it all hangs from.
+    #[test]
+    fn the_walk_to_a_block_gives_its_branch_oldest_first_and_where_it_forks() {
+        let mut store = ChainStore::new(params());
+
+        let trunk = run_from(Hash32::ZERO, 0..5, 0);
+        let trunk_ids: Vec<Hash32> = trunk.iter().map(Block::id).collect();
+        for block in &trunk {
+            store.hold(block.id(), block.clone(), 0);
+            store.branch.push(block.id());
+        }
+
+        let rival = run_from(trunk_ids[2], 3..6, 7);
+        let rival_ids: Vec<Hash32> = rival.iter().map(Block::id).collect();
+        for block in &rival {
+            store.hold(block.id(), block.clone(), 0);
+        }
+
+        assert_eq!(
+            store.branch_to(rival_ids[2]),
+            Ok((Some(2), rival_ids.clone())),
+            "oldest first, from the block the two branches share"
+        );
+
+        assert_eq!(
+            store.branch_to(trunk_ids[4]),
+            Ok((Some(4), Vec::new())),
+            "a block already followed asks for nothing to be applied"
+        );
+    }
+
+    /// Two chains that start from different first blocks share no history at
+    /// all, so there is no branch point between them and no honest way to
+    /// switch. Read as a fork it would look like a rewind to the beginning of
+    /// time, which is the reorganisation the depth limit exists to refuse.
+    #[test]
+    fn a_second_genesis_shares_no_history_with_the_branch_being_followed() {
+        let mut store = ChainStore::new(params());
+
+        let followed = run_from(Hash32::ZERO, 0..3, 0);
+        for block in &followed {
+            store.hold(block.id(), block.clone(), 0);
+            store.branch.push(block.id());
+        }
+
+        let stray = block_at(0, Hash32::ZERO, 99);
+        let stray_id = stray.id();
+        store.hold(stray_id, stray, 0);
+        assert_eq!(store.branch_to(stray_id), Err(ChainError::NotGenesis));
+
+        // The same block on a node following nothing is where a branch starts,
+        // and the fork position says there is none rather than naming zero.
+        let mut fresh = ChainStore::new(params());
+        let first = block_at(0, Hash32::ZERO, 99);
+        fresh.hold(first.id(), first, 0);
+        assert_eq!(fresh.branch_to(stray_id), Ok((None, vec![stray_id])));
+    }
+
+    /// A walk that cannot be completed has to fail before anything is undone.
+    /// Discovered halfway through a rewind, the same refusal would leave the
+    /// node on neither branch.
+    #[test]
+    fn a_branch_this_node_cannot_assemble_is_refused_rather_than_half_walked() {
+        let mut store = ChainStore::new(params());
+
+        let trunk = run_from(Hash32::ZERO, 0..3, 0);
+        for block in &trunk {
+            store.hold(block.id(), block.clone(), 0);
+            store.branch.push(block.id());
+        }
+
+        let rival = run_from(trunk[2].id(), 3..6, 7);
+        let rival_ids: Vec<Hash32> = rival.iter().map(Block::id).collect();
+        for block in &rival {
+            store.hold(block.id(), block.clone(), 0);
+        }
+
+        // A block already known to be bad taints every branch through it, so
+        // the heaviest chain in memory is worth nothing if it runs over one.
+        store.invalid.insert(rival_ids[1]);
+        assert!(
+            matches!(
+                store.branch_to(rival_ids[2]),
+                Err(ChainError::KnownBad { id }) if id == rival_ids[1]
+            ),
+            "the walk went through a block this node had already refused"
+        );
+
+        // And a branch whose middle this node let go of names what it lost,
+        // rather than reporting the tree as corrupt or walking past the hole.
+        store.invalid.remove(&rival_ids[1]);
+        store.release(&rival_ids[0]);
+        assert_eq!(
+            store.branch_to(rival_ids[2]),
+            Err(ChainError::UnknownParent(rival_ids[0]))
+        );
+    }
+
+    /// Bodies are read back by height, because a log is records in order of
+    /// height. What sits at a height is not always what sat there when the
+    /// question was asked, so the answer is checked against the identifier it
+    /// was asked for: a log that has moved on returns nothing rather than the
+    /// wrong block.
+    #[test]
+    fn a_body_read_back_is_checked_against_the_identifier_it_was_asked_for() {
+        let mut store = ChainStore::new(params());
+        let block = block_at(3, Hash32::ZERO, 1);
+        let id = block.id();
+        store.hold(id, block.clone(), 0);
+
+        assert_eq!(store.body_of(&id), Some(block.clone()));
+        assert_eq!(store.body_of(&Hash32::ZERO), None, "a block never seen");
+
+        // A node that let go of the body and has nowhere to read it back keeps
+        // the header and says it has no body, which is the truth.
+        store.blocks.get_mut(&id).unwrap().body = None;
+        assert_eq!(store.body_of(&id), None);
+
+        // A log that has been reorganised under this node's feet offers the
+        // block that sits at the height now, and it is refused.
+        let usurper = block_at(3, Hash32::ZERO, 2);
+        assert_ne!(usurper.id(), id);
+        store.reads_bodies_from(Arc::new(Shelf::holding(usurper)));
+        assert_eq!(
+            store.body_of(&id),
+            None,
+            "the wrong block at the right height is still the wrong block"
+        );
+
+        store.reads_bodies_from(Arc::new(Shelf::holding(block.clone())));
+        assert_eq!(store.body_of(&id), Some(block));
+    }
+
+    /// A block stops costing memory two different ways: its body is let go of,
+    /// or the whole entry is dropped. Both take the same bytes off the same
+    /// count, so a block that leaves by both routes must not be subtracted
+    /// twice — a count that drifted below the truth is a ceiling that stops
+    /// binding.
+    #[test]
+    fn bytes_held_come_off_the_count_once_however_a_block_leaves_memory() {
+        let mut store = ChainStore::new(params());
+        assert_eq!(store.held_bytes(), 0);
+
+        let first = block_at(0, Hash32::ZERO, 1);
+        let second = block_at(1, first.id(), 1);
+        let first_bytes = first.encode().len();
+        let second_bytes = second.encode().len();
+        let (first_id, second_id) = (first.id(), second.id());
+
+        store.hold(first_id, first.clone(), 0);
+        store.hold(second_id, second, 0);
+        assert_eq!(store.held_bytes(), first_bytes + second_bytes);
+        assert_eq!(store.bodies_held(), 2);
+
+        store.hold(first_id, first, 0);
+        assert_eq!(
+            store.held_bytes(),
+            first_bytes + second_bytes,
+            "the same block held twice is one block"
+        );
+        assert_eq!(store.len(), 2);
+
+        // Let go of a body, as a node does once the block is on disk.
+        store.blocks.get_mut(&first_id).unwrap().body = None;
+        store.recount();
+        assert_eq!(store.held_bytes(), second_bytes);
+        assert_eq!(store.bodies_held(), 1);
+
+        store.release(&first_id);
+        assert_eq!(
+            store.held_bytes(),
+            second_bytes,
+            "an entry without a body costs nothing, so dropping it saves nothing"
+        );
+        assert!(!store.contains(&first_id));
+
+        store.release(&second_id);
+        assert_eq!(store.held_bytes(), 0);
+        assert_eq!(store.len(), 0);
+    }
+
+    /// A count of blocks does not bound memory, because a block is not a fixed
+    /// size: four thousand rival blocks at the largest the rules allow is most
+    /// of a gigabyte held on the word of a peer. So what is held off the
+    /// followed branch is bounded in bytes, and the branch itself is never
+    /// what pays for it — those are the blocks a reorganisation has to undo.
+    #[test]
+    fn blocks_off_the_followed_branch_are_dropped_oldest_first_and_it_is_never_touched() {
+        const CHUNK: usize = 4 * 1024 * 1024;
+
+        let mut store = ChainStore::new(params());
+
+        // On the branch, and older than every rival, so a sweep going by age
+        // alone would take it first.
+        let anchor = shelve(&mut store, 0, 0, CHUNK);
+        store.branch.push(anchor);
+
+        let rivals: Vec<Hash32> = (1..=12u64)
+            .map(|n| shelve(&mut store, n, n, CHUNK))
+            .collect();
+        assert_eq!(store.side_bytes(), CHUNK * 12);
+        assert!(store.side_bytes() > MAX_SIDE_BYTES);
+
+        store.forget_oldest_side_blocks();
+
+        assert!(
+            store.side_bytes() <= MAX_SIDE_BYTES,
+            "holding {} bytes off the branch, the ceiling is {MAX_SIDE_BYTES}",
+            store.side_bytes()
+        );
+        assert!(
+            store.contains(&anchor),
+            "the branch a reorganisation has to undo was swept away with the rest"
+        );
+        for gone in &rivals[..4] {
+            assert!(!store.contains(gone), "the oldest rivals should have gone");
+        }
+        for kept in &rivals[4..] {
+            assert!(store.contains(kept), "and no more than the oldest");
+        }
+        assert_eq!(
+            store.held_bytes(),
+            CHUNK * 9,
+            "the count was rebuilt from what is left rather than adjusted as it went"
+        );
+
+        // Under the ceiling there is nothing to do, and it does nothing.
+        let held = store.len();
+        store.forget_oldest_side_blocks();
+        assert_eq!(store.len(), held);
+        assert_eq!(store.held_bytes(), CHUNK * 9);
+    }
+
+    /// One block leaves the window each time one is added, so this is a step
+    /// and not a sweep: what it costs cannot depend on how long the chain has
+    /// been running, on a node whose whole claim is that its cost does not
+    /// grow with the chain.
+    #[test]
+    fn blocks_too_deep_to_undo_are_let_go_one_at_a_time() {
+        let mut store = ChainStore::new(params());
+        let past = 5usize;
+        let count = as_height(MAX_REORG_DEPTH + past);
+
+        let mut previous = Hash32::ZERO;
+        let mut ids = Vec::new();
+        for height in 0..count {
+            let block = block_at(height, previous, 1);
+            let id = block.id();
+            previous = id;
+            store.hold(id, block, 0);
+            store.branch.push(id);
+            // Exactly where `follow` calls it: once per block applied.
+            store.forget_what_cannot_change();
+            ids.push(id);
+        }
+
+        assert_eq!(
+            store.undo_from,
+            as_height(past),
+            "the cursor moved one block per block, and not in a burst at the end"
+        );
+        assert_eq!(
+            store.len(),
+            MAX_REORG_DEPTH,
+            "what is held is the window, whatever the chain has reached"
+        );
+        assert!(!store.contains(&ids[past - 1]));
+        assert!(store.contains(&ids[past]));
+        assert_eq!(
+            store.held_bytes(),
+            store
+                .blocks
+                .values()
+                .map(|stored| stored.bytes)
+                .fold(0usize, usize::saturating_add),
+            "and the bytes came off with the blocks"
+        );
     }
 }
