@@ -51,17 +51,30 @@ use crate::state::header_leaf;
 /// means inventing half the chain. It only approaches zero as `s` approaches
 /// the half at which mining the chain outright is cheaper than forging it.
 ///
-/// Each draw lands in invented work with probability `lie`, so `count` draws
-/// miss with probability `(1 - lie)^count`. At 512 that reaches 2^-128 for
-/// every forger up to 45.7% of the world's work. Past that the count would
-/// have to grow without bound, and no count protects a chain against a
-/// majority: this rests on the same assumption the chain does, not a stronger
-/// one. Doubling to 1024 reaches 47.8%, which is a megabyte more traffic for
-/// two points of a margin that ends at 50% whatever is spent.
+/// The derivation then says each draw lands in invented work with probability
+/// `lie`, so `count` draws miss with probability `(1 - lie)^count`, which at
+/// 512 reaches 2^-128 for every forger up to 45.7% of the world's work.
+///
+/// **That second step is measurably wrong, and 45.7% is not the number.** It
+/// holds only if the invented work is spread evenly over a chain drawn from
+/// evenly, and this draw is deliberately not even: it is denser towards the
+/// tip. A forger picks how deep to fork, and forking deep puts its gap where
+/// the draw is thin. Measured against this very function, the placement that
+/// suits a forger best leaves 512 draws reaching 2^-128 only up to **roughly
+/// 7%** of the world's work; at 45.7% it gives 2^-5.8, and 2^-128 there would
+/// take about 11 300 draws.
+///
+/// So 512 is what the chain ships and what the derivation asked for, and the
+/// derivation was not asking the right question. Reaching 2^-128 against the
+/// share this project claims needs either a much larger count, a draw whose
+/// density matches the theorem it means to instantiate rather than approximating
+/// it in whole halvings, or a smaller claim. That is a protocol decision and it
+/// has not been taken.
 ///
 /// `cargo run --release -p cairn-ledger --example sampled_start` prints the
-/// derivation and then checks it the other way, by forging chains and watching
-/// them fail.
+/// derivation and forges chains against it;
+/// `--example adversarial_placement` is where the number above comes from, and
+/// it checks its own model against forgeries that were actually built.
 ///
 /// At roughly two kilobytes an opened header this is about a megabyte, which
 /// is more than one message carries: a proof travels in several.
@@ -419,16 +432,25 @@ mod tests {
         Hash32::from_bytes([byte; 32])
     }
 
-    /// The count is derived rather than chosen, so the derivation is checked
-    /// here: changing `SAMPLES` without meaning to would change what the chain
-    /// withstands, and nothing else would say so.
+    /// The arithmetic 512 was chosen by, pinned so it cannot drift unnoticed.
     ///
-    /// A forger holding share `s` of the world's work has to invent
-    /// `1 - s / (1 - s)` of the chain it presents. `count` draws miss that
-    /// with probability `(1 - lie)^count`, and the count is set so this
-    /// reaches 2^-128 for every share the chain's own assumption allows.
+    /// **This does not say the chain withstands what the arithmetic says it
+    /// does, and it used to be named as though it did.** What it pins is the
+    /// derivation: a forger holding share `s` has to invent `1 - s / (1 - s)`
+    /// of the chain it presents, `count` draws miss that with probability
+    /// `(1 - lie)^count`, and 512 is where that reaches 2^-128 at 45.7%.
+    ///
+    /// The second step of that derivation is measurably wrong — it assumes the
+    /// invented work is spread evenly over a chain drawn from evenly, and a
+    /// forger chooses a placement where it is not. Measured, 512 holds to
+    /// roughly 7% rather than 45.7%; see the note on [`SAMPLES`] and
+    /// `examples/adversarial_placement.rs`.
+    ///
+    /// Kept, and kept passing, because the number in the code should not move
+    /// by accident while what to replace it with is being decided. A test that
+    /// pins arithmetic has to say that is all it pins.
     #[test]
-    fn the_sample_count_holds_against_the_share_it_claims_to() {
+    fn the_arithmetic_the_count_was_chosen_by_is_the_one_written_down() {
         let missed = |share: f64, count: i32| {
             let lie = 1.0 - share / (1.0 - share);
             (1.0 - lie).powi(count)
@@ -440,13 +462,13 @@ mod tests {
         for share in [0.10, 0.20, 0.30, 0.40, 0.45] {
             assert!(
                 missed(share, count) <= 2f64.powi(-128),
-                "a forger at {share} of the work is missed more often than \
-                 one in 2^128"
+                "the derivation still says what it said about {share}"
             );
         }
 
-        // And the claim is not idle: just past that, it stops holding, which
-        // is what makes 45.7% a boundary rather than a round number.
+        // And the arithmetic is not idle: just past that, it stops, which is
+        // what made 45.7% a boundary rather than a round number — in the
+        // derivation, which is not the same as in the chain.
         assert!(
             missed(0.46, count) > 2f64.powi(-128),
             "the count would hold further than the comment says it does"

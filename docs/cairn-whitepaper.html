@@ -429,16 +429,27 @@
       of work stops protecting anything.
     </p>
     <p>
-      That derivation is ours and nobody outside this project has checked it.
-      It treats every draw as landing in invented work with one flat
-      probability, where the draw is in fact taken against accumulated work
-      under a difficulty that moves; it is not reconciled with the FlyClient
-      theorem it means to instantiate; and it budgets nothing for a forger who
-      re-mines its own tip until the Fiat-Shamir seed falls somewhere it likes,
-      which is a thing the natural attack does anyway. The margin it leaves at
-      45.7% is nil, and our own measurement puts the bound at 2<sup>-30</sup>
-      by 49%. Until someone qualified has proved it or corrected it, 512 is a
-      conjecture, and nothing here claims more than that.
+      <strong>That last step does not survive measurement, and 45.7% is not the
+      number.</strong> It holds only if the invented work is spread evenly over
+      a chain that is drawn from evenly, and this draw is deliberately not even:
+      it is denser towards the tip. A forger chooses how deep to fork, and
+      forking deep puts its gap where the draw is thin — inventing more of the
+      chain, but being asked about it less. Measured against the function this
+      implementation actually ships, the placement that suits a forger best
+      leaves 512 draws reaching 2<sup>-128</sup> only up to roughly 7% of the
+      world's work. At 45.7% it gives 2<sup>-5.8</sup>, and 2<sup>-128</sup>
+      there would take about 11 300 draws — twenty megabytes to join a chain,
+      where the whole point was one.
+    </p>
+    <p>
+      The mechanism is not what is wrong here; the count is. Reaching
+      2<sup>-128</sup> against the share this paper claims needs a much larger
+      count, or a draw whose density matches the theorem it means to instantiate
+      rather than approximating it in whole halvings, or a smaller claim
+      honestly stated. Which of those is a protocol decision, and it has not
+      been taken. Nor is any of this a proof in the other direction: the figure
+      above is a measurement of one family of placements, arrived at without
+      the outside review this most needs.
     </p>
     <p>
       Measurement checks the derivation the other way, by forging chains and
@@ -652,17 +663,16 @@
       currency is worthless by design and which will be reset.
     </p>
     <p>
-      <strong>The sample count is a conjecture, not a theorem.</strong> A
-      newcomer opens 512 headers, which on our own unreviewed derivation holds
-      against any forger up to 45.7% of the world's work at
-      2<sup>-128</sup>. That derivation does not account for adversarial
-      placement under moving difficulty, nor for a forger re-mining its tip to
-      grind the seed, and it has not been reconciled with the FlyClient
-      theorem. Past 45.7% no count would do: a forger at half the work has
-      nothing left to invent and can simply mine the chain. The margin between
-      45.7% and 50% is the price of a bounded proof, and doubling the count
-      moves it only to 47.8% — which is why the count is where an external
-      review of this design should start.
+      <strong>512 headers do not buy what this paper claimed they buy.</strong>
+      The count was derived on the assumption that a forger's invented work is
+      spread evenly over a chain drawn from evenly. The draw is denser towards
+      the tip on purpose, a forger picks how deep to fork, and measuring the
+      placement that suits it best puts 512 draws at 2<sup>-128</sup> only up to
+      roughly 7% of the world's work rather than 45.7%. At 45.7% the same
+      measurement gives 2<sup>-5.8</sup>. The mechanism stands; the number does
+      not, and correcting it is a protocol decision nobody has taken. This is
+      the most important thing on this page, it was found by us and not by
+      anyone independent, and it is where an outside review should start.
     </p>
     <p>
       <strong>A rule changes at a height, and a node that has not updated by

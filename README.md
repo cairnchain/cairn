@@ -122,9 +122,15 @@ height whose rules it does not have says which version it needs and stops,
 rather than treating every updated peer as a liar and following whoever did not
 update either.
 
-What is left before a network worth trusting: a proof of the sampling bound,
-which is ours and unreviewed, an outside audit, and enough people running nodes
-that no single one of them matters.
+What is left before a network worth trusting: the sampling count, an outside
+audit, and enough people running nodes that no single one of them matters. The
+count is the pressing one. 512 headers were derived on the assumption that a
+forger's invented work is spread evenly over a chain drawn from evenly; the
+draw is denser towards the tip on purpose, a forger picks how deep to fork, and
+measuring the placement that suits it best puts 512 draws at 2^-128 only up to
+roughly 7% of the world's work rather than the 45.7% claimed. The mechanism
+stands and the number does not. `cargo run --release -p cairn-ledger --example
+adversarial_placement` is the measurement.
 
 ## Getting it
 
