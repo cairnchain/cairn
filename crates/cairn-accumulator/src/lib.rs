@@ -16,7 +16,10 @@
 //! Verification is a few dozen hashes, fast enough for a phone.
 //!
 //! Hash functions are not broken by quantum computers, unlike the elliptic
-//! curve and hidden order groups the shorter alternatives rest on.
+//! curve and hidden order groups the shorter alternatives rest on. That holds
+//! for this structure and not for the money in it: notes are locked to Ed25519
+//! keys, and an address is the key itself, so the key is on the chain from the
+//! moment a note is made.
 
 pub mod forest;
 pub mod key;

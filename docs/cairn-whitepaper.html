@@ -429,6 +429,18 @@
       of work stops protecting anything.
     </p>
     <p>
+      That derivation is ours and nobody outside this project has checked it.
+      It treats every draw as landing in invented work with one flat
+      probability, where the draw is in fact taken against accumulated work
+      under a difficulty that moves; it is not reconciled with the FlyClient
+      theorem it means to instantiate; and it budgets nothing for a forger who
+      re-mines its own tip until the Fiat-Shamir seed falls somewhere it likes,
+      which is a thing the natural attack does anyway. The margin it leaves at
+      45.7% is nil, and our own measurement puts the bound at 2<sup>-30</sup>
+      by 49%. Until someone qualified has proved it or corrected it, 512 is a
+      conjecture, and nothing here claims more than that.
+    </p>
+    <p>
       Measurement checks the derivation the other way, by forging chains and
       watching them fail, and it also shows why the distribution must be taken
       and not improvised: under a uniform draw, a forger who keeps the real
@@ -640,12 +652,17 @@
       currency is worthless by design and which will be reset.
     </p>
     <p>
-      <strong>The sample count rests on the majority assumption and nothing
-      weaker.</strong> A newcomer opens 512 headers, which holds against any
-      forger up to 45.7% of the world's work at 2<sup>-128</sup>. Past that no
-      count would do: a forger at half the work has nothing left to invent and
-      can simply mine the chain. The margin between 45.7% and 50% is the price
-      of a bounded proof, and doubling the count moves it only to 47.8%.
+      <strong>The sample count is a conjecture, not a theorem.</strong> A
+      newcomer opens 512 headers, which on our own unreviewed derivation holds
+      against any forger up to 45.7% of the world's work at
+      2<sup>-128</sup>. That derivation does not account for adversarial
+      placement under moving difficulty, nor for a forger re-mining its tip to
+      grind the seed, and it has not been reconciled with the FlyClient
+      theorem. Past 45.7% no count would do: a forger at half the work has
+      nothing left to invent and can simply mine the chain. The margin between
+      45.7% and 50% is the price of a bounded proof, and doubling the count
+      moves it only to 47.8% — which is why the count is where an external
+      review of this design should start.
     </p>
     <p>
       <strong>A node that joined cannot take in a newcomer.</strong> Showing
@@ -667,8 +684,8 @@
       room left is.
     </p>
     <p>
-      The implementation is roughly 28 600 lines of Rust with 378 tests, no
-      unsafe code, no asynchronous runtime, and five dependencies. Arithmetic
+      The implementation is roughly 33 100 lines of Rust with 419 tests, no
+      unsafe code, no asynchronous runtime, and six dependencies. Arithmetic
       side effects, slice indexing, and panicking helpers are denied at the
       workspace level. It is small enough to be read, which is the point: a
       chain asking people to verify for themselves should be verifiable in
