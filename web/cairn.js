@@ -690,6 +690,14 @@ async function transaction(id) {
   );
 }
 
+// An address holding more notes than the explorer will walk is answered with a
+// floor rather than a total: the API says so with `counted`, and a number
+// printed as though it were exact would be the one thing worse than a slow
+// page. The sign says it without a sentence, and without a translation.
+function atLeast(data, text) {
+  return data.counted === false ? '\u2265\u202f' + text : text;
+}
+
 async function address(owner, parameters) {
   const from = parameters.get('from');
   const data = await api('address/' + encodeURIComponent(owner) + (from ? '?from=' + encodeURIComponent(from) : ''));
@@ -713,13 +721,13 @@ async function address(owner, parameters) {
         stat(t('stat.balance'), cairn(data.balance) + ' CAIRN'),
         stat(t('stat.received'), cairn(data.received) + ' CAIRN'),
         stat(t('stat.sent'), cairn(data.spent) + ' CAIRN'),
-        stat(t('stat.notesHeld'), count(data.unspentNotes), t('stat.notesHeld.note', { total: count(data.notes) }))
+        stat(t('stat.notesHeld'), atLeast(data, count(data.unspentNotes)), t('stat.notesHeld.note', { total: count(data.notes) }))
       ),
       panel(
         t('address.holdings'),
         explainer('explain.holdings'),
         data.moreNotes
-          ? el('p', { class: 'small dim', text: t('address.moreNotes', { shown: count(data.unspent.length), total: count(data.unspentNotes) }) })
+          ? el('p', { class: 'small dim', text: t('address.moreNotes', { shown: count(data.unspent.length), total: atLeast(data, count(data.unspentNotes)) }) })
           : null,
         table(
           [{ label: t('field.note') }, { label: t('field.value'), numeric: true }, { label: t('field.since'), numeric: true }, { label: t('field.state') }],

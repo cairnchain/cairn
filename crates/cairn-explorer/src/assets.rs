@@ -55,7 +55,7 @@ const PAPERS: [(&str, &str); 3] = [
         "/whitepaper",
         paper!("en", "../../../docs/cairn-whitepaper.html"),
     ),
-    ("/design", paper!("en", "../../../docs/cairn-design.html")),
+    ("/design", paper!("fr", "../../../docs/cairn-design.html")),
     (
         "/prior-art",
         paper!("fr", "../../../docs/cairn-prior-art.html"),
@@ -134,4 +134,46 @@ fn languages() -> String {
     }
     json.end_array();
     json.finish()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::{LOCALES, PAPERS};
+
+    /// Words a document of this length cannot avoid, and which differ enough
+    /// between the two languages to tell one from the other.
+    ///
+    /// A tell rather than a dictionary. What is being caught is a paper served
+    /// under the wrong language, not a clumsy sentence.
+    const MARKERS: [(&str, [&str; 6]); 2] = [
+        ("en", [" the ", " of ", " and ", " is ", " that ", " with "]),
+        ("fr", [" le ", " des ", " est ", " qui ", " pour ", " une "]),
+    ];
+
+    fn score(text: &str, words: &[&str]) -> usize {
+        words.iter().map(|word| text.matches(word).count()).sum()
+    }
+
+    /// A browser believes `<html lang>`. It hyphenates by it, chooses a font by
+    /// it, and it is the voice a screen reader speaks in, so a French paper
+    /// announced as English is read aloud as nonsense to the one reader who
+    /// cannot see that it is French. What each paper says about itself is held
+    /// here against what it is written in.
+    #[test]
+    fn each_paper_is_declared_in_the_language_it_is_written_in() {
+        for (path, body) in PAPERS {
+            let declared = LOCALES
+                .iter()
+                .map(|(code, _, _)| *code)
+                .find(|code| body.contains(&format!("<html lang=\"{code}\"")))
+                .unwrap_or_else(|| panic!("{path} declares no language the site speaks"));
+            let reads_as = MARKERS
+                .iter()
+                .max_by_key(|(_, words)| score(body, words))
+                .map(|(code, _)| *code)
+                .unwrap();
+            assert_eq!(declared, reads_as, "{path} says {declared}");
+        }
+    }
 }

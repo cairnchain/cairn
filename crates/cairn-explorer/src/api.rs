@@ -5,6 +5,7 @@
 //! exactly, and a money figure that is silently rounded in the last digits is
 //! the kind of wrong that nobody notices until it matters.
 
+use std::cell::RefCell;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use cairn_chain::ChainStore;
@@ -26,7 +27,12 @@ use cairn_http::{Request, Response};
 /// Blocks listed per page.
 const PAGE: usize = 25;
 /// Largest page a caller may ask for.
-const MAX_PAGE: usize = 200;
+///
+/// An answer that quotes blocks holds all of them at once while it is written,
+/// and a block runs to `max_block_bytes`, so the ceiling on a page is a ceiling
+/// on what one stranger can make this node carry. It is the same order as the
+/// number of blocks a peer may ask for in one message, for the same reason.
+const MAX_PAGE: usize = 128;
 /// Entries returned for one address before the caller has to ask for more.
 ///
 /// Both the notes an address holds and the movements through it are paged. An
@@ -34,13 +40,18 @@ const MAX_PAGE: usize = 200;
 /// an answer carrying all of them is one an anonymous caller could ask for
 /// repeatedly to make this node do arbitrary work and send arbitrary bytes.
 const ADDRESS_PAGE: usize = 100;
+/// Notes looked at for one address before the walk gives up.
+///
+/// Wide enough that an ordinary address is counted exactly, narrow enough that
+/// the cost of asking stays the caller's own rather than everyone else's.
+const ADDRESS_SCAN: usize = 10_000;
 
 /// Bytes one hot note costs a node, measured on the running implementation:
 /// the note itself, its identifier, and its share of the sparse tree.
 ///
 /// Reported so a page can state what a node carries without inventing the
 /// figure, and so the number moves if the implementation ever changes.
-const HOT_BYTES_PER_NOTE: u64 = 813;
+const HOT_BYTES_PER_NOTE: u64 = 516;
 
 /// The node the explorer reads, plus what it keeps on top of it.
 pub(crate) struct Explorer {
@@ -84,15 +95,52 @@ impl Explorer {
     }
 
     /// Routes one request, or reports that nothing here answers it.
+    ///
+    /// Read twice at most, with both locks let go of in between. A node holds
+    /// the bodies of the blocks it could still have to undo and no more, so
+    /// most of what an answer quotes comes off a disk, and seeking a disk with
+    /// the chain held is one anonymous caller deciding how long every peer
+    /// waits. So the first reading answers from memory and *names* the heights
+    /// it could not have; those are fetched with nothing held; the second
+    /// reading is the answer. It is what the sync layer does with the blocks a
+    /// peer asks for, for the same reason.
+    ///
+    /// The first answer is thrown away whenever there is a second. That costs
+    /// one write of a page that was going to be written anyway, and pages have
+    /// a ceiling, which is the cheap half of the trade.
     pub(crate) fn answer(&self, request: &Request) -> Option<Response> {
+        // Before either lock. Everything else this server serves — the page,
+        // its script, the papers — would otherwise queue behind the indexer
+        // for a chain it is never going to read.
+        request.after("/api/")?;
+
+        let (answer, wanted) = self.read(request, &[]);
+        if wanted.is_empty() {
+            return answer;
+        }
+        let fetched: Vec<Block> = wanted
+            .iter()
+            .filter_map(|height| self.node.archived_at(*height))
+            .collect();
+        // Whatever the second reading still wants is a block this node does
+        // not hold, and it is answered around rather than asked for again.
+        self.read(request, &fetched).0
+    }
+
+    /// One reading of the request, with the blocks fetched for it so far, and
+    /// the heights it turned out to still want.
+    fn read(&self, request: &Request, fetched: &[Block]) -> (Option<Response>, Vec<u64>) {
         let index = self.index();
         self.node.with_chain(|chain| {
             let context = Context {
                 chain,
                 index: &index,
                 node: &self.node,
+                fetched,
+                wanted: RefCell::new(Vec::new()),
             };
-            route(&context, request)
+            let answer = route(&context, request);
+            (answer, context.wanted.into_inner())
         })
     }
 }
@@ -102,6 +150,11 @@ struct Context<'a> {
     chain: &'a ChainStore,
     index: &'a Index,
     node: &'a Node,
+    /// Blocks already fetched off the log for this request. A page's worth at
+    /// most, which is what bounds the memory one answer stands for.
+    fetched: &'a [Block],
+    /// Heights this reading wanted and did not have, for the one after it.
+    wanted: RefCell<Vec<u64>>,
 }
 
 impl Context<'_> {
@@ -109,17 +162,31 @@ impl Context<'_> {
         self.chain.params()
     }
 
-    /// The block at `height` on the followed branch, wherever it is.
+    /// The block at `height` on the followed branch, when it is already in
+    /// hand.
     ///
     /// A node lets go of the bodies of blocks too deep to be undone, which is
     /// what keeps its memory from growing with the chain. An explorer answers
-    /// about all of them, so it reads the rest from the log, where the branch
-    /// sits in order of height.
+    /// about all of them, so the rest sit in the log in order of height — and
+    /// nothing here goes to the log, because this runs with the chain held. A
+    /// height that is not in hand is written down instead, and the reading
+    /// after this one has it.
     fn block_at(&self, height: u64) -> Option<Block> {
         if let Some(block) = self.chain.block_at(height) {
             return Some(block.clone());
         }
-        self.node.archived_at(height)
+        if let Some(block) = self
+            .fetched
+            .iter()
+            .find(|block| block.header.height == height)
+        {
+            return Some(block.clone());
+        }
+        let mut wanted = self.wanted.borrow_mut();
+        if !wanted.contains(&height) {
+            wanted.push(height);
+        }
+        None
     }
 
     /// The same, found by identifier.
@@ -127,7 +194,7 @@ impl Context<'_> {
         if let Some(block) = self.chain.block(id) {
             return Some(block.clone());
         }
-        self.node.archived_at(self.chain.height_of(id)?)
+        self.block_at(self.chain.height_of(id)?)
     }
 
     fn height(&self) -> Option<u64> {
@@ -149,7 +216,7 @@ fn route(context: &Context<'_>, request: &Request) -> Option<Response> {
             "status" => status(context),
             "params" => params(context),
             "blocks" => blocks(context, request),
-            "pool" => pool(context),
+            "pool" => pool(context, request),
             "holders" => holders(context),
             "search" => search(context, request),
             other => match other.split_once('/') {
@@ -316,6 +383,34 @@ fn params(context: &Context<'_>) -> Response {
     Response::json(json.finish())
 }
 
+/// How much one answer carries, as the caller asked for it.
+///
+/// Clamped rather than refused: somebody who asks for a million is handed a
+/// page, and somebody who asks for none is still handed something. What is not
+/// on offer is an answer whose size is the caller's to choose, because the work
+/// of building it is not the caller's to pay.
+fn limit_of(request: &Request) -> usize {
+    request
+        .parameter("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(PAGE)
+        .clamp(1, MAX_PAGE)
+}
+
+/// Where a page starts, counted from the first entry.
+fn offset_of(request: &Request) -> usize {
+    request
+        .parameter("from")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
+/// Where to ask from next, when anything is left to ask for.
+fn next_after(offset: usize, listed: usize, total: usize) -> Option<usize> {
+    let next = offset.saturating_add(listed);
+    (next < total).then_some(next)
+}
+
 fn blocks(context: &Context<'_>, request: &Request) -> Response {
     let Some(tip) = context.height() else {
         let mut json = Writer::new();
@@ -333,36 +428,30 @@ fn blocks(context: &Context<'_>, request: &Request) -> Response {
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(tip)
         .min(tip);
-    let limit = request
-        .parameter("limit")
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(PAGE)
-        .clamp(1, MAX_PAGE);
+    let limit = limit_of(request);
 
     let mut json = Writer::new();
     json.begin_object();
     json.key("blocks");
     json.begin_array();
+    // A fixed run of heights rather than a walk until the page is full. A node
+    // that cannot produce a block for a height would otherwise be sent down the
+    // chain looking for one, and how far it went would be the caller's to
+    // decide. A page is what is there in that run, which may be less.
     let mut height = from;
-    let mut listed = 0usize;
-    loop {
-        if listed >= limit {
-            break;
-        }
+    let mut walked = 0usize;
+    while walked < limit {
         if let Some(block) = context.block_at(height) {
             block_summary(&mut json, context, &block);
-            listed = listed.saturating_add(1);
         }
-        let Some(next) = height.checked_sub(1) else {
+        walked = walked.saturating_add(1);
+        let Some(under) = height.checked_sub(1) else {
             break;
         };
-        height = next;
+        height = under;
     }
     json.end_array();
-    match from
-        .checked_sub(u64::try_from(listed).unwrap_or(0))
-        .filter(|_| listed >= limit)
-    {
+    match from.checked_sub(u64::try_from(walked).unwrap_or(u64::MAX)) {
         Some(next) => json.field_u64("next", next),
         None => json.field_null("next"),
     }
@@ -699,14 +788,56 @@ fn coinbase_object(json: &mut Writer, context: &Context<'_>, block: &Block) {
     json.end_object();
 }
 
+/// A page of what an address still holds, and how sure the count under it is.
+#[derive(Debug)]
+struct Holdings {
+    /// The newest unspent notes, at most a page of them.
+    listed: Vec<(NoteId, NoteRecord)>,
+    /// Unspent notes the walk saw, which is every one of them when it finished.
+    unspent: usize,
+    /// Whether the walk reached the end of the list.
+    whole: bool,
+}
+
+/// Walks an address's notes newest first, and stops walking.
+///
+/// Notes are kept in the order they arrived and each says for itself whether it
+/// has been spent, so the newest unspent ones are found by walking back past
+/// the spent. An address that has mined for a year holds hundreds of thousands
+/// of them, and walking all of them is work an anonymous caller could ask for as
+/// often as they liked, with the chain held the whole time. So the walk has a
+/// ceiling.
+///
+/// What that costs is exactness past the ceiling, where the count becomes a
+/// floor. The answer carries which of the two it is rather than leaving a reader
+/// to assume the wrong one.
+fn holdings(notes: &[NoteId], record: impl Fn(&NoteId) -> Option<NoteRecord>) -> Holdings {
+    let mut listed = Vec::new();
+    let mut unspent = 0usize;
+    for id in notes.iter().rev().take(ADDRESS_SCAN) {
+        let Some(note) = record(id) else {
+            continue;
+        };
+        if !note.is_unspent() {
+            continue;
+        }
+        unspent = unspent.saturating_add(1);
+        if listed.len() < ADDRESS_PAGE {
+            listed.push((*id, note));
+        }
+    }
+    Holdings {
+        listed,
+        unspent,
+        whole: notes.len() <= ADDRESS_SCAN,
+    }
+}
+
 fn address(context: &Context<'_>, reference: &str, request: &Request) -> Response {
     let Some(owner) = parse_owner(reference) else {
         return Response::error(400, "not an address");
     };
-    let offset = request
-        .parameter("from")
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
+    let offset = offset_of(request);
 
     let mut json = Writer::new();
     json.begin_object();
@@ -719,6 +850,7 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
         json.field_usize("notes", 0);
         json.field_usize("unspentNotes", 0);
         json.field_bool("moreNotes", false);
+        json.field_bool("counted", true);
         json.key("unspent");
         json.begin_array();
         json.end_array();
@@ -736,36 +868,24 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
     json.field_str("spent", &record.spent.as_pebbles().to_string());
     json.field_usize("notes", record.notes.len());
 
-    // Newest first, and only one page of them. Walking every note an address
-    // ever held is exactly the work this endpoint must not do on demand.
-    let mut unspent = 0usize;
-    let mut listed = 0usize;
-    let mut more_notes = false;
+    let held = holdings(&record.notes, |id| context.index.note(id));
     json.key("unspent");
     json.begin_array();
-    for id in record.notes.iter().rev() {
-        let Some(note) = context.index.note(id) else {
-            continue;
-        };
-        if !note.is_unspent() {
-            continue;
-        }
-        unspent = unspent.saturating_add(1);
-        if listed >= ADDRESS_PAGE {
-            more_notes = true;
-            continue;
-        }
-        listed = listed.saturating_add(1);
+    for (id, note) in &held.listed {
         json.begin_object();
         json.field_str("note", &note_reference(id));
         json.field_str("value", &note.value.as_pebbles().to_string());
         json.field_u64("createdAt", note.created_at);
-        json.field_str("tier", tier_of(context, id, &note));
+        json.field_str("tier", tier_of(context, id, note));
         json.end_object();
     }
     json.end_array();
-    json.field_usize("unspentNotes", unspent);
-    json.field_bool("moreNotes", more_notes);
+    json.field_usize("unspentNotes", held.unspent);
+    json.field_bool("moreNotes", held.unspent > held.listed.len());
+    // Whether that count is the whole of it, or the floor the walk stopped at.
+    // A reader is owed the difference: a figure that quietly means "at least"
+    // is the kind of wrong nobody notices until it matters.
+    json.field_bool("counted", held.whole);
 
     // One line per movement: a note arriving, and later the transfer that
     // spent it. The index records these as the chain produces them, so they
@@ -839,16 +959,32 @@ fn note(context: &Context<'_>, reference: &str) -> Response {
     Response::json(json.finish())
 }
 
-fn pool(context: &Context<'_>) -> Response {
+/// What is waiting for a block, a page of it at a time.
+///
+/// The pool has a ceiling in bytes and none in transfers, so a run of small
+/// ones is a long list. Writing every one of them out is work an anonymous
+/// caller could ask for as often as they liked, and bytes this node then has to
+/// send. `count` is the whole of it; the array is one page.
+fn pool(context: &Context<'_>, request: &Request) -> Response {
+    let total = context.chain.pool_len();
+    let offset = offset_of(request);
+    let limit = limit_of(request);
+
     let mut json = Writer::new();
     json.begin_object();
-    json.field_usize("count", context.chain.pool_len());
+    json.field_usize("count", total);
     json.key("transfers");
     json.begin_array();
-    for (_, transfer) in context.chain.pooled_transfers() {
+    let mut listed = 0usize;
+    for (_, transfer) in context.chain.pooled_transfers().skip(offset).take(limit) {
         transfer_object(&mut json, context, transfer, false);
+        listed = listed.saturating_add(1);
     }
     json.end_array();
+    match next_after(offset, listed, total) {
+        Some(next) => json.field_usize("next", next),
+        None => json.field_null("next"),
+    }
     json.end_object();
     Response::json(json.finish())
 }
@@ -960,4 +1096,132 @@ fn readable(bytes: &[u8]) -> Option<String> {
     text.chars()
         .all(|character| !character.is_control())
         .then(|| text.to_owned())
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use super::{
+        holdings, limit_of, next_after, offset_of, ADDRESS_PAGE, ADDRESS_SCAN, MAX_PAGE, PAGE,
+    };
+    use crate::index::NoteRecord;
+    use cairn_crypto::SecretKey;
+    use cairn_http::Request;
+    use cairn_ledger::note::NoteId;
+    use cairn_primitives::{Amount, Hash32};
+
+    fn asking(query: &str) -> Request {
+        Request {
+            path: "/api/pool".to_owned(),
+            query: query.to_owned(),
+            head_only: false,
+            post: false,
+            body: String::new(),
+            host: String::new(),
+            origin: String::new(),
+        }
+    }
+
+    fn note_id(index: usize) -> NoteId {
+        NoteId::new(
+            Hash32::from_bytes([9; 32]),
+            u32::try_from(index).unwrap_or(u32::MAX),
+        )
+    }
+
+    /// One note still held and one already spent, otherwise alike.
+    fn records() -> (NoteRecord, NoteRecord) {
+        let unspent = NoteRecord {
+            value: Amount::from_pebbles(1).unwrap(),
+            owner: SecretKey::from_bytes(&[7; 32]).public_key(),
+            created_at: 1,
+            spent_at: None,
+            spent_by: None,
+        };
+        (
+            unspent,
+            NoteRecord {
+                spent_at: Some(2),
+                ..unspent
+            },
+        )
+    }
+
+    /// How much work an answer is has to be this node's decision. An explorer
+    /// on a public address is answering strangers, and one of them asking for
+    /// everything at once must cost them a page and no more.
+    #[test]
+    fn a_caller_does_not_choose_how_large_an_answer_is() {
+        assert_eq!(limit_of(&asking("")), PAGE, "a page, unasked");
+        assert_eq!(limit_of(&asking("limit=5")), 5);
+        assert_eq!(
+            limit_of(&asking("limit=1000000")),
+            MAX_PAGE,
+            "asking for everything is asking for a page"
+        );
+        assert_eq!(
+            limit_of(&asking("limit=0")),
+            1,
+            "and asking for nothing is still answered"
+        );
+        assert_eq!(limit_of(&asking("limit=-1")), PAGE);
+        assert_eq!(limit_of(&asking("limit=plenty")), PAGE);
+
+        assert_eq!(offset_of(&asking("")), 0);
+        assert_eq!(offset_of(&asking("from=40")), 40);
+        assert_eq!(offset_of(&asking("from=-1")), 0);
+    }
+
+    #[test]
+    fn a_page_names_the_next_one_only_when_there_is_one() {
+        assert_eq!(next_after(0, 25, 100), Some(25));
+        assert_eq!(next_after(75, 25, 100), None, "the last page ends the walk");
+        assert_eq!(next_after(0, 3, 3), None);
+        assert_eq!(next_after(0, 0, 0), None, "and nothing waiting has no page");
+    }
+
+    #[test]
+    fn what_an_address_holds_is_one_page_of_the_newest() {
+        let (unspent, spent) = records();
+        let notes: Vec<NoteId> = (0..400usize).map(note_id).collect();
+        // Every other note spent, so a page is filled from a list twice as
+        // long as itself.
+        let held = holdings(&notes, |id| {
+            Some(if id.index % 2 == 0 { spent } else { unspent })
+        });
+
+        assert_eq!(held.listed.len(), ADDRESS_PAGE, "one page and no more");
+        assert_eq!(
+            held.listed.first().map(|(id, _)| id.index),
+            Some(399),
+            "newest first"
+        );
+        assert_eq!(held.unspent, 200, "and every note held was counted");
+        assert!(held.whole, "because the walk reached the end of the list");
+    }
+
+    /// The figure an address answers with is one a reader takes at face value,
+    /// so where it stops being a total it has to say so rather than read as one.
+    #[test]
+    fn a_walk_over_an_address_stops_and_says_that_it_stopped() {
+        let (unspent, _) = records();
+
+        let notes: Vec<NoteId> = (0..=ADDRESS_SCAN).map(note_id).collect();
+        let held = holdings(&notes, |_| Some(unspent));
+        assert_eq!(held.listed.len(), ADDRESS_PAGE);
+        assert_eq!(
+            held.unspent, ADDRESS_SCAN,
+            "the walk stopped where it says it does"
+        );
+        assert!(!held.whole, "and does not call where it stopped a total");
+
+        let notes: Vec<NoteId> = (0..ADDRESS_SCAN).map(note_id).collect();
+        let held = holdings(&notes, |_| Some(unspent));
+        assert_eq!(held.unspent, ADDRESS_SCAN);
+        assert!(held.whole, "one note under the ceiling and it is exact");
+    }
 }

@@ -162,6 +162,24 @@ fn parse_config(text: &str) -> Result<Given, String> {
     Ok(given)
 }
 
+/// Reads the configuration file, and says nothing only when there is none.
+///
+/// No file is the ordinary case: a node that was never configured runs on its
+/// defaults. A file that is there and cannot be read is the opposite case, and
+/// treating the two alike is how an operator ends up watching a node report for
+/// duty on settings it never saw. That is the same failure an unknown setting
+/// name is refused for, one level up.
+fn read_config(path: &std::path::Path) -> Result<String, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(format!(
+            "{} is there and could not be read: {error}",
+            path.display()
+        )),
+    }
+}
+
 /// Reads the command line, then the configuration file the command line points
 /// at, and settles every setting.
 pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, String> {
@@ -171,7 +189,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
     }
 
     let data = PathBuf::from(command_line.first("data").unwrap_or(DEFAULT_DATA));
-    let file = std::fs::read_to_string(data.join(CONFIG_FILE)).unwrap_or_default();
+    let file = read_config(&data.join(CONFIG_FILE))?;
     let config = parse_config(&file)?;
 
     let setting = |name: &str| -> Option<String> {
@@ -488,6 +506,30 @@ mod tests {
             "testnet-3",
             "the command line wins"
         );
+    }
+
+    /// The failure this exists for is silent: a node that starts, prints a
+    /// summary, and follows rules the operator wrote down and never saw
+    /// applied. A directory standing in for the file is used because it is
+    /// unreadable for everybody, including whoever runs the tests as root.
+    #[test]
+    fn a_config_that_cannot_be_read_is_not_an_empty_one() {
+        let directory =
+            std::env::temp_dir().join(format!("cairn-unreadable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(directory.join(CONFIG_FILE)).unwrap();
+        let data = directory.to_string_lossy().to_string();
+
+        let error = resolve_options(&args(&["--data", &data])).unwrap_err();
+        assert!(
+            error.contains(CONFIG_FILE),
+            "the operator is told which file: {error}"
+        );
+
+        // Nothing there at all is the ordinary case, and carries on.
+        std::fs::remove_dir(directory.join(CONFIG_FILE)).unwrap();
+        assert!(resolve_options(&args(&["--data", &data])).is_ok());
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
