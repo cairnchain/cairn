@@ -64,7 +64,6 @@ dependencies = [
  "getrandom",
  "hex",
  "thiserror",
- "zeroize",
 ]
 
 [[package]]
@@ -151,6 +150,7 @@ dependencies = [
  "cairn-net",
  "cairn-primitives",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]

@@ -26,3 +26,4 @@ cairn-net.workspace = true
 cairn-http.workspace = true
 cairn-primitives.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
