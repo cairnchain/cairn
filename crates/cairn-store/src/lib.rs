@@ -7,6 +7,19 @@
 //! There is no checksum on a record. Every block is verified cryptographically
 //! when it is replayed, which catches anything a checksum would and a great
 //! deal more.
+//!
+//! What a record does have is durability. An append returns once the record
+//! and the offset naming it are on the disk, in that order, because `flush`
+//! says nothing about a disk — only about this program's buffers — and two
+//! writes in flight at once land in whatever order the operating system
+//! chooses. Without the sync, the careful ordering below is a description of
+//! what this code does and not of what the disk ends up holding, and a power
+//! cut can leave an offset pointing at bytes that were never written.
+//!
+//! It costs one sync of each file per block. At a block a minute that is
+//! nothing, and what it buys is that an accepted block is a kept block —
+//! which matters least for a node that can ask for it again, and most for an
+//! archivist, which is the one role that cannot.
 
 pub mod header_tree;
 pub mod headers;
@@ -113,6 +126,25 @@ fn hold(path: &Path) -> Result<File, StoreError> {
         .create(true)
         .truncate(true)
         .open(path)?)
+}
+
+/// Makes a rename durable, where the platform has a way to say so.
+///
+/// Unix has one: syncing the directory itself. Windows does not let a
+/// directory be opened as a file at all, and `ReplaceFile` is not something
+/// the standard library reaches — so on Windows this is a no-op and a
+/// compaction interrupted by a power cut can leave the old log in place. The
+/// next start treats that as an index reaching past its log and rebuilds, so
+/// nothing is served wrongly; what is lost is the compaction, not the chain.
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<(), StoreError> {
+    File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<(), StoreError> {
+    Ok(())
 }
 
 /// An append only record of every block a node has accepted.
@@ -299,6 +331,11 @@ impl BlockLog {
 
         std::fs::rename(&staged_log, &self.path)?;
         std::fs::rename(&staged_index, &index_path)?;
+        // A rename changes the directory rather than either file, so syncing
+        // the files leaves it exactly as unrecorded as it was. Without this a
+        // machine that loses power here comes back to the directory it had
+        // before, holding a log that was moved out of it.
+        sync_directory(&self.directory)?;
 
         self.file = OpenOptions::new().read(true).write(true).open(&self.path)?;
         self.index = OpenOptions::new()
@@ -316,9 +353,9 @@ impl BlockLog {
     /// Drops everything, leaving a log that starts wherever the next block does.
     pub fn clear(&mut self) -> Result<(), StoreError> {
         self.index.set_len(0)?;
-        self.index.flush()?;
+        self.index.sync_data()?;
         self.file.set_len(0)?;
-        self.file.flush()?;
+        self.file.sync_data()?;
         self.count = 0;
         self.first = 0;
         self.end = 0;
@@ -362,7 +399,14 @@ impl BlockLog {
         let start = self.end;
         self.file.seek(SeekFrom::Start(start))?;
         self.file.write_all(&record)?;
-        self.file.flush()?;
+        // The comment above is only true if the two writes reach the disk in
+        // the order they were made, and without this they do not: `flush` says
+        // nothing about the disk, only about this program's buffers, so both
+        // are in flight at once and the order they land in belongs to the
+        // operating system. An offset that lands first, followed by a power
+        // cut, names bytes that were never written — which is the one outcome
+        // the ordering was chosen to avoid.
+        self.file.sync_data()?;
 
         let end = start.saturating_add(record.len() as u64);
         self.write_offset(self.count, end)?;
@@ -376,7 +420,10 @@ impl BlockLog {
         let at = (index as u64).saturating_mul(OFFSET_BYTES);
         self.index.seek(SeekFrom::Start(at))?;
         self.index.write_all(&end.to_le_bytes())?;
-        self.index.flush()?;
+        // Once this returns, the block is on the disk and so is the offset
+        // naming it. That is what an accepted block is allowed to mean: an
+        // archivist that answers with proofs cannot fetch again what it lost.
+        self.index.sync_data()?;
         Ok(())
     }
 
