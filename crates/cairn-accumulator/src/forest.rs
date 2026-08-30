@@ -47,6 +47,19 @@ pub fn empty_leaf() -> Hash32 {
 /// Public for the same reason as `tree_of`: a forest kept on disk has to
 /// produce the same hashes as one kept in memory, and there must be one
 /// definition of that rather than two.
+///
+/// One domain for every forest, and there are two of them here: the cold set
+/// and the history of headers. So an internal subtree of one is computable
+/// bit for bit in the other, which looks like the beginning of a way to carry
+/// a proof across. It is not, and the reason is a rung lower: a proof is only
+/// ever checked by folding it up to a leaf, and the leaves are in domains of
+/// their own — `ForestLeaf` against `HeaderHistoryLeaf`. A path that arrived
+/// from the other forest fails there, before its shape is ever considered,
+/// and the root it is checked against commits to the leaf count as well as to
+/// the structure. Separating this domain too would make the argument shorter
+/// by one step and change nothing else; it is written down instead, because
+/// changing it now would invalidate every proof on the network for a
+/// difference that is a smell rather than a hole.
 pub fn node_hash(left: Hash32, right: Hash32) -> Hash32 {
     let mut hasher = Hasher::new(Domain::ForestNode);
     hasher.update(left.as_bytes());
