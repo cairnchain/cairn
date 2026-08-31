@@ -1120,6 +1120,23 @@ impl LedgerState {
             self.recent.insert(0, summary);
         }
 
+        // The watched notes, undone in the opposite order to `commit`: what it
+        // took out goes back first, then what it put in comes out. These are
+        // in no root and nothing about the chain disagrees when they are
+        // wrong — which is exactly why nothing would say so. What would be
+        // wrong is a wallet: after a reorganisation it would still be shown a
+        // note that was undone, and would have lost one that still exists,
+        // until something made it resynchronise.
+        for spend in &transition.spent_cold {
+            if self.watching.contains(&spend.note.owner) {
+                self.watched_notes
+                    .insert(spend.id, (spend.position, spend.note));
+            }
+        }
+        for (id, _) in &transition.evicted {
+            self.watched_notes.remove(id);
+        }
+
         let restored: Vec<(u64, Hash32)> = transition
             .spent_cold
             .iter()

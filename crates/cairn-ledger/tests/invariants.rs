@@ -103,6 +103,14 @@ struct Fingerprint {
     grace_len: usize,
     next_cold_position: u64,
     grace: Vec<Vec<(NoteId, u64, Note)>>,
+    /// The proofs kept current for watched owners.
+    ///
+    /// In no root at all, and restored by a route nothing states: undoing a
+    /// block assigns a clone of the forest as it stood, and the proofs come
+    /// back only because `watched` is a field of what is cloned. A node that
+    /// lost them would still agree with everyone about every block, and would
+    /// quietly stop being able to prove notes it was proving a moment before.
+    watched: Vec<(NoteId, u64, Note)>,
 }
 
 fn fingerprint(state: &LedgerState) -> Fingerprint {
@@ -125,6 +133,11 @@ fn fingerprint(state: &LedgerState) -> Fingerprint {
         grace_len: state.grace_len(),
         next_cold_position: state.next_cold_position(),
         grace: state.grace_window(),
+        watched: {
+            let mut watched: Vec<(NoteId, u64, Note)> = state.watched_notes().collect();
+            watched.sort_by_key(|(id, _, _)| *id);
+            watched
+        },
     }
 }
 
@@ -156,6 +169,7 @@ struct Reached {
     cold_spends: u64,
     evictions: u64,
     undos: u64,
+    watched_seen: u64,
 }
 
 /// Builds the transfers for one block out of what the state actually holds.
@@ -294,6 +308,7 @@ fn extend(
         };
         reached.blocks += 1;
         reached.evictions += connected.transition.evicted.len() as u64;
+        reached.watched_seen += state.watched_notes().count() as u64;
         held.extend(created);
         held.push(Held {
             id: NoteId::new(block.coinbase.id(), 0),
@@ -316,6 +331,9 @@ fn undoing_any_sequence_of_blocks_restores_the_state_exactly() {
     for seed in 0..SEQUENCES {
         let mut rng = Rng::new(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
         let mut state = LedgerState::archiving();
+        // Without this, watched proofs are always empty and the field for them
+        // in the fingerprint compares nothing to nothing.
+        state.watch_owner(wallet(2).public_key());
         let mut held = Vec::new();
 
         // Past GRACE_BLOCKS, so that notes age out of the window and can only
@@ -370,6 +388,10 @@ fn undoing_any_sequence_of_blocks_restores_the_state_exactly() {
         reached.cold_spends > 15,
         "notes aged out of the grace window and were spent against a proof: {reached:?}"
     );
+    assert!(
+        reached.watched_seen > 100,
+        "proofs were kept for a watched owner, so restoring them was tested: {reached:?}"
+    );
 }
 
 /// The second invariant: a reorganisation lands where the branch alone would.
@@ -389,6 +411,8 @@ fn a_reorganisation_lands_on_the_state_the_winning_branch_alone_would_build() {
         // it. Whether they agree afterwards is the whole question.
         let mut walker = LedgerState::archiving();
         let mut control = LedgerState::archiving();
+        walker.watch_owner(wallet(2).public_key());
+        control.watch_owner(wallet(2).public_key());
         let mut held = Vec::new();
 
         // The fork point sits past the grace window, so both branches spend
@@ -477,5 +501,9 @@ fn a_reorganisation_lands_on_the_state_the_winning_branch_alone_would_build() {
     assert!(
         reached.cold_spends > 15 && reached.evictions > 1_000,
         "the reorganisations crossed the tier boundary rather than staying hot: {reached:?}"
+    );
+    assert!(
+        reached.watched_seen > 100,
+        "proofs were kept for a watched owner across the reorganisations: {reached:?}"
     );
 }

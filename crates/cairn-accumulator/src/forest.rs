@@ -234,6 +234,12 @@ impl Decode for Forest {
 /// The whole cold set, as a node holds it.
 ///
 /// At most sixty four hashes and two counters, whatever the forest contains.
+/// Cloning one carries the watched proofs with it, and something depends on
+/// that: undoing a block puts the cold set back by assigning a clone of the
+/// forest as it stood before, so a `Clone` that dropped `watched` to save
+/// memory would leave a node that reorganised unable to prove notes it had
+/// been proving a moment earlier — silently, and only for the owners it
+/// watches. Said here because a derive cannot say it.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Forest {
     roots: Vec<Option<Hash32>>,
