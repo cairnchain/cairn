@@ -474,8 +474,7 @@
       rather than devising its own. It is implemented: a newcomer draws 4 096
       headers against accumulated work rather than height, with a Fiat-Shamir
       seed taken from the tip, and each opened header is checked against the
-      tip's own commitment. Joining a thirty year chain costs about 8 MB
-      against the forty-eight gigabytes of reading it replaces.
+      tip's own commitment. Weighing a thirty year chain costs about 8 MB.
     </p>
     <p>
       The count follows from the assumption the chain already makes. A forger
@@ -541,10 +540,12 @@
     </p>
     <p>
       One practical note in Cairn's favour. A production study of FlyClient
-      reports that proof size is dominated by header size, at 1 344 bytes per
-      header on the chain it was deployed to, and that restructuring headers
-      would reduce proofs by 71% at the cost of a consensus change it can no
-      longer make <sup><a href="#r8">[8]</a></sup>. A Cairn header is 182 bytes.
+      reports that proof size is dominated by header size, and that
+      restructuring headers would reduce proofs by 71% at the cost of a
+      consensus change the chain it studied can no longer make
+      <sup><a href="#r8">[8]</a></sup>. That chain's header is 1 487 bytes, of
+      which 1 344 is one Equihash solution. A Cairn header is 182 bytes, which
+      is the same lesson taken before rather than after.
     </p>
   </div>
 </section>
@@ -733,10 +734,15 @@
       </table>
     </div>
     <p class="fig-note">
-      The first three rows are what arriving used to cost, and section 7 is
-      how it stopped costing that: a newcomer is handed 12 MB rather than
-      reading any of it. The rows below are the cost of participating, and only
-      one of them grows.
+      The first three rows are what arriving used to cost, and section 7 is how
+      it stopped costing that. Arriving now has three parts, and it is worth
+      adding them up rather than quoting the smallest: about 8 MB to weigh the
+      chain, about 12 MB for the ledger, and the thousand blocks between that
+      ledger and the tip, which a newcomer validates itself. Those blocks are
+      at most 128 MB and in practice far less, since a block is only as large
+      as the traffic that filled it. Call it 20 MB on a quiet chain and under
+      150 MB on a saturated one, against forty-eight gigabytes of reading, and
+      none of the three grows with the chain's age.
     </p>
   </div>
 </section>

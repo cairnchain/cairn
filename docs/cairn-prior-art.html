@@ -11,8 +11,8 @@
       position exacte de Cairn dessus.
     </p>
     <div class="stamp">
-      <span>27 août 2026</span>
-      <span>16 travaux examinés</span>
+      <span>31 août 2026</span>
+      <span>19 travaux examinés</span>
       <span>Un résultat théorique décisif</span>
     </div>
   </header>
@@ -21,8 +21,11 @@
     <div>
       <dt>La bonne nouvelle</dt>
       <dd>
-        Aucune chaîne, en production ou en projet, ne <b>plafonne son état par
-        règle de consensus</b>. C'est le cœur de Cairn et il est vacant.
+        Aucune chaîne en production ne <b>plafonne son état par règle de
+        consensus</b>. Le projet le plus proche, l'expiration d'état
+        d'Ethereum, borne par l'âge et n'est jamais sorti de la recherche. La
+        place de Cairn reste vacante, mais le voisin est plus près que cette
+        page ne le disait d'abord.
       </dd>
     </div>
     <div>
@@ -36,7 +39,7 @@
       <dt>La surprise</dt>
       <dd>
         La faiblesse principale du meilleur schéma de démarrage léger est
-        <b>la taille des en-têtes</b>. Les nôtres sont sept fois plus petits
+        <b>la taille des en-têtes</b>. Les nôtres sont huit fois plus petits
         que ceux qu'il a fallu supporter ailleurs.
       </dd>
     </div>
@@ -56,7 +59,9 @@
         cesse de grandir. Ethereum poursuit depuis des années un chantier appelé
         <em>statelessness</em> qui, de l'aveu de sa propre documentation, reste
         à plusieurs années du réseau principal et dépend d'au moins deux autres
-        chantiers pour aboutir.
+        chantiers pour aboutir. Une branche de ce chantier, l'expiration
+        d'état, ressemble assez à Cairn pour mériter mieux qu'une ligne : elle
+        a sa section à elle, plus bas.
       </p>
       <p>
         La conséquence est celle que Cairn met en avant depuis le début : plus
@@ -74,7 +79,8 @@
         Chaque encart indique ce que Cairn en reprend, et ce qui l'en sépare. Le
         trait bleu marque un travail dont nous nous inspirons, le trait vert un
         endroit où nous divergeons volontairement, le trait ambre une approche
-        que nous refusons.
+        que nous refusons. Une huitième famille, la plus proche de toutes par
+        la construction, a sa section à elle juste après.
       </p>
 
       <h3>Accumulateurs par empreintes</h3>
@@ -86,9 +92,10 @@
         </div>
         <p>
           Remplace l'ensemble des sorties non dépensées par une forêt d'arbres
-          de Merkle parfaits. Onze gigaoctets deviennent moins d'un demi
-          kilooctet. Le dépensier fournit une preuve d'appartenance avec sa
-          transaction. Coût mesuré : environ 25 % de bande passante en plus.
+          de Merkle parfaits. Onze gigaoctets deviennent moins d'un kilooctet
+          de racines. Le dépensier fournit une preuve d'appartenance avec sa
+          transaction. Coût mesuré en rejouant la synchronisation complète :
+          environ 25 % de téléchargement en plus.
         </p>
         <div class="split">
           <div class="take">
@@ -118,17 +125,20 @@
           <span class="card-where">2020, 2023 · académique</span>
         </div>
         <p>
-          Même objectif avec des accumulateurs RSA : deux engagements de taille
-          constante, l'un sur les sorties créées, l'autre sur les sorties
-          dépensées. Preuves d'appartenance de taille constante, plus courtes
-          que celles d'une forêt d'empreintes.
+          Même objectif avec des accumulateurs RSA. CompactChain tient tout
+          l'état dans deux engagements de taille constante, l'un sur les
+          sorties créées, l'autre sur les dépensées ; MiniChain n'y met que
+          les dépensées, les créées vivant dans une chaîne de Merkle en
+          montagne. Les preuves d'appartenance RSA sont de taille constante,
+          plus courtes que celles d'une forêt d'empreintes.
         </p>
         <div class="split">
           <div class="apart">
             <span class="lbl">Écart</span>
             <span class="val">
-              Un accumulateur RSA demande un groupe d'ordre inconnu : soit une
-              cérémonie de confiance initiale, soit des groupes de classes,
+              Un accumulateur RSA demande un groupe d'ordre inconnu : une
+              cérémonie de confiance initiale, un module publié dont on parie
+              que personne n'a gardé les facteurs, ou des groupes de classes,
               lourds et bien moins éprouvés. Cairn n'a que BLAKE3, sans
               cérémonie et sans hypothèse cryptographique nouvelle. L'ensemble y
               reste aussi non borné.
@@ -142,23 +152,29 @@
       <div class="card">
         <div class="card-top">
           <span class="card-name">Mina</span>
-          <span class="card-where">2020 · en production</span>
+          <span class="card-where">papier 2020 · réseau lancé en 2021</span>
         </div>
         <p>
           Chaque bloc porte une preuve à divulgation nulle que toute l'histoire
-          précédente est valide. La chaîne entière tient dans environ 22
-          kilooctets, constants. C'est la réponse la plus complète au problème
-          que Cairn attaque, et elle fonctionne.
+          précédente est valide. Vérifier la chaîne entière tient dans environ
+          22 kilooctets, constants ; le décompte technique du projet donne
+          aujourd'hui un peu moins. C'est la réponse la plus complète au
+          problème que Cairn attaque, et elle fonctionne.
         </p>
         <div class="split">
           <div class="apart">
             <span class="lbl">Écart</span>
             <span class="val">
-              Preuve d'enjeu, donc une distribution initiale décidée par
-              quelqu'un. Et une pile cryptographique que presque personne ne
-              peut auditer, à l'opposé d'une ligne qui tient à ce qu'un lecteur
-              puisse tout relire. Mina paie en complexité ce que Cairn paie en
-              acceptant une garantie plus faible.
+              Ces kilooctets couvrent la vérification, pas la tenue : le
+              registre des comptes n'y est pas, celui qui produit un bloc le
+              détient en entier, et il grandit avec l'usage. Fabriquer les
+              preuves est un travail lourd, confié à des nœuds spécialisés
+              qu'un marché interne rémunère. S'ajoutent la preuve d'enjeu,
+              donc une distribution initiale décidée par quelqu'un, et une
+              pile cryptographique que presque personne ne peut auditer, à
+              l'opposé d'une ligne qui tient à ce qu'un lecteur puisse tout
+              relire. Mina paie en complexité ce que Cairn paie en acceptant
+              une garantie plus faible.
             </span>
           </div>
         </div>
@@ -242,20 +258,24 @@
       <div class="card">
         <div class="card-top">
           <span class="card-name">NIPoPoW</span>
-          <span class="card-where">2017 · académique</span>
+          <span class="card-where">2017 · implémenté sur Ergo</span>
         </div>
         <p>
           Prouve qu'un travail considérable a eu lieu en ne montrant que les
           blocs exceptionnellement lourds, dits superblocs. Ressources
-          logarithmiques en la longueur de la chaîne.
+          logarithmiques en la longueur de la chaîne. Le client de référence
+          d'Ergo l'implémente et s'en sert pour ses nœuds légers.
         </p>
         <div class="split">
           <div class="apart">
             <span class="lbl">Écart</span>
             <span class="val">
-              Vulnérabilité connue : un attaquant peut corrompre les mineurs
-              chanceux qui trouvent des superblocs pour qu'ils ne les publient
-              pas. Schéma écarté au profit du suivant.
+              Deux limites, avancées par les auteurs de FlyClient. L'analyse
+              d'origine suppose une difficulté constante, ce qu'aucune chaîne
+              vivante n'a. Et la preuve repose sur une poignée de blocs rares,
+              donc un attaquant peut payer les mineurs chanceux qui les
+              trouvent pour qu'ils les gardent : en corrompre peu suffit.
+              Schéma écarté chez nous au profit du suivant.
             </span>
           </div>
         </div>
@@ -264,7 +284,7 @@
       <div class="card">
         <div class="card-top">
           <span class="card-name">FlyClient</span>
-          <span class="card-where">IEEE S&amp;P 2020 · déployé sur Zcash</span>
+          <span class="card-where">IEEE S&amp;P 2020 · engagement gravé dans Zcash</span>
         </div>
         <p>
           Chaque en-tête engage un accumulateur de tous les en-têtes précédents.
@@ -273,16 +293,17 @@
           engagement. Preuve de synchronisation inférieure à 500 kilooctets sur
           Ethereum, environ 6 600 fois plus petite qu'une preuve classique.
           Sécurité établie sous l'hypothèse d'un attaquant contrôlant moins de
-          la moitié de la puissance de calcul.
+          la moitié de la puissance de calcul. Zcash grave l'engagement
+          d'en-têtes qu'il exige depuis 2020 ; le client complet n'y a été
+          construit qu'en 2026, et c'est l'encart suivant.
         </p>
         <div class="split">
           <div class="take">
             <span class="lbl">Repris</span>
             <span class="val">
-              C'est le schéma que Cairn suivra, et les deux champs gravés dans
-              nos en-têtes hier sont précisément ce qu'il exige. Nous ne
-              l'inventerons pas : nous le reprendrons avec ses paramètres
-              démontrés.
+              C'est le schéma que Cairn suit. Les deux champs qu'il exige sont
+              gravés dans nos en-têtes, et le tirage est implémenté avec ses
+              paramètres démontrés, non réinventé.
             </span>
           </div>
         </div>
@@ -291,17 +312,19 @@
       <div class="card">
         <div class="card-top">
           <span class="card-name">Catching the Fly</span>
-          <span class="card-where">2026 · retour de terrain</span>
+          <span class="card-where">2026 · implémenté dans le nœud de Zcash</span>
         </div>
         <p>
-          Une équipe raconte ce qu'implanter FlyClient en production coûte
-          vraiment. Trois constats. Le modèle d'adversaire d'origine, à deux
-          paramètres, n'a pas d'interprétation économique et se prête mal au
-          déploiement ; un modèle à un seul paramètre, le budget de l'attaquant,
-          réduit l'échantillonnage de 37 % à sécurité égale. Les preuves sont
-          dominées par la taille des en-têtes, 1 344 octets chacun sur leur
-          chaîne. Et restructurer les en-têtes pour n'y garder que le nécessaire
-          réduit les preuves de 71 %, au prix d'un changement de consensus.
+          Une équipe raconte ce qu'implanter FlyClient dans le nœud de Zcash
+          coûte vraiment. Trois constats. Le modèle d'adversaire d'origine, à
+          deux paramètres, n'a pas d'interprétation économique et se prête mal
+          au déploiement ; un modèle à un seul paramètre, le budget de
+          l'attaquant, réduit l'échantillonnage d'environ 37 % à sécurité
+          égale. Les preuves sont dominées par la taille des en-têtes,
+          1 487 octets chacun sur cette chaîne, dont 1 344 pour la seule
+          solution de preuve de travail. Et restructurer les en-têtes pour n'y
+          garder que le nécessaire réduit les preuves de 71 %, au prix d'un
+          changement de consensus.
         </p>
         <div class="split">
           <div class="take">
@@ -314,9 +337,9 @@
             <span class="lbl">Avantage</span>
             <span class="val">
               Leurs deux difficultés majeures ne sont pas les nôtres. Notre
-              en-tête fait 182 octets, sept fois moins que celui qui plombe
+              en-tête fait 182 octets, huit fois moins que celui qui plombe
               leurs preuves. Et le changement de consensus qu'ils ne peuvent
-              plus faire, nous l'avons fait hier, précisément parce que notre
+              plus faire, nous avons pu le faire, précisément parce que notre
               réseau ne porte encore aucune valeur.
             </span>
           </div>
@@ -354,7 +377,150 @@
   </section>
 
   <section>
-    <div class="rail"><span class="n">3</span><span>La limite</span></div>
+    <div class="rail"><span class="n">3</span><span>Le plus proche</span></div>
+    <div class="body">
+      <h2>L'expiration d'état d'Ethereum, prise comme une construction</h2>
+      <p class="lede">
+        La première version de cette page rangeait ce chantier dans la file
+        d'attente d'Ethereum et n'en disait rien de plus. Une relecture
+        extérieure a corrigé cette paresse : sur le papier, c'est la
+        construction la plus proche de la nôtre, et elle mérite d'être
+        comparée point par point plutôt que citée en passant.
+      </p>
+      <p>
+        La proposition la plus aboutie de cette ligne date de 2021. Un arbre
+        d'état par période, environ un an chacune. Seul l'arbre de la période
+        en cours s'écrit ; les précédents sont gelés, et un nœud complet n'en
+        garde que les racines. Un compte que personne n'a touché depuis une
+        période est expiré : le réveiller demande un témoin, fourni par le
+        dépensier ou par un tiers, vérifié contre ces racines. Et les
+        producteurs de blocs sont censés garder l'arbre de la période
+        précédente, pour que ce qui vient d'expirer ne demande de témoin à
+        personne.
+      </p>
+      <p>
+        Il faut le dire tel que c'est : deux étages, un plafond tenu par le
+        consensus sur la partie active, des preuves à la charge du dépensier,
+        les racines seules chez le validateur, et même un amorti pour ce qui
+        vient de tomber. La forme de Cairn, dessinée pour Ethereum, cinq ans
+        avant nous. Nous ne l'avons pas apprise là, mais elle y était d'abord,
+        et le taire serait la revendication excessive que cette étude
+        s'interdit.
+      </p>
+
+      <div class="scroll">
+        <table>
+          <caption>La même forme, comparée point par point</caption>
+          <thead>
+            <tr>
+              <th></th>
+              <th>Expiration d'état, proposition de 2021</th>
+              <th>Cairn</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Ce qui est plafonné</td>
+              <td>L'état actif d'une période ; sa taille suit ce que le gaz laisse écrire en un an</td>
+              <td>Le tiroir : 131 072 billets, un nombre</td>
+            </tr>
+            <tr>
+              <td>La règle qui fait descendre</td>
+              <td>L'âge : une période sans être touché</td>
+              <td>La place : tiroir plein, le plus ancien descend</td>
+            </tr>
+            <tr>
+              <td>Ce que devient l'expiré</td>
+              <td>Des arbres gelés, un par période, que quelqu'un doit détenir quelque part</td>
+              <td>Une forêt dont chaque nœud garde 64 empreintes ; les feuilles chez les seuls archivistes</td>
+            </tr>
+            <tr>
+              <td>Qui fournit le témoin</td>
+              <td>Le dépensier, ou un tiers ; la proposition cite Etherscan</td>
+              <td>Le dépensier ; son portefeuille l'entretient seul, depuis les blocs</td>
+            </tr>
+            <tr>
+              <td>Ce que coûte le témoin</td>
+              <td>Une appartenance, plus une absence par période traversée : il s'allonge avec le sommeil</td>
+              <td>Une seule appartenance, 369 à 685 octets mesurés ; la durée du sommeil n'y change rien</td>
+            </tr>
+            <tr>
+              <td>Le retour d'absence</td>
+              <td>Trouver qui détient les arbres gelés</td>
+              <td>Trouver un archiviste : même dette, même question de rémunération ouverte</td>
+            </tr>
+            <tr>
+              <td>Ce dont ça dépend</td>
+              <td>Un nouvel arbre d'engagement, Verkle dans le texte et peut-être un autre depuis, des adresses allongées, et la migration d'une chaîne vivante</td>
+              <td>Des arbres de hachage, et une règle posée avant que le réseau ne porte de valeur</td>
+            </tr>
+            <tr>
+              <td>Statut</td>
+              <td>Recherche ; jamais implémenté sur le réseau principal</td>
+              <td>Implémenté ; réseau de test seulement</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Où Cairn tient mieux, et pourquoi</h3>
+      <p>
+        <strong>Le plafond est un nombre, pas un âge.</strong> Une période d'un
+        an borne un rythme, remis à zéro chaque année : la partie active
+        grandit avec l'activité à l'intérieur de la période, et un an de
+        succès pèse plus lourd qu'un an de calme. 131 072 est un effectif ; le
+        succès n'y change rien, et c'est toute la thèse de ce projet.
+      </p>
+      <p>
+        <strong>Le témoin ne connaît pas le calendrier.</strong> Dans un modèle
+        de comptes, une adresse peut renaître, donc réveiller un compte exige
+        de prouver aussi qu'il n'a rien fait dans aucune des périodes
+        traversées, et la proposition allonge les adresses pour rendre ces
+        conflits tenables. Un billet naît une fois et meurt une fois : une
+        preuve d'appartenance suffit, aucune preuve d'absence, rien à changer
+        aux adresses. C'est le modèle en billets qui paie ici.
+      </p>
+      <p>
+        <strong>Le porteur peut se garder lui-même.</strong> Chez nous, tout
+        ce qu'il faut pour tenir sa preuve à jour passe dans les blocs, et le
+        portefeuille le fait sans rien demander à personne. Fabriquer un
+        témoin de réveil demande les arbres gelés, que le dépensier ordinaire
+        ne détient pas ; la proposition nomme un tiers qui les détiendrait.
+      </p>
+      <p>
+        <strong>La grâce est une règle, pas une attente.</strong> Les
+        producteurs sont censés garder la période précédente ; rien ne les y
+        oblige. Nos soixante-quatre blocs de grâce sont engagés dans la racine
+        d'état que chaque bloc porte : un nœud qui en divergerait quitterait
+        la chaîne.
+      </p>
+      <p>
+        <strong>Rien de neuf en dessous.</strong> Pas de nouvel arbre
+        d'engagement à faire mûrir, pas de séparation des rôles à inventer :
+        des hachages, et une frontière.
+      </p>
+
+      <h3>Où il ne tient pas mieux, et il faut le dire aussi</h3>
+      <p>
+        Leur utilisateur a un an devant lui avant la première friction ; le
+        nôtre, sur une chaîne chargée, quelques heures avant la cave. C'est le
+        prix du plafond en nombre, le whitepaper le chiffre, et l'expiration
+        par l'âge est plus douce pour celui qui dort.
+      </p>
+      <p>
+        Et leur problème est plus dur que le nôtre. Des comptes qui se
+        modifient sur place, des contrats qui ne peuvent pas garder leurs
+        preuves eux-mêmes, et une chaîne vivante qui porte des centaines de
+        milliards : poser une règle pareille après coup casse des choses, et
+        c'est très exactement pour cela que ce chantier dure. Cairn n'a eu
+        qu'à écrire la règle avant de porter quoi que ce soit. La comparaison
+        flatte la chaîne jeune, pas ses auteurs.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail"><span class="n">4</span><span>La limite</span></div>
     <div class="body">
       <h2>Le théorème que personne ne contourne</h2>
       <p class="lede">
@@ -366,8 +532,9 @@
         <span class="tag">Christ et Bonneau · Financial Cryptography 2023</span>
         <p class="claim">
           Il n'existe aucun point de compromis utile : un système doit soit
-          garder un état global de taille linéaire, soit exiger un rythme
-          quasi linéaire de mises à jour de preuves chez ses utilisateurs.
+          garder un état global de taille linéaire en le nombre de comptes,
+          soit exiger un rythme quasi linéaire de mises à jour de preuves chez
+          ses utilisateurs.
         </p>
         <p>
           Le résultat est de théorie de l'information, donc il ne dépend
@@ -399,8 +566,8 @@
       </p>
       <p>
         <strong>Ce sont nos archivistes.</strong> Ils sont dans la conception de
-        Cairn depuis le premier jour, avec leur rémunération à la demande, et ils
-        y ont été mis pour une intuition. L'étude montre qu'ils n'étaient pas un
+        Cairn depuis le premier jour, ouverts à tous et que personne ne paie, et
+        ils y ont été mis pour une intuition. L'étude montre qu'ils n'étaient pas un
         confort mais une nécessité structurelle, et que la question de leur
         modèle économique est ouverte pour tout le monde, pas seulement pour
         nous.
@@ -422,7 +589,7 @@
   </section>
 
   <section>
-    <div class="rail"><span class="n">4</span><span>La position</span></div>
+    <div class="rail"><span class="n">5</span><span>La position</span></div>
     <div class="body">
       <h2>Où Cairn se tient exactement</h2>
       <p class="lede">
@@ -466,11 +633,18 @@
               <td>Intégral</td>
             </tr>
             <tr>
+              <td>Ethereum, expiration d'état</td>
+              <td>En projet, par période</td>
+              <td class="yes">Oui, réveil sur témoin</td>
+              <td class="no">Preuve d'enjeu, distribution</td>
+              <td>Point de contrôle cru</td>
+            </tr>
+            <tr>
               <td>Mina</td>
-              <td class="yes">Oui, par la preuve</td>
+              <td>Vérifier oui, produire non</td>
               <td class="yes">Oui</td>
               <td class="no">Preuve d'enjeu, distribution</td>
-              <td class="yes">Oui, 22 ko</td>
+              <td class="yes">Oui, preuve de 22 ko</td>
             </tr>
             <tr>
               <td>Ergo</td>
@@ -506,14 +680,15 @@
             <li><b>L'engagement sur l'histoire des en-têtes</b> et le tirage pondéré par le travail viennent de FlyClient.</li>
             <li><b>Les archivistes</b> sont les <em>proof-serving nodes</em> de Christ et Bonneau, arrivés chez nous par une autre route.</li>
             <li><b>L'idée que les billets très récents coûtent moins</b> existe chez Utreexo sous forme d'optimisation locale.</li>
+            <li><b>La forme à deux étages, témoins à la charge du dépensier,</b> est dessinée dans l'expiration d'état d'Ethereum dès 2021, pour un modèle de comptes. Arrivée chez nous par une autre route, mais elle y était d'abord.</li>
           </ul>
         </div>
         <div class="mine">
           <h4>Ce qui, après recherche, n'a pas d'équivalent</h4>
           <ul>
-            <li><b>Un plafond dur sur l'état chaud, inscrit dans le consensus.</b> Les autres bornent la mémoire d'un nœud ou découragent l'occupation par un coût. Aucun ne fait de la taille de l'ensemble détenu une règle que le réseau applique.</li>
-            <li><b>Les deux températures ensemble</b> : détenir intégralement un ensemble borné et porter tout le reste en soixante-quatre empreintes. La recherche menée n'a rien trouvé de cette forme.</li>
-            <li><b>La fenêtre de grâce comme règle du réseau.</b> Utreexo exempte le cas d'une sortie créée et dépensée dans le même bloc, et laisse le reste au cache de chaque nœud. Chez nous, soixante-quatre blocs de grâce sont une règle que tous appliquent, donc une garantie pour le payeur et non une chance.</li>
+            <li><b>Un plafond en nombre fixe sur l'état chaud, inscrit dans le consensus.</b> Les chaînes en production bornent la mémoire d'un nœud ou découragent l'occupation par un coût. Le seul projet qui plafonne par règle, l'expiration d'état d'Ethereum, borne un rythme par période et n'est jamais sorti de la recherche. Un effectif que le réseau applique, la recherche menée n'en a trouvé nulle part.</li>
+            <li><b>Les deux températures implémentées, et rien d'autre chez le validateur.</b> La forme existe sur le papier depuis 2021. La paire qui tourne, un ensemble borné détenu en entier et tout le reste en soixante-quatre empreintes sans arbre gelé à détenir quelque part, la recherche menée n'en a pas trouvé.</li>
+            <li><b>La fenêtre de grâce comme règle du réseau.</b> Utreexo exempte le cas d'une sortie créée et dépensée dans le même bloc, et laisse le reste au cache de chaque nœud ; l'expiration d'état attend des producteurs qu'ils gardent la période précédente, sans en faire une règle. Chez nous, soixante-quatre blocs de grâce sont engagés dans la racine d'état, donc une garantie pour le payeur et non une chance.</li>
             <li><b>Un état borné sans rien détruire.</b> Ergo et la proposition de décembre bornent en confisquant. Cairn borne en déplaçant, et la première garantie du protocole l'interdit explicitement.</li>
           </ul>
         </div>
@@ -529,7 +704,7 @@
   </section>
 
   <section>
-    <div class="rail"><span class="n">5</span><span>La suite</span></div>
+    <div class="rail"><span class="n">6</span><span>La suite</span></div>
     <div class="body">
       <h2>Ce que cette étude change pour nous</h2>
 
@@ -537,19 +712,20 @@
         <li>
           <b>Reprendre FlyClient, ne pas l'inventer.</b>
           <span>
-            Le schéma est publié, relu, déployé, et sa sécurité est établie sous
-            une hypothèse claire. Nous l'implanterons avec le modèle d'adversaire
-            économique proposé en 2026, qui coûte 37 % d'échantillons en moins à
-            sécurité égale.
+            Le schéma est publié, relu, et sa sécurité est établie sous une
+            hypothèse claire. C'est fait depuis : l'implantation reprend le
+            modèle d'adversaire économique proposé en 2026, qui coûte environ
+            37 % d'échantillons en moins à sécurité égale.
           </span>
         </li>
         <li>
           <b>Exploiter la légèreté de nos en-têtes.</b>
           <span>
             La difficulté principale rencontrée en production ailleurs est le
-            poids des en-têtes dans les preuves. Les nôtres font 182 octets. La
-            même preuve devrait donc être nettement plus petite chez nous, et
-            c'est un chiffre à mesurer et à publier plutôt qu'à supposer.
+            poids des en-têtes dans les preuves. Les nôtres font 182 octets.
+            C'est mesuré depuis : environ 8 Mo pour rejoindre trente ans de
+            chaîne, en-têtes et chemins compris, contre les 48 Go qu'ils
+            remplacent.
           </span>
         </li>
         <li>
@@ -567,6 +743,7 @@
             Un papier qui cite Christ et Bonneau, dit de quel côté il tombe et
             pourquoi, sera bien plus solide qu'un papier qui n'en parle pas. Un
             lecteur compétent connaîtra ce résultat et cherchera notre réponse.
+            C'est fait : le whitepaper y consacre sa section 8.
           </span>
         </li>
         <li>
@@ -583,7 +760,7 @@
   </section>
 
   <section>
-    <div class="rail"><span class="n">6</span><span>Sources</span></div>
+    <div class="rail"><span class="n">7</span><span>Sources</span></div>
     <div class="body">
       <h2>Ce sur quoi tout ce qui précède repose</h2>
 
@@ -639,7 +816,7 @@
         <div class="src">
           <span class="who">Ethereum</span>
           <span class="what">
-            <a href="https://ethereum.org/roadmap/statelessness/">Statelessness, state expiry and history expiry</a>, documentation officielle.
+            <a href="https://ethereum.org/roadmap/statelessness/">Statelessness, state expiry and history expiry</a>, documentation officielle. La construction comparée à la section 3 : Vitalik Buterin, <a href="https://ethresear.ch/t/resurrection-conflict-minimized-state-bounding-take-2/8739">Resurrection-conflict-minimized state bounding, take 2</a>, et <a href="https://notes.ethereum.org/@vbuterin/verkle_and_state_expiry_proposal">A state expiry and statelessness roadmap</a>, 2021. L'expiration de l'histoire, distincte, est <a href="https://eips.ethereum.org/EIPS/eip-4444">EIP-4444</a>.
           </span>
         </div>
         <div class="src">
@@ -652,16 +829,19 @@
 
       <p class="tail-note">
         Une réserve de méthode, qui vaut d'être écrite. Une recherche ne prouve
-        pas une absence. Que rien n'ait été trouvé sur le plafond par consensus
-        rend la chose probable, pas certaine, et il restera utile de faire relire
-        cette section par quelqu'un du domaine avant de la publier telle quelle.
+        pas une absence, et cette page en est elle-même la preuve : sa première
+        version rangeait l'expiration d'état dans une file d'attente, et il a
+        fallu une relecture extérieure pour la remettre à sa place, en
+        section 3. Ce qui reste revendiqué sans équivalent l'est après cette
+        correction, pas avant, et il restera utile de faire relire cette page
+        par quelqu'un du domaine avant de la publier telle quelle.
       </p>
     </div>
   </section>
 
   <footer>
-    <span>Cairn · étude de l'existant · v1</span>
-    <span>27 août 2026</span>
+    <span>Cairn · étude de l'existant · v2</span>
+    <span>31 août 2026</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 
