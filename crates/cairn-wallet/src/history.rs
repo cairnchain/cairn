@@ -551,7 +551,10 @@ mod tests {
 
         // The chain still holds what was read: nothing moved.
         assert!(
-            !history.diverged(|height| ids.get(height as usize).copied()),
+            !history.diverged(|height| usize::try_from(height)
+                .ok()
+                .and_then(|at| ids.get(at))
+                .copied()),
             "every block is where it was read"
         );
 
@@ -574,7 +577,10 @@ mod tests {
             history.diverged(|height| if height == 4 {
                 Some(elsewhere)
             } else {
-                ids.get(height as usize).copied()
+                usize::try_from(height)
+                    .ok()
+                    .and_then(|at| ids.get(at))
+                    .copied()
             }),
             "the block at the top is not the one that was read"
         );

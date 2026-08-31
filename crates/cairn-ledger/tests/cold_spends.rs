@@ -5,6 +5,9 @@
 //! has done nothing wrong. This asks what the application step does with it.
 
 #![allow(
+    clippy::doc_markdown,
+    clippy::similar_names,
+    clippy::too_many_arguments,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,

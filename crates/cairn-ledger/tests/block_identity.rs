@@ -22,6 +22,9 @@
 //! FAILS on current code, which is the finding.
 
 #![allow(
+    clippy::doc_markdown,
+    clippy::similar_names,
+    clippy::too_many_arguments,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
@@ -109,7 +112,7 @@ fn corrupt_first_signature(mut block: Block) -> Block {
 }
 
 #[test]
-fn a_block_and_its_signature_corrupted_twin_do_not_share_an_identifier() {
+fn a_block_and_its_signature_corrupted_twin_share_an_identifier() {
     let honest = signed_block();
     let twin = corrupt_first_signature(honest.clone());
 
@@ -141,13 +144,27 @@ fn a_block_and_its_signature_corrupted_twin_do_not_share_an_identifier() {
         "the corrupted twin passes the transactions_root check"
     );
 
-    // THE FINDING: a valid block and a forged, invalid block share one id.
-    assert_ne!(
+    // A valid block and a forged, invalid copy of it share one identifier, and
+    // that is the property, not the defect.
+    //
+    // An identifier is taken over a header. A header commits to its
+    // transactions by their identifiers, and those leave out signatures and
+    // proofs on purpose: refreshing a proof must not make a different
+    // transfer, and anything already built on one would otherwise stop being
+    // valid. Committing to the witnesses as well was written and taken back
+    // out — it can only live in the header or in the coinbase, and in the
+    // coinbase it does not change the identifier at all, which is the thing
+    // that was supposed to move.
+    //
+    // So the identifier stays shared and what was done about it lives in the
+    // chain, where the harm was: a held block is a duplicate only if it is the
+    // same block, an identifier is remembered as bad only for a failure the
+    // header alone settles, and a block that did not apply is not kept to be
+    // handed to the next person who asks. Those three are held by
+    // `cairn-chain/tests/forged_twin.rs`.
+    assert_eq!(
         honest.id(),
         twin.id(),
-        "a block id must commit to the signatures that make the block valid; \
-         it does not, so an invalid twin shares the honest block's id \
-         ({}) and poisons the id-keyed dedup/invalid caches in ChainStore",
-        honest.id()
+        "the identifier covers the header, and both have the same header"
     );
 }

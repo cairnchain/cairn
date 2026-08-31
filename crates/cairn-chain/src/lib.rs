@@ -1248,6 +1248,22 @@ impl ChainStore {
                         }
                         self.invalid.insert(*id);
                     }
+                    // And the block goes, unless the only thing wrong with it
+                    // is that this node is too old to judge it.
+                    //
+                    // An identifier is taken over a header, so what failed may
+                    // be a forged copy of a real block: one signature broken,
+                    // no work done, sent first. Keeping it means handing that
+                    // copy to whoever next asks for the block it was copied
+                    // from, and standing in the way of the real one. Nothing
+                    // that did not apply is worth passing on.
+                    //
+                    // A block from rules this build lacks is different. It
+                    // becomes valid the moment the node is updated, and
+                    // throwing it away would mean asking for it again.
+                    if error.outdated().is_none() && self.blocks.remove(id).is_some() {
+                        self.recount();
+                    }
                     self.restore(&added, &rolled_back, now)?;
                     return Err(error);
                 }
