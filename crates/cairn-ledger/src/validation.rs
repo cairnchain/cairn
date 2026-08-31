@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use cairn_crypto::{PublicKey, Signature};
 use cairn_primitives::codec::Encode;
 use cairn_primitives::{Amount, Hash32};
 
@@ -353,6 +354,81 @@ pub struct TransferOutcome {
     pub spent_cold: Vec<ColdSpend>,
 }
 
+/// A signature found while validating, waiting to be checked.
+///
+/// Collected rather than checked where it is found, so that a whole block's
+/// signatures are checked in one place — and a full block's worth is enough
+/// work to be worth splitting across the cores the machine already has.
+///
+/// The position is carried so a failure names the same input the one-at-a-time
+/// check would have named. Which of two bad signatures is reported changes
+/// nothing any node agrees on, but a validator that names a different one on
+/// every run is one nobody can debug.
+struct Pending {
+    owner: PublicKey,
+    message: Hash32,
+    signature: Signature,
+    transfer: usize,
+    input: usize,
+}
+
+impl Pending {
+    fn holds(&self) -> bool {
+        self.owner
+            .verify(self.message.as_bytes(), &self.signature)
+            .is_ok()
+    }
+}
+
+/// Signatures below which splitting the work costs more than it saves.
+const SPLIT_ABOVE: usize = 64;
+
+/// Threads worth asking for. A validator is not the only thing on the machine.
+const MOST_THREADS: usize = 8;
+
+/// Checks every signature collected, and names the first that does not hold.
+///
+/// First in the order validation reached them, whichever thread got there.
+/// The check itself is pure — the same key, message and signature give the
+/// same answer anywhere — so splitting it changes how long a block takes and
+/// nothing about whether it is valid.
+fn first_failure(pending: &[Pending]) -> Option<&Pending> {
+    if pending.len() < SPLIT_ABOVE {
+        return pending.iter().find(|found| !found.holds());
+    }
+
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .clamp(1, MOST_THREADS);
+    let each = pending.len().div_ceil(threads).max(1);
+
+    std::thread::scope(|scope| {
+        let running: Vec<_> = pending
+            .chunks(each)
+            .map(|slice| scope.spawn(move || slice.iter().find(|found| !found.holds())))
+            .collect();
+
+        let mut worst: Option<&Pending> = None;
+        for handle in running {
+            // A thread that died took its answer with it, and the answer it
+            // was carrying may have been "this block is invalid". Refusing the
+            // block is the only safe reading of that, so the first signature
+            // stands in for one that could not be checked.
+            let Ok(found) = handle.join() else {
+                return pending.first();
+            };
+            if let Some(found) = found {
+                let better = worst
+                    .is_none_or(|held| (found.transfer, found.input) < (held.transfer, held.input));
+                if better {
+                    worst = Some(found);
+                }
+            }
+        }
+        worst
+    })
+}
+
 /// Checks everything about a transfer that does not require the note set.
 pub fn check_transfer_shape(
     transfer: &Transfer,
@@ -474,6 +550,39 @@ pub fn check_transfer(
     spent_cold: &BTreeMap<NoteId, ColdSpend>,
     params: &ConsensusParams,
 ) -> Result<TransferOutcome, TransferError> {
+    let mut pending = Vec::new();
+    let outcome = resolve_transfer(
+        transfer,
+        0,
+        state,
+        spent_hot,
+        spent_cold,
+        params,
+        &mut pending,
+    )?;
+    if let Some(failed) = first_failure(&pending) {
+        return Err(TransferError::InvalidSignature {
+            input_index: failed.input,
+        });
+    }
+    Ok(outcome)
+}
+
+/// The same, with the signatures written down instead of checked.
+///
+/// Everything else is decided here: the shape, where each note is, that it is
+/// not already spent, and what it is worth. What is left over is the one part
+/// that needs no state at all, and a block's worth of it is enough work to be
+/// worth doing in one go.
+fn resolve_transfer(
+    transfer: &Transfer,
+    position_in_block: usize,
+    state: &LedgerState,
+    spent_hot: &BTreeSet<NoteId>,
+    spent_cold: &BTreeMap<NoteId, ColdSpend>,
+    params: &ConsensusParams,
+    pending: &mut Vec<Pending>,
+) -> Result<TransferOutcome, TransferError> {
     check_transfer_shape(transfer, params)?;
 
     let mut available = Amount::ZERO;
@@ -484,11 +593,13 @@ pub fn check_transfer(
         let (spent, fallen) = resolve_input(state, input, spent_hot, spent_cold)?;
 
         let position = u32::try_from(index).unwrap_or(u32::MAX);
-        let message = transfer.signature_message(params.network, position, &spent);
-        spent
-            .owner
-            .verify(message.as_bytes(), &input.signature)
-            .map_err(|_| TransferError::InvalidSignature { input_index: index })?;
+        pending.push(Pending {
+            owner: spent.owner,
+            message: transfer.signature_message(params.network, position, &spent),
+            signature: input.signature,
+            transfer: position_in_block,
+            input: index,
+        });
 
         available = available
             .checked_add(spent.value)
@@ -572,9 +683,23 @@ pub fn evaluate_block_body(
     let mut created: Vec<(NoteId, Note)> = Vec::new();
     let mut total_fees = Amount::ZERO;
 
+    // Collected across the whole block and checked once below, rather than one
+    // at a time here. A full block carries over a thousand of them, every one
+    // an elliptic curve verification, and that is the bulk of what the chain
+    // lock is held for while a block is judged.
+    let mut pending: Vec<Pending> = Vec::new();
+
     for (index, transfer) in transfers.iter().enumerate() {
-        let outcome = check_transfer(transfer, state, &spent_hot, &spent_cold, params)
-            .map_err(|source| BlockError::InvalidTransfer { index, source })?;
+        let outcome = resolve_transfer(
+            transfer,
+            index,
+            state,
+            &spent_hot,
+            &spent_cold,
+            params,
+            &mut pending,
+        )
+        .map_err(|source| BlockError::InvalidTransfer { index, source })?;
 
         spent_hot.extend(outcome.spent_hot);
         spent_cold.extend(
@@ -587,6 +712,15 @@ pub fn evaluate_block_body(
         total_fees = total_fees
             .checked_add(outcome.fee)
             .ok_or(BlockError::ValueOverflow)?;
+    }
+
+    if let Some(failed) = first_failure(&pending) {
+        return Err(BlockError::InvalidTransfer {
+            index: failed.transfer,
+            source: TransferError::InvalidSignature {
+                input_index: failed.input,
+            },
+        });
     }
 
     // What the schedule pays at this height, plus what the transfers paid to
@@ -899,4 +1033,73 @@ pub fn connect_block(
 /// is why the two travel together.
 pub fn disconnect_block(state: &mut LedgerState, connected: &ConnectedBlock) {
     state.revert(&connected.transition, &connected.undo);
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+    use cairn_crypto::SecretKey;
+
+    fn pending(seed: u8, transfer: usize, input: usize, good: bool) -> Pending {
+        let key = SecretKey::from_bytes(&[seed | 1; 32]);
+        let message = Hash32::from_bytes([seed; 32]);
+        let signature = key.sign(message.as_bytes());
+        Pending {
+            owner: if good {
+                key.public_key()
+            } else {
+                // A key that did not sign this: the signature is well formed
+                // and does not hold, which is what a forged transfer looks
+                // like and what a corrupted one looks like too.
+                SecretKey::from_bytes(&[0xAB; 32]).public_key()
+            },
+            message,
+            signature,
+            transfer,
+            input,
+        }
+    }
+
+    /// The same answer above the threshold as below it.
+    ///
+    /// Past `SPLIT_ABOVE` the work is handed to several threads, and the one
+    /// that finds a bad signature first is whichever was scheduled first. What
+    /// is reported has to be the one validation reached first instead, or a
+    /// node names a different input on every run and nobody can debug it. The
+    /// verdict is the same either way — this is about the report.
+    #[test]
+    fn a_split_check_names_the_same_signature_a_whole_one_would() {
+        for count in [4usize, SPLIT_ABOVE - 1, SPLIT_ABOVE, SPLIT_ABOVE * 4 + 3] {
+            for bad_at in [0usize, 1, count / 2, count - 1] {
+                let found: Vec<Pending> = (0..count)
+                    .map(|index| {
+                        let seed = u8::try_from(index % 251).unwrap();
+                        pending(seed, index / 8, index, index != bad_at)
+                    })
+                    .collect();
+
+                let failure = first_failure(&found).expect("one of them does not hold");
+                assert_eq!(
+                    (failure.transfer, failure.input),
+                    (found[bad_at].transfer, found[bad_at].input),
+                    "{count} signatures, the bad one at {bad_at}"
+                );
+            }
+        }
+    }
+
+    /// And nothing is reported when every one of them holds, at any size.
+    #[test]
+    fn a_split_check_finds_nothing_wrong_with_signatures_that_hold() {
+        for count in [1usize, SPLIT_ABOVE, SPLIT_ABOVE * 4 + 3] {
+            let found: Vec<Pending> = (0..count)
+                .map(|index| {
+                    let seed = u8::try_from(index % 251).unwrap();
+                    pending(seed, index / 8, index, true)
+                })
+                .collect();
+            assert!(first_failure(&found).is_none(), "{count} good signatures");
+        }
+    }
 }
