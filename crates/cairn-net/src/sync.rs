@@ -419,25 +419,26 @@ pub const JOIN_RATHER_THAN_READ: u64 = 1_024;
 
 /// Heights one peer may have outstanding at any moment.
 ///
-/// One batch, which is what this node asks for and then waits on: it does not
-/// ask again before the last answer arrived. A set that grew past this grew
-/// because somebody was growing it, and it was unbounded. Two messages a peer
-/// pays one unit each for — a chain it says it has, a block it says it found —
-/// both extended it and both pushed back the only thing that emptied it, so a
-/// peer that kept talking kept the set and kept adding to it. A thousand of
-/// them, a fraction of one allowance window, held a hundred and twenty eight
-/// thousand heights.
-const MAX_AWAITING: usize = MAX_REQUESTED;
+/// This was unbounded. Two messages a peer pays one unit each for — a chain it
+/// says it has, a block it says it found — both extended the set and both
+/// pushed back the only thing that emptied it, so a peer that kept talking
+/// kept the set and kept adding to it. A thousand of them, a fraction of one
+/// allowance window, held a hundred and twenty eight thousand heights.
+///
+/// Four batches rather than one, which a catch-up turned out to need. A node
+/// that asks for a stretch its peer has since let go of hears nothing back,
+/// and what moves it on is the next thing that peer says about its chain. With
+/// room for only the batch already outstanding, that arrived and was dropped,
+/// and the node waited out `BATCH_PATIENCE` instead — a minute of nothing, for
+/// each stretch, on a sync that should take seconds. Four is still four
+/// kilobytes and still a ceiling; unbounded was the defect, not the size.
+const MAX_AWAITING: usize = MAX_REQUESTED * 4;
 
 /// Asks for a stretch of a peer's branch, starting at `from`.
 fn request_range(peer: &mut PeerState, from: u64, count: u64, now: u64) -> Reaction {
-    let room = MAX_AWAITING.saturating_sub(peer.awaiting.len());
     let wanted = usize::try_from(count)
         .unwrap_or(MAX_REQUESTED)
-        .min(MAX_REQUESTED)
-        .min(room);
-    // Nothing asked, so nothing is written down and the clock that empties the
-    // set is not pushed back. A peer with a batch outstanding waits for it.
+        .min(MAX_REQUESTED);
     if wanted == 0 {
         return Reaction::idle();
     }
@@ -445,6 +446,18 @@ fn request_range(peer: &mut PeerState, from: u64, count: u64, now: u64) -> React
         .filter_map(|step| u64::try_from(step).ok())
         .map(|step| from.saturating_add(step))
         .collect();
+    // Only what this would newly wait on counts against the ceiling. Asking
+    // again for a stretch already outstanding grows nothing, and is how a sync
+    // gets past a peer that answered part of one.
+    let room = MAX_AWAITING.saturating_sub(peer.awaiting.len());
+    if batch
+        .iter()
+        .filter(|at| !peer.awaiting.contains(at))
+        .count()
+        > room
+    {
+        return Reaction::idle();
+    }
     peer.awaiting.extend(batch.iter().copied());
     peer.asked_at = now;
     Reaction::reply(vec![Message::GetBlocks(batch)])
@@ -464,7 +477,8 @@ fn request_announced(
         .iter()
         .filter(|entry| !chain.contains(&entry.id))
         .map(|entry| entry.height)
-        .take(MAX_REQUESTED.min(room))
+        .filter(|at| peer.awaiting.contains(at) || room > 0)
+        .take(MAX_REQUESTED)
         .collect();
     if wanted.is_empty() {
         return follow_up(chain, peer, now);

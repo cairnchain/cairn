@@ -21,9 +21,16 @@ what it borrows and what limit it accepts.
 
 ## Status
 
-Pre-alpha, and running in public. `testnet-3` has been up since 27 August 2026
-on two seed nodes at two hosts in two countries. Its money is worth nothing,
-is meant to be worth nothing, and the network will be reset.
+Pre-alpha, and running in public. `testnet-4` opened on 31 August 2026, on
+three machines at three hosts. Its money is worth nothing, is meant to be
+worth nothing, and the network will be reset.
+
+It is the fourth because an audit pass found that a cold note could be spent
+twice: a proof was accepted if it matched the cold set as it stood at any of
+the last thirty two blocks, and the step that takes the note out cannot use
+an old path, so it removed nothing and the note stayed. That changes what a
+header commits to, so the chain that could mint from nothing was not carried
+forward.
 
 There is no mainnet. A network exists once its first block does, and that one
 will be mined in the open on the day it is announced.
@@ -95,8 +102,8 @@ how many people can be paid in a minute.
 
 | Network | Starts from | Opens at | Block time |
 | --- | --- | --- | --- |
-| `testnet-3` | `0000001b9876...` | 1787820378 | 60 s |
-| `devnet` | `00000139ffc6...` | 1787820357 | 5 s |
+| `testnet-4` | `000000031c94...` | 1788186376 | 60 s |
+| `devnet` | `000000d86525...` | 1788186545 | 5 s |
 | `mainnet` | not made yet | | |
 
 There is an explorer, which is a node that also serves a website: the chain in

@@ -15,7 +15,7 @@ Group=cairn
 # proxy holding the certificate, because this program speaks HTTP and nothing
 # else, and a page about who owns what must not be alterable in transit.
 ExecStart=/usr/local/bin/cairn-explorer \
-    --network testnet-3 \
+    --network testnet-4 \
     --data /var/lib/cairn-explorer \
     --listen 0.0.0.0:9945 \
     --http 127.0.0.1:8080

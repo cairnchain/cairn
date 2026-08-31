@@ -10,9 +10,9 @@
     carried in sixty four hashes.
   </p>
   <div class="byline">
-    <span>Draft, 29 August 2026</span>
+    <span>Draft, 31 August 2026</span>
     <span><a href="https://github.com/cairnchain/cairn">github.com/cairnchain/cairn</a></span>
-    <span>testnet-3, no mainnet exists</span>
+    <span>testnet-4, no mainnet exists</span>
   </div>
 </header>
 
@@ -227,15 +227,27 @@
       this workable rather than merely correct.
     </p>
 
-    <h3><span class="sub">4.1</span>The proof window</h3>
+    <h3><span class="sub">4.1</span>A proof is worth what it is worth now</h3>
     <p>
-      A proof may be up to <code>PROOF_WINDOW = 32</code> blocks stale. Without
-      this, a transfer written while a block was being found would be invalid
-      by the time it arrived, through no fault of its author. Verification
-      walks backwards through recent roots and stops at the first block that
-      emptied the position. An earlier version of this check compared roots
-      before checking whether the position had been spent, which permitted a
-      double spend; the ordering is load-bearing.
+      A proof is checked against the cold set as it stands, and against nothing
+      else. Earlier versions accepted one matching any of the last thirty two
+      states, so that a transfer written while a block was being found was not
+      invalid through no fault of its author. That was half a rule. Removing a
+      note folds the empty leaf along the path the proof carries, and an old
+      path does not reach the root that is there now, so the removal did
+      nothing, reported it through a value no caller read, and the note stayed
+      to be spent again. Every node computed the same wrong state, so the
+      network agreed and nothing forked.
+    </p>
+    <p>
+      Completing the rule instead of removing it would mean carrying, as
+      committed state, whatever changed between an old root and the current
+      one — bounded, at roughly four megabytes, but bought for a convenience
+      that costs nothing to have another way. A transfer's identifier excludes
+      its witness by design, so refreshing a proof does not make a different
+      transfer. One that waited too long is the same transfer offered again;
+      the pool already drops what the state no longer accepts, and a wallet
+      already keeps its own proofs current as the forest grows.
     </p>
 
     <h3><span class="sub">4.2</span>The grace window</h3>
@@ -584,7 +596,7 @@
       <div><span class="k">Bytes per hot note, measured</span><span class="v">516</span></div>
       <div><span class="k">Hot set at capacity</span><span class="v">68 MB</span></div>
       <div><span class="k">Cold set carried by a node</span><span class="v">64 hashes, 2 kB</span></div>
-      <div><span class="k">Proof window</span><span class="v">32 blocks</span></div>
+      
       <div><span class="k">Grace window</span><span class="v">64 blocks, 8 192 notes</span></div>
       <div><span class="k">Difficulty window</span><span class="v">90 blocks, LWMA</span></div>
       <div><span class="k">Median time past</span><span class="v">11 blocks</span></div>

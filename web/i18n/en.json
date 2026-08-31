@@ -429,7 +429,7 @@
           "Two windows make this survivable in practice. A proof may be up to 32 blocks stale, so a wallet that fell slightly behind is not refused. And a note that has only just fallen stays spendable with no proof at all for 64 blocks, because every node still has it."
         ],
         "technical": [
-          "PROOF_WINDOW is 32 blocks. Verification walks backwards through recent roots and stops at the first block that emptied the position: an earlier version of this check compared roots before checking whether the position had been spent, which allowed a double spend.",
+          "A proof is checked against the cold set as it stands, and against nothing else. Earlier versions accepted one matching any of the last thirty two states, so a transfer written while a block was being found was not invalid through no fault of its author. That was half a rule: removing a note folds along the path the proof carries, an old path does not reach the root that is there now, so the removal did nothing and the note stayed to be spent again. A transfer's identifier excludes its witness, so one that waited too long is the same transfer offered again with a fresh proof.",
           "GRACE_BLOCKS is 64 and GRACE_NOTES is 8192. Archivists, which are optional nodes that do keep the cold set, can rebuild a proof for someone who lost theirs."
         ]
       }
@@ -586,7 +586,7 @@
       "body": {
         "plain": ["This is how you get CAIRN on a test network. Your computer starts looking for blocks, and when it finds one the reward goes to your address. There is no other way to get any: nobody has a stock to hand out."],
         "curious": ["Single-threaded mining inside the node, which is enough for a test network. Rewards go to the key you name, and that key can live anywhere: the node is told an address and never sees the secret behind it."],
-        "technical": ["The opening difficulty of testnet-3 is 2^27, calibrated so the first block takes roughly the target block time on one ordinary core, at a measured 2.29 million hashes per second."]
+        "technical": ["The opening difficulty of testnet-4 is 2^27, calibrated so the first block takes roughly the target block time on one ordinary core, at a measured 2.29 million hashes per second."]
       }
     },
     "server": {

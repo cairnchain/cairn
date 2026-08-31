@@ -43,8 +43,25 @@ impl NetworkId {
     /// Changing what a header commits to invalidates every block mined under
     /// the old rule, so the network starts over and takes the next number.
     pub const TESTNET_3: Self = Self(0x4341_5256);
+    /// The fourth, because a cold note could be spent twice.
+    ///
+    /// A proof was accepted if it matched the cold set as it stood at any of
+    /// the last thirty two blocks, so that a spender who took one a few blocks
+    /// ago was not punished for the wait. Accepting it was half a rule: the
+    /// step that takes the note out folds along the path the proof carries,
+    /// and an old path does not reach the root that is there now, so the
+    /// removal did nothing, said so through a value nobody read, and the note
+    /// stayed to be spent again. Every node computed the same wrong state, so
+    /// they all agreed and nothing forked.
+    ///
+    /// A proof is now worth what it is worth now, and the window that was kept
+    /// for it left the state root with it. Both change what a header commits
+    /// to, so every block mined under the old rule is invalid and the network
+    /// starts over. The chain it replaces could mint from nothing, which is
+    /// not a chain to carry forward under a schedule.
+    pub const TESTNET_4: Self = Self(0x4341_5257);
     /// Kept as the name of whichever test network is current.
-    pub const TESTNET: Self = Self::TESTNET_3;
+    pub const TESTNET: Self = Self::TESTNET_4;
     /// A throwaway network with the same rules but a much shorter block time,
     /// for running the software on one machine.
     pub const DEVNET: Self = Self(0x4341_5244);

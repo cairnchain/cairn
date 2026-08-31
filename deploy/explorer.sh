@@ -18,7 +18,7 @@
 
 set -eu
 
-NETWORK="${NETWORK:-testnet-3}"
+NETWORK="${NETWORK:-testnet-4}"
 PORT="${PORT:-9945}"
 HTTP="${HTTP:-127.0.0.1:8080}"
 SEED="${SEED:-}"
@@ -75,7 +75,7 @@ chmod 0750 "$DATA"
 
 say "Service"
 UNIT=/etc/systemd/system/cairn-explorer.service
-if [ "$NETWORK" != "testnet-3" ] || [ "$PORT" != "9945" ] ||
+if [ "$NETWORK" != "testnet-4" ] || [ "$PORT" != "9945" ] ||
    [ "$HTTP" != "127.0.0.1:8080" ] || [ -n "$SEED" ]; then
     ARGS="--network $NETWORK --data $DATA --listen 0.0.0.0:$PORT --http $HTTP"
     for peer in $SEED; do

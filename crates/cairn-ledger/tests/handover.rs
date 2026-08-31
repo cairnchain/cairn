@@ -374,13 +374,8 @@ fn a_handed_over_ledger_accepts_a_proof_taken_a_few_blocks_ago() {
     node.mine_empty(&miner, 3);
 
     let handover = node.handover();
-    assert!(!handover.bygone.is_empty(), "the window travels");
+
     let mut fresh = accept(&handover, params.hot_capacity).expect("it checks out");
-    assert_eq!(
-        fresh.proof_window_root(),
-        node.state.proof_window_root(),
-        "and arrives whole"
-    );
 
     let mut transfer = Transfer::new(
         vec![Input::cold(id, fallen_note, position, proof)],
@@ -393,22 +388,4 @@ fn a_handed_over_ledger_accepts_a_proof_taken_a_few_blocks_ago() {
     connect_block(&mut fresh, &block, &params, NOW)
         .expect("a handed over ledger takes a proof the chain took");
     assert_eq!(fresh.state_root(), node.state.state_root());
-}
-
-/// A proof window of the sender's choosing.
-#[test]
-fn a_proof_window_the_header_does_not_commit_to_is_refused() {
-    let params = params();
-    let miner = wallet(1);
-    let mut node = Node::new();
-    node.mine_empty(&miner, RECENT_HEADERS + 8);
-
-    let mut handover = node.handover();
-    handover.bygone.clear();
-
-    assert_eq!(
-        accept(&handover, params.hot_capacity).err(),
-        Some(HandoverError::StateRootMismatch),
-        "an empty window is a different ledger, and the header says which"
-    );
 }

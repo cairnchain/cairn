@@ -1011,7 +1011,7 @@ function unpack(build) {
 
 function download() {
   clear(view);
-  const network = state.status && state.status.network ? state.status.network.name : 'testnet-3';
+  const network = state.status && state.status.network ? state.status.network.name : 'testnet-4';
   const here = thisMachine();
   const mine = BUILDS.find((build) => build.key === here) || null;
   const rest = BUILDS.filter((build) => build !== mine);

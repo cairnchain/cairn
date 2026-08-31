@@ -186,7 +186,7 @@
 <div class="page">
 
   <header class="top">
-    <p class="eyebrow">Cairn · état des lieux · 29 août 2026</p>
+    <p class="eyebrow">Cairn · état des lieux · 31 août 2026</p>
     <h1>La route jusqu'au mainnet</h1>
     <p class="sub">
       Ce qui est fait, ce qui reste, qui le fait, ce que ça coûte. Sans
@@ -220,6 +220,7 @@
       <div>
         <h3>Ce qui tourne en ce moment</h3>
         <ul>
+          <li><span class="mono">testnet-4</span>, ouvert le 31 août</li>
           <li><span class="mono">cairnchain.org</span> le site, sous certificat</li>
           <li>Trois serveurs chez trois hébergeurs</li>
           <li>Un mineur, la chaîne avance à un bloc la minute</li>
@@ -236,7 +237,9 @@
           Mettre une machine à jour, en <span class="mono">root</span> :
           <span class="mono">sh /usr/local/src/cairn/deploy/install.sh</span>.
           Une mise à jour qui ferait taire un mineur en silence refuse de
-          partir et dit comment aller dans les deux sens.
+          partir et dit comment aller dans les deux sens. Rien à effacer au
+          passage en testnet-4 : un nœud met de côté les blocs de l'ancienne
+          chaîne et repart du nouveau premier bloc.
         </p>
       </div>
       <div>
@@ -301,14 +304,17 @@
     <p class="phase-why">
       Le réseau existe et il est public. Trois serveurs chez trois hébergeurs,
       le code ouvert, les programmes téléchargeables, le site sous certificat,
-      un mineur, une chaîne qui avance. Cette phase est faite.
+      un mineur, une chaîne qui avance. Cette phase est faite — et le réseau
+      est reparti en <span class="mono">testnet-4</span> le 31 août, parce
+      qu'un audit a trouvé qu'un billet froid pouvait être dépensé deux fois.
+      Une chaîne qui a pu créer de la monnaie ne se reporte pas.
     </p>
 
     <div class="tasks">
       <div class="task finished">
         <div class="task-what">
           <b>Le protocole et les programmes</b>
-          <span>Nœud, portefeuille, explorateur, site. Le premier bloc de testnet-3 est miné et inscrit dans le code.</span>
+          <span>Nœud, portefeuille, explorateur, site. Le premier bloc de testnet-4 est miné et inscrit dans le code.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
@@ -360,6 +366,30 @@
         </div>
         <div class="who you">toi</div>
         <div class="cost real">une dizaine d'euros par an</div>
+      </div>
+      <div class="task finished">
+        <div class="task-what">
+          <b>Un audit complet, et onze défauts</b>
+          <span>Sept relecteurs, un par sous-système, chacun tenu de fournir un test qui échoue plutôt qu'un rapport. Onze défauts confirmés, tous reproduits avant d'être crus. Le plus grave : un billet froid pouvait être dépensé deux fois — de la monnaie créée, et tous les nœuds d'accord, donc rien qui forke et rien qui proteste. Les autres : un inconnu qui isole un nœud du réseau avec huit connexions, une mémoire qu'un pair fait grandir sans limite, un jumeau forgé qui prend la place du vrai bloc, un nettoyage qui vidait le disque, l'historique du portefeuille qui ne survivait pas à une réorganisation.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task finished">
+        <div class="task-what">
+          <b>Une preuve vaut ce qu'elle vaut maintenant</b>
+          <span>La règle qui autorisait une preuve un peu vieille était une demi-règle : le retrait replie le long du chemin que porte la preuve, un vieux chemin n'atteint pas la racine actuelle, donc il ne retirait rien. La compléter aurait coûté quatre mégaoctets d'état engagé ; la retirer ne coûte rien, parce que l'identité d'un transfert exclut son témoin — une preuve périmée se rafraîchit sans faire une autre transaction. La fenêtre est sortie de l'engagement d'état avec elle : de l'état que personne ne lit est une affirmation fausse sur ce qu'un nœud détient.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
+      </div>
+      <div class="task finished">
+        <div class="task-what">
+          <b>Deux corrections construites puis retirées</b>
+          <span>Le départage déterministe à travail égal, et l'engagement aux signatures dans l'en-tête. Les deux écrits, les deux repris : le premier faisait réorganiser un nœud qui rattrape en chemin pour arriver au même endroit un bloc plus tard, le second coûtait dix-sept pour cent d'en-têtes par an pour déplacer une propriété que Bitcoin a aussi et traite de la même façon. Dans les deux cas ce sont des tests existants qui ont arrêté le changement, pas une relecture.</span>
+        </div>
+        <div class="who me">moi</div>
+        <div class="cost">terminé</div>
       </div>
       <div class="task finished">
         <div class="task-what">

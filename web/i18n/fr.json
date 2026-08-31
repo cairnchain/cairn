@@ -429,7 +429,7 @@
           "Deux fenêtres rendent cela vivable en pratique. Une preuve peut avoir jusqu'à 32 blocs de retard, si bien qu'un portefeuille légèrement à la traîne n'est pas refusé. Et un billet qui vient juste de tomber reste dépensable sans aucune preuve pendant 64 blocs, parce que chaque nœud l'a encore."
         ],
         "technical": [
-          "PROOF_WINDOW vaut 32 blocs. La vérification remonte les racines récentes et s'arrête au premier bloc qui a vidé la position : une version antérieure de ce contrôle comparait les racines avant de vérifier si la position avait été dépensée, ce qui autorisait une double dépense.",
+          "Une preuve est vérifiée contre l'ensemble froid tel qu'il est, et contre rien d'autre. Les versions antérieures en acceptaient une qui correspondait à l'un des trente-deux derniers états, pour qu'un transfert écrit pendant qu'un bloc était trouvé ne soit pas invalide sans faute de son auteur. C'était une demi-règle : retirer un billet replie le long du chemin que porte la preuve, un vieux chemin n'atteint pas la racine actuelle, le retrait ne faisait donc rien et le billet restait, à dépenser une deuxième fois. L'identité d'un transfert exclut son témoin, si bien qu'un transfert qui a trop attendu est le même transfert réofferte avec une preuve fraîche.",
           "GRACE_BLOCKS vaut 64 et GRACE_NOTES vaut 8192. Les archivistes, des nœuds optionnels qui gardent l'ensemble froid, peuvent reconstruire une preuve pour qui a perdu la sienne."
         ]
       }
@@ -586,7 +586,7 @@
       "body": {
         "plain": ["C'est ainsi qu'on obtient des CAIRN sur un réseau de test. Votre ordinateur se met à chercher des blocs, et quand il en trouve un, la récompense va à votre adresse. Il n'y a aucun autre moyen d'en obtenir : personne n'a de stock à distribuer."],
         "curious": ["Minage sur un seul fil d'exécution dans le nœud, ce qui suffit pour un réseau de test. Les récompenses vont à la clé que vous indiquez, et cette clé peut vivre n'importe où : le nœud reçoit une adresse et ne voit jamais le secret qui est derrière."],
-        "technical": ["La difficulté d'ouverture de testnet-3 est 2^27, calibrée pour que le premier bloc prenne à peu près le temps de bloc visé sur un cœur ordinaire, à 2,29 millions d'empreintes par seconde mesurées."]
+        "technical": ["La difficulté d'ouverture de testnet-4 est 2^27, calibrée pour que le premier bloc prenne à peu près le temps de bloc visé sur un cœur ordinaire, à 2,29 millions d'empreintes par seconde mesurées."]
       }
     },
     "server": {

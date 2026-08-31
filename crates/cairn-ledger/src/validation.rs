@@ -137,10 +137,10 @@ impl ConsensusParams {
             // Not yet made. A network exists once its first block does, and
             // that block will be mined in the open on the day it is announced.
             "mainnet" => None,
-            "testnet" | "testnet-3" => Some(Self {
-                network: NetworkId::TESTNET_3,
-                genesis: crate::genesis::pinned(NetworkId::TESTNET_3),
-                opens_at: crate::genesis::opens_at(NetworkId::TESTNET_3),
+            "testnet" | "testnet-4" => Some(Self {
+                network: NetworkId::TESTNET_4,
+                genesis: crate::genesis::pinned(NetworkId::TESTNET_4),
+                opens_at: crate::genesis::opens_at(NetworkId::TESTNET_4),
                 genesis_difficulty: 1 << 27,
                 ..Self::testnet()
             }),
@@ -165,7 +165,7 @@ impl ConsensusParams {
     pub fn network_name(&self) -> &'static str {
         match self.network {
             NetworkId::DEVNET => "devnet",
-            NetworkId::TESTNET_3 => "testnet-3",
+            NetworkId::TESTNET_4 => "testnet-4",
             // Mainnet lands here too until it has a first block, which is the
             // honest answer: it is not a network yet.
             _ => "unnamed",

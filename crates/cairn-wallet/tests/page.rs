@@ -167,7 +167,7 @@ fn the_page_answers_its_own_and_nothing_else() {
         body.contains("\"spendable\":\"100.00000000 CAIRN\""),
         "{body}"
     );
-    assert!(body.contains("\"network\":\"testnet-3\""), "{body}");
+    assert!(body.contains("\"network\":\"testnet-4\""), "{body}");
 
     // Without the secret, whoever is asking.
     assert_eq!(running.get("/api/state", &host, "").0, 403);

@@ -62,13 +62,19 @@ pub fn cold_leaf(id: &NoteId, note: &Note) -> Hash32 {
 /// Both counts are committed to, so the boundary between the tiers is itself
 /// part of the commitment and a node cannot quietly hold more or fewer notes
 /// hot than the rules allow.
+///
+/// A window of past cold sets was committed to here as well, so that a proof
+/// taken a few blocks ago could still be checked. Accepting one was half a
+/// rule — the step that takes the note out cannot use an old path — so the
+/// rule went, and with nothing left to consult the window went too. State
+/// carried inside a commitment and read by nobody is a claim about what a node
+/// holds that is not true.
 fn compose_state_root(
     hot_root: Hash32,
     hot_len: u64,
     cold_root: Hash32,
     cold_len: u64,
     grace_root: Hash32,
-    bygone_root: Hash32,
 ) -> Hash32 {
     let mut hasher = Hasher::new(Domain::StateCommitment);
     hasher.update(hot_root.as_bytes());
@@ -76,7 +82,6 @@ fn compose_state_root(
     hasher.update(cold_root.as_bytes());
     hasher.update(&cold_len.encode());
     hasher.update(grace_root.as_bytes());
-    hasher.update(bygone_root.as_bytes());
     hasher.finalize()
 }
 
@@ -101,45 +106,6 @@ fn compose_grace_root(grace: &VecDeque<Vec<(NoteId, u64, Note)>>) -> Hash32 {
         }
     }
     hasher.finalize()
-}
-
-/// The states a proof may still be checked against, as one hash.
-///
-/// A header commits to this for the same reason it commits to the grace
-/// window: it decides which blocks are valid. A proof is written against the
-/// cold set as it stood when it was taken, and a spender who took one a few
-/// blocks ago has not done anything wrong, so a handful of recent states are
-/// kept and a proof against any of them is accepted. A node that did not
-/// build its own state and was handed one would hold none of them, and would
-/// refuse every proof that was not taken at the exact tip.
-fn compose_bygone_root(bygone: &VecDeque<Bygone>) -> Hash32 {
-    let mut hasher = Hasher::new(Domain::ProofWindow);
-    hasher.update(&u64::try_from(bygone.len()).unwrap_or(u64::MAX).encode());
-    for past in bygone {
-        hasher.update(past.roots.commitment().as_bytes());
-        hasher.update(
-            &u64::try_from(past.emptied.len())
-                .unwrap_or(u64::MAX)
-                .encode(),
-        );
-        for position in &past.emptied {
-            hasher.update(&position.encode());
-        }
-    }
-    hasher.finalize()
-}
-
-/// The proof window after a block, given the state it moves away from and the
-/// places it empties.
-///
-/// Pure, for the same reason the grace window's is.
-fn advance_bygone(bygone: &VecDeque<Bygone>, roots: Forest, emptied: Vec<u64>) -> VecDeque<Bygone> {
-    let mut next = bygone.clone();
-    next.push_back(Bygone { roots, emptied });
-    while next.len() > PROOF_WINDOW {
-        next.pop_front();
-    }
-    next
 }
 
 /// The grace window after a block, given what fell in it.
@@ -215,23 +181,6 @@ pub const GRACE_NOTES: usize = 8_192;
 /// bites first.
 pub const GRACE_BLOCKS: usize = 64;
 
-/// Blocks a spender's proof may lag behind by.
-///
-/// A proof describes the forest at the moment it was taken, and the forest
-/// moves with every block. Demanding that a spender be exactly at the tip
-/// would mean a transfer built while a block was being found is worthless, and
-/// on a busy chain almost every transfer is built while a block is being
-/// found. So a handful of recent states are kept and a proof against any of
-/// them is accepted, as long as the note has not been spent since.
-pub const PROOF_WINDOW: usize = 32;
-
-/// A forest as it stood before a block, and what that block took out of it.
-#[derive(Clone, Debug)]
-struct Bygone {
-    roots: Forest,
-    emptied: Vec<u64>,
-}
-
 /// The cold set, as whoever is holding it holds it.
 ///
 /// A plain node keeps [`ColdSet::Roots`]: at most sixty four hashes and two
@@ -248,13 +197,18 @@ pub enum ColdSet {
     Archive(Archive),
 }
 
-/// The cold set together with the recent states a proof may still be checked
-/// against.
+/// The cold set, and nothing beside it.
+///
+/// A window of the last thirty two states used to sit here, so a proof taken
+/// a few blocks ago could still be checked. Accepting one was half a rule: the
+/// step that takes a note out folds along the path the proof carries, and an
+/// old path does not reach the root that is there now, so the removal did
+/// nothing and the note could be spent again. The rule went, and with nothing
+/// left to consult the window went with it — including out of the state root,
+/// where it was a claim about what a node holds that had stopped being true.
 #[derive(Clone, Debug, Default)]
 pub struct ColdTier {
     now: ColdSet,
-    /// Oldest first, at most [`PROOF_WINDOW`] deep.
-    bygone: VecDeque<Bygone>,
 }
 
 impl ColdTier {
@@ -262,7 +216,6 @@ impl ColdTier {
     pub fn plain() -> Self {
         Self {
             now: ColdSet::plain(),
-            bygone: VecDeque::new(),
         }
     }
 
@@ -270,7 +223,6 @@ impl ColdTier {
     pub fn archiving() -> Self {
         Self {
             now: ColdSet::archiving(),
-            bygone: VecDeque::new(),
         }
     }
 
@@ -334,28 +286,6 @@ impl ColdTier {
     /// it nothing, and costs everybody else nothing to check.
     pub fn verify(&self, position: u64, leaf: Hash32, proof: &ForestProof) -> bool {
         self.now.verify(position, leaf, proof)
-    }
-
-    /// Files the current state away before a block moves it, and says what fell
-    /// out of the window.
-    fn remember(&mut self, emptied: Vec<u64>) -> Option<Bygone> {
-        // Worked out by the same function the projection uses.
-        let kept = advance_bygone(&self.bygone, self.now.snapshot().roots_only(), emptied);
-        let dropped = if kept.len() <= self.bygone.len() {
-            self.bygone.pop_front()
-        } else {
-            None
-        };
-        self.bygone = kept;
-        dropped
-    }
-
-    /// Puts the window back as it was.
-    fn forget(&mut self, dropped: Option<Bygone>) {
-        self.bygone.pop_back();
-        if let Some(bygone) = dropped {
-            self.bygone.push_front(bygone);
-        }
     }
 }
 
@@ -544,8 +474,6 @@ pub struct BlockUndo {
     /// it swallowed, and those are not recoverable from the roots that remain.
     /// Sixty four hashes is a small price for not having to hold the forest.
     cold_before: Forest,
-    /// The state that fell out of the acceptance window when this block landed.
-    dropped_bygone: Option<Bygone>,
     /// Blocks whose fallen notes stopped being spendable without a proof when
     /// this block landed.
     grace_dropped: Vec<Vec<(NoteId, u64, Note)>>,
@@ -781,17 +709,6 @@ impl LedgerState {
             .map(|(id, _, note)| cold_leaf(id, note))
     }
 
-    /// The cold set as it stood at each of the last few blocks, with what each
-    /// block emptied, oldest first.
-    #[must_use]
-    pub fn proof_window(&self) -> Vec<(Forest, Vec<u64>)> {
-        self.cold
-            .bygone
-            .iter()
-            .map(|past| (past.roots.clone(), past.emptied.clone()))
-            .collect()
-    }
-
     /// The cold set as this node holds it, roots only.
     #[must_use]
     pub fn cold_roots(&self) -> Forest {
@@ -808,7 +725,6 @@ impl LedgerState {
         hot: Vec<(NoteId, HotEntry)>,
         cold: Forest,
         grace: VecDeque<Vec<(NoteId, u64, Note)>>,
-        bygone: Vec<(Forest, Vec<u64>)>,
         headers_before_tip: Forest,
         recent: Vec<HeaderSummary>,
         at: &BlockHeader,
@@ -816,10 +732,6 @@ impl LedgerState {
         let mut state = Self {
             cold: ColdTier {
                 now: ColdSet::Roots(cold),
-                bygone: bygone
-                    .into_iter()
-                    .map(|(roots, emptied)| Bygone { roots, emptied })
-                    .collect(),
             },
             recent,
             headers_before_tip: headers_before_tip.clone(),
@@ -935,14 +847,7 @@ impl LedgerState {
             self.cold.commitment(),
             self.cold.len(),
             compose_grace_root(&self.grace),
-            compose_bygone_root(&self.cold.bygone),
         )
-    }
-
-    /// The window a proof may still be checked against, as one hash.
-    #[must_use]
-    pub fn proof_window_root(&self) -> Hash32 {
-        compose_bygone_root(&self.cold.bygone)
     }
 
     /// The grace window as one hash, which a header commits to.
@@ -1017,25 +922,12 @@ impl LedgerState {
         // the same way, so a block's projection and its application cannot
         // disagree about what is spendable without a proof.
         let grace = advance_grace(&self.grace, landing(&fallen, transition));
-        // Filed away before the block moves it, which is the order applying
-        // one uses, so the two cannot disagree about which states a proof may
-        // still be checked against.
-        let bygone = advance_bygone(
-            &self.cold.bygone,
-            self.cold.now.snapshot().roots_only(),
-            transition
-                .spent_cold
-                .iter()
-                .map(|spend| spend.position)
-                .collect(),
-        );
         Some(compose_state_root(
             hot_tree.root(),
             hot_tree.len() as u64,
             cold.commitment(),
             cold.len(),
             compose_grace_root(&grace),
-            compose_bygone_root(&bygone),
         ))
     }
 
@@ -1053,15 +945,6 @@ impl LedgerState {
             headers_before_before_tip: self.headers_before_tip.clone(),
             ..BlockUndo::default()
         };
-        // File the state away before the block moves it, so a spender whose
-        // proof was taken a few blocks ago is still able to spend.
-        undo.dropped_bygone = self.cold.remember(
-            transition
-                .spent_cold
-                .iter()
-                .map(|spend| spend.position)
-                .collect(),
-        );
 
         // Read what the block is about to destroy, before it destroys it.
         for id in &transition.spent_hot {
@@ -1158,7 +1041,6 @@ impl LedgerState {
         self.cold
             .now
             .rewind(&undo.cold_before, transition.evicted.len(), &restored);
-        self.cold.forget(undo.dropped_bygone.clone());
         self.rewind_grace(&undo.grace_dropped);
 
         for (id, entry) in &undo.unevicted {
@@ -1285,7 +1167,6 @@ mod tests {
 
         // Eight more leaves merge the tree the proof describes, so it stops
         // matching the roots as they now stand.
-        tier.remember(Vec::new());
         for index in 8..16u64 {
             tier.now.add(leaf(index));
         }
@@ -1302,7 +1183,7 @@ mod tests {
     }
 
     #[test]
-    fn a_recent_proof_cannot_resurrect_a_note_that_was_spent() {
+    fn a_proof_of_a_real_past_does_not_resurrect_a_spent_note() {
         let mut tier = ColdTier::archiving();
         for index in 0..8u64 {
             tier.now.add(leaf(index));
@@ -1311,22 +1192,11 @@ mod tests {
         assert!(tier.verify(3, leaf(3), &proof));
 
         // The note is spent, which is what the block records.
-        tier.remember(vec![3]);
         assert!(tier.now.remove_batch(&[(3, leaf(3), proof.clone())]));
 
         assert!(
             !tier.verify(3, leaf(3), &proof),
             "the proof still describes a real past, and that is exactly why it is refused"
         );
-    }
-
-    #[test]
-    fn the_window_stays_bounded() {
-        let mut tier = ColdTier::plain();
-        for index in 0..(PROOF_WINDOW as u64 * 3) {
-            tier.now.add(leaf(index));
-            tier.remember(Vec::new());
-        }
-        assert_eq!(tier.bygone.len(), PROOF_WINDOW);
     }
 }

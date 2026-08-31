@@ -41,7 +41,7 @@ cairnd, a Cairn node
                          one, the addresses written into the program for
                          this network are used, which is why a node that
                          was just downloaded finds the network on its own
-  --network <name>       testnet-3 or devnet (default: testnet-3)
+  --network <name>       testnet-4 or devnet (default: testnet-4)
                          devnet has the same rules with a five second block
                          time and a tiny hot set, for one machine.
                          mainnet does not exist yet: a network exists once
@@ -210,7 +210,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         if name == "mainnet" {
             "mainnet does not exist yet: its first block has not been mined".to_owned()
         } else {
-            format!("unknown network `{name}`, try testnet-3 or devnet")
+            format!("unknown network `{name}`, try testnet-4 or devnet")
         }
     })?;
 
@@ -395,7 +395,7 @@ mod tests {
         let options = resolve_options(&[]).unwrap().unwrap();
         assert_eq!(options.data, PathBuf::from(DEFAULT_DATA));
         assert_eq!(options.listen.port(), 9_944);
-        assert_eq!(options.params.network_name(), "testnet-3");
+        assert_eq!(options.params.network_name(), "testnet-4");
         assert_eq!(options.params.target_block_time, 60);
         assert!(options.mine_to.is_none());
         // A program somebody just downloaded finds the network on its own,
@@ -498,12 +498,12 @@ mod tests {
         assert_eq!(options.seeds.len(), 1);
         assert_eq!(options.status_period, 3);
 
-        let options = resolve_options(&args(&["--data", &data, "--network", "testnet-3"]))
+        let options = resolve_options(&args(&["--data", &data, "--network", "testnet-4"]))
             .unwrap()
             .unwrap();
         assert_eq!(
             options.params.network_name(),
-            "testnet-3",
+            "testnet-4",
             "the command line wins"
         );
     }

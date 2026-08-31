@@ -154,10 +154,14 @@ fn a_peer_cannot_grow_the_awaiting_set_without_bound() {
         );
     }
 
+    // Four batches, and not one more, whatever the peer says. The defect was
+    // that there was no ceiling at all: a thousand of these messages, a
+    // fraction of one allowance window, held a hundred and twenty eight
+    // thousand heights, and it grew for as long as the peer kept talking.
     assert!(
-        peer.awaiting.len() <= MAX_REQUESTED,
-        "awaiting grew to {} heights from 1000 cheap Chain messages and is never bounded: \
-         a peer sending these indefinitely exhausts the node's memory",
+        peer.awaiting.len() <= MAX_REQUESTED * 4,
+        "awaiting grew to {} heights from 1000 cheap Chain messages: a peer \
+         sending these indefinitely would exhaust the node's memory",
         peer.awaiting.len(),
     );
 }
