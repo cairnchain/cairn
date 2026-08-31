@@ -288,6 +288,15 @@ impl Wallet {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
+        // Before reading forward: is what it already read still the chain? A
+        // branch that was undone leaves this history describing blocks nobody
+        // has any more, and reading on from there would stack the winning
+        // branch on top of the losing one.
+        if history.diverged(|height| self.node.archived_at(height).map(|block| block.id())) {
+            history.forget();
+            let _ = history.save(&self.history_file);
+        }
+
         let mut taken = 0usize;
         let stop = tip.saturating_add(1);
         while history.next() < stop && (taken as u64) < CATCH_UP_BATCH {

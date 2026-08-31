@@ -151,6 +151,12 @@ pub struct History {
     /// The first height this history could see, so it never claims to cover
     /// what it never read.
     from: Option<u64>,
+    /// The identifier of the newest block read.
+    ///
+    /// Kept so a branch that was undone can be noticed. A reorganisation
+    /// replaces every block above the fork, so this one is enough to detect
+    /// one: if it is still where it was, nothing below it moved either.
+    last: Option<Hash32>,
 }
 
 impl History {
@@ -197,6 +203,7 @@ impl History {
             return;
         }
         self.next = self.next.saturating_add(1);
+        self.last = Some(block.id());
         if self.from.is_none() {
             self.from = Some(block.header.height);
         }
@@ -301,19 +308,40 @@ impl History {
             return;
         }
         self.next = height;
+        // Nothing read is adjacent to what comes next, so there is no block to
+        // compare against any more.
+        self.last = None;
         if self.from.is_none() {
             self.from = Some(height);
         }
     }
 
-    /// Forgets everything from `height` upward, for a branch that was undone.
-    pub fn rewind_to(&mut self, height: u64) {
-        self.movements.retain(|movement| movement.height < height);
-        self.next = self.next.min(height);
+    /// Whether the chain no longer holds the block this last read.
+    ///
+    /// `chain` answers what block sits at a height now. A reorganisation
+    /// replaces every block above the fork it happened at, so asking about the
+    /// newest one read is enough to notice: if that block is still there, no
+    /// block below it moved.
+    ///
+    /// A height the wallet can no longer read is not a divergence. A node that
+    /// dropped an old block has not changed its mind about it.
+    pub fn diverged(&self, chain: impl Fn(u64) -> Option<Hash32>) -> bool {
+        let (Some(last), Some(top)) = (self.last, self.next.checked_sub(1)) else {
+            return false;
+        };
+        matches!(chain(top), Some(now) if now != last)
     }
 
     /// Starts again from nothing, for a wallet whose blocks no longer line up
     /// with what it read.
+    ///
+    /// This is the whole answer to a reorganisation, and dropping the
+    /// movements above the fork is not. Which notes are this key's is built up
+    /// as blocks go past, so a history that kept that map while forgetting
+    /// some of the blocks that filled it would go on calling a stranger's
+    /// transfer ours. There is nothing to invert it with, and reading the
+    /// chain again is what the file exists to be cheaper than, not a thing
+    /// that cannot be done.
     pub fn forget(&mut self) {
         *self = Self::new();
     }
@@ -346,6 +374,7 @@ impl Encode for History {
         self.next.encode_to(out);
         self.from.unwrap_or(u64::MAX).encode_to(out);
         self.movements.encode_to(out);
+        self.last.unwrap_or(Hash32::ZERO).encode_to(out);
         let held: Vec<Owned> = self
             .held
             .iter()
@@ -363,12 +392,14 @@ impl Decode for History {
         let next = u64::decode_from(reader)?;
         let from = u64::decode_from(reader)?;
         let movements = Vec::<Movement>::decode_from(reader)?;
+        let last = Hash32::decode_from(reader)?;
         let held = Vec::<Owned>::decode_from(reader)?;
         Ok(Self {
             held: held.into_iter().map(|held| (held.id, held.value)).collect(),
             movements,
             next,
             from: (from != u64::MAX).then_some(from),
+            last: (last != Hash32::ZERO).then_some(last),
         })
     }
 }
@@ -507,17 +538,50 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_that_was_undone_is_forgotten() {
+    fn a_branch_that_was_undone_is_noticed_and_forgotten() {
         let mine = key(1);
         let mut history = History::new();
+        let mut ids = Vec::new();
         for height in 0..5 {
-            history.take(&block(height, mine, Vec::new()), mine);
+            let block = block(height, mine, Vec::new());
+            ids.push(block.id());
+            history.take(&block, mine);
         }
         assert_eq!(history.len(), 5);
 
-        history.rewind_to(3);
-        assert_eq!(history.len(), 3, "what happened at three and above is gone");
-        assert_eq!(history.next(), 3, "and it will be read again");
+        // The chain still holds what was read: nothing moved.
+        assert!(
+            !history.diverged(|height| ids.get(height as usize).copied()),
+            "every block is where it was read"
+        );
+
+        // A height the wallet can no longer read is not a branch being undone.
+        assert!(
+            !history.diverged(|_| None),
+            "a block that was dropped is not a block that changed"
+        );
+
+        // The newest block is now a different one, which is what a
+        // reorganisation leaves behind. The difference has to be in the
+        // header, because that is what an identifier is taken over: two blocks
+        // paying different people are the same block to this check unless
+        // their headers differ, which on a real chain they always do.
+        let mut rival = block(4, key(2), Vec::new());
+        rival.header.nonce = 7;
+        let elsewhere = rival.id();
+        assert_ne!(elsewhere, ids[4], "the rival really is another block");
+        assert!(
+            history.diverged(|height| if height == 4 {
+                Some(elsewhere)
+            } else {
+                ids.get(height as usize).copied()
+            }),
+            "the block at the top is not the one that was read"
+        );
+
+        history.forget();
+        assert_eq!(history.len(), 0, "and the whole account is read again");
+        assert_eq!(history.next(), 0);
     }
 
     #[test]
