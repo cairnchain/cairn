@@ -38,6 +38,8 @@ use cairn_primitives::{Amount, Hash32};
 /// mistake and the other is not.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum WalletError {
+    #[error("this transfer has to pay at least {needed}")]
+    FeeTooLow { needed: Amount },
     #[error("could not start: {0}")]
     CouldNotStart(String),
     #[error("`{0}` is not an address: {1}")]
@@ -224,6 +226,40 @@ impl Wallet {
     #[must_use]
     pub const fn node(&self) -> &Node {
         &self.node
+    }
+
+    /// What a transfer to `recipient` for `amount` would have to pay.
+    ///
+    /// Worked out from the transfer this wallet would actually build, since
+    /// what a transfer costs the network depends on its shape: how many notes
+    /// it gathers, whether any of them travel with a proof, and how many
+    /// places it leaves behind in the set every node holds.
+    ///
+    /// An estimate, and the one place it can be short is where paying the fee
+    /// makes the wallet reach for another note. Then sending says so.
+    pub fn floor_for(&self, recipient: PublicKey, amount: Amount) -> Amount {
+        let holdings = self.holdings();
+        let Some((spending, gathered)) = select(&holdings.notes, amount) else {
+            return Amount::ZERO;
+        };
+        let mut outputs = vec![Note::new(amount, recipient)];
+        if let Some(change) = gathered.checked_sub(amount) {
+            if change > Amount::ZERO {
+                outputs.push(Note::new(change, self.address()));
+            }
+        }
+        let inputs = spending
+            .iter()
+            .map(|held| match &held.fallen {
+                None => Input::hot(held.id),
+                Some((position, proof)) => {
+                    Input::cold(held.id, held.note, *position, proof.clone())
+                }
+            })
+            .collect();
+        let transfer = Transfer::new(inputs, outputs);
+        let bytes = transfer.encode().len();
+        cairn_chain::fee_floor(cairn_chain::transfer_weight(&transfer, bytes))
     }
 
     /// Reaches for a peer, and remembers it whether or not it answers now.
@@ -442,6 +478,17 @@ impl Wallet {
         // wallet holds its money in many small fallen notes, each of which
         // travels with its own proof.
         let bytes = transfer.encode().len();
+
+        // The network turns away a transfer that pays less than the floor, so
+        // the refusal is better said here, with the number, than fetched back
+        // from a pool the sender cannot see. A fee of nothing was the ordinary
+        // case until the floor existed, and a wallet that went on sending them
+        // would look broken rather than out of date.
+        let floor = cairn_chain::fee_floor(cairn_chain::transfer_weight(&transfer, bytes));
+        if fee < floor {
+            return Err(WalletError::FeeTooLow { needed: floor });
+        }
+
         if bytes > self.params.max_block_bytes {
             return Err(WalletError::TooBulky {
                 notes: spending.len(),

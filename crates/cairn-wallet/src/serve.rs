@@ -220,9 +220,13 @@ fn send(wallet: &Wallet, request: &Request) -> Response {
     let Some(amount) = request.field("amount").and_then(|text| parse_amount(&text)) else {
         return refusal("that is not an amount of CAIRN");
     };
+    // Left blank means what the network asks, worked out from the transfer
+    // this would build. Nothing is no longer a fee anybody carries, and a page
+    // that sent one would have the refusal come back from a pool the person
+    // typing cannot see.
     let fee = match request.field("fee") {
-        None => Amount::ZERO,
-        Some(text) if text.trim().is_empty() => Amount::ZERO,
+        None => wallet.floor_for(recipient, amount),
+        Some(text) if text.trim().is_empty() => wallet.floor_for(recipient, amount),
         Some(text) => match parse_amount(&text) {
             Some(fee) => fee,
             None => return refusal("that fee is not an amount of CAIRN"),

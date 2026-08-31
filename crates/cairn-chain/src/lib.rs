@@ -35,24 +35,104 @@ pub const MAX_POOLED: usize = 4_096;
 
 /// What every waiting transfer may take altogether.
 ///
-/// Four blocks' worth, which is as far ahead as a pool is any use: what waits
-/// longer than that is waiting because nobody will carry it. Counting bytes as
-/// well as transfers is what makes the ceiling mean something, since one
-/// transfer spending notes out of the cold set carries a proof for each and
-/// can run to half a megabyte on its own.
+/// Half an hour of full blocks, which is as far ahead as a pool is any use:
+/// what waits longer than that is waiting because nobody will carry it.
+/// Counting bytes as well as transfers is what makes the ceiling mean
+/// something, since one transfer spending notes out of the cold set carries a
+/// proof for each and can run to half a megabyte on its own.
 pub const MAX_POOL_BYTES: usize = 4 * 1024 * 1024;
 
-/// A transfer waiting for a block, with what it was worth and what it takes.
+/// What one more note in the hot set adds to a transfer's weight, in bytes.
 ///
-/// Both are worked out once, when it arrives. What it is worth decides what it
-/// displaces and what a miner reaches for first; what it takes decides whether
-/// there is room. Reading either again from the transfer itself would mean
-/// encoding it or revalidating it on every comparison.
+/// A transfer is not priced by its bytes alone, because bytes are not the
+/// resource this design exists to protect. Every note a transfer creates
+/// beyond what it spends takes a place in the hot set, and on a busy chain the
+/// tier is full, so the place is taken from whoever holds the oldest note
+/// there: their money now needs a proof to spend. Priced by bytes, a transfer
+/// creating two hundred and fifty six notes churned the tier more than four
+/// times cheaper than the payments it displaced, because an output is forty
+/// bytes and a payment is nearly two hundred.
+///
+/// Five hundred and twelve is the measured cost of holding a hot note, rounded
+/// down to a power of two; `cairn-ledger/examples/footprint.rs` measures it.
+/// Charging a place what the place costs is a judgement rather than a theorem,
+/// but it buys the property that matters: pushing a note out of the tier costs
+/// about what an ordinary payment costs, however the pusher shapes the
+/// transfer. `cairn-ledger/examples/blocksize.rs` works the ratio out from
+/// measured sizes.
+pub const NOTE_WEIGHT: usize = 512;
+
+/// The least a transfer pays per unit of weight, in pebbles.
+///
+/// Zero used to be accepted, and on a quiet chain zero was also mined, since a
+/// block with room takes what is offered. That made churning the hot set free
+/// exactly when notes stay hot the longest and the churn does the most
+/// relative harm. The floor's job is to exist, not to deter on its own: no
+/// fixed number can, because nobody knows what a pebble will buy. Deterrence
+/// comes from the weight above when blocks are contested, and from the
+/// eviction cap in the consensus rules always.
+///
+/// Ten is a judgement: an ordinary payment weighs about seven hundred, so it
+/// pays a few thousand pebbles, dust against anything worth a block's room,
+/// while pushing the whole tier out costs whole CAIRN even on an empty chain.
+/// This is local policy, not consensus: a block carrying cheaper transfers is
+/// still valid, this node just will not pool or build one.
+pub const MIN_FEE_PER_WEIGHT: u64 = 10;
+
+/// Fixed point scale for fee against weight, so the pool can order transfers
+/// without dividing pebbles away.
+const RATE_SCALE: u128 = 1 << 16;
+
+/// What carrying a transfer takes from the network: its bytes, plus a charge
+/// for every place it takes in the hot set.
+///
+/// The charge is on notes created beyond notes spent, whatever tier the spent
+/// ones sit in. A cold input frees no hot place, so crediting it is slightly
+/// generous, but the alternative is a weight that depends on the state, and a
+/// price that moves under the wallet quoting it cannot be paid on purpose. A
+/// transfer that spends more than it creates weighs its bytes and nothing
+/// more: consolidation gives the tier room back, and this is where that is
+/// worth something.
+#[must_use]
+pub fn transfer_weight(transfer: &Transfer, bytes: usize) -> usize {
+    let places = transfer.outputs.len().saturating_sub(transfer.inputs.len());
+    bytes.saturating_add(places.saturating_mul(NOTE_WEIGHT))
+}
+
+/// The least a transfer of this weight pays to be pooled at all.
+#[must_use]
+pub fn fee_floor(weight: usize) -> Amount {
+    let pebbles = u64::try_from(weight)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(MIN_FEE_PER_WEIGHT);
+    Amount::from_pebbles(pebbles).unwrap_or(Amount::MAX_MONEY)
+}
+
+/// What a transfer pays for each unit of what it takes, as a fixed point
+/// number every node computes identically.
+fn rate(fee: Amount, weight: usize) -> u128 {
+    let weight = u128::try_from(weight.max(1)).unwrap_or(1);
+    u128::from(fee.as_pebbles())
+        .saturating_mul(RATE_SCALE)
+        .checked_div(weight)
+        .unwrap_or(0)
+}
+
+/// A transfer waiting for a block, with what it pays and what it takes.
+///
+/// All three are worked out once, when it arrives. The fee against the weight
+/// decides what it displaces and what a miner reaches for first; the bytes
+/// decide whether there is room. Reading any of them again from the transfer
+/// itself would mean encoding it or revalidating it on every comparison.
 #[derive(Clone, Debug)]
 struct Pooled {
     transfer: Transfer,
     fee: Amount,
     bytes: usize,
+    /// Bytes plus the hot set places taken, which is what the fee is measured
+    /// against. Fixed by the transfer's shape, so unlike the fee it never has
+    /// to be worked out again.
+    weight: usize,
 }
 
 /// How far back the followed branch can be undone.
@@ -494,12 +574,12 @@ pub struct ChainStore {
     /// gigabytes of memory handed to whoever cared to send them, without a
     /// single rule being broken.
     pool_bytes: usize,
-    /// The same transfers by what they pay, cheapest first.
+    /// The same transfers by what they pay for what they take, cheapest first.
     ///
     /// Kept alongside rather than derived, so finding what to make room for
     /// costs a lookup and not a pass over the pool: a peer sending transfers
     /// as fast as it can would otherwise decide how much work each one causes.
-    pool_by_fee: BTreeSet<(Amount, Hash32)>,
+    pool_by_rate: BTreeSet<(u128, Hash32)>,
 }
 
 impl ChainStore {
@@ -531,7 +611,7 @@ impl ChainStore {
             state,
             pool: BTreeMap::new(),
             pool_bytes: 0,
-            pool_by_fee: BTreeSet::new(),
+            pool_by_rate: BTreeSet::new(),
         }
     }
 
@@ -852,29 +932,29 @@ impl ChainStore {
         let Some(held) = self.pool.remove(id) else {
             return;
         };
-        self.pool_by_fee.remove(&(held.fee, *id));
+        self.pool_by_rate
+            .remove(&(rate(held.fee, held.weight), *id));
         self.pool_bytes = self.pool_bytes.saturating_sub(held.bytes);
     }
 
     /// Takes a transfer that has been broadcast, returning whether it was new.
     ///
     /// A transfer is checked against the state as it stands, so a node never
-    /// holds one it already knows cannot be included. A transfer spending a
-    /// note another pooled transfer already spends is refused rather than
-    /// replacing it: choosing between two conflicting spends is a fee policy,
-    /// and the chain has no fee market yet to decide it with.
+    /// holds one it already knows cannot be included. It pays at least the
+    /// floor for its weight, or it is refused with the floor named, so the
+    /// refusal reaches whoever set the fee.
+    ///
+    /// A transfer spending a note another pooled transfer already spends can
+    /// replace it, by paying for everything it displaces and then the floor
+    /// again on top. An identifier excludes its witness on purpose, so a
+    /// transfer offered again with a fresher proof is the same transfer and
+    /// none of this applies to it: it is already here.
     pub fn accept_transfer(&mut self, transfer: Transfer) -> Result<bool, TransferError> {
         let id = transfer.id();
         if self.pool.contains_key(&id) {
             return Ok(false);
         }
 
-        let spent = self.pooled_inputs();
-        for input in &transfer.inputs {
-            if spent.contains(&input.note_id) {
-                return Err(TransferError::UnknownNote(input.note_id));
-            }
-        }
         let outcome = check_transfer(
             &transfer,
             &self.state,
@@ -898,26 +978,59 @@ impl ChainStore {
             });
         }
 
-        // A full pool that refuses everything is a pool anyone can close. Four
-        // thousand transfers paying nothing would hold every place, and a
-        // sender who paid would be turned away behind them, for as long as the
-        // attacker cared to keep it up. So a full pool makes room for whoever
-        // pays more than the least it already holds, and refuses only what
-        // would not improve it.
-        //
-        // Full by count or full by size: one large transfer can take the room
-        // of a hundred small ones, so both have to be made room for, and one
+        let weight = transfer_weight(&transfer, bytes);
+        let floor = fee_floor(weight);
+        if outcome.fee < floor {
+            return Err(TransferError::FeeBelowFloor {
+                fee: outcome.fee,
+                floor,
+            });
+        }
+        let offered = rate(outcome.fee, weight);
+        let (conflicts, conflict_bytes) =
+            self.displaced_by(&transfer, outcome.fee, offered, floor)?;
+
+        // A full pool that refuses everything is a pool anyone can close, so a
+        // full one makes room for whoever pays a better rate than the least it
+        // already holds, and refuses only what would not improve it. Full by
+        // count or full by size: one large transfer can take the room of a
+        // hundred small ones, so both have to be made room for, and one
         // arrival can displace several.
-        while self.pool.len() >= MAX_POOLED
-            || self.pool_bytes.saturating_add(bytes) > MAX_POOL_BYTES
+        //
+        // Decided before anything is dropped. A refusal partway through would
+        // otherwise have already thrown out transfers the newcomer then never
+        // replaced.
+        let mut victims: Vec<Hash32> = Vec::new();
         {
-            let Some((cheapest, victim)) = self.pool_by_fee.first().copied() else {
-                return Ok(false);
-            };
-            if outcome.fee <= cheapest {
-                return Ok(false);
+            let mut count = self.pool.len().saturating_sub(conflicts.len());
+            let mut held = self
+                .pool_bytes
+                .saturating_sub(conflict_bytes)
+                .saturating_add(bytes);
+            let mut cheapest_first = self.pool_by_rate.iter();
+            while count >= MAX_POOLED || held > MAX_POOL_BYTES {
+                let Some((cheapest, victim)) = cheapest_first.next() else {
+                    return Ok(false);
+                };
+                if conflicts.contains(victim) {
+                    continue;
+                }
+                if offered <= *cheapest {
+                    return Ok(false);
+                }
+                let Some(losing) = self.pool.get(victim) else {
+                    return Ok(false);
+                };
+                victims.push(*victim);
+                count = count.saturating_sub(1);
+                held = held.saturating_sub(losing.bytes);
             }
-            self.drop_pooled(&victim);
+        }
+        for gone in &conflicts {
+            self.drop_pooled(gone);
+        }
+        for gone in &victims {
+            self.drop_pooled(gone);
         }
 
         self.pool_bytes = self.pool_bytes.saturating_add(bytes);
@@ -927,9 +1040,10 @@ impl ChainStore {
                 transfer,
                 fee: outcome.fee,
                 bytes,
+                weight,
             },
         );
-        self.pool_by_fee.insert((outcome.fee, id));
+        self.pool_by_rate.insert((offered, id));
         Ok(true)
     }
 
@@ -943,25 +1057,27 @@ impl ChainStore {
 
     /// Transfers a miner can put in the next block, and the fees they carry.
     ///
-    /// Walked from the best paying down, and within the same fee in identifier
+    /// Walked from the best rate down, and within the same rate in identifier
     /// order, so two nodes holding the same pool build the same block. Order
     /// is a miner's choice and not a rule: a block is valid whatever order its
     /// transfers were picked in. But picking by identifier meant a fee bought
-    /// nothing, and a fee that buys nothing is one nobody pays, which leaves a
-    /// pool with no way to tell whose transfer matters when there is not room
-    /// for everyone.
+    /// nothing, and picking by the fee alone let one large transfer buy a
+    /// block's worth of room for the price of one payment. What is greedy here
+    /// is a choice too: a cleverer packing might squeeze out more fees, but
+    /// every node has to be able to predict a block, and greedy from the best
+    /// rate down is the packing everyone can predict.
     pub fn selection(&self, limit: usize) -> (Vec<Transfer>, Amount) {
         let mut chosen = Vec::new();
         let mut spent_hot: BTreeSet<NoteId> = BTreeSet::new();
         let mut spent_cold: BTreeMap<NoteId, ColdSpend> = BTreeMap::new();
         let mut fees = Amount::ZERO;
 
-        // Best paying first. The fee here is what it was worth when it was
+        // Best rate first. The rate here is what it was worth when it was
         // admitted, which is a hint rather than a promise: what each one
         // actually pays is worked out again below, against the state as it
         // stands now.
         let ordered = self
-            .pool_by_fee
+            .pool_by_rate
             .iter()
             .rev()
             .filter_map(|(_, id)| self.pool.get(id))
@@ -972,6 +1088,17 @@ impl ChainStore {
             .params
             .max_block_bytes
             .saturating_sub(Self::BLOCK_OVERHEAD_BYTES);
+
+        // How many notes the block may still add to the hot set before it
+        // would push out more than the rules let one block push. Room the tier
+        // itself still has counts, and the coinbase is allowed for as if it
+        // were full, because it is not known yet.
+        let mut places = self
+            .params
+            .hot_capacity
+            .saturating_sub(self.state.hot_len())
+            .saturating_add(self.params.max_evictions_per_block)
+            .saturating_sub(self.params.max_coinbase_outputs);
 
         for transfer in ordered {
             if chosen.len() >= limit {
@@ -989,6 +1116,20 @@ impl ChainStore {
             else {
                 continue;
             };
+            // The same refusal a full block would meet, made before the block
+            // is built. Only notes spent out of the hot set give places back:
+            // a cold spend puts its outputs into the tier and takes nothing
+            // out of it.
+            let created = transfer.outputs.len();
+            let freed = outcome.spent_hot.len();
+            if created > freed {
+                let Some(left) = places.checked_sub(created.saturating_sub(freed)) else {
+                    continue;
+                };
+                places = left;
+            } else {
+                places = places.saturating_add(freed.saturating_sub(created));
+            }
             let Some(total) = fees.checked_add(outcome.fee) else {
                 continue;
             };
@@ -1006,11 +1147,68 @@ impl ChainStore {
         (chosen, fees)
     }
 
-    fn pooled_inputs(&self) -> BTreeSet<NoteId> {
-        self.pool
-            .values()
-            .flat_map(|held| held.transfer.inputs.iter().map(|input| input.note_id))
-            .collect()
+    /// The pooled transfers a newcomer would take the place of, and what they
+    /// take together, once it has paid enough to take it.
+    ///
+    /// Two spends of one note cannot both wait, so one of them has to go, and
+    /// which one is a price and not an accident of arrival. The newcomer takes
+    /// the place of everything it conflicts with if it pays what they paid
+    /// together, the floor again on top, and a better rate than any of them.
+    /// The extra floor is what a retry costs: without it, a sender could have
+    /// the network relay endless copies of one spend for one fee.
+    fn displaced_by(
+        &self,
+        transfer: &Transfer,
+        fee: Amount,
+        offered: u128,
+        floor: Amount,
+    ) -> Result<(BTreeSet<Hash32>, usize), TransferError> {
+        let spenders = self.pooled_spenders();
+        let mut conflicts: BTreeSet<Hash32> = BTreeSet::new();
+        for input in &transfer.inputs {
+            if let Some(holder) = spenders.get(&input.note_id) {
+                conflicts.insert(*holder);
+            }
+        }
+        if conflicts.is_empty() {
+            return Ok((conflicts, 0));
+        }
+
+        let mut displaced: u128 = 0;
+        let mut best: u128 = 0;
+        let mut bytes = 0usize;
+        for holder in &conflicts {
+            let Some(held) = self.pool.get(holder) else {
+                continue;
+            };
+            displaced = displaced.saturating_add(u128::from(held.fee.as_pebbles()));
+            best = best.max(rate(held.fee, held.weight));
+            bytes = bytes.saturating_add(held.bytes);
+        }
+        let asked = displaced.saturating_add(u128::from(floor.as_pebbles()));
+        if u128::from(fee.as_pebbles()) < asked || offered <= best {
+            // The first conflicting input names what is already spoken for,
+            // which is what the sender has to know to try again.
+            let taken = transfer
+                .inputs
+                .iter()
+                .map(|input| input.note_id)
+                .find(|note| spenders.contains_key(note))
+                .unwrap_or(NoteId::new(transfer.id(), 0));
+            return Err(TransferError::UnknownNote(taken));
+        }
+        Ok((conflicts, bytes))
+    }
+
+    /// Which pooled transfer spends each note the pool has spoken for.
+    fn pooled_spenders(&self) -> BTreeMap<NoteId, Hash32> {
+        let mut spenders = BTreeMap::new();
+        for (id, held) in &self.pool {
+            for input in &held.transfer.inputs {
+                spenders.insert(input.note_id, *id);
+            }
+        }
+        spenders
     }
 
     /// Drops every pooled transfer the current state no longer accepts.
@@ -1021,7 +1219,7 @@ impl ChainStore {
     fn prune_pool(&mut self) {
         let params = self.params;
         let state = &self.state;
-        let mut kept: BTreeSet<(Amount, Hash32)> = BTreeSet::new();
+        let mut kept: BTreeSet<(u128, Hash32)> = BTreeSet::new();
         let mut bytes = 0usize;
         self.pool.retain(|id, held| {
             match check_transfer(
@@ -1036,14 +1234,14 @@ impl ChainStore {
                 // moved. What it takes does not, so that is kept.
                 Ok(outcome) => {
                     held.fee = outcome.fee;
-                    kept.insert((outcome.fee, *id));
+                    kept.insert((rate(outcome.fee, held.weight), *id));
                     bytes = bytes.saturating_add(held.bytes);
                     true
                 }
                 Err(_) => false,
             }
         });
-        self.pool_by_fee = kept;
+        self.pool_by_rate = kept;
         self.pool_bytes = bytes;
     }
 

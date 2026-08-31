@@ -76,6 +76,23 @@ pub struct ConsensusParams {
     pub halving_interval: u64,
     /// Notes the hot set holds before the oldest start falling to the cold set.
     pub hot_capacity: usize,
+    /// Notes one block may push from the hot set to the cold set.
+    ///
+    /// How fast the hot set turns over is a shared resource: every note pushed
+    /// out is somebody's money now needing a proof to spend, and the pusher
+    /// chooses who by choosing nothing, since it is always the oldest that
+    /// falls. Fees make that churn cost something, but a fee is only a price,
+    /// and a miner includes its own transfers for free. This is the bound that
+    /// holds whatever anyone pays.
+    ///
+    /// The number is a judgement. Full blocks of ordinary payments push out
+    /// about six hundred and eighty six notes each, so honest traffic never
+    /// meets this; what meets it is a block stuffed with outputs, which could
+    /// otherwise push out over three thousand. At this cap, emptying the whole
+    /// tier takes at least a hundred and twenty eight blocks, about two hours,
+    /// instead of forty three minutes. `cairn-ledger/examples/blocksize.rs`
+    /// works both figures out from measured sizes.
+    pub max_evictions_per_block: usize,
     /// Blocks a handed over ledger must sit below the tip it belongs to.
     ///
     /// See [`crate::handover::BURIAL`] for what it buys. Here because it is a
@@ -195,6 +212,9 @@ impl ConsensusParams {
             tail_reward: TAIL_REWARD,
             halving_interval: emission::HALVING_INTERVAL,
             hot_capacity: DEFAULT_HOT_CAPACITY,
+            // A hundred and twenty eighth of the tier, so however the blocks
+            // are stuffed, emptying it takes at least that many of them.
+            max_evictions_per_block: DEFAULT_HOT_CAPACITY >> 7,
             burial: crate::handover::BURIAL,
             target_block_time: DEFAULT_TARGET_BLOCK_TIME,
             genesis_difficulty: MIN_DIFFICULTY,
@@ -242,6 +262,14 @@ impl ConsensusParams {
         self
     }
 
+    /// The same, for how many notes one block may push out. For tests, which
+    /// would otherwise have to fill blocks to the byte limit to reach it.
+    #[must_use]
+    pub const fn with_max_evictions(mut self, limit: usize) -> Self {
+        self.max_evictions_per_block = limit;
+        self
+    }
+
     /// The same, for how deep a handed over ledger must sit. For tests, which
     /// would otherwise have to mine a thousand blocks to reach one.
     #[must_use]
@@ -265,6 +293,10 @@ pub enum TransferError {
     TooManyOutputs { count: usize, limit: usize },
     #[error("transfer takes {bytes} bytes, more than the {limit} a block carries")]
     TooLargeForABlock { bytes: usize, limit: usize },
+    /// Raised by the pool, never by a block rule: what a block may carry is
+    /// not priced, what a node will carry for a stranger is.
+    #[error("transfer pays {fee}, below the {floor} its bytes and new notes ask")]
+    FeeBelowFloor { fee: Amount, floor: Amount },
     #[error("note {0:?} is spent twice in the same transfer")]
     DuplicateInput(NoteId),
     #[error("note {0:?} is unknown or already spent")]
@@ -322,6 +354,8 @@ pub enum BlockError {
     CoinbaseHeightMismatch { header: u64, coinbase: u64 },
     #[error("block carries {count} transfers, limit is {limit}")]
     TooManyTransfers { count: usize, limit: usize },
+    #[error("block pushes {count} notes to the cold set, limit is {limit}")]
+    TooManyEvictions { count: usize, limit: usize },
     #[error("block takes {bytes} bytes, limit is {limit}")]
     BlockTooLarge { bytes: usize, limit: usize },
     #[error("coinbase creates {count} notes, limit is {limit}")]
@@ -762,6 +796,16 @@ pub fn evaluate_block_body(
     created.extend(coinbase.created_notes());
 
     let evicted = state.plan_evictions(&spent_hot, &created, params.hot_capacity);
+    // Falling is what a full tier does to make room, so how many fall is
+    // decided by what the block creates, and a block can be stuffed with
+    // outputs for exactly that purpose. Fees put a price on it; this puts a
+    // ceiling on it, because a miner pays no fee to itself.
+    if evicted.len() > params.max_evictions_per_block {
+        return Err(BlockError::TooManyEvictions {
+            count: evicted.len(),
+            limit: params.max_evictions_per_block,
+        });
+    }
     let transition = StateTransition {
         spent_hot: spent_hot.into_iter().collect(),
         spent_cold: spent_cold.into_values().collect(),

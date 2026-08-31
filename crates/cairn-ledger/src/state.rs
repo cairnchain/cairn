@@ -190,7 +190,9 @@ pub const GRACE_BLOCKS: usize = 64;
 ///
 /// An archivist keeps [`ColdSet::Archive`] instead, which is every leaf the
 /// forest ever held. Only an archivist can rebuild a proof for someone who
-/// lost theirs, and that is the service it is paid for.
+/// lost theirs. Nobody is paid for that, which every paper says and this
+/// comment used to contradict: the network does not need it, and the person
+/// who does is whoever lost their own proof.
 #[derive(Clone, Debug)]
 pub enum ColdSet {
     Roots(Forest),

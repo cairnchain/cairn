@@ -133,6 +133,83 @@ fn the_hot_set_never_grows_past_its_cap() {
     assert_eq!(state.cold_len(), 60 - CAPACITY as u64);
 }
 
+/// A block may push only so many notes out of the hot set, whatever it pays.
+///
+/// How fast the tier turns over is a shared resource: every note pushed out is
+/// somebody's money now needing a proof to spend. Fees put a price on that for
+/// strangers, and a miner pays no fee to itself, so the price alone bounds
+/// nothing. The cap is what holds either way, which is why it is a block rule
+/// and not a pool policy. It is also why the transfers here pay no fee at
+/// all: what a block may contain is not priced, only bounded.
+#[test]
+fn a_block_may_not_push_out_more_notes_than_the_rules_allow() {
+    let params = ConsensusParams::testnet()
+        .with_hot_capacity(CAPACITY)
+        .with_max_evictions(2);
+    let miner = wallet(1);
+    let mut state = LedgerState::archiving();
+    let notes = mine_empty(&mut state, &params, &miner, CAPACITY as u64);
+
+    // One note into two pushes out two: the coinbase adds one, the spend takes
+    // one away, and the tier was full. At the cap, the block stands.
+    let (id, note) = notes[0];
+    let mut within = Transfer::new(
+        vec![Input::hot(id)],
+        vec![
+            Note::new(Amount::from_pebbles(1).unwrap(), miner.public_key()),
+            Note::new(
+                Amount::from_pebbles(note.value.as_pebbles() - 1).unwrap(),
+                miner.public_key(),
+            ),
+        ],
+    );
+    within.sign_input(params.network, 0, &note, &miner);
+    mine(&mut state, &params, &miner, vec![within]);
+
+    // One note into three would push out three. The first two of the eight
+    // fell with the block above, so the spend takes one that is still hot.
+    let (id, note) = notes[3];
+    let mut past = Transfer::new(
+        vec![Input::hot(id)],
+        vec![
+            Note::new(Amount::from_pebbles(1).unwrap(), miner.public_key()),
+            Note::new(Amount::from_pebbles(1).unwrap(), miner.public_key()),
+            Note::new(
+                Amount::from_pebbles(note.value.as_pebbles() - 2).unwrap(),
+                miner.public_key(),
+            ),
+        ],
+    );
+    past.sign_input(params.network, 0, &note, &miner);
+
+    let height = state.next_height().unwrap();
+    let timestamp = 1_000 + height * 600;
+    let coinbase = CoinbaseTransaction::new(
+        height,
+        vec![Note::new(params.initial_reward, miner.public_key())],
+    );
+    assert!(matches!(
+        assemble_block(
+            &state,
+            coinbase.clone(),
+            vec![past.clone()],
+            &params,
+            timestamp,
+            0
+        ),
+        Err(BlockError::TooManyEvictions { count: 3, limit: 2 })
+    ));
+
+    // A node that lifted its own cap can build the block, and every node that
+    // kept the rules refuses it: the cap is consensus, not preference.
+    let lax = params.with_max_evictions(64);
+    let block = assemble_block(&state, coinbase, vec![past], &lax, timestamp, 0).unwrap();
+    assert!(matches!(
+        connect_block(&mut state, &block, &params, NOW),
+        Err(BlockError::TooManyEvictions { count: 3, limit: 2 })
+    ));
+}
+
 #[test]
 fn the_oldest_note_falls_first() {
     let params = params();

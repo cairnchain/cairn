@@ -26,6 +26,7 @@ use cairn_ledger::note::Note;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
+use cairn_primitives::Amount;
 use cairn_wallet::serve::{self, Opened};
 use cairn_wallet::Wallet;
 
@@ -241,7 +242,12 @@ fn money_sent_from_the_page_leaves_the_wallet() {
 
     let before = running.wallet.holdings().spendable;
     let head = format!("POST /api/send HTTP/1.1\r\nhost: {host}\r\norigin: http://{host}");
-    let body = format!("k={secret}&to={recipient}&amount=60&fee=0");
+    // What the network will carry, which is no longer nothing.
+    let floor = running
+        .wallet
+        .floor_for(recipient, Amount::from_cairn("60").unwrap());
+    let floor = floor.to_string().replace(" CAIRN", "");
+    let body = format!("k={secret}&to={recipient}&amount=60&fee={floor}");
     let (status, answer) = running.ask(&head, &body);
     assert_eq!(status, 200);
     assert!(answer.contains("\"sent\":true"), "{answer}");

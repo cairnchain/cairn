@@ -17,7 +17,7 @@
 
 use std::path::PathBuf;
 
-use cairn_crypto::SecretKey;
+use cairn_crypto::{PublicKey, SecretKey};
 use cairn_ledger::block::Block;
 use cairn_ledger::note::Note;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
@@ -98,6 +98,11 @@ fn funded(name: &str, seed: u8, blocks: usize) -> (Wallet, Forge, PathBuf) {
     (wallet, forge, directory)
 }
 
+/// What the network will carry for this spend, which is no longer nothing.
+fn floor(wallet: &Wallet, to: PublicKey, amount: Amount) -> Amount {
+    wallet.floor_for(to, amount)
+}
+
 fn cairn(text: &str) -> Amount {
     Amount::from_cairn(text).unwrap()
 }
@@ -156,7 +161,11 @@ fn spending_more_than_is_there_is_refused_and_says_so() {
     let recipient = SecretKey::from_bytes(&[9; 32]).public_key();
 
     let error = wallet
-        .send(recipient, cairn("500"), Amount::ZERO)
+        .send(
+            recipient,
+            cairn("500"),
+            floor(&wallet, recipient, cairn("500")),
+        )
         .unwrap_err();
     match error {
         WalletError::NotEnough { needed, have, .. } => {
@@ -176,8 +185,11 @@ fn spending_more_than_is_there_is_refused_and_says_so() {
         "the fee is part of what has to be covered"
     );
 
-    // Exactly the balance, with no fee, does go through.
-    assert!(wallet.send(recipient, cairn("100"), Amount::ZERO).is_ok());
+    // The balance less what the network asks to carry it does go through.
+    // There is no sending all of it any more: a fee is part of the price.
+    let paying = floor(&wallet, recipient, cairn("100"));
+    let sending = cairn("100").checked_sub(paying).unwrap();
+    assert!(wallet.send(recipient, sending, paying).is_ok());
 
     wallet.shutdown();
     let _ = std::fs::remove_dir_all(&directory);
@@ -206,12 +218,17 @@ fn a_spend_takes_as_few_notes_as_it_can() {
     let (wallet, _forge, directory) = funded("fewest", 4, 6);
     let recipient = SecretKey::from_bytes(&[9; 32]).public_key();
 
-    let sent = wallet.send(recipient, cairn("120"), Amount::ZERO).unwrap();
+    let paying = floor(&wallet, recipient, cairn("120"));
+    let sent = wallet.send(recipient, cairn("120"), paying).unwrap();
     assert_eq!(
         sent.notes, 3,
         "three fifties cover a hundred and twenty, and two do not"
     );
-    assert_eq!(sent.change, cairn("30"));
+    assert_eq!(
+        sent.change,
+        cairn("30").checked_sub(paying).unwrap(),
+        "the change is what is left after the fee"
+    );
     assert_eq!(
         sent.from_cold, 0,
         "nothing has fallen on a chain this short"

@@ -45,7 +45,8 @@ Network options
   --network <name>     testnet-4 or devnet (default: testnet-4); it has to
                        be the same network the node is on
   --wait <seconds>     how long to spend catching up (default: 30)
-  --fee <cairn>        what to pay to be carried (default: 0)
+  --fee <cairn>        what to pay to be carried. Without one, the least
+                       the network will carry, worked out from the transfer
 
 Options for `open`
 
@@ -230,14 +231,17 @@ fn spend(arguments: &[String]) -> Result<(), String> {
         .ok_or_else(|| "how much? use --amount".to_owned())?;
     let amount = Amount::from_cairn(amount)
         .ok_or_else(|| format!("`{amount}` is not an amount of CAIRN"))?;
-    let fee = match flags.value("fee") {
-        None => Amount::ZERO,
+    let asked = match flags.value("fee") {
+        None => None,
         Some(text) => {
-            Amount::from_cairn(text).ok_or_else(|| format!("`{text}` is not an amount"))?
+            Some(Amount::from_cairn(text).ok_or_else(|| format!("`{text}` is not an amount"))?)
         }
     };
 
     let wallet = join(&flags)?;
+    // Without one named, what the network asks for. Nothing is not an option
+    // any more and defaulting to it would send transfers nobody carries.
+    let fee = asked.unwrap_or_else(|| wallet.floor_for(recipient, amount));
     let sent = wallet.send(recipient, amount, fee).map_err(|error| {
         wallet.shutdown();
         error.to_string()

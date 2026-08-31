@@ -62,7 +62,7 @@ pub const HTML: &str = r#"<!doctype html>
         <div class="row">
           <label>Amount
             <input name="amount" id="amount" autocomplete="off"
-                   inputmode="decimal" placeholder="0.00">
+                   inputmode="decimal" placeholder="the least the network carries">
           </label>
           <label>Fee
             <input name="fee" id="fee" autocomplete="off"
