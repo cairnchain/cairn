@@ -162,6 +162,44 @@ pub struct Outdated {
 
 impl ChainError {
     /// The rules this node lacks, when that is why the block was refused.
+    /// Whether this failure condemns the header itself.
+    ///
+    /// A block's identifier is taken over its header, and a header does not
+    /// commit to the signatures that make its body valid. Two different blocks
+    /// can therefore share an identifier, so only a failure the header alone
+    /// settles may be remembered against one: a timestamp out of range, a
+    /// parent that is not there, work that was not done.
+    ///
+    /// Anything the body decides — a signature, a root that does not match, a
+    /// coinbase that overpays — says nothing about another body carrying the
+    /// same identifier. Remembering that would let anyone lock the real block
+    /// out of a node by sending a corrupted twin first, at the cost of copying
+    /// it: the twin inherits the real block's work, so it is free.
+    ///
+    /// Listed rather than excluded, so a failure added later is not condemned
+    /// by default. Refusing to remember costs one validation. Remembering
+    /// wrongly costs a node the chain.
+    fn settles_the_header(&self) -> bool {
+        let Self::InvalidBlock { source, .. } = self else {
+            return false;
+        };
+        matches!(
+            source,
+            BlockError::UnsupportedVersion { .. }
+                | BlockError::WrongNetwork { .. }
+                | BlockError::WrongHeight { .. }
+                | BlockError::WrongParent { .. }
+                | BlockError::HeightOverflow
+                | BlockError::TimestampTooFarAhead { .. }
+                | BlockError::TimestampNotAfterMedian { .. }
+                | BlockError::BeforeTheNetworkOpened { .. }
+                | BlockError::WrongGenesis { .. }
+                | BlockError::WrongDifficulty { .. }
+                | BlockError::InsufficientWork { .. }
+                | BlockError::WrongTotalWork { .. }
+        )
+    }
+
     pub fn outdated(&self) -> Option<Outdated> {
         match self {
             Self::InvalidBlock {
@@ -1046,8 +1084,23 @@ impl ChainStore {
     /// `now` is this node's clock, in seconds since the Unix epoch.
     pub fn add_block(&mut self, block: Block, now: u64) -> Result<Accepted, ChainError> {
         let id = block.id();
-        if self.blocks.contains_key(&id) {
-            return Ok(Accepted::Duplicate);
+        // Already held, and the same block: nothing to do. Already held and a
+        // *different* block is the case that matters, because an identifier is
+        // taken over a header and a header does not commit to the signatures
+        // in its body. Anyone can copy a block, break one signature, and send
+        // the twin first; it costs them nothing, since the twin inherits the
+        // work of the block it copies. Treating that as a duplicate would hand
+        // them the real block's place, and the node would never follow the
+        // chain past it.
+        match self.blocks.get(&id) {
+            Some(held) if held.body.as_ref() == Some(&block) => {
+                return Ok(Accepted::Duplicate);
+            }
+            // Held with its body dropped, which a node does once it has been
+            // applied. It was applied, so it was valid, and this is that block
+            // or a twin of it; either way there is nothing to decide again.
+            Some(held) if held.body.is_none() => return Ok(Accepted::Duplicate),
+            _ => {}
         }
 
         // Two cheap checks before the block earns a place in memory. Neither
@@ -1161,7 +1214,7 @@ impl ChainStore {
                     // `branch_to` as an ordinary refusal — the peer blamed for
                     // this node being old, which is the one outcome the
                     // scheduled rule change exists to avoid.
-                    if error.outdated().is_none() {
+                    if error.settles_the_header() {
                         if self.invalid.len() >= MAX_INVALID {
                             self.invalid.clear();
                         }
