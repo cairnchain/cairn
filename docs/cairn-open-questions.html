@@ -1,0 +1,205 @@
+<title>Cairn, les questions ouvertes</title>
+<link rel="stylesheet" href="cairn-design.css">
+<div class="wrap">
+
+  <header class="mast">
+    <h1 class="mark">CAIRN</h1>
+    <p class="thesis">Trois questions qu'une <em>revue extérieure</em> a posées, et la position prise sur chacune.</p>
+    <div class="metaline">
+      <span>Questions ouvertes · v1</span>
+      <span>31 août 2026</span>
+      <span>Complète le document de conception</span>
+    </div>
+  </header>
+
+  <section>
+    <div class="rail"><span class="num">I</span><span>Le cadre</span></div>
+    <div class="body">
+      <h2>Trois omissions, pas trois bogues</h2>
+      <p class="lede">Une revue de conception extérieure a relevé trois choses qu'une monnaie doit traiter et que nos documents n'avaient jamais traitées. Rien ne casse, rien ne fuit : ce sont des silences. Après vérification contre le code, la revue a raison sur les trois.</p>
+      <p>Les trois : ce que la chaîne montre de ses utilisateurs ; ce qu'un ordinateur quantique pourrait un jour lui prendre ; et de qui dépend l'épargnant qui revient après des années d'absence. La revue place les deux premières au premier ordre, et juge la troisième plus grave que nos papiers ne le disent.</p>
+      <p>La règle de ce document est celle de tous les autres : ce qui suit est établi depuis le code, pas depuis nos propres papiers, chaque chiffre est mesuré ou compté, et ce qui n'est pas su est écrit comme tel. Un lecteur doit apprendre une faiblesse de nous, pas contre nous.</p>
+      <p>Pour chaque question : ce qui est vrai aujourd'hui, ce que le terrain a déjà essayé et à quel prix, ce que cela coûterait ici, la position prise, et ce qu'elle change au format du billet. Ce dernier point n'est pas un détail. Une règle peut changer à une hauteur annoncée, mais un billet déjà créé garde pour toujours la forme qu'il avait en naissant : ce qui se décide du format aujourd'hui vaut pour toute la valeur qui se posera dessus.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail"><span class="num">II</span><span>La vie privée</span></div>
+    <div class="body">
+      <h2>Ce que la chaîne montre, et à qui</h2>
+      <p class="lede">Aujourd'hui, Cairn protège moins bien la vie privée que Bitcoin. Non par un choix assumé : par silence. C'est la phrase que nos documents devaient contenir et ne contenaient pas.</p>
+
+      <h3>Ce qu'un observateur apprend</h3>
+      <p>L'adresse est la clé publique elle-même. Elle est écrite sur la chaîne à la création du billet, en clair, à côté du montant. Un paiement ordinaire pèse 191 octets et chacun d'eux se lit : quels billets meurent, quels billets naissent, pour qui, pour combien, et la différence entre les deux, qui est le frais. Rien n'est chiffré nulle part.</p>
+      <p>Le portefeuille aggrave ce que le protocole expose. Il tient une clé par fichier, donc une adresse par personne, réutilisée à chaque paiement : le salaire, le loyer et les dons arrivent au même endroit, et quiconque connaît l'adresse lit le solde et toute l'histoire. Le papier d'origine de Bitcoin recommandait déjà une clé neuve par transaction, et les portefeuilles de ce réseau le font par défaut depuis des années. Le nôtre ne le fait pas.</p>
+      <p>L'explorateur, enfin, industrialise la lecture. Il tient pour chaque propriétaire tout ce qu'il a reçu et dépensé, à quelle hauteur, le solde qui en découle, et il publie les cinquante détenteurs les plus riches. C'est un programme séparé que personne n'est obligé de faire tourner, et cette séparation est réelle du côté du coût des nœuds ; du côté de la vie privée elle ne protège de rien, car n'importe qui peut construire le même index depuis ce que le réseau diffuse de toute façon. Un nœud oublie ; le monde, non. Ce qui a été diffusé une fois est public pour toujours.</p>
+
+      <h3>Ce que font les autres, et à quel prix</h3>
+      <div class="tablewrap">
+        <table>
+          <caption>Le terrain, honnêtement</caption>
+          <thead><tr><th>Réseau</th><th>Ce qui est caché</th><th>Le prix payé</th></tr></thead>
+          <tbody>
+            <tr><td>Bitcoin</td><td>Rien, mais l'adresse est l'empreinte de la clé et une clé neuve par paiement est la norme</td><td>L'analyse du graphe reste efficace ; des sociétés entières en vivent</td></tr>
+            <tr><td>Monero</td><td>L'expéditeur, le destinataire, le montant</td><td>Environ 2 ko par transaction, dix fois le nôtre ; chaque sortie jamais créée et un reçu par dépense gardés pour toujours, donc un état qui grandit sans borne</td></tr>
+            <tr><td>Zcash</td><td>Tout, dans la partie protégée</td><td>Des transactions de plusieurs kilooctets ; un reçu par dépense gardé pour toujours ; retrouver son propre argent oblige à essayer de déchiffrer chaque sortie de la chaîne</td></tr>
+            <tr><td>Mimblewimble</td><td>Les montants, et le graphe se compacte</td><td>Des paiements interactifs, les deux portefeuilles doivent se parler ; une centaine d'octets par transaction gardés pour toujours</td></tr>
+            <tr class="us"><td>Cairn aujourd'hui</td><td>Rien, et l'adresse est la clé elle-même, réutilisée</td><td>La lecture est gratuite, pour tout le monde, pour toujours</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="push-md">Un motif traverse cette table, et il n'est pas un accident. Cacher qui dépense quoi oblige le réseau à se souvenir de quelque chose par dépense, pour toujours : Monero garde une image de clé, Zcash un jeton de dépense, Mimblewimble un noyau. Ou bien il oblige l'utilisateur à porter l'histoire : les leurres de Monero se tirent parmi toutes les sorties passées, et un portefeuille Zcash qui revient d'absence essaie de déchiffrer tout ce qu'il a manqué. Une mémoire éternelle chez les nœuds, ou l'histoire chez les utilisateurs : les deux sont exactement le coût qui grandit que ce projet existe pour refuser.</p>
+      <p>Une nuance, parce qu'elle est vraie : notre accumulateur sait prouver l'absence, donc un ensemble de reçus de dépense tiendrait chez chaque nœud en soixante-quatre empreintes, comme la cave. Ce qui ne tient pas, c'est l'entretien. La preuve d'absence d'un reçu encore secret ne peut être rafraîchie que par son propriétaire, qui ne peut la confier à personne sans se désigner. Le fardeau de mise à jour que ce projet a accepté pour les billets s'étendrait à des chemins que nul ne peut surveiller pour vous. Personne n'a résolu cela, nous non plus, et ce document ne prétend pas le contraire.</p>
+      <p>Enfin, tout ce que le terrain déploie pour cacher, montants engagés, signatures en anneau, preuves à divulgation nulle, repose sur le logarithme discret, que l'adversaire de la section suivante casse.</p>
+
+      <h3>La position</h3>
+      <div class="decisions">
+        <div class="dec">
+          <span class="q">La réutilisation d'adresse</span>
+          <span class="a">Le portefeuille tire une clé neuve par paiement, avant le mainnet</span>
+          <span class="why">Une graine unique, des clés dérivées, une adresse fraîche à chaque encaissement. Le portefeuille est déjà un nœud qui lit chaque bloc : reconnaître cent adresses au lieu d'une est une comparaison de plus par sortie, pas un serveur de plus, et personne d'autre n'apprend rien, là où un portefeuille sur téléphone, ailleurs, confie sa liste d'adresses au serveur qu'il interroge. Cela ramène Cairn à la norme de Bitcoin, pas au-delà : une dépense qui réunit plusieurs billets les relie publiquement, et une adresse de dons publiée reste un point fixe. C'est un changement de logiciel, pas de protocole, et le fichier de clé actuel reste lisible.</span>
+        </div>
+        <div class="dec">
+          <span class="q">Les montants</span>
+          <span class="a">En clair, et ce n'est pas un report</span>
+          <span class="why">Les montants cachés existent et se paient : environ 700 octets de preuve par montant pour établir qu'il n'est pas négatif, une vérification en millisecondes, un paiement qui passe de 191 octets à près d'un kilooctet, le débit divisé par cinq. Le refus ne vient pas de là. Il vient de ce qu'une offre cachée n'est plus vérifiable que par une hypothèse mathématique, le logarithme discret, qu'un ordinateur quantique casse : le jour où il la casse, quelqu'un peut fabriquer de la monnaie cachée et personne, jamais, ne peut le démontrer. Une chaîne dont la promesse est d'être encore vérifiable dans trente ans ne pose pas son émission là-dessus. Cairn promet une offre que n'importe qui recompte, et l'écrit.</span>
+        </div>
+        <div class="dec">
+          <span class="q">Cacher qui paie qui</span>
+          <span class="a">Pas au niveau du protocole tant que le dilemme ci-dessus tient</span>
+          <span class="why">Les adresses furtives coûteraient un balayage à chaque portefeuille et reposent sur un échange de clés qui n'est pas post-quantique ; les reçus de dépense butent sur l'entretien décrit plus haut. Plutôt qu'une promesse vague, une porte laissée ouverte : l'adresse-empreinte de la section suivante est compatible avec des clés à usage unique, donc rien de ce qui se verrouille aujourd'hui n'interdit d'y revenir quand quelqu'un, ici ou ailleurs, aura résolu l'entretien sans mémoire éternelle. D'ici là, ce que Cairn offre est une transparence dite, pas un anonymat manqué.</span>
+        </div>
+        <div class="dec">
+          <span class="q">L'explorateur</span>
+          <span class="a">Il continue de montrer ce que tout le monde peut voir, et le dit</span>
+          <span class="why">Retirer l'index de notre explorateur ne retirerait l'information à personne, sauf au lecteur honnête : le réseau diffuse tout, et le premier venu reconstruit le même index. Le site affichera donc, à côté du solde d'une adresse, que cette page est possible précisément parce que la chaîne est publique. Une conséquence mérite d'être écrite : sur une chaîne transparente, des tiers peuvent juger un billet à son histoire. Les règles, elles, n'en jugent aucun, aucun billet n'y vaut plus ou moins qu'un autre, et c'est tout ce qu'un protocole peut promettre là-dessus. Bitcoin vit avec la même limite ; il la dit rarement.</span>
+        </div>
+      </div>
+      <p class="push-md">Ce que cette position change au format du billet : rien pour les montants, qui restent huit octets en clair. Pour l'adresse, le changement vient de la section suivante, décidé pour une autre raison, et il sert aussi ici.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail"><span class="num">III</span><span>L'ordinateur quantique</span></div>
+    <div class="body">
+      <h2>Un adversaire annoncé trente ans d'avance</h2>
+      <p class="lede">La promesse du projet se compte en décennies, et c'est exactement l'horizon où les estimations publiques placent un ordinateur quantique capable de casser ces clés. La revue a raison : une ligne en aparté ne suffisait pas.</p>
+
+      <h3>Ce qui est exposé, précisément</h3>
+      <p>Il y a deux familles de cryptographie dans Cairn, et elles ne tombent pas ensemble. La structure, le sceau, les deux forêts, la preuve de travail, les identifiants, est faite de fonctions de hachage, que l'ordinateur quantique n'entame pas de façon utile. Ce point était déjà dans le document de conception, et il tient : l'état, le sceau qui l'engage et l'histoire des en-têtes n'ont rien à craindre.</p>
+      <p>Les fonds, si. Un billet est verrouillé par une signature Ed25519, dont la clé secrète se retrouve depuis la clé publique sur un ordinateur quantique assez grand. Et l'adresse étant la clé publique elle-même, la clé de chaque billet non dépensé est en clair sur la chaîne depuis sa création. Un tel adversaire n'a pas besoin d'attraper une transaction au vol : il lit la chaîne, à son heure, et chaque billet dormant est une cible immobile. L'épargnant, précisément celui que ce projet met en avant, est le plus exposé.</p>
+      <p>Bitcoin fait mieux, et il vaut la peine de dire pourquoi. Une sortie ordinaire y porte l'empreinte de la clé, et la clé ne paraît qu'au moment de dépenser : un billet jamais dépensé, d'une adresse jamais réutilisée, n'offre rien à casser, et la fenêtre d'attaque se réduit aux minutes entre la diffusion d'un paiement et son enfouissement. Le bouclier est imparfait, les recensements publics situent autour du quart de l'offre de Bitcoin ce qui est déjà à découvert, clés réutilisées et sorties des premières années, et le format le plus récent, Taproot, y renonce en remettant la clé dans la sortie. Mais la norme protège. Cairn n'a pas la norme : chez nous, cent pour cent de l'offre est à découvert, par construction.</p>
+
+      <h3>Ce que coûterait une signature post-quantique</h3>
+      <p>Les schémas standardisés existent, publiés en 2024 ; un quatrième, Falcon, attend encore sa version finale au moment d'écrire. Aucun ne rend les 64 octets d'Ed25519 : une signature post-quantique se compte en kilooctets, et c'est un problème particulier pour une conception dont tout l'intérêt est d'être petite. Mesuré contre notre format, un paiement ordinaire, un billet dépensé, deux créés, dans un bloc de 128 ko :</p>
+      <div class="tablewrap">
+        <table>
+          <caption>Un paiement ordinaire sous chaque schéma, adresse en empreinte de clé</caption>
+          <thead><tr><th>Schéma</th><th>Clé publique</th><th>Signature</th><th>Un paiement</th><th>Par bloc</th><th>Par seconde</th></tr></thead>
+          <tbody>
+            <tr><td>Ed25519, adresse = clé (aujourd'hui)</td><td class="num">32 o</td><td class="num">64 o</td><td class="num">191 o</td><td class="num">686</td><td class="num">11,4</td></tr>
+            <tr class="us"><td>Ed25519, adresse en empreinte</td><td class="num">32 o</td><td class="num">64 o</td><td class="num">223 o</td><td class="num">587</td><td class="num">9,8</td></tr>
+            <tr><td>Falcon-512</td><td class="num">897 o</td><td class="num">666 o</td><td class="num">1 690 o</td><td class="num">77</td><td class="num">1,3</td></tr>
+            <tr><td>ML-DSA-44</td><td class="num">1 312 o</td><td class="num">2 420 o</td><td class="num">3 859 o</td><td class="num">33</td><td class="num">0,55</td></tr>
+            <tr><td>SLH-DSA-128s</td><td class="num">32 o</td><td class="num">7 856 o</td><td class="num">8 015 o</td><td class="num">16</td><td class="num">0,27</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="push-md">Le bloc n'est pas la seule victime, et c'est le chiffre qui décide tout. Tant que l'adresse est la clé, la clé vit dans le billet, et le billet vit dans le tiroir que chaque nœud porte : sous ML-DSA-44, chaque billet chaud grossit de 1 280 octets, le tiroir passe d'environ 68 Mo à environ 236 Mo, et le téléphone, qui est la raison d'être du chiffre, ne suit plus. Avec l'adresse en empreinte, le billet garde ses quarante octets quel que soit le schéma : la clé ne paraît que sur le fil, à la dépense, et le tiroir ne bouge pas. C'est la différence entre une migration coûteuse et une migration impossible.</p>
+      <p>Sur le choix du schéma lui-même : SLH-DSA est le seul qui repose sur les mêmes hypothèses que notre structure, du hachage et rien d'autre, et c'est le plus lourd du tableau. Falcon est le plus petit et le plus délicat à implémenter correctement. Les schémas en treillis sont jeunes à l'échelle où ce projet compte. Il n'y a aucune urgence à trancher, à une condition : que le format n'ait plus à changer le jour où l'on tranche.</p>
+
+      <h3>La position</h3>
+      <div class="decisions">
+        <div class="dec">
+          <span class="q">L'adresse</span>
+          <span class="a">L'empreinte de la clé, plus jamais la clé, avant le mainnet</span>
+          <span class="why">Un billet porte désormais trente-deux octets qui nomment une clé sans la montrer. Le dépensier révèle sa clé en dépensant, le nœud vérifie l'empreinte puis la signature : un hachage et une comparaison de plus. Le prix : trente-deux octets par entrée, un paiement passe de 191 à 223 octets, un bloc de 686 à 587 paiements, 9,8 par seconde. Ce que cela achète : le bouclier de Bitcoin, un billet non dépensé d'une adresse jamais réutilisée n'expose rien, et surtout le découplage, car le billet ne sait plus quel schéma de signature le garde, donc le schéma peut changer sans que le format change. C'est la seule décision de ce document qui doive entrer dans le format avant qu'une chaîne de valeur existe, et elle coûte trente-deux octets.</span>
+        </div>
+        <div class="dec">
+          <span class="q">Le schéma de signature</span>
+          <span class="a">Ed25519 aujourd'hui, aucun schéma post-quantique choisi</span>
+          <span class="why">Choisir aujourd'hui, c'est figer des tailles brutales sur des standards qui ont deux ans, pour un adversaire dont personne ne date l'arrivée. Le mécanisme d'introduction existe déjà : une règle qui change nomme sa hauteur d'activation, et les transferts portent un numéro de version, donc un second type de témoin s'ajoute le jour venu sans rien renuméroter. Chaque année d'attente rend le choix mieux informé, et l'adresse en empreinte fait que rien dans le format ne rend l'attente plus chère. Ce qui se décide maintenant n'est pas le schéma : c'est que le format n'en dépende plus.</span>
+        </div>
+        <div class="dec">
+          <span class="q">La migration, le jour venu</span>
+          <span class="a">Un déménagement des fonds, annoncé, et un bord assumé</span>
+          <span class="why">Aucun protocole ne remplace une clé à la place de son propriétaire : le jour où un schéma post-quantique s'active, chacun devra déplacer ses fonds vers une adresse du nouveau type, et les fonds dont la clé est perdue resteront prenables par l'adversaire. Bitcoin a exactement le même bord et pas de meilleure réponse. Ce que les deux décisions précédentes changent, c'est tout ce qui précède ce jour : avec l'empreinte et sans réutilisation, l'exposition se réduit aux paiements en vol, quelques minutes que nos blocs d'une minute font plus courtes que chez Bitcoin. Elle cesse d'être une propriété du format pour devenir un choix de comportement, ce qui est le mieux qu'une chaîne sache faire.</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail"><span class="num">IV</span><span>L'archiviste</span></div>
+    <div class="body">
+      <h2>De qui dépend l'épargnant qui revient</h2>
+      <p class="lede">La cave n'est pas une perte, disent nos documents, puisqu'un archiviste peut toujours reconstituer une preuve. La revue répond : et s'il n'y en a pas ? Elle a raison de poser la question à cette hauteur, car le personnage le plus concerné est celui que ce projet met en avant, l'épargnant hors ligne depuis des années.</p>
+
+      <h3>La situation exacte, chiffrée</h3>
+      <p>Le tiroir tient 131 072 billets, et le plus ancien tombe quand il est plein. À blocs pleins, un billet qui ne bouge pas descend à la cave en 3,2 heures ; à un dixième du trafic, en 32 heures ; à un centième, en treize jours. La fenêtre qui suit la chute, pendant laquelle il se dépense encore sans preuve, dure douze minutes à pleine charge. La cave est donc l'état normal de toute épargne, pas un cas rare, et le document de conception le disait déjà.</p>
+      <p>Trois situations, et elles n'appellent pas le même service. Un portefeuille allumé ne remarque rien : chaque bloc porte de quoi rafraîchir ses preuves, il ne demande rien à personne, et une preuve pèse 685 octets en moyenne à un million de billets tombés, de l'ordre du kilooctet à trente ans de chaîne pleine. Un portefeuille éteint quelques jours se rattrape en relisant les blocs manqués, que les nœuds gardent pour cela : un gigaoctet par défaut, environ cinq jours de chaîne pleine.</p>
+      <p>Au-delà, tout dépend de ce qui a survécu. Celui qui a gardé son carnet, quels billets, à quelle position de la forêt, n'a besoin que d'une preuve fraîche. La produire demande l'archive de la cave, 64 octets par billet tombé ; cela coûte quelques microsecondes et une réponse d'un kilooctet, et le portefeuille vérifie seul le résultat contre les racines que tout nœud tient. La confiance demandée est nulle : un archiviste ne peut pas mentir, il peut seulement se taire. Celui qui a tout perdu sauf sa clé doit d'abord retrouver ce qu'il possède, et cela, l'archive ne le sait pas, car elle tient des empreintes, pas des noms. Retrouver demande l'histoire des blocs, ou un index par propriétaire comme celui de l'explorateur.</p>
+      <p>Et personne n'est payé pour tenir l'un ou l'autre. Voilà l'omission, énoncée depuis le code : la deuxième garantie du document de conception, reconstituable pour toujours, repose sur un rôle que le protocole ne rémunère pas, dont le réseau ne dépend pas, et dont l'épargnant, lui, dépend entièrement.</p>
+      <div class="tablewrap">
+        <table>
+          <caption>Ce que pèsent les deux services, mesuré à trente ans, un bloc par minute</caption>
+          <thead><tr><th>La chaîne est</th><th>Paiements / s</th><th>L'archive, pour prouver</th><th>L'histoire, pour retrouver</th></tr></thead>
+          <tbody>
+            <tr><td>pleine à 1 %</td><td class="num">0,1</td><td class="num">6,0 Go</td><td class="num">20,7 Go</td></tr>
+            <tr><td>pleine à 10 %</td><td class="num">1,1</td><td class="num">68,6 Go</td><td class="num">206,7 Go</td></tr>
+            <tr class="us"><td>pleine</td><td class="num">11,4</td><td class="num">692,3 Go</td><td class="num">2,1 To</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="push-md">Même au pire, l'archive tient sur un seul disque ordinaire. C'est un rôle de bénévole au sens où l'archive complète de Bitcoin en est un, à deux différences près : là-bas, tout nouveau venu dépend d'elle, ici seul l'épargnant sans carnet en dépend ; et là-bas elle pèse des téraoctets dès aujourd'hui. Le risque n'est donc pas le prix du service. Le risque est qu'une année calme d'une petite chaîne n'ait personne pour le rendre, et un protocole ne fabrique pas des volontaires. Ce qu'il peut faire : les multiplier, les rendre vérifiables, et les rendre payables.</p>
+
+      <h3>Ce qui existe déjà, et ce qui se construit</h3>
+      <p>Deux morceaux sont déjà dans le code. L'explorateur garde la cave entière par défaut, en plus de son index : chaque explorateur public est donc déjà, matériellement, un point de reconstitution complet, l'index pour retrouver et l'archive pour prouver. Et un nœud ordinaire accepte un drapeau qui lui fait garder la cave. Ce qui manque est le chemin : aucun message du protocole réseau ne permet aujourd'hui de demander une preuve à qui que ce soit, et rien ne permet de payer celui qui la rend.</p>
+      <div class="decisions">
+        <div class="dec">
+          <span class="q">Le carnet du portefeuille</span>
+          <span class="a">Cinquante-deux octets par billet, exportés et chiffrés</span>
+          <span class="why">L'identifiant, la position, le montant : 52 octets qui ne changent qu'à un paiement, jamais à un bloc, et que le portefeuille exporte chiffrés pour être posés n'importe où. Ce fichier transforme « j'ai tout perdu » en « il me faut une preuve fraîche », c'est-à-dire le service qui ne coûte rien et n'exige aucune confiance. Ce que la graine seule ne pourra jamais : une preuve dépend de la forme de la forêt entière, qu'aucune graine ne connaît. Ce qu'une graine retrouve, ce sont les clés, et avec les clés dérivées de la section II, toutes les adresses. Graine plus n'importe quel archiviste complet suffisent donc au pire cas ; graine seule, jamais, et l'écrire vaut mieux que le laisser croire.</span>
+        </div>
+        <div class="dec">
+          <span class="q">Payer la reconstitution</span>
+          <span class="a">Un marché, petit, non atomique, sans toucher au consensus</span>
+          <span class="why">Le format le permet déjà, et c'était voulu : la signature d'un transfert engage les billets et les montants, jamais le témoin qui les accompagne. Un portefeuille signe donc un transfert qui dépense le billet retrouvé et paie l'archiviste dans une sortie ordinaire ; l'archiviste y attache la preuve et le diffuse. Il ne peut pas détourner un centime, tout est signé ; le portefeuille ne peut guère tricher, dépenser le même billet ailleurs demanderait une autre preuve fraîche, qu'il n'a pas. Le seul vol possible est le frais de reconstitution lui-même, en soufflant la preuve d'une transaction déjà en vol : à ce niveau d'enjeu, viser l'atomicité coûterait au protocole plus que le marché ne pèse. Deux messages s'ajoutent au protocole réseau, demander et livrer ; rien au consensus, rien au format. Le prix se découvre entre les parties ; servir coûte des microsecondes, c'est porter l'ensemble qui se paie.</span>
+        </div>
+        <div class="dec">
+          <span class="q">Qui porte quoi</span>
+          <span class="a">L'archive se découpe, et chaque morceau se vérifie</span>
+          <span class="why">La forêt est un ensemble d'arbres, et les positions ne sont jamais réutilisées : un volontaire peut porter un arbre, ou un intervalle de positions, et servir des preuves sur son morceau seulement. Une preuve fausse ne passe aucune vérification, donc un archiviste partiel n'a rien à prouver sur lui-même pour être utile. Le rôle n'exige ni la totalité, ni une identité, ni une autorisation : il faut seulement qu'à eux tous, les morceaux couvrent l'ensemble, et le marché du point précédent donne une raison de couvrir les morceaux délaissés.</span>
+        </div>
+        <div class="dec">
+          <span class="q">La fenêtre qui suit la chute</span>
+          <span class="a">Ne bouge pas</span>
+          <span class="why">Elle existe pour le payeur qu'un bloc prend de vitesse, pas pour l'épargnant, et elle ne peut pas servir les deux. Couvrir un an de sommeil à pleine charge demanderait de garder chauds environ 360 millions de billets, soit 186 Go chez chaque nœud : une fenêtre assez grande pour l'épargnant est la cave sous un autre nom, et le plafond du nœud est la raison d'être du projet. Toute la marge de ce côté est déjà prise.</span>
+        </div>
+      </div>
+      <p class="push-md">Ce qui reste vrai après tout cela, et qui doit être écrit plutôt que contourné : la reconstitution repose sur au moins un volontaire portant un ensemble qui grandit. Le protocole rend ce volontaire bon marché, découpable, vérifiable et payable ; il ne peut pas le faire exister. Le testnet est l'expérience qui dira si cela suffit, et ce document sera corrigé par ce qu'elle montre.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="rail"><span class="num">V</span><span>Ce qui se dégage</span></div>
+    <div class="body">
+      <h2>Une décision achète les trois</h2>
+      <p>Sur trois questions, une seule chose devait entrer dans le format du billet avant qu'une chaîne de valeur existe : le propriétaire d'un billet devient l'empreinte d'une clé, plus jamais une clé. Trente-deux octets inchangés dans le billet, trente-deux de plus par dépense, et cela achète le bouclier quantique de Bitcoin, un schéma de signature remplaçable sans toucher au format, et une porte ouverte aux clés à usage unique si la vie privée au niveau du protocole devient un jour tenable. Tout le reste, clés dérivées d'une graine, carnet exporté, marché de la reconstitution, est du logiciel autour du format, remplaçable à loisir.</p>
+      <p>Ce qui reste ouvert, par ordre de certitude décroissante sur ce que nous en savons :</p>
+      <ul class="open">
+        <li><b>L'entretien des preuves secrètes.</b> Cacher qui dépense sans mémoire éternelle chez les nœuds demanderait de rafraîchir des preuves d'absence que personne ne peut surveiller pour leur propriétaire. Notre accumulateur tient la moitié bornée du problème ; personne, nulle part, ne tient l'autre moitié.</li>
+        <li><b>Le choix du schéma post-quantique et sa hauteur.</b> Dans quelques années, mieux informé, sans pénalité d'attente maintenant que le format n'en dépend plus. Le déclencheur honnête est l'état de l'art, pas une date.</li>
+        <li><b>Si le marché de la reconstitution trouve des vendeurs.</b> Une petite chaîne dans une année calme est le cas défavorable, et aucun raisonnement ne remplace l'observation : c'est une question pour le testnet, pas pour ce document.</li>
+      </ul>
+      <p class="pull">La revue demandait que trois silences deviennent trois positions. Les voici : datées, chiffrées, et prises pour être contredites par écrit.</p>
+    </div>
+  </section>
+
+  <footer>
+    <span>Cairn · questions ouvertes v1</span>
+    <span>Statut : positions prises, à discuter</span>
+    <span>Rien de ce document n'est un conseil en investissement</span>
+  </footer>
+
+</div>
