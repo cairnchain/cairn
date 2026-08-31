@@ -26,7 +26,28 @@ use cairn_primitives::Hash32;
 use crate::block::{BlockHeader, HeaderSummary};
 use crate::note::{Note, NoteId};
 use crate::pow::{meets_target, RECENT_HEADERS};
-use crate::state::{HotEntry, LedgerState, GRACE_BLOCKS, GRACE_NOTES};
+use crate::state::{header_leaf, HotEntry, LedgerState, GRACE_BLOCKS, GRACE_NOTES};
+
+/// Blocks a handed over ledger must sit below the tip it belongs to.
+///
+/// A newcomer cannot check a ledger. It has watched no transaction go past, so
+/// what it is handed is only as good as the header that commits to it — and a
+/// header's state root is a field its miner chose. Proof of work says that
+/// somebody spent electricity on those bytes, not that the state in them is
+/// what honest transactions would have produced. One block bought an arbitrary
+/// ledger.
+///
+/// So no ledger is taken at the tip. It is taken from here, and the newcomer
+/// applies the blocks in between itself, checking every rule as any node does.
+/// A lie must therefore be this deep, and to be this deep while still being
+/// the heaviest chain offered, its author had to out-mine everybody else for
+/// as long as it took to build them. That is the assumption the chain already
+/// rests on, which is the point: the arrival stops being the weak part.
+///
+/// The same as the deepest reorganisation a node accepts, so a newcomer lands
+/// exactly where a node that was away and came back lands, with the same
+/// ability to be moved off it by a heavier chain.
+pub const BURIAL: u64 = 1_024;
 
 /// What fell in one block: the note, where it landed, and what it was.
 pub type Fallen = (NoteId, u64, Note);
@@ -35,9 +56,34 @@ pub type Fallen = (NoteId, u64, Note);
 #[derive(Clone, Debug)]
 pub struct Handover {
     /// The header this ledger belongs to. Its commitments are what everything
-    /// else is checked against, so a handover is only as good as the header it
-    /// names, and that header is what the sampling settled.
+    /// else is checked against.
+    ///
+    /// It is not the tip. A ledger is handed over from far enough below the
+    /// tip that whoever made it had to keep mining for [`BURIAL`] blocks
+    /// afterwards, which is the whole of what stops a stranger writing one.
     pub at: BlockHeader,
+    /// The tip of the chain this ledger belongs to, which is the one the
+    /// sampling weighed.
+    ///
+    /// A header says what state it commits to, and proof of work says only
+    /// that somebody burned electricity on those bytes. It does not say the
+    /// state is what honest transactions would have produced, and nothing a
+    /// newcomer can check says so either: it has watched no transaction go
+    /// past. So a tip on its own buys an arbitrary ledger for the price of one
+    /// block, and the answer is not to check the tip harder but to refuse to
+    /// take one at all.
+    pub tip: BlockHeader,
+    /// The header forest as it stood before that tip, roots only.
+    ///
+    /// Sixty four hashes, whatever the chain's age, and the tip commits to
+    /// their hash — so a sender cannot offer a forest of its own choosing
+    /// without having also made the tip.
+    pub tip_history: Forest,
+    /// That `at` sits where it says in that forest.
+    ///
+    /// This is what ties the ledger to the chain that was weighed. Without it
+    /// a peer could weigh one chain and hand over the ledger of another.
+    pub anchor: ForestProof,
     /// Every note in the hot set, with the height that decides when it falls.
     pub hot: Vec<(NoteId, HotEntry)>,
     /// The cold set as sixty four hashes.
@@ -74,6 +120,10 @@ pub enum HandoverError {
     StateRootMismatch,
     #[error("the headers handed over are not the ones the header commits to")]
     HistoryMismatch,
+    #[error("the ledger sits at {at}, not far enough below the tip at {tip}")]
+    NotBuried { at: u64, tip: u64 },
+    #[error("the ledger's header does not sit on the chain that was weighed")]
+    NotOnTheWeighedChain,
     #[error("the recent headers do not run up to the one this ledger belongs to")]
     RecentNotEndingAtTip,
     #[error("the recent headers are not consecutive")]
@@ -95,7 +145,14 @@ impl LedgerState {
     /// timestamp rule read them, and a node that cannot check the next block
     /// has not really been handed anything.
     #[must_use]
-    pub fn handover(&self, at: BlockHeader, recent: Vec<BlockHeader>) -> Handover {
+    pub fn handover(
+        &self,
+        at: BlockHeader,
+        tip: BlockHeader,
+        tip_history: Forest,
+        anchor: ForestProof,
+        recent: Vec<BlockHeader>,
+    ) -> Handover {
         let grace = self.grace_window();
         let grace_proofs = grace
             .iter()
@@ -104,6 +161,9 @@ impl LedgerState {
             .collect();
         Handover {
             at,
+            tip,
+            tip_history,
+            anchor,
             hot: self.hot_notes().collect(),
             cold: self.cold_roots(),
             grace,
@@ -119,10 +179,39 @@ impl LedgerState {
 /// The header is the authority. Everything else is rebuilt and checked against
 /// what the header already committed to, so a handover proves itself: there is
 /// nothing to take on the word of whoever sent it.
-pub fn accept(handover: &Handover, hot_capacity: usize) -> Result<LedgerState, HandoverError> {
+pub fn accept(
+    handover: &Handover,
+    hot_capacity: usize,
+    burial: u64,
+) -> Result<LedgerState, HandoverError> {
     let at = &handover.at;
-    if !meets_target(&at.id(), at.difficulty) {
+    let tip = &handover.tip;
+    if !meets_target(&at.id(), at.difficulty) || !meets_target(&tip.id(), tip.difficulty) {
         return Err(HandoverError::HeaderWithoutWork);
+    }
+
+    // Deep enough that whoever wrote this ledger had to go on mining for a
+    // thousand blocks over it, and be the heaviest chain the whole time. That
+    // is what a newcomer gets instead of the ability to check the ledger
+    // itself, which it has no way to do.
+    if at.height.saturating_add(burial) > tip.height {
+        return Err(HandoverError::NotBuried {
+            at: at.height,
+            tip: tip.height,
+        });
+    }
+
+    // And it is that tip's own chain. The forest is the one the tip vouches
+    // for, and the header this ledger belongs to sits in it at the height it
+    // claims — so a peer cannot weigh one chain and hand over another's.
+    if handover.tip_history.commitment() != tip.history {
+        return Err(HandoverError::HistoryMismatch);
+    }
+    if !handover
+        .tip_history
+        .verify(at.height, header_leaf(&at.id()), &handover.anchor)
+    {
+        return Err(HandoverError::NotOnTheWeighedChain);
     }
     // Checked before anything is built, since the size of what follows is
     // otherwise decided by whoever sent it.
@@ -214,6 +303,9 @@ fn summaries(headers: &[BlockHeader]) -> Vec<HeaderSummary> {
 impl Encode for Handover {
     fn encode_to(&self, out: &mut Vec<u8>) {
         self.at.encode_to(out);
+        self.tip.encode_to(out);
+        self.tip_history.encode_to(out);
+        self.anchor.encode_to(out);
         self.cold.encode_to(out);
         self.headers.encode_to(out);
 
@@ -260,6 +352,9 @@ impl Encode for Handover {
 impl Decode for Handover {
     fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
         let at = BlockHeader::decode_from(reader)?;
+        let tip = BlockHeader::decode_from(reader)?;
+        let tip_history = Forest::decode_from(reader)?;
+        let anchor = ForestProof::decode_from(reader)?;
         let cold = Forest::decode_from(reader)?;
         let headers = Forest::decode_from(reader)?;
 
@@ -272,6 +367,9 @@ impl Decode for Handover {
 
         Ok(Self {
             at,
+            tip,
+            tip_history,
+            anchor,
             hot,
             cold,
             grace,

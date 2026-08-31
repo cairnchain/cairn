@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use cairn_accumulator::forest::{Forest, ForestProof};
 use cairn_chain::{Accepted, Bodies, ChainError, ChainStore, Located, Outdated};
 use cairn_crypto::PublicKey;
 use cairn_ledger::block::{Block, BlockHeader};
@@ -1239,9 +1240,14 @@ fn take_join_part(
                 // peer that weighed one and handed over another would
                 // otherwise have its second answer taken on the strength of
                 // the first.
-                .filter(|handover| handover.at.id() == expected)
+                // The tip it names has to be the one that was weighed. What
+                // ties the ledger to that tip is inside `accept`: the ledger's
+                // own header is proved to sit in the tip's header forest, and
+                // to sit far enough below it.
+                .filter(|handover| handover.tip.id() == expected)
                 .and_then(|handover| {
-                    let state = accept(&handover, shared.params.hot_capacity).ok()?;
+                    let state =
+                        accept(&handover, shared.params.hot_capacity, shared.params.burial).ok()?;
                     shared.chain().adopt(state, &handover.recent).ok()?;
                     // Kept only once it has been taken, so what is on disk is
                     // a ledger this node checked and adopted rather than one
@@ -1258,7 +1264,14 @@ fn take_join_part(
                 return Some(give_up(&mut joining, shared));
             }
             *joining = Progress::Landed;
-            None
+            // A ledger arrives from below the tip on purpose, so landing one
+            // is not arriving: the blocks between it and the tip are the part
+            // this node checks for itself, and it has to go and ask for them.
+            // Nothing else would — what drives a sync forward is a block
+            // landing, and none is on its way.
+            Some(Message::GetChain {
+                locator: shared.chain().locator(),
+            })
         }
     }
 }
@@ -1578,7 +1591,29 @@ impl Shared {
                     open_start(&tip, state.headers_before_tip(), SAMPLES, header_at, prove)?;
                 Some(start.encode())
             }
-            Joining::Ledger => build_ledger(state, &tip, header_at).map(|held| held.encode()),
+            Joining::Ledger => {
+                // Not this node's ledger as it stands. One from far enough
+                // below the tip that whoever wrote it had to keep mining over
+                // it, which is the only thing a newcomer can lean on: it
+                // cannot check a ledger, having watched no transaction go
+                // past.
+                let anchor_height = tip.height.checked_sub(self.params.burial)?;
+                let buried = chain.ledger_at(anchor_height)?;
+                let anchor = log
+                    .as_ref()?
+                    .forest
+                    .prove_in(anchor_height, tip.height)
+                    .ok()??;
+                build_ledger(
+                    &buried,
+                    &header_at(anchor_height)?,
+                    &tip,
+                    state.headers_before_tip(),
+                    anchor,
+                    header_at,
+                )
+                .map(|held| held.encode())
+            }
         }
     }
 
@@ -1603,9 +1638,26 @@ impl Shared {
             }
             Some(store.blocks.read_at(height).ok()??.header)
         };
-        let state = chain.state();
         let tip = header_at(chain.height()?)?;
-        build_ledger(state, &tip, header_at).map(|held| held.encode())
+        // The same buried ledger it would hand a stranger, and for the same
+        // reason: one path, one set of rules, and a node that reads its own
+        // disk back checks it the way anybody else would.
+        let anchor_height = tip.height.checked_sub(self.params.burial)?;
+        let buried = chain.ledger_at(anchor_height)?;
+        let anchor = log
+            .as_ref()?
+            .forest
+            .prove_in(anchor_height, tip.height)
+            .ok()??;
+        build_ledger(
+            &buried,
+            &header_at(anchor_height)?,
+            &tip,
+            chain.state().headers_before_tip(),
+            anchor,
+            header_at,
+        )
+        .map(|held| held.encode())
     }
 }
 
@@ -1922,17 +1974,23 @@ fn maintenance_loop(shared: &Arc<Shared>) {
 /// they are consecutive and end at this tip.
 fn build_ledger(
     state: &LedgerState,
+    at: &BlockHeader,
     tip: &BlockHeader,
+    tip_history: Forest,
+    anchor: ForestProof,
     header_at: impl Fn(u64) -> Option<BlockHeader>,
 ) -> Option<Handover> {
-    let from = tip
+    // The headers before the one this ledger belongs to, not before the tip:
+    // they are what the difficulty and timestamp rules read, and the first
+    // block this newcomer will check is the one after `at`.
+    let from = at
         .height
         .saturating_sub(u64::try_from(RECENT_HEADERS.saturating_sub(1)).unwrap_or(0));
     let mut recent = Vec::with_capacity(RECENT_HEADERS);
-    for height in from..=tip.height {
+    for height in from..=at.height {
         recent.push(header_at(height)?);
     }
-    Some(state.handover(*tip, recent))
+    Some(state.handover(*at, *tip, tip_history, anchor, recent))
 }
 
 /// Fills the header log in from the blocks, for the stretch it is missing.
@@ -2009,7 +2067,7 @@ fn read_handed_ledger(
 ) -> Option<(LedgerState, Vec<BlockHeader>)> {
     let bytes = std::fs::read(directory.join(HANDED_LEDGER)).ok()?;
     let handover = Handover::decode(&bytes).ok()?;
-    let state = accept(&handover, params.hot_capacity).ok()?;
+    let state = accept(&handover, params.hot_capacity, params.burial).ok()?;
     Some((state, handover.recent))
 }
 

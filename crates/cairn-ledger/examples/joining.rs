@@ -104,9 +104,23 @@ fn handover_bytes(capacity: usize) -> usize {
         headers.push(block.header);
     }
 
+    // Measured at the tip, which no real handover is — it is the size of the
+    // ledger that travels, and burying it changes where it is taken from, not
+    // how big it is.
     let tip = *headers.last().unwrap();
     let from = headers.len().saturating_sub(RECENT_HEADERS);
-    state.handover(tip, headers[from..].to_vec()).encode().len()
+    state
+        .handover(
+            tip,
+            tip,
+            state.headers_before_tip(),
+            cairn_accumulator::forest::ForestProof {
+                siblings: Vec::new(),
+            },
+            headers[from..].to_vec(),
+        )
+        .encode()
+        .len()
 }
 
 fn with_commas(value: usize) -> String {

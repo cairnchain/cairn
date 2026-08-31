@@ -1323,6 +1323,33 @@ impl ChainStore {
         }
     }
 
+    /// This node's ledger as it stood at `height`.
+    ///
+    /// Built by undoing blocks off a copy rather than by keeping a second
+    /// ledger about, which is what makes handing over a buried one free: the
+    /// records that undo a block are already held, because being able to
+    /// change branches is what they are for.
+    ///
+    /// `None` past what can still be undone. A node that has let those records
+    /// go cannot get back there, and a node that was handed its own ledger
+    /// rather than reading its way to one has none at all until it has applied
+    /// that many blocks itself.
+    #[must_use]
+    pub fn ledger_at(&self, height: u64) -> Option<LedgerState> {
+        let tip = self.height()?;
+        if height > tip || height < self.undo_from {
+            return None;
+        }
+        let mut state = self.state.clone();
+        let mut at = tip;
+        while at > height {
+            let id = self.branch.id_at(at)?;
+            disconnect_block(&mut state, self.applied.get(&id)?);
+            at = at.checked_sub(1)?;
+        }
+        Some(state)
+    }
+
     /// Undoes every applied block above `position`, newest first.
     fn rewind_to(&mut self, position: Option<u64>) -> Result<Vec<Hash32>, ChainError> {
         let keep = position.map_or(0, |height| height.saturating_add(1));

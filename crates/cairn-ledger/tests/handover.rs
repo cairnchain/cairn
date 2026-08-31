@@ -1,6 +1,7 @@
 //! Being handed a ledger instead of replaying the chain that made it.
 
 #![allow(
+    clippy::cast_possible_truncation,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
@@ -8,6 +9,7 @@
     clippy::arithmetic_side_effects
 )]
 
+use cairn_accumulator::Archive;
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::handover::{accept, Handover, HandoverError};
@@ -23,8 +25,14 @@ const NOW: u64 = 2_000_000_000;
 /// point: a handover that never crossed a tier would prove nothing.
 const HOT: usize = 8;
 
+/// Buried shallowly, so a test does not have to mine a thousand blocks to
+/// reach a ledger anyone would hand over.
+const BURIAL: u64 = 8;
+
 fn params() -> ConsensusParams {
-    ConsensusParams::testnet().with_hot_capacity(HOT)
+    ConsensusParams::testnet()
+        .with_hot_capacity(HOT)
+        .with_burial(BURIAL)
 }
 
 fn wallet(seed: u8) -> SecretKey {
@@ -32,8 +40,20 @@ fn wallet(seed: u8) -> SecretKey {
 }
 
 /// A chain, kept the way a node that has been running keeps one.
+///
+/// The ledger at every height is kept as well, which a real node does not need
+/// to do — it rebuilds an old one by undoing blocks off the current one. Here
+/// it is simply cheaper than writing that again.
 struct Node {
     state: LedgerState,
+    /// The ledger at each height.
+    past: Vec<LedgerState>,
+    /// And the block that produced it, so a newcomer can be given the ones it
+    /// has to check for itself.
+    blocks: Vec<Block>,
+    /// Every header leaf, so this can prove where one sits. A real node reads
+    /// that off its header log; here it is kept in memory.
+    history: Archive,
     headers: Vec<BlockHeader>,
     clock: u64,
 }
@@ -42,6 +62,9 @@ impl Node {
     fn new() -> Self {
         Self {
             state: LedgerState::archiving(),
+            past: Vec::new(),
+            blocks: Vec::new(),
+            history: Archive::new(),
             headers: Vec::new(),
             clock: 1_000,
         }
@@ -58,6 +81,11 @@ impl Node {
         let block =
             assemble_block(&self.state, coinbase, transfers, &params, self.clock, 0).unwrap();
         connect_block(&mut self.state, &block, &params, NOW).unwrap();
+        self.past.push(self.state.clone());
+        self.blocks.push(block.clone());
+        self.history
+            .add(cairn_ledger::state::header_leaf(&block.header.id()))
+            .unwrap();
         self.headers.push(block.header);
         block
     }
@@ -68,11 +96,48 @@ impl Node {
         }
     }
 
+    /// The height a handover from this node belongs to, which is never the
+    /// tip.
+    fn anchor_height(&self) -> u64 {
+        self.headers.last().unwrap().height - BURIAL
+    }
+
+    /// The ledger a handover from this node carries.
+    fn buried(&self) -> &LedgerState {
+        &self.past[self.anchor_height() as usize]
+    }
+
+    /// The blocks a newcomer must check for itself before it has caught up.
+    ///
+    /// This is what a buried handover buys: they are not taken on anybody's
+    /// word, they are validated, so the ledger the newcomer ends on is one it
+    /// built rather than one it was given.
+    fn to_catch_up(&self) -> Vec<Block> {
+        self.blocks[(self.anchor_height() as usize + 1)..].to_vec()
+    }
+
     /// What this node would hand to someone starting out.
+    ///
+    /// Never the ledger at the tip. One from `BURIAL` blocks below it, with
+    /// the proof that it sits on the chain the tip ends.
     fn handover(&self) -> Handover {
         let tip = *self.headers.last().unwrap();
-        let from = self.headers.len().saturating_sub(RECENT_HEADERS);
-        self.state.handover(tip, self.headers[from..].to_vec())
+        let anchor_height = tip.height - BURIAL;
+        let at = self.headers[anchor_height as usize];
+        let state = &self.past[anchor_height as usize];
+        let tip_history = self.state.headers_before_tip();
+        let anchor = self
+            .history
+            .prove_in(anchor_height, tip.height)
+            .expect("the header sits in the forest before the tip");
+        let first = (anchor_height as usize + 1).saturating_sub(RECENT_HEADERS);
+        state.handover(
+            at,
+            tip,
+            tip_history,
+            anchor,
+            self.headers[first..=anchor_height as usize].to_vec(),
+        )
     }
 }
 
@@ -91,14 +156,29 @@ fn a_handed_over_ledger_carries_on_exactly_as_the_one_it_came_from() {
     node.mine_empty(&miner, RECENT_HEADERS + 40);
 
     let handover = node.handover();
-    let mut fresh = accept(&handover, params.hot_capacity).expect("it checks out");
+    let mut fresh = accept(&handover, params.hot_capacity, params.burial).expect("it checks out");
 
+    // What arrives is the ledger from BURIAL blocks back, not the one at the
+    // tip. That is the whole defence: nobody is believed about the present.
+    assert_eq!(fresh.state_root(), node.buried().state_root());
+    assert_eq!(fresh.grace_root(), node.buried().grace_root());
+    assert_eq!(fresh.history_root(), node.buried().history_root());
+    assert_eq!(fresh.hot_len(), node.buried().hot_len());
+    assert_eq!(fresh.cold_len(), node.buried().cold_len());
+    assert_ne!(
+        fresh.tip().unwrap().id,
+        node.state.tip().unwrap().id,
+        "and it is behind, on purpose"
+    );
+
+    // It closes the gap by checking every rule of every block in it, which is
+    // what makes the ledger it ends on one it built rather than one it took.
+    for block in node.to_catch_up() {
+        connect_block(&mut fresh, &block, &params, NOW)
+            .expect("a newcomer validates its way to the tip");
+    }
     assert_eq!(fresh.state_root(), node.state.state_root());
-    assert_eq!(fresh.grace_root(), node.state.grace_root());
-    assert_eq!(fresh.history_root(), node.state.history_root());
     assert_eq!(fresh.tip().unwrap().id, node.state.tip().unwrap().id);
-    assert_eq!(fresh.hot_len(), node.state.hot_len());
-    assert_eq!(fresh.cold_len(), node.state.cold_len());
 
     // And now the part that matters: both carry on, and stay together.
     for _ in 0..20 {
@@ -136,7 +216,12 @@ fn a_handed_over_ledger_accepts_a_spend_from_the_grace_window() {
 
     let handover = node.handover();
     assert!(!handover.grace.is_empty(), "the window travels");
-    let mut fresh = accept(&handover, params.hot_capacity).expect("it checks out");
+    let mut fresh = accept(&handover, params.hot_capacity, params.burial).expect("it checks out");
+    // A newcomer arrives BURIAL blocks back and validates its way forward, so
+    // by the time it is asked anything it is at the tip like everyone else.
+    for block in node.to_catch_up() {
+        connect_block(&mut fresh, &block, &params, NOW).expect("it validates its way up");
+    }
     assert_eq!(
         fresh.grace_len(),
         node.state.grace_len(),
@@ -192,7 +277,7 @@ fn a_ledger_that_does_not_match_its_header_is_refused() {
     handover.hot[0] = (id, entry);
 
     assert_eq!(
-        accept(&handover, params.hot_capacity).err(),
+        accept(&handover, params.hot_capacity, params.burial).err(),
         Some(HandoverError::StateRootMismatch),
         "a ledger is only worth what its header says about it"
     );
@@ -212,7 +297,7 @@ fn a_grace_window_the_header_does_not_commit_to_is_refused() {
     handover.grace.clear();
 
     assert_eq!(
-        accept(&handover, params.hot_capacity).err(),
+        accept(&handover, params.hot_capacity, params.burial).err(),
         Some(HandoverError::StateRootMismatch),
         "an empty window is a different ledger, and the header says which"
     );
@@ -233,7 +318,7 @@ fn a_history_the_header_does_not_commit_to_is_refused() {
     handover.headers = other.state.headers_before_tip();
 
     assert_eq!(
-        accept(&handover, params.hot_capacity).err(),
+        accept(&handover, params.hot_capacity, params.burial).err(),
         Some(HandoverError::HistoryMismatch),
     );
 }
@@ -252,7 +337,7 @@ fn recent_headers_that_are_not_a_chain_are_refused() {
     handover.recent[2] = node.headers[0];
 
     assert_eq!(
-        accept(&handover, params.hot_capacity).err(),
+        accept(&handover, params.hot_capacity, params.burial).err(),
         Some(HandoverError::RecentNotConsecutive),
     );
 
@@ -260,7 +345,7 @@ fn recent_headers_that_are_not_a_chain_are_refused() {
     let mut handover = node.handover();
     handover.recent.pop();
     assert_eq!(
-        accept(&handover, params.hot_capacity).err(),
+        accept(&handover, params.hot_capacity, params.burial).err(),
         Some(HandoverError::RecentNotEndingAtTip),
     );
 }
@@ -281,7 +366,7 @@ fn a_hot_set_past_the_cap_is_refused_before_it_is_built() {
 
     assert!(
         matches!(
-            accept(&handover, params.hot_capacity),
+            accept(&handover, params.hot_capacity, params.burial),
             Err(HandoverError::HotSetTooLarge { .. })
         ),
         "how much work a handover costs is not for its sender to decide"
@@ -301,10 +386,11 @@ fn a_handover_survives_a_round_trip() {
     let read_back = <Handover as cairn_primitives::codec::Decode>::decode(&bytes)
         .expect("what it wrote, it reads");
 
-    let rebuilt = accept(&read_back, params.hot_capacity).expect("and it still checks out");
-    assert_eq!(rebuilt.state_root(), node.state.state_root());
-    assert_eq!(rebuilt.hot_len(), node.state.hot_len());
-    assert_eq!(rebuilt.grace_len(), node.state.grace_len());
+    let rebuilt =
+        accept(&read_back, params.hot_capacity, params.burial).expect("and it still checks out");
+    assert_eq!(rebuilt.state_root(), node.buried().state_root());
+    assert_eq!(rebuilt.hot_len(), node.buried().hot_len());
+    assert_eq!(rebuilt.grace_len(), node.buried().grace_len());
 
     println!(
         "a handover of {} blocks takes {} bytes",
@@ -375,7 +461,12 @@ fn a_handed_over_ledger_accepts_a_proof_taken_a_few_blocks_ago() {
 
     let handover = node.handover();
 
-    let mut fresh = accept(&handover, params.hot_capacity).expect("it checks out");
+    let mut fresh = accept(&handover, params.hot_capacity, params.burial).expect("it checks out");
+    // A newcomer arrives BURIAL blocks back and validates its way forward, so
+    // by the time it is asked anything it is at the tip like everyone else.
+    for block in node.to_catch_up() {
+        connect_block(&mut fresh, &block, &params, NOW).expect("it validates its way up");
+    }
 
     let mut transfer = Transfer::new(
         vec![Input::cold(id, fallen_note, position, proof)],
@@ -388,4 +479,71 @@ fn a_handed_over_ledger_accepts_a_proof_taken_a_few_blocks_ago() {
     connect_block(&mut fresh, &block, &params, NOW)
         .expect("a handed over ledger takes a proof the chain took");
     assert_eq!(fresh.state_root(), node.state.state_root());
+}
+
+/// The attack this exists to stop.
+///
+/// A miner who finds one block can commit to any ledger it likes: proof of
+/// work says electricity was spent on those bytes, not that the state in them
+/// is what honest transactions would have produced, and a newcomer has watched
+/// no transaction go past to know otherwise. Before this, one block bought an
+/// arbitrary ledger on every newcomer.
+///
+/// What stops it is refusing to take a ledger at the tip at all. A forger must
+/// now bury its invention under `burial` blocks and be the heaviest chain for
+/// all of them, which is out-mining everybody else — the assumption the chain
+/// already rests on.
+#[test]
+fn a_ledger_at_the_tip_is_refused_however_good_it_looks() {
+    let params = params();
+    let miner = wallet(1);
+    let mut node = Node::new();
+    node.mine_empty(&miner, RECENT_HEADERS + 20);
+
+    // An honest, internally perfect handover — but of the ledger as it stands.
+    // Every commitment in it is real; it is refused for where it sits.
+    let tip = *node.headers.last().unwrap();
+    let at_the_tip = node.state.handover(
+        tip,
+        tip,
+        node.state.headers_before_tip(),
+        node.history
+            .prove_in(tip.height, tip.height.saturating_add(1))
+            .expect("it can prove its own tip"),
+        node.headers[node.headers.len() - RECENT_HEADERS..].to_vec(),
+    );
+
+    assert_eq!(
+        accept(&at_the_tip, params.hot_capacity, params.burial).err(),
+        Some(HandoverError::NotBuried {
+            at: tip.height,
+            tip: tip.height,
+        }),
+        "nobody is believed about the present, however well they say it"
+    );
+}
+
+/// And it has to be the chain that was weighed, not merely some chain.
+#[test]
+fn a_ledger_from_another_chain_is_refused() {
+    let params = params();
+    let miner = wallet(1);
+    let mut node = Node::new();
+    node.mine_empty(&miner, RECENT_HEADERS + 20);
+
+    // Another chain of the same shape, mined by somebody else.
+    let mut other = Node::new();
+    other.mine_empty(&wallet(9), RECENT_HEADERS + 20);
+
+    // Its ledger, offered under our tip. Everything inside is consistent; what
+    // is missing is that its header sits nowhere in our tip's history.
+    let mut borrowed = other.handover();
+    borrowed.tip = *node.headers.last().unwrap();
+    borrowed.tip_history = node.state.headers_before_tip();
+
+    assert_eq!(
+        accept(&borrowed, params.hot_capacity, params.burial).err(),
+        Some(HandoverError::NotOnTheWeighedChain),
+        "a peer cannot weigh one chain and hand over another's ledger"
+    );
 }

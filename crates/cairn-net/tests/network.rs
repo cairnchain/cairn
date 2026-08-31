@@ -30,8 +30,13 @@ const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
 const PATIENCE: Duration = Duration::from_secs(15);
 
+/// Shallow, so a test does not have to mine a thousand blocks before a node
+/// has a ledger anyone would hand over. What the depth buys is argued in
+/// `cairn_ledger::handover::BURIAL`; what it costs a test is time.
+const BURIAL: u64 = 8;
+
 fn params() -> ConsensusParams {
-    ConsensusParams::testnet()
+    ConsensusParams::testnet().with_burial(BURIAL)
 }
 
 fn loopback() -> SocketAddr {
@@ -818,8 +823,13 @@ fn a_node_that_joined_writes_and_serves_what_it_validates() {
     });
     assert_eq!(joiner.joining(), Joined::Done);
     assert!(
-        joiner.archived_at(top).is_none(),
-        "it wrote nothing yet, having validated nothing yet"
+        joiner.archived_at(top).is_some(),
+        "the last blocks it checked for itself, which is what a buried \
+         handover makes it do"
+    );
+    assert!(
+        joiner.archived_at(top.saturating_sub(BURIAL)).is_none(),
+        "and nothing below that, which it was handed rather than checked"
     );
 
     // Blocks it validates itself, which are the ones it can vouch for.
@@ -843,7 +853,7 @@ fn a_node_that_joined_writes_and_serves_what_it_validates() {
         Some(top + 3),
     );
     assert!(
-        joiner.archived_at(top).is_none(),
+        joiner.archived_at(top.saturating_sub(BURIAL)).is_none(),
         "and nothing it was only handed"
     );
 
@@ -856,7 +866,12 @@ fn a_node_that_joined_writes_and_serves_what_it_validates() {
         !restored.rejoining,
         "it had the ledger it was handed, so nothing was set aside"
     );
-    assert_eq!(restored.blocks, 3, "the blocks it validated came back");
+    assert_eq!(
+        restored.blocks,
+        usize::try_from(BURIAL).unwrap() + 3,
+        "every block it validated came back: the ones between the buried \
+         ledger and the tip, and the three it saw afterwards"
+    );
     assert_eq!(restored.refused, 0);
     assert_eq!(
         again.height(),
@@ -1336,6 +1351,19 @@ fn a_node_that_joined_fills_in_the_headers_and_can_then_take_someone_in() {
             .map(|log| log.first_height() == 0 && log.reaches() >= top)
             .unwrap_or(false)
     });
+
+    // It cannot pass a ledger on yet, and that is the point of a buried
+    // handover: what it holds from before it arrived is what it was handed,
+    // not what it checked, and it has nothing of its own to bury a ledger
+    // under. It earns that by validating.
+    for _ in 0..=BURIAL {
+        joined.submit_block(forge.mine()).unwrap();
+    }
+    let top = top + BURIAL + 1;
+    wait_for(
+        "the node that joined to validate its way past a burial",
+        || joined.height() == Some(top),
+    );
 
     // And now a newcomer can join through it rather than through the one node
     // that read the chain.

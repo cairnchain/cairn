@@ -222,7 +222,7 @@ fn a_declared_length_that_lies_is_refused_rather_than_fatal() {
 fn a_bent_ledger_and_a_bent_weighing_are_refused_rather_than_fatal() {
     let seed = 0x4CA1_2026_u64;
     let mut rng = Rng::new(seed);
-    let params = ConsensusParams::testnet();
+    let params = ConsensusParams::testnet().with_burial(8);
 
     let (handover, start) = valid_join_answers();
     let ledger = handover.encode();
@@ -240,7 +240,7 @@ fn a_bent_ledger_and_a_bent_weighing_are_refused_rather_than_fatal() {
             // Refusing is the expected answer; accepting a bent one would be
             // a defect this cannot see, which is what the handover tests are
             // for. What is checked here is that neither outcome is a panic.
-            if cairn_ledger::handover::accept(&bent, params.hot_capacity).is_ok() {
+            if cairn_ledger::handover::accept(&bent, params.hot_capacity, params.burial).is_ok() {
                 took += 1;
             }
         }
@@ -262,7 +262,7 @@ fn a_bent_ledger_and_a_bent_weighing_are_refused_rather_than_fatal() {
     // An unbent one has to pass, or the campaign proves nothing about the
     // checks it is bending.
     assert!(
-        cairn_ledger::handover::accept(&handover, params.hot_capacity).is_ok(),
+        cairn_ledger::handover::accept(&handover, params.hot_capacity, params.burial).is_ok(),
         "the ledger these mutations start from is not one that would be taken"
     );
     let _ = (took, weighed);
@@ -270,11 +270,12 @@ fn a_bent_ledger_and_a_bent_weighing_are_refused_rather_than_fatal() {
 
 /// A ledger a newcomer would be handed, and the weighing that comes before it.
 fn valid_join_answers() -> (Handover, SampledStart) {
-    let params = ConsensusParams::testnet();
+    let params = ConsensusParams::testnet().with_burial(8);
     let miner = SecretKey::from_bytes(&[5; 32]);
     let mut state = LedgerState::new();
     let mut archive = cairn_accumulator::Archive::new();
     let mut headers = Vec::new();
+    let mut past = Vec::new();
     let mut clock = 1_000u64;
 
     for _ in 0..40 {
@@ -288,6 +289,7 @@ fn valid_join_answers() -> (Handover, SampledStart) {
             assemble_block(&state, coinbase, Vec::<Transfer>::new(), &params, clock, 0).unwrap();
         let block = mine_block(block, ATTEMPTS).unwrap();
         connect_block(&mut state, &block, &params, NOW).unwrap();
+        past.push(state.clone());
         headers.push(block.header);
         archive.add(cairn_ledger::state::header_leaf(&block.header.id()));
     }
@@ -295,11 +297,22 @@ fn valid_join_answers() -> (Handover, SampledStart) {
     let tip = *headers.last().unwrap();
     // The run of recent headers the difficulty rule reads, which a handover
     // has to carry in full or it is refused before anything else is looked at.
-    let from = headers
-        .len()
-        .saturating_sub(cairn_ledger::pow::RECENT_HEADERS);
-    let recent = headers[from..].to_vec();
-    let handover = state.handover(tip, recent);
+    let last = usize::try_from(tip.height - params.burial).unwrap();
+    let from = (last + 1).saturating_sub(cairn_ledger::pow::RECENT_HEADERS);
+    let recent = headers[from..=last].to_vec();
+    // From below the tip, as any handover is: one at the tip is refused for
+    // where it sits, which would make this campaign bend nothing.
+    let anchor_height = tip.height - params.burial;
+    let at = headers[usize::try_from(anchor_height).unwrap()];
+    let handover = past[usize::try_from(anchor_height).unwrap()].handover(
+        at,
+        tip,
+        state.headers_before_tip(),
+        archive
+            .prove_in(anchor_height, tip.height)
+            .expect("it can prove its own history"),
+        recent,
+    );
     let start = cairn_ledger::sampling::open_start(
         &tip,
         state.headers_before_tip(),
@@ -313,7 +326,7 @@ fn valid_join_answers() -> (Handover, SampledStart) {
 
 /// One of each thing a peer can send, encoded.
 fn valid_messages() -> Vec<Vec<u8>> {
-    let params = ConsensusParams::testnet();
+    let params = ConsensusParams::testnet().with_burial(8);
     let miner = SecretKey::from_bytes(&[9; 32]);
     let mut state = LedgerState::new();
     let mut blocks = Vec::new();
@@ -352,7 +365,17 @@ fn valid_messages() -> Vec<Vec<u8>> {
         listen: 9944,
         nonce: 77,
     };
-    let handover = state.handover(tip.header, vec![tip.header]);
+    // Only ever encoded, never accepted: this campaign feeds shapes to the
+    // decoder, and what a decoder does with nonsense is the whole question.
+    let handover = state.handover(
+        tip.header,
+        tip.header,
+        cairn_accumulator::forest::Forest::new(),
+        cairn_accumulator::forest::ForestProof {
+            siblings: Vec::new(),
+        },
+        vec![tip.header],
+    );
 
     vec![
         Message::Hello(handshake).encode(),

@@ -403,7 +403,44 @@
       later.
     </p>
 
-    <h3><span class="sub">7.3</span>Sampled verification</h3>
+    <h3><span class="sub">7.3</span>What sampling does not settle</h3>
+    <p>
+      Weighing settles which chain carries the most work. It settles nothing
+      about what that chain's ledger says, and the two are easily confused. A
+      header commits to a state root, and proof of work says that somebody
+      spent electricity on those bytes — not that the state in them is what
+      honest transactions would have produced. A node that read the chain knows
+      the difference because it watched every transaction go past. A newcomer
+      has watched none.
+    </p>
+    <p>
+      So a newcomer that took the ledger of the heaviest tip would be buying an
+      arbitrary ledger for the price of one block: mine one on top of the real
+      chain, commit to any state you like, be heaviest for the moment somebody
+      arrives. The honest network is unharmed — every node that read the chain
+      rejects that block on sight — but the newcomer, which is the party this
+      whole construction exists to serve, is not.
+    </p>
+    <p>
+      Cairn does not take a ledger at the tip. It takes one from
+      <code>BURIAL = 1 024</code> blocks below it and validates every block in
+      between itself, checking every rule as any node does. A lie must
+      therefore be buried that deep, and to be that deep while still being the
+      heaviest chain on offer, its author had to out-mine everybody else for as
+      long as it took to build them. That is the assumption the chain already
+      rests on. The arrival stops being the weak part, and it stops being a
+      light client: what a newcomer ends on is a ledger it built, from a
+      starting point nobody could have written without doing the work.
+    </p>
+    <p>
+      The depth is the same as the deepest reorganisation a node accepts, so a
+      newcomer lands exactly where a node that was away and came back lands,
+      with the same ability to be moved off it by a heavier chain. What it
+      costs is the blocks in between, once, and that cost does not grow with
+      the chain: in thirty years it is still a thousand blocks.
+    </p>
+
+    <h3><span class="sub">7.4</span>Sampled verification</h3>
     <p>
       With those commitments, a newcomer holding only the tip can be handed a
       logarithmic sample of old headers, verify that each sits where it claims
@@ -602,6 +639,7 @@
       <div><span class="k">Median time past</span><span class="v">11 blocks</span></div>
       <div><span class="k">Maximum retarget</span><span class="v">factor 4</span></div>
       <div><span class="k">Maximum reorganisation depth</span><span class="v">1 024 blocks</span></div>
+      <div><span class="k">Burial before a ledger is taken</span><span class="v">1 024 blocks</span></div>
       <div><span class="k">Initial reward</span><span class="v">50 CAIRN</span></div>
       <div><span class="k">Halving interval</span><span class="v">1 051 200 blocks</span></div>
       <div><span class="k">Tail reward</span><span class="v">0.01 CAIRN, perpetual</span></div>

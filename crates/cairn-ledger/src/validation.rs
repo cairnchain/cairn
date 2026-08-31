@@ -76,6 +76,12 @@ pub struct ConsensusParams {
     pub halving_interval: u64,
     /// Notes the hot set holds before the oldest start falling to the cold set.
     pub hot_capacity: usize,
+    /// Blocks a handed over ledger must sit below the tip it belongs to.
+    ///
+    /// See [`crate::handover::BURIAL`] for what it buys. Here because it is a
+    /// consensus rule like any other: two nodes that disagreed about it would
+    /// disagree about which handovers are worth taking.
+    pub burial: u64,
     /// Seconds the retarget aims for between blocks.
     pub target_block_time: u64,
     /// Difficulty the first block carries, before any history exists.
@@ -155,6 +161,9 @@ impl ConsensusParams {
                 genesis_difficulty: 1 << 23,
                 target_block_time: 5,
                 hot_capacity: 64,
+                // A throwaway network reaches this in minutes rather than in
+                // most of a day, which is the whole point of having one.
+                burial: 32,
                 ..Self::testnet()
             }),
             _ => None,
@@ -186,6 +195,7 @@ impl ConsensusParams {
             tail_reward: TAIL_REWARD,
             halving_interval: emission::HALVING_INTERVAL,
             hot_capacity: DEFAULT_HOT_CAPACITY,
+            burial: crate::handover::BURIAL,
             target_block_time: DEFAULT_TARGET_BLOCK_TIME,
             genesis_difficulty: MIN_DIFFICULTY,
             max_transfers_per_block: 4096,
@@ -229,6 +239,14 @@ impl ConsensusParams {
     #[must_use]
     pub const fn with_hot_capacity(mut self, capacity: usize) -> Self {
         self.hot_capacity = capacity;
+        self
+    }
+
+    /// The same, for how deep a handed over ledger must sit. For tests, which
+    /// would otherwise have to mine a thousand blocks to reach one.
+    #[must_use]
+    pub const fn with_burial(mut self, blocks: u64) -> Self {
+        self.burial = blocks;
         self
     }
 }
