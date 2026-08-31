@@ -1186,8 +1186,25 @@ impl ChainStore {
         self.hold(id, block, total_work);
 
         if total_work <= self.total_work() {
-            // Ties keep the block already followed. Reorganising for no gain in
-            // work would let anyone churn the tip at no cost.
+            // Ties keep the block already followed, and this is a choice with
+            // a cost, so it is worth writing down rather than implying.
+            //
+            // Two miners finding a block at the same height is ordinary. It
+            // leaves two branches of exactly equal work, and two honest nodes
+            // that heard them in opposite orders sit on different tips until a
+            // heavier block settles it. Nothing is wrong with either node.
+            //
+            // Breaking the tie on the lower identifier would settle it at once
+            // and was tried. It costs more than it buys: a node catching up
+            // along a rival branch passes through equal work on the way and
+            // reorganises there, so every sync against a competitor does extra
+            // rewinding to reach the same place one block later anyway.
+            //
+            // So the split stands for one block interval and then resolves,
+            // which is what every chain of this shape does. What must not be
+            // said is that the order is total and identical everywhere: it is
+            // not, it is the order the blocks arrived in, and the papers now
+            // say so.
             return Ok(Accepted::SideBranch);
         }
         self.follow(id, now)
