@@ -15,23 +15,26 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/cairnchain/cairn"
 
+# No version on the internal ones. They are never published to a registry, so
+# a version here would only be a second place the number lives, and the
+# release is now cut from that number: two of them is two that can disagree.
 [workspace.dependencies]
-cairn-accumulator = { path = "crates/cairn-accumulator", version = "0.1.0" }
-cairn-chain = { path = "crates/cairn-chain", version = "0.1.0" }
-cairn-crypto = { path = "crates/cairn-crypto", version = "0.1.0" }
-cairn-explorer = { path = "crates/cairn-explorer", version = "0.1.0" }
-cairn-http = { path = "crates/cairn-http", version = "0.1.0" }
-cairn-ledger = { path = "crates/cairn-ledger", version = "0.1.0" }
-cairn-net = { path = "crates/cairn-net", version = "0.1.0" }
-cairn-node = { path = "crates/cairn-node", version = "0.1.0" }
-cairn-store = { path = "crates/cairn-store", version = "0.1.0" }
-cairn-primitives = { path = "crates/cairn-primitives", version = "0.1.0" }
+cairn-accumulator = { path = "crates/cairn-accumulator" }
+cairn-chain = { path = "crates/cairn-chain" }
+cairn-crypto = { path = "crates/cairn-crypto" }
+cairn-explorer = { path = "crates/cairn-explorer" }
+cairn-http = { path = "crates/cairn-http" }
+cairn-ledger = { path = "crates/cairn-ledger" }
+cairn-net = { path = "crates/cairn-net" }
+cairn-node = { path = "crates/cairn-node" }
+cairn-store = { path = "crates/cairn-store" }
+cairn-primitives = { path = "crates/cairn-primitives" }
 blake3 = { version = "1", default-features = false, features = ["std"] }
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc", "fast", "zeroize"] }
 getrandom = "0.3"

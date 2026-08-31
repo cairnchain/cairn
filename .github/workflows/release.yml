@@ -14,15 +14,21 @@
 # file, and in what each program prints. Every release keeps its own copy of
 # the files under its own tag, so an old one stays reachable for good.
 #
-# Run it by pushing a tag:
+# There is nothing to run. A release happens when the version in Cargo.toml
+# changes on the main branch, and that is the whole ceremony: the number is
+# where a version already lives, so making it also the thing that publishes
+# removes both a step somebody has to remember and the failure it invited —
+# a tag naming one version over programs that report another. The tag is made
+# here, from the number, so the two cannot disagree.
 #
-#     git tag -a v0.1.0 -m "..." && git push origin v0.1.0
+# The tag message is the commit that changed the number, which is where the
+# reason for a release is already written.
 
 name: release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
     inputs:
       version:
@@ -39,7 +45,47 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Whether this push publishes anything, and under what number.
+  #
+  # A push that did not change the version is an ordinary push and stops here.
+  # So is one whose version already has a release, which is what makes this
+  # safe to re-run: publishing is decided by what does not yet exist rather
+  # than by what just happened.
+  decide:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.look.outputs.release }}
+      version: ${{ steps.look.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - id: look
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "a dry run of ${{ inputs.version }}, publishing nothing"
+            exit 0
+          fi
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "v$version is already released; nothing to do"
+            exit 0
+          fi
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "v$version has no release yet, so this push is one"
+
   build:
+    needs: decide
+    # An ordinary push builds nothing here. The checks that run on every commit
+    # are a different file; this one exists to make what people download.
+    if: needs.decide.outputs.release == 'true' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
     strategy:
@@ -68,19 +114,6 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      # A tag that disagrees with the version in Cargo.toml produces programs
-      # that report one number while the release is named another. Cheaper to
-      # refuse here than to explain later.
-      - name: Check the tag against the version
-        if: github.event_name == 'push'
-        shell: bash
-        run: |
-          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "tag $GITHUB_REF_NAME does not match version $version in Cargo.toml" >&2
-            exit 1
-          fi
-
       - name: Install the toolchain this repository pins
         run: rustup show
 
@@ -98,7 +131,7 @@ jobs:
       - name: Gather what goes in the archive
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${{ needs.decide.outputs.version }}"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             version="${{ inputs.version }}"
           fi
@@ -137,7 +170,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: build
+    needs: [decide, build]
     runs-on: ubuntu-latest
     # The only job that writes anything: the release, and the attestation that
     # says which build produced it.
@@ -148,8 +181,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          # The tag message becomes the release notes, so the tag has to
-          # arrive with its annotation rather than as a bare ref.
+          # The commit that changed the version becomes the release notes and
+          # the tag's message, so the whole history has to be here.
           fetch-depth: 0
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -170,25 +203,37 @@ jobs:
       #   gh attestation verify <file> --repo ${{ github.repository }}
       # Recorded in a public transparency log, so only for a real release.
       - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
-        if: github.event_name == 'push'
+        if: needs.decide.outputs.release == 'true'
         with:
           subject-path: "downloads/*.tar.gz, downloads/*.zip"
 
-      # What the tag says, followed by the same closing note every time: how
-      # to check these files without having to believe anyone.
+      # The commit that changed the version, followed by the same closing note
+      # every time: how to check these files without having to believe anyone.
       - name: Write the release notes
         run: |
-          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
+          git log -1 --format='%B' > notes.md
           cat deploy/RELEASE_FOOTER.md >> notes.md
           cat notes.md
 
+      # Made here rather than by hand, from the number the release is named
+      # after, so a tag cannot name one version over programs reporting
+      # another. Annotated with the commit that asked for the release.
+      - name: Tag it
+        if: needs.decide.outputs.release == 'true'
+        run: |
+          version="${{ needs.decide.outputs.version }}"
+          git -c user.name="cairn releases" -c user.email="releases@cairnchain.org" \
+            tag -a "v$version" -F notes.md
+          git push origin "v$version"
+
       - name: Publish
-        if: github.event_name == 'push'
+        if: needs.decide.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          version="${{ needs.decide.outputs.version }}"
+          gh release create "v$version" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "$GITHUB_REF_NAME" \
+            --title "v$version" \
             --notes-file notes.md \
             downloads/*
