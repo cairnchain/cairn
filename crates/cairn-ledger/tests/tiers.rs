@@ -344,7 +344,7 @@ fn offering_a_proof_for_a_note_still_in_the_hot_set_is_refused() {
 }
 
 #[test]
-fn a_proof_taken_a_few_blocks_ago_is_still_good() {
+fn a_proof_that_went_stale_is_refused_and_the_same_spend_goes_through_refreshed() {
     let params = params();
     let miner = wallet(1);
     let mut state = LedgerState::archiving();
@@ -353,14 +353,42 @@ fn a_proof_taken_a_few_blocks_ago_is_still_good() {
     let (first, first_note) = notes[0];
     let (second, second_note) = notes[1];
 
-    // Taken now, and the cold set moves before it is used. A spender cannot
-    // be expected to be exactly at the tip: on a busy chain a block lands
-    // while the transfer is still being written.
+    // Written now, and the cold set moves before it is used, which on a busy
+    // chain is ordinary: a block lands while the transfer is being written.
     let earlier = spend_cold(&state, &params, first, first_note, &miner, &wallet(2));
+    let again = earlier.clone();
     let moving = spend_cold(&state, &params, second, second_note, &miner, &wallet(3));
     mine(&mut state, &params, &miner, vec![moving]);
 
-    mine(&mut state, &params, &miner, vec![earlier]);
+    // It is refused, and refused is the point. Accepting it and then quietly
+    // failing to take the note out is how one note paid two people.
+    let coinbase = CoinbaseTransaction::new(
+        state.next_height().unwrap(),
+        vec![Note::new(params.initial_reward, miner.public_key())],
+    );
+    let refused = assemble_block(
+        &state,
+        coinbase,
+        vec![earlier],
+        &params,
+        1_000 + state.next_height().unwrap() * 600,
+        0,
+    );
+    assert!(
+        refused.is_err(),
+        "a proof against a set that has moved buys nothing"
+    );
+
+    // Taken again against the set as it stands, the same spend goes through.
+    // Nothing about the transfer changed but its witness, and a witness is not
+    // part of what a transfer is: it has the same identifier it always had.
+    let refreshed = spend_cold(&state, &params, first, first_note, &miner, &wallet(2));
+    assert_eq!(
+        refreshed.id(),
+        again.id(),
+        "the same transfer, because a witness is not part of one"
+    );
+    mine(&mut state, &params, &miner, vec![refreshed]);
 }
 
 #[test]

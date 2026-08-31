@@ -310,28 +310,30 @@ impl ColdTier {
         self.now.locate(id, note)
     }
 
-    /// Whether the proof holds now, or held recently enough and the note has
-    /// not been spent since.
+    /// Whether the proof holds against the set as it stands.
     ///
-    /// Walking backwards and gathering what each block took out is what stops
-    /// an old proof from resurrecting a note that has already been spent.
+    /// Only as it stands. This once also accepted a proof matching any of the
+    /// last thirty two states, so that a spender who took one a few blocks ago
+    /// was not punished for the wait. Accepting it was half a rule: the step
+    /// that takes the note out folds the empty leaf up the path the proof
+    /// carries, and an old path does not reach the root that is there now, so
+    /// the removal quietly did nothing and said so through a value nobody
+    /// read. The note stayed, and could be spent again. Money out of nothing,
+    /// agreed by every node, so nothing forked and nothing complained.
+    ///
+    /// The half that was missing cannot be written cheaply. Rebuilding an old
+    /// path into a current one means holding what changed in between, and a
+    /// node holds sixty four hashes: carrying thirty two blocks of the cold
+    /// set's movements as committed state would grow the one thing this design
+    /// exists to bound, to buy a convenience.
+    ///
+    /// And it is only a convenience. A transfer's identity leaves out its
+    /// witness on purpose, precisely so a proof can be refreshed without
+    /// making it a different transfer. One that waited too long is the same
+    /// transfer with a newer proof, offered again — which costs whoever holds
+    /// it nothing, and costs everybody else nothing to check.
     pub fn verify(&self, position: u64, leaf: Hash32, proof: &ForestProof) -> bool {
-        if self.now.verify(position, leaf, proof) {
-            return true;
-        }
-        // Walking backwards, a block that emptied this place is reached before
-        // any state that still showed it. Once past that block every older
-        // state describes a note that has already been spent, so the search
-        // stops rather than accepting one.
-        for bygone in self.bygone.iter().rev() {
-            if bygone.emptied.contains(&position) {
-                return false;
-            }
-            if bygone.roots.verify(position, leaf, proof) {
-                return true;
-            }
-        }
-        false
+        self.now.verify(position, leaf, proof)
     }
 
     /// Files the current state away before a block moves it, and says what fell
@@ -565,7 +567,7 @@ fn replay(
     cold: &mut ColdSet,
     transition: &StateTransition,
     height: u64,
-) -> Vec<(NoteId, u64)> {
+) -> Option<Vec<(NoteId, u64)>> {
     for id in &transition.spent_hot {
         hot_tree.remove(note_key(id));
     }
@@ -580,7 +582,14 @@ fn replay(
             )
         })
         .collect();
-    cold.remove_batch(&removals);
+    // Answered rather than dropped. Every proof here was checked against these
+    // same roots a moment ago, so a refusal means this node's own state and its
+    // own validation disagree, and going on would take the note's value out of
+    // nothing. Dropping this answer is what let that happen: the removal did
+    // nothing, said so, and nobody was listening.
+    if !cold.remove_batch(&removals) {
+        return None;
+    }
     for (id, note) in &transition.created {
         hot_tree.insert(note_key(id), hot_value(note, height));
     }
@@ -601,7 +610,7 @@ fn replay(
     for spend in &transition.spent_cold {
         cold.unwatch(spend.position);
     }
-    fallen
+    Some(fallen)
 }
 
 /// The unspent notes, split across the two tiers.
@@ -1000,10 +1009,10 @@ impl LedgerState {
     /// persistent, and the cold side only ever needs its roots, because
     /// appending takes nothing else and removing takes a proof the block
     /// already carries.
-    pub fn project(&self, transition: &StateTransition, height: u64) -> Hash32 {
+    pub fn project(&self, transition: &StateTransition, height: u64) -> Option<Hash32> {
         let mut hot_tree = self.hot_tree.clone();
         let mut cold = ColdSet::Roots(self.cold.now.snapshot());
-        let fallen = replay(&mut hot_tree, &mut cold, transition, height);
+        let fallen = replay(&mut hot_tree, &mut cold, transition, height)?;
         // The same window applying this block would leave behind, worked out
         // the same way, so a block's projection and its application cannot
         // disagree about what is spendable without a proof.
@@ -1020,14 +1029,14 @@ impl LedgerState {
                 .map(|spend| spend.position)
                 .collect(),
         );
-        compose_state_root(
+        Some(compose_state_root(
             hot_tree.root(),
             hot_tree.len() as u64,
             cold.commitment(),
             cold.len(),
             compose_grace_root(&grace),
             compose_bygone_root(&bygone),
-        )
+        ))
     }
 
     /// Applies an already validated transition, returning its inverse.
@@ -1066,8 +1075,12 @@ impl LedgerState {
             }
         }
 
+        // Applying reaches here only after the same transition projected, so a
+        // refusal is this node disagreeing with itself. Nothing is minted
+        // either way: the notes simply stay where they are, and the root that
+        // comes out will not match the one the block claims.
         let fallen = replay(&mut self.hot_tree, &mut self.cold.now, transition, height);
-        let recently_fallen = fallen;
+        let recently_fallen = fallen.unwrap_or_default();
         for (id, position) in &recently_fallen {
             if let Some((_, note)) = transition.evicted.iter().find(|(other, _)| other == id) {
                 if self.watching.contains(&note.owner) {
@@ -1262,7 +1275,7 @@ mod tests {
     }
 
     #[test]
-    fn a_proof_is_accepted_while_it_is_recent_and_not_after() {
+    fn a_proof_is_worth_what_it_is_worth_now() {
         let mut tier = ColdTier::archiving();
         for index in 0..8u64 {
             tier.now.add(leaf(index));
@@ -1277,22 +1290,15 @@ mod tests {
             tier.now.add(leaf(index));
         }
         assert!(
-            !tier.now.verify(0, leaf(0), &proof),
-            "stale against the roots as they are"
-        );
-        assert!(
-            tier.verify(0, leaf(0), &proof),
-            "and still good, because it is recent"
+            !tier.verify(0, leaf(0), &proof),
+            "and it is refused, rather than accepted and then not applied"
         );
 
-        // Far enough back and it is no longer worth keeping around.
-        for _ in 0..PROOF_WINDOW {
-            tier.remember(Vec::new());
-        }
-        assert!(
-            !tier.verify(0, leaf(0), &proof),
-            "past the window it is refused"
-        );
+        // Taken again, it is good again. That is the whole cost of the rule:
+        // a proof is refreshed by whoever holds it, and a transfer's identity
+        // does not include its witness, so nothing else about the spend moves.
+        let fresh = tier.prove(0).expect("an archivist can prove it again");
+        assert!(tier.verify(0, leaf(0), &fresh));
     }
 
     #[test]

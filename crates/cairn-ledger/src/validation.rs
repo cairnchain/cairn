@@ -332,6 +332,14 @@ pub enum BlockError {
     TransactionsRootMismatch { expected: Hash32, found: Hash32 },
     #[error("header commits to state root {found}, the block produces {expected}")]
     StateRootMismatch { expected: Hash32, found: Hash32 },
+    /// The block cannot be applied to the set it was checked against.
+    ///
+    /// A note it spends is not where its proof said, so taking it out would
+    /// take nothing out. The checks before this one already refuse that, so
+    /// reaching here means this node disagrees with itself; it is not a thing
+    /// a peer can cause, and it is refused rather than carried past.
+    #[error("a note this block spends is not where its proof places it")]
+    NoteNotWhereProved,
     #[error("header commits to history {found}, this chain's headers produce {expected}")]
     HistoryMismatch { expected: Hash32, found: Hash32 },
     #[error("header claims {found} total work, its parent and difficulty give {expected}")]
@@ -742,7 +750,14 @@ pub fn evaluate_block_body(
         created,
         evicted,
     };
-    let state_root = state.project(&transition, height);
+    // A projection that cannot be made is a block that cannot be applied. It
+    // means a note this block spends is not where its proof said, which the
+    // checks above already refused — so reaching here is this node disagreeing
+    // with itself, and the only safe answer is to refuse the block rather than
+    // to carry on with a root that does not describe anything.
+    let state_root = state
+        .project(&transition, height)
+        .ok_or(BlockError::NoteNotWhereProved)?;
 
     Ok(BlockEffect {
         transition,
