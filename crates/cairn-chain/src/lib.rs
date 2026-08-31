@@ -544,14 +544,25 @@ impl ChainStore {
     ///
     /// Only for a chain that was told where to read them back. Without that
     /// this does nothing, because it would be throwing them away.
-    pub fn release_bodies(&mut self, written: u64) {
+    pub fn release_bodies(&mut self, held_from: u64, written: u64) {
         if self.bodies.is_none() {
             return;
         }
         let Some(tip) = self.height() else { return };
         let keep_from = tip.saturating_sub(WARM_BODIES);
         let below = written.min(keep_from);
-        for height in self.undo_from..below {
+        // Never below where the log begins. A body is in memory or on disk and
+        // never in neither, and what the log holds at its front is whatever an
+        // operator's budget left there. Letting go of a body below that leaves
+        // a reorganisation that fails partway with nowhere to read back the
+        // branch it was restoring, and a node on neither branch.
+        //
+        // So the budget trades disk against memory rather than against being
+        // able to put a branch back: an operator who keeps almost nothing gets
+        // a node holding its undo window in memory, which is what it did before
+        // any of this was written down.
+        let from = self.undo_from.max(held_from);
+        for height in from..below {
             let Some(id) = self.branch.id_at(height) else {
                 continue;
             };

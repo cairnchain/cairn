@@ -115,6 +115,14 @@ const COST_CHAIN: u32 = 8;
 const COST_TRANSFER: u32 = 4;
 const COST_BLOCK: u32 = 8;
 const COST_PER_BLOCK_SERVED: u32 = 1;
+/// What one header served costs, which is one read off the header log.
+///
+/// A header is smaller than a block and cheaper to send, but the disk does not
+/// care: both are a seek and a read. Charging the ask rather than what it
+/// serves is what let one seventeen byte request buy five hundred and twelve
+/// reads, which is the whole of the difference between a limit that counts
+/// what answering costs and one that counts messages.
+const COST_PER_HEADER_SERVED: u32 = 1;
 /// What one piece of a join answer costs to build and send.
 ///
 /// An eighth of a window, so a newcomer collecting twenty two pieces takes
@@ -409,11 +417,27 @@ pub const BATCH_PATIENCE: u64 = 60;
 /// taking whichever finishes.
 pub const JOIN_RATHER_THAN_READ: u64 = 1_024;
 
+/// Heights one peer may have outstanding at any moment.
+///
+/// One batch, which is what this node asks for and then waits on: it does not
+/// ask again before the last answer arrived. A set that grew past this grew
+/// because somebody was growing it, and it was unbounded. Two messages a peer
+/// pays one unit each for — a chain it says it has, a block it says it found —
+/// both extended it and both pushed back the only thing that emptied it, so a
+/// peer that kept talking kept the set and kept adding to it. A thousand of
+/// them, a fraction of one allowance window, held a hundred and twenty eight
+/// thousand heights.
+const MAX_AWAITING: usize = MAX_REQUESTED;
+
 /// Asks for a stretch of a peer's branch, starting at `from`.
 fn request_range(peer: &mut PeerState, from: u64, count: u64, now: u64) -> Reaction {
+    let room = MAX_AWAITING.saturating_sub(peer.awaiting.len());
     let wanted = usize::try_from(count)
         .unwrap_or(MAX_REQUESTED)
-        .min(MAX_REQUESTED);
+        .min(MAX_REQUESTED)
+        .min(room);
+    // Nothing asked, so nothing is written down and the clock that empties the
+    // set is not pushed back. A peer with a batch outstanding waits for it.
     if wanted == 0 {
         return Reaction::idle();
     }
@@ -435,11 +459,12 @@ fn request_announced(
     ids: &[Located],
     now: u64,
 ) -> Reaction {
+    let room = MAX_AWAITING.saturating_sub(peer.awaiting.len());
     let wanted: Vec<u64> = ids
         .iter()
         .filter(|entry| !chain.contains(&entry.id))
         .map(|entry| entry.height)
-        .take(MAX_REQUESTED)
+        .take(MAX_REQUESTED.min(room))
         .collect();
     if wanted.is_empty() {
         return follow_up(chain, peer, now);
@@ -551,6 +576,10 @@ pub fn on_message(
         Message::GetBlocks(ids) => {
             let wanted = u32::try_from(ids.len().min(MAX_REQUESTED)).unwrap_or(u32::MAX);
             wanted.saturating_mul(COST_PER_BLOCK_SERVED)
+        }
+        Message::GetHeaders { count, .. } => {
+            let wanted = u32::try_from((*count).min(MAX_HEADERS as u64)).unwrap_or(u32::MAX);
+            wanted.saturating_mul(COST_PER_HEADER_SERVED)
         }
         _ => COST_TRIVIAL,
     };

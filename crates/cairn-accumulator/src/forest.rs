@@ -428,6 +428,19 @@ impl Forest {
     /// The proof comes from whoever is spending. Nobody else has a reason to
     /// have kept it, and nobody else needs to.
     pub fn remove(&mut self, position: u64, leaf: Hash32, proof: &ForestProof) -> bool {
+        // An emptied place proves itself: after a removal the root above it is
+        // exactly what folding the empty leaf gives, so a second removal of the
+        // same place verifies and would count a leaf that is not there. The
+        // roots do not move, so nothing shows it — only the count does, and the
+        // count is committed to. Refused here rather than trusted to the
+        // caller, which is where the two kinds of node were told to dedup and
+        // only one was.
+        //
+        // Nothing legitimate presents it: a fallen note's leaf is taken over
+        // its identifier and its contents, never over nothing.
+        if leaf == empty_leaf() {
+            return false;
+        }
         if !self.verify(position, leaf, proof) {
             return false;
         }

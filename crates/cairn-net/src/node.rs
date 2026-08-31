@@ -190,6 +190,12 @@ struct Peer {
     host: Option<IpAddr>,
     /// Where this peer says it listens, once it has said so.
     advertised: Option<SocketAddr>,
+    /// Whether this node opened the connection, rather than answering one.
+    ///
+    /// A connection somebody else opened is a connection somebody else chose,
+    /// and counting it as one of this node's own is how a stranger decides who
+    /// it talks to.
+    dialled: bool,
 }
 
 struct Shared {
@@ -255,6 +261,34 @@ struct Shared {
     /// why it stopped. Running on would mean following the chain of whoever
     /// had not updated either.
     outdated: Mutex<Option<Outdated>>,
+}
+
+/// The height a block log should be cut back to, keeping everything above it.
+///
+/// Two floors, and the lower of them wins.
+///
+/// The first is the window the chain can still undo. The chain lets go of
+/// block bodies from memory in the belief that this log holds them, so cutting
+/// into that window leaves a reorganisation that fails partway with nowhere to
+/// read back the branch it was restoring, and a node on neither branch.
+/// Whatever an operator sets, this much is not theirs to drop.
+///
+/// The second is the budget they did set. What that buys is other people: a
+/// peer a little behind reads blocks here rather than being handed a whole
+/// ledger. Below it, blocks go.
+///
+/// This once dropped everything below the ledger, which is to say everything,
+/// because the ledger stands for the tip. A node then kept nothing on disk
+/// however large its budget, could answer nobody who was behind, and had
+/// quietly taken away the floor its own released bodies stand on.
+///
+/// The budget is met on an average rather than by measuring each block. It is
+/// an operator's preference about disk, not a rule anything depends on, and
+/// walking the whole log to spend it exactly would cost more than it saves.
+fn cut_for(tip: u64, held: u64, bytes: u64, keep: u64) -> u64 {
+    let average = bytes.checked_div(held).unwrap_or(0).max(1);
+    let affordable = keep.checked_div(average).unwrap_or(0);
+    tip.saturating_add(1).saturating_sub(affordable)
 }
 
 impl Shared {
@@ -337,7 +371,7 @@ impl Shared {
         let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(log) = log.as_mut() {
             write_branch(log, accepted, chain);
-            chain.release_bodies(log.blocks.reaches());
+            chain.release_bodies(log.blocks.first_height(), log.blocks.reaches());
         }
     }
 
@@ -349,8 +383,8 @@ impl Shared {
     /// other order would leave a node with neither the blocks nor the ledger
     /// that replaces them.
     fn trim_history(&self) {
+        let keep = self.keep_bytes.load(Ordering::Relaxed);
         let over = {
-            let keep = self.keep_bytes.load(Ordering::Relaxed);
             let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
             log.as_ref()
                 .is_some_and(|store| store.blocks.bytes() > keep)
@@ -376,16 +410,17 @@ impl Shared {
 
         let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(log) = log.as_mut() {
-            // Everything below the ledger, which is everything the ledger now
-            // stands for. The block at that height stays: the ledger is what
-            // the chain looked like once it had been applied, so replaying
-            // starts at the one after it.
-            //
             // A log that no longer reaches that height was rewritten by a
-            // reorganisation between the two checks above, and emptying it
-            // here would throw away blocks this node still holds.
-            if log.blocks.holds(at.height) {
-                let _ = log.blocks.keep_from(at.height.saturating_add(1));
+            // reorganisation between the two checks above, and dropping
+            // against it would throw away blocks this node still holds.
+            if !log.blocks.holds(at.height) {
+                return;
+            }
+
+            let held = u64::try_from(log.blocks.len()).unwrap_or(u64::MAX);
+            let cut = cut_for(at.height, held, log.blocks.bytes(), keep);
+            if cut > log.blocks.first_height() {
+                let _ = log.blocks.keep_from(cut);
             }
         }
     }
@@ -2022,7 +2057,7 @@ fn decide(
             // Bodies now on disk, and far enough back that no ordinary
             // reorganisation reads them. Said after writing, never before: a
             // body let go of before it was written is a body nobody has.
-            chain.release_bodies(log.blocks.reaches());
+            chain.release_bodies(log.blocks.first_height(), log.blocks.reaches());
         }
     }
     let passing: Vec<Transfer> = reaction
@@ -2141,7 +2176,15 @@ fn dial_from_book(shared: &Arc<Shared>, now: u64) {
         let peers = shared.peers();
         let connected: HashSet<SocketAddr> =
             peers.values().filter_map(|peer| peer.advertised).collect();
-        (connected, peers.len())
+        // Only the ones this node went out and opened. A connection somebody
+        // else opened does not tell this node anything about the network: the
+        // stranger chose it. Counting those was enough to stop a node dialling
+        // at all — hold eight connections open and it never looks for anybody
+        // again, and then sees the world through whoever is holding them.
+        (
+            connected,
+            peers.values().filter(|peer| peer.dialled).count(),
+        )
     };
     let wanted = TARGET_PEERS.saturating_sub(count);
     if wanted == 0 {
@@ -2241,6 +2284,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, initiator: bool) {
         id,
         Peer {
             outbound: outbound.clone(),
+            dialled: initiator,
             stream: shutdown_end,
             host: remote,
             advertised: None,
@@ -2584,5 +2628,36 @@ mod tests {
             2,
             "both ends agree"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod trimming {
+    use super::cut_for;
+
+    /// What the budget buys, which is other people: a peer a little behind
+    /// reads blocks here rather than being handed a whole ledger.
+    #[test]
+    fn a_budget_keeps_roughly_what_it_pays_for() {
+        // Ten thousand blocks of a hundred thousand bytes, and a budget for a
+        // fifth of them.
+        let cut = cut_for(10_000, 10_000, 10_000 * 100_000, 2_000 * 100_000);
+        assert_eq!(cut, 8_001, "the newest two thousand are kept");
+    }
+
+    /// The defect this replaced. The ledger stands for the tip, so cutting
+    /// below the ledger cut below the tip, which is everything: a node kept
+    /// nothing on disk however large its budget, and could answer nobody who
+    /// was behind.
+    #[test]
+    fn a_large_budget_drops_nothing() {
+        assert_eq!(cut_for(500, 500, 500 * 100_000, u64::MAX), 0);
+    }
+
+    /// An empty log has no average to take, and must not divide by it.
+    #[test]
+    fn nothing_held_is_not_a_division_by_nothing() {
+        assert_eq!(cut_for(0, 0, 0, 1_000), 0);
     }
 }
