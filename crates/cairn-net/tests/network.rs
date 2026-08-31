@@ -1661,10 +1661,9 @@ fn a_node_looks_up_the_name_it_starts_from_while_it_is_running() {
 
 /// A newcomer ends on the heaviest chain offered, whoever answered first.
 ///
-/// **This does not pass, and it is here because it does not.** It is the
-/// shape of a defect an outside design review found, written down so it
-/// cannot be mislaid, and the honest record of a repair that went only part
-/// of the way.
+/// The shape of a defect an outside design review found, written down while
+/// it was open so it could not be mislaid, and kept now that it is closed
+/// because it is the one choice a node never gets to remake.
 ///
 /// Weighing shows that one chain's work was really done. It does not show
 /// that no heavier chain exists, and the two were treated as the same thing.
@@ -1672,15 +1671,14 @@ fn a_node_looks_up_the_name_it_starts_from_while_it_is_running() {
 /// share can mine a slow, entirely self-consistent chain that proves itself
 /// perfectly well; it never out-mines anybody, it only answers first.
 ///
-/// Refusing to adopt a ledger while somebody claims more work — which is now
-/// done — turns a forged ledger into a slow honest read. It does not fix
-/// this, because the slow read commits to the lighter chain just as firmly:
-/// measured, the newcomer settles on the light tip and stays there. Past
-/// `MAX_REORG_DEPTH` a fork choice is final, so **the first chain a node
-/// commits to is the one it keeps, whether it joined or read**. The decision
-/// has to be made before either begins, and that is a change to how a node
-/// with no chain chooses a peer at all — not to the join alone.
-#[ignore = "the defect it describes is open: see the doc comment"]
+/// Refusing to adopt a ledger while somebody claims more work was the first
+/// repair, and it only turned a forged ledger into a slow honest read of the
+/// same chain, which commits just as firmly: past `MAX_REORG_DEPTH` a fork
+/// choice is final, so the first chain a node commits to is the one it
+/// keeps, whether it joined or read. What closes it is that a node with no
+/// chain no longer follows anybody on a handshake. It hears its peers out,
+/// asks the one claiming the most work to show it, and commits only to a
+/// chain at least as heavy as every claim still standing.
 #[test]
 fn a_newcomer_refuses_a_chain_lighter_than_what_it_has_been_told_exists() {
     let params = params();

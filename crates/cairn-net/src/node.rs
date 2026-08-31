@@ -39,6 +39,7 @@ use cairn_primitives::Hash32;
 use cairn_store::{BlockLog, DirectoryLock, HeaderLog, HeaderTree, StoreError, HANDED_LEDGER};
 
 use crate::book::AddressBook;
+use crate::choosing::{self, Approach, Chooser, JoinProgress};
 use crate::joining::{Collecting, Joined, Progress};
 use crate::message::{Joining, Message, JOIN_PART_BYTES, MAX_CHAIN, MAX_HEADERS};
 use crate::refusal::{can_be_refused, Refusals};
@@ -213,15 +214,15 @@ struct Shared {
     /// cycle to break.
     log: Arc<Mutex<Option<Store>>>,
     book: Mutex<AddressBook>,
-    /// The most work any peer has ever claimed, backed or not.
+    /// The one choice a node with no chain makes about whom to follow.
     ///
-    /// A claim is not proof, and this is not treated as one. What it is for is
-    /// knowing when *not* to believe a chain that has proved itself: weighing
-    /// shows that one chain's work is real, never that it is the most. A
-    /// newcomer that adopted the first chain to prove itself would be taking
-    /// the first answer rather than the best, and the first answer is the one
-    /// an attacker races to give.
-    best_claim: Mutex<u128>,
+    /// A claim is not proof, and nothing here treats one as proof. What the
+    /// claims are for is knowing when *not* to believe a chain that has
+    /// proved itself: weighing shows that one chain's work is real, never
+    /// that it is the most. A newcomer that adopted the first chain to prove
+    /// itself would be taking the first answer rather than the best, and the
+    /// first answer is the one an attacker races to give.
+    choosing: Mutex<Chooser>,
     /// Names this node was told to start from, kept as names.
     ///
     /// A name is looked up again while the book holds no seed at all, because
@@ -353,14 +354,17 @@ impl Shared {
         self.book.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Notes what a peer says it has, and answers with the most seen so far.
-    fn claimed(&self, work: u128) -> u128 {
-        let mut best = self
-            .best_claim
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        *best = (*best).max(work);
-        *best
+    fn choosing(&self) -> MutexGuard<'_, Chooser> {
+        self.choosing.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Hands `message` to one peer, if it is still there.
+    ///
+    /// Queued and never waited on, for the same reason a broadcast is.
+    fn send_to(&self, id: PeerId, message: Message) {
+        if let Some(peer) = self.peers().get(&id) {
+            let _ = peer.outbound.try_send(message);
+        }
     }
 
     fn seed_names(&self) -> MutexGuard<'_, Vec<String>> {
@@ -863,7 +867,7 @@ impl Node {
             chain: Mutex::new(chain),
             log: Arc::new(Mutex::new(log)),
             book: Mutex::new(book),
-            best_claim: Mutex::new(0),
+            choosing: Mutex::new(Chooser::new()),
             seed_names: Mutex::new(Vec::new()),
             names_looked_up_at: AtomicU64::new(0),
             directory,
@@ -1138,7 +1142,12 @@ enum Taken {
 }
 
 /// Hands a message to the join collector if that is what it is.
-fn join_piece(shared: &Arc<Shared>, message: Message, outbound: &SyncSender<Message>) -> Taken {
+fn join_piece(
+    shared: &Arc<Shared>,
+    from: PeerId,
+    message: Message,
+    outbound: &SyncSender<Message>,
+) -> Taken {
     let Message::JoinPart {
         what,
         at,
@@ -1149,7 +1158,14 @@ fn join_piece(shared: &Arc<Shared>, message: Message, outbound: &SyncSender<Mess
     else {
         return Taken::Other(message);
     };
-    let Some(next) = take_join_part(shared, what, at, part, parts, bytes) else {
+    // Only the peer the node chose to ask is collected from. Anybody may
+    // send a piece, and there is one collection: before this check, a piece
+    // from somebody else landed in it, did not fit, and tore down an honest
+    // exchange at the cost of one message.
+    if !shared.choosing().asked_join(from) {
+        return Taken::Handled;
+    }
+    let Some(next) = take_join_part(shared, from, what, at, part, parts, bytes) else {
         return Taken::Handled;
     };
     if outbound.try_send(next).is_err() {
@@ -1166,10 +1182,11 @@ fn join_piece(shared: &Arc<Shared>, message: Message, outbound: &SyncSender<Mess
 /// nothing and a header commits to the whole or to none of it.
 ///
 /// Anything that does not check out ends the attempt rather than being argued
-/// with. There is another peer, and a node with no chain has nothing to lose
-/// by starting again.
+/// with, and tells the chooser, which stops counting the claim and asks the
+/// next claimant on its own round.
 fn take_join_part(
     shared: &Arc<Shared>,
+    from: PeerId,
     what: Joining,
     at: Hash32,
     part: u32,
@@ -1195,7 +1212,7 @@ fn take_join_part(
         // The first piece of the weighing, which is where a join starts.
         Progress::Idle => {
             let Some(started) = Collecting::started(what, at, part, parts, bytes, now) else {
-                return Some(give_up(&mut joining, shared));
+                return fail_attempt(&mut joining, shared, from, now);
             };
             step(&mut joining, started, None)
         }
@@ -1204,7 +1221,7 @@ fn take_join_part(
         // chain that was weighed.
         Progress::Weighed { tip, .. } => {
             let Some(started) = Collecting::started(what, at, part, parts, bytes, now) else {
-                return Some(give_up(&mut joining, shared));
+                return fail_attempt(&mut joining, shared, from, now);
             };
             step(&mut joining, started, Some(tip))
         }
@@ -1212,7 +1229,7 @@ fn take_join_part(
             if !collecting.take(what, at, part, bytes, now) {
                 // The pieces held cannot be completed, so the attempt is
                 // dropped and this node falls back to reading the chain.
-                return Some(give_up(&mut joining, shared));
+                return fail_attempt(&mut joining, shared, from, now);
             }
             step(&mut joining, collecting, None)
         }
@@ -1221,7 +1238,7 @@ fn take_join_part(
             mut collecting,
         } => {
             if !collecting.take(what, at, part, bytes, now) {
-                return Some(give_up(&mut joining, shared));
+                return fail_attempt(&mut joining, shared, from, now);
             }
             step(&mut joining, collecting, Some(tip))
         }
@@ -1236,12 +1253,12 @@ fn take_join_part(
                 .ok()
                 .and_then(|start| Some((check_start(&start, SAMPLES).ok()?, start.tip)));
             let Some((shown, tip)) = weighed else {
-                return Some(give_up(&mut joining, shared));
+                return fail_attempt(&mut joining, shared, from, now);
             };
 
             // What weighing settles is that *this* chain's work was really
             // done. It does not settle that no heavier chain exists, and the
-            // two were treated as the same thing here — which is the whole of
+            // two were treated as the same thing here, which is the whole of
             // what a newcomer had to get right.
             //
             // Difficulty follows whatever hashrate is present, so a forger
@@ -1249,12 +1266,16 @@ fn take_join_part(
             // chain for weeks and have it prove itself. It never out-mines
             // anybody. It only has to answer first.
             //
-            // So a chain that proves itself is adopted only when nobody is
-            // claiming more. Somebody claiming more may be lying, and then
-            // this costs a slow start rather than a wrong one: reading the
-            // chain is always available and cannot be captured.
-            if shown.total_work < shared.claimed(0) {
-                return Some(give_up(&mut joining, shared));
+            // So the chooser is told what was shown, and a chain that proves
+            // itself goes forward only while nobody credible claims more.
+            // When somebody does, this attempt ends and that somebody is
+            // asked to show it, which costs a slow start rather than a wrong
+            // one. The peer here did nothing wrong and its showing is kept:
+            // if the heavier claim cannot be shown, this chain is the one
+            // that comes back.
+            if !shared.choosing().shown(from, shown.total_work, now) {
+                *joining = Progress::Idle;
+                return None;
             }
 
             *joining = Progress::Weighed { tip, since: now };
@@ -1264,10 +1285,20 @@ fn take_join_part(
             })
         }
         Joining::Ledger => {
-            let expected = match &*joining {
-                Progress::Fetching { tip, .. } | Progress::Weighed { tip, .. } => tip.id(),
+            let (expected, weighed_work) = match &*joining {
+                Progress::Fetching { tip, .. } | Progress::Weighed { tip, .. } => {
+                    (tip.id(), tip.total_work)
+                }
                 _ => return None,
             };
+            // The last look before the one commitment this node gets to
+            // make. A heavier claim can have arrived while the ledger was
+            // crossing, and adopting past it would be taking the best answer
+            // so far while a better one is said to exist.
+            if !shared.choosing().allows(from, weighed_work, now) {
+                *joining = Progress::Idle;
+                return None;
+            }
             let landed = Handover::decode(&whole)
                 .ok()
                 // The ledger has to belong to the chain that was weighed. A
@@ -1295,7 +1326,7 @@ fn take_join_part(
                     Some(())
                 });
             if landed.is_none() {
-                return Some(give_up(&mut joining, shared));
+                return fail_attempt(&mut joining, shared, from, now);
             }
             *joining = Progress::Landed;
             // A ledger arrives from below the tip on purpose, so landing one
@@ -1310,16 +1341,23 @@ fn take_join_part(
     }
 }
 
-/// Abandons a join and asks for the chain the long way instead.
+/// Ends a join attempt whose answer does not add up, and says so.
 ///
-/// A node that asked to be handed a ledger and did not get one still has to
-/// end up on the chain. Nothing about a failed handover says the peer is at
-/// fault, so it is asked the ordinary question rather than dropped.
-fn give_up(joining: &mut Progress, shared: &Arc<Shared>) -> Message {
+/// This used to fall back to reading the chain from the same peer, which
+/// quietly committed to whatever that peer held: reading a chain past the
+/// reorganisation limit is as final as being handed its ledger. Now the
+/// claim stops counting and the chooser asks the next claimant on its own
+/// round, so a failed answer costs its owner the exchange rather than
+/// costing this node its choice.
+fn fail_attempt(
+    joining: &mut Progress,
+    shared: &Arc<Shared>,
+    from: PeerId,
+    now: u64,
+) -> Option<Message> {
+    shared.choosing().failed(from, now);
     *joining = Progress::Idle;
-    Message::GetChain {
-        locator: shared.chain().locator(),
-    }
+    None
 }
 
 /// Files a collection back where it belongs, and says what is still missing.
@@ -1997,7 +2035,7 @@ fn maintenance_loop(shared: &Arc<Shared>) {
         if let Some(asking) = shared.wants_headers() {
             shared.broadcast(None, &asking);
         }
-        abandon_stalled_join(shared, now);
+        drive_choosing(shared, now);
         shared.refusals().forget_expired(now);
     }
 }
@@ -2140,12 +2178,6 @@ fn decide(
     };
     let reaction = on_message(&mut local, peer, message, unix_now());
 
-    // What this peer says it has, which a join has to know before it believes
-    // any one answer. Recorded whether or not it was shown: the point of it is
-    // that somebody claims more than what has been proved, which is a reason
-    // to keep asking rather than to adopt.
-    shared.claimed(peer.total_work);
-
     // Written while the chain is still held, so the log cannot record a branch
     // the chain has already moved off.
     if let Some(accepted) = reaction.applied.as_ref() {
@@ -2175,27 +2207,87 @@ fn was_away(previous: u64, now: u64) -> bool {
     now < previous || now.saturating_sub(previous) >= AWAY_GAP
 }
 
-/// Gives up on a join nothing has arrived for, and goes back to reading.
+/// Notes what a peer introduced itself as having, for the choice a node
+/// with no chain has in front of it.
 ///
-/// The other ways a join ends are all answers: a piece that does not fit, a
-/// weight that does not check out, a ledger that does not match the tip it was
-/// weighed at. Silence is the one that has to be noticed rather than handled,
-/// and it is the likeliest of them, since it is what a peer hanging up looks
-/// like.
-fn abandon_stalled_join(shared: &Arc<Shared>, now: u64) {
-    let asking = {
-        let mut joining = shared
+/// Only such a node has that choice: one with a chain weighs branches by
+/// their work as they arrive, and what anyone claims is neither here nor
+/// there.
+fn note_claim(shared: &Arc<Shared>, id: PeerId, peer: &PeerState) {
+    let empty = shared.chain().is_empty();
+    if !empty {
+        return;
+    }
+    shared.choosing().noted(
+        id,
+        peer.remote,
+        peer.total_work,
+        peer.height,
+        peer.archives,
+        unix_now(),
+    );
+}
+
+/// One round of the choice a node with no chain makes about whom to follow.
+///
+/// Everything the chooser reads is gathered first and each lock is let go of
+/// before the next is taken, so no two of them are ever held together and
+/// nothing here can wait on a thread that is waiting on it.
+fn drive_choosing(shared: &Arc<Shared>, now: u64) {
+    let join = {
+        let joining = shared
             .joining
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if !has_gone_quiet(joining.moved(), now) {
-            return;
+        match joining.moved() {
+            None => JoinProgress::NothingYet,
+            Some(moved) if has_gone_quiet(Some(moved), now) => JoinProgress::Stalled,
+            Some(_) => JoinProgress::Moving,
         }
-        give_up(&mut joining, shared)
     };
-    // Asked of everyone rather than of the peer that went quiet, which is the
-    // one peer known not to be answering.
-    shared.broadcast(None, &asking);
+    let connected: Vec<PeerId> = shared.peers().keys().copied().collect();
+    let (empty, work) = {
+        let chain = shared.chain();
+        (chain.is_empty(), chain.total_work())
+    };
+    let step = shared.choosing().step(now, empty, work, join, &connected);
+    match step {
+        choosing::Step::Quiet => {}
+        choosing::Step::Ask(peer, Approach::Join) => {
+            // A fresh attempt starts from nothing: pieces of an old one
+            // would not fit it, and noticing that used to cost the attempt.
+            *shared
+                .joining
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Progress::Idle;
+            shared.send_to(
+                peer,
+                Message::GetJoin {
+                    what: Joining::Weight,
+                    part: 0,
+                },
+            );
+        }
+        choosing::Step::Ask(peer, Approach::Read) => {
+            let locator = shared.chain().locator();
+            shared.send_to(peer, Message::GetChain { locator });
+        }
+        // The choice is made. Whoever still claims more than the chain this
+        // node took was held off while it chose, and gets the ordinary
+        // question now: their chains arrive as branches, and the fork choice
+        // weighs branches for a living.
+        choosing::Step::Nudge(peers) => {
+            let locator = shared.chain().locator();
+            for peer in peers {
+                shared.send_to(
+                    peer,
+                    Message::GetChain {
+                        locator: locator.clone(),
+                    },
+                );
+            }
+        }
+    }
 }
 
 /// Whether a join that last moved at `moved` has been quiet long enough to be
@@ -2493,15 +2585,37 @@ fn read_loop(
 
         // A piece of a join answer belongs to whoever is collecting one, which
         // is this node rather than the layer that reads messages.
-        let message = match join_piece(shared, message, outbound) {
+        let message = match join_piece(shared, id, message, outbound) {
             Taken::Handled => continue,
             Taken::Failed => return,
             Taken::Other(message) => message,
         };
 
+        // While this node is still choosing whom to follow, a block taken
+        // from anybody else is the beginning of following them, and the
+        // first block followed past the reorganisation limit is the choice
+        // being made by whoever sent it. Held off, not held against: the
+        // peer's turn comes when the chooser asks it, or once the choice is
+        // made.
+        if matches!(
+            message,
+            Message::Block(_) | Message::Announce(_) | Message::Chain { .. }
+        ) && shared.choosing().holds_off(id)
+        {
+            continue;
+        }
+
+        // Whether this message is the introduction, before it is consumed:
+        // what a peer claims is said there and nowhere else.
+        let introduction = matches!(message, Message::Hello(_) | Message::Welcome(_));
+
         // The chain is held for the decision and for writing the log, and let
         // go before anything is sent, so a slow peer never stalls the chain.
         let (mut reaction, passing) = decide(shared, &mut peer, message);
+
+        if introduction && peer.greeted {
+            note_claim(shared, id, &peer);
+        }
 
         shared.remember(&reaction.learned);
         shared.forget(&reaction.forget);

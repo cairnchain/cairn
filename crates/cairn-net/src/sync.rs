@@ -47,6 +47,9 @@ pub struct PeerState {
     pub greeted: bool,
     pub height: u64,
     pub total_work: u128,
+    /// Whether the peer said it can show a newcomer the whole chain, which
+    /// is what choosing whom to join has to know about everyone who spoke.
+    pub archives: bool,
     /// Heights asked for and not yet received. While this is non empty the node
     /// is mid batch and does not ask for more.
     ///
@@ -350,6 +353,7 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
     peer.greeted = true;
     peer.height = theirs.height;
     peer.total_work = theirs.total_work;
+    peer.archives = theirs.archives;
 
     let mut reaction = Reaction::idle();
     // The peer names its own port; the address it is reachable at is that port
@@ -373,20 +377,15 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
         )));
     }
     if theirs.total_work > local.chain.total_work() {
-        // Two ways to catch up, and they are not a race: whichever is asked
-        // for arrives first on a short chain and last on a long one, so the
-        // choice is made rather than run.
-        //
-        // Being handed a ledger costs about twelve megabytes whatever the
-        // chain's age, and reading one costs what the chain weighs. Below the
-        // crossing point reading is simply cheaper, and above it the gap only
-        // widens. Only an archivist can hand one over.
-        if local.chain.is_empty() && theirs.archives && theirs.height >= JOIN_RATHER_THAN_READ {
-            reaction.reply.push(Message::GetJoin {
-                what: Joining::Weight,
-                part: 0,
-            });
-        } else {
+        // A node with no chain facing one long enough to be final does not
+        // ask here at all. Whatever it starts following first is what it
+        // keeps, so the choice of whom to ask is made once, by the node,
+        // against every claim it has heard, rather than by whichever
+        // handshake this happens to be. A short chain carries no such
+        // weight: following the wrong one is undone by the fork choice like
+        // any other branch, so it is simply asked for.
+        let held_for_the_choice = local.chain.is_empty() && theirs.height >= JOIN_RATHER_THAN_READ;
+        if !held_for_the_choice {
             reaction.reply.push(Message::GetChain {
                 locator: local.chain.locator(),
             });
@@ -415,6 +414,12 @@ pub const BATCH_PATIENCE: u64 = 60;
 /// megabytes where a few would have done. Either mistake costs seconds, once,
 /// and what matters is that a node chooses rather than starting both and
 /// taking whichever finishes.
+///
+/// It carries a second duty on purpose: it matches the deepest
+/// reorganisation a node accepts, so a chain this long is also one a node
+/// with nothing cannot back out of once it follows it. That is why a
+/// newcomer facing a chain past this length does not ask on the handshake,
+/// and lets [`crate::choosing`] decide whom to ask instead.
 pub const JOIN_RATHER_THAN_READ: u64 = 1_024;
 
 /// Heights one peer may have outstanding at any moment.
