@@ -1,13 +1,21 @@
 # Cairn
 
-A blockchain designed so that a full validating node costs the same to run in
-thirty years as it does today.
+A blockchain whose validation state is capped by consensus rule, so the work
+of checking it does not grow with the chain.
+
+That is one claim, not three, and the difference matters. What is capped is
+the state a validator must hold: about 68 MB, whatever the chain's age. What
+is not capped is the header chain a node keeps in order to take newcomers in,
+which grows at 182 bytes a header, 129 MB a year, nor the share of a user's
+money that needs an inclusion proof to spend, which rises as the chain gets
+busier. "Costs the same in thirty years" is a slogan the body of the paper
+already corrects, so it is not made here.
 
 Every existing chain grows its validation cost with its own usage, so the
 longer it succeeds the fewer people can afford to verify it, and validation
 drifts into data centres. Cairn holds the ledger as a fixed size commitment
 instead of a growing database: a bounded working set lives in every node, and
-everything that has not moved in a long time lives only in the commitment and
+everything that has not moved recently lives only in the commitment and
 is spent by presenting a proof. Nothing is ever destroyed, expired, or charged
 rent.
 

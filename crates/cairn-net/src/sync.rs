@@ -536,6 +536,13 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
             outdated: error.outdated(),
             ..Reaction::idle()
         },
+        // A branch this node cannot reach is not a peer's fault. It means this
+        // node is somewhere it cannot get back from — which is what happens to
+        // one that was handed a chain and later meets the real one. Dropping
+        // the messenger there is the worst possible answer: it keeps the wrong
+        // chain and cuts off the only party telling it so. Nothing is held
+        // against the peer, and the block is simply not taken.
+        Err(ChainError::ForkTooDeep { .. } | ChainError::TooOld { .. }) => Reaction::idle(),
         Err(_) => Reaction::close(DropReason::BadBlock { id }),
     }
 }

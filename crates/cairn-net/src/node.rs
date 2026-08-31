@@ -213,6 +213,15 @@ struct Shared {
     /// cycle to break.
     log: Arc<Mutex<Option<Store>>>,
     book: Mutex<AddressBook>,
+    /// The most work any peer has ever claimed, backed or not.
+    ///
+    /// A claim is not proof, and this is not treated as one. What it is for is
+    /// knowing when *not* to believe a chain that has proved itself: weighing
+    /// shows that one chain's work is real, never that it is the most. A
+    /// newcomer that adopted the first chain to prove itself would be taking
+    /// the first answer rather than the best, and the first answer is the one
+    /// an attacker races to give.
+    best_claim: Mutex<u128>,
     /// Names this node was told to start from, kept as names.
     ///
     /// A name is looked up again while the book holds no seed at all, because
@@ -342,6 +351,16 @@ impl Shared {
 
     fn book(&self) -> MutexGuard<'_, AddressBook> {
         self.book.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Notes what a peer says it has, and answers with the most seen so far.
+    fn claimed(&self, work: u128) -> u128 {
+        let mut best = self
+            .best_claim
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *best = (*best).max(work);
+        *best
     }
 
     fn seed_names(&self) -> MutexGuard<'_, Vec<String>> {
@@ -844,6 +863,7 @@ impl Node {
             chain: Mutex::new(chain),
             log: Arc::new(Mutex::new(log)),
             book: Mutex::new(book),
+            best_claim: Mutex::new(0),
             seed_names: Mutex::new(Vec::new()),
             names_looked_up_at: AtomicU64::new(0),
             directory,
@@ -1214,16 +1234,30 @@ fn take_join_part(
         Joining::Weight => {
             let weighed = SampledStart::decode(&whole)
                 .ok()
-                .filter(|start| check_start(start, SAMPLES).is_ok());
-            let Some(start) = weighed else {
+                .and_then(|start| Some((check_start(&start, SAMPLES).ok()?, start.tip)));
+            let Some((shown, tip)) = weighed else {
                 return Some(give_up(&mut joining, shared));
             };
-            // What this settles is which chain is heaviest and nothing else.
-            // The ledger at that chain's tip is the next thing to ask for.
-            *joining = Progress::Weighed {
-                tip: start.tip,
-                since: now,
-            };
+
+            // What weighing settles is that *this* chain's work was really
+            // done. It does not settle that no heavier chain exists, and the
+            // two were treated as the same thing here — which is the whole of
+            // what a newcomer had to get right.
+            //
+            // Difficulty follows whatever hashrate is present, so a forger
+            // with a small share can mine a slow, entirely self-consistent
+            // chain for weeks and have it prove itself. It never out-mines
+            // anybody. It only has to answer first.
+            //
+            // So a chain that proves itself is adopted only when nobody is
+            // claiming more. Somebody claiming more may be lying, and then
+            // this costs a slow start rather than a wrong one: reading the
+            // chain is always available and cannot be captured.
+            if shown.total_work < shared.claimed(0) {
+                return Some(give_up(&mut joining, shared));
+            }
+
+            *joining = Progress::Weighed { tip, since: now };
             Some(Message::GetJoin {
                 what: Joining::Ledger,
                 part: 0,
@@ -2105,6 +2139,12 @@ fn decide(
         nonce: shared.nonce,
     };
     let reaction = on_message(&mut local, peer, message, unix_now());
+
+    // What this peer says it has, which a join has to know before it believes
+    // any one answer. Recorded whether or not it was shown: the point of it is
+    // that somebody claims more than what has been proved, which is a reason
+    // to keep asking rather than to adopt.
+    shared.claimed(peer.total_work);
 
     // Written while the chain is still held, so the log cannot record a branch
     // the chain has already moved off.

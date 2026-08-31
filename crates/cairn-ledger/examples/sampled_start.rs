@@ -191,9 +191,18 @@ fn at_full_size() {
 /// it is half the chain, and it only approaches zero as the share approaches
 /// the half at which proof of work stops protecting anything at all.
 ///
-/// Every draw lands in invented work with probability `lie`, so `count` draws
-/// miss with probability `(1 - lie)^count`. Turned around, `count` draws hold
-/// against every share up to the one where that probability reaches 2^-128.
+/// The step that used to follow — every draw lands in invented work with
+/// probability `lie`, so `count` draws miss with `(1 - lie)^count` — assumes
+/// the draw is uniform over the chain. It is not, and deliberately not: the
+/// density is one over the distance from the tip, which is what makes the
+/// bound indifferent to how deep a forger forks. Missing the factor that costs
+/// took a claimed 2^-128 down to a measured 2^-5.8.
+///
+/// What is printed below is therefore the number that model gives and not the
+/// bound. It is kept because seeing the two side by side is the point: the
+/// wrong model is the optimistic one, which is how it survived. The real
+/// figure comes from `--example adversarial_placement`, which builds forgeries
+/// and measures them.
 fn from_the_threat() {
     println!("\n\nWhat a forger has to lie about, given what it holds:\n");
     println!(
@@ -220,17 +229,17 @@ fn from_the_threat() {
         );
     }
 
-    // The share at which the count stops reaching 2^-128.
+    // What the uniform-draw model gives, which is not the bound.
     let share = margin(i32::try_from(cairn_ledger::sampling::SAMPLES).unwrap_or(512));
     println!(
-        "\n{} draws hold against any forger up to {:.1}% of the world's work, at\n\
-         2^-128. Past that the count would have to grow without bound, because a\n\
-         forger at half the work has nothing left to invent: it can simply mine\n\
-         the chain. That is the same assumption the chain itself rests on, so\n\
-         this is not a weaker one, and the margin between {:.1}% and 50% is what\n\
-         the count buys.",
+        "\nUnder the uniform-draw model, {} draws would hold to {:.1}% of the\n\
+         world's work at 2^-128. THAT MODEL IS WRONG and this line is its\n\
+         obituary: the draw is one over the distance from the tip, not uniform,\n\
+         and the factor that costs is what once hid a real 2^-5.8 behind a\n\
+         claimed 2^-128. The bound is 43% measured, 40% claimed in the papers,\n\
+         and it comes from `--example adversarial_placement`, which builds the\n\
+         forgeries rather than reasoning about them.",
         cairn_ledger::sampling::SAMPLES,
-        share * 100.0,
         share * 100.0,
     );
     println!(

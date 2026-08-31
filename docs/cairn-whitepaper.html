@@ -39,8 +39,9 @@
     The design accepts a proven cost rather than claiming to escape it. Christ
     and Bonneau show that a succinct global state forces a near-linear rate of
     local proof updates <sup><a href="#r1">[1]</a></sup>; Cairn falls on that
-    side deliberately, and confines the burden to notes that have not moved in
-    a long time. Headers commit to accumulated work and to a forest of every
+    side deliberately, and confines the burden to notes that have not moved
+    recently — which on a busy chain means hours, not years: the hot set holds
+    a fixed number of notes, not a fixed span of time. Headers commit to accumulated work and to a forest of every
     earlier header, so that joining the chain need not mean downloading it.
   </p>
 </div>
@@ -442,6 +443,17 @@
 
     <h3><span class="sub">7.4</span>Sampled verification</h3>
     <p>
+      One assumption is load-bearing here and was not stated before: that at
+      least one of the peers a newcomer is talking to is honest and can answer.
+      Joining is trust-minimised, not trust-free. Every chain offered proves
+      its own work, so no peer can invent weight — but a newcomer surrounded
+      entirely by one party's nodes is shown only what that party chooses to
+      show. That is the same assumption every proof-of-work client makes at
+      the moment it first connects, and it is worth writing down rather than
+      implying it away.
+    </p>
+
+    <p>
       With those commitments, a newcomer holding only the tip can be handed a
       logarithmic sample of old headers, verify that each sits where it claims
       in the tip's commitment, and conclude what work stands behind the tip
@@ -559,7 +571,23 @@
       The hot set does not repeal the result; what it changes is who is
       affected. Notes that have moved recently, which are the ones ordinarily
       spent, are held in full by every node and require no proof at all. The
-      obligation falls only on value that has not moved in a long time.
+      obligation falls only on value that has not moved recently. How recently
+      is worth stating plainly rather than leaving to the word: the hot set is
+      capped at a <em>number</em> of notes, so how long a note stays in it
+      depends on how busy the chain is. Measured at full blocks — 686 payments
+      a block, which is what success looks like — a note falls to the cold set
+      in <strong>3.2 hours</strong>, and the grace window that follows lasts
+      about twelve minutes. At a tenth of that traffic it is 32 hours, and at a
+      hundredth, thirteen days.
+    </p>
+    <p>
+      So the honest statement is that the validator's cost is capped and the
+      saver's inconvenience is not: the busier the chain, the more of anyone's
+      money needs an inclusion proof to spend. That is the Christ–Bonneau cost
+      this design accepts rather than escapes, and it lands hardest exactly
+      when the chain succeeds. A wallet that stays online refreshes its own
+      proofs and never notices. One that does not must keep them, or find
+      somebody who did.
     </p>
     <p>
       The authors name proof-serving nodes, third parties holding the full

@@ -1658,3 +1658,73 @@ fn a_node_looks_up_the_name_it_starts_from_while_it_is_running() {
     seeded.shutdown();
     fresh.shutdown();
 }
+
+/// A newcomer ends on the heaviest chain offered, whoever answered first.
+///
+/// **This does not pass, and it is here because it does not.** It is the
+/// shape of a defect an outside design review found, written down so it
+/// cannot be mislaid, and the honest record of a repair that went only part
+/// of the way.
+///
+/// Weighing shows that one chain's work was really done. It does not show
+/// that no heavier chain exists, and the two were treated as the same thing.
+/// Difficulty follows whatever hashrate is present, so a forger with a small
+/// share can mine a slow, entirely self-consistent chain that proves itself
+/// perfectly well; it never out-mines anybody, it only answers first.
+///
+/// Refusing to adopt a ledger while somebody claims more work — which is now
+/// done — turns a forged ledger into a slow honest read. It does not fix
+/// this, because the slow read commits to the lighter chain just as firmly:
+/// measured, the newcomer settles on the light tip and stays there. Past
+/// `MAX_REORG_DEPTH` a fork choice is final, so **the first chain a node
+/// commits to is the one it keeps, whether it joined or read**. The decision
+/// has to be made before either begins, and that is a change to how a node
+/// with no chain chooses a peer at all — not to the join alone.
+#[ignore = "the defect it describes is open: see the doc comment"]
+#[test]
+fn a_newcomer_refuses_a_chain_lighter_than_what_it_has_been_told_exists() {
+    let params = params();
+
+    // A long chain, and a shorter one that is entirely valid on its own.
+    let mut heavy_forge = Forge::new(params);
+    let heavy = heavy_forge
+        .mine_many(usize::try_from(cairn_net::sync::JOIN_RATHER_THAN_READ).unwrap() + 60);
+    let mut light_forge = Forge::starting_at(params, 500_000);
+    let light = light_forge
+        .mine_many(usize::try_from(cairn_net::sync::JOIN_RATHER_THAN_READ).unwrap() + 20);
+
+    assert!(
+        heavy.last().unwrap().header.total_work > light.last().unwrap().header.total_work,
+        "one really is heavier than the other"
+    );
+
+    let root = std::env::temp_dir().join(format!("cairn-first-answer-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+
+    let (heavy_host, _) = Node::open_archiving(params, loopback(), root.join("heavy")).unwrap();
+    for block in &heavy {
+        heavy_host.submit_block(block.clone()).unwrap();
+    }
+    let (light_host, _) = Node::open_archiving(params, loopback(), root.join("light")).unwrap();
+    for block in &light {
+        light_host.submit_block(block.clone()).unwrap();
+    }
+
+    let (newcomer, _) = Node::open(params, loopback(), root.join("newcomer")).unwrap();
+    newcomer.connect(heavy_host.address()).unwrap();
+    newcomer.connect(light_host.address()).unwrap();
+
+    let top = heavy.last().unwrap().header.height;
+    wait_for("the newcomer to land on the heavier chain", || {
+        newcomer.height() == Some(top)
+    });
+    assert_eq!(
+        newcomer.with_chain(cairn_chain::ChainStore::tip),
+        Some(heavy.last().unwrap().id()),
+        "and on that one, not on the one that also proved itself"
+    );
+
+    newcomer.shutdown();
+    heavy_host.shutdown();
+    light_host.shutdown();
+}
