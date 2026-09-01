@@ -60,8 +60,26 @@ impl NetworkId {
     /// starts over. The chain it replaces could mint from nothing, which is
     /// not a chain to carry forward under a schedule.
     pub const TESTNET_4: Self = Self(0x4341_5257);
+    /// The fifth, because a stranger could hand a newcomer a chain nobody
+    /// mined, and a miner could talk the difficulty down to nothing.
+    ///
+    /// Two rules changed and either one on its own would have been enough. A
+    /// tip has to open the header it was built on, and the run of headers
+    /// between a handed-over ledger and the tip has to travel with it and be
+    /// checked block by block, so weight can no longer be borrowed from a
+    /// chain somebody else mined. And the retarget reads solve times as signed
+    /// values along a timeline of its own, so a miner dating its blocks ahead
+    /// no longer takes six minutes from the measurement and gives one second
+    /// back; past a sixth of the hash rate that had no equilibrium at all.
+    ///
+    /// The second of those changes what difficulty every block must carry, so
+    /// every block mined under the old rule is invalid under this one and the
+    /// network starts over. The first changes the shape of two exchanges, and
+    /// a node still on testnet-4 is told plainly that it is on another network
+    /// rather than failing somewhere confusing.
+    pub const TESTNET_5: Self = Self(0x4341_5258);
     /// Kept as the name of whichever test network is current.
-    pub const TESTNET: Self = Self::TESTNET_4;
+    pub const TESTNET: Self = Self::TESTNET_5;
     /// A throwaway network with the same rules but a much shorter block time,
     /// for running the software on one machine.
     pub const DEVNET: Self = Self(0x4341_5244);

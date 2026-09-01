@@ -10,7 +10,7 @@ Three programs are in this folder.
   cairn-explorer  a node that also serves the website, from your machine,
                   reading your chain.
 
-This is testnet-4, a test network. Its money is worth nothing, it is meant
+This is testnet-5, a test network. Its money is worth nothing, it is meant
 to be worth nothing, and the network will be reset. Nothing on it carries
 over to anything.
 

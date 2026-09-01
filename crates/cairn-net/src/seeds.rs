@@ -38,7 +38,7 @@ pub const DEFAULT_PORT: u16 = 9944;
 ///
 /// One name, carrying however many machines the zone file says. Adding an
 /// entry point is a line in that file; it is not a release.
-const TESTNET_4: [&str; 1] = ["seed.cairnchain.org:9944"];
+const TESTNET_5: [&str; 1] = ["seed.cairnchain.org:9944"];
 
 /// The starting points written into the program for `network`.
 ///
@@ -47,7 +47,7 @@ const TESTNET_4: [&str; 1] = ["seed.cairnchain.org:9944"];
 /// wasting its time on a network it cannot follow.
 pub fn written_in(network: NetworkId) -> &'static [&'static str] {
     match network {
-        NetworkId::TESTNET_4 => &TESTNET_4,
+        NetworkId::TESTNET_5 => &TESTNET_5,
         _ => &[],
     }
 }
@@ -141,7 +141,7 @@ mod tests {
     /// network, where the name fails for the wrong reason and is passed over.
     #[test]
     fn every_written_in_seed_names_a_port() {
-        for name in written_in(NetworkId::TESTNET_4) {
+        for name in written_in(NetworkId::TESTNET_5) {
             let (host, port) = name.rsplit_once(':').expect("a seed names a port");
             assert!(!host.is_empty(), "`{name}` names no host");
             assert!(
@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn what_was_asked_for_wins_and_is_not_repeated() {
         let asked = vec!["127.0.0.1:9944".to_owned(), "127.0.0.1:9944".to_owned()];
-        let found = start_from(&asked, NetworkId::TESTNET_4).expect("a literal address resolves");
+        let found = start_from(&asked, NetworkId::TESTNET_5).expect("a literal address resolves");
         assert_eq!(found.len(), 1, "the same address twice is one address");
         assert_eq!(
             found.first().map(ToString::to_string),
@@ -165,7 +165,7 @@ mod tests {
     #[test]
     fn a_seed_that_was_asked_for_and_cannot_be_reached_stops_the_node() {
         let asked = vec!["127.0.0.1".to_owned()];
-        assert!(start_from(&asked, NetworkId::TESTNET_4).is_err(), "no port");
+        assert!(start_from(&asked, NetworkId::TESTNET_5).is_err(), "no port");
     }
 
     #[test]

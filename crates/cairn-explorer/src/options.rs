@@ -15,7 +15,7 @@ use cairn_net::seeds;
 ///
 /// An unknown name stops it rather than being passed over, so an operator
 /// never runs something other than what they wrote.
-const KNOWN: [&str; 6] = ["data", "listen", "http", "seed", "network", "help"];
+const KNOWN: [&str; 7] = ["data", "listen", "http", "seed", "network", "help", "check"];
 const DEFAULT_DATA: &str = "cairn-explorer-data";
 const DEFAULT_LISTEN: &str = "0.0.0.0:9945";
 const DEFAULT_HTTP: &str = "127.0.0.1:8080";
@@ -31,7 +31,12 @@ cairn-explorer, a Cairn node that also serves a website
                          (default: 127.0.0.1:8080)
   --seed <address>       a peer to start from; repeat for more. Without one,
                        the addresses written into the program are used
-  --network <name>       testnet-4 or devnet (default: testnet-4)
+  --check                work out what this explorer would do and print it,
+                         then stop without starting anything. Exits with an
+                         error if a setting is one this build does not
+                         accept, which is how a script can find out that a
+                         network it was told to use has been retired
+  --network <name>       testnet-5 or devnet (default: testnet-5)
   --help                 print this and stop
 
 The explorer always keeps the cold set, because answering questions about
@@ -90,7 +95,7 @@ fn parse_arguments(arguments: &[String]) -> Result<Given, String> {
             return Err(format!("unknown option `--{name}`"));
         }
         index = index.saturating_add(1);
-        if name == "help" {
+        if name == "help" || name == "check" {
             given.push(name, String::new());
             continue;
         }
@@ -118,7 +123,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         if name == "mainnet" {
             "mainnet does not exist yet: its first block has not been mined".to_owned()
         } else {
-            format!("unknown network `{name}`, try testnet-4 or devnet")
+            format!("unknown network `{name}`, try testnet-5 or devnet")
         }
     })?;
 

@@ -105,7 +105,7 @@ resolve() {
 }
 
 listen=$(carried listen)
-resolve NETWORK "$(carried network)" testnet-4
+resolve NETWORK "$(carried network)" testnet-5
 resolve PORT "${listen##*:}" 9945
 resolve HTTP "$(carried http)" 127.0.0.1:8080
 resolve SEED "$(carried seed)" ""
@@ -154,6 +154,17 @@ chown cairn:cairn "$DATA"
 chmod 0750 "$DATA"
 
 say "Service"
+# A test network gets retired when a rule has to change, and its name stays
+# written in the unit file of every machine that was running it. Carrying a
+# setting forward is right until the build stops accepting it, and then it is
+# a service that will not start. The explorer itself is asked, since it is the
+# only thing that knows which names this build has.
+if [ -n "$NETWORK" ] && ! /usr/local/bin/cairn-explorer --check --network "$NETWORK" >/dev/null 2>&1; then
+    echo "network  $NETWORK is not a network this build knows, so testnet-5 is used"
+    echo "         instead. Name one explicitly to choose another."
+    NETWORK=testnet-5
+fi
+
 # Written from the settings above rather than copied, so the unit says in full
 # what this machine does, and is a record the next run can read back.
 ARGS="--network $NETWORK --data $DATA --listen 0.0.0.0:$PORT --http $HTTP"

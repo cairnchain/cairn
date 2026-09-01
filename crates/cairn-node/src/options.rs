@@ -24,8 +24,9 @@ pub(crate) const CONFIG_FILE: &str = "cairn.conf";
 /// An unknown name stops the node rather than being passed over. A setting
 /// that is silently ignored is how an operator ends up running rules they did
 /// not choose, which on a chain means following a different one.
-const KNOWN: [&str; 10] = [
+const KNOWN: [&str; 11] = [
     "data", "listen", "seed", "network", "mine", "status", "run-for", "archive", "keep", "help",
+    "check",
 ];
 const DEFAULT_DATA: &str = "cairn-data";
 const DEFAULT_LISTEN: &str = "0.0.0.0:9944";
@@ -41,12 +42,17 @@ cairnd, a Cairn node
                          one, the addresses written into the program for
                          this network are used, which is why a node that
                          was just downloaded finds the network on its own
-  --network <name>       testnet-4 or devnet (default: testnet-4)
+  --network <name>       testnet-5 or devnet (default: testnet-5)
                          devnet has the same rules with a five second block
                          time and a tiny hot set, for one machine.
                          mainnet does not exist yet: a network exists once
                          its first block does, and that one will be mined in
                          the open on the day it is announced
+  --check                work out what this node would do and print it,
+                         then stop without starting anything. Exits with an
+                         error if a setting is one this build does not
+                         accept, which is how a script can find out that a
+                         network it was told to use has been retired
   --mine <public key>    produce blocks, paying rewards to this key
   --archive              keep the cold set, so this node can rebuild a proof
                          for a wallet that lost its own. Costs a set that
@@ -130,7 +136,7 @@ fn parse_arguments(arguments: &[String]) -> Result<Given, String> {
         }
         index = index.saturating_add(1);
 
-        if name == "help" || name == "archive" {
+        if name == "help" || name == "archive" || name == "check" {
             given.push(name, String::new());
             continue;
         }
@@ -210,7 +216,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         if name == "mainnet" {
             "mainnet does not exist yet: its first block has not been mined".to_owned()
         } else {
-            format!("unknown network `{name}`, try testnet-4 or devnet")
+            format!("unknown network `{name}`, try testnet-5 or devnet")
         }
     })?;
 
@@ -395,7 +401,7 @@ mod tests {
         let options = resolve_options(&[]).unwrap().unwrap();
         assert_eq!(options.data, PathBuf::from(DEFAULT_DATA));
         assert_eq!(options.listen.port(), 9_944);
-        assert_eq!(options.params.network_name(), "testnet-4");
+        assert_eq!(options.params.network_name(), "testnet-5");
         assert_eq!(options.params.target_block_time, 60);
         assert!(options.mine_to.is_none());
         // A program somebody just downloaded finds the network on its own,
@@ -498,12 +504,12 @@ mod tests {
         assert_eq!(options.seeds.len(), 1);
         assert_eq!(options.status_period, 3);
 
-        let options = resolve_options(&args(&["--data", &data, "--network", "testnet-4"]))
+        let options = resolve_options(&args(&["--data", &data, "--network", "testnet-5"]))
             .unwrap()
             .unwrap();
         assert_eq!(
             options.params.network_name(),
-            "testnet-4",
+            "testnet-5",
             "the command line wins"
         );
     }

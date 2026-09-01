@@ -12,7 +12,7 @@
   <div class="byline">
     <span>Draft, 31 August 2026</span>
     <span><a href="https://github.com/cairnchain/cairn">github.com/cairnchain/cairn</a></span>
-    <span>testnet-4, no mainnet exists</span>
+    <span>testnet-5, no mainnet exists</span>
   </div>
 </header>
 
@@ -305,9 +305,26 @@
     <h3><span class="sub">5.2</span>Difficulty and timestamps</h3>
     <p>
       Difficulty retargets every block over a linearly weighted moving average
-      of the previous 90, with solve times clamped at six times the target and
-      a maximum factor of four per retarget. A large miner arriving or leaving
-      changes the rate without stranding the chain.
+      of the previous 90, with solve times clamped at six times the target in
+      either direction and a maximum factor of four per retarget. A large miner
+      arriving or leaving changes the rate without stranding the chain.
+    </p>
+    <p>
+      In either direction is the load-bearing part, and it was not there at
+      first. A solve time was read as the gap from the parent, floored at one
+      second, which made lying about time asymmetric: a miner dating its own
+      blocks six minutes ahead took six minutes out of the measurement, and the
+      honest block that followed put one second back. The retarget then read a
+      chain running far slower than it was and answered by lowering the
+      difficulty, and since the arithmetic does not depend on the difficulty
+      there was no level at which it settled. Past roughly a sixth of the hash
+      rate the difficulty fell to its floor within the hour, at which point
+      cumulative work stops measuring electricity and the fork choice stops
+      meaning anything. The measurement now runs along a timeline of its own
+      that moves only by what it counted, so a spike is repaid in full by the
+      blocks after it and a window telescopes to the distance between its own
+      ends however its middle was stamped. Simulated against every share up to
+      a half, the fastest a liar can now make the chain run is the target.
     </p>
     <p>
       Timestamps are validated against the median of the previous 11 blocks
@@ -446,9 +463,9 @@
       One assumption is load-bearing here and was not stated before: that at
       least one of the peers a newcomer is talking to is honest and can answer.
       Joining is trust-minimised, not trust-free. Every chain offered proves
-      its own work, so no peer can invent weight, but a newcomer surrounded
-      entirely by one party's nodes is shown only what that party chooses to
-      show. That is the same assumption every proof-of-work client makes at
+      its own work, and the checks below are what make that true rather than
+      merely intended, but a newcomer surrounded entirely by one party's nodes
+      is shown only what that party chooses to show. That is the same assumption every proof-of-work client makes at
       the moment it first connects, and it is worth writing down rather than
       implying it away.
     </p>
@@ -475,6 +492,38 @@
       headers against accumulated work rather than height, with a Fiat-Shamir
       seed taken from the tip, and each opened header is checked against the
       tip's own commitment. Weighing a thirty year chain costs about 8 MB.
+    </p>
+    <p>
+      Three checks sit around the draw, and they are not decoration. An audit
+      of the implementation found that without them a stranger could hand a
+      newcomer a chain nobody had mined, for a single hash. It took the honest
+      chain's headers, which any node serves to anyone who asks, put them in a
+      commitment of its own, appended a thousand leaves that were not headers
+      at all, and mined a tip at the difficulty floor declaring one unit more
+      work than the honest chain. Every draw landed in the honest work below
+      and every one was answered by a genuine header with a genuine proof. The
+      lesson is worth stating plainly: a commitment places a header at a
+      position, and a position is not a chain.
+    </p>
+    <p>
+      So the tip must open the header it was built on, at the height below it,
+      carrying the work its own total leaves over, which a tip mined on nothing
+      cannot produce. A number of blocks implies a least amount of work,
+      because the difficulty falls by at most a fixed factor per block and
+      never below the floor, so the stretches between opened headers cost
+      something whether or not a draw looked at them: a thousand blocks cannot
+      be worth one hash. And the run of headers between a handed-over ledger
+      and the tip travels with it, so a newcomer rebuilds the commitment from
+      the anchor upward and sees whether it arrives where the tip says it
+      should, which catches a substituted header wherever it sat.
+    </p>
+    <p>
+      That last one is also what makes the burial cost work rather than block
+      count. The run is checked block by block against the difficulty its own
+      window demands, so the sender does not choose the price of its burial:
+      before that check existed, a thousand blocks of burial could be laid at
+      the difficulty floor for a thousand hashes, and the phrase bought
+      nothing.
     </p>
     <p>
       The count follows from the assumption the chain already makes. A forger
@@ -766,6 +815,16 @@
       correction was found. That the same thing is not still hiding one level
       down is exactly what nobody outside this project has checked, and it is
       where an outside review should start.
+    </p>
+    <p>
+      There is a second reason to start there. The next thing found was not in
+      the bound at all but beside it: the sampling was sound about how much
+      work a chain carried and said nothing about whether the tip stood at the
+      end of that chain, which let a forger borrow a weight somebody else had
+      mined. Three checks close it and they are described in 7.4. What is worth
+      taking from the episode is that the failure was not in the arithmetic
+      everybody looks at. It was in an assumption the arithmetic never made and
+      the surrounding code quietly relied on.
     </p>
     <p>
       <strong>A rule changes at a height, and a node that has not updated by

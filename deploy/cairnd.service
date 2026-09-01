@@ -16,7 +16,7 @@ Group=cairn
 
 # The node prints a status line and nothing else; journald keeps it.
 ExecStart=/usr/local/bin/cairnd \
-    --network testnet-4 \
+    --network testnet-5 \
     --data /var/lib/cairn \
     --listen 0.0.0.0:9944 \
     --status 60

@@ -110,7 +110,7 @@ fn the_burial_anchor_can_be_rebuilt() {
         store.ledger_at(anchor).is_some(),
         "the burial anchor at height {anchor} (tip {tip} minus burial {burial}) \
          cannot be rebuilt, so own_ledger and the handover-serving path both \
-         return None on any network where burial == MAX_REORG_DEPTH (testnet-4 \
+         return None on any network where burial == MAX_REORG_DEPTH (testnet-5 \
          and mainnet both do)"
     );
 }

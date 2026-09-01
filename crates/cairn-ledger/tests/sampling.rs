@@ -162,7 +162,12 @@ fn a_tip_that_overstates_its_work_is_caught() {
     let samples = draw(seed_of(&forged), 64, work_before(&forged), forged.height)
         .into_iter()
         .map(|work| {
-            let height = covering(&ledger, work).unwrap_or(HEIGHT - 2);
+            // The best it has: the block spanning the draw where one does,
+            // and otherwise the deepest header its forest can prove, since
+            // the tip is not in its own history.
+            let height = covering(&ledger, work)
+                .unwrap_or(HEIGHT - 2)
+                .min(HEIGHT - 2);
             let header = keeper.headers[usize::try_from(height).unwrap()];
             let proof = keeper.before_tip.prove(height).unwrap();
             Sample { header, proof }

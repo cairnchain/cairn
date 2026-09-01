@@ -449,7 +449,7 @@ fn nothing_may_be_dated_before_the_network_opened() {
 fn a_first_block_already_takes_real_work() {
     // Otherwise the opening seconds are a race the rest of the world has not
     // been told about yet.
-    for name in ["testnet-4", "devnet"] {
+    for name in ["testnet-5", "devnet"] {
         let params = ConsensusParams::for_network(name).expect("it exists");
         assert!(
             params.genesis_difficulty > 1_000_000,

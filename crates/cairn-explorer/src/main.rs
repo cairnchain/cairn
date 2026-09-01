@@ -53,6 +53,15 @@ fn run(arguments: &[String]) -> Result<(), String> {
         None => println!("starts from  nothing pinned"),
     }
 
+    // Everything above is a question about the settings, and everything below
+    // starts a node. A script updating a machine needs the first without the
+    // second: a retired test network leaves its name in a unit file, and an
+    // explorer that will not start is a worse answer than a script that saw
+    // the refusal and asked for the current name instead.
+    if arguments.iter().any(|argument| argument == "--check") {
+        return Ok(());
+    }
+
     let (node, restored) = Node::open_archiving(options.params, options.listen, &options.data)
         .map_err(|error| format!("could not start: {error}"))?;
     println!("listening    {}", node.address());

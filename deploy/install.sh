@@ -97,7 +97,7 @@ resolve() {
 }
 
 listen=$(carried listen)
-resolve NETWORK "$(carried network)" testnet-4
+resolve NETWORK "$(carried network)" testnet-5
 resolve PORT "${listen##*:}" 9944
 resolve SEED "$(carried seed)" ""
 # A public key to pay block rewards to. Mining needs the address money goes to
@@ -222,6 +222,18 @@ chown cairn:cairn "$DATA"
 chmod 0750 "$DATA"
 
 say "Service"
+# A test network gets retired when a rule has to change, and its name stays
+# written in the unit file of every machine that was running it. Carrying a
+# setting forward is right until the build stops accepting it, and then it is
+# a service that will not start. The node itself is asked, since it is the
+# only thing that knows which names this build has: a refusal here means the
+# name is gone, and the default is the current one.
+if [ -n "$NETWORK" ] && ! /usr/local/bin/cairnd --check --network "$NETWORK" >/dev/null 2>&1; then
+    echo "network  $NETWORK is not a network this build knows, so testnet-5 is used"
+    echo "         instead. Name one explicitly to choose another."
+    NETWORK=testnet-5
+fi
+
 # Written from the settings above rather than copied, so the unit says in full
 # what this machine does, and is a record the next run can read back.
 ARGS="--network $NETWORK --data $DATA --listen 0.0.0.0:$PORT --status 60"

@@ -32,6 +32,15 @@ fn run(arguments: &[String]) -> Result<(), String> {
     println!("cairnd {}", env!("CARGO_PKG_VERSION"));
     print!("{}", options::describe(&options));
 
+    // Everything above is a question about the settings, and everything below
+    // starts a node. A script updating a machine needs the first without the
+    // second: a test network that has been retired leaves its name written in
+    // a unit file, and a node that will not start is a worse answer than a
+    // script that saw the refusal and asked for the current name instead.
+    if arguments.iter().any(|argument| argument == "--check") {
+        return Ok(());
+    }
+
     let started = if options.archive {
         Node::open_archiving
     } else {

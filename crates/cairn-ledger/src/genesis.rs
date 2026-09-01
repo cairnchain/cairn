@@ -18,11 +18,13 @@ use cairn_primitives::Hash32;
 use crate::block::Block;
 use crate::note::NetworkId;
 
-/// The first block of testnet-4, as bytes.
+/// The first block of testnet-5, as bytes.
 ///
 /// Mined once, in the open. Its coinbase pays nobody: a network should not
-/// start with someone already holding something.
-const TESTNET_4: &str = "010057524143000000000000000000000000000000000000000000000000000000000000000000000000000000001c57b5409c87c207a51a7afb6de0a6872e55c4a9505143b310eaa30cac30f792b99665b29f3e16eda0932413c217ec72dcb6ec0c4f5875ec41ed0dc235759b732b8a7f4949a18c612a530d7dc3aa53b75b7fa4163daff6c2742422bdae5a12e2088f956a000000000000000800000000000000080000000000000000000000001abf930500000000010000000000000000000000000037000000436169726e20746573746e65742d342e20412070726f6f6620697320776f727468207768617420697420697320776f727468206e6f772e00000000";
+/// start with someone already holding something. What it says is what the
+/// network started over for: weight cannot be borrowed from a chain somebody
+/// else mined, and a miner does not get to tell the retarget what time it is.
+const TESTNET_5: &str = "010058524143000000000000000000000000000000000000000000000000000000000000000000000000000000006036cb588855842a7771b159462658ab35f4bcd29b2b88dcaf1ebf57c06bde6cb99665b29f3e16eda0932413c217ec72dcb6ec0c4f5875ec41ed0dc235759b732b8a7f4949a18c612a530d7dc3aa53b75b7fa4163daff6c2742422bdae5a12e2f76a966a000000000000000800000000000000080000000000000000000000006ef567090000000001000000000000000000000000003d000000436169726e20746573746e65742d352e20576569676874206973206e6f7420626f72726f77656420616e642074696d65206973206e6f7420746f6c642e00000000";
 
 /// The first block of the throwaway network.
 ///
@@ -31,7 +33,7 @@ const DEVNET: &str = "0100445241430000000000000000000000000000000000000000000000
 
 fn encoded(network: NetworkId) -> Option<&'static str> {
     let text = match network {
-        NetworkId::TESTNET_4 => TESTNET_4,
+        NetworkId::TESTNET_5 => TESTNET_5,
         NetworkId::DEVNET => DEVNET,
         _ => return None,
     };
@@ -64,7 +66,7 @@ mod tests {
     use crate::pow::meets_target;
 
     fn networks() -> [NetworkId; 2] {
-        [NetworkId::TESTNET_4, NetworkId::DEVNET]
+        [NetworkId::TESTNET_5, NetworkId::DEVNET]
     }
 
     #[test]
@@ -93,6 +95,19 @@ mod tests {
         }
     }
 
+    /// The two numbers everything else is pinned to, written out so that a
+    /// block replaced without replacing what names it stops the build rather
+    /// than the network. The README and the site quote both.
+    #[test]
+    fn the_pinned_identifier_and_opening_are_what_is_published() {
+        let first = block(NetworkId::TESTNET_5).unwrap();
+        assert_eq!(
+            cairn_primitives::hex::encode(first.id().as_bytes()),
+            "00000003c0f371d2b695623f2e870d6628305c330be393c7eb6229ab0c1e5596"
+        );
+        assert_eq!(opens_at(NetworkId::TESTNET_5), 1_788_242_679);
+    }
+
     #[test]
     fn nobody_starts_out_holding_anything() {
         for network in networks() {
@@ -115,7 +130,7 @@ mod tests {
 
     #[test]
     fn the_networks_do_not_share_a_beginning() {
-        assert_ne!(pinned(NetworkId::TESTNET_4), pinned(NetworkId::DEVNET));
+        assert_ne!(pinned(NetworkId::TESTNET_5), pinned(NetworkId::DEVNET));
         assert_eq!(
             pinned(NetworkId::MAINNET),
             None,
