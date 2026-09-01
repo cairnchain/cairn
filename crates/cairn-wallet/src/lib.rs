@@ -16,6 +16,7 @@ pub mod keyfile;
 pub mod page;
 pub mod serve;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -23,10 +24,12 @@ use std::time::{Duration, Instant};
 
 use crate::history::{History, Movement};
 use cairn_accumulator::ForestProof;
-use cairn_crypto::{PublicKey, SecretKey};
+use cairn_chain::Outdated;
+use cairn_crypto::{random_bytes, PublicKey, SecretKey};
 use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::transaction::{Input, Transfer};
-use cairn_ledger::validation::ConsensusParams;
+use cairn_ledger::validation::{ConsensusParams, TransferError};
+use cairn_net::node::{Probation, Refused, Stranded};
 use cairn_net::{Joined, Node};
 use cairn_primitives::codec::Encode;
 use cairn_primitives::{Amount, Hash32};
@@ -49,12 +52,17 @@ pub enum WalletError {
     #[error("that total is too large")]
     TooLarge,
     #[error(
-        "{needed} is more than the {have} this wallet can spend{}",
+        "{needed} is more than the {have} this wallet can spend{}{}",
+        waiting_note(*waiting),
         stranded_note(*stranded)
     )]
     NotEnough {
         needed: Amount,
         have: Amount,
+        /// Money already handed to a payment no block has carried yet. Not
+        /// spendable and not gone: it comes back as change, or it goes to
+        /// whoever is being paid, and until a block decides which, neither.
+        waiting: Amount,
         /// Money held in notes whose proof this node cannot produce. Real
         /// money, and the reason a balance must never be shown as one number.
         stranded: Amount,
@@ -69,8 +77,36 @@ pub enum WalletError {
         bytes: usize,
         limit: usize,
     },
-    #[error("the network would not take it: {0}")]
+    #[error("{0}")]
     Refused(String),
+    #[error(
+        "this exact payment is already waiting for a block, as {id}. It was not sent a second \
+         time and nobody has been paid twice. Wait for a block to carry it, which takes a few \
+         minutes, and if you meant to pay the same person again, send it after that"
+    )]
+    AlreadyWaiting { id: Hash32 },
+    #[error(
+        "there was no room for it: this wallet's node is already holding as many waiting \
+         transfers as it will, and this one does not pay enough to take the place of the \
+         cheapest. Nothing was sent. Send it again paying more to be carried"
+    )]
+    NoRoom,
+    #[error(
+        "that fee is {fee}, to send {amount}. The network asks {floor} to carry this one, so \
+         the fee as typed is out of all proportion to the payment. Nothing was sent: check \
+         where the decimal point went. If you really do mean to pay it, say so and send again"
+    )]
+    FeeOutOfProportion {
+        fee: Amount,
+        amount: Amount,
+        floor: Amount,
+    },
+    #[error(
+        "the operating system would not provide the randomness this spend needs to keep its \
+         shape to itself, so nothing was sent rather than something that says which output is \
+         yours"
+    )]
+    NoRandomness,
 }
 
 fn stranded_note(stranded: Amount) -> String {
@@ -78,6 +114,14 @@ fn stranded_note(stranded: Amount) -> String {
         String::new()
     } else {
         format!(". Another {stranded} sits in notes this node cannot prove")
+    }
+}
+
+fn waiting_note(waiting: Amount) -> String {
+    if waiting == Amount::ZERO {
+        String::new()
+    } else {
+        format!(". Another {waiting} is held by a payment waiting for a block")
     }
 }
 
@@ -97,6 +141,26 @@ impl Held {
     pub const fn is_cold(&self) -> bool {
         self.fallen.is_some()
     }
+
+    /// This note as a transfer spends it, unsigned.
+    fn as_input(&self) -> Input {
+        match &self.fallen {
+            None => Input::hot(self.id),
+            Some((position, proof)) => Input::cold(self.id, self.note, *position, proof.clone()),
+        }
+    }
+}
+
+/// A spend worked out but not yet built, signed or handed over.
+///
+/// The same arithmetic answers two questions, so it is done in one place:
+/// what a fee left blank should be, and what the spend about to be made costs.
+/// They used to be worked out separately and they disagreed.
+struct Draft {
+    spending: Vec<Held>,
+    change: Amount,
+    bytes: usize,
+    floor: Amount,
 }
 
 /// What this key holds.
@@ -104,6 +168,20 @@ impl Held {
 pub struct Holdings {
     /// What can be spent right now.
     pub spendable: Amount,
+    /// Money handed to a payment that no block has carried yet.
+    ///
+    /// Counted apart from what can be spent, and taken out of it, because a
+    /// note promised to a transfer waiting in the pool is a note the network
+    /// will not let anybody spend twice. A wallet that went on counting it
+    /// would build a second transfer out of the same notes, watch the pool
+    /// turn it away for being the one it already holds, and tell its owner
+    /// their money had moved again. That is how a person pays once and hands
+    /// over twice.
+    ///
+    /// It is not gone either. Part of it comes back as change and the rest
+    /// goes to whoever is being paid, and until a block carries the transfer
+    /// neither has happened.
+    pub waiting: Amount,
     /// Money in notes that have fallen and whose proof this node cannot
     /// produce.
     ///
@@ -112,7 +190,12 @@ pub struct Holdings {
     /// total would show a balance that quietly went down, which is the worst
     /// thing a wallet can tell anyone.
     pub stranded: Amount,
-    /// Every note, newest first, so a face can show where the money sits.
+    /// The notes a spend can reach for, so a face can show where the money
+    /// sits.
+    ///
+    /// Notes a waiting payment already holds are not among them, which is the
+    /// same rule as [`Holdings::spendable`] said in the form the selection
+    /// reads.
     pub notes: Vec<Held>,
 }
 
@@ -121,9 +204,26 @@ impl Holdings {
     #[must_use]
     pub fn total(&self) -> Amount {
         self.spendable
-            .checked_add(self.stranded)
+            .checked_add(self.waiting)
+            .and_then(|sum| sum.checked_add(self.stranded))
             .unwrap_or(self.spendable)
     }
+}
+
+/// A payment this wallet handed over that no block carries yet.
+///
+/// A wallet that could not say this had only two things to tell its owner
+/// about a payment, done and not done, and a payment spends most of its first
+/// few minutes being neither.
+#[derive(Clone, Copy, Debug)]
+pub struct Waiting {
+    pub id: Hash32,
+    /// What leaves this key when a block carries it: what is being paid, and
+    /// the fee with it.
+    pub amount: Amount,
+    /// What it holds meanwhile, which is more. The difference comes back as
+    /// change, and comes back only when a block carries it.
+    pub committed: Amount,
 }
 
 /// Where this wallet's node has got to.
@@ -133,9 +233,104 @@ pub struct Progress {
     pub peers: usize,
     pub joining: Joined,
     pub total_work: u128,
+    /// What the node has still to check before it stands behind the ledger it
+    /// was handed.
+    ///
+    /// Asked for because joining reports itself done while this is set: the
+    /// ledger arrived whole and it is in the chain, and none of that is this
+    /// node having checked it. A wallet showing a height and a balance out of
+    /// a ledger nobody here validated is doing the one thing this library says
+    /// it does not do.
+    pub probation: Option<Probation>,
+    /// The rules this software turned out not to have, if it met any.
+    pub outdated: Option<Outdated>,
+    /// Why the node cannot get on from where it stands, if it cannot.
+    pub stranded: Option<Stranded>,
+}
+
+impl Progress {
+    /// What is wrong with the numbers beside this, in words a face can show
+    /// without knowing what a node is.
+    ///
+    /// All three of these look, from the outside, exactly like a wallet that
+    /// is working: a height, a balance, and no complaint. Two of them mean the
+    /// height stopped moving some time ago and will not start again, and the
+    /// third means the balance is a stranger's word rather than this wallet's
+    /// own reading. None of them is worth hiding to keep a page tidy.
+    #[must_use]
+    pub fn warning(&self) -> Option<String> {
+        if let Some(outdated) = self.outdated {
+            return Some(format!(
+                "This wallet is too old for the chain it is on. The rules from block {} need \
+                 version {}, and this program knows only version {}. It stopped following the \
+                 chain there on purpose, so the height and the balance shown are from before \
+                 that moment and will not move again. Install a newer wallet and start it \
+                 again: nothing on disk is lost, and the key file is not touched.",
+                outdated.height, outdated.required, outdated.known
+            ));
+        }
+        if let Some(stranded) = self.stranded {
+            return Some(format!(
+                "This wallet was handed the ledger at block {}, and had to check its own way to \
+                 block {} before it could stand behind it. The blocks in between never arrived, \
+                 and it holds nothing below block {}, so there is no other way to reach them. \
+                 The balance shown is not one this wallet has checked. Delete this wallet's data \
+                 directory and start it again from a peer you trust; the key file is a separate \
+                 file and is not touched by that.",
+                stranded.anchor, stranded.settles_at, stranded.anchor
+            ));
+        }
+        if let Some(probation) = self.probation {
+            return Some(format!(
+                "This wallet has not yet checked the chain it is showing you. It was handed the \
+                 ledger at block {} and has checked {} of the {} blocks above it that it has to \
+                 check first. Until it has, the balance below is somebody else's account of your \
+                 money rather than this wallet's own. It carries on by itself; wait for this \
+                 line to go before believing the number.",
+                probation.anchor,
+                probation.checked(),
+                probation.owed()
+            ));
+        }
+        None
+    }
+}
+
+/// How much of the chain this key's own account of itself covers.
+///
+/// A history that is behind and does not say so is worse than one that is
+/// short and does: a person reading a list headed "what happened, newest
+/// first" whose newest entry is a hundred blocks old has been told something
+/// untrue about their own money.
+#[derive(Clone, Copy, Debug)]
+pub struct Covered {
+    /// The first height it could read, or `None` if it has read nothing.
+    pub from: Option<u64>,
+    /// The newest height it has read.
+    pub through: Option<u64>,
+    /// Where the chain itself has got to.
+    pub tip: Option<u64>,
+}
+
+impl Covered {
+    /// Blocks the chain has that the account has not read.
+    #[must_use]
+    pub fn behind(&self) -> u64 {
+        match (self.tip, self.through) {
+            (Some(tip), Some(through)) => tip.saturating_sub(through),
+            (Some(tip), None) => tip.saturating_add(1),
+            _ => 0,
+        }
+    }
 }
 
 /// What a spend did, once it has left.
+///
+/// It has left, and it has not arrived. A transfer handed to the network waits
+/// in a pool until a miner puts it in a block, which takes minutes, and none
+/// of it has happened while this is being read. Whatever shows this has to say
+/// so: a face that reports a payment as done is a face that has somebody hand
+/// over the goods.
 #[derive(Clone, Copy, Debug)]
 pub struct Sent {
     pub id: Hash32,
@@ -158,6 +353,27 @@ const HISTORY_FILE: &str = "history.dat";
 /// holding the chain while it walks the lot, so the page stays answerable and
 /// the next block still arrives.
 const CATCH_UP_BATCH: u64 = 512;
+
+/// How long the chain has to sit still, with somebody to ask, before catching
+/// up counts as done.
+const SETTLED_FOR: Duration = Duration::from_secs(2);
+
+/// How far above what the network asks a fee may go before the wallet stops
+/// and makes sure it was meant.
+///
+/// Wide on purpose. Paying several times the floor to be carried sooner is an
+/// ordinary thing to want, and a wallet that questioned it would teach its
+/// owner to wave the question away, which is the state in which the fee that
+/// really was a slip goes through.
+const STEEP_MULTIPLE: u64 = 100;
+
+/// Rounds the blank-fee quote is allowed before it gives up and lets sending
+/// name the number instead.
+///
+/// Two is the usual answer and three is the most that has been seen: the fee
+/// only ever moves the quote by making the spend reach for another note, and
+/// there are not many notes to reach for.
+const QUOTE_ROUNDS: usize = 8;
 
 /// A key, and the node that verifies the chain it lives on.
 ///
@@ -235,32 +451,64 @@ impl Wallet {
     /// it gathers, whether any of them travel with a proof, and how many
     /// places it leaves behind in the set every node holds.
     ///
-    /// An estimate, and the one place it can be short is where paying the fee
-    /// makes the wallet reach for another note. Then sending says so.
+    /// And worked out more than once, because the fee is part of what has to
+    /// be covered. Pricing a transfer that gathers enough for the amount and
+    /// then sending one that gathers enough for the amount and the fee are two
+    /// different transfers whenever the fee crosses a note boundary, and the
+    /// second is the larger. Quoting the first was a number this wallet then
+    /// refused, and it refused it on exactly the round amounts people type. So
+    /// the quote is fed back in until the transfer it prices is the transfer
+    /// that would be built, which takes two passes and settles.
     pub fn floor_for(&self, recipient: PublicKey, amount: Amount) -> Amount {
         let holdings = self.holdings();
-        let Some((spending, gathered)) = select(&holdings.notes, amount) else {
-            return Amount::ZERO;
-        };
-        let mut outputs = vec![Note::new(amount, recipient)];
-        if let Some(change) = gathered.checked_sub(amount) {
-            if change > Amount::ZERO {
-                outputs.push(Note::new(change, self.address()));
+        let mut fee = Amount::ZERO;
+        for _ in 0..QUOTE_ROUNDS {
+            let Some(needed) = amount.checked_add(fee) else {
+                return fee;
+            };
+            // Not enough to cover the amount and this fee together. Sending is
+            // where that is said, with the numbers; quoting a larger fee here
+            // would only make it worse.
+            let Some(draft) = self.draft(&holdings, recipient, amount, needed) else {
+                return fee;
+            };
+            if draft.floor <= fee {
+                return fee;
             }
+            fee = draft.floor;
         }
-        let inputs = spending
-            .iter()
-            .map(|held| match &held.fallen {
-                None => Input::hot(held.id),
-                Some((position, proof)) => {
-                    Input::cold(held.id, held.note, *position, proof.clone())
-                }
-            })
-            .collect();
+        fee
+    }
+
+    /// The transfer this wallet would build to pay `amount` while gathering
+    /// `needed`, unsigned and in selection order, with what it costs.
+    ///
+    /// Unsigned costs nothing in accuracy: a signature is a fixed number of
+    /// bytes whether it has been made or not, so what this measures is what
+    /// the finished transfer weighs. Selection order costs nothing either,
+    /// because shuffling moves bytes around without adding any.
+    fn draft(
+        &self,
+        holdings: &Holdings,
+        recipient: PublicKey,
+        amount: Amount,
+        needed: Amount,
+    ) -> Option<Draft> {
+        let (spending, gathered) = select(&holdings.notes, needed)?;
+        let change = gathered.checked_sub(needed)?;
+        let mut outputs = vec![Note::new(amount, recipient)];
+        if change > Amount::ZERO {
+            outputs.push(Note::new(change, self.address()));
+        }
+        let inputs = spending.iter().map(Held::as_input).collect();
         let transfer = Transfer::new(inputs, outputs);
         let bytes = transfer.encode().len();
-        let freed = spending.iter().filter(|held| held.fallen.is_none()).count();
-        cairn_chain::fee_floor(cairn_chain::transfer_weight(&transfer, bytes, freed))
+        Some(Draft {
+            floor: floor_of(&transfer, bytes, &spending),
+            bytes,
+            spending,
+            change,
+        })
     }
 
     /// Reaches for a peer, and remembers it whether or not it answers now.
@@ -277,6 +525,9 @@ impl Wallet {
             peers: self.node.peer_count(),
             joining: self.node.joining(),
             total_work: self.node.total_work(),
+            probation: self.node.probation(),
+            outdated: self.node.outdated(),
+            stranded: self.node.stranded(),
         }
     }
 
@@ -285,6 +536,15 @@ impl Wallet {
     /// A wallet that answered from a chain it had not finished reading would
     /// show a balance from the past, which for a wallet is a wrong answer
     /// rather than a slow one.
+    ///
+    /// A chain that has not arrived at all is not a chain that has stopped
+    /// moving, and telling the two apart is the whole of what is careful here.
+    /// A node being handed a ledger reports no height until the last piece of
+    /// it lands, so its height sits at nothing for as long as the handover
+    /// takes; read as a number that is not changing, that is a wallet giving
+    /// up two seconds into a thirty second wait and answering nought. It is
+    /// also what a peer that completes the handshake and then says nothing
+    /// leaves behind, and there is no reason to make that free.
     pub fn catch_up(&self, patience: Duration) {
         let deadline = Instant::now()
             .checked_add(patience)
@@ -295,13 +555,16 @@ impl Wallet {
         while Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(200));
             let height = self.node.height();
-            if height == last {
-                if self.node.peer_count() > 0 && still_since.elapsed() > Duration::from_secs(2) {
-                    return;
-                }
-            } else {
+            if height != last {
                 last = height;
                 still_since = Instant::now();
+                continue;
+            }
+            if height.is_none() {
+                continue;
+            }
+            if self.node.peer_count() > 0 && still_since.elapsed() > SETTLED_FOR {
+                return;
             }
         }
     }
@@ -329,7 +592,9 @@ impl Wallet {
         // branch that was undone leaves this history describing blocks nobody
         // has any more, and reading on from there would stack the winning
         // branch on top of the losing one.
-        if history.diverged(|height| self.node.archived_at(height).map(|block| block.id())) {
+        if history.diverged(Some(tip), |height| {
+            self.node.archived_at(height).map(|block| block.id())
+        }) {
             history.forget();
             let _ = history.save(&self.history_file);
         }
@@ -359,9 +624,16 @@ impl Wallet {
     }
 
     /// This key's own account of what happened to it, newest first.
+    ///
+    /// Reads its way to the chain's tip rather than one batch of it. Reading
+    /// in batches is how the lock is let go of often enough for the next block
+    /// to arrive, and it was never meant to be how far the history goes: a
+    /// wallet six hundred blocks behind showed the first five hundred and
+    /// twelve, headed the list "what happened, newest first", and left the
+    /// last eighty-eight out without a word.
     #[must_use]
     pub fn history(&self) -> Vec<Movement> {
-        self.follow();
+        while self.follow() > 0 {}
         self.history
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -370,23 +642,61 @@ impl Wallet {
             .collect()
     }
 
-    /// The first height the history could see, so a face can say what it does
-    /// not cover rather than implying it covers everything.
+    /// What the history took back when the chain changed under it, newest
+    /// first.
+    ///
+    /// Money that moved and then did not. Kept separately from the movements
+    /// because it is not one: it describes a block nobody has any more.
     #[must_use]
-    pub fn history_from(&self) -> Option<u64> {
+    pub fn undone(&self) -> Vec<Movement> {
         self.history
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .from()
+            .undone()
+            .copied()
+            .collect()
+    }
+
+    /// What the history covers, so a face can say what it does not rather than
+    /// implying it covers everything.
+    #[must_use]
+    pub fn history_covers(&self) -> Covered {
+        let tip = self.node.height();
+        let history = self
+            .history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let from = history.from();
+        Covered {
+            from,
+            through: from.and(history.next().checked_sub(1)),
+            tip,
+        }
     }
 
     /// Everything this key owns, and what part of it cannot move.
+    ///
+    /// The confirmed ledger is only half the answer. What is waiting in the
+    /// pool has not happened, but the notes it holds are promised, and money a
+    /// wallet shows as spendable had better be money it can spend.
     #[must_use]
     pub fn holdings(&self) -> Holdings {
+        self.reckon().0
+    }
+
+    /// The payments this wallet has handed over that no block carries yet.
+    #[must_use]
+    pub fn waiting(&self) -> Vec<Waiting> {
+        self.reckon().1
+    }
+
+    /// One reading of the chain answering both, since the pool decides what is
+    /// spendable and the notes decide what the pool is holding.
+    fn reckon(&self) -> (Holdings, Vec<Waiting>) {
         let mine = self.address();
         self.node.with_chain(|chain| {
             let state = chain.state();
-            let mut notes: Vec<Held> = state
+            let mut held: Vec<Held> = state
                 .hot_notes()
                 .filter(|(_, entry)| entry.note.owner == mine)
                 .map(|(id, entry)| Held {
@@ -396,29 +706,95 @@ impl Wallet {
                 })
                 .collect();
 
-            let mut stranded = Amount::ZERO;
+            // Notes that have fallen out of the set every node keeps. Ours
+            // either way; spendable only while this node can still prove where
+            // one sits.
+            let mut unprovable: Vec<(NoteId, Amount)> = Vec::new();
             for (id, position, note) in state.watched_notes() {
                 if note.owner != mine {
                     continue;
                 }
                 match state.cold().proof_of(position) {
-                    Some(proof) => notes.push(Held {
+                    Some(proof) => held.push(Held {
                         id,
                         note,
                         fallen: Some((position, proof)),
                     }),
-                    None => stranded = stranded.checked_add(note.value).unwrap_or(stranded),
+                    None => unprovable.push((id, note.value)),
                 }
             }
 
-            let spendable = notes.iter().fold(Amount::ZERO, |sum, held| {
-                sum.checked_add(held.note.value).unwrap_or(sum)
-            });
-            Holdings {
-                spendable,
-                stranded,
-                notes,
+            let values: BTreeMap<NoteId, Amount> = held
+                .iter()
+                .map(|one| (one.id, one.note.value))
+                .chain(unprovable.iter().copied())
+                .collect();
+
+            // An input names a note and not its owner, so which pooled
+            // transfers are ours is decided by which notes they reach for.
+            let mut committed: BTreeSet<NoteId> = BTreeSet::new();
+            let mut waiting: Vec<Waiting> = Vec::new();
+            for (id, transfer) in chain.pooled_transfers() {
+                let ours: Vec<NoteId> = transfer
+                    .inputs
+                    .iter()
+                    .map(|input| input.note_id)
+                    .filter(|note_id| values.contains_key(note_id))
+                    .collect();
+                if ours.is_empty() {
+                    continue;
+                }
+                let gave = ours.iter().fold(Amount::ZERO, |sum, note_id| {
+                    values
+                        .get(note_id)
+                        .and_then(|value| sum.checked_add(*value))
+                        .unwrap_or(sum)
+                });
+                let got = transfer
+                    .created_notes()
+                    .into_iter()
+                    .filter(|(_, note)| note.owner == mine)
+                    .fold(Amount::ZERO, |sum, (_, note)| {
+                        sum.checked_add(note.value).unwrap_or(sum)
+                    });
+                committed.extend(ours);
+                waiting.push(Waiting {
+                    id: *id,
+                    amount: gave.checked_sub(got).unwrap_or(Amount::ZERO),
+                    committed: gave,
+                });
             }
+
+            let mut notes = Vec::with_capacity(held.len());
+            let mut spendable = Amount::ZERO;
+            let mut promised = Amount::ZERO;
+            for one in held {
+                let value = one.note.value;
+                if committed.contains(&one.id) {
+                    promised = promised.checked_add(value).unwrap_or(promised);
+                } else {
+                    spendable = spendable.checked_add(value).unwrap_or(spendable);
+                    notes.push(one);
+                }
+            }
+            let mut stranded = Amount::ZERO;
+            for (id, value) in unprovable {
+                if committed.contains(&id) {
+                    promised = promised.checked_add(value).unwrap_or(promised);
+                } else {
+                    stranded = stranded.checked_add(value).unwrap_or(stranded);
+                }
+            }
+
+            (
+                Holdings {
+                    spendable,
+                    waiting: promised,
+                    stranded,
+                    notes,
+                },
+                waiting,
+            )
         })
     }
 
@@ -426,11 +802,41 @@ impl Wallet {
     ///
     /// Nothing about this is shown anywhere: the key is used here and the
     /// signature is made here, so a face never holds either.
+    ///
+    /// A fee out of all proportion to the amount is refused rather than paid.
+    /// See [`Wallet::send_over_the_odds`] for the way past that, which exists
+    /// because paying over the odds is sometimes exactly what was meant.
     pub fn send(
         &self,
         recipient: PublicKey,
         amount: Amount,
         fee: Amount,
+    ) -> Result<Sent, WalletError> {
+        self.spend(recipient, amount, fee, false)
+    }
+
+    /// The same spend, with a fee out of all proportion taken as meant.
+    ///
+    /// A wallet cannot tell a decimal point in the wrong place from somebody
+    /// who wants their transfer in the next block whatever it costs, and both
+    /// happen. So it stops and asks once, and this is the answer: the ceiling
+    /// is one a person can step over on purpose, because a ceiling they
+    /// cannot is a wallet deciding how much their own hurry is worth.
+    pub fn send_over_the_odds(
+        &self,
+        recipient: PublicKey,
+        amount: Amount,
+        fee: Amount,
+    ) -> Result<Sent, WalletError> {
+        self.spend(recipient, amount, fee, true)
+    }
+
+    fn spend(
+        &self,
+        recipient: PublicKey,
+        amount: Amount,
+        fee: Amount,
+        meant: bool,
     ) -> Result<Sent, WalletError> {
         if amount == Amount::ZERO {
             return Err(WalletError::NothingToSend);
@@ -438,33 +844,66 @@ impl Wallet {
         let needed = amount.checked_add(fee).ok_or(WalletError::TooLarge)?;
 
         let holdings = self.holdings();
-        let (spending, gathered) =
-            select(&holdings.notes, needed).ok_or(WalletError::NotEnough {
-                needed,
-                have: holdings.spendable,
-                stranded: holdings.stranded,
-            })?;
-        let change = gathered.checked_sub(needed).ok_or(WalletError::NotEnough {
+        let short = || WalletError::NotEnough {
             needed,
             have: holdings.spendable,
+            waiting: holdings.waiting,
             stranded: holdings.stranded,
-        })?;
+        };
+        let draft = self
+            .draft(&holdings, recipient, amount, needed)
+            .ok_or_else(short)?;
 
-        let mine = self.address();
-        let mut outputs = vec![Note::new(amount, recipient)];
-        if change > Amount::ZERO {
-            outputs.push(Note::new(change, mine));
+        // The network turns away a transfer that pays less than the floor, so
+        // the refusal is better said here, with the number, than fetched back
+        // from a pool the sender cannot see. A fee of nothing was the ordinary
+        // case until the floor existed, and a wallet that went on sending them
+        // would look broken rather than out of date.
+        if fee < draft.floor {
+            return Err(WalletError::FeeTooLow {
+                needed: draft.floor,
+            });
+        }
+        if !meant && fee > ceiling(amount, draft.floor) {
+            return Err(WalletError::FeeOutOfProportion {
+                fee,
+                amount,
+                floor: draft.floor,
+            });
         }
 
-        let inputs = spending
-            .iter()
-            .map(|held| match &held.fallen {
-                None => Input::hot(held.id),
-                Some((position, proof)) => {
-                    Input::cold(held.id, held.note, *position, proof.clone())
-                }
-            })
-            .collect();
+        // A transfer no block can carry would be refused by the network, and
+        // it is better to say so here than to have the refusal come back as a
+        // rule nobody outside the protocol has heard of. It happens when a
+        // wallet holds its money in many small fallen notes, each of which
+        // travels with its own proof.
+        if draft.bytes > self.params.max_block_bytes {
+            return Err(WalletError::TooBulky {
+                notes: draft.spending.len(),
+                bytes: draft.bytes,
+                limit: self.params.max_block_bytes,
+            });
+        }
+
+        // Nothing about the order of a transfer is meant to say anything, and
+        // as it stood both halves of the order said plenty. The change went
+        // last every time, so an observer who knew that followed this wallet
+        // from one payment to the next whatever key the change was paid to,
+        // and the fresh keys that work is heading for would have bought
+        // nothing. The inputs came out in the order they were chosen, hot
+        // before cold and then largest first, which is a signature saying
+        // which program built the transfer and resolves the change output on
+        // its own. Both are one shuffle, done before signing because what is
+        // signed commits to the order.
+        let mut spending = draft.spending;
+        shuffle(&mut spending)?;
+        let mut outputs = vec![Note::new(amount, recipient)];
+        if draft.change > Amount::ZERO {
+            outputs.push(Note::new(draft.change, self.address()));
+        }
+        shuffle(&mut outputs)?;
+
+        let inputs = spending.iter().map(Held::as_input).collect();
         let mut transfer = Transfer::new(inputs, outputs);
         for (index, held) in spending.iter().enumerate() {
             let Ok(index) = u32::try_from(index) else {
@@ -473,37 +912,26 @@ impl Wallet {
             transfer.sign_input(self.params.network, index, &held.note, &self.secret);
         }
 
-        // A transfer no block can carry would be refused by the network, and
-        // it is better to say so here than to have the refusal come back as a
-        // rule nobody outside the protocol has heard of. It happens when a
-        // wallet holds its money in many small fallen notes, each of which
-        // travels with its own proof.
-        let bytes = transfer.encode().len();
-
-        // The network turns away a transfer that pays less than the floor, so
-        // the refusal is better said here, with the number, than fetched back
-        // from a pool the sender cannot see. A fee of nothing was the ordinary
-        // case until the floor existed, and a wallet that went on sending them
-        // would look broken rather than out of date.
-        let freed = spending.iter().filter(|held| held.fallen.is_none()).count();
-        let floor = cairn_chain::fee_floor(cairn_chain::transfer_weight(&transfer, bytes, freed));
-        if fee < floor {
-            return Err(WalletError::FeeTooLow { needed: floor });
-        }
-
-        if bytes > self.params.max_block_bytes {
-            return Err(WalletError::TooBulky {
-                notes: spending.len(),
-                bytes,
-                limit: self.params.max_block_bytes,
-            });
-        }
-
         let id = transfer.id();
         let from_cold = spending.iter().filter(|held| held.is_cold()).count();
-        self.node
+        // The answer matters. A pool that already holds this identifier, and a
+        // full pool that would rather keep what it has, both leave nothing
+        // pooled and nothing broadcast, and both say so by returning false
+        // rather than by failing. Read as success, that is a wallet reporting
+        // a payment the network never took, which is how somebody hands over
+        // two things for one payment.
+        let taken = self
+            .node
             .submit_transaction(transfer)
-            .map_err(|error| WalletError::Refused(error.to_string()))?;
+            .map_err(|error| WalletError::Refused(said_plainly(&error)))?;
+        if !taken {
+            let already = self.node.with_chain(|chain| chain.pooled(&id).is_some());
+            return Err(if already {
+                WalletError::AlreadyWaiting { id }
+            } else {
+                WalletError::NoRoom
+            });
+        }
 
         // Held open long enough for the transfer to leave. Reporting a spend
         // that reached nobody as done would be telling someone their money
@@ -515,7 +943,7 @@ impl Wallet {
             id,
             amount,
             fee,
-            change,
+            change: draft.change,
             notes: spending.len(),
             from_cold,
             handed_on,
@@ -553,6 +981,87 @@ fn select(held: &[Held], needed: Amount) -> Option<(Vec<Held>, Amount)> {
     (gathered >= needed).then_some((chosen, gathered))
 }
 
+/// What the network asks to carry `transfer`.
+fn floor_of(transfer: &Transfer, bytes: usize, spending: &[Held]) -> Amount {
+    let freed = spending.iter().filter(|held| held.fallen.is_none()).count();
+    cairn_chain::fee_floor(cairn_chain::transfer_weight(transfer, bytes, freed))
+}
+
+/// The most a spend pays to be carried before the wallet stops and asks.
+///
+/// The larger of two numbers, and both are needed. The amount being paid,
+/// because a fee worth more than the payment is nearly always a decimal point
+/// in the wrong place: someone meaning `0.00005` and typing `5`. And a wide
+/// multiple of what the network actually asks, because on a payment of a few
+/// pebbles the floor itself can come to more than the payment, and a wallet
+/// that questioned its own quote would be teaching its owner to wave the
+/// question away.
+fn ceiling(amount: Amount, floor: Amount) -> Amount {
+    let generous = Amount::from_pebbles(floor.as_pebbles().saturating_mul(STEEP_MULTIPLE))
+        .unwrap_or(Amount::MAX_MONEY);
+    amount.max(generous)
+}
+
+/// Puts `items` in an order nothing can be read from.
+///
+/// Drawn from the operating system rather than from anything this program
+/// keeps, and a refusal is passed on rather than worked around: a spend that
+/// went out in a predictable order would be one an observer reads the change
+/// output off, which is the whole thing this is for.
+fn shuffle<T>(items: &mut [T]) -> Result<(), WalletError> {
+    let mut remaining = items.len();
+    while remaining > 1 {
+        let drawn = random_bytes::<8>().map_err(|_| WalletError::NoRandomness)?;
+        let span = u64::try_from(remaining).unwrap_or(u64::MAX);
+        // Taking a draw over the whole range modulo the span leaves the lowest
+        // few values very slightly likelier, by about one part in 2^57 for the
+        // handful of notes a transfer gathers. Nothing is read off that.
+        let pick =
+            usize::try_from(u64::from_le_bytes(drawn).checked_rem(span).unwrap_or(0)).unwrap_or(0);
+        remaining = remaining.saturating_sub(1);
+        items.swap(remaining, pick);
+    }
+    Ok(())
+}
+
+/// A refusal from the node, said to whoever is holding the money.
+///
+/// The types underneath print for whoever is debugging them: a note comes out
+/// as a `Debug` struct thirty two bytes wide, and "unknown or already spent"
+/// is said about a note this wallet spent itself a moment ago. Neither belongs
+/// in front of somebody trying to pay for something, and in the one case that
+/// happens most the fact that matters, that a second payment has to wait for a
+/// block, is in neither of them.
+fn said_plainly(refusal: &Refused) -> String {
+    match refusal {
+        Refused::OnProbation(probation) => format!(
+            "this wallet's node has not finished checking the ledger it was handed, and it will \
+             not carry a payment until it has. It has checked {} of the {} blocks above block \
+             {}. Nothing was sent; leave the wallet open and try again when that line has gone.",
+            probation.checked(),
+            probation.owed(),
+            probation.anchor
+        ),
+        Refused::Transfer(TransferError::UnknownNote(_) | TransferError::MissingProof { .. }) => {
+            "one of the notes this payment is made of is not there any more. Almost always that \
+             means a payment you have already made is still waiting for a block: until one \
+             carries it, the notes it holds cannot be spent again. Nothing was sent. Wait a few \
+             minutes and look at the balance before trying again."
+                .to_owned()
+        }
+        Refused::Transfer(TransferError::FeeBelowFloor { floor, .. }) => format!(
+            "the network asks {floor} to carry this payment and this one pays less, so nothing \
+             was sent. Send it again paying that."
+        ),
+        Refused::Transfer(TransferError::TooLargeForABlock { .. }) => {
+            "this payment gathers so many notes that no block would carry it. Nothing was sent. \
+             Send a smaller amount, more than once: each one leaves fewer notes behind."
+                .to_owned()
+        }
+        other => format!("the network would not take this payment, and nothing was sent: {other}"),
+    }
+}
+
 fn wait_until(patience: Duration, ready: impl Fn() -> bool) -> bool {
     let deadline = Instant::now()
         .checked_add(patience)
@@ -564,4 +1073,121 @@ fn wait_until(patience: Duration, ready: impl Fn() -> bool) -> bool {
         std::thread::sleep(Duration::from_millis(50));
     }
     ready()
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+mod tests {
+    use super::{ceiling, said_plainly, shuffle, Progress};
+    use cairn_ledger::note::NoteId;
+    use cairn_ledger::validation::TransferError;
+    use cairn_net::node::{Probation, Refused};
+    use cairn_net::Joined;
+    use cairn_primitives::{Amount, Hash32};
+
+    fn cairn(text: &str) -> Amount {
+        Amount::from_cairn(text).unwrap()
+    }
+
+    /// A fee larger than the payment is nearly always a decimal point in the
+    /// wrong place, and a fee near what the network asks never is, however
+    /// small the payment. Both have to be true of the ceiling or it refuses
+    /// the wallet's own quote on a payment of a few pebbles.
+    #[test]
+    fn the_ceiling_on_a_fee_is_the_payment_or_a_wide_multiple_of_the_floor() {
+        let floor = cairn("0.00007");
+        assert_eq!(ceiling(cairn("1"), floor), cairn("1"));
+        assert!(cairn("5") > ceiling(cairn("1"), floor), "five to send one");
+
+        // A payment worth less than the fee the network itself asks. Refusing
+        // this would be a wallet refusing the number it just quoted.
+        let tiny = cairn("0.00001");
+        assert!(floor <= ceiling(tiny, floor));
+        assert!(
+            cairn("0.005") <= ceiling(tiny, floor),
+            "and there is room above it to pay to be carried sooner"
+        );
+    }
+
+    /// A `Debug` struct thirty two bytes wide used to go straight from the
+    /// ledger's refusal into what the page showed, saying "already spent"
+    /// about a note this wallet had spent itself half a minute earlier. The
+    /// fact that mattered, that a second payment has to wait for a block, was
+    /// nowhere in it.
+    #[test]
+    fn a_refusal_reaches_a_person_in_words() {
+        let unknown = Refused::Transfer(TransferError::UnknownNote(NoteId::new(
+            Hash32::from_bytes([9; 32]),
+            0,
+        )));
+        let said = said_plainly(&unknown);
+        assert!(!said.contains("NoteId"), "{said}");
+        assert!(!said.contains("Hash32"), "{said}");
+        assert!(!said.contains("already spent"), "{said}");
+        assert!(said.contains("waiting for a block"), "{said}");
+        assert!(said.contains("Nothing was sent"), "{said}");
+    }
+
+    /// The node reports three states in which a height and a balance say
+    /// nothing, and the wallet showed none of them. Probation is the one that
+    /// matters most: joining reports itself done throughout it, so a wallet
+    /// just started shows a balance out of a ledger it has not checked.
+    #[test]
+    fn a_ledger_this_wallet_has_not_checked_is_said_to_be_one() {
+        let healthy = Progress {
+            height: Some(10),
+            peers: 1,
+            joining: Joined::Done,
+            total_work: 10,
+            probation: None,
+            outdated: None,
+            stranded: None,
+        };
+        assert!(healthy.warning().is_none(), "nothing to say about this one");
+
+        let on_probation = Progress {
+            probation: Some(Probation {
+                anchor: 900,
+                settles_at: 1000,
+                reached: 940,
+            }),
+            ..healthy
+        };
+        let said = on_probation.warning().unwrap();
+        assert!(said.contains("900"), "{said}");
+        assert!(said.contains("40 of the 100"), "{said}");
+        assert!(said.contains("has not yet checked"), "{said}");
+    }
+
+    /// A change output that is always last is one an observer picks out with
+    /// certainty, whatever key it is paid to, which would leave the fresh key
+    /// work worth very little. Two outputs, so a shuffle that does nothing
+    /// fails this every time and a shuffle that works fails it about once in
+    /// a hundred million runs.
+    #[test]
+    fn shuffling_moves_things() {
+        let mut seen_first = false;
+        let mut seen_second = false;
+        for _ in 0..64 {
+            let mut pair = ["recipient", "change"];
+            shuffle(&mut pair).unwrap();
+            if pair[0] == "change" {
+                seen_first = true;
+            } else {
+                seen_second = true;
+            }
+        }
+        assert!(seen_first && seen_second, "the change moved about");
+
+        // And it keeps everything it was given, which is the half of this that
+        // would lose money rather than privacy.
+        let mut many: Vec<u32> = (0..64).collect();
+        shuffle(&mut many).unwrap();
+        many.sort_unstable();
+        assert_eq!(many, (0..64).collect::<Vec<u32>>());
+    }
 }

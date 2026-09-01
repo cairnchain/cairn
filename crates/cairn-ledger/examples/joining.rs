@@ -21,7 +21,7 @@ use cairn_ledger::block::BlockHeader;
 use cairn_ledger::handover::BURIAL;
 use cairn_ledger::note::Note;
 use cairn_ledger::pow::RECENT_HEADERS;
-use cairn_ledger::sampling::SAMPLES;
+use cairn_ledger::sampling::{SAMPLES, SHALLOWEST};
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
 use cairn_ledger::LedgerState;
@@ -40,9 +40,16 @@ fn main() {
     );
     println!("{}", "-".repeat(56));
 
-    // A sampled start is a tip, sixty four hashes, and one opened header per
-    // draw. It does not depend on the ledger, so it is the same on every row.
-    let sampling = SAMPLES * (core::mem::size_of::<BlockHeader>() + 64 * 32 + 4);
+    // A sampled start is a tip, sixty four hashes, one opened header per draw,
+    // and the run from the deepest of those up to the tip. It does not depend
+    // on the ledger, so it is the same on every row.
+    //
+    // The run is what ties the top of a chain to a difficulty anybody can
+    // check, and it is about a thousand headers: the draw stops resolving that
+    // far from the tip, so that is exactly the stretch nothing else looks at.
+    let run = usize::try_from(SHALLOWEST).unwrap_or(0) + RECENT_HEADERS;
+    let sampling = SAMPLES * (core::mem::size_of::<BlockHeader>() + 64 * 32 + 4)
+        + run * core::mem::size_of::<BlockHeader>();
 
     for capacity in SIZES {
         let bytes = handover_bytes(capacity);

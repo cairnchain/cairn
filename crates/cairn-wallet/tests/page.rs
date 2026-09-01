@@ -255,6 +255,8 @@ fn money_sent_from_the_page_leaves_the_wallet() {
         answer.contains("\"amount\":\"60.00000000 CAIRN\""),
         "{answer}"
     );
+    // What the page was never told, and what a mistyped fee is paid out of.
+    assert!(answer.contains("\"fee\":\""), "{answer}");
 
     // It is in the pool, which is where a spend goes before a block carries it.
     let pooled = running
@@ -262,11 +264,18 @@ fn money_sent_from_the_page_leaves_the_wallet() {
         .node()
         .with_chain(cairn_chain::ChainStore::pool_len);
     assert_eq!(pooled, 1, "the transfer is with the network");
+
+    // Nobody has been paid yet, and the notes the payment is made of are out
+    // of what can be spent: the network will not carry them twice, so a wallet
+    // that went on counting them would build a second payment nothing takes.
+    let holdings = running.wallet.holdings();
+    assert_eq!(holdings.waiting, Amount::from_cairn("100").unwrap());
     assert_eq!(
-        running.wallet.holdings().spendable,
-        before,
-        "and nothing has moved yet: a spend is spent when a block carries it"
+        holdings.spendable,
+        before.checked_sub(holdings.waiting).unwrap(),
+        "the two notes it gathered are spoken for"
     );
+    assert_eq!(holdings.total(), before, "and none of it has gone anywhere");
 
     // What a person mistypes has to come back as something they can act on
     // rather than as a failure.

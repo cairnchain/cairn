@@ -167,7 +167,28 @@ impl Decode for Amount {
 }
 
 impl<T: Encode> Encode for Vec<T> {
+    /// The two sides of this pair do not agree about everything, and the part
+    /// they do not agree about is unreachable rather than handled.
+    ///
+    /// This writes whatever length it is given; the decoder refuses anything
+    /// past [`MAX_SEQUENCE_LEN`]. So a sequence longer than that encodes to a
+    /// frame nothing can read back, and a node could take an identifier over a
+    /// structure it cannot re-parse. Nothing on the wire comes near the
+    /// ceiling, since a block is capped far below it and every sequence in a
+    /// block is capped again by its own rule.
+    ///
+    /// Silently writing a shorter count was considered and is worse: it would
+    /// give two different sequences the same encoding, which is the one
+    /// property this whole module exists to deny. Refusing is not available
+    /// either, since encoding cannot fail. So the disagreement is left where
+    /// it is, made loud in a debug build, and written down here so that
+    /// whoever adds a type that could reach it finds this note first.
     fn encode_to(&self, out: &mut Vec<u8>) {
+        debug_assert!(
+            self.len() <= MAX_SEQUENCE_LEN,
+            "a sequence of {} is past what the decoder will read back",
+            self.len()
+        );
         let len = u32::try_from(self.len()).unwrap_or(u32::MAX);
         len.encode_to(out);
         for item in self {

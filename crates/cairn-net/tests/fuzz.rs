@@ -253,7 +253,8 @@ fn a_bent_ledger_and_a_bent_weighing_are_refused_rather_than_fatal() {
             bytes[at] = rng.byte();
         }
         if let Ok(bent) = SampledStart::decode(&bytes) {
-            if cairn_ledger::sampling::check_start(&bent, bent.samples.len()).is_ok() {
+            if cairn_ledger::sampling::check_start(&bent, bent.samples.len(), NOW, &params).is_ok()
+            {
                 weighed += 1;
             }
         }

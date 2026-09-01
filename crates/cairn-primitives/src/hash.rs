@@ -63,7 +63,6 @@ pub enum Domain {
     AccumulatorNode,
     NoteKey,
     HotNoteValue,
-    ColdNoteValue,
     StateCommitment,
     ForestLeaf,
     ForestNode,
@@ -71,7 +70,6 @@ pub enum Domain {
     HeaderHistoryLeaf,
     SamplingSeed,
     GraceWindow,
-    ProofWindow,
 }
 
 impl Domain {
@@ -90,7 +88,6 @@ impl Domain {
             Self::AccumulatorNode => "cairn v1 accumulator node",
             Self::NoteKey => "cairn v1 note key",
             Self::HotNoteValue => "cairn v1 hot note value",
-            Self::ColdNoteValue => "cairn v1 cold note value",
             Self::StateCommitment => "cairn v1 state commitment",
             Self::ForestLeaf => "cairn v1 forest leaf",
             Self::ForestNode => "cairn v1 forest node",
@@ -98,7 +95,6 @@ impl Domain {
             Self::HeaderHistoryLeaf => "cairn v1 header history leaf",
             Self::SamplingSeed => "cairn v1 sampling seed",
             Self::GraceWindow => "cairn v1 grace window",
-            Self::ProofWindow => "cairn v1 proof window",
         }
     }
 }
@@ -121,7 +117,6 @@ struct DomainKeys {
     accumulator_node: [u8; HASH_LEN],
     note_key: [u8; HASH_LEN],
     hot_note_value: [u8; HASH_LEN],
-    cold_note_value: [u8; HASH_LEN],
     state_commitment: [u8; HASH_LEN],
     forest_leaf: [u8; HASH_LEN],
     forest_node: [u8; HASH_LEN],
@@ -129,7 +124,6 @@ struct DomainKeys {
     header_history_leaf: [u8; HASH_LEN],
     sampling_seed: [u8; HASH_LEN],
     grace_window: [u8; HASH_LEN],
-    proof_window: [u8; HASH_LEN],
 }
 
 fn domain_keys() -> &'static DomainKeys {
@@ -148,7 +142,6 @@ fn domain_keys() -> &'static DomainKeys {
         accumulator_node: blake3::derive_key(Domain::AccumulatorNode.context(), &[]),
         note_key: blake3::derive_key(Domain::NoteKey.context(), &[]),
         hot_note_value: blake3::derive_key(Domain::HotNoteValue.context(), &[]),
-        cold_note_value: blake3::derive_key(Domain::ColdNoteValue.context(), &[]),
         state_commitment: blake3::derive_key(Domain::StateCommitment.context(), &[]),
         forest_leaf: blake3::derive_key(Domain::ForestLeaf.context(), &[]),
         forest_node: blake3::derive_key(Domain::ForestNode.context(), &[]),
@@ -156,7 +149,6 @@ fn domain_keys() -> &'static DomainKeys {
         header_history_leaf: blake3::derive_key(Domain::HeaderHistoryLeaf.context(), &[]),
         sampling_seed: blake3::derive_key(Domain::SamplingSeed.context(), &[]),
         grace_window: blake3::derive_key(Domain::GraceWindow.context(), &[]),
-        proof_window: blake3::derive_key(Domain::ProofWindow.context(), &[]),
     })
 }
 
@@ -176,7 +168,6 @@ fn key_for(domain: Domain) -> &'static [u8; HASH_LEN] {
         Domain::AccumulatorNode => &keys.accumulator_node,
         Domain::NoteKey => &keys.note_key,
         Domain::HotNoteValue => &keys.hot_note_value,
-        Domain::ColdNoteValue => &keys.cold_note_value,
         Domain::StateCommitment => &keys.state_commitment,
         Domain::ForestLeaf => &keys.forest_leaf,
         Domain::ForestNode => &keys.forest_node,
@@ -184,7 +175,6 @@ fn key_for(domain: Domain) -> &'static [u8; HASH_LEN] {
         Domain::HeaderHistoryLeaf => &keys.header_history_leaf,
         Domain::SamplingSeed => &keys.sampling_seed,
         Domain::GraceWindow => &keys.grace_window,
-        Domain::ProofWindow => &keys.proof_window,
     }
 }
 

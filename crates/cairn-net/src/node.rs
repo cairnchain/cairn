@@ -1698,9 +1698,10 @@ fn take_join_part(
 
     match what {
         Joining::Weight => {
-            let weighed = SampledStart::decode(&whole)
-                .ok()
-                .and_then(|start| Some((check_start(&start, SAMPLES).ok()?, start.tip)));
+            let weighed = SampledStart::decode(&whole).ok().and_then(|start| {
+                let weighed = check_start(&start, SAMPLES, now, &shared.params).ok()?;
+                Some((weighed, start.tip))
+            });
             let Some((shown, tip)) = weighed else {
                 return fail_attempt(&mut joining, shared, from, now);
             };

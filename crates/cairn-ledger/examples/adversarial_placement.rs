@@ -262,7 +262,7 @@ fn forged_is_caught(honest: &[BlockHeader], fork: u64, gap: u128, count: usize, 
         .collect();
     let last = shown.len() - 2;
 
-    let samples = draw(seed_of(&tip), count, work_before(&tip), tip.height)
+    let samples: Vec<Sample> = draw(seed_of(&tip), count, work_before(&tip), tip.height)
         .into_iter()
         .map(|work| {
             // The best it can do: the block spanning the draw, or the nearest
@@ -276,6 +276,19 @@ fn forged_is_caught(honest: &[BlockHeader], fork: u64, gap: u128, count: usize, 
 
     let start = SampledStart {
         tip,
+        // The best run it has up to its tip: the headers it is showing.
+        tail: {
+            let deepest = samples
+                .iter()
+                .map(|sample: &Sample| sample.header.height)
+                .max()
+                .unwrap_or(0);
+            let from = usize::try_from(
+                deepest.saturating_sub(cairn_ledger::pow::DIFFICULTY_WINDOW as u64),
+            )
+            .unwrap_or(0);
+            shown.get(from..).map(<[_]>::to_vec).unwrap_or_default()
+        },
         // The best parent it has: the header it really does sit above.
         parent: tip.height.checked_sub(1).and_then(|below| {
             Some(Sample {
@@ -286,7 +299,7 @@ fn forged_is_caught(honest: &[BlockHeader], fork: u64, gap: u128, count: usize, 
         history: before_tip.forest().roots_only(),
         samples,
     };
-    check_start(&start, count).is_err()
+    check_start(&start, count, NOW, &ConsensusParams::testnet()).is_err()
 }
 
 /// An honest chain of `count` blocks.

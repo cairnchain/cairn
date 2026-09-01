@@ -27,6 +27,11 @@ use cairn_primitives::{Amount, Hash32};
 /// years does not turn its history into the cost it exists to avoid.
 const MAX_MOVEMENTS: usize = 4096;
 
+/// Undone movements kept. A reorganisation deep enough to undo more than this
+/// is not something anybody has seen, and the record is worth having a bound
+/// on all the same.
+const MAX_UNDONE: usize = 256;
+
 /// Which way money went.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
@@ -146,6 +151,21 @@ pub struct History {
     held: BTreeMap<NoteId, Amount>,
     /// Newest last.
     movements: Vec<Movement>,
+    /// What the account said before the chain changed under it, less whatever
+    /// reading the chain again put back.
+    ///
+    /// Kept because forgetting is not the same as nothing having happened. A
+    /// wallet that paid somebody, watched a block carry it, and then found
+    /// itself on a branch where it never happened has to be able to say so:
+    /// the money is back, and the person holding the wallet is the only one
+    /// who can decide what that means for whoever was being paid. Emptying
+    /// the history and saying nothing leaves them with neither the payment
+    /// nor its undoing.
+    ///
+    /// Newest last, like the movements it was made from. An entry leaves as
+    /// soon as a block is read that carries the same transaction, because
+    /// then it was not undone after all, only moved.
+    undone: Vec<Movement>,
     /// The next height to read.
     next: u64,
     /// The first height this history could see, so it never claims to cover
@@ -168,6 +188,11 @@ impl History {
     /// Movements, newest first.
     pub fn movements(&self) -> impl Iterator<Item = &Movement> {
         self.movements.iter().rev()
+    }
+
+    /// What the chain took back and has not given again, newest first.
+    pub fn undone(&self) -> impl Iterator<Item = &Movement> {
+        self.undone.iter().rev()
     }
 
     #[must_use]
@@ -290,6 +315,9 @@ impl History {
     }
 
     fn record(&mut self, movement: Movement) {
+        // A block carries it, so whatever branch it was read on before, it is
+        // on this one now and was never undone.
+        self.undone.retain(|held| held.id != movement.id);
         self.movements.push(movement);
         if self.movements.len() > MAX_MOVEMENTS {
             let over = self.movements.len().saturating_sub(MAX_MOVEMENTS);
@@ -318,32 +346,52 @@ impl History {
 
     /// Whether the chain no longer holds the block this last read.
     ///
-    /// `chain` answers what block sits at a height now. A reorganisation
-    /// replaces every block above the fork it happened at, so asking about the
-    /// newest one read is enough to notice: if that block is still there, no
-    /// block below it moved.
+    /// `tip` is how far the chain reaches now and `chain` answers what block
+    /// sits at a height. A reorganisation replaces every block above the fork
+    /// it happened at, so asking about the newest one read is enough to
+    /// notice: if that block is still there, no block below it moved.
     ///
     /// A height the wallet can no longer read is not a divergence. A node that
-    /// dropped an old block has not changed its mind about it.
-    pub fn diverged(&self, chain: impl Fn(u64) -> Option<Hash32>) -> bool {
-        let (Some(last), Some(top)) = (self.last, self.next.checked_sub(1)) else {
+    /// dropped an old block has not changed its mind about it. A chain that no
+    /// longer reaches that height is a different matter, and it is why the tip
+    /// is asked for as well as the block: work decides which branch wins, not
+    /// length, so the branch that won can end below the one it replaced. Read
+    /// from the block alone that case answers "nothing there", which is
+    /// indistinguishable from a block dropped for age and is the opposite of
+    /// the truth.
+    pub fn diverged(&self, tip: Option<u64>, chain: impl Fn(u64) -> Option<Hash32>) -> bool {
+        let (Some(last), Some(newest)) = (self.last, self.next.checked_sub(1)) else {
             return false;
         };
-        matches!(chain(top), Some(now) if now != last)
+        if matches!(tip, Some(reaches) if reaches < newest) {
+            return true;
+        }
+        matches!(chain(newest), Some(now) if now != last)
     }
 
-    /// Starts again from nothing, for a wallet whose blocks no longer line up
-    /// with what it read.
+    /// Starts again from nothing, keeping what the branch that lost said.
     ///
-    /// This is the whole answer to a reorganisation, and dropping the
-    /// movements above the fork is not. Which notes are this key's is built up
-    /// as blocks go past, so a history that kept that map while forgetting
-    /// some of the blocks that filled it would go on calling a stranger's
-    /// transfer ours. There is nothing to invert it with, and reading the
-    /// chain again is what the file exists to be cheaper than, not a thing
-    /// that cannot be done.
+    /// Starting again is the whole answer to a reorganisation, and dropping
+    /// the movements above the fork is not. Which notes are this key's is
+    /// built up as blocks go past, so a history that kept that map while
+    /// forgetting some of the blocks that filled it would go on calling a
+    /// stranger's transfer ours. There is nothing to invert it with, and
+    /// reading the chain again is what the file exists to be cheaper than, not
+    /// a thing that cannot be done.
+    ///
+    /// What is not thrown away is the account itself. It is set aside as
+    /// undone, and every movement the chain still carries is taken back out of
+    /// it as the blocks are read again, so what is left at the end is exactly
+    /// what the chain took away.
     pub fn forget(&mut self) {
-        *self = Self::new();
+        let mut undone = std::mem::take(&mut self.undone);
+        undone.append(&mut self.movements);
+        let over = undone.len().saturating_sub(MAX_UNDONE);
+        undone.drain(..over);
+        *self = Self {
+            undone,
+            ..Self::default()
+        };
     }
 
     /// Reads it back from `path`, or starts empty when there is nothing to
@@ -384,6 +432,7 @@ impl Encode for History {
             })
             .collect();
         held.encode_to(out);
+        self.undone.encode_to(out);
     }
 }
 
@@ -394,12 +443,14 @@ impl Decode for History {
         let movements = Vec::<Movement>::decode_from(reader)?;
         let last = Hash32::decode_from(reader)?;
         let held = Vec::<Owned>::decode_from(reader)?;
+        let undone = Vec::<Movement>::decode_from(reader)?;
         Ok(Self {
             held: held.into_iter().map(|held| (held.id, held.value)).collect(),
             movements,
             next,
             from: (from != u64::MAX).then_some(from),
             last: (last != Hash32::ZERO).then_some(last),
+            undone,
         })
     }
 }
@@ -551,7 +602,7 @@ mod tests {
 
         // The chain still holds what was read: nothing moved.
         assert!(
-            !history.diverged(|height| usize::try_from(height)
+            !history.diverged(Some(4), |height| usize::try_from(height)
                 .ok()
                 .and_then(|at| ids.get(at))
                 .copied()),
@@ -560,8 +611,16 @@ mod tests {
 
         // A height the wallet can no longer read is not a branch being undone.
         assert!(
-            !history.diverged(|_| None),
+            !history.diverged(Some(4), |_| None),
             "a block that was dropped is not a block that changed"
+        );
+
+        // A chain that no longer reaches that height is, whatever it answers
+        // about the block: work decides the branch, so the one that won can
+        // end lower than the one it replaced.
+        assert!(
+            history.diverged(Some(2), |_| None),
+            "the chain stops below what this read, so what it read is gone"
         );
 
         // The newest block is now a different one, which is what a
@@ -574,7 +633,7 @@ mod tests {
         let elsewhere = rival.id();
         assert_ne!(elsewhere, ids[4], "the rival really is another block");
         assert!(
-            history.diverged(|height| if height == 4 {
+            history.diverged(Some(4), |height| if height == 4 {
                 Some(elsewhere)
             } else {
                 usize::try_from(height)
@@ -588,6 +647,36 @@ mod tests {
         history.forget();
         assert_eq!(history.len(), 0, "and the whole account is read again");
         assert_eq!(history.next(), 0);
+        assert_eq!(
+            history.undone().count(),
+            5,
+            "while what it said before is kept, to be given back as the chain is read again"
+        );
+    }
+
+    /// Forgetting keeps the account, and reading the chain again takes back
+    /// out of it everything the chain still carries. What is left is what was
+    /// really undone.
+    #[test]
+    fn what_the_chain_gives_back_stops_being_undone() {
+        let mine = key(1);
+        let mut history = History::new();
+        for height in 0..3 {
+            history.take(&block(height, mine, Vec::new()), mine);
+        }
+        history.forget();
+        assert_eq!(history.undone().count(), 3);
+
+        // Two of the three blocks are on the branch that won.
+        for height in 0..2 {
+            history.take(&block(height, mine, Vec::new()), mine);
+        }
+        assert_eq!(history.len(), 2, "read again from the chain");
+        assert_eq!(
+            history.undone().count(),
+            1,
+            "and only the one the chain no longer carries is still undone"
+        );
     }
 
     #[test]

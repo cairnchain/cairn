@@ -491,10 +491,11 @@
       rather than devising its own. It is implemented: a newcomer draws 4 096
       headers against accumulated work rather than height, with a Fiat-Shamir
       seed taken from the tip, and each opened header is checked against the
-      tip's own commitment. Weighing a thirty year chain costs about 8 MB.
+      tip's own commitment. Weighing a thirty year chain costs about 9 MB,
+      of which the run described below is a fifth.
     </p>
     <p>
-      Three checks sit around the draw, and they are not decoration. An audit
+      Four checks sit around the draw, and they are not decoration. An audit
       of the implementation found that without them a stranger could hand a
       newcomer a chain nobody had mined, for a single hash. It took the honest
       chain's headers, which any node serves to anyone who asks, put them in a
@@ -524,6 +525,39 @@
       before that check existed, a thousand blocks of burial could be laid at
       the difficulty floor for a thousand hashes, and the phrase bought
       nothing.
+    </p>
+    <p>
+      Those three were written first and were not enough, which is worth
+      recording rather than tidying away. The draw deliberately stops
+      resolving about a thousand blocks from the tip, and nothing else looked
+      up there either. So a forger left the honest chain untouched, appended
+      its own headers at the difficulty floor, one hash each, and put the work
+      it was inventing inside the band the draw never reaches. Every check
+      above passes: the tip has a parent, because the forger mined one; the
+      blocks between opened headers are worth what they say, because a cheap
+      run honestly states that it is cheap; and the ledger's own run reaches
+      the tip, because the whole run is the forger's. The anchor a newcomer is
+      handed is then one of its headers, with whatever ledger it likes.
+    </p>
+    <p>
+      What was missing is that the top of a chain was tied to no difficulty
+      anybody could check. So the run from the deepest header the draw
+      actually landed on, up to the tip, travels with the weighing and is
+      walked under the retarget: each header carries the difficulty its window
+      demands, dates after that window's median, and adds its own work. The
+      window below the pinned header comes along too and is honest by
+      construction, because those headers have to chain into it, and swapping
+      them would mean having mined the pinned header on top of one's own.
+    </p>
+    <p>
+      The tip's timestamp is then measured against the reader's own clock,
+      which is what turns the whole thing into a cost. Blocks at the
+      difficulty floor have to be spaced at the target or the retarget demands
+      more of them, so the thousand cheap blocks a forger needs span most of a
+      day of stated time, and they cannot be backdated because they have to
+      date after the honest window they descend from. A day ahead of the
+      reader is refused. What the attack costs is therefore real waiting, and
+      the honest chain out-mines it while it waits.
     </p>
     <p>
       The count follows from the assumption the chain already makes. A forger
@@ -785,7 +819,7 @@
     <p class="fig-note">
       The first three rows are what arriving used to cost, and section 7 is how
       it stopped costing that. Arriving now has three parts, and it is worth
-      adding them up rather than quoting the smallest: about 8 MB to weigh the
+      adding them up rather than quoting the smallest: about 9 MB to weigh the
       chain, about 12 MB for the ledger, and the thousand blocks between that
       ledger and the tip, which a newcomer validates itself. Those blocks are
       at most 128 MB and in practice far less, since a block is only as large

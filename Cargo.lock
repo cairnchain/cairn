@@ -64,6 +64,7 @@ dependencies = [
  "getrandom",
  "hex",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]

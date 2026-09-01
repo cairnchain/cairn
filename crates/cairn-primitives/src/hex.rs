@@ -48,9 +48,27 @@ pub fn decode(text: &str) -> Option<Vec<u8>> {
 }
 
 /// Parses hexadecimal of exactly `N` bytes.
+///
+/// Written without going through [`decode`], which is not a matter of taste.
+/// This is the function a key file is read through, and the vector `decode`
+/// builds would hold the whole secret and be freed without being wiped, so
+/// every wallet start left a copy of the private key in released memory for a
+/// core dump or a page of swap to pick up. The caller wraps what it is handed
+/// and cannot wrap what it never saw. Filling the array directly means there
+/// is nothing else to wipe.
 pub fn decode_array<const N: usize>(text: &str) -> Option<[u8; N]> {
-    let bytes = decode(text)?;
-    <[u8; N]>::try_from(bytes.as_slice()).ok()
+    let bytes = text.as_bytes();
+    if bytes.len() != N.checked_mul(2)? {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (slot, pair) in out.iter_mut().zip(bytes.chunks(2)) {
+        let [high, low] = pair else { return None };
+        let high = value(*high)?;
+        let low = value(*low)?;
+        *slot = high.checked_shl(4).unwrap_or(0) | low;
+    }
+    Some(out)
 }
 
 #[cfg(test)]

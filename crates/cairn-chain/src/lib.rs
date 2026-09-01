@@ -1510,6 +1510,20 @@ impl ChainStore {
             }
         }
 
+        // A block that was undone took its transfers with it, and they were
+        // paid for and are still wanted. Offering them back to the pool is
+        // what keeps a reorganisation from quietly cancelling somebody's
+        // payment: without it the money returns to the sender, the payment is
+        // in no block and in no pool, and the only party who could notice is
+        // the one who has just been told it was sent.
+        //
+        // Newest first, because a transfer from the block just undone is the
+        // one most likely still to matter, and because that is the order a
+        // rewind produces. Anything the winning branch already carries is
+        // refused here for spending notes that are spent, which is the same
+        // answer by a shorter road than checking for it.
+        self.repool(&rolled_back);
+
         // The state moved, so what the pool holds has to be reconsidered.
         self.prune_pool();
         self.forget_what_cannot_change();
@@ -1598,6 +1612,30 @@ impl ChainStore {
             at = at.checked_sub(1)?;
         }
         Some(state)
+    }
+
+    /// Offers the transfers of undone blocks back to the pool.
+    ///
+    /// Bounded by the pool's own limits rather than by the depth of the
+    /// reorganisation: past them nothing more can be taken, so there is no
+    /// reason to go on validating. What is dropped this way is the oldest of
+    /// what was undone, which is the part most likely to have been replaced
+    /// on the branch that won.
+    fn repool(&mut self, undone: &[Hash32]) {
+        for id in undone {
+            if self.pool.len() >= MAX_POOLED || self.pool_bytes >= MAX_POOL_BYTES {
+                return;
+            }
+            let Some(block) = self.block(id) else {
+                continue;
+            };
+            for transfer in block.transfers.clone() {
+                if self.pool.len() >= MAX_POOLED || self.pool_bytes >= MAX_POOL_BYTES {
+                    return;
+                }
+                let _ = self.accept_transfer(transfer);
+            }
+        }
     }
 
     /// Undoes every applied block above `position`, newest first.

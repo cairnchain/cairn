@@ -22,6 +22,7 @@ use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::handover::{accept, Handover, HandoverError};
 use cairn_ledger::note::Note;
+use cairn_ledger::pow::DIFFICULTY_WINDOW;
 use cairn_ledger::sampling::{
     check_start, draw, seed_of, work_before, Sample, SampledStart, StartError, SAMPLES,
 };
@@ -94,6 +95,22 @@ impl Chain {
     fn tip(&self) -> BlockHeader {
         *self.headers.last().unwrap()
     }
+}
+
+/// The best run of headers a forger can offer up to its tip: the honest ones
+/// under the header the draw landed deepest on, and then its own.
+fn best_run(shown: &[BlockHeader], samples: &[Sample], tip: BlockHeader) -> Vec<BlockHeader> {
+    let deepest = samples
+        .iter()
+        .map(|sample| sample.header.height)
+        .max()
+        .unwrap_or(0);
+    let from = usize::try_from(deepest.saturating_sub(DIFFICULTY_WINDOW as u64)).unwrap();
+    let mut run: Vec<BlockHeader> = shown[from..].to_vec();
+    if run.last().map(BlockHeader::id) != Some(tip.id()) {
+        run.push(tip);
+    }
+    run
 }
 
 /// The position in a forest of one-work headers that covers a drawn value.
@@ -194,11 +211,12 @@ fn a_tip_on_no_chain_has_no_parent_to_open() {
             header: real_tip,
             proof: forest.prove_in(real_tip.height, forged_tip.height).unwrap(),
         }),
+        tail: best_run(&stolen, &samples, forged_tip),
         history: roots,
         samples,
     };
 
-    let refused = check_start(&start, SAMPLES);
+    let refused = check_start(&start, SAMPLES, NOW, &params());
     assert!(
         matches!(refused, Err(StartError::ParentNotTheTipsOwn)),
         "a tip standing on nothing has no parent to open, and it said {refused:?}"
@@ -293,10 +311,11 @@ fn an_invented_ledger_cannot_borrow_a_weight_it_did_not_earn() {
                 .prove_in((leaves.len() - 1) as u64, forged_tip.height)
                 .unwrap(),
         }),
+        tail: best_run(&leaves, &samples, forged_tip),
         history: forest.forest().roots_only(),
         samples,
     };
-    let refused = check_start(&start, SAMPLES);
+    let refused = check_start(&start, SAMPLES, NOW, &params());
     assert!(
         matches!(refused, Err(StartError::ParentNotTheTipsOwn)),
         "the weighing now asks the tip for its own parent, and it said {refused:?}"
@@ -453,16 +472,23 @@ fn padding_a_forest_out_to_the_burial_depth_is_refused() {
             header: stand_on,
             proof: forest.prove_in(stand_on.height, forged_tip.height).unwrap(),
         }),
+        // The padding is not headers, so there is no run to offer over it.
+        tail: {
+            let mut run = best_run(&honest.headers, &samples, stand_on);
+            run.push(forged_tip);
+            run
+        },
         history: forest.forest().roots_only(),
         samples,
     };
     // Every draw is still answered perfectly, which is the point: the samples
-    // were never the weak part. What refuses the forgery is the stretch of
-    // chain between the last header opened and the tip, which states almost no
-    // work for a great many blocks.
-    let refused = check_start(&start, SAMPLES);
+    // were never the weak part. What refuses the forgery is what lies between
+    // the last header opened and the tip: a great many blocks stating almost
+    // no work, and a run that cannot be shown because most of it is not
+    // headers at all.
+    let refused = check_start(&start, SAMPLES, NOW, &params());
     assert!(
-        matches!(refused, Err(StartError::BlocksWorthLessThanTheyCost { .. })),
+        refused.is_err(),
         "the padding cost nothing and must not weigh anything, but the weighing said {refused:?}"
     );
 

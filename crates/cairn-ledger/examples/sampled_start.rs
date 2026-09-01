@@ -339,7 +339,7 @@ fn caught_out(honest: &[BlockHeader], claim: f64, count: usize, salt: u64, lie: 
         .map(|header| (header.height, header.total_work, header.difficulty))
         .collect();
 
-    let samples = draw(seed_of(&forged), count, work_before(&forged), forged.height)
+    let samples: Vec<Sample> = draw(seed_of(&forged), count, work_before(&forged), forged.height)
         .into_iter()
         .map(|work| {
             // The best it can do: the block that spans the draw, or the
@@ -353,6 +353,19 @@ fn caught_out(honest: &[BlockHeader], claim: f64, count: usize, salt: u64, lie: 
 
     let start = SampledStart {
         tip: forged,
+        // The best run it has up to its tip: the headers it is showing.
+        tail: {
+            let deepest = samples
+                .iter()
+                .map(|sample: &Sample| sample.header.height)
+                .max()
+                .unwrap_or(0);
+            let from = usize::try_from(
+                deepest.saturating_sub(cairn_ledger::pow::DIFFICULTY_WINDOW as u64),
+            )
+            .unwrap_or(0);
+            shown.get(from..).map(<[_]>::to_vec).unwrap_or_default()
+        },
         // The best parent it has: the header it really does sit above.
         parent: forged.height.checked_sub(1).and_then(|below| {
             Some(Sample {
@@ -363,7 +376,7 @@ fn caught_out(honest: &[BlockHeader], claim: f64, count: usize, salt: u64, lie: 
         history: before_tip.forest().roots_only(),
         samples,
     };
-    check_start(&start, count).is_err()
+    check_start(&start, count, NOW, &ConsensusParams::testnet()).is_err()
 }
 
 /// An honest chain of `count` blocks.

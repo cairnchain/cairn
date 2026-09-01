@@ -352,7 +352,7 @@ fn the_history_is_written_down_and_read_back() {
     assert!(movements[1..]
         .iter()
         .all(|m| m.direction == cairn_wallet::history::Direction::Mined));
-    assert_eq!(wallet.history_from(), Some(0));
+    assert_eq!(wallet.history_covers().from, Some(0));
     wallet.shutdown();
     drop(wallet);
 
@@ -362,7 +362,7 @@ fn the_history_is_written_down_and_read_back() {
     assert_eq!(remembered.len(), 5, "it was written down");
     assert_eq!(remembered[0].amount, cairn("61"));
     assert_eq!(remembered[0].id, movements[0].id, "the same transfer");
-    assert_eq!(again.history_from(), Some(0));
+    assert_eq!(again.history_covers().from, Some(0));
 
     again.shutdown();
     let _ = std::fs::remove_dir_all(&directory);

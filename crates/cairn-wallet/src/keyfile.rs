@@ -24,14 +24,83 @@ use cairn_crypto::SecretKey;
 use zeroize::Zeroizing;
 
 /// Reads a key file.
+///
+/// Two things are checked before the contents are believed, and both are
+/// things a person cannot be expected to work out from a parse failure. A file
+/// that is there and empty is what a write that never finished leaves behind,
+/// and the message has to say to delete it, because refusing to overwrite it
+/// is the other half of this module and the two together are a trap. And a
+/// file anyone with an account on this machine can read is a key anyone with
+/// an account on this machine has: that is what restoring from a backup, or
+/// copying off a memory stick, or a `chmod` down a whole directory, leaves.
 pub fn read(path: &Path) -> Result<SecretKey, String> {
     let text = Zeroizing::new(
         std::fs::read_to_string(path)
             .map_err(|error| format!("could not read {}: {error}", path.display()))?,
     );
-    let bytes = key_bytes(&text)
-        .ok_or_else(|| format!("{} does not hold 32 bytes of hexadecimal", path.display()))?;
+    // Emptiness is settled first. A file with no key in it holds nothing worth
+    // protecting, and telling somebody to tighten the permissions on it would
+    // send them round the same loop the message below exists to break.
+    if text.trim().is_empty() {
+        return Err(format!(
+            "{} is empty: it holds no key at all. A file left like this is what a write that \
+             never finished leaves behind, so there is nothing in it to lose. Delete it and run \
+             `cairn-wallet new` again. If money was ever paid to an address made from this file, \
+             the key for it is only in a copy you took yourself.",
+            path.display()
+        ));
+    }
+    guard_the_mode(path)?;
+    let bytes = key_bytes(&text).ok_or_else(|| {
+        format!(
+            "{} is not a key file: a key file holds 64 hexadecimal characters on one line, and \
+             this holds something else. Check that it is the file you meant.",
+            path.display()
+        )
+    })?;
     Ok(SecretKey::from_bytes(&bytes))
+}
+
+/// Refuses a key file other people on this machine can read.
+///
+/// A warning would be the softer answer and it would be the wrong one: the
+/// warning goes past once, the file stays readable for as long as the wallet
+/// is used, and whoever else has an account here has had the money the whole
+/// time. Refusing costs one command, and the message is that command.
+#[cfg(unix)]
+fn guard_the_mode(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return Ok(());
+    };
+    let mode = metadata.permissions().mode() & 0o777;
+    // The group and other bits. Clippy would rather this counted trailing
+    // zeroes, which is the same test written so that nobody reading it can see
+    // it is about permissions.
+    #[allow(clippy::verbose_bit_mask)]
+    if mode & 0o077 == 0 {
+        return Ok(());
+    }
+    Err(format!(
+        "{} can be read by other accounts on this machine, and anyone who reads it holds the \
+         money. Its permissions are {mode:04o} and they have to be 0600. Run `chmod 600 {}` and \
+         try again. If this machine is shared, treat the key as one somebody else may already \
+         have and move the money to a new one.",
+        path.display(),
+        path.display()
+    ))
+}
+
+/// The same, where there is no mode to read.
+///
+/// Windows decides who may read a file by an access control list inherited
+/// from the directory, which is the state of affairs `create_private` sets out
+/// at length. There is nothing here to check that would mean anything.
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+fn guard_the_mode(_path: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 /// Writes a key file, refusing to overwrite one that already exists.
@@ -45,6 +114,17 @@ pub fn read(path: &Path) -> Result<SecretKey, String> {
 /// the key, and checking that it is absent before writing would leave a moment
 /// where something else could create it in between. How much private is worth
 /// on a given platform is said at `create_private`.
+///
+/// And it is on the disk before this returns, which is not what writing a file
+/// means. `File::flush` is documented to do nothing at all, because a `File`
+/// holds no buffer of its own to flush: what it leaves behind is bytes the
+/// kernel will write out at some point in the next few seconds. That is fine
+/// for a cache and it is not fine here. A person runs this, reads the address
+/// off the screen, gives it to somebody who pays it, and loses power inside
+/// that window; the money is then at an address whose key was never written
+/// down. So the file is synced, and on Unix the directory holding it is synced
+/// too, because a file whose name has not reached the disk is a file that is
+/// not there.
 pub fn write(path: &Path, secret: &SecretKey) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -55,10 +135,7 @@ pub fn write(path: &Path, secret: &SecretKey) -> Result<(), String> {
 
     let mut file = create_private(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::AlreadyExists {
-            return format!(
-                "{} already exists; move it aside if you really mean to replace it",
-                path.display()
-            );
+            return already_there(path);
         }
         format!("could not write {}: {error}", path.display())
     })?;
@@ -67,10 +144,77 @@ pub fn write(path: &Path, secret: &SecretKey) -> Result<(), String> {
     // the key. A string holding the key that has to grow leaves its old buffer
     // behind, freed and unwiped, with nothing left pointing at it to wipe.
     let text = key_hex(secret);
-    file.write_all(text.as_bytes())
+    let written = file
+        .write_all(text.as_bytes())
         .and_then(|()| file.write_all(b"\n"))
-        .and_then(|()| file.flush())
-        .map_err(|error| format!("could not write {}: {error}", path.display()))
+        .and_then(|()| file.sync_all());
+    drop(file);
+
+    if let Err(error) = written {
+        // What is on the disk now is a file holding part of a key or none of
+        // it, under the name the next attempt will refuse to touch. Taking it
+        // away loses nothing, because nothing usable was ever in it, and
+        // leaving it turns a full disk into a wallet that cannot be made.
+        let _ = std::fs::remove_file(path);
+        return Err(format!(
+            "could not write {}: {error}. Nothing was left behind, so there is a name free to \
+             try again at.",
+            path.display()
+        ));
+    }
+
+    if let Err(error) = sync_the_directory(path) {
+        return Err(format!(
+            "{} was written but this machine would not confirm it: {error}. Check the file is \
+             there before giving out the address it names.",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// What to say about a key file that is already where one was asked for.
+///
+/// An empty one is the case worth telling apart. That is what a write cut off
+/// by a full disk or a power cut leaves, and the plain refusal sends whoever
+/// hit it round a loop: writing says the file is already there, reading says
+/// it is not a key, and neither says the file is empty and can go.
+fn already_there(path: &Path) -> String {
+    if std::fs::read(path).is_ok_and(|held| held.iter().all(u8::is_ascii_whitespace)) {
+        return format!(
+            "{} is already there and it is empty: it holds no key. That is what a write that \
+             never finished leaves behind, and there is nothing in it to lose. Delete it and run \
+             this again.",
+            path.display()
+        );
+    }
+    format!(
+        "{} already exists; move it aside if you really mean to replace it. Whatever is in it is \
+         the only copy, so replacing it would destroy the money it holds.",
+        path.display()
+    )
+}
+
+/// Makes the file's name durable, where the platform has a way to say so.
+///
+/// Unix has one: syncing the directory itself. Windows will not open a
+/// directory as a file, so there it is left as it is, which is the same
+/// position `cairn-store` records for the same reason.
+#[cfg(unix)]
+fn sync_the_directory(path: &Path) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    match parent {
+        Some(parent) => std::fs::File::open(parent)?.sync_all(),
+        None => std::fs::File::open(".")?.sync_all(),
+    }
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+fn sync_the_directory(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// The key as the file spells it, in a buffer that wipes itself on the way out.
@@ -166,7 +310,14 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("key");
         std::fs::write(&path, "hello").unwrap();
-        assert!(read(&path).is_err());
+        // Private, so what is being tested is the contents and not the mode.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let read_back = read(&path).unwrap_err();
+        assert!(read_back.contains("not a key file"), "{read_back}");
         assert!(read(&directory.join("missing")).is_err());
     }
 

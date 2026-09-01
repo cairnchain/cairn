@@ -12,7 +12,7 @@ use cairn_accumulator::Archive;
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::BlockHeader;
 use cairn_ledger::note::Note;
-use cairn_ledger::pow::work_of;
+use cairn_ledger::pow::{work_of, DIFFICULTY_WINDOW};
 use cairn_ledger::sampling::{
     check_start, covering, draw, open_start, seed_of, work_before, Sample, SampledStart, StartError,
 };
@@ -87,7 +87,7 @@ impl Keeper {
             .map(|header| (header.height, header.total_work, header.difficulty))
             .collect();
 
-        let samples = draw(seed_of(&tip), count, work_before(&tip), tip.height)
+        let samples: Vec<Sample> = draw(seed_of(&tip), count, work_before(&tip), tip.height)
             .into_iter()
             .map(|work| {
                 let height = covering(&ledger, work).expect("some block spans it");
@@ -101,8 +101,16 @@ impl Keeper {
             .collect();
 
         let below = usize::try_from(tip.height).unwrap() - 1;
+        let deepest = samples
+            .iter()
+            .map(|sample: &Sample| sample.header.height)
+            .max()
+            .unwrap_or(tip.height);
+        let from = usize::try_from(deepest.saturating_sub(DIFFICULTY_WINDOW as u64)).unwrap();
+        let tail = self.headers[from..=usize::try_from(tip.height).unwrap()].to_vec();
         SampledStart {
             tip,
+            tail,
             parent: Some(Sample {
                 header: self.headers[below],
                 proof: self
@@ -122,7 +130,7 @@ fn an_honest_chain_answers_every_question_asked_of_it() {
     let keeper = Keeper::build(HEIGHT);
     let start = keeper.open(64);
 
-    let weighed = check_start(&start, 64).expect("an honest chain checks out");
+    let weighed = check_start(&start, 64, NOW, &params()).expect("an honest chain checks out");
     assert_eq!(weighed.height, HEIGHT - 1);
     assert_eq!(weighed.total_work, keeper.tip().total_work);
     assert_eq!(weighed.tip, keeper.tip().id());
@@ -177,12 +185,16 @@ fn a_tip_that_overstates_its_work_is_caught() {
     let start = SampledStart {
         tip: forged,
         parent: keeper.open(1).parent,
+        tail: keeper.open(1).tail,
         history: keeper.before_tip.forest().roots_only(),
         samples,
     };
 
     assert!(
-        matches!(check_start(&start, 64), Err(StartError::WrongPlace { .. })),
+        matches!(
+            check_start(&start, 64, NOW, &params()),
+            Err(StartError::WrongPlace { .. })
+        ),
         "a tip claiming four times its work should not pass"
     );
 }
@@ -198,7 +210,7 @@ fn a_history_the_tip_does_not_commit_to_is_refused() {
         ..keeper.open(16)
     };
     assert_eq!(
-        check_start(&start, 16),
+        check_start(&start, 16, NOW, &params()),
         Err(StartError::HistoryMismatch),
         "the tip commits to its history, so a different one is not it"
     );
@@ -216,7 +228,7 @@ fn a_header_from_another_chain_is_refused() {
 
     assert!(
         matches!(
-            check_start(&start, 16),
+            check_start(&start, 16, NOW, &params()),
             Err(StartError::NotInHistory { .. })
         ),
         "being a real block somewhere is not being a block here"
@@ -237,7 +249,7 @@ fn a_header_without_work_is_refused() {
 
     assert!(
         matches!(
-            check_start(&start, 16),
+            check_start(&start, 16, NOW, &params()),
             Err(StartError::SampleWithoutWork { .. })
         ),
         "a header that did no work proves nothing about a chain"
@@ -270,7 +282,10 @@ fn a_header_that_does_not_span_the_work_drawn_is_refused() {
     start.samples[0].proof = keeper.before_tip.prove(elsewhere.height).unwrap();
 
     assert!(
-        matches!(check_start(&start, 16), Err(StartError::WrongPlace { .. })),
+        matches!(
+            check_start(&start, 16, NOW, &params()),
+            Err(StartError::WrongPlace { .. })
+        ),
         "the answer has to be to the question that was asked"
     );
 }
@@ -283,7 +298,10 @@ fn a_short_answer_is_refused() {
     start.samples.truncate(15);
 
     assert!(
-        matches!(check_start(&start, 16), Err(StartError::WrongCount { .. })),
+        matches!(
+            check_start(&start, 16, NOW, &params()),
+            Err(StartError::WrongCount { .. })
+        ),
         "every question has to be answered"
     );
 }
@@ -297,7 +315,7 @@ fn a_history_shorter_than_the_tip_is_refused() {
 
     assert!(
         matches!(
-            check_start(&start, 16),
+            check_start(&start, 16, NOW, &params()),
             Err(StartError::HistoryWrongLength { .. } | StartError::TipWithoutWork)
         ),
         "the history holds one leaf per block before the tip, and no fewer"
@@ -326,7 +344,7 @@ fn a_keeper_answers_a_draw_it_did_not_choose() {
     .expect("a keeper can answer");
 
     assert_eq!(start.samples.len(), 64);
-    let weighed = check_start(&start, 64).expect("and the answer stands up");
+    let weighed = check_start(&start, 64, NOW, &params()).expect("and the answer stands up");
     assert_eq!(weighed.total_work, tip.total_work);
 
     // The heights it opened are the ones the draw asked about, found by
@@ -448,16 +466,22 @@ fn a_chain_padded_out_with_weightless_blocks_is_refused() {
             header: stand_on,
             proof: padded.prove(stand_on.height).unwrap(),
         }),
+        // The forger's best run: the honest headers below, then its own.
+        tail: keeper.headers[keeper.headers.len() - 1 - DIFFICULTY_WINDOW..]
+            .iter()
+            .copied()
+            .chain([stand_on, forged])
+            .collect(),
         history: padded.forest().roots_only(),
         samples,
     };
     assert!(
         matches!(
-            check_start(&start, 64),
+            check_start(&start, 64, NOW, &params()),
             Err(StartError::BlocksWorthLessThanTheyCost { .. })
         ),
         "a thousand blocks cannot be worth one hash, and were: {:?}",
-        check_start(&start, 64)
+        check_start(&start, 64, NOW, &params())
     );
 }
 
@@ -471,7 +495,8 @@ fn a_chain_padded_out_with_weightless_blocks_is_refused() {
 fn a_chain_that_sheds_its_difficulty_is_still_weighed() {
     let keeper = Keeper::build(HEIGHT);
     let start = keeper.open(64);
-    check_start(&start, 64).expect("an honest chain checks out whatever its difficulty did");
+    check_start(&start, 64, NOW, &params())
+        .expect("an honest chain checks out whatever its difficulty did");
 
     for pair in keeper.headers.windows(2) {
         let (before, after) = (&pair[0], &pair[1]);

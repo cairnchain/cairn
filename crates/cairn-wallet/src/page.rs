@@ -34,11 +34,15 @@ pub const HTML: &str = r#"<!doctype html>
     </div>
   </header>
 
+  <div class="alarm" id="warning" hidden></div>
+
   <section class="balance">
     <p class="label">Yours, and verified here</p>
     <div class="amount"><span id="spendable">…</span><span class="unit">CAIRN</span></div>
     <p class="note-line" id="held-line">Reading the chain.</p>
+    <div class="stranded" id="waiting" hidden></div>
     <div class="stranded" id="stranded" hidden></div>
+    <div class="stranded" id="undone" hidden></div>
   </section>
 
   <div class="grid">
@@ -69,6 +73,8 @@ pub const HTML: &str = r#"<!doctype html>
                    inputmode="decimal" placeholder="0.00">
           </label>
         </div>
+        <p class="note-line" id="quote">Leave the fee blank for the least the
+          network will carry.</p>
         <button id="go" type="submit">Send</button>
         <p class="said" id="said"></p>
       </form>
@@ -157,6 +163,15 @@ pub const CSS: &str = r#"  :root{
     background:#211A10;padding:.85rem 1rem;border-radius:0 4px 4px 0;
     font-size:.88rem;color:var(--ink-2)}
   .stranded b{color:var(--ink);font-weight:600}
+
+  /* Louder than the boxes inside the balance, because what it says is that
+     the balance is not this wallet's own answer. */
+  .alarm{margin-top:1rem;border:1px solid #C4746A;border-left:3px solid #C4746A;
+    background:#251A1A;padding:.9rem 1.05rem;border-radius:4px;
+    font-size:.88rem;line-height:1.55;color:var(--ink-2)}
+  .alarm b{color:var(--ink);font-weight:600}
+  .said button{margin-top:.6rem;font-size:.8rem;padding:.45rem .8rem;
+    background:var(--warn)}
 
   .grid{display:grid;gap:1rem;margin-top:1rem}
   @media (min-width:50rem){.grid{grid-template-columns:1fr 1fr}}
@@ -254,6 +269,42 @@ async function refresh() {
   $("joining-wrap").hidden = !joining;
   if (joining) { text("joining", state.joining); }
 
+  // The node can be in three states where a height and a balance mean nothing,
+  // and all three look from here like a wallet that is working.
+  const warning = $("warning");
+  warning.hidden = state.warning === null;
+  if (state.warning !== null) { warning.textContent = state.warning; }
+
+  // A payment handed over is not a payment made. Until a block carries it the
+  // balance has not moved and the notes it holds cannot be spent again, and a
+  // person pressing Send twice because nothing happened is the whole reason
+  // this line is here.
+  const waiting = $("waiting");
+  waiting.hidden = state.payments.length === 0;
+  if (state.payments.length > 0) {
+    const total = state.payments.map((p) => p.amount).join(", ");
+    waiting.innerHTML = "<b>" + state.payments.length +
+      (state.payments.length === 1 ? " payment is" : " payments are") +
+      " waiting for a block</b>: " + total + ". Nothing has been paid yet and " +
+      "nothing has been sent twice. A block takes a few minutes; the balance " +
+      "moves when one carries it.";
+  }
+
+  // Money that moved and then did not, because the chain the wallet had read
+  // turned out not to be the one that won.
+  const undone = $("undone");
+  undone.hidden = state.undone.length === 0;
+  if (state.undone.length > 0) {
+    const held = new Set(state.payments.map((p) => p.id));
+    const lines = state.undone.map((m) =>
+      m.way + " " + m.amount + " at block " + m.height +
+      (held.has(m.id) ? ", waiting for a block again" : ""));
+    undone.innerHTML = "<b>The chain changed and took these back.</b> They " +
+      "were in this wallet's account of itself and the chain no longer " +
+      "carries them: " + lines.join("; ") + ". The money is back in the " +
+      "balance above. Whoever you were paying has not been paid.";
+  }
+
   const stranded = $("stranded");
   const strandedZero = state.stranded.startsWith("0.00000000");
   stranded.hidden = strandedZero;
@@ -303,13 +354,25 @@ async function refresh() {
     row.append(way, value, when);
     moves.append(row);
   }
-  text("moves-line", state.movements.length === 0
-    ? (state.history_from === null
-        ? "Nothing yet."
-        : "Nothing since block " + state.history_from + ", which is as far back as this wallet can see.")
-    : (state.history_from > 0
-        ? "As far back as block " + state.history_from + ": this wallet did not read what came before."
-        : ""));
+  const said = [];
+  if (state.movements.length === 0) {
+    said.push(state.history_from === null
+      ? "Nothing yet."
+      : "Nothing since block " + state.history_from + ", which is as far back as this wallet can see.");
+  } else if (state.history_from > 0) {
+    said.push("As far back as block " + state.history_from + ": this wallet did not read what came before.");
+  }
+  if (state.movements_held > state.movements.length) {
+    said.push("Showing the newest " + state.movements.length + " of " + state.movements_held + ".");
+  }
+  // A list that stops short of the chain and does not say so is a list that
+  // says something untrue about somebody's money.
+  if (state.history_behind > 0) {
+    said.push("Still reading: " + state.history_behind +
+      (state.history_behind === 1 ? " block" : " blocks") +
+      " of the chain are not in this list yet.");
+  }
+  text("moves-line", said.join(" "));
 
   const held = state.held;
   const fallen = state.notes.filter((n) => n.cold).length;
@@ -333,36 +396,75 @@ $("copy").addEventListener("click", async () => {
   }
 });
 
-$("send").addEventListener("submit", async (event) => {
-  event.preventDefault();
+const typed = () => new URLSearchParams({
+  k: KEY,
+  to: $("to").value.trim(),
+  amount: $("amount").value.trim(),
+  fee: $("fee").value.trim(),
+});
+
+const post = (path, body) => fetch(path, {
+  method: "POST",
+  headers: { "content-type": "application/x-www-form-urlencoded" },
+  body: body.toString(),
+}).then((answer) => answer.json());
+
+// What carrying it costs, said before it is paid rather than after. The fee
+// box takes a number nothing else on this page ever showed back, and one
+// keystroke is the difference between a fee of 0.00005 and a fee of 5.
+let quoting = 0;
+async function quote() {
+  const mine = ++quoting;
+  const blank = "Leave the fee blank for the least the network will carry.";
+  if ($("to").value.trim().length !== 64 || $("amount").value.trim() === "") {
+    text("quote", blank);
+    return;
+  }
+  let result;
+  try { result = await post("/api/quote", typed()); } catch (_) { return; }
+  if (mine !== quoting) { return; }
+  if (!result.quoted) { text("quote", blank); return; }
+  text("quote", "Sending " + result.amount + " and paying " + result.fee +
+    " to carry it, " + result.total + " in all. The network asks " +
+    result.floor + ".");
+}
+
+for (const box of ["to", "amount", "fee"]) {
+  $(box).addEventListener("input", quote);
+}
+
+async function spend(anyway) {
   const said = $("said");
   const go = $("go");
   said.className = "said";
   go.disabled = true;
   go.textContent = "Sending…";
 
-  const body = new URLSearchParams({
-    k: KEY,
-    to: $("to").value.trim(),
-    amount: $("amount").value.trim(),
-    fee: $("fee").value.trim(),
-  });
+  const body = typed();
+  if (anyway) { body.set("anyway", "1"); }
 
   try {
-    const answer = await fetch("/api/send", {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: body.toString(),
-    });
-    const result = await answer.json();
+    const result = await post("/api/send", body);
     if (result.sent) {
       said.className = "said good";
-      said.innerHTML = "Sent <b>" + result.amount + "</b>" +
+      said.innerHTML = "Handed over: <b>" + result.amount + "</b> to be paid, " +
+        "<b>" + result.fee + "</b> to carry it." +
         (result.handed_on
-          ? ". Handed to the network: it is spent once a block carries it."
-          : ". <b>No peer took it</b>, so it is not spent.") +
+          ? " <b>Waiting for a block</b>, which takes a few minutes. Nobody has been paid yet."
+          : " <b>No peer took it</b>, so it is not sent and nobody has been paid.") +
         "<br><code>" + result.id + "</code>";
       $("to").value = ""; $("amount").value = ""; $("fee").value = "";
+      quote();
+    } else if (result.steep) {
+      // The one refusal a person is allowed to overrule, because paying over
+      // the odds to be carried sooner is a thing people mean to do.
+      said.className = "said bad";
+      said.textContent = result.error;
+      const again = document.createElement("button");
+      again.type = "button";
+      again.textContent = "Pay that fee, I mean it";
+      again.addEventListener("click", () => spend(true));
+      said.append(document.createElement("br"), again);
     } else {
       said.className = "said bad";
       said.textContent = result.error;
@@ -374,6 +476,11 @@ $("send").addEventListener("submit", async (event) => {
   go.disabled = false;
   go.textContent = "Send";
   refresh();
+}
+
+$("send").addEventListener("submit", (event) => {
+  event.preventDefault();
+  spend(false);
 });
 
 refresh();

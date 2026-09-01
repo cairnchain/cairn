@@ -104,7 +104,12 @@ fn answer(wallet: &Wallet, opened: &Opened, request: &Request) -> Response {
         "/wallet.js" => served(crate::page::JS.as_bytes(), "text/javascript; charset=utf-8"),
         "/api/state" => state(wallet),
         "/api/send" if request.post => send(wallet, request),
-        "/api/send" => text(405, "this one is a POST"),
+        // Asked before a spend, so the page can show what carrying it costs
+        // rather than finding out afterwards. A POST like the spend it is
+        // about, because it takes the same three fields and because nothing
+        // that reads this wallet should be reachable by following a link.
+        "/api/quote" if request.post => quote(wallet, request),
+        "/api/send" | "/api/quote" => text(405, "this one is a POST"),
         _ => text(404, "nothing here"),
     }
 }
@@ -170,10 +175,30 @@ fn state(wallet: &Wallet) -> Response {
     }
     json.field_usize("peers", progress.peers);
     json.field_str("joining", &progress.joining.to_string());
+    // Three states of the node the height and the balance say nothing about,
+    // and all three look from here like a wallet that is working.
+    match progress.warning() {
+        Some(warning) => json.field_str("warning", &warning),
+        None => json.field_null("warning"),
+    }
     json.field_str("spendable", &holdings.spendable.to_string());
+    json.field_str("waiting", &holdings.waiting.to_string());
     json.field_str("stranded", &holdings.stranded.to_string());
     json.field_bool("anything", !holdings.notes.is_empty());
     json.field_usize("held", holdings.notes.len());
+
+    // Payments handed over that no block carries yet. The one thing a person
+    // watching an unmoved balance after pressing Send needs to be told.
+    json.key("payments");
+    json.begin_array();
+    for payment in wallet.waiting() {
+        json.begin_object();
+        json.field_str("id", &payment.id.to_string());
+        json.field_str("amount", &payment.amount.to_string());
+        json.field_str("committed", &payment.committed.to_string());
+        json.end_object();
+    }
+    json.end_array();
     json.key("notes");
     json.begin_array();
     // Enough to show where the money sits without handing a page a list that
@@ -190,9 +215,10 @@ fn state(wallet: &Wallet) -> Response {
 
     // What happened, newest first. Read from the wallet's own account of it
     // rather than from the chain, which does not keep one.
+    let movements = wallet.history();
     json.key("movements");
     json.begin_array();
-    for movement in wallet.history().iter().take(MOVEMENTS_SHOWN) {
+    for movement in movements.iter().take(MOVEMENTS_SHOWN) {
         json.begin_object();
         json.field_u64("height", movement.height);
         json.field_u64("at", movement.at);
@@ -202,23 +228,51 @@ fn state(wallet: &Wallet) -> Response {
         json.end_object();
     }
     json.end_array();
-    match wallet.history_from() {
+    json.field_usize("movements_held", movements.len());
+
+    // What the chain took back. A payment that was undone leaves the list
+    // above, and leaving with it is the only record anybody had of it.
+    let undone = wallet.undone();
+    json.key("undone");
+    json.begin_array();
+    for movement in undone.iter().take(MOVEMENTS_SHOWN) {
+        json.begin_object();
+        json.field_u64("height", movement.height);
+        json.field_str("way", movement.direction.as_str());
+        json.field_str("amount", &movement.amount.to_string());
+        json.field_str("id", &movement.id.to_string());
+        json.end_object();
+    }
+    json.end_array();
+
+    let covered = wallet.history_covers();
+    match covered.from {
         Some(from) => json.field_u64("history_from", from),
         None => json.field_null("history_from"),
     }
+    json.field_u64("history_behind", covered.behind());
     json.end_object();
     json_response(200, json)
 }
 
-fn send(wallet: &Wallet, request: &Request) -> Response {
+/// What a person typed into the send form, read once.
+struct Asked {
+    recipient: PublicKey,
+    amount: Amount,
+    fee: Amount,
+}
+
+fn asked(wallet: &Wallet, request: &Request) -> Result<Asked, Response> {
     let Some(to) = request.field("to") else {
-        return refusal("who is being paid?");
+        return Err(refusal("who is being paid?"));
     };
     let Ok(recipient) = parse_key(&to) else {
-        return refusal("that is not a public key: it is 64 hexadecimal characters");
+        return Err(refusal(
+            "that is not a public key: it is 64 hexadecimal characters",
+        ));
     };
     let Some(amount) = request.field("amount").and_then(|text| parse_amount(&text)) else {
-        return refusal("that is not an amount of CAIRN");
+        return Err(refusal("that is not an amount of CAIRN"));
     };
     // Left blank means what the network asks, worked out from the transfer
     // this would build. Nothing is no longer a fee anybody carries, and a page
@@ -229,11 +283,62 @@ fn send(wallet: &Wallet, request: &Request) -> Response {
         Some(text) if text.trim().is_empty() => wallet.floor_for(recipient, amount),
         Some(text) => match parse_amount(&text) {
             Some(fee) => fee,
-            None => return refusal("that fee is not an amount of CAIRN"),
+            None => return Err(refusal("that fee is not an amount of CAIRN")),
         },
     };
+    Ok(Asked {
+        recipient,
+        amount,
+        fee,
+    })
+}
 
-    match wallet.send(recipient, amount, fee) {
+/// What a spend would cost, without making it.
+///
+/// The fee was the one number the page never showed. Somebody meaning
+/// `0.00005` and typing `5` paid five CAIRN to a miner and read "Sent
+/// 1.00000000 CAIRN", with nothing anywhere saying what carrying it had cost.
+fn quote(wallet: &Wallet, request: &Request) -> Response {
+    let asked = match asked(wallet, request) {
+        Ok(asked) => asked,
+        Err(refusal) => return refusal,
+    };
+    let floor = wallet.floor_for(asked.recipient, asked.amount);
+    let total = asked
+        .amount
+        .checked_add(asked.fee)
+        .unwrap_or(Amount::MAX_MONEY);
+
+    let mut json = Writer::new();
+    json.begin_object();
+    json.field_bool("quoted", true);
+    json.field_str("amount", &asked.amount.to_string());
+    json.field_str("fee", &asked.fee.to_string());
+    json.field_str("floor", &floor.to_string());
+    json.field_str("total", &total.to_string());
+    json.end_object();
+    json_response(200, json)
+}
+
+fn send(wallet: &Wallet, request: &Request) -> Response {
+    let asked = match asked(wallet, request) {
+        Ok(asked) => asked,
+        Err(refusal) => return refusal,
+    };
+    // Set only by pressing the button the refusal below puts up, so a fee out
+    // of all proportion is paid once somebody has read the number and said
+    // again that they mean it.
+    let meant = request
+        .field("anyway")
+        .is_some_and(|text| text.trim() == "1");
+    let spend = if meant {
+        wallet.send_over_the_odds(asked.recipient, asked.amount, asked.fee)
+    } else {
+        wallet.send(asked.recipient, asked.amount, asked.fee)
+    };
+
+    match spend {
+        Err(error @ WalletError::FeeOutOfProportion { .. }) => steep(&error.to_string()),
         Err(error) => refusal(&error.to_string()),
         Ok(sent) => {
             let mut json = Writer::new();
@@ -241,6 +346,7 @@ fn send(wallet: &Wallet, request: &Request) -> Response {
             json.field_bool("sent", true);
             json.field_str("id", &sent.id.to_string());
             json.field_str("amount", &sent.amount.to_string());
+            json.field_str("fee", &sent.fee.to_string());
             json.field_str("change", &sent.change.to_string());
             json.field_usize("notes", sent.notes);
             json.field_usize("from_cold", sent.from_cold);
@@ -275,6 +381,22 @@ fn refusal(message: &str) -> Response {
     let mut json = Writer::new();
     json.begin_object();
     json.field_bool("sent", false);
+    json.field_str("error", message);
+    json.end_object();
+    json_response(200, json)
+}
+
+/// A refusal the person asking is allowed to overrule.
+///
+/// Marked apart from the others so the page can put up a button rather than
+/// only a sentence. Overpaying is sometimes the point, and a wallet that made
+/// it impossible would be one that decided for its owner how much their hurry
+/// is worth.
+fn steep(message: &str) -> Response {
+    let mut json = Writer::new();
+    json.begin_object();
+    json.field_bool("sent", false);
+    json.field_bool("steep", true);
     json.field_str("error", message);
     json.end_object();
     json_response(200, json)

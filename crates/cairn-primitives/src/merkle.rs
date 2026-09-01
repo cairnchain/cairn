@@ -29,6 +29,23 @@ fn merkle_node(left: Hash32, right: Hash32) -> Hash32 {
 ///
 /// The root of an empty list is a fixed digest that no non empty list can
 /// produce, because it is computed under its own domain.
+///
+/// Two of the choices below cost injectivity, and the caller is what buys it
+/// back. A single element is its own root, and an odd node is promoted rather
+/// than paired with itself, which is the defence against the old Bitcoin
+/// duplication flaw. Together they mean an interior node digest, placed in a
+/// list of leaves, is indistinguishable from the subtree it stands for:
+/// `merkle_root([a, b, c])` and `merkle_root([merkle_root([a, b]), c])` are
+/// the same thirty two bytes.
+///
+/// That is not reachable today and the reason is not in this function. Every
+/// caller passes digests taken under [`Domain::MerkleLeaf`], and an interior
+/// node is taken under [`Domain::MerkleNode`], so no leaf can ever equal a
+/// node. There is also no verifier for a path through this tree anywhere:
+/// a root is recomputed and compared, never folded from a proof somebody
+/// sent. Both are properties of the callers rather than of the code here, so
+/// anyone writing that verifier, or passing digests from anywhere else, has
+/// to check this argument still holds before doing it.
 pub fn merkle_root(leaves: &[Hash32]) -> Hash32 {
     let mut level: Vec<Hash32> = match leaves {
         [] => return hash(Domain::MerkleEmpty, &[]),

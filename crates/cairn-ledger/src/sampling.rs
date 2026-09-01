@@ -29,9 +29,13 @@ use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
 use cairn_primitives::hash::{hash, Domain};
 use cairn_primitives::Hash32;
 
-use crate::block::BlockHeader;
-use crate::pow::{meets_target, work_of, MAX_RETARGET_FACTOR, MIN_DIFFICULTY};
+use crate::block::{BlockHeader, HeaderSummary};
+use crate::pow::{
+    median_time_past, meets_target, next_difficulty, work_of, DIFFICULTY_WINDOW,
+    MAX_RETARGET_FACTOR, MIN_DIFFICULTY,
+};
 use crate::state::header_leaf;
+use crate::validation::ConsensusParams;
 
 /// Headers opened when a newcomer is deciding between chains.
 ///
@@ -136,7 +140,7 @@ const FEWEST_LEVELS: u32 = 1;
 /// fork choice already offers: a newcomer cannot be put on the wrong chain by
 /// more than this, and within it, it is in the same position as any node that
 /// just reconnected.
-const SHALLOWEST: u64 = 1_024;
+pub const SHALLOWEST: u64 = 1_024;
 
 /// One header a prover opened, and the proof that it sits where it says.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,6 +154,35 @@ pub struct Sample {
 pub struct SampledStart {
     /// The header everything else is measured against.
     pub tip: BlockHeader,
+    /// Every header from a full retarget window below the deepest thing the
+    /// draw pinned, up to the tip. Oldest first.
+    ///
+    /// The draw deliberately stops resolving [`SHALLOWEST`] blocks from the
+    /// tip, and for a while nothing else looked up there either. That was
+    /// enough on its own: a forger left the honest chain untouched, appended
+    /// its own headers at the difficulty floor, one hash each, and put the
+    /// work it was inventing inside the band the draw never reaches. The
+    /// anchor a newcomer is then handed is one of the forger's own headers,
+    /// with whatever ledger it cares to commit to. Neither the parent check
+    /// nor the work between opened headers sees it, because both are about
+    /// what a run of blocks is worth and this run really is worth what it
+    /// says: almost nothing, honestly stated.
+    ///
+    /// What was missing is that the top of a chain was tied to no difficulty
+    /// anybody could check. The run below fixes that by starting at a header
+    /// the draw actually landed on, and walking upward under the retarget:
+    /// each header carries the difficulty the window demands of it, dates
+    /// after that window's median, and adds its own work to the total. The
+    /// window below the pinned header comes along too, and is honest because
+    /// those headers have to chain into it: a forger cannot swap them without
+    /// having mined the pinned header on top of its own.
+    ///
+    /// Held together with the tip's timestamp being near the reader's own
+    /// clock, that makes the cheap run cost the one thing a forger cannot
+    /// manufacture. Blocks at the floor have to be spaced at the target or
+    /// the retarget demands more of them, so a thousand of them span most of
+    /// a day, and a day ahead of the reader is refused.
+    pub tail: Vec<BlockHeader>,
     /// The header the tip was built on, opened in the tip's own history.
     ///
     /// Without it the weighing said only that a tip names a forest, which is
@@ -224,7 +257,38 @@ pub enum StartError {
     ParentNotOpened,
     #[error("the header opened for the tip's parent is not the one the tip names")]
     ParentNotTheTipsOwn,
+    #[error("the run up to the tip holds {given} headers, and {wanted} were wanted")]
+    TailWrongLength { given: u64, wanted: u64 },
+    #[error("the run up to the tip does not hold the header opened at height {at}")]
+    TailMissesWhatWasOpened { at: u64 },
+    #[error("the header at {at} in the run up to the tip does not follow the one below it")]
+    TailNotConsecutive { at: u64 },
+    #[error("the header at {at} in the run up to the tip carries no work")]
+    TailWithoutWork { at: u64 },
+    #[error("the header at {at} states difficulty {stated}, and the rules demand {demanded}")]
+    TailAtTheWrongDifficulty { at: u64, stated: u64, demanded: u64 },
+    #[error("the header at {at} is not later than the median of the window before it")]
+    TailOutOfTime { at: u64 },
+    #[error("the work stated at {at} is not the work below it plus its own")]
+    TailWorkDoesNotAddUp { at: u64 },
+    #[error("the tip is dated {timestamp}, further ahead than this node will take")]
+    TipFromTheFuture { timestamp: u64 },
+    #[error("nothing was opened, so there is nothing to measure the tip against")]
+    NothingOpened,
 }
+
+/// The longest run this will walk between the deepest thing the draw pinned
+/// and the tip.
+///
+/// On a chain whose difficulty is near its own lifetime average the band the
+/// draw leaves unresolved is about [`SHALLOWEST`] blocks, so the run is that
+/// plus a window. The ceiling is generous against that because the band is
+/// measured in work: a chain whose difficulty has fallen well below what it
+/// averaged over its life has more blocks inside the same band. Past this it
+/// cannot be weighed and has to be read, which is a real limit and is stated
+/// rather than hidden. A chain that has lost sixteen times its hash rate and
+/// not recovered is the shape that reaches it.
+pub const MOST_TAIL: u64 = 16 * SHALLOWEST + DIFFICULTY_WINDOW as u64;
 
 /// The least work `blocks` blocks can carry, starting from a block of this
 /// difficulty.
@@ -307,6 +371,13 @@ impl Encode for SampledStart {
         for sample in &self.samples {
             sample.encode_to(out);
         }
+
+        u32::try_from(self.tail.len())
+            .unwrap_or(u32::MAX)
+            .encode_to(out);
+        for header in &self.tail {
+            header.encode_to(out);
+        }
     }
 }
 
@@ -334,8 +405,20 @@ impl Decode for SampledStart {
         for _ in 0..count {
             samples.push(Sample::decode_from(reader)?);
         }
+        let held = usize::try_from(u32::decode_from(reader)?).unwrap_or(usize::MAX);
+        if u64::try_from(held).unwrap_or(u64::MAX) > MOST_TAIL {
+            return Err(CodecError::InvalidValue {
+                type_name: "SampledStart",
+            });
+        }
+        let mut tail = Vec::with_capacity(held.min(1024));
+        for _ in 0..held {
+            tail.push(BlockHeader::decode_from(reader)?);
+        }
+
         Ok(Self {
             tip,
+            tail,
             parent,
             history,
             samples,
@@ -465,7 +548,12 @@ pub fn draw(seed: Hash32, count: usize, total_work: u128, blocks: u64) -> Vec<u1
 ///
 /// This is what the height and the work being separate claims used to cost.
 /// They are now tied to each other by the one rule that governs both.
-pub fn check_start(start: &SampledStart, count: usize) -> Result<Weighed, StartError> {
+pub fn check_start(
+    start: &SampledStart,
+    count: usize,
+    now: u64,
+    params: &ConsensusParams,
+) -> Result<Weighed, StartError> {
     let tip = &start.tip;
     if !meets_target(&tip.id(), tip.difficulty) {
         return Err(StartError::TipWithoutWork);
@@ -521,12 +609,122 @@ pub fn check_start(start: &SampledStart, count: usize) -> Result<Weighed, StartE
 
     check_the_parent(start)?;
     check_the_gaps(start)?;
+    check_the_tail(start, now, params)?;
 
     Ok(Weighed {
         tip: tip.id(),
         height: tip.height,
         total_work: tip.total_work,
     })
+}
+
+/// Walks the top of the chain, which the draw does not reach.
+///
+/// Starts a full retarget window below the deepest header the draw landed on,
+/// so the window the first checked header is judged against is one a forger
+/// would have had to mine that header on top of. From there every header is
+/// held to the rules a node applies to any block it is handed: the difficulty
+/// the window demands, a timestamp past that window's median, its own work
+/// added to the total, and real work behind its own identifier.
+///
+/// The tip's timestamp is measured against the reader's own clock here rather
+/// than left to the forward validation that comes later, because this is
+/// where the decision is made. Without it a forger can hand over a chain whose
+/// cheap blocks are spaced out across days it never waited.
+fn check_the_tail(
+    start: &SampledStart,
+    now: u64,
+    params: &ConsensusParams,
+) -> Result<(), StartError> {
+    let tip = &start.tip;
+    if tip.timestamp > now.saturating_add(params.max_timestamp_drift) {
+        return Err(StartError::TipFromTheFuture {
+            timestamp: tip.timestamp,
+        });
+    }
+
+    // The deepest thing the draw actually landed on. The parent does not
+    // count: it is required rather than drawn, so a forger chooses it.
+    let Some(pinned) = start
+        .samples
+        .iter()
+        .map(|sample| &sample.header)
+        .max_by_key(|header| header.height)
+    else {
+        return Err(StartError::NothingOpened);
+    };
+
+    let window = u64::try_from(DIFFICULTY_WINDOW).unwrap_or(u64::MAX);
+    let from = pinned.height.saturating_sub(window);
+    let Some(span) = tip.height.checked_sub(from) else {
+        return Err(StartError::TailWrongLength {
+            given: u64::try_from(start.tail.len()).unwrap_or(u64::MAX),
+            wanted: 0,
+        });
+    };
+    let wanted = span.saturating_add(1);
+    let given = u64::try_from(start.tail.len()).unwrap_or(u64::MAX);
+    if given != wanted || wanted > MOST_TAIL {
+        return Err(StartError::TailWrongLength { given, wanted });
+    }
+
+    let mut summaries: Vec<HeaderSummary> = Vec::with_capacity(start.tail.len());
+    let mut previous: Option<&BlockHeader> = None;
+    let mut carried_the_pinned = false;
+    for header in &start.tail {
+        if !meets_target(&header.id(), header.difficulty) {
+            return Err(StartError::TailWithoutWork { at: header.height });
+        }
+        if let Some(below) = previous {
+            if header.height != below.height.saturating_add(1) || header.previous != below.id() {
+                return Err(StartError::TailNotConsecutive { at: header.height });
+            }
+            // Below the pinned header nothing can be checked but the chain
+            // itself, since the window that would judge those difficulties is
+            // not here. Above it the rules apply in full, and that is where a
+            // forger's cheap run would have to live.
+            if below.height >= pinned.height {
+                let demanded = next_difficulty(&summaries, params.target_block_time);
+                if header.difficulty != demanded {
+                    return Err(StartError::TailAtTheWrongDifficulty {
+                        at: header.height,
+                        stated: header.difficulty,
+                        demanded,
+                    });
+                }
+                if median_time_past(&summaries).is_some_and(|median| header.timestamp <= median) {
+                    return Err(StartError::TailOutOfTime { at: header.height });
+                }
+                if header.total_work != below.total_work.saturating_add(work_of(header.difficulty))
+                {
+                    return Err(StartError::TailWorkDoesNotAddUp { at: header.height });
+                }
+            }
+        }
+        if header.height == pinned.height {
+            if header.id() != pinned.id() {
+                return Err(StartError::TailMissesWhatWasOpened { at: pinned.height });
+            }
+            carried_the_pinned = true;
+        }
+        summaries.push(HeaderSummary {
+            height: header.height,
+            timestamp: header.timestamp,
+            difficulty: header.difficulty,
+        });
+        if summaries.len() > DIFFICULTY_WINDOW.saturating_add(1) {
+            summaries.remove(0);
+        }
+        previous = Some(header);
+    }
+
+    if !carried_the_pinned {
+        return Err(StartError::TailMissesWhatWasOpened { at: pinned.height });
+    }
+    if previous.is_some_and(|last| last.id() != tip.id()) {
+        return Err(StartError::TailNotConsecutive { at: tip.height });
+    }
+    Ok(())
 }
 
 /// Checks that the tip stands at the end of the chain it names.
@@ -666,6 +864,17 @@ pub fn open_start(
         let proof = prove(height)?;
         samples.push(Sample { header, proof });
     }
+    let deepest = samples
+        .iter()
+        .map(|sample: &Sample| sample.header.height)
+        .max()
+        .unwrap_or(tip.height);
+    let window = u64::try_from(DIFFICULTY_WINDOW).unwrap_or(u64::MAX);
+    let mut tail = Vec::new();
+    for height in deepest.saturating_sub(window)..=tip.height {
+        tail.push(header_at(height)?);
+    }
+
     let parent = match tip.height.checked_sub(1) {
         None => None,
         Some(below) => Some(Sample {
@@ -675,6 +884,7 @@ pub fn open_start(
     };
     Some(SampledStart {
         tip: *tip,
+        tail,
         parent,
         history,
         samples,

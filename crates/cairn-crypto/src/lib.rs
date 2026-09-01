@@ -21,6 +21,7 @@ use std::fmt;
 
 use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
 use ed25519_dalek::{Signature as DalekSignature, SigningKey, VerifyingKey};
+use zeroize::Zeroizing;
 
 pub const PUBLIC_KEY_LEN: usize = 32;
 pub const SECRET_KEY_LEN: usize = 32;
@@ -67,9 +68,15 @@ pub fn random_bytes<const N: usize>() -> Result<[u8; N], CryptoError> {
 
 impl SecretKey {
     /// Draws a fresh key from the operating system entropy source.
+    ///
+    /// The seed is wiped rather than left in the stack frame it was drawn in.
+    /// The key built from it wipes itself when it is dropped, which is what
+    /// the reasoning above rests on, but that covers the copy inside the
+    /// struct and not the thirty two bytes the caller drew: they are the same
+    /// key, and one of them was being left behind.
     pub fn generate() -> Result<Self, CryptoError> {
-        let mut seed = [0u8; SECRET_KEY_LEN];
-        getrandom::fill(&mut seed).map_err(|_| CryptoError::NoEntropy)?;
+        let mut seed = Zeroizing::new([0u8; SECRET_KEY_LEN]);
+        getrandom::fill(seed.as_mut()).map_err(|_| CryptoError::NoEntropy)?;
         Ok(Self(SigningKey::from_bytes(&seed)))
     }
 
