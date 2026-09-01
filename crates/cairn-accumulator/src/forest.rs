@@ -53,7 +53,7 @@ pub fn empty_leaf() -> Hash32 {
 /// bit for bit in the other, which looks like the beginning of a way to carry
 /// a proof across. It is not, and the reason is a rung lower: a proof is only
 /// ever checked by folding it up to a leaf, and the leaves are in domains of
-/// their own — `ForestLeaf` against `HeaderHistoryLeaf`. A path that arrived
+/// their own: `ForestLeaf` against `HeaderHistoryLeaf`. A path that arrived
 /// from the other forest fails there, before its shape is ever considered,
 /// and the root it is checked against commits to the leaf count as well as to
 /// the structure. Separating this domain too would make the argument shorter
@@ -238,7 +238,7 @@ impl Decode for Forest {
 /// that: undoing a block puts the cold set back by assigning a clone of the
 /// forest as it stood before, so a `Clone` that dropped `watched` to save
 /// memory would leave a node that reorganised unable to prove notes it had
-/// been proving a moment earlier — silently, and only for the owners it
+/// been proving a moment earlier, silently, and only for the owners it
 /// watches. Said here because a derive cannot say it.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Forest {
@@ -431,7 +431,7 @@ impl Forest {
         // An emptied place proves itself: after a removal the root above it is
         // exactly what folding the empty leaf gives, so a second removal of the
         // same place verifies and would count a leaf that is not there. The
-        // roots do not move, so nothing shows it — only the count does, and the
+        // roots do not move, so nothing shows it; only the count does, and the
         // count is committed to. Refused here rather than trusted to the
         // caller, which is where the two kinds of node were told to dedup and
         // only one was.

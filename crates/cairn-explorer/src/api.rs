@@ -109,8 +109,8 @@ impl Explorer {
     /// one write of a page that was going to be written anyway, and pages have
     /// a ceiling, which is the cheap half of the trade.
     pub(crate) fn answer(&self, request: &Request) -> Option<Response> {
-        // Before either lock. Everything else this server serves — the page,
-        // its script, the papers — would otherwise queue behind the indexer
+        // Before either lock. Everything else this server serves (the page,
+        // its script, the papers) would otherwise queue behind the indexer
         // for a chain it is never going to read.
         request.after("/api/")?;
 
@@ -167,7 +167,7 @@ impl Context<'_> {
     ///
     /// A node lets go of the bodies of blocks too deep to be undone, which is
     /// what keeps its memory from growing with the chain. An explorer answers
-    /// about all of them, so the rest sit in the log in order of height — and
+    /// about all of them, so the rest sit in the log in order of height, and
     /// nothing here goes to the log, because this runs with the chain held. A
     /// height that is not in hand is written down instead, and the reading
     /// after this one has it.

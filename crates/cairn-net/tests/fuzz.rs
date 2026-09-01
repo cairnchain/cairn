@@ -2,7 +2,7 @@
 //!
 //! A node decodes bytes chosen by strangers. Every message below arrives over
 //! a socket from someone who was never asked to be honest, so what these check
-//! is not that valid input works — the other tests do that — but that invalid
+//! is not that valid input works (the other tests do that) but that invalid
 //! input fails, in every way it can be invalid, without taking the node with
 //! it.
 //!
@@ -240,7 +240,7 @@ fn a_bent_ledger_and_a_bent_weighing_are_refused_rather_than_fatal() {
             // Refusing is the expected answer; accepting a bent one would be
             // a defect this cannot see, which is what the handover tests are
             // for. What is checked here is that neither outcome is a panic.
-            if cairn_ledger::handover::accept(&bent, params.hot_capacity, params.burial).is_ok() {
+            if cairn_ledger::handover::accept(&bent, &params).is_ok() {
                 took += 1;
             }
         }
@@ -262,7 +262,7 @@ fn a_bent_ledger_and_a_bent_weighing_are_refused_rather_than_fatal() {
     // An unbent one has to pass, or the campaign proves nothing about the
     // checks it is bending.
     assert!(
-        cairn_ledger::handover::accept(&handover, params.hot_capacity, params.burial).is_ok(),
+        cairn_ledger::handover::accept(&handover, &params).is_ok(),
         "the ledger these mutations start from is not one that would be taken"
     );
     let _ = (took, weighed);
@@ -311,6 +311,7 @@ fn valid_join_answers() -> (Handover, SampledStart) {
         archive
             .prove_in(anchor_height, tip.height)
             .expect("it can prove its own history"),
+        headers[usize::try_from(anchor_height).unwrap() + 1..].to_vec(),
         recent,
     );
     let start = cairn_ledger::sampling::open_start(
@@ -374,6 +375,7 @@ fn valid_messages() -> Vec<Vec<u8>> {
         cairn_accumulator::forest::ForestProof {
             siblings: Vec::new(),
         },
+        Vec::new(),
         vec![tip.header],
     );
 

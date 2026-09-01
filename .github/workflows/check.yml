@@ -48,7 +48,7 @@ jobs:
   # invariants whose first visible sign of failure would otherwise be a node
   # disagreeing with the network: what undoing a block restores, what the hot
   # set and the index over it agree on. An assertion nothing ever runs is a
-  # comment. One machine is enough — what this catches is not platform
+  # comment. One machine is enough: what this catches is not platform
   # specific.
   assertions:
     runs-on: ubuntu-latest

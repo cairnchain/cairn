@@ -135,14 +135,23 @@ systemctl stop cairnd
 sh /usr/local/src/cairn/deploy/install.sh   # rebuilds and restarts
 ```
 
-`install.sh` rewrites the service file from the environment it is given, so
-whatever `SEED` and `MINE` were set to on the last run is what the unit says.
-Pass them again on an update, or edit `/etc/systemd/system/cairnd.service`.
+`install.sh` reads the settings this machine already has back out of its unit
+file, so an update takes none of them with it: `NETWORK`, `PORT`, `SEED` and
+`MINE` come back as they were. It prints what it kept, so a setting that went
+missing on its way through `sudo` is visible before anything is built.
 
-An update that would silently stop a node from mining refuses to run and
-prints both ways out: the same `MINE` again to keep it, or `MINE=off` to
-actually turn it off. A miner that quietly stopped is how a test network goes
-still without anybody noticing.
+Naming a setting changes it. Naming it empty puts it back to the default it
+ships with, which is the one way a setting goes back on its own:
+
+```
+sudo env PORT=9955 sh /usr/local/src/cairn/deploy/install.sh   # keeps the rest
+sudo env PORT= sh /usr/local/src/cairn/deploy/install.sh       # back to 9944
+sudo env MINE= sh /usr/local/src/cairn/deploy/install.sh       # stop mining
+```
+
+A node that was mining therefore keeps mining, which is what a test network
+lives on: a miner that quietly stopped is how one goes still without anybody
+noticing. Stopping it is `MINE=`, said out loud, and nothing else.
 
 A node killed outright, or a server that loses power, comes back on its own:
 the data directory lock is held by the kernel on an open file and is released
@@ -164,9 +173,13 @@ sudo env DOMAIN=cairnchain.org sh /usr/local/src/cairn/deploy/explorer.sh
 
 That builds the explorer, runs it on loopback, installs Caddy in front of it,
 and asks for a certificate. A bare name like `cairnchain.org` also gets
-`www.cairnchain.org` redirected to it, because people type it. Without
-`DOMAIN` the site is served over plain HTTP, which is fine for looking at and
-wrong for publishing.
+`www.cairnchain.org` redirected to it, because people type it. On a first run
+with no `DOMAIN` the site is served over plain HTTP, which is fine for looking
+at and wrong for publishing.
+
+`explorer.sh` keeps its settings the way `install.sh` does, the domain among
+them: running it again for a new build leaves the certificate where it is, and
+`DOMAIN=` is what takes a site back to plain HTTP.
 
 No seed has to be named: the addresses a node starts from are written into
 the program.

@@ -417,7 +417,7 @@ pub struct TransferOutcome {
 /// A signature found while validating, waiting to be checked.
 ///
 /// Collected rather than checked where it is found, so that a whole block's
-/// signatures are checked in one place — and a full block's worth is enough
+/// signatures are checked in one place, and a full block's worth is enough
 /// work to be worth splitting across the cores the machine already has.
 ///
 /// The position is carried so a failure names the same input the one-at-a-time
@@ -449,8 +449,8 @@ const MOST_THREADS: usize = 8;
 /// Checks every signature collected, and names the first that does not hold.
 ///
 /// First in the order validation reached them, whichever thread got there.
-/// The check itself is pure — the same key, message and signature give the
-/// same answer anywhere — so splitting it changes how long a block takes and
+/// The check itself is pure (the same key, message and signature give the
+/// same answer anywhere), so splitting it changes how long a block takes and
 /// nothing about whether it is valid.
 fn first_failure(pending: &[Pending]) -> Option<&Pending> {
     if pending.len() < SPLIT_ABOVE {
@@ -814,7 +814,7 @@ pub fn evaluate_block_body(
     };
     // A projection that cannot be made is a block that cannot be applied. It
     // means a note this block spends is not where its proof said, which the
-    // checks above already refused — so reaching here is this node disagreeing
+    // checks above already refused, so reaching here is this node disagreeing
     // with itself, and the only safe answer is to refuse the block rather than
     // to carry on with a root that does not describe anything.
     let state_root = state
@@ -944,7 +944,7 @@ fn check_header(
 
     // Which rules judge this block is decided by where it sits, and where it
     // sits is decided by the state rather than by what the block says about
-    // itself — its own claim about its height is checked further down, and a
+    // itself: its own claim about its height is checked further down, and a
     // block that lied about it would otherwise pick the rules it is judged by.
     let required = params.version_at(expected_height);
     if required > BLOCK_VERSION {
@@ -1144,7 +1144,7 @@ mod tests {
     /// that finds a bad signature first is whichever was scheduled first. What
     /// is reported has to be the one validation reached first instead, or a
     /// node names a different input on every run and nobody can debug it. The
-    /// verdict is the same either way — this is about the report.
+    /// verdict is the same either way; this is about the report.
     #[test]
     fn a_split_check_names_the_same_signature_a_whole_one_would() {
         for count in [4usize, SPLIT_ABOVE - 1, SPLIT_ABOVE, SPLIT_ABOVE * 4 + 3] {

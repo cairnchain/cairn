@@ -84,6 +84,14 @@ struct Claim {
     /// When this peer was last asked, so the last resort does not ask the
     /// same broken peer every round.
     tried: Option<u64>,
+    /// When the claim was first heard.
+    ///
+    /// A word costs a stranger one connection, so a stream of them can be
+    /// produced for ever. Ranking on the number alone let each new one push
+    /// in front of a claim that had been waiting, and the waiting one was
+    /// never asked. Arriving later does not buy a turn ahead of somebody who
+    /// was already there.
+    heard: u64,
 }
 
 /// How a chosen peer is asked to show its chain.
@@ -172,6 +180,9 @@ impl Chooser {
         // failed. This is what stops a peer washing its claim clean by
         // reconnecting under a fresh connection number.
         let unbacked = host.is_some_and(|host| self.unbacked_hosts.contains(&host));
+        // A peer that says something new keeps the moment it first spoke, so
+        // revising a claim upward is not a way to jump the queue either.
+        let heard = self.claims.get(&peer).map_or(now, |known| known.heard);
         self.claims.insert(
             peer,
             Claim {
@@ -181,6 +192,7 @@ impl Chooser {
                 host,
                 unbacked,
                 tried: None,
+                heard,
             },
         );
         if height >= JOIN_RATHER_THAN_READ && self.first_claim_at.is_none() {
@@ -236,14 +248,21 @@ impl Chooser {
     /// time: once something has been proven for [`PROVEN_PATIENCE`], words
     /// alone stop counting against it.
     pub fn allows(&mut self, peer: u64, work: u128, now: u64) -> bool {
+        let outweighs =
+            |other: &u64, claim: &Claim| *other != peer && !claim.unbacked && claim.work > work;
         let heavier = self
             .claims
             .iter()
-            .any(|(other, claim)| *other != peer && !claim.unbacked && claim.work > work);
+            .any(|(other, claim)| outweighs(other, claim));
+        let owed = self.proven.is_some_and(|(_, at)| {
+            self.claims
+                .iter()
+                .any(|(other, claim)| outweighs(other, claim) && Self::owed_a_turn(claim, at, now))
+        });
         let patience_over = self
             .proven
             .is_some_and(|(best, at)| work >= best && now.saturating_sub(at) >= PROVEN_PATIENCE);
-        if heavier && !patience_over {
+        if heavier && (!patience_over || owed) {
             self.asked = None;
             return false;
         }
@@ -321,12 +340,18 @@ impl Chooser {
         // Once something has been proven and its patience has run out, only
         // claims the proof already covers are worth asking about: whatever
         // still claims more has had its time to show it.
-        let ceiling = self
-            .proven
-            .and_then(|(best, at)| (now.saturating_sub(at) >= PROVEN_PATIENCE).then_some(best));
+        //
+        // Had its time, which is the part this used to get wrong. A claim that
+        // was never once asked has not refused anything, and shutting it out
+        // on a deadline it never got a turn in is how a stranger with a
+        // handful of addresses made a node adopt the lighter of two chains it
+        // could see. The ceiling now only closes on claims that were tried.
+        let ceiling = self.proven.and_then(|(best, at)| {
+            (now.saturating_sub(at) >= PROVEN_PATIENCE).then_some((best, at))
+        });
         let pick = self
-            .pick(ceiling)
-            .or_else(|| self.pick(None))
+            .pick(ceiling, now)
+            .or_else(|| self.pick(None, now))
             .or_else(|| self.last_resort(now));
         let Some((peer, approach)) = pick else {
             return Step::Quiet;
@@ -339,12 +364,43 @@ impl Chooser {
     }
 
     /// The heaviest claim still standing, and how to ask about it.
-    fn pick(&self, ceiling: Option<u128>) -> Option<(u64, Approach)> {
+    /// Whether a claim is still owed the turn the patience is about to close.
+    ///
+    /// The patience exists so that words alone cannot hold a node off its
+    /// chain forever. It was written as if every heavier claimant had been
+    /// asked and had failed to answer, which is what makes ignoring it fair.
+    /// A claimant that stood there when the proof landed and was never once
+    /// asked has failed nothing, and shutting it out is how a stranger with a
+    /// handful of addresses made a node take the lighter of two chains it
+    /// could see: the cheap claims are chased first, one per answering
+    /// window, and by the time they run out the honest one is out of time it
+    /// never had.
+    ///
+    /// Whoever turned up after the proof is a different matter. Letting late
+    /// words push the deadline back is the hold-off this patience is for, so
+    /// the set that must be asked is fixed at the moment of proving, and it
+    /// only shrinks: a peer that goes away has its claim dropped, and one
+    /// that is asked and stays silent is marked once its answering window
+    /// runs out. Being asked is not the same as having answered, so the turn
+    /// is owed until that window closes, not from the moment the question
+    /// leaves.
+    fn owed_a_turn(claim: &Claim, proven_at: u64, now: u64) -> bool {
+        claim.heard <= proven_at
+            && claim
+                .tried
+                .is_none_or(|at| now.saturating_sub(at) < FIRST_ANSWER_PATIENCE)
+    }
+
+    fn pick(&self, ceiling: Option<(u128, u64)>, now: u64) -> Option<(u64, Approach)> {
         let (peer, claim) = self
             .claims
             .iter()
             .filter(|(_, claim)| !claim.unbacked)
-            .filter(|(_, claim)| ceiling.is_none_or(|most| claim.work <= most))
+            .filter(|(_, claim)| {
+                ceiling.is_none_or(|(most, proven_at)| {
+                    claim.work <= most || Self::owed_a_turn(claim, proven_at, now)
+                })
+            })
             .max_by_key(|(peer, claim)| (claim.work, **peer))?;
         let approach = if claim.archives && claim.height >= JOIN_RATHER_THAN_READ {
             Approach::Join
@@ -645,5 +701,150 @@ mod tests {
             "the choice was the whole job"
         );
         assert!(!chooser.holds_off(2), "nobody is held off after it");
+    }
+
+    /// AUDIT (finding 1): a heavier claim from a connected peer that never
+    /// failed is passed over, and the node commits to a lighter chain it has
+    /// proved, because a stream of cheap fake "heavier" claims starves the
+    /// honest claimant of a turn until the proven-patience ceiling excludes it.
+    ///
+    /// The claims that hold the node off are unverified handshake numbers, so
+    /// they cost an attacker nothing but a connection. One decoy chain the
+    /// attacker can actually show (light, self-consistent) plus a handful of
+    /// silent "I have more" connections is enough. This contradicts the
+    /// module's own invariant, "Nothing is adopted while a heavier claim
+    /// stands unexamined", and the ceiling comment's premise that a heavier
+    /// claimant "has had its time to show it": peer 2 never had a turn.
+    #[test]
+    fn a_starved_heavier_claim_is_passed_over_for_a_lighter_proven_chain() {
+        let mut chooser = Chooser::new();
+        // The attacker's decoy: claims the most, so it is asked first, and can
+        // actually show its chain, but the chain is light (work 50).
+        chooser.noted(1, Some(host(1)), 2_000, LONG, true, 100);
+        // The honest peer: a genuinely heavier chain (work 100), present and
+        // never failing for the whole episode.
+        chooser.noted(2, Some(host(2)), 100, LONG, true, 100);
+        // Throwaway connections that only claim a big number and go silent.
+        // Each outranks the honest peer, so the honest peer is never the pick.
+        for sybil in 10u8..=13 {
+            chooser.noted(u64::from(sybil), Some(host(sybil)), 1_000, LONG, true, 100);
+        }
+        let connected = &[1u64, 2, 10, 11, 12, 13];
+
+        // Settling passes; the heaviest claim (the decoy) is asked and shows
+        // its light chain. Something is now proven, and the clock starts.
+        assert_eq!(
+            chooser.step(102, true, 0, JoinProgress::NothingYet, connected),
+            Step::Ask(1, Approach::Join),
+            "the decoy claims the most, so it is asked first"
+        );
+        assert!(
+            !chooser.shown(1, 50, 102),
+            "the honest peer still claims more than was shown, so not adopted yet"
+        );
+
+        // The sybils are chased heaviest-first, one per first-answer window,
+        // each failing on silence. The honest peer (work 100) is below their
+        // claimed 1000 the whole time, so it is never asked.
+        assert_eq!(
+            chooser.step(103, true, 0, JoinProgress::NothingYet, connected),
+            Step::Ask(13, Approach::Join)
+        );
+        for (asked_at, next) in [(133, 12), (163, 11), (193, 10)] {
+            assert_eq!(
+                chooser.step(asked_at, true, 0, JoinProgress::NothingYet, connected),
+                Step::Ask(next, Approach::Join),
+                "a silent sybil fails and the next-heaviest sybil is asked"
+            );
+        }
+
+        // 193 + FIRST_ANSWER_PATIENCE = 223, which is past 102 + PROVEN_PATIENCE
+        // (= 222). The last sybil fails and the ceiling now excludes every
+        // claim heavier than what was shown, including the honest peer.
+        let decided = chooser.step(223, true, 0, JoinProgress::NothingYet, connected);
+        // Correct behaviour: peer 2's heavier claim has never been examined and
+        // peer 2 is still connected and never failed, so it must be asked
+        // before the node commits to the lighter proven chain.
+        assert_eq!(
+            decided,
+            Step::Ask(2, Approach::Join),
+            "a heavier claim from a connected, never-failed peer must be examined \
+             before the node commits to the lighter chain it proved"
+        );
+    }
+
+    /// AUDIT (finding 1, consequence): the same episode, driven one step
+    /// further, commits the node to the decoy's lighter chain. Once the
+    /// ceiling has picked the decoy (peer 1), its showing is adopted even
+    /// though peer 2's heavier claim is connected, never failed, and never
+    /// examined. `shown` returning true here is the node taking the lighter
+    /// chain; on a real network this is past the reorganisation limit and can
+    /// never be undone.
+    #[test]
+    fn the_lighter_chain_is_adopted_while_a_heavier_claim_stands_unexamined() {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(1)), 2_000, LONG, true, 100);
+        chooser.noted(2, Some(host(2)), 100, LONG, true, 100);
+        for sybil in 10u8..=13 {
+            chooser.noted(u64::from(sybil), Some(host(sybil)), 1_000, LONG, true, 100);
+        }
+        let connected = &[1u64, 2, 10, 11, 12, 13];
+
+        assert_eq!(
+            chooser.step(102, true, 0, JoinProgress::NothingYet, connected),
+            Step::Ask(1, Approach::Join)
+        );
+        assert!(!chooser.shown(1, 50, 102));
+        chooser.step(103, true, 0, JoinProgress::NothingYet, connected);
+        for asked_at in [133, 163, 193] {
+            chooser.step(asked_at, true, 0, JoinProgress::NothingYet, connected);
+        }
+        // Under the ceiling the decoy is out of the running, and the turn
+        // goes to the claim that was owed one.
+        assert_eq!(
+            chooser.step(223, true, 0, JoinProgress::NothingYet, connected),
+            Step::Ask(2, Approach::Join)
+        );
+        // Correct behaviour: peer 2 (work 100) is heavier than the shown 50,
+        // still connected, and never failed, so the decoy's chain must not be
+        // adopted. It is.
+        assert!(
+            !chooser.shown(1, 50, 223),
+            "adopted a chain of work 50 while peer 2's unexamined claim of 100 stands"
+        );
+    }
+
+    /// Control for the finding above: with no honest peer present, taking the
+    /// lighter proven chain after the sybils fail *is* the right thing, so the
+    /// defect is specifically that the honest peer 2 is ignored, not the
+    /// patience mechanism itself. This passes on current code.
+    #[test]
+    fn control_without_the_honest_peer_the_proven_chain_is_correctly_taken() {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(1)), 2_000, LONG, true, 100);
+        for sybil in 10u8..=13 {
+            chooser.noted(u64::from(sybil), Some(host(sybil)), 1_000, LONG, true, 100);
+        }
+        let connected = &[1u64, 10, 11, 12, 13];
+        assert_eq!(
+            chooser.step(102, true, 0, JoinProgress::NothingYet, connected),
+            Step::Ask(1, Approach::Join)
+        );
+        assert!(!chooser.shown(1, 50, 102));
+        assert_eq!(
+            chooser.step(103, true, 0, JoinProgress::NothingYet, connected),
+            Step::Ask(13, Approach::Join)
+        );
+        for (asked_at, next) in [(133, 12), (163, 11), (193, 10)] {
+            assert_eq!(
+                chooser.step(asked_at, true, 0, JoinProgress::NothingYet, connected),
+                Step::Ask(next, Approach::Join)
+            );
+        }
+        assert_eq!(
+            chooser.step(223, true, 0, JoinProgress::NothingYet, connected),
+            Step::Ask(1, Approach::Join),
+            "no honest claim stands, so taking the proven chain is correct"
+        );
     }
 }

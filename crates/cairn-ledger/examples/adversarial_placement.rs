@@ -4,14 +4,14 @@
 //! of the world's work has to invent `1 - s/(1-s)` of the chain it presents,
 //! and every draw lands in the invented part with that probability. The second
 //! half is the one worth doubting. It is true when the invented work is spread
-//! evenly over a chain drawn from evenly — and the draw here is deliberately
+//! evenly over a chain drawn from evenly, and the draw here is deliberately
 //! not even. It is denser towards the tip, because that is where a forger who
 //! cannot afford real work was assumed to have to put the lie.
 //!
 //! A forger has a choice the derivation does not give it: how deep to fork.
 //! Forking at genesis means its whole chain is its own, and the invented
 //! fraction is the `1 - s/(1-s)` the derivation assumes. Forking recently
-//! means sharing the honest chain's history, inventing far less of the whole —
+//! means sharing the honest chain's history, inventing far less of the whole,
 //! but having to put that little where the draw looks hardest. Somewhere
 //! between the two is the placement that suits it best, and nothing in the
 //! derivation says the count survives it.
@@ -54,8 +54,8 @@ const BLOCKS: u64 = 30 * 365 * 24 * 60;
 /// A difficulty a real network reaches. Constant here: what varying it does is
 /// a second question, and one this says nothing about.
 const PER_BLOCK: u128 = 1 << 40;
-/// Seeds per placement. A forger cannot choose the seed — it comes from its own
-/// tip — so what matters is the average over seeds, not the best one.
+/// Seeds per placement. A forger cannot choose the seed, which comes from its
+/// own tip, so what matters is the average over seeds, not the best one.
 const SEEDS: u64 = 400;
 
 fn main() {
@@ -153,7 +153,7 @@ fn built_and_checked() {
     // says nothing. Where the two curves have to meet is in between.
     // Fewer draws rather than a longer chain. A gap cannot be finer than one
     // block, so at six hundred blocks every gap worth telling is caught by 512
-    // draws every time — and a case caught every time agrees with any model
+    // draws every time, and a case caught every time agrees with any model
     // that says "caught". Lowering the count moves the same distribution into
     // the range where the two curves have to meet or disagree.
     for (depth_share, divisor, count) in [
@@ -213,7 +213,7 @@ fn built_and_checked() {
 /// Builds one forgery and asks whether the check catches it.
 ///
 /// The forger keeps the honest history up to `fork`, then states work that
-/// jumps by `gap` — work no block of its chain spans. Every header after the
+/// jumps by `gap`, work no block of its chain spans. Every header after the
 /// fork restates its total, so every one of them is mined again: that is what
 /// this forgery costs, and it is the cost an adversary would actually pay.
 fn forged_is_caught(honest: &[BlockHeader], fork: u64, gap: u128, count: usize, salt: u64) -> bool {
@@ -276,6 +276,13 @@ fn forged_is_caught(honest: &[BlockHeader], fork: u64, gap: u128, count: usize, 
 
     let start = SampledStart {
         tip,
+        // The best parent it has: the header it really does sit above.
+        parent: tip.height.checked_sub(1).and_then(|below| {
+            Some(Sample {
+                header: *shown.get(usize::try_from(below).ok()?)?,
+                proof: before_tip.prove(below)?,
+            })
+        }),
         history: before_tip.forest().roots_only(),
         samples,
     };
@@ -438,7 +445,7 @@ impl Worst {
 /// The real function rather than a model of it: the whole question is whether
 /// the distribution that is actually shipped behaves the way the derivation
 /// assumed, so modelling it here would answer the wrong question. A forger
-/// cannot pick the seed — it comes from its own tip — so what decides the
+/// cannot pick the seed, which comes from its own tip, so what decides the
 /// count is the average over seeds, not the kindest one.
 fn every_draw(total: u128) -> Vec<u128> {
     let mut all = Vec::with_capacity((SEEDS as usize) * SAMPLES);

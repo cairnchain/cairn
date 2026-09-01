@@ -685,8 +685,8 @@ fn a_block_from_rules_this_build_lacks_is_named_as_such_and_not_as_a_bad_block()
     // that the first refusal put it in the set of blocks known to be bad: a
     // block this software cannot judge becomes valid the moment the node is
     // updated, and remembering it as bad would outlive the update and come
-    // back through `branch_to` as an ordinary refusal — the peer blamed for
-    // this node being old. That the set is untouched is pinned by the unit
+    // back through `branch_to` as an ordinary refusal, with the peer blamed
+    // for this node being old. That the set is untouched is pinned by the unit
     // test on `branch_to` in the crate itself, where the set is reachable.
     assert_eq!(
         store.add_block(blocks[5].clone(), NOW),

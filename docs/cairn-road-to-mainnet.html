@@ -236,10 +236,11 @@
         <p class="resume-note">
           Mettre une machine à jour, en <span class="mono">root</span> :
           <span class="mono">sh /usr/local/src/cairn/deploy/install.sh</span>.
-          Une mise à jour qui ferait taire un mineur en silence refuse de
-          partir et dit comment aller dans les deux sens. Rien à effacer au
-          passage en testnet-4 : un nœud met de côté les blocs de l'ancienne
-          chaîne et repart du nouveau premier bloc.
+          Une mise à jour ne touche à aucun réglage : la machine garde le
+          réseau, le port, les pairs et le minage qu'elle avait. Pour en
+          changer un, on le nomme ; pour le remettre par défaut, on le nomme
+          vide. Rien à effacer au passage en testnet-4 : un nœud met de côté
+          les blocs de l'ancienne chaîne et repart du nouveau premier bloc.
         </p>
       </div>
       <div>
@@ -248,7 +249,7 @@
           <b>Plus rien d'obligatoire.</b> Rien de ce qui reste sur cette page
           n'est du code. Ce que je peux encore faire est du choix : rendre le
           portefeuille plus agréable, préparer le téléphone, ou continuer à
-          chercher des défauts pendant que le réseau tourne — c'est cette
+          chercher des défauts pendant que le réseau tourne ; c'est cette
           dernière qui a le meilleur rendement, puisque chacun trouvé avant
           l'audit est de l'argent qui reste dans ta poche.
         </p>
@@ -304,7 +305,7 @@
     <p class="phase-why">
       Le réseau existe et il est public. Trois serveurs chez trois hébergeurs,
       le code ouvert, les programmes téléchargeables, le site sous certificat,
-      un mineur, une chaîne qui avance. Cette phase est faite — et le réseau
+      un mineur, une chaîne qui avance. Cette phase est faite, et le réseau
       est reparti en <span class="mono">testnet-4</span> le 31 août, parce
       qu'un audit a trouvé qu'un billet froid pouvait être dépensé deux fois.
       Une chaîne qui a pu créer de la monnaie ne se reporte pas.
@@ -330,7 +331,7 @@
       <div class="task finished">
         <div class="task-what">
           <b>Trois serveurs allumés en permanence</b>
-          <span>Chez trois hébergeurs différents : deux qui font nœud, un qui sert le site et fait nœud aussi. Un nouveau venu n'a besoin d'aucune adresse — le nom inscrit dans le programme suffit — et le réseau lui apprend les autres tout seul, ce qui a été vérifié en direct.</span>
+          <span>Chez trois hébergeurs différents : deux qui font nœud, un qui sert le site et fait nœud aussi. Un nouveau venu n'a besoin d'aucune adresse (le nom inscrit dans le programme suffit) et le réseau lui apprend les autres tout seul, ce qui a été vérifié en direct.</span>
         </div>
         <div class="who you">toi</div>
         <div class="cost real">quelques € / mois</div>
@@ -354,7 +355,7 @@
       <div class="task finished">
         <div class="task-what">
           <b>Des programmes téléchargeables</b>
-          <span>Publiés le 29 août : cinq systèmes, Mac Apple et Intel, Linux 64 bits et ARM, Windows. Compilés par GitHub sur ses propres machines, avec une attestation qui relie chaque fichier au commit et à la procédure qui l'ont produit — un lecteur vérifie auprès de GitHub, pas auprès de nous. Vérifié en le faisant : l'archive téléchargée, son empreinte comparée à celle publiée, et le nœud lancé sans un seul argument. Il a trouvé le réseau et rattrapé 474 blocs en dix secondes.</span>
+          <span>Publiés le 29 août : cinq systèmes, Mac Apple et Intel, Linux 64 bits et ARM, Windows. Compilés par GitHub sur ses propres machines, avec une attestation qui relie chaque fichier au commit et à la procédure qui l'ont produit : un lecteur vérifie auprès de GitHub, pas auprès de nous. Vérifié en le faisant : l'archive téléchargée, son empreinte comparée à celle publiée, et le nœud lancé sans un seul argument. Il a trouvé le réseau et rattrapé 474 blocs en dix secondes.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
@@ -370,7 +371,7 @@
       <div class="task finished">
         <div class="task-what">
           <b>Un audit complet, et onze défauts</b>
-          <span>Sept relecteurs, un par sous-système, chacun tenu de fournir un test qui échoue plutôt qu'un rapport. Onze défauts confirmés, tous reproduits avant d'être crus. Le plus grave : un billet froid pouvait être dépensé deux fois — de la monnaie créée, et tous les nœuds d'accord, donc rien qui forke et rien qui proteste. Les autres : un inconnu qui isole un nœud du réseau avec huit connexions, une mémoire qu'un pair fait grandir sans limite, un jumeau forgé qui prend la place du vrai bloc, un nettoyage qui vidait le disque, l'historique du portefeuille qui ne survivait pas à une réorganisation.</span>
+          <span>Sept relecteurs, un par sous-système, chacun tenu de fournir un test qui échoue plutôt qu'un rapport. Onze défauts confirmés, tous reproduits avant d'être crus. Le plus grave : un billet froid pouvait être dépensé deux fois. De la monnaie créée, et tous les nœuds d'accord, donc rien qui forke et rien qui proteste. Les autres : un inconnu qui isole un nœud du réseau avec huit connexions, une mémoire qu'un pair fait grandir sans limite, un jumeau forgé qui prend la place du vrai bloc, un nettoyage qui vidait le disque, l'historique du portefeuille qui ne survivait pas à une réorganisation.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
@@ -378,7 +379,7 @@
       <div class="task finished">
         <div class="task-what">
           <b>Une preuve vaut ce qu'elle vaut maintenant</b>
-          <span>La règle qui autorisait une preuve un peu vieille était une demi-règle : le retrait replie le long du chemin que porte la preuve, un vieux chemin n'atteint pas la racine actuelle, donc il ne retirait rien. La compléter aurait coûté quatre mégaoctets d'état engagé ; la retirer ne coûte rien, parce que l'identité d'un transfert exclut son témoin — une preuve périmée se rafraîchit sans faire une autre transaction. La fenêtre est sortie de l'engagement d'état avec elle : de l'état que personne ne lit est une affirmation fausse sur ce qu'un nœud détient.</span>
+          <span>La règle qui autorisait une preuve un peu vieille était une demi-règle : le retrait replie le long du chemin que porte la preuve, un vieux chemin n'atteint pas la racine actuelle, donc il ne retirait rien. La compléter aurait coûté quatre mégaoctets d'état engagé ; la retirer ne coûte rien, parce que l'identité d'un transfert exclut son témoin. Une preuve périmée se rafraîchit sans faire une autre transaction. La fenêtre est sortie de l'engagement d'état avec elle : de l'état que personne ne lit est une affirmation fausse sur ce qu'un nœud détient.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
@@ -394,7 +395,7 @@
       <div class="task finished">
         <div class="task-what">
           <b>Trouver le réseau sans qu'on le lui dise</b>
-          <span>Un programme téléchargé ne connaissait aucune adresse : il fallait lui en donner une à la main, sinon il ne trouvait rien. Un seul nom est maintenant inscrit dans le programme, comme le premier bloc, et la redondance vit dans la zone DNS — ajouter une machine au réseau est une ligne dans un fichier, pas une nouvelle version à publier. Aucune adresse en dur : celle qu'on loue aujourd'hui appartient à un inconnu dans deux ans, et le monde entier irait toquer chez lui.</span>
+          <span>Un programme téléchargé ne connaissait aucune adresse : il fallait lui en donner une à la main, sinon il ne trouvait rien. Un seul nom est maintenant inscrit dans le programme, comme le premier bloc, et la redondance vit dans la zone DNS : ajouter une machine au réseau est une ligne dans un fichier, pas une nouvelle version à publier. Aucune adresse en dur : celle qu'on loue aujourd'hui appartient à un inconnu dans deux ans, et le monde entier irait toquer chez lui.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
@@ -442,7 +443,7 @@
       <div class="task finished">
         <div class="task-what">
           <b>Rejoindre sans lire trente ans</b>
-          <span>Le démarrage échantillonné voyage maintenant sur le réseau et se branche dans le nœud. Un nouveau venu pèse la chaîne sur des en-têtes tirés au sort — cinq cent douze à l'époque, quatre mille quatre-vingt-seize depuis que le compte a été corrigé — puis reçoit l'état en une trentaine de morceaux : quelques mégaoctets au lieu de quarante-huit gigaoctets de lecture. En dessous de mille blocs, lire reste moins cher, et le nœud choisit.</span>
+          <span>Le démarrage échantillonné voyage maintenant sur le réseau et se branche dans le nœud. Un nouveau venu pèse la chaîne sur des en-têtes tirés au sort (cinq cent douze à l'époque, quatre mille quatre-vingt-seize depuis que le compte a été corrigé), puis reçoit l'état en une trentaine de morceaux : quelques mégaoctets au lieu de quarante-huit gigaoctets de lecture. En dessous de mille blocs, lire reste moins cher, et le nœud choisit.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
@@ -490,7 +491,7 @@
       <div class="task finished">
         <div class="task-what">
           <b>Remettre les serveurs à jour</b>
-          <span>Le protocole est passé en version 4 : les nœuds d'hier et ceux d'aujourd'hui ne se parlent plus. Fait le 29 août, sans effacer les données — la chaîne a continué. Vérifié depuis l'extérieur : les deux serveurs répondent, se connaissent, et la chaîne avance.</span>
+          <span>Le protocole est passé en version 4 : les nœuds d'hier et ceux d'aujourd'hui ne se parlent plus. Fait le 29 août, sans effacer les données : la chaîne a continué. Vérifié depuis l'extérieur : les deux serveurs répondent, se connaissent, et la chaîne avance.</span>
         </div>
         <div class="who you">toi</div>
         <div class="cost">terminé</div>
@@ -562,7 +563,7 @@
       <div class="task finished">
         <div class="task-what">
           <b>Compter des blocs ne borne rien</b>
-          <span>Un nœud gardait quatre mille blocs concurrents sans regarder leur poids : près d'un gigaoctet offert à qui les envoie. Cinquième défaut de la même famille — deux limites dans deux fichiers dont personne n'avait fait le produit. La borne est maintenant en octets, et un test la relit contre ce qu'un téléphone porte.</span>
+          <span>Un nœud gardait quatre mille blocs concurrents sans regarder leur poids : près d'un gigaoctet offert à qui les envoie. Cinquième défaut de la même famille : deux limites dans deux fichiers dont personne n'avait fait le produit. La borne est maintenant en octets, et un test la relit contre ce qu'un téléphone porte.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
@@ -570,7 +571,7 @@
       <div class="task finished">
         <div class="task-what">
           <b>Changer une règle sans jeter la chaîne</b>
-          <span>Le seul outil pour changer une règle était de renuméroter le réseau : trois fois en trois semaines, gratuit à chaque fois parce que la monnaie ne vaut rien, et impossible dès le premier euro. Une règle qui change nomme maintenant la hauteur à partir de laquelle elle s'applique, les blocs d'avant restent jugés comme ils l'ont toujours été, et personne ne vote — le signalement par les mineurs est refusé pour la même raison que la preuve d'enjeu. Ce qui était déjà là sans qu'on l'ait prévu : la version est le tout premier champ d'un bloc, donc un nœud décide comment lire le reste après l'avoir lue. Ce qui manquait vraiment était ailleurs : un nœud dépassé prenait le bloc pour un mensonge et coupait avec le pair qui l'envoyait, c'est-à-dire avec tous ceux qui avaient mis à jour, ce qui le laissait sur la chaîne minoritaire de ceux qui ne l'avaient pas fait. Il dit maintenant quelle version lui manque, et il s'arrête.</span>
+          <span>Le seul outil pour changer une règle était de renuméroter le réseau : trois fois en trois semaines, gratuit à chaque fois parce que la monnaie ne vaut rien, et impossible dès le premier euro. Une règle qui change nomme maintenant la hauteur à partir de laquelle elle s'applique, les blocs d'avant restent jugés comme ils l'ont toujours été, et personne ne vote. Le signalement par les mineurs est refusé pour la même raison que la preuve d'enjeu. Ce qui était déjà là sans qu'on l'ait prévu : la version est le tout premier champ d'un bloc, donc un nœud décide comment lire le reste après l'avoir lue. Ce qui manquait vraiment était ailleurs : un nœud dépassé prenait le bloc pour un mensonge et coupait avec le pair qui l'envoyait, c'est-à-dire avec tous ceux qui avaient mis à jour, ce qui le laissait sur la chaîne minoritaire de ceux qui ne l'avaient pas fait. Il dit maintenant quelle version lui manque, et il s'arrête.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
@@ -578,7 +579,7 @@
       <div class="task finished">
         <div class="task-what">
           <b>Corriger le nombre d'en-têtes qu'un nouveau venu ouvre</b>
-          <span>Cinq cent douze avait été calculé en supposant que le travail inventé par un faussaire est réparti uniformément sur une chaîne qu'on tire uniformément. Le tirage est délibérément plus dense près du sommet, et un faussaire choisit à quelle profondeur forker : forker profond l'oblige à inventer davantage, mais place son mensonge là où l'on tire peu. Ce compromis n'était nulle part dans le calcul. Mesuré contre la fonction de tirage réellement livrée, et vérifié contre des forgeries effectivement minées et passées à la vraie vérification, cinq cent douze tirages ne tiennent qu'à sept pour cent de la puissance mondiale au lieu des quarante-cinq annoncés. Le mécanisme tient, le nombre non. Trois issues : un compte beaucoup plus grand — onze mille, soit vingt mégaoctets pour rejoindre une chaîne dont l'argument entier est qu'il en faut un —, une densité de tirage conforme au théorème qu'elle prétend appliquer plutôt qu'approchée par halvings entiers, ou une revendication réduite et honnêtement énoncée. C'est la seule chose de cette page qui touche au cœur de la thèse.</span>
+          <span>Cinq cent douze avait été calculé en supposant que le travail inventé par un faussaire est réparti uniformément sur une chaîne qu'on tire uniformément. Le tirage est délibérément plus dense près du sommet, et un faussaire choisit à quelle profondeur forker : forker profond l'oblige à inventer davantage, mais place son mensonge là où l'on tire peu. Ce compromis n'était nulle part dans le calcul. Mesuré contre la fonction de tirage réellement livrée, et vérifié contre des forgeries effectivement minées et passées à la vraie vérification, cinq cent douze tirages ne tiennent qu'à sept pour cent de la puissance mondiale au lieu des quarante-cinq annoncés. Le mécanisme tient, le nombre non. Trois issues : un compte beaucoup plus grand (onze mille, soit vingt mégaoctets pour rejoindre une chaîne dont l'argument entier est qu'il en faut un), une densité de tirage conforme au théorème qu'elle prétend appliquer plutôt qu'approchée par halvings entiers, ou une revendication réduite et honnêtement énoncée. C'est la seule chose de cette page qui touche au cœur de la thèse.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
@@ -677,7 +678,7 @@
       <div class="task finished">
         <div class="task-what">
           <b>La plomberie qui porte tout ça</b>
-          <span>Les messages réseau, le découpage d'un état de 12 Mo en messages d'un, et le branchement dans le nœud. Écrit et vérifié le 29 août — et c'est en le vérifiant qu'on a découvert que six défauts empêchaient tout échange d'aboutir.</span>
+          <span>Les messages réseau, le découpage d'un état de 12 Mo en messages d'un, et le branchement dans le nœud. Écrit et vérifié le 29 août, et c'est en le vérifiant qu'on a découvert que six défauts empêchaient tout échange d'aboutir.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
@@ -685,7 +686,7 @@
       <div class="task finished">
         <div class="task-what">
           <b>Les corps de blocs relus sur le disque</b>
-          <span>Un nœud gardait le contenu des mille vingt-quatre blocs sur lesquels il peut revenir en arrière : 186 Mo, pour des blocs déjà sur son disque. Il n'en garde plus que soixante-quatre et les en-têtes du reste, soit 12 Mo, et relit un bloc dans le seul cas qui le demande — un changement de branche qui échoue en route et doit remettre l'ancienne. Le dernier poste du protocole.</span>
+          <span>Un nœud gardait le contenu des mille vingt-quatre blocs sur lesquels il peut revenir en arrière : 186 Mo, pour des blocs déjà sur son disque. Il n'en garde plus que soixante-quatre et les en-têtes du reste, soit 12 Mo, et relit un bloc dans le seul cas qui le demande : un changement de branche qui échoue en route et doit remettre l'ancienne. Le dernier poste du protocole.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
@@ -701,7 +702,7 @@
       <div class="task finished">
         <div class="task-what">
           <b>Spécifier les archivistes</b>
-          <span>La question était : comment les payer, puisqu'ils portent le seul coût qui grandisse. La réponse a déplacé la question. Ce dont le réseau a besoin, ce sont les en-têtes — 129 Mo par an — donc tout nœud le fait et il n'y a personne à payer. Reste un service de confort, dont le réseau se passe : rendre sa preuve à qui l'a perdue.</span>
+          <span>La question était : comment les payer, puisqu'ils portent le seul coût qui grandisse. La réponse a déplacé la question. Ce dont le réseau a besoin, ce sont les en-têtes (129 Mo par an), donc tout nœud le fait et il n'y a personne à payer. Reste un service de confort, dont le réseau se passe : rendre sa preuve à qui l'a perdue.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">terminé</div>
@@ -856,13 +857,13 @@
       comment rémunérer celui qui garde l'histoire, puisqu'il porte le seul
       coût du réseau qui grandisse. La réponse s'est déplacée. Ce dont le
       réseau a besoin pour qu'un nouveau venu arrive, ce ne sont pas les blocs
-      — le démarrage échantillonné les a rendus inutiles — ce sont les
-      en-têtes : 129 Mo par an, contre 50 Go pour Bitcoin et 200 pour
-      Ethereum. À ce prix, tout nœud le fait, et c'est écrit et vérifié. Plutôt
-      que de chercher comment payer un service dont personne ne peut se passer,
-      rendre ce service assez petit pour que tout le monde le rende. Garder
-      tous les blocs et archiver les notes tombées restent des rôles qu'on
-      choisit, non payés, dont le réseau se passe.
+      (le démarrage échantillonné les a rendus inutiles), ce sont les en-têtes :
+      129 Mo par an, contre 50 Go pour Bitcoin et 200 pour Ethereum. À ce prix,
+      tout nœud le fait, et c'est écrit et vérifié. Plutôt que de chercher
+      comment payer un service dont personne ne peut se passer, rendre ce
+      service assez petit pour que tout le monde le rende. Garder tous les
+      blocs et archiver les notes tombées restent des rôles qu'on choisit, non
+      payés, dont le réseau se passe.
     </p>
     <p>
       <strong>Le projet est sorti.</strong> <span class="mono">cairnchain.org</span>

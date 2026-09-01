@@ -15,8 +15,8 @@
 //! second half is wrong.** It assumes a draw lands in invented work with the
 //! same probability as the share invented, which holds for a uniform draw and
 //! not for this one. What that costs, and the count that replaces it, is in
-//! `adversarial_placement`. Kept because the first half — how much a forger
-//! has to invent, given what it holds — is sound and is what the correction
+//! `adversarial_placement`. Kept because the first half (how much a forger
+//! has to invent, given what it holds) is sound and is what the correction
 //! builds on, and because a table of measured catch rates is worth having
 //! beside it.
 //!
@@ -191,8 +191,8 @@ fn at_full_size() {
 /// it is half the chain, and it only approaches zero as the share approaches
 /// the half at which proof of work stops protecting anything at all.
 ///
-/// The step that used to follow — every draw lands in invented work with
-/// probability `lie`, so `count` draws miss with `(1 - lie)^count` — assumes
+/// The step that used to follow (every draw lands in invented work with
+/// probability `lie`, so `count` draws miss with `(1 - lie)^count`) assumes
 /// the draw is uniform over the chain. It is not, and deliberately not: the
 /// density is one over the distance from the tip, which is what makes the
 /// bound indifferent to how deep a forger forks. Missing the factor that costs
@@ -353,6 +353,13 @@ fn caught_out(honest: &[BlockHeader], claim: f64, count: usize, salt: u64, lie: 
 
     let start = SampledStart {
         tip: forged,
+        // The best parent it has: the header it really does sit above.
+        parent: forged.height.checked_sub(1).and_then(|below| {
+            Some(Sample {
+                header: *shown.get(usize::try_from(below).ok()?)?,
+                proof: before_tip.prove(below)?,
+            })
+        }),
         history: before_tip.forest().roots_only(),
         samples,
     };

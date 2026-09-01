@@ -18,14 +18,21 @@ pub const DIFFICULTY_WINDOW: usize = 90;
 /// Blocks the median time past is taken over.
 pub const MEDIAN_TIME_WINDOW: usize = 11;
 
-/// A solve time is clamped into this multiple of the target before it can
-/// influence the retarget, so a miner cannot move the difficulty far with one
-/// dishonest timestamp.
+/// A solve time is clamped into this multiple of the target, in either
+/// direction, before it can influence the retarget, so a miner cannot move the
+/// difficulty far with one dishonest timestamp.
 const MAX_SOLVETIME_FACTOR: u64 = 6;
 
 /// Ceiling on how far one retarget may move the difficulty, in either
 /// direction. Belt and braces on top of the clamped solve times.
-const MAX_RETARGET_FACTOR: u128 = 4;
+///
+/// Public because the weighing in [`crate::sampling`] reasons from it. Two
+/// headers a thousand blocks apart cannot state whatever work they like
+/// between them: the difficulty may fall by at most this factor per block and
+/// never below [`MIN_DIFFICULTY`], so a number of blocks implies a least
+/// amount of work. Reading the constant rather than restating it is what
+/// keeps the two rules from drifting apart.
+pub const MAX_RETARGET_FACTOR: u128 = 4;
 
 /// How many recent headers a node has to keep to apply every rule here.
 pub const RECENT_HEADERS: usize = if DIFFICULTY_WINDOW > MEDIAN_TIME_WINDOW {
@@ -108,6 +115,20 @@ pub fn median_time_past(recent: &[HeaderSummary]) -> Option<u64> {
 /// A linearly weighted moving average: recent solve times count for more than
 /// older ones, so the chain answers a change in hash rate within a handful of
 /// blocks instead of a fixed epoch.
+///
+/// The solve times are read along a timeline the retarget keeps for itself. It
+/// opens at the oldest header in the window and then moves by each claimed gap,
+/// clamped to the ceiling in either direction, so it only ever moves by what it
+/// counted. That is what makes the window telescope: the time it measures is
+/// the distance between the two ends of its own timeline, whatever the headers
+/// in between claimed, so a timestamp thrown forward is given back in full by
+/// the blocks after it and buys the miner that wrote it nothing.
+///
+/// Measuring each gap against its own parent instead would leave the give back
+/// short by whatever the clamp cut off, which is the difference a miner holding
+/// two blocks in a row could keep: it can drag the tip a ceiling further ahead
+/// with each block it holds, while the honest block that follows can only hand
+/// one ceiling back.
 pub fn next_difficulty(recent: &[HeaderSummary], target_block_time: u64) -> u64 {
     let last = match recent.last() {
         None => return MIN_DIFFICULTY,
@@ -124,29 +145,38 @@ pub fn next_difficulty(recent: &[HeaderSummary], target_block_time: u64) -> u64 
         return last.difficulty.max(MIN_DIFFICULTY);
     };
 
-    let ceiling = target_block_time.saturating_mul(MAX_SOLVETIME_FACTOR);
-    let mut weighted_solvetime: u128 = 0;
+    let ceiling = i128::from(target_block_time.saturating_mul(MAX_SOLVETIME_FACTOR));
+    let mut counted = window
+        .first()
+        .map_or(0, |first| i128::from(first.timestamp));
+    let mut weighted_solvetime: i128 = 0;
     let mut total_difficulty: u128 = 0;
 
-    for (index, pair) in window.windows(2).enumerate() {
-        let [previous, current] = pair else { continue };
-        // A timestamp that runs backwards clamps to one second rather than
-        // wrapping, and one that runs far ahead clamps to the ceiling.
-        let solvetime = current
-            .timestamp
-            .saturating_sub(previous.timestamp)
-            .clamp(1, ceiling);
-        let weight = u128::try_from(index.saturating_add(1)).unwrap_or(u128::MAX);
-        weighted_solvetime =
-            weighted_solvetime.saturating_add(weight.saturating_mul(u128::from(solvetime)));
+    for (index, current) in window.iter().skip(1).enumerate() {
+        // Signed, and measured from the timeline rather than from the parent's
+        // own claim. A gap that runs backwards is worth the time it gives back
+        // and not one second, and a gap the ceiling cut short is repaid by the
+        // gaps that follow it rather than lost.
+        let solvetime = i128::from(current.timestamp)
+            .saturating_sub(counted)
+            .clamp(ceiling.saturating_neg(), ceiling);
+        counted = counted.saturating_add(solvetime);
+        let weight = i128::try_from(index.saturating_add(1)).unwrap_or(i128::MAX);
+        weighted_solvetime = weighted_solvetime.saturating_add(weight.saturating_mul(solvetime));
         total_difficulty = total_difficulty.saturating_add(u128::from(current.difficulty));
     }
 
-    if weighted_solvetime == 0 {
-        return last.difficulty.max(MIN_DIFFICULTY);
+    let previous = u128::from(last.difficulty).max(1);
+    // A window whose timeline stood still or ran backwards measured no time at
+    // all, which is a chain claiming it produced its blocks in nothing. The
+    // answer is the steepest rise the retarget allows, not a division by zero.
+    let measured = u128::try_from(weighted_solvetime).unwrap_or(0);
+    if measured == 0 {
+        return u64::try_from(previous.saturating_mul(MAX_RETARGET_FACTOR))
+            .unwrap_or(u64::MAX)
+            .max(MIN_DIFFICULTY);
     }
 
-    let previous = u128::from(last.difficulty).max(1);
     let count = u128::try_from(available).unwrap_or(1);
     // The weights 1..=n sum to n(n+1)/2, so a chain running exactly on schedule
     // produces a weighted solve time of that sum times the target, and the
@@ -162,7 +192,7 @@ pub fn next_difficulty(recent: &[HeaderSummary], target_block_time: u64) -> u64 
         .max(1);
     let next = average
         .saturating_mul(expected)
-        .checked_div(weighted_solvetime)
+        .checked_div(measured)
         .unwrap_or(previous);
 
     let floor = previous

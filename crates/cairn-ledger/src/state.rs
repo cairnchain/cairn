@@ -65,7 +65,7 @@ pub fn cold_leaf(id: &NoteId, note: &Note) -> Hash32 {
 ///
 /// A window of past cold sets was committed to here as well, so that a proof
 /// taken a few blocks ago could still be checked. Accepting one was half a
-/// rule — the step that takes the note out cannot use an old path — so the
+/// rule (the step that takes the note out cannot use an old path), so the
 /// rule went, and with nothing left to consult the window went too. State
 /// carried inside a commitment and read by nobody is a claim about what a node
 /// holds that is not true.
@@ -206,7 +206,7 @@ pub enum ColdSet {
 /// step that takes a note out folds along the path the proof carries, and an
 /// old path does not reach the root that is there now, so the removal did
 /// nothing and the note could be spent again. The rule went, and with nothing
-/// left to consult the window went with it — including out of the state root,
+/// left to consult the window went with it, including out of the state root,
 /// where it was a claim about what a node holds that had stopped being true.
 #[derive(Clone, Debug, Default)]
 pub struct ColdTier {
@@ -284,7 +284,7 @@ impl ColdTier {
     /// And it is only a convenience. A transfer's identity leaves out its
     /// witness on purpose, precisely so a proof can be refreshed without
     /// making it a different transfer. One that waited too long is the same
-    /// transfer with a newer proof, offered again — which costs whoever holds
+    /// transfer with a newer proof, offered again, which costs whoever holds
     /// it nothing, and costs everybody else nothing to check.
     pub fn verify(&self, position: u64, leaf: Hash32, proof: &ForestProof) -> bool {
         self.now.verify(position, leaf, proof)
@@ -1021,7 +1021,7 @@ impl LedgerState {
         // The watched notes, undone in the opposite order to `commit`: what it
         // took out goes back first, then what it put in comes out. These are
         // in no root and nothing about the chain disagrees when they are
-        // wrong — which is exactly why nothing would say so. What would be
+        // wrong, which is exactly why nothing would say so. What would be
         // wrong is a wallet: after a reorganisation it would still be shown a
         // note that was undone, and would have lost one that still exists,
         // until something made it resynchronise.

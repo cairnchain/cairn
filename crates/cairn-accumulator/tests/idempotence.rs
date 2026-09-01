@@ -2,7 +2,7 @@
 //!
 //! A place that has been emptied proves itself: the root above it is exactly
 //! what folding the empty leaf gives, so a second removal of the same place
-//! verifies. The roots do not move, so nothing shows it — but the count does,
+//! verifies. The roots do not move, so nothing shows it, but the count does,
 //! and the count is committed to. A node that dropped it twice and one that
 //! dropped it once would commit to different cold sets from the same block.
 //!

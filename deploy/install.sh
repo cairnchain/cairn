@@ -11,6 +11,12 @@
 # It needs no address to start from: the ones a node begins with are written
 # into the program. SEED still works, and names a peer to try first.
 #
+# The same command updates the machine later, and takes no settings with it.
+# One this run does not name is read back off the machine, so an update keeps
+# the network, the port, the seeds and the mining address the node already
+# had. Naming a setting changes it. Naming it empty puts it back to the
+# default it ships with.
+#
 # It builds from source rather than fetching a binary, so what runs is what
 # you can read. That takes a few minutes and a little memory; see the note
 # about swap below if the build is killed partway.
@@ -22,16 +28,10 @@
 
 set -eu
 
-NETWORK="${NETWORK:-testnet-4}"
-PORT="${PORT:-9944}"
-SEED="${SEED:-}"
-# A public key to pay block rewards to. Mining needs the address money goes to
-# and nothing else: the key that spends it never leaves the machine that holds
-# it, so this stays true even here, where nothing worth stealing may sit.
-MINE="${MINE:-}"
 REPO="${REPO:-https://github.com/cairnchain/cairn}"
 SRC="/usr/local/src/cairn"
 DATA="/var/lib/cairn"
+UNIT=/etc/systemd/system/cairnd.service
 
 say() { printf '\n== %s\n' "$1"; }
 
@@ -42,25 +42,72 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-UNIT=/etc/systemd/system/cairnd.service
-STOP_MINING=""
+# The installed unit is the only record of what this machine was told to do:
+# NETWORK, PORT, SEED and MINE are written down nowhere else. So a setting
+# this run does not name is read back out of it rather than reset to the
+# default. An update that says nothing changes nothing, which is what makes
+# the update line printed at the end safe to follow.
+#
+# An unset variable and an empty one are different things here. Unset says
+# nothing about a setting. Empty says put it back to the default.
 
-# A node that was mining and is updated without MINE would come back not
-# mining, correctly and silently, and on a test network that stops the chain
-# for everybody. So an update that would drop it stops here and says how to go
-# either way, rather than choosing for the operator.
-if [ -z "$MINE" ] && [ -f "$UNIT" ]; then
-    was=$(sed -n 's/.*--mine \([0-9a-fA-F]*\).*/\1/p' "$UNIT" | head -n 1)
-    if [ -n "$was" ]; then
-        echo "this node is mining and this run did not say to keep it" >&2
-        echo "  to keep mining:  sudo env MINE=$was sh $0" >&2
-        echo "  to stop mining:  sudo env MINE=off sh $0" >&2
-        exit 1
-    fi
+# That unit's ExecStart as one line: this script writes one line, and the file
+# it ships with wraps the same command across several.
+INSTALLED=""
+if [ -f "$UNIT" ]; then
+    INSTALLED=$(awk '/^ExecStart=/ {
+        line = $0
+        while (sub(/\\$/, "", line)) { getline more; line = line " " more }
+        print line
+        exit
+    }' "$UNIT")
 fi
+
+# One argument out of that line, or all of them where it repeats, as --seed
+# does.
+carried() {
+    found=""
+    take=""
+    for word in $INSTALLED; do
+        if [ -n "$take" ]; then
+            found="$found $word"
+            take=""
+        elif [ "$word" = "--$1" ]; then
+            take=1
+        fi
+    done
+    echo "${found# }"
+}
+
+# Named by this run, else carried, else the default. It assigns rather than
+# prints, because KEPT has to outlive the call and a command substitution is
+# a subshell.
+KEPT=""
+resolve() {
+    eval "named=\${$1+named}; passed=\${$1-}"
+    if [ -n "$named" ]; then
+        value="${passed:-$3}"
+    elif [ -n "$2" ]; then
+        value="$2"
+        KEPT="$KEPT $1"
+    else
+        value="$3"
+    fi
+    eval "$1=\$value"
+}
+
+listen=$(carried listen)
+resolve NETWORK "$(carried network)" testnet-4
+resolve PORT "${listen##*:}" 9944
+resolve SEED "$(carried seed)" ""
+# A public key to pay block rewards to. Mining needs the address money goes to
+# and nothing else: the key that spends it never leaves the machine that holds
+# it, so this stays true even here, where nothing worth stealing may sit.
+resolve MINE "$(carried mine)" ""
+
+# MINE=off said stop mining before an empty value said it for every setting.
 if [ "$MINE" = "off" ]; then
     MINE=""
-    STOP_MINING=1
 fi
 
 # A key that is not a key produces a service that will not start, and systemd
@@ -80,16 +127,18 @@ if [ -n "$MINE" ]; then
 fi
 
 # Said early, so a run that lost a setting on its way through sudo is obvious
-# before anything is built rather than after it is running.
+# before anything is built rather than after it is running, and so that what
+# was kept rather than chosen is said out loud.
 echo "network  $NETWORK"
 echo "port     $PORT"
 echo "seeds    ${SEED:-none given, the written-in ones are used}"
 if [ -n "$MINE" ]; then
     echo "mining   to $MINE"
-elif [ -n "$STOP_MINING" ]; then
-    echo "mining   off, and this run turns it off"
 else
     echo "mining   off"
+fi
+if [ -n "$KEPT" ]; then
+    echo "kept     ${KEPT# }, which this run did not name"
 fi
 
 say "Packages"
@@ -173,28 +222,23 @@ chown cairn:cairn "$DATA"
 chmod 0750 "$DATA"
 
 say "Service"
-cp "$SRC/deploy/cairnd.service" "$UNIT"
-
-# The unit ships with the defaults; rewrite the line if this run asked for
-# something else, so every server ends up with a unit that says what it does.
-if [ "$NETWORK" != "testnet-4" ] || [ "$PORT" != "9944" ] ||
-   [ -n "$SEED" ] || [ -n "$MINE" ] || [ -n "$STOP_MINING" ]; then
-    ARGS="--network $NETWORK --data $DATA --listen 0.0.0.0:$PORT --status 60"
-    for peer in $SEED; do
-        ARGS="$ARGS --seed $peer"
-    done
-    if [ -n "$MINE" ]; then
-        ARGS="$ARGS --mine $MINE"
-    fi
-    # Collapse the shipped multi-line ExecStart into one line with our
-    # arguments, leaving every hardening directive untouched.
-    awk -v args="$ARGS" '
-        /^ExecStart=/ { print "ExecStart=/usr/local/bin/cairnd " args; skip = 1; next }
-        skip && /\\$/ { next }
-        skip { skip = 0; next }
-        { print }
-    ' "$SRC/deploy/cairnd.service" > "$UNIT"
+# Written from the settings above rather than copied, so the unit says in full
+# what this machine does, and is a record the next run can read back.
+ARGS="--network $NETWORK --data $DATA --listen 0.0.0.0:$PORT --status 60"
+for peer in $SEED; do
+    ARGS="$ARGS --seed $peer"
+done
+if [ -n "$MINE" ]; then
+    ARGS="$ARGS --mine $MINE"
 fi
+# Collapse the shipped multi-line ExecStart into one line with our
+# arguments, leaving every hardening directive untouched.
+awk -v args="$ARGS" '
+    /^ExecStart=/ { print "ExecStart=/usr/local/bin/cairnd " args; skip = 1; next }
+    skip && /\\$/ { next }
+    skip { skip = 0; next }
+    { print }
+' "$SRC/deploy/cairnd.service" > "$UNIT"
 
 systemctl daemon-reload
 systemctl enable cairnd
@@ -226,6 +270,14 @@ The node is running and will come back on its own after a reboot or a crash.
   stop it              systemctl stop cairnd
   start it again       systemctl start cairnd
   update it            sh install.sh
+
+The update line takes no settings: this machine keeps the ones it already
+has. Naming one changes it, and naming it empty puts it back to the default,
+which is the only way a setting goes back on its own:
+
+  change two           sudo env NETWORK=devnet PORT=9955 sh install.sh
+  put them back        sudo env NETWORK= PORT= sh install.sh
+  stop mining          sudo env MINE= sh install.sh
 
 Publish this machine as <its public address>:$PORT so others can start from
 it. Nothing else about it needs to be public, and nothing on it is worth

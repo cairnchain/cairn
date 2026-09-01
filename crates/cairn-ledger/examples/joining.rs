@@ -18,6 +18,7 @@
 
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::BlockHeader;
+use cairn_ledger::handover::BURIAL;
 use cairn_ledger::note::Note;
 use cairn_ledger::pow::RECENT_HEADERS;
 use cairn_ledger::sampling::SAMPLES;
@@ -69,6 +70,19 @@ fn main() {
          its size, since without it a newcomer refuses spends everyone else\n\
          takes; and the last {RECENT_HEADERS} headers, which the difficulty rule reads."
     );
+
+    // The run between the ledger and the tip. It is what says the ledger
+    // belongs to the chain that was weighed, and it is checked block by block,
+    // which is also what makes the burial cost work rather than block count.
+    let buried = usize::try_from(BURIAL).unwrap_or(0) * core::mem::size_of::<BlockHeader>();
+    println!(
+        "\nAnd the {} headers between the ledger and the tip, {}. A newcomer is\n\
+         about to ask for those blocks in full anyway, so what this adds to the\n\
+         exchange is the headers arriving before the ledger is stood behind\n\
+         rather than after.",
+        with_commas(usize::try_from(BURIAL).unwrap_or(0)),
+        format_bytes(buried),
+    );
 }
 
 /// A ledger filled to `capacity` notes, handed over, measured.
@@ -104,9 +118,10 @@ fn handover_bytes(capacity: usize) -> usize {
         headers.push(block.header);
     }
 
-    // Measured at the tip, which no real handover is — it is the size of the
-    // ledger that travels, and burying it changes where it is taken from, not
-    // how big it is.
+    // Measured at the tip, which no real handover is. What burying it adds is
+    // the run of headers between the ledger and the tip, which is counted
+    // separately below because it depends on the burial depth and not on the
+    // hot set.
     let tip = *headers.last().unwrap();
     let from = headers.len().saturating_sub(RECENT_HEADERS);
     state
@@ -117,6 +132,7 @@ fn handover_bytes(capacity: usize) -> usize {
             cairn_accumulator::forest::ForestProof {
                 siblings: Vec::new(),
             },
+            Vec::new(),
             headers[from..].to_vec(),
         )
         .encode()

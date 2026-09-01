@@ -4,11 +4,11 @@
 
   <header class="mast">
     <h1 class="mark">CAIRN</h1>
-    <p class="thesis">Une monnaie que <em>ton téléphone</em> vérifie lui-même — aujourd'hui, et dans trente ans.</p>
+    <p class="thesis">Une monnaie que <em>ton téléphone</em> vérifie lui-même : aujourd'hui, et dans trente ans.</p>
     <div class="metaline">
       <span>Document de conception · v0.16</span>
       <span>26 août 2026</span>
-      <span>Nom de code — provisoire</span>
+      <span>Nom de code (provisoire)</span>
     </div>
   </header>
 
@@ -17,7 +17,7 @@
     <div class="body">
       <h2>Toutes les cryptomonnaies se recentralisent en grandissant</h2>
       <p class="lede">Ce n'est pas un accident de parcours. C'est une conséquence directe de leur conception, et personne ne l'a corrigée.</p>
-      <p>Une cryptomonnaie, c'est un grand cahier de comptes public dont des milliers d'ordinateurs — les <em>nœuds</em> — gardent chacun une copie et sur le contenu duquel ils se mettent d'accord en permanence, sans banque, sans serveur central, sans patron. C'est cette redondance, et rien d'autre, qui rend le système décentralisé.</p>
+      <p>Une cryptomonnaie, c'est un grand cahier de comptes public dont des milliers d'ordinateurs (les <em>nœuds</em>) gardent chacun une copie et sur le contenu duquel ils se mettent d'accord en permanence, sans banque, sans serveur central, sans patron. C'est cette redondance, et rien d'autre, qui rend le système décentralisé.</p>
       <p>Or ce cahier ne fait que grossir. Chaque compte, chaque transaction, depuis le premier jour, à conserver pour toujours. Tenir une copie complète devient chaque année plus cher.</p>
       <div class="tablewrap">
         <table>
@@ -41,7 +41,7 @@
     <div class="body">
       <h2>Ne pas transporter le cahier. Transporter son sceau.</h2>
       <p>Et si les nœuds ne gardaient pas le cahier ? À la place, chacun garde un <strong>sceau</strong> : un très petit code, quelques dizaines de caractères, calculé à partir du cahier entier.</p>
-      <p>Sa propriété — des mathématiques établies, pas une astuce — est qu'avec ce sceau seul, on peut <strong>vérifier qu'une page est authentique sans jamais avoir eu le cahier</strong>.</p>
+      <p>Sa propriété (des mathématiques établies, pas une astuce) est qu'avec ce sceau seul, on peut <strong>vérifier qu'une page est authentique sans jamais avoir eu le cahier</strong>.</p>
       <p>Le fonctionnement s'inverse alors : c'est celui qui dépense qui présente sa page, accompagnée d'une preuve qu'elle appartient bien au cahier officiel. Le nœud vérifie la preuve, met à jour le sceau, et n'a rien à conserver.</p>
       <p><strong>Le cahier peut grossir à l'infini ; le sceau, lui, garde toujours la même taille.</strong> Un nœud complet tient sur un ordinateur à soixante euros. Dans vingt ans aussi. Et sur un téléphone.</p>
       <div class="tablewrap">
@@ -101,12 +101,12 @@
         <div class="dec">
           <span class="q">Représentation de la valeur</span>
           <span class="a">Des billets, pas des soldes</span>
-          <span class="why">On ne possède pas « un solde », on possède un ensemble de billets — comme du liquide. Payer 7 avec un billet de 10 consomme le 10 et rend un billet de 3. Un billet est créé une fois, détruit une fois, jamais modifié : c'est précisément ce que le système de sceau traite le mieux et le plus vite. Un solde qui change sans cesse se prouverait beaucoup plus mal.</span>
+          <span class="why">On ne possède pas « un solde », on possède un ensemble de billets, comme du liquide. Payer 7 avec un billet de 10 consomme le 10 et rend un billet de 3. Un billet est créé une fois, détruit une fois, jamais modifié : c'est précisément ce que le système de sceau traite le mieux et le plus vite. Un solde qui change sans cesse se prouverait beaucoup plus mal.</span>
         </div>
         <div class="dec">
           <span class="q">Passage du tiroir à la cave</span>
           <span class="a">Quand le tiroir est plein, le plus ancien non touché descend</span>
-          <span class="why">La seule règle qui garantisse vraiment un coût de nœud plafonné — c'est-à-dire la raison d'être du projet. L'alternative, un délai fixe, laisserait le tiroir gonfler avec la popularité et recréerait le problème qu'on veut résoudre.</span>
+          <span class="why">La seule règle qui garantisse vraiment un coût de nœud plafonné, c'est-à-dire la raison d'être du projet. L'alternative, un délai fixe, laisserait le tiroir gonfler avec la popularité et recréerait le problème qu'on veut résoudre.</span>
         </div>
         <div class="dec">
           <span class="q">Conservation de la cave</span>
@@ -136,17 +136,17 @@
         <div class="dec">
           <span class="q">Combien d'en-têtes un nouveau venu ouvre</span>
           <span class="a">Quatre mille quatre-vingt-seize, et la garantie s'énonce en profondeur</span>
-          <span class="why">Le tirage doit être plus dense près du sommet, sans quoi un faussaire forke profond et place son mensonge là où l'on tire peu : il en invente davantage en valeur absolue, mais on le lui demande beaucoup moins souvent. La densité qui neutralise ce choix est une sur la distance au sommet, et son prix est un facteur égal au nombre de halvings sur chaque tirage. La première version du calcul l'avait oublié : elle annonçait cinq cent douze tirages et quarante-cinq pour cent, et la mesure a montré que le placement qui arrange le mieux un faussaire ramenait cette garantie à deux puissance moins six. Le compte corrigé est quatre mille quatre-vingt-seize, soit huit mégaoctets pour rejoindre une chaîne de trente ans, contre les quarante-huit gigaoctets qu'il remplace. Il tient, mesuré, jusqu'à quarante-trois pour cent de la puissance mondiale ; les papiers annoncent quarante, gardant trois points pour l'écart entre un escalier de halvings et la densité lisse qu'il représente. Le tirage cesse de distinguer à mille vingt-quatre blocs du sommet, délibérément : descendre plus fin coûterait un tiers du compte en plus pour séparer des chaînes que le choix de branche ne sépare pas non plus. La garantie s'énonce donc en profondeur, et c'est plus honnête ainsi : un faussaire à quarante pour cent ne peut pas placer un nouveau venu sur une branche qui s'écarte de la vraie de plus de mille deux cent quarante blocs, soit vingt heures. En deçà il le peut, comme un pair lent le peut — c'est la situation de tout nœud pendant ses premiers blocs, et c'est moins profond que la réorganisation qu'un nœud accepterait de toute façon. Au-delà de cinquante pour cent, plus rien ne protège : un faussaire qui détient la moitié du travail n'a plus rien à inventer.</span>
+          <span class="why">Le tirage doit être plus dense près du sommet, sans quoi un faussaire forke profond et place son mensonge là où l'on tire peu : il en invente davantage en valeur absolue, mais on le lui demande beaucoup moins souvent. La densité qui neutralise ce choix est une sur la distance au sommet, et son prix est un facteur égal au nombre de halvings sur chaque tirage. La première version du calcul l'avait oublié : elle annonçait cinq cent douze tirages et quarante-cinq pour cent, et la mesure a montré que le placement qui arrange le mieux un faussaire ramenait cette garantie à deux puissance moins six. Le compte corrigé est quatre mille quatre-vingt-seize, soit huit mégaoctets pour rejoindre une chaîne de trente ans, contre les quarante-huit gigaoctets qu'il remplace. Il tient, mesuré, jusqu'à quarante-trois pour cent de la puissance mondiale ; les papiers annoncent quarante, gardant trois points pour l'écart entre un escalier de halvings et la densité lisse qu'il représente. Le tirage cesse de distinguer à mille vingt-quatre blocs du sommet, délibérément : descendre plus fin coûterait un tiers du compte en plus pour séparer des chaînes que le choix de branche ne sépare pas non plus. La garantie s'énonce donc en profondeur, et c'est plus honnête ainsi : un faussaire à quarante pour cent ne peut pas placer un nouveau venu sur une branche qui s'écarte de la vraie de plus de mille deux cent quarante blocs, soit vingt heures. En deçà il le peut, comme un pair lent le peut : c'est la situation de tout nœud pendant ses premiers blocs, et c'est moins profond que la réorganisation qu'un nœud accepterait de toute façon. Au-delà de cinquante pour cent, plus rien ne protège : un faussaire qui détient la moitié du travail n'a plus rien à inventer.</span>
         </div>
         <div class="dec">
           <span class="q">Changer une règle une fois la chaîne lancée</span>
           <span class="a">Une hauteur d'activation inscrite dans le programme, jamais un vote</span>
-          <span class="why">Tant que la monnaie ne vaut rien, une règle qui change se paie en renumérotant le réseau : on jette la chaîne et on recommence. C'est arrivé trois fois, et ça n'a rien coûté. Le jour où elle vaut quelque chose, ce même geste efface les soldes de tout le monde. Une règle qui change porte donc désormais la hauteur à partir de laquelle elle s'applique : les blocs antérieurs continuent d'être jugés par la règle qui les jugeait, si bien que rien de ce qui est déjà miné ne devient invalide et qu'aucun solde n'est détruit. Personne ne vote. La hauteur est dans le code, publiée longtemps avant d'arriver, et un nœud qui n'est pas d'accord fait tourner un autre programme plutôt que de déposer un bulletin. Le signalement par les mineurs a été envisagé puis écarté : il donnerait à ceux qui minent un droit de veto sur les règles, c'est-à-dire exactement l'autorité que cette chaîne refuse d'accorder à quiconque, et c'est déjà l'objection qu'elle fait à la preuve d'enjeu. Ce qu'aucun mécanisme ne résout : un nœud qui n'a pas mis à jour à temps se retrouve sur une autre chaîne. Il ne fait pas semblant de fonctionner — il dit quelle version lui manque et il s'arrête, parce qu'un portefeuille qui lit un solde sur une chaîne abandonnée répond avec assurance et se trompe.</span>
+          <span class="why">Tant que la monnaie ne vaut rien, une règle qui change se paie en renumérotant le réseau : on jette la chaîne et on recommence. C'est arrivé trois fois, et ça n'a rien coûté. Le jour où elle vaut quelque chose, ce même geste efface les soldes de tout le monde. Une règle qui change porte donc désormais la hauteur à partir de laquelle elle s'applique : les blocs antérieurs continuent d'être jugés par la règle qui les jugeait, si bien que rien de ce qui est déjà miné ne devient invalide et qu'aucun solde n'est détruit. Personne ne vote. La hauteur est dans le code, publiée longtemps avant d'arriver, et un nœud qui n'est pas d'accord fait tourner un autre programme plutôt que de déposer un bulletin. Le signalement par les mineurs a été envisagé puis écarté : il donnerait à ceux qui minent un droit de veto sur les règles, c'est-à-dire exactement l'autorité que cette chaîne refuse d'accorder à quiconque, et c'est déjà l'objection qu'elle fait à la preuve d'enjeu. Ce qu'aucun mécanisme ne résout : un nœud qui n'a pas mis à jour à temps se retrouve sur une autre chaîne. Il ne fait pas semblant de fonctionner : il dit quelle version lui manque et il s'arrête, parce qu'un portefeuille qui lit un solde sur une chaîne abandonnée répond avec assurance et se trompe.</span>
         </div>
         <div class="dec">
           <span class="q">Langage d'implémentation</span>
           <span class="a">Rust</span>
-          <span class="why">Sécurité mémoire — un dépassement dans un validateur, ce sont des fonds volés. Pas de ramasse-miettes, donc un temps d'exécution des blocs prévisible. Le meilleur écosystème cryptographique existant. Et le langage où le code d'un nœud est le plus auditable par des tiers, ce qui compte le jour où l'on demande à des inconnus de le faire tourner.</span>
+          <span class="why">Sécurité mémoire : un dépassement dans un validateur, ce sont des fonds volés. Pas de ramasse-miettes, donc un temps d'exécution des blocs prévisible. Le meilleur écosystème cryptographique existant. Et le langage où le code d'un nœud est le plus auditable par des tiers, ce qui compte le jour où l'on demande à des inconnus de le faire tourner.</span>
         </div>
       </div>
     </div>
@@ -160,7 +160,7 @@
       <ol class="guar">
         <li><div><b>Rien n'est jamais détruit ni grignoté.</b><span>Aucun loyer qui ronge un solde, aucune date d'expiration, aucune confiscation. Jamais, dans aucune circonstance.</span></div></li>
         <li><div><b>Reconstituable pour toujours, sans limite de temps.</b><span>Même après la perte totale du portefeuille, les fonds se récupèrent depuis l'historique public via un archiviste. C'est cette garantie qui rend la règle du tiroir acceptable.</span></div></li>
-        <li><div><b>Le portefeuille absorbe toute la complexité.</b><span>Il conserve et rafraîchit les preuves en arrière-plan. Dépenser depuis la cave est un peu plus lent — ce n'est pas une démarche.</span></div></li>
+        <li><div><b>Le portefeuille absorbe toute la complexité.</b><span>Il conserve et rafraîchit les preuves en arrière-plan. Dépenser depuis la cave est un peu plus lent ; ce n'est pas une démarche.</span></div></li>
       </ol>
     </div>
   </section>
@@ -169,8 +169,8 @@
     <div class="rail"><span class="num">VI</span><span>Raison d'être</span></div>
     <div class="body">
       <h2>À quoi ça sert, concrètement</h2>
-      <p>Une monnaie sans raison d'exister est un support de spéculation, pas un projet. Mais cette raison n'a pas à être une application posée par-dessus : chez Bitcoin, le protocole <em>est</em> le projet. Ici aussi — et l'usage découle mécaniquement de la conception, il n'est pas plaqué dessus.</p>
-      <p>Aujourd'hui, ouvrir une application crypto sur un téléphone ne vérifie rien du tout. L'appareil est incapable de porter le cahier, donc il interroge un serveur — souvent le même pour des millions de personnes. On fait confiance à une entreprise pour savoir ce qu'on possède. C'est la centralisation la plus massive de tout l'écosystème, et elle est presque invisible.</p>
+      <p>Une monnaie sans raison d'exister est un support de spéculation, pas un projet. Mais cette raison n'a pas à être une application posée par-dessus : chez Bitcoin, le protocole <em>est</em> le projet. Ici aussi. Et l'usage découle mécaniquement de la conception, il n'est pas plaqué dessus.</p>
+      <p>Aujourd'hui, ouvrir une application crypto sur un téléphone ne vérifie rien du tout. L'appareil est incapable de porter le cahier, donc il interroge un serveur, souvent le même pour des millions de personnes. On fait confiance à une entreprise pour savoir ce qu'on possède. C'est la centralisation la plus massive de tout l'écosystème, et elle est presque invisible.</p>
       <p class="pull">Chez Cairn, le cahier ne pèse rien. Le téléphone est donc un nœud du réseau à part entière : il vérifie lui-même, ne demande la permission à personne, et fonctionnera encore dans trente ans.</p>
       <p>Aucune grande chaîne existante ne peut tenir cette promesse, parce qu'aucune n'a été conçue pour.</p>
     </div>
@@ -213,14 +213,14 @@
       <div class="note">
         <span class="tag">À savoir, pas maintenant</span>
         <p><b>Une cotation n'est pas une étape technique.</b> C'est une décision commerciale et juridique prise par des tiers, très en aval de tout ce qui précède : elle suppose une chaîne qui tourne, des nœuds tenus par des inconnus, et de la demande réelle. La laisser influencer les choix de conception aujourd'hui abîmerait le protocole sans rapprocher l'objectif d'un jour.</p>
-        <p class="push-sm">Côté cadre légal, l'Union européenne applique le règlement MiCA depuis fin 2024, et une émission publique y crée des obligations réelles. Un point mérite d'être connu tôt car il oriente la conception de l'émission : les crypto-actifs créés automatiquement en récompense du fonctionnement du réseau bénéficient d'un régime nettement plus léger qu'une vente au public. Ce n'est pas un avis juridique — c'est un sujet à faire regarder par un professionnel avant toute ouverture au public.</p>
+        <p class="push-sm">Côté cadre légal, l'Union européenne applique le règlement MiCA depuis fin 2024, et une émission publique y crée des obligations réelles. Un point mérite d'être connu tôt car il oriente la conception de l'émission : les crypto-actifs créés automatiquement en récompense du fonctionnement du réseau bénéficient d'un régime nettement plus léger qu'une vente au public. Ce n'est pas un avis juridique : c'est un sujet à faire regarder par un professionnel avant toute ouverture au public.</p>
       </div>
     </div>
   </section>
 
   <footer>
     <span>Cairn · document de conception v0.16</span>
-    <span>Statut — prêt à être lancé en public</span>
+    <span>Statut : prêt à être lancé en public</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 

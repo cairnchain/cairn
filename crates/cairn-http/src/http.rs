@@ -5,13 +5,18 @@
 //! what was compiled in. One thread per connection, the same choice the node
 //! makes for its peers and for the same reason: a reader can hold the whole
 //! thing in their head.
+//!
+//! A thread each is only affordable because a connection is bounded three
+//! ways: how many are served at once, how many come from one address, and how
+//! long any one of them may take to ask its question.
 
+use std::collections::HashMap;
 use std::io::{self, BufReader, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Longest request line and header block accepted.
 const MAX_HEAD_BYTES: usize = 8 * 1024;
@@ -19,8 +24,44 @@ const MAX_HEAD_BYTES: usize = 8 * 1024;
 const MAX_LINE_BYTES: usize = 2 * 1024;
 /// Connections served at once. Beyond this a caller is turned away rather than
 /// queued, so a flood costs threads that are already bounded.
-const MAX_CONNECTIONS: usize = 64;
+pub const MAX_CONNECTIONS: usize = 64;
+/// Connections held at once from any one address.
+///
+/// The ceiling above says what a flood costs; this says that one machine
+/// cannot be the whole flood. Without it a single host takes all
+/// [`MAX_CONNECTIONS`] slots, holds them, and every other reader is met with a
+/// 503 for as long as it cares to keep them.
+///
+/// A quarter of the ceiling rather than a handful, because one address here is
+/// rarely one person. A browser opens several connections to an origin at
+/// once, and a household or an office arrives behind a single NAT.
+///
+/// The loopback does not count against it, and that exemption is the whole
+/// reason this number can stay this low. As the explorer is deployed it sits
+/// behind a proxy on the same machine, so every reader of the public site
+/// arrives as `127.0.0.1`: counting them together would have capped the site
+/// at sixteen readers while doing nothing at all about the flood, since a
+/// flood arriving through the proxy wears the proxy's address too. There the
+/// protection is the deadline above and whatever the proxy imposes in front.
+/// This ceiling is for the other deployment, a node answering on a public
+/// port with nothing in front of it, which is where one address really is one
+/// machine and where holding every slot is an attack somebody can mount from
+/// a laptop.
+pub const MAX_PER_HOST: usize = 16;
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a caller has, from being accepted, to finish asking.
+///
+/// `READ_TIMEOUT` is measured per read, so every byte that arrives resets it:
+/// a caller sending one byte every nine seconds is never late by that measure
+/// and can hold its slot forever for a few bytes a minute. This one is fixed
+/// when the connection is accepted and nothing the caller sends moves it.
+///
+/// Ten seconds, the same figure as the read timeout and for the same reason. A
+/// request head is a few hundred bytes and every real client writes it in one
+/// go the moment it connects, so ten seconds is already thousands of times
+/// what an honest one needs on a bad link. Past that the caller is not slow,
+/// it is not coming.
+pub const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
 /// Bytes a form body may reach. A spend names an address, an amount and a
 /// fee; anything past this is not one.
 const MAX_BODY_BYTES: usize = 4096;
@@ -144,7 +185,7 @@ where
     F: Fn(&Request) -> Response + Send + Sync + 'static,
 {
     let answer = Arc::new(answer);
-    let live = Arc::new(AtomicUsize::new(0));
+    let slots = Arc::new(Slots::default());
     let _ = listener.set_nonblocking(false);
 
     for incoming in listener.incoming() {
@@ -154,10 +195,12 @@ where
         let Ok(stream) = incoming else {
             continue;
         };
+        let accepted = Instant::now();
         let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
         let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
 
-        if live.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
+        let host = stream.peer_addr().ok().map(|address| address.ip());
+        let Some(slot) = slots.take(host) else {
             let mut stream = stream;
             let _ = write_response(
                 &mut stream,
@@ -166,28 +209,122 @@ where
             );
             let _ = stream.shutdown(Shutdown::Both);
             continue;
-        }
+        };
 
         let answer = Arc::clone(&answer);
-        let counted = Arc::clone(&live);
-        live.fetch_add(1, Ordering::SeqCst);
-        let spawned = thread::Builder::new()
+        let _ = thread::Builder::new()
             .name("explorer-http".to_owned())
             .spawn(move || {
-                handle(stream, answer.as_ref());
-                counted.fetch_sub(1, Ordering::SeqCst);
+                handle(stream, answer.as_ref(), accepted);
+                // Mentioned so the closure owns the slot, which is what
+                // gives it back on the ways out that never reach this line.
+                drop(slot);
             });
-        if spawned.is_err() {
-            live.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// The connections in flight, counted for the server and for each address.
+///
+/// Two counts rather than one because they answer different questions: how
+/// much this server has on at once, and whether one machine has all of it.
+/// They sit under one lock so they cannot disagree about the same connection,
+/// and the table holds only addresses that are connected right now, so it is
+/// bounded by the ceiling like everything else here.
+#[derive(Debug, Default)]
+struct Slots {
+    counts: Mutex<Counts>,
+}
+
+#[derive(Debug, Default)]
+struct Counts {
+    live: usize,
+    from_host: HashMap<IpAddr, usize>,
+}
+
+impl Slots {
+    /// Takes a slot for a connection from `host`, unless there is no room for
+    /// it, on the server or for that address.
+    ///
+    /// A `host` of `None` is a peer the operating system would not name, which
+    /// is what a connection that has already gone looks like. It still counts
+    /// against the ceiling, because it still costs a thread.
+    fn take(self: &Arc<Self>, host: Option<IpAddr>) -> Option<Held> {
+        let mut counts = self.counts();
+        if counts.live >= MAX_CONNECTIONS {
+            return None;
+        }
+        // Anything reaching this from the machine it runs on is either the
+        // proxy in front of it, carrying every reader of the public site under
+        // one address, or the operator. Neither is a flood worth counting, and
+        // treating the proxy as one visitor was capping the site rather than
+        // the attack.
+        let counted = host.filter(|host| !host.is_loopback());
+        if let Some(host) = counted {
+            let held = counts.from_host.get(&host).copied().unwrap_or(0);
+            if held >= MAX_PER_HOST {
+                return None;
+            }
+            counts.from_host.insert(host, held.saturating_add(1));
+        }
+        counts.live = counts.live.saturating_add(1);
+        Some(Held {
+            slots: Arc::clone(self),
+            host: counted,
+        })
+    }
+
+    /// A poisoned lock means a thread panicked while holding it. What is under
+    /// it is two counters, and carrying on with them is better than turning
+    /// every visitor away for the rest of the run.
+    fn counts(&self) -> MutexGuard<'_, Counts> {
+        self.counts.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// A slot, held for exactly as long as the connection that took it.
+///
+/// Given back when this is dropped rather than at the end of the code that
+/// answers, so that every way out gives it back: an answer written, a caller
+/// cut off at the deadline, a thread that panicked partway, and a thread that
+/// never started, since the slot travels inside the closure that would have
+/// run it.
+#[derive(Debug)]
+struct Held {
+    slots: Arc<Slots>,
+    host: Option<IpAddr>,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let mut counts = self.slots.counts();
+        counts.live = counts.live.saturating_sub(1);
+        let Some(host) = self.host else {
+            return;
+        };
+        let gone = match counts.from_host.get_mut(&host) {
+            Some(held) => {
+                *held = held.saturating_sub(1);
+                *held == 0
+            }
+            None => false,
+        };
+        if gone {
+            counts.from_host.remove(&host);
         }
     }
 }
 
-fn handle<F>(mut stream: TcpStream, answer: &F)
+fn handle<F>(mut stream: TcpStream, answer: &F, accepted: Instant)
 where
     F: Fn(&Request) -> Response,
 {
-    let response = match read_request(&mut BufReader::new(&stream)) {
+    let until = accepted
+        .checked_add(REQUEST_DEADLINE)
+        .unwrap_or_else(Instant::now);
+    let response = match read_request(&mut BufReader::new(Timed {
+        stream: &stream,
+        until,
+    })) {
         Ok(Some(request)) => {
             let head_only = request.head_only;
             (answer(&request), head_only)
@@ -197,6 +334,32 @@ where
     };
     let _ = write_response(&mut stream, &response.0, response.1);
     let _ = stream.shutdown(Shutdown::Both);
+}
+
+/// A reader that stops at a fixed moment, however slowly the bytes come.
+///
+/// The socket's own timeout is per read, so a caller that sends a byte
+/// whenever it is about to run out resets it forever and keeps its slot for
+/// almost nothing. This one is fixed when the connection is accepted. It also
+/// hands the socket whatever is left of that budget as its own timeout, so a
+/// caller that goes quiet at the last moment cannot buy another read timeout's
+/// worth of silence on top.
+#[derive(Debug)]
+struct Timed<'a> {
+    stream: &'a TcpStream,
+    until: Instant,
+}
+
+impl io::Read for Timed<'_> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::from(io::ErrorKind::TimedOut));
+        }
+        let _ = self.stream.set_read_timeout(Some(left.min(READ_TIMEOUT)));
+        let mut source = self.stream;
+        source.read(out)
+    }
 }
 
 /// Reads one request head.
@@ -404,8 +567,10 @@ pub fn bind(address: SocketAddr) -> io::Result<TcpListener> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{percent_decode, Request};
+    use super::{percent_decode, Request, Slots, MAX_CONNECTIONS, MAX_PER_HOST};
     use std::fmt::Write as _;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
 
     fn request(path: &str, query: &str) -> Request {
         Request {
@@ -553,5 +718,47 @@ mod tests {
         let request = request("/api/block/17", "");
         assert_eq!(request.after("/api/block/"), Some("17"));
         assert_eq!(request.after("/api/tx/"), None);
+    }
+
+    /// One machine on the open network cannot be the whole flood.
+    #[test]
+    fn an_address_from_outside_stops_at_its_share() {
+        let slots = Arc::new(Slots::default());
+        let host = Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+        let held: Vec<_> = (0..MAX_PER_HOST).filter_map(|_| slots.take(host)).collect();
+        assert_eq!(held.len(), MAX_PER_HOST);
+        assert!(
+            slots.take(host).is_none(),
+            "the next one from that address is turned away"
+        );
+        assert!(
+            slots
+                .take(Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4))))
+                .is_some(),
+            "while everybody else is still served"
+        );
+    }
+
+    /// The loopback is the proxy carrying the whole public site, so counting
+    /// it per address would cap the site rather than any flood. It still
+    /// counts against the ceiling, because it still costs a thread.
+    #[test]
+    fn the_proxy_on_this_machine_is_not_counted_per_address() {
+        let slots = Arc::new(Slots::default());
+        let host = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let held: Vec<_> = (0..MAX_CONNECTIONS)
+            .filter_map(|_| slots.take(host))
+            .collect();
+        assert_eq!(
+            held.len(),
+            MAX_CONNECTIONS,
+            "the proxy is one address and every reader of the site"
+        );
+        assert!(slots.take(host).is_none(), "the ceiling still holds");
+        drop(held);
+        assert!(
+            slots.take(host).is_some(),
+            "and the slots come back when the connections do"
+        );
     }
 }

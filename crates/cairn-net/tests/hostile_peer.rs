@@ -41,7 +41,7 @@ fn wait_until(patience: Duration, mut ready: impl FnMut() -> bool) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// FINDING 1 — GetHeaders is charged one flat unit yet serves up to MAX_HEADERS
+// FINDING 1: GetHeaders is charged one flat unit yet serves up to MAX_HEADERS
 // reads off the header log, so a peer can pull ~MAX_HEADERS times more disk
 // work per allowance window than the per-block charge on GetBlocks allows.
 // ---------------------------------------------------------------------------
@@ -123,7 +123,7 @@ fn getheaders_is_charged_far_below_the_disk_it_serves() {
 }
 
 // ---------------------------------------------------------------------------
-// FINDING 2 — the per-peer `awaiting` set has no ceiling. A stranger sends a
+// FINDING 2: the per-peer `awaiting` set has no ceiling. A stranger sends a
 // stream of cheap `Chain` messages, each naming a fresh run of heights; each
 // extends `awaiting` by up to MAX_REQUESTED and resets `asked_at`, so the
 // BATCH_PATIENCE clear (which reads that same `asked_at`) never fires. The set
@@ -167,7 +167,7 @@ fn a_peer_cannot_grow_the_awaiting_set_without_bound() {
 }
 
 // ---------------------------------------------------------------------------
-// FINDING 3 — dial_from_book counts ALL peers (inbound included) against
+// FINDING 3: dial_from_book counts ALL peers (inbound included) against
 // TARGET_PEERS, with no reserved outbound slots. A stranger that holds
 // TARGET_PEERS inbound connections drives `wanted` to zero, so the node never
 // dials out and only ever talks to whoever connected to it: an eclipse.

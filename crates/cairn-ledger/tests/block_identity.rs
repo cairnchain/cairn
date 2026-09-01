@@ -15,7 +15,7 @@
 //! (cairn-chain/src/lib.rs:1049 `blocks.contains_key(&id) -> Duplicate`, and
 //! :1168 `invalid.insert(id)` on a non-outdated failure, consulted at :1207).
 //! An attacker who delivers B' before the honest B therefore poisons those
-//! caches so the honest B is refused -- a work-free, targeted relay DoS.
+//! caches so the honest B is refused, which is a work-free, targeted relay DoS.
 //!
 //! This test asserts the property the design NEEDS to defend against that: a
 //! block and its signature-corrupted twin must not share an identifier. It
@@ -152,7 +152,7 @@ fn a_block_and_its_signature_corrupted_twin_share_an_identifier() {
     // proofs on purpose: refreshing a proof must not make a different
     // transfer, and anything already built on one would otherwise stop being
     // valid. Committing to the witnesses as well was written and taken back
-    // out — it can only live in the header or in the coinbase, and in the
+    // out: it can only live in the header or in the coinbase, and in the
     // coinbase it does not change the identifier at all, which is the thing
     // that was supposed to move.
     //

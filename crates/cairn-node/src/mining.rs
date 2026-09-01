@@ -86,9 +86,21 @@ fn build(
         // The timestamp has to clear the median of recent blocks. On a chain
         // whose blocks are minutes apart that is always the wall clock; on one
         // being caught up it is the median plus a second.
+        let now = unix_now();
         let earliest =
             median_time_past(state.recent_headers()).map_or(0, |median| median.saturating_add(1));
-        let timestamp = unix_now().max(earliest);
+
+        // And it has to stay inside the drift every node measures against its
+        // own clock. The two bounds can cross: if enough recent blocks are
+        // dated near the edge of the drift, the median they carry sits past
+        // what this node's own clock will accept, and every block it could
+        // assemble is one it would refuse itself. There is nothing to mine
+        // then, only a clock to wait for, so it says so and the caller tries
+        // again in a moment.
+        if earliest > now.saturating_add(params.max_timestamp_drift) {
+            return None;
+        }
+        let timestamp = now.max(earliest);
 
         // Whatever the pool holds that fits together, and what those transfers
         // pay to be carried.

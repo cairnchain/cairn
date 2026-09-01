@@ -21,7 +21,7 @@ pub const BLOCK_VERSION: u16 = 1;
 /// This is the whole of the upgrade mechanism, and the shortness is the point.
 /// A rule that changes takes the next version and the height it starts at.
 /// Blocks before that height go on being judged by the rule that judged them,
-/// so nothing already mined becomes invalid and no balance is thrown away —
+/// so nothing already mined becomes invalid and no balance is thrown away,
 /// which is the difference between changing a rule and renumbering the
 /// network, and the difference only matters once the chain carries something.
 ///

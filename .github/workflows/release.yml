@@ -17,7 +17,7 @@
 # There is nothing to run. A release happens when the version in Cargo.toml
 # changes on the main branch, and that is the whole ceremony: the number is
 # where a version already lives, so making it also the thing that publishes
-# removes both a step somebody has to remember and the failure it invited —
+# removes both a step somebody has to remember and the failure it invited:
 # a tag naming one version over programs that report another. The tag is made
 # here, from the number, so the two cannot disagree.
 #

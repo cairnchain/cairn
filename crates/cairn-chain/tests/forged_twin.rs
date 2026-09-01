@@ -1,4 +1,4 @@
-//! AUDIT SCRATCH TEST — end-to-end consequence of block-id malleability.
+//! AUDIT SCRATCH TEST: end-to-end consequence of block-id malleability.
 //!
 //! A block id is the header id, and the header commits to signatures/witnesses
 //! nowhere (its `transactions_root` is a Merkle root over `Transfer::id()`,
@@ -8,7 +8,7 @@
 //!
 //! `ChainStore` keys both its dedup and its invalid-block memory on the block
 //! id. Deliver B' before B and the node stores B' under B's id, marks that id
-//! invalid, and then treats the honest B as a duplicate — so the honest block is
+//! invalid, and then treats the honest B as a duplicate: the honest block is
 //! refused. This is a work-free, targeted relay DoS (the twin inherits B's PoW).
 //!
 //! This test asserts the honest block is still accepted after the twin. It

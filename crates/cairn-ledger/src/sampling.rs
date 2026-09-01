@@ -30,7 +30,7 @@ use cairn_primitives::hash::{hash, Domain};
 use cairn_primitives::Hash32;
 
 use crate::block::BlockHeader;
-use crate::pow::{meets_target, work_of};
+use crate::pow::{meets_target, work_of, MAX_RETARGET_FACTOR, MIN_DIFFICULTY};
 use crate::state::header_leaf;
 
 /// Headers opened when a newcomer is deciding between chains.
@@ -90,7 +90,7 @@ use crate::state::header_leaf;
 ///
 /// **The guarantee is a depth, and it is worth stating as one.** A forger at
 /// 40% cannot put a newcomer on a branch differing from the real one by more
-/// than about 1240 blocks — twenty hours. Inside that, it can, and so can a
+/// than about 1240 blocks (twenty hours). Inside that, it can, and so can a
 /// slow peer: it is where any node sits for its first blocks after connecting,
 /// and it is shallower than the reorganisation this node would accept anyway.
 ///
@@ -133,7 +133,7 @@ const FEWEST_LEVELS: u32 = 1;
 /// tell those apart either: a node refuses to reorganise deeper than
 /// `MAX_REORG_DEPTH`, the same 1024 blocks, and below that it changes its mind
 /// freely. So the guarantee the sampling offers is stated to match the one the
-/// fork choice already offers — a newcomer cannot be put on the wrong chain by
+/// fork choice already offers: a newcomer cannot be put on the wrong chain by
 /// more than this, and within it, it is in the same position as any node that
 /// just reconnected.
 const SHALLOWEST: u64 = 1_024;
@@ -150,6 +150,20 @@ pub struct Sample {
 pub struct SampledStart {
     /// The header everything else is measured against.
     pub tip: BlockHeader,
+    /// The header the tip was built on, opened in the tip's own history.
+    ///
+    /// Without it the weighing said only that a tip names a forest, which is
+    /// not the same as saying it stands at the end of a chain. An attacker
+    /// took the honest chain's headers, which any node serves to anyone who
+    /// asks, built a forest of them, and mined one header at the difficulty
+    /// floor to sit on top: one hash, always successful, claiming the honest
+    /// chain's whole weight and one unit more. Every draw was answered by a
+    /// genuine honest header. Opening the parent costs one more header and one
+    /// more path, and a tip on no chain has none to give.
+    ///
+    /// `None` only for a chain that is one block long, which has no parent to
+    /// open.
+    pub parent: Option<Sample>,
     /// The header forest as it stood before the tip, roots only.
     ///
     /// Sixty four hashes, whatever the chain's age. The tip commits to their
@@ -180,6 +194,85 @@ pub enum StartError {
     WrongPlace { index: usize },
     #[error("the header opened at draw {index} states more work than the tip")]
     PastTheTip { index: usize },
+    #[error(
+        "the {blocks} blocks between height {from} and height {to} state {stated} work, \
+         and that many blocks cannot be worth less than {least}"
+    )]
+    BlocksWorthLessThanTheyCost {
+        from: u64,
+        to: u64,
+        blocks: u64,
+        stated: u128,
+        least: u128,
+    },
+    #[error(
+        "the {blocks} blocks between height {from} and height {to} state {stated} work, \
+         and that many blocks cannot be worth more than {most}"
+    )]
+    BlocksWorthMoreThanTheyCould {
+        from: u64,
+        to: u64,
+        blocks: u64,
+        stated: u128,
+        most: u128,
+    },
+    #[error("work runs backwards between height {from} and height {to}")]
+    WorkRunsBackwards { from: u64, to: u64 },
+    #[error("the first {blocks} blocks of the chain state only {stated} work")]
+    OpeningWorthLessThanItCost { blocks: u64, stated: u128 },
+    #[error("the header the tip was built on was not opened")]
+    ParentNotOpened,
+    #[error("the header opened for the tip's parent is not the one the tip names")]
+    ParentNotTheTipsOwn,
+}
+
+/// The least work `blocks` blocks can carry, starting from a block of this
+/// difficulty.
+///
+/// The retarget may divide the difficulty by [`MAX_RETARGET_FACTOR`] each
+/// block and never takes it below [`MIN_DIFFICULTY`], so the cheapest run of
+/// blocks there is falls as fast as the rule allows and then sits on the
+/// floor. Bounded work: the descent reaches the floor in at most the number of
+/// times the factor divides a `u64`, and everything after that is one
+/// multiplication.
+fn least_work_over(difficulty: u64, blocks: u64) -> u128 {
+    let floor = u128::from(MIN_DIFFICULTY);
+    let mut least: u128 = 0;
+    let mut carried = u128::from(difficulty);
+    let mut done: u64 = 0;
+    while done < blocks {
+        carried = carried
+            .checked_div(MAX_RETARGET_FACTOR)
+            .unwrap_or(floor)
+            .max(floor);
+        least = least.saturating_add(carried);
+        done = done.saturating_add(1);
+        if carried == floor {
+            let rest = blocks.saturating_sub(done);
+            return least.saturating_add(u128::from(rest).saturating_mul(floor));
+        }
+    }
+    least
+}
+
+/// The most work `blocks` blocks can carry, starting from a block of this
+/// difficulty. The mirror of [`least_work_over`], rising by the same factor
+/// until a difficulty cannot be stated in a `u64` at all.
+fn most_work_over(difficulty: u64, blocks: u64) -> u128 {
+    let ceiling = u128::from(u64::MAX);
+    let mut most: u128 = 0;
+    let mut carried = u128::from(difficulty).max(1);
+    let mut done: u64 = 0;
+    while done < blocks {
+        carried = carried.saturating_mul(MAX_RETARGET_FACTOR).min(ceiling);
+        most = most.saturating_add(carried);
+        done = done.saturating_add(1);
+        if carried == ceiling {
+            let rest = blocks.saturating_sub(done);
+            return most.saturating_add(u128::from(rest).saturating_mul(ceiling));
+        }
+    }
+    most
 }
 
 impl Encode for Sample {
@@ -201,6 +294,13 @@ impl Encode for SampledStart {
     fn encode_to(&self, out: &mut Vec<u8>) {
         self.tip.encode_to(out);
         self.history.encode_to(out);
+        match &self.parent {
+            None => 0u8.encode_to(out),
+            Some(parent) => {
+                1u8.encode_to(out);
+                parent.encode_to(out);
+            }
+        }
         u32::try_from(self.samples.len())
             .unwrap_or(u32::MAX)
             .encode_to(out);
@@ -214,6 +314,15 @@ impl Decode for SampledStart {
     fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
         let tip = BlockHeader::decode_from(reader)?;
         let history = Forest::decode_from(reader)?;
+        let parent = match u8::decode_from(reader)? {
+            0 => None,
+            1 => Some(Sample::decode_from(reader)?),
+            _ => {
+                return Err(CodecError::InvalidValue {
+                    type_name: "SampledStart",
+                })
+            }
+        };
         let count = usize::try_from(u32::decode_from(reader)?).unwrap_or(usize::MAX);
         // Bounded before anything is reserved, since a sender picks it.
         if count > SAMPLES {
@@ -227,6 +336,7 @@ impl Decode for SampledStart {
         }
         Ok(Self {
             tip,
+            parent,
             history,
             samples,
         })
@@ -329,6 +439,32 @@ pub fn draw(seed: Hash32, count: usize, total_work: u128, blocks: u64) -> Vec<u1
 /// falls short of the draw and its own total reaches it. That last one is what
 /// ties a claimed total to blocks that were actually made: a chain claiming
 /// work it did not do has nothing to open at the values inside the claim.
+///
+/// Then, and this is the part the first version left out, what is checked
+/// between the headers opened rather than at them. The draw is over work, so a
+/// stretch of chain claiming no work is a stretch the draw almost never lands
+/// in, and for a while that was a door left wide open. A forger took the
+/// honest chain's headers, which anybody can ask for, put them in a forest of
+/// its own, appended an anchor of its invention and a thousand leaves that
+/// were not headers at all, and mined a tip at the difficulty floor: one hash,
+/// always successful, declaring one unit more work than the honest chain. All
+/// four thousand draws landed in the honest work below and every one of them
+/// was answered by a genuine honest header with a genuine proof. The forgery
+/// was heavier than every honest peer's claim and could be shown, so it won on
+/// the chooser's own terms without any need to isolate anybody, and the ledger
+/// hung off it was whatever its author liked.
+///
+/// What closes it is that a number of blocks implies a least amount of work.
+/// The difficulty may fall by at most [`MAX_RETARGET_FACTOR`] per block and
+/// never below [`MIN_DIFFICULTY`], so between any two headers whose place is
+/// established the work must have grown by at least what that descent allows,
+/// and by no more than the matching climb. A thousand blocks are worth a
+/// thousand hashes at the very least, and far more than that off a chain of
+/// any real difficulty, because walking the difficulty down has to be mined
+/// like anything else. The forgery states one.
+///
+/// This is what the height and the work being separate claims used to cost.
+/// They are now tied to each other by the one rule that governs both.
 pub fn check_start(start: &SampledStart, count: usize) -> Result<Weighed, StartError> {
     let tip = &start.tip;
     if !meets_target(&tip.id(), tip.difficulty) {
@@ -383,11 +519,123 @@ pub fn check_start(start: &SampledStart, count: usize) -> Result<Weighed, StartE
         }
     }
 
+    check_the_parent(start)?;
+    check_the_gaps(start)?;
+
     Ok(Weighed {
         tip: tip.id(),
         height: tip.height,
         total_work: tip.total_work,
     })
+}
+
+/// Checks that the tip stands at the end of the chain it names.
+///
+/// The parent has to be in the tip's own history at the height below it, be
+/// the header the tip names as its own, and carry the work the tip's total
+/// leaves for it. A tip that was mined on nothing has no parent that satisfies
+/// all three, and mining one that does means mining on the chain it claims,
+/// which is the honest thing this whole exchange is trying to tell apart from
+/// the rest.
+fn check_the_parent(start: &SampledStart) -> Result<(), StartError> {
+    let tip = &start.tip;
+    let Some(below) = tip.height.checked_sub(1) else {
+        // One block long, so there is nothing under it to open.
+        return Ok(());
+    };
+    let Some(parent) = start.parent.as_ref() else {
+        return Err(StartError::ParentNotOpened);
+    };
+    let header = &parent.header;
+    if header.height != below || header.id() != tip.previous {
+        return Err(StartError::ParentNotTheTipsOwn);
+    }
+    if !meets_target(&header.id(), header.difficulty) {
+        return Err(StartError::ParentNotTheTipsOwn);
+    }
+    if !start
+        .history
+        .verify(below, header_leaf(&header.id()), &parent.proof)
+    {
+        return Err(StartError::NotInHistory { index: usize::MAX });
+    }
+    if header.total_work.saturating_add(work_of(tip.difficulty)) != tip.total_work {
+        return Err(StartError::ParentNotTheTipsOwn);
+    }
+    Ok(())
+}
+
+/// Checks the stretches of chain nobody opened.
+///
+/// Every header whose place in the tip's history is established is a point the
+/// chain is pinned at, and the tip is the last of them. Between two such
+/// points there are as many blocks as their heights differ by, and those
+/// blocks cannot state whatever work suits their author: the retarget bounds
+/// how fast the difficulty moves, so the run has a least and a most.
+///
+/// The lower bound is the one that matters. It is what makes a stretch of
+/// chain cost something whether or not the draw ever looked at it, and so what
+/// stops a chain being padded out to a height it never mined.
+fn check_the_gaps(start: &SampledStart) -> Result<(), StartError> {
+    let mut points: Vec<&BlockHeader> = start
+        .samples
+        .iter()
+        .chain(start.parent.iter())
+        .map(|sample| &sample.header)
+        .chain(std::iter::once(&start.tip))
+        .collect();
+    points.sort_unstable_by_key(|header| (header.height, header.total_work));
+    points.dedup_by_key(|header| header.height);
+
+    // Below the lowest point the chain is not pinned at all, so all that can
+    // be said is that every block down there is a block: the floor is the
+    // least any of them is worth.
+    if let Some(first) = points.first() {
+        let blocks = first.height.saturating_add(1);
+        let least = u128::from(blocks).saturating_mul(u128::from(MIN_DIFFICULTY));
+        if first.total_work < least {
+            return Err(StartError::OpeningWorthLessThanItCost {
+                blocks,
+                stated: first.total_work,
+            });
+        }
+    }
+
+    for pair in points.windows(2) {
+        let (Some(from), Some(to)) = (pair.first(), pair.get(1)) else {
+            continue;
+        };
+        let Some(blocks) = to.height.checked_sub(from.height) else {
+            continue;
+        };
+        let Some(stated) = to.total_work.checked_sub(from.total_work) else {
+            return Err(StartError::WorkRunsBackwards {
+                from: from.height,
+                to: to.height,
+            });
+        };
+        let least = least_work_over(from.difficulty, blocks);
+        if stated < least {
+            return Err(StartError::BlocksWorthLessThanTheyCost {
+                from: from.height,
+                to: to.height,
+                blocks,
+                stated,
+                least,
+            });
+        }
+        let most = most_work_over(from.difficulty, blocks);
+        if stated > most {
+            return Err(StartError::BlocksWorthMoreThanTheyCould {
+                from: from.height,
+                to: to.height,
+                blocks,
+                stated,
+                most,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Builds the answer to a newcomer's draw, for a node that kept the headers.
@@ -418,8 +666,16 @@ pub fn open_start(
         let proof = prove(height)?;
         samples.push(Sample { header, proof });
     }
+    let parent = match tip.height.checked_sub(1) {
+        None => None,
+        Some(below) => Some(Sample {
+            header: header_at(below)?,
+            proof: prove(below)?,
+        }),
+    };
     Some(SampledStart {
         tip: *tip,
+        parent,
         history,
         samples,
     })
@@ -487,7 +743,7 @@ mod tests {
     /// that a draw lands in the invented part with that same probability. It
     /// would if the draw were uniform. It is not: it is one over the distance
     /// from the tip, which is what makes it indifferent to how deep a forger
-    /// forks — and the price of that indifference is a factor of the number of
+    /// forks, and the price of that indifference is a factor of the number of
     /// halvings on every draw. Missing it is what put the count at 512.
     ///
     /// So: a draw lands in the gap with probability `ln(1/(1-lie)) / levels`

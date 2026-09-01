@@ -3,7 +3,7 @@
 //! Two branches of exactly equal work are not ordered identically on every
 //! node: each keeps the one that reached it first. That is a deliberate
 //! choice. Breaking the tie on the lower identifier would settle it at once,
-//! and costs more than it buys — a node catching up along a rival branch
+//! and costs more than it buys: a node catching up along a rival branch
 //! passes through equal work on the way and would reorganise there, doing
 //! extra rewinding to reach the same place one block later regardless.
 //!
@@ -85,7 +85,7 @@ impl Forge {
 }
 
 /// Both branches are one block on the same parent, with the same timestamp and
-/// so the same difficulty and the same work — they differ only in who mined
+/// so the same difficulty and the same work. They differ only in who mined
 /// them. A node that saw A first keeps A; a node that saw B first keeps B.
 /// Then one more block, and they agree again.
 #[test]
@@ -128,7 +128,7 @@ fn an_equal_work_split_lasts_one_block_and_then_resolves() {
 
     // Equal work is NOT ordered identically on every node: each keeps the
     // block that reached it first. That is a deliberate choice, not an
-    // oversight, and what it costs is exactly this — for one block interval,
+    // oversight, and what it costs is exactly this: for one block interval,
     // two honest nodes follow different tips.
     assert_ne!(
         node_a.tip(),

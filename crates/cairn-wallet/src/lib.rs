@@ -9,7 +9,7 @@
 //! sits on top of it is a face: a terminal today, a page served on the
 //! machine's own loopback next, and something native on a phone later. Faces
 //! are rewritten; this is not. A key is read into this process and never
-//! leaves it — no face is ever handed one, and none can sign.
+//! leaves it: no face is ever handed one, and none can sign.
 
 pub mod history;
 pub mod keyfile;
@@ -259,7 +259,8 @@ impl Wallet {
             .collect();
         let transfer = Transfer::new(inputs, outputs);
         let bytes = transfer.encode().len();
-        cairn_chain::fee_floor(cairn_chain::transfer_weight(&transfer, bytes))
+        let freed = spending.iter().filter(|held| held.fallen.is_none()).count();
+        cairn_chain::fee_floor(cairn_chain::transfer_weight(&transfer, bytes, freed))
     }
 
     /// Reaches for a peer, and remembers it whether or not it answers now.
@@ -484,7 +485,8 @@ impl Wallet {
         // from a pool the sender cannot see. A fee of nothing was the ordinary
         // case until the floor existed, and a wallet that went on sending them
         // would look broken rather than out of date.
-        let floor = cairn_chain::fee_floor(cairn_chain::transfer_weight(&transfer, bytes));
+        let freed = spending.iter().filter(|held| held.fallen.is_none()).count();
+        let floor = cairn_chain::fee_floor(cairn_chain::transfer_weight(&transfer, bytes, freed));
         if fee < floor {
             return Err(WalletError::FeeTooLow { needed: floor });
         }

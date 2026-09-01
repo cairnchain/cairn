@@ -3,7 +3,7 @@
 # A dependency does not have to change to start being one: an advisory
 # published against a version already pinned in Cargo.lock makes it one
 # overnight, without a commit and without anyone touching the code. So this
-# runs on a schedule as well as on changes to the lockfile — a check that only
+# runs on a schedule as well as on changes to the lockfile: a check that only
 # fires when somebody pushes is not a watch.
 #
 # Kept out of check.yml deliberately: a weekly run of that file would build on

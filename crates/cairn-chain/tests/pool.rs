@@ -668,7 +668,11 @@ fn a_conflicting_transfer_replaces_what_it_pays_for() {
 
     let first = spend(&params, id, note, &miner, &wallet(2), pebbles(PLAIN_FEE));
     let first_id = first.id();
-    let floor = fee_floor(transfer_weight(&first, first.encode().len()));
+    let floor = fee_floor(transfer_weight(
+        &first,
+        first.encode().len(),
+        first.inputs.len(),
+    ));
     assert_eq!(store.accept_transfer(first), Ok(true));
 
     // Pays more, and not enough more: what it displaces plus the floor is the

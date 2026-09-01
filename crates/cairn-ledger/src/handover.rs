@@ -25,13 +25,14 @@ use cairn_primitives::Hash32;
 
 use crate::block::{BlockHeader, HeaderSummary};
 use crate::note::{Note, NoteId};
-use crate::pow::{meets_target, RECENT_HEADERS};
+use crate::pow::{median_time_past, meets_target, next_difficulty, work_of, RECENT_HEADERS};
 use crate::state::{header_leaf, HotEntry, LedgerState, GRACE_BLOCKS, GRACE_NOTES};
+use crate::validation::ConsensusParams;
 
 /// Blocks a handed over ledger must sit below the tip it belongs to.
 ///
 /// A newcomer cannot check a ledger. It has watched no transaction go past, so
-/// what it is handed is only as good as the header that commits to it — and a
+/// what it is handed is only as good as the header that commits to it, and a
 /// header's state root is a field its miner chose. Proof of work says that
 /// somebody spent electricity on those bytes, not that the state in them is
 /// what honest transactions would have produced. One block bought an arbitrary
@@ -76,7 +77,7 @@ pub struct Handover {
     /// The header forest as it stood before that tip, roots only.
     ///
     /// Sixty four hashes, whatever the chain's age, and the tip commits to
-    /// their hash — so a sender cannot offer a forest of its own choosing
+    /// their hash, so a sender cannot offer a forest of its own choosing
     /// without having also made the tip.
     pub tip_history: Forest,
     /// That `at` sits where it says in that forest.
@@ -101,6 +102,26 @@ pub struct Handover {
     pub grace_proofs: Vec<(u64, ForestProof)>,
     /// The header forest as it stood before `at`, which `at` commits to.
     pub headers: Forest,
+    /// Every header between the ledger's own and the tip, oldest first, the
+    /// last of them being the tip itself.
+    ///
+    /// This is what ties the ledger to the chain that was weighed. The forest
+    /// proof above says the ledger's header sits at a position in a forest,
+    /// and the forest belongs to whoever made the tip, so on its own it says
+    /// nothing: a forger swapped one leaf of the honest chain's forest for a
+    /// header of a private chain it had mined for nothing, and handed over the
+    /// ledger that went with it. Rebuilding the forest from this run catches
+    /// that wherever the swap was, because the forest is append only and the
+    /// receiver holds the part below the anchor already.
+    ///
+    /// It also makes the burial cost something. The run is checked block by
+    /// block against the rules a node applies to any other block, so the
+    /// sender no longer chooses those difficulties.
+    ///
+    /// About a hundred and eighty kilobytes at the burial depth, against a
+    /// ledger of tens of megabytes and the blocks themselves, which the
+    /// receiver is about to ask for anyway.
+    pub buried: Vec<BlockHeader>,
     /// The last few headers in full, oldest first, ending at `at`.
     ///
     /// The difficulty rule and the timestamp rule both read these, so a node
@@ -136,6 +157,22 @@ pub enum HandoverError {
     BadGraceProof { position: u64 },
     #[error("the note at {position} is in the grace window with no proof for it")]
     MissingGraceProof { position: u64 },
+    #[error(
+        "{given} headers were handed over between the ledger and the tip, and {wanted} lie there"
+    )]
+    BuriedRunWrongLength { given: u64, wanted: u64 },
+    #[error("the header at {at} does not follow the one below it")]
+    BuriedRunNotConsecutive { at: u64 },
+    #[error("the header at {at} carries no work")]
+    BuriedWithoutWork { at: u64 },
+    #[error("the header at {at} states difficulty {stated}, and the rules demand {demanded}")]
+    BuriedAtTheWrongDifficulty { at: u64, stated: u64, demanded: u64 },
+    #[error("the header at {at} is not later than the median of the window before it")]
+    BuriedOutOfTime { at: u64 },
+    #[error("the work stated at {at} is not the work below it plus its own")]
+    BuriedWorkDoesNotAddUp { at: u64 },
+    #[error("the headers handed over do not run up to the tip that was weighed")]
+    BuriedRunNotEndingAtTheTip,
 }
 
 impl LedgerState {
@@ -151,6 +188,7 @@ impl LedgerState {
         tip: BlockHeader,
         tip_history: Forest,
         anchor: ForestProof,
+        buried: Vec<BlockHeader>,
         recent: Vec<BlockHeader>,
     ) -> Handover {
         let grace = self.grace_window();
@@ -169,6 +207,7 @@ impl LedgerState {
             grace,
             grace_proofs,
             headers: self.headers_before_tip(),
+            buried,
             recent,
         }
     }
@@ -179,11 +218,9 @@ impl LedgerState {
 /// The header is the authority. Everything else is rebuilt and checked against
 /// what the header already committed to, so a handover proves itself: there is
 /// nothing to take on the word of whoever sent it.
-pub fn accept(
-    handover: &Handover,
-    hot_capacity: usize,
-    burial: u64,
-) -> Result<LedgerState, HandoverError> {
+pub fn accept(handover: &Handover, params: &ConsensusParams) -> Result<LedgerState, HandoverError> {
+    let hot_capacity = params.hot_capacity;
+    let burial = params.burial;
     let at = &handover.at;
     let tip = &handover.tip;
     if !meets_target(&at.id(), at.difficulty) || !meets_target(&tip.id(), tip.difficulty) {
@@ -203,7 +240,7 @@ pub fn accept(
 
     // And it is that tip's own chain. The forest is the one the tip vouches
     // for, and the header this ledger belongs to sits in it at the height it
-    // claims — so a peer cannot weigh one chain and hand over another's.
+    // claims, so a peer cannot weigh one chain and hand over another's.
     if handover.tip_history.commitment() != tip.history {
         return Err(HandoverError::HistoryMismatch);
     }
@@ -226,6 +263,14 @@ pub fn accept(
     }
 
     check_recent(handover)?;
+    check_buried(
+        at,
+        tip,
+        &handover.headers,
+        &handover.buried,
+        &handover.recent,
+        params,
+    )?;
 
     let mut state = LedgerState::rebuilt(
         handover.hot.clone(),
@@ -288,6 +333,132 @@ fn check_recent(handover: &Handover) -> Result<(), HandoverError> {
     Ok(())
 }
 
+/// The most blocks a handover may claim between its ledger and the tip.
+///
+/// The run is normally exactly the burial depth, since that is where a node
+/// takes its anchor from. The ceiling is here because the sender chooses the
+/// length and the receiver has to walk it, so without one a peer could hand
+/// over a run long enough to be an afternoon's work to check.
+pub const MOST_BURIED: u64 = 4 * BURIAL;
+
+/// Ties the ledger's own header to the tip the sampling weighed, by the chain
+/// of headers that runs between them.
+///
+/// This is the check the design was missing, and missing it cost the whole
+/// argument. A forest proof says a header sits at a position in a forest. It
+/// does not say the forest is a chain, and the forest belongs to whoever made
+/// the tip. So a forger took the honest chain's headers, swapped one leaf for
+/// a header of a private chain it had mined for nothing, and mined a tip at
+/// the difficulty floor: one hash. The displaced header and the anchor sat at
+/// the same height and spanned the same unit of work, so no draw could tell
+/// them apart, and the ledger handed over was one the forger had written for
+/// itself, paying itself every coinbase there had ever been.
+///
+/// Two things close it, and the first is nearly free. The header forest is
+/// append only, so a newcomer does not have to take a proof's word for where
+/// the anchor sits: it holds the forest as it stood before the anchor, because
+/// the anchor commits to it, and it can add the anchor and then every header
+/// above it and see whether it arrives at the forest the tip commits to. Under
+/// a swap it does not, and it does not matter where in the chain the swap was
+/// or whether any draw would ever have looked there.
+///
+/// The second is that the run has to have been mined. Each header names the
+/// one before it, carries the difficulty the retarget demands of it, states a
+/// timestamp past the median of its window, and adds its own work to the
+/// total. The window starts as the headers that come with the ledger and moves
+/// forward with the run, so every step is judged by the same rule a node
+/// applies to a block it is handed. That is what makes the burial cost
+/// something: before this, the sender chose those difficulties and could set
+/// them all to the floor, so a thousand blocks of burial were a thousand
+/// hashes and the phrase "buried a thousand deep" bought nothing at all.
+///
+/// What comes out of it is the anchor's own total work, which used to be a
+/// number the sender wrote down and nobody read. It is now the tip's total
+/// work, which the sampling established, less the work of a run that was
+/// checked block by block.
+pub fn check_buried(
+    at: &BlockHeader,
+    tip: &BlockHeader,
+    before_at: &Forest,
+    buried: &[BlockHeader],
+    recent: &[BlockHeader],
+    params: &ConsensusParams,
+) -> Result<(), HandoverError> {
+    let Some(claimed) = tip.height.checked_sub(at.height) else {
+        return Err(HandoverError::NotBuried {
+            at: at.height,
+            tip: tip.height,
+        });
+    };
+    let given = u64::try_from(buried.len()).unwrap_or(u64::MAX);
+    if given != claimed || claimed > MOST_BURIED {
+        return Err(HandoverError::BuriedRunWrongLength {
+            given,
+            wanted: claimed,
+        });
+    }
+
+    // The forest the anchor commits to, which the caller has already checked
+    // against `at.history`, plus the anchor itself. Everything above is added
+    // as it is checked, and what comes out has to be the tip's own.
+    let mut forest = before_at.clone();
+    forest.add(header_leaf(&at.id()));
+
+    let mut window = summaries(recent);
+    let mut previous = *at;
+    for header in buried {
+        if header.height != previous.height.saturating_add(1) || header.previous != previous.id() {
+            return Err(HandoverError::BuriedRunNotConsecutive { at: header.height });
+        }
+        if !meets_target(&header.id(), header.difficulty) {
+            return Err(HandoverError::BuriedWithoutWork { at: header.height });
+        }
+        let demanded = next_difficulty(&window, params.target_block_time);
+        if header.difficulty != demanded {
+            return Err(HandoverError::BuriedAtTheWrongDifficulty {
+                at: header.height,
+                stated: header.difficulty,
+                demanded,
+            });
+        }
+        if median_time_past(&window).is_some_and(|median| header.timestamp <= median) {
+            return Err(HandoverError::BuriedOutOfTime { at: header.height });
+        }
+        if header.total_work
+            != previous
+                .total_work
+                .saturating_add(work_of(header.difficulty))
+        {
+            return Err(HandoverError::BuriedWorkDoesNotAddUp { at: header.height });
+        }
+
+        // The tip is not in its own history, so its leaf is the one leaf the
+        // rebuilt forest must not have.
+        if header.height < tip.height {
+            forest.add(header_leaf(&header.id()));
+        }
+        window.push(HeaderSummary {
+            height: header.height,
+            timestamp: header.timestamp,
+            difficulty: header.difficulty,
+        });
+        if window.len() > RECENT_HEADERS {
+            window.remove(0);
+        }
+        previous = *header;
+    }
+
+    if previous.id() != tip.id() {
+        return Err(HandoverError::BuriedRunNotEndingAtTheTip);
+    }
+    // The forest the tip commits to is the one this run just rebuilt, leaf by
+    // leaf, from the anchor's own. Nothing was swapped anywhere below it.
+    if forest.commitment() != tip.history {
+        return Err(HandoverError::NotOnTheWeighedChain);
+    }
+    Ok(())
+}
+
 /// What the difficulty and timestamp rules read, out of headers in full.
 fn summaries(headers: &[BlockHeader]) -> Vec<HeaderSummary> {
     headers
@@ -346,6 +517,13 @@ impl Encode for Handover {
         for header in &self.recent {
             header.encode_to(out);
         }
+
+        u32::try_from(self.buried.len())
+            .unwrap_or(u32::MAX)
+            .encode_to(out);
+        for header in &self.buried {
+            header.encode_to(out);
+        }
     }
 }
 
@@ -364,6 +542,7 @@ impl Decode for Handover {
         let grace = decode_grace(reader)?;
         let grace_proofs = decode_proofs(reader)?;
         let recent = decode_recent(reader)?;
+        let buried = decode_buried(reader)?;
 
         Ok(Self {
             at,
@@ -375,9 +554,26 @@ impl Decode for Handover {
             grace,
             grace_proofs,
             headers,
+            buried,
             recent,
         })
     }
+}
+
+/// Reads the run between the ledger and the tip, refusing a length no chain
+/// asks for before a byte of it is reserved.
+fn decode_buried(reader: &mut Reader<'_>) -> Result<Vec<BlockHeader>, CodecError> {
+    let count = usize::try_from(u32::decode_from(reader)?).unwrap_or(usize::MAX);
+    if u64::try_from(count).unwrap_or(u64::MAX) > MOST_BURIED {
+        return Err(CodecError::InvalidValue {
+            type_name: "Handover buried run",
+        });
+    }
+    let mut buried = Vec::with_capacity(count.min(1024));
+    for _ in 0..count {
+        buried.push(BlockHeader::decode_from(reader)?);
+    }
+    Ok(buried)
 }
 
 /// The most notes a hot set may hold on any network this code knows.

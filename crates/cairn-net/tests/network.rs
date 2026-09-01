@@ -1558,7 +1558,7 @@ fn a_switch_that_fails_puts_back_a_branch_read_off_the_disk() {
     let ours = shared_chain.mine_many(80);
     // The same length as ours, so it is held as a branch and not switched to:
     // ties keep the branch already followed. Only its last block makes it
-    // heavier, and that one is a lie — the work is real and the height follows
+    // heavier, and that one is a lie: the work is real and the height follows
     // on, so it is taken into memory, and it fails when the ledger is asked to
     // apply it. So the whole switch happens at once, and fails at the end.
     let mut rival = theirs.mine_many(81);

@@ -12,20 +12,23 @@
 #     sudo env DOMAIN=cairnchain.org sh explorer.sh
 #
 # DOMAIN is what the certificate is issued for, and it has to already point at
-# this machine. Without one the site is served over plain HTTP, which is fine
-# to look at and wrong to publish: a page saying who owns what must not be
-# alterable by anything between here and the reader.
+# this machine. Without one, on a first run, the site is served over plain
+# HTTP, which is fine to look at and wrong to publish: a page saying who owns
+# what must not be alterable by anything between here and the reader.
+#
+# The same command updates the machine later, and takes no settings with it.
+# One this run does not name is read back off the machine, the domain
+# included, so an update keeps the certificate the site already has. Naming a
+# setting changes it. Naming it empty puts it back to the default it ships
+# with.
 
 set -eu
 
-NETWORK="${NETWORK:-testnet-4}"
-PORT="${PORT:-9945}"
-HTTP="${HTTP:-127.0.0.1:8080}"
-SEED="${SEED:-}"
-DOMAIN="${DOMAIN:-}"
 REPO="${REPO:-https://github.com/cairnchain/cairn}"
 SRC="/usr/local/src/cairn"
 DATA="/var/lib/cairn-explorer"
+UNIT=/etc/systemd/system/cairn-explorer.service
+CADDYFILE=/etc/caddy/Caddyfile
 
 say() { printf '\n== %s\n' "$1"; }
 
@@ -36,12 +39,89 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+# What is already on this machine is the only record of what it was told to
+# do, so a setting this run does not name is read back out of it rather than
+# reset to the default. A re-run that says nothing changes nothing, which
+# matters most for DOMAIN: dropping it takes the certificate off a published
+# site and leaves it answering in plain HTTP.
+#
+# An unset variable and an empty one are different things here. Unset says
+# nothing about a setting. Empty says put it back to the default.
+
+# The installed unit's ExecStart as one line: this script writes one line, and
+# the file it ships with wraps the same command across several.
+INSTALLED=""
+if [ -f "$UNIT" ]; then
+    INSTALLED=$(awk '/^ExecStart=/ {
+        line = $0
+        while (sub(/\\$/, "", line)) { getline more; line = line " " more }
+        print line
+        exit
+    }' "$UNIT")
+fi
+
+# One argument out of that line, or all of them where it repeats, as --seed
+# does.
+carried() {
+    found=""
+    take=""
+    for word in $INSTALLED; do
+        if [ -n "$take" ]; then
+            found="$found $word"
+            take=""
+        elif [ "$word" = "--$1" ]; then
+            take=1
+        fi
+    done
+    echo "${found# }"
+}
+
+# The domain is not in the unit; the Caddyfile is where it is written down.
+# The first site block is the one this script wrote, and :80 is what it writes
+# when there is no domain, which is to say no domain carried.
+carried_domain() {
+    [ -f "$CADDYFILE" ] || return 0
+    site=$(sed -n 's/^\([^ #][^ ]*\) {$/\1/p' "$CADDYFILE" | head -n 1)
+    if [ "$site" != ":80" ]; then
+        echo "$site"
+    fi
+}
+
+# Named by this run, else carried, else the default. It assigns rather than
+# prints, because KEPT has to outlive the call and a command substitution is
+# a subshell.
+KEPT=""
+resolve() {
+    eval "named=\${$1+named}; passed=\${$1-}"
+    if [ -n "$named" ]; then
+        value="${passed:-$3}"
+    elif [ -n "$2" ]; then
+        value="$2"
+        KEPT="$KEPT $1"
+    else
+        value="$3"
+    fi
+    eval "$1=\$value"
+}
+
+listen=$(carried listen)
+resolve NETWORK "$(carried network)" testnet-4
+resolve PORT "${listen##*:}" 9945
+resolve HTTP "$(carried http)" 127.0.0.1:8080
+resolve SEED "$(carried seed)" ""
+resolve DOMAIN "$(carried_domain)" ""
+
 echo "network  $NETWORK"
+echo "port     $PORT"
+echo "http     $HTTP"
 echo "seeds    ${SEED:-none}"
 if [ -n "$DOMAIN" ]; then
     echo "domain   $DOMAIN, with a certificate"
 else
     echo "domain   none, so plain HTTP on port 80"
+fi
+if [ -n "$KEPT" ]; then
+    echo "kept     ${KEPT# }, which this run did not name"
 fi
 
 say "Source"
@@ -74,22 +154,18 @@ chown cairn:cairn "$DATA"
 chmod 0750 "$DATA"
 
 say "Service"
-UNIT=/etc/systemd/system/cairn-explorer.service
-if [ "$NETWORK" != "testnet-4" ] || [ "$PORT" != "9945" ] ||
-   [ "$HTTP" != "127.0.0.1:8080" ] || [ -n "$SEED" ]; then
-    ARGS="--network $NETWORK --data $DATA --listen 0.0.0.0:$PORT --http $HTTP"
-    for peer in $SEED; do
-        ARGS="$ARGS --seed $peer"
-    done
-    awk -v args="$ARGS" '
-        /^ExecStart=/ { print "ExecStart=/usr/local/bin/cairn-explorer " args; skip = 1; next }
-        skip && /\\$/ { next }
-        skip { skip = 0; next }
-        { print }
-    ' "$SRC/deploy/cairn-explorer.service" > "$UNIT"
-else
-    cp "$SRC/deploy/cairn-explorer.service" "$UNIT"
-fi
+# Written from the settings above rather than copied, so the unit says in full
+# what this machine does, and is a record the next run can read back.
+ARGS="--network $NETWORK --data $DATA --listen 0.0.0.0:$PORT --http $HTTP"
+for peer in $SEED; do
+    ARGS="$ARGS --seed $peer"
+done
+awk -v args="$ARGS" '
+    /^ExecStart=/ { print "ExecStart=/usr/local/bin/cairn-explorer " args; skip = 1; next }
+    skip && /\\$/ { next }
+    skip { skip = 0; next }
+    { print }
+' "$SRC/deploy/cairn-explorer.service" > "$UNIT"
 systemctl daemon-reload
 systemctl enable cairn-explorer
 systemctl restart cairn-explorer
@@ -121,9 +197,28 @@ else
     SITE=":80"
 fi
 
-cat > /etc/caddy/Caddyfile <<CADDY
+cat > "$CADDYFILE" <<CADDY
 # Written by explorer.sh. The explorer serves plain HTTP on loopback; this
 # holds the certificate and is the only thing listening on the outside.
+
+# Caddy waits forever for a request head by default, on the reasoning that a
+# slow caller may be an honest one on a bad line. That is the right default
+# for a general server and the wrong one here: the explorer behind this
+# answers every reader from an index already in memory, so a head that has
+# taken ten seconds to arrive is not a slow reader, and a few dozen of them
+# are how a public site is taken down from a laptop. The explorer enforces the
+# same bound on its own side for a node published without anything in front of
+# it; this is the half that applies to cairnchain.org.
+{
+    servers {
+        timeouts {
+            read_header 10s
+            read_body 30s
+            idle 2m
+        }
+    }
+}
+
 $SITE {
     reverse_proxy $HTTP
 
@@ -146,7 +241,7 @@ CADDY
 # second thing to keep a certificate for and a second address for a link to
 # be written with, so it redirects rather than serves.
 if [ -n "$WWW" ]; then
-    cat >> /etc/caddy/Caddyfile <<CADDY
+    cat >> "$CADDYFILE" <<CADDY
 
 $WWW {
     redir https://$DOMAIN{uri} permanent
@@ -154,6 +249,15 @@ $WWW {
 CADDY
 fi
 
+# A bad config here takes the public site off the air, and the restart is
+# where that would happen. Checked first, so a mistake in this file leaves the
+# server that is already running exactly where it was.
+if command -v caddy >/dev/null 2>&1 && ! caddy validate --config "$CADDYFILE" >/dev/null 2>&1; then
+    echo "the Caddyfile this script wrote does not validate, so caddy was not" >&2
+    echo "restarted and the site is still being served as it was:" >&2
+    caddy validate --config "$CADDYFILE" >&2
+    exit 1
+fi
 systemctl restart caddy
 
 say "Firewall"
@@ -169,16 +273,27 @@ fi
 say "Done"
 grep '^ExecStart=' "$UNIT"
 systemctl --no-pager --lines=5 status cairn-explorer || true
+echo
 if [ -n "$DOMAIN" ]; then
-    echo
     echo "The site is at https://$DOMAIN/ once the certificate is issued,"
-    if [ -n "$WWW" ]; then
-        echo "and https://$WWW/ redirects to it."
-    fi
     echo "which takes a few seconds the first time. Watch it with:"
     echo "  journalctl -u caddy -f"
+    if [ -n "$WWW" ]; then
+        echo "https://$WWW/ redirects to it."
+    fi
 else
-    echo
     echo "The site is at http://<this machine>/ over plain HTTP."
-    echo "Set DOMAIN and run this again to put a certificate in front of it."
+    echo "Name a domain and run this again to put a certificate in front of it."
 fi
+cat <<NOTE
+
+  what it is doing     journalctl -u cairn-explorer -f
+  update it            sh explorer.sh
+
+The update line takes no settings: this machine keeps the ones it already
+has, the domain among them. Naming one changes it, and naming it empty puts
+it back to the default, which is the only way a setting goes back on its own:
+
+  change the domain    sudo env DOMAIN=example.org sh explorer.sh
+  back to plain HTTP   sudo env DOMAIN= sh explorer.sh
+NOTE

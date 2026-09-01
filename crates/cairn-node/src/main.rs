@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use cairn_net::node::Probation;
 use cairn_net::{Joined, Node};
 
 const TICK: Duration = Duration::from_millis(100);
@@ -64,6 +65,18 @@ fn run(arguments: &[String]) -> Result<(), String> {
             restored.discarded_bytes
         );
     }
+    // A node that was handed a ledger owes the network its own check of the
+    // blocks above it, and until it has done that it is not a node on a chain,
+    // it is a node holding somebody's account of one. Said here rather than
+    // only in the status line, because this is the moment an operator finds
+    // out what they are starting.
+    if let Some(probation) = node.probation() {
+        println!("probation    {probation}");
+        println!(
+            "             it does not mine, does not take transfers, and does not \
+             answer as a node on a chain until it has"
+        );
+    }
     println!();
 
     // The names, not just what they resolved to: a node that could not look
@@ -88,6 +101,26 @@ fn run(arguments: &[String]) -> Result<(), String> {
         let params = options.params;
         let started = Instant::now();
         thread::spawn(move || {
+            // A node on probation would have every block it made refused, and
+            // would spend every core it has finding them. Waiting here is the
+            // same rule stated where it costs nothing: what the node will not
+            // do is settled by `submit_block`, and this only keeps the machine
+            // from doing it pointlessly.
+            let mut said = false;
+            while running.load(Ordering::SeqCst) && node.probation().is_some() {
+                if !said {
+                    said = true;
+                    println!(
+                        "[{:>8}] mining waits until this node has checked the blocks \
+                         above the ledger it was handed",
+                        stamp(started),
+                    );
+                }
+                thread::sleep(TICK);
+            }
+            if !running.load(Ordering::SeqCst) {
+                return;
+            }
             mining::run(&node, &params, key, &running, |block| {
                 println!(
                     "[{:>8}] mined  height {:<6} difficulty {:<10} {}",
@@ -137,6 +170,32 @@ fn watch(node: &Node, options: &options::Options, running: &AtomicBool) {
             );
             return;
         }
+        // A ledger this node was handed, and blocks above it that nobody will
+        // deliver. It cannot get back below where it was handed on, so there
+        // is nothing to wait for and nothing it can do about it; the cure is
+        // the operator's.
+        if let Some(stranded) = node.stranded() {
+            println!(
+                "[{:>8}] stopping: this node was handed a ledger at height {}, and had to check its \
+                 way to height {} before it could stand behind it. It waited {} seconds with \
+                 peers to ask and not one of the blocks in between arrived{}. It holds \
+                 nothing below the ledger, so no chain forking under it can be followed from \
+                 here. Delete the data directory and start again, from a seed you trust.",
+                stamp(started),
+                stranded.anchor,
+                stranded.settles_at,
+                stranded.waited,
+                if stranded.out_of_reach > 0 {
+                    format!(
+                        ", while {} blocks arrived from a chain it cannot reach",
+                        stranded.out_of_reach
+                    )
+                } else {
+                    String::new()
+                },
+            );
+            return;
+        }
         if let Some(limit) = limit {
             if started.elapsed() >= limit {
                 return;
@@ -161,9 +220,31 @@ fn watch(node: &Node, options: &options::Options, running: &AtomicBool) {
                 Joined::No | Joined::Done => {}
                 joining => println!("           joining  {joining}"),
             }
+            // And once it has arrived, the height it shows is the anchor's
+            // rather than this node's, which without this reads as a healthy
+            // node. It is not one until the line below stops appearing.
+            if let Some(probation) = node.probation() {
+                println!(
+                    "           {}",
+                    probation_line(&probation, node.out_of_reach())
+                );
+            }
         }
         thread::sleep(TICK);
     }
+}
+
+/// The status line for a node that has not yet stood behind the ledger it was
+/// handed.
+///
+/// Blocks arriving from a chain this node cannot reach are named alongside,
+/// because that combination, a height that does not move and blocks it can do
+/// nothing with, is what being on the wrong chain looks like from the outside.
+fn probation_line(probation: &Probation, out_of_reach: u64) -> String {
+    if out_of_reach == 0 {
+        return format!("probation {probation}");
+    }
+    format!("probation {probation}, and {out_of_reach} blocks arrived from a chain it cannot reach")
 }
 
 fn stamp(since: Instant) -> String {

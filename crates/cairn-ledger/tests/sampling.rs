@@ -100,8 +100,16 @@ impl Keeper {
             })
             .collect();
 
+        let below = usize::try_from(tip.height).unwrap() - 1;
         SampledStart {
             tip,
+            parent: Some(Sample {
+                header: self.headers[below],
+                proof: self
+                    .before_tip
+                    .prove(below as u64)
+                    .expect("a keeper can prove the header under its own tip"),
+            }),
             history: self.before_tip.forest().roots_only(),
             samples,
         }
@@ -163,6 +171,7 @@ fn a_tip_that_overstates_its_work_is_caught() {
 
     let start = SampledStart {
         tip: forged,
+        parent: keeper.open(1).parent,
         history: keeper.before_tip.forest().roots_only(),
         samples,
     };
@@ -351,4 +360,125 @@ fn a_node_that_did_not_keep_the_headers_cannot_answer() {
         |_| None,
     );
     assert!(start.is_none(), "an honest no beats a made up yes");
+}
+
+/// The hole this whole check exists to close.
+///
+/// The draw is over work, so a stretch of chain that claims no work is a
+/// stretch the draw almost never lands in. A forger used that: it took the
+/// honest chain's headers, which anybody can ask any node for, put them in a
+/// forest of its own, appended a thousand leaves that were not headers at all
+/// and a tip mined at the difficulty floor, and declared one unit more work
+/// than the honest chain. Every draw landed in the honest work below and every
+/// one was answered by a genuine honest header with a genuine proof.
+///
+/// A number of blocks now implies a least amount of work, because the
+/// difficulty falls by at most a fixed factor per block and never below the
+/// floor. The padding is a thousand blocks and cannot be worth one hash.
+#[test]
+fn a_chain_padded_out_with_weightless_blocks_is_refused() {
+    let keeper = Keeper::build(HEIGHT);
+    let honest = keeper.tip();
+
+    let mut padded = Archive::new();
+    for header in &keeper.headers {
+        padded.add(header_leaf(&header.id()));
+    }
+    let padding = 1_024u64;
+    for filler in 0..padding {
+        padded.add(cairn_primitives::Hash32::from_bytes(
+            [u8::try_from(filler % 256).unwrap_or(0); 32],
+        ));
+    }
+
+    // A header of the forger's own to stand under the tip, so the tip has a
+    // parent to open. At the floor every hash satisfies it, so it is free.
+    let stand_on = BlockHeader {
+        history: cairn_primitives::Hash32::from_bytes([0x44; 32]),
+        height: padded.len(),
+        total_work: honest.total_work,
+        difficulty: 1,
+        previous: cairn_primitives::Hash32::from_bytes([0x11; 32]),
+        timestamp: honest.timestamp + 600,
+        nonce: 0,
+        ..honest
+    };
+    padded.add(header_leaf(&stand_on.id()));
+
+    let forged = BlockHeader {
+        history: padded.forest().roots_only().commitment(),
+        height: padded.len(),
+        total_work: honest.total_work + 1,
+        difficulty: 1,
+        previous: stand_on.id(),
+        timestamp: honest.timestamp + 1_200,
+        nonce: 0,
+        ..honest
+    };
+
+    let ledger: Vec<(u64, u128, u64)> = keeper
+        .headers
+        .iter()
+        .rev()
+        .map(|header| (header.height, header.total_work, header.difficulty))
+        .collect();
+    let samples: Vec<Sample> = draw(seed_of(&forged), 64, work_before(&forged), forged.height)
+        .into_iter()
+        .map(|work| {
+            let height = covering(&ledger, work).expect("the honest chain spans every draw");
+            Sample {
+                header: keeper.headers[usize::try_from(height).unwrap()],
+                proof: padded
+                    .prove(height)
+                    .expect("the forger kept the honest leaves"),
+            }
+        })
+        .collect();
+
+    // The forger mines a header of its own to sit under the tip, so that the
+    // tip has a parent to open. At the floor every hash satisfies it.
+    let start = SampledStart {
+        tip: forged,
+        parent: Some(Sample {
+            header: stand_on,
+            proof: padded.prove(stand_on.height).unwrap(),
+        }),
+        history: padded.forest().roots_only(),
+        samples,
+    };
+    assert!(
+        matches!(
+            check_start(&start, 64),
+            Err(StartError::BlocksWorthLessThanTheyCost { .. })
+        ),
+        "a thousand blocks cannot be worth one hash, and were: {:?}",
+        check_start(&start, 64)
+    );
+}
+
+/// The other side of the same rule, and the one that would hurt if it were
+/// wrong. A chain whose hash rate collapses really does shed difficulty, as
+/// fast as the retarget allows, and it must still be weighable. The bound is
+/// written from the retarget's own clamp rather than from a guess, so an
+/// honest chain satisfies it by construction; this is here so that moving the
+/// clamp without moving the bound stops the build rather than the network.
+#[test]
+fn a_chain_that_sheds_its_difficulty_is_still_weighed() {
+    let keeper = Keeper::build(HEIGHT);
+    let start = keeper.open(64);
+    check_start(&start, 64).expect("an honest chain checks out whatever its difficulty did");
+
+    for pair in keeper.headers.windows(2) {
+        let (before, after) = (&pair[0], &pair[1]);
+        let least = u128::from(before.difficulty) / cairn_ledger::pow::MAX_RETARGET_FACTOR;
+        assert!(
+            u128::from(after.difficulty) >= least.max(1),
+            "the retarget never sheds more than the bound assumes it can"
+        );
+        assert_eq!(
+            after.total_work,
+            before.total_work + work_of(after.difficulty),
+            "work is the sum of the difficulties, which is what the bound counts"
+        );
+    }
 }

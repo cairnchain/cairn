@@ -40,7 +40,7 @@
     and Bonneau show that a succinct global state forces a near-linear rate of
     local proof updates <sup><a href="#r1">[1]</a></sup>; Cairn falls on that
     side deliberately, and confines the burden to notes that have not moved
-    recently — which on a busy chain means hours, not years: the hot set holds
+    recently, which on a busy chain means hours, not years: the hot set holds
     a fixed number of notes, not a fixed span of time. Headers commit to accumulated work and to a forest of every
     earlier header, so that joining the chain need not mean downloading it.
   </p>
@@ -243,12 +243,12 @@
     <p>
       Completing the rule instead of removing it would mean carrying, as
       committed state, whatever changed between an old root and the current
-      one — bounded, at roughly four megabytes, but bought for a convenience
-      that costs nothing to have another way. A transfer's identifier excludes
-      its witness by design, so refreshing a proof does not make a different
-      transfer. One that waited too long is the same transfer offered again;
-      the pool already drops what the state no longer accepts, and a wallet
-      already keeps its own proofs current as the forest grows.
+      one. That is bounded, at roughly four megabytes, but it is bought for a
+      convenience that costs nothing to have another way. A transfer's
+      identifier excludes its witness by design, so refreshing a proof does not
+      make a different transfer. One that waited too long is the same transfer
+      offered again; the pool already drops what the state no longer accepts,
+      and a wallet already keeps its own proofs current as the forest grows.
     </p>
 
     <h3><span class="sub">4.2</span>The grace window</h3>
@@ -409,7 +409,7 @@
       Weighing settles which chain carries the most work. It settles nothing
       about what that chain's ledger says, and the two are easily confused. A
       header commits to a state root, and proof of work says that somebody
-      spent electricity on those bytes — not that the state in them is what
+      spent electricity on those bytes, not that the state in them is what
       honest transactions would have produced. A node that read the chain knows
       the difference because it watched every transaction go past. A newcomer
       has watched none.
@@ -418,8 +418,8 @@
       So a newcomer that took the ledger of the heaviest tip would be buying an
       arbitrary ledger for the price of one block: mine one on top of the real
       chain, commit to any state you like, be heaviest for the moment somebody
-      arrives. The honest network is unharmed — every node that read the chain
-      rejects that block on sight — but the newcomer, which is the party this
+      arrives. The honest network is unharmed (every node that read the chain
+      rejects that block on sight), but the newcomer, which is the party this
       whole construction exists to serve, is not.
     </p>
     <p>
@@ -446,7 +446,7 @@
       One assumption is load-bearing here and was not stated before: that at
       least one of the peers a newcomer is talking to is honest and can answer.
       Joining is trust-minimised, not trust-free. Every chain offered proves
-      its own work, so no peer can invent weight — but a newcomer surrounded
+      its own work, so no peer can invent weight, but a newcomer surrounded
       entirely by one party's nodes is shown only what that party chooses to
       show. That is the same assumption every proof-of-work client makes at
       the moment it first connects, and it is worth writing down rather than
@@ -482,7 +482,7 @@
       presented by a party holding a share <em>s</em> of the world's work, has
       at least <em>1 &minus; s/(1&minus;s)</em> of itself invented: work no
       block of it spans. At a third of the world's work that is half the chain.
-      What does not follow — and an earlier version of this paper said it did —
+      What does not follow (and an earlier version of this paper said it did)
       is that a draw lands in that invented part with the same probability. It
       would if the draw were uniform, and it is deliberately not: the density is
       one over the distance from the tip. That is what makes the bound
@@ -494,7 +494,7 @@
     <p>
       Setting the count from the real expression gives 4 096 draws, holding
       against every forger up to 43% of the world's work over a thirty year
-      chain — measured against the function this implementation ships, and
+      chain, measured against the function this implementation ships, and
       against forgeries built and put through the check. This paper claims 40%,
       keeping three points for the difference between a staircase of halvings
       and the smooth density it stands for. Past 50% nothing helps: a forger at
@@ -506,7 +506,7 @@
       resolving finer would cost a third of the count again to separate chains
       the fork choice does not separate either. So a forger at 40% cannot put a
       newcomer on a branch differing from the real one by more than about
-      1 240 blocks — twenty hours. Inside that it can, and so can a slow peer:
+      1 240 blocks (twenty hours). Inside that it can, and so can a slow peer:
       it is where any node sits for its first blocks after connecting, and it is
       shallower than the deepest reorganisation this node would accept anyway.
     </p>
@@ -575,8 +575,8 @@
       obligation falls only on value that has not moved recently. How recently
       is worth stating plainly rather than leaving to the word: the hot set is
       capped at a <em>number</em> of notes, so how long a note stays in it
-      depends on how busy the chain is. Measured at full blocks — 686 payments
-      a block, which is what success looks like — a note falls to the cold set
+      depends on how busy the chain is. Measured at full blocks (686 payments
+      a block, which is what success looks like), a note falls to the cold set
       in <strong>3.2 hours</strong>, and the grace window that follows lasts
       about twelve minutes. At a tenth of that traffic it is 32 hours, and at a
       hundredth, thirteen days.
@@ -603,7 +603,7 @@
       chain carries the most work, which the network cannot do without, and
       rebuilding the proof of a note whose owner lost theirs, which it can. The
       first was separated out and made small enough that every node performs
-      it — 182 bytes a header, 129 MB a year — so nothing in the protocol now
+      it (182 bytes a header, 129 MB a year), so nothing in the protocol now
       depends on a party being paid. What is left is recovery for a wallet that
       kept no records, and a wallet that keeps its own needs no one.
     </p>
@@ -776,7 +776,7 @@
       it go on being judged by the rule that judged them: nothing already mined
       becomes invalid. Nobody votes on it. The height is in the software,
       published long before it arrives, and miner signalling is refused for the
-      reason proof of stake is — it would hand whoever mines a veto over the
+      reason proof of stake is: it would hand whoever mines a veto over the
       rules. What none of that fixes is the node that did not update: it is
       following a chain the network has left. It is told which version it
       lacks, and stops, because a wallet reading a balance off an abandoned

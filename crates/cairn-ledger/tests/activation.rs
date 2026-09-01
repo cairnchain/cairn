@@ -11,7 +11,7 @@
 //! The other half is what a node does when the height it has reached is
 //! governed by rules it does not have. It must not treat that as a bad block:
 //! every peer that had updated would be sending the same one, so refusing them
-//! leaves it following whoever had not updated either — a minority chain,
+//! leaves it following whoever had not updated either, a minority chain
 //! believed to be the chain. It says which version it needs, and stops.
 
 #![allow(

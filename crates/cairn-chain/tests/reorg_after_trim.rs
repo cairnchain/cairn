@@ -161,7 +161,7 @@ fn feed(store: &mut ChainStore, blocks: &[Block]) {
 /// The control: bodies are kept where they can be read back, so a failed
 /// reorganisation restores the branch it left, exactly as it should.
 ///
-/// This is the same scenario as the test below with one difference — the
+/// This is the same scenario as the test below with one difference: the
 /// shelf still holds the released bodies. It passing while the other fails is
 /// what shows the failure is the missing bodies and nothing else.
 #[test]
@@ -202,7 +202,7 @@ fn a_failed_reorg_restores_the_branch_when_bodies_can_be_read_back() {
 /// The bug this closed, kept as the case that must not come back.
 ///
 /// Bodies were let go of, and the place they are read back from was then
-/// emptied — a node's upkeep dropping blocks off the front of its log. A
+/// emptied, a node's upkeep dropping blocks off the front of its log. A
 /// reorganisation that failed could no longer restore the branch it left, and
 /// the node was stranded at the fork, on neither branch.
 ///

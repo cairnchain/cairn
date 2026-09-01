@@ -86,16 +86,33 @@ const RATE_SCALE: u128 = 1 << 16;
 /// What carrying a transfer takes from the network: its bytes, plus a charge
 /// for every place it takes in the hot set.
 ///
-/// The charge is on notes created beyond notes spent, whatever tier the spent
-/// ones sit in. A cold input frees no hot place, so crediting it is slightly
-/// generous, but the alternative is a weight that depends on the state, and a
-/// price that moves under the wallet quoting it cannot be paid on purpose. A
-/// transfer that spends more than it creates weighs its bytes and nothing
-/// more: consolidation gives the tier room back, and this is where that is
-/// worth something.
+/// `freed` is how many of the spent notes were actually in the hot set, so
+/// only those are credited with giving a place back. Counting inputs instead
+/// was the obvious thing and it was wrong at one boundary: a note that has
+/// just fallen may still be spent through the grace window with a plain hot
+/// witness, a hundred bytes and no proof, and it frees nothing, because it
+/// left the tier already. A transfer re-spending a handful of those and
+/// paying them straight back to itself was charged for no places at all while
+/// pushing that many notes out, which churned the tier at about a fifth of an
+/// ordinary payment's price: the discount this weight exists to close, back
+/// through the one door left open. A cold input carries its proof, so its
+/// bytes already cover the place it does not free.
+///
+/// This makes the weight depend on the state, which the earlier note here
+/// gave as the reason not to do it: a price that moves under the wallet
+/// quoting it cannot be paid on purpose. It moves by one place, five thousand
+/// one hundred and twenty pebbles, and only for a note that falls between the
+/// quote and the node reading it. A wallet already asks for the number and is
+/// told the number when it is short, which is the answer to a price that
+/// moves, and being unable to state the price of the one shape worth gaming
+/// is not.
+///
+/// A transfer that spends more hot notes than it creates weighs its bytes and
+/// nothing more: consolidation gives the tier room back, and this is where
+/// that is worth something.
 #[must_use]
-pub fn transfer_weight(transfer: &Transfer, bytes: usize) -> usize {
-    let places = transfer.outputs.len().saturating_sub(transfer.inputs.len());
+pub fn transfer_weight(transfer: &Transfer, bytes: usize, freed: usize) -> usize {
+    let places = transfer.outputs.len().saturating_sub(freed);
     bytes.saturating_add(places.saturating_mul(NOTE_WEIGHT))
 }
 
@@ -148,6 +165,20 @@ struct Pooled {
 /// than either would accept, which on a live network means an attack or a
 /// partition lasting the better part of a day.
 pub const MAX_REORG_DEPTH: usize = 1_024;
+
+/// A handover is taken from [`cairn_ledger::handover::BURIAL`] blocks below
+/// the tip, and reaching that height means undoing every block above it, so
+/// the undo records have to stretch at least that far.
+///
+/// Written down because the two numbers live in different crates and are
+/// equal, which leaves no margin at all. They were once one apart in the
+/// wrong direction, by an off-by-one in the guard below rather than in either
+/// number, and the whole handover was quietly unreachable on any chain past a
+/// thousand blocks: a newcomer was never handed a ledger and a restarting
+/// node never read its own. Nothing failed, nothing was logged, and the
+/// devnet tests missed it because devnet buries at thirty two. If either
+/// number moves again, this stops the build rather than the network.
+const _: () = assert!(cairn_ledger::handover::BURIAL <= MAX_REORG_DEPTH as u64);
 
 /// Blocks kept off the followed branch before the unreachable ones are
 /// dropped.
@@ -228,7 +259,7 @@ pub enum ChainError {
 /// has not met a bad peer: it has met the network moving on without it, and
 /// the two call for opposite reactions. Treating it as a bad peer would drop
 /// every node that had updated and leave this one following whoever had not,
-/// which is a minority chain believed to be the chain — the one outcome a
+/// which is a minority chain believed to be the chain, the one outcome a
 /// scheduled rule change has to avoid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Outdated {
@@ -250,8 +281,8 @@ impl ChainError {
     /// settles may be remembered against one: a timestamp out of range, a
     /// parent that is not there, work that was not done.
     ///
-    /// Anything the body decides — a signature, a root that does not match, a
-    /// coinbase that overpays — says nothing about another body carrying the
+    /// Anything the body decides (a signature, a root that does not match, a
+    /// coinbase that overpays) says nothing about another body carrying the
     /// same identifier. Remembering that would let anyone lock the real block
     /// out of a node by sending a corrupted twin first, at the cost of copying
     /// it: the twin inherits the real block's work, so it is free.
@@ -259,6 +290,18 @@ impl ChainError {
     /// Listed rather than excluded, so a failure added later is not condemned
     /// by default. Refusing to remember costs one validation. Remembering
     /// wrongly costs a node the chain.
+    ///
+    /// One verdict looks as though the header settles it and does not, which
+    /// is why it is named here rather than merely absent from the list.
+    /// A timestamp too far ahead is measured against the reading node's own
+    /// clock, so it is the one refusal in the whole set that two honest nodes
+    /// can disagree about, and that the same node reverses simply by waiting.
+    /// Remembering it turned a second of clock skew into a permanent exile: a
+    /// miner publishing a block dated at the edge of the allowed drift, which
+    /// costs nothing and is valid to everybody whose clock is right, put that
+    /// block on the blacklist of every node running slightly slow, and from
+    /// then on those nodes refused the whole chain through it and blamed every
+    /// honest peer that offered it.
     fn settles_the_header(&self) -> bool {
         let Self::InvalidBlock { source, .. } = self else {
             return false;
@@ -270,7 +313,6 @@ impl ChainError {
                 | BlockError::WrongHeight { .. }
                 | BlockError::WrongParent { .. }
                 | BlockError::HeightOverflow
-                | BlockError::TimestampTooFarAhead { .. }
                 | BlockError::TimestampNotAfterMedian { .. }
                 | BlockError::BeforeTheNetworkOpened { .. }
                 | BlockError::WrongGenesis { .. }
@@ -978,7 +1020,7 @@ impl ChainStore {
             });
         }
 
-        let weight = transfer_weight(&transfer, bytes);
+        let weight = transfer_weight(&transfer, bytes, outcome.spent_hot.len());
         let floor = fee_floor(weight);
         if outcome.fee < floor {
             return Err(TransferError::FeeBelowFloor {
@@ -1437,8 +1479,8 @@ impl ChainStore {
                     // block known to be bad: the same block becomes valid the
                     // moment the node is updated. Remembering it as bad would
                     // outlive the update, and would come back through
-                    // `branch_to` as an ordinary refusal — the peer blamed for
-                    // this node being old, which is the one outcome the
+                    // `branch_to` as an ordinary refusal, with the peer blamed
+                    // for this node being old, which is the one outcome the
                     // scheduled rule change exists to avoid.
                     if error.settles_the_header() {
                         if self.invalid.len() >= MAX_INVALID {
@@ -1503,7 +1545,7 @@ impl ChainStore {
                 // What is remembered is that this block failed, not why: the
                 // set holds identifiers and nothing else. Naming a cause here
                 // would mean inventing one, and an invented cause is worse
-                // than none — it is read by whoever has to tell a bad peer
+                // than none: it is read by whoever has to tell a bad peer
                 // from a node that is out of date.
                 return Err(ChainError::KnownBad { id: cursor });
             }
@@ -1532,10 +1574,20 @@ impl ChainStore {
     /// go cannot get back there, and a node that was handed its own ledger
     /// rather than reading its way to one has none at all until it has applied
     /// that many blocks itself.
+    ///
+    /// How deep that is takes a moment of care, and getting it wrong by one
+    /// left the whole handover unreachable on a chain past a thousand blocks.
+    /// Reaching height `h` means undoing the blocks above it, so what is
+    /// needed is the record for every height from `h + 1` to the tip, and
+    /// nothing for `h` itself. The deepest that can be reached is therefore
+    /// [`Self::undo_from`] minus one, not `undo_from`: the block whose own
+    /// record has just been let go is still the block a rewind lands on.
+    /// A reorganisation of the full [`MAX_REORG_DEPTH`] already lands there,
+    /// so refusing it here was refusing something the store does elsewhere.
     #[must_use]
     pub fn ledger_at(&self, height: u64) -> Option<LedgerState> {
         let tip = self.height()?;
-        if height > tip || height < self.undo_from {
+        if height > tip || height.saturating_add(1) < self.undo_from {
             return None;
         }
         let mut state = self.state.clone();
@@ -1899,7 +1951,7 @@ mod tests {
     /// It holds no milestones, by design and by its own documentation, and the
     /// list they live in is read by index. Appending to an empty one would put
     /// the first block this node happened to see past a milestone boundary
-    /// where height zero is looked up — and `locator` would then offer a peer
+    /// where height zero is looked up, and `locator` would then offer a peer
     /// `height 0, id <a block from five thousand>`, a position this node has
     /// never held and cannot defend.
     #[test]
@@ -2294,7 +2346,7 @@ mod tests {
     /// A block stops costing memory two different ways: its body is let go of,
     /// or the whole entry is dropped. Both take the same bytes off the same
     /// count, so a block that leaves by both routes must not be subtracted
-    /// twice — a count that drifted below the truth is a ceiling that stops
+    /// twice: a count that drifted below the truth is a ceiling that stops
     /// binding.
     #[test]
     fn bytes_held_come_off_the_count_once_however_a_block_leaves_memory() {
@@ -2343,7 +2395,7 @@ mod tests {
     /// size: four thousand rival blocks at the largest the rules allow is most
     /// of a gigabyte held on the word of a peer. So what is held off the
     /// followed branch is bounded in bytes, and the branch itself is never
-    /// what pays for it — those are the blocks a reorganisation has to undo.
+    /// what pays for it: those are the blocks a reorganisation has to undo.
     #[test]
     fn blocks_off_the_followed_branch_are_dropped_oldest_first_and_it_is_never_touched() {
         const CHUNK: usize = 4 * 1024 * 1024;

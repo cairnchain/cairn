@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
 
 use cairn_chain::{Accepted, ChainError, ChainStore, Located, Outdated};
-use cairn_ledger::block::Block;
+use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::note::NetworkId;
 use cairn_primitives::Hash32;
 
@@ -233,6 +233,16 @@ pub struct Reaction {
     /// Named rather than read here, for the same reason blocks are: they come
     /// off a disk, and this runs with the chain held.
     pub headers: Option<(u64, u64)>,
+    /// A run of headers a peer offered as the ones from before this node
+    /// arrived, and the height it says they start at.
+    ///
+    /// Named rather than taken here, again because taking them reaches a
+    /// disk: they go into a log of their own and the forest they make is
+    /// weighed against a commitment. Named *here* rather than picked out of
+    /// the stream before it reaches this layer, which is where they used to
+    /// be taken, so that a run from a peer that has not introduced itself is
+    /// refused like anything else it might send.
+    pub offered_headers: Option<(u64, Vec<BlockHeader>)>,
     /// Heights on the followed branch a peer asked for.
     ///
     /// Named rather than read here, because most of them are read off a disk
@@ -252,6 +262,19 @@ pub struct Reaction {
     pub relayed: Vec<Hash32>,
     /// Set when the connection should be closed.
     pub drop_peer: Option<DropReason>,
+    /// The height of a block this node refused because it can never take it,
+    /// rather than because it has not caught up to it yet.
+    ///
+    /// The two refusals look identical from here and mean opposite things,
+    /// and only one of them was ever said out loud. A block whose parent has
+    /// not arrived is ordinary and resolves itself. A block hanging below
+    /// everything this node holds does not: a node handed a ledger holds
+    /// nothing under the height it was handed on and never will, so a branch
+    /// forking under there cannot be assembled however much of it arrives.
+    ///
+    /// Set rather than acted on, because what it means is a question about
+    /// this node and not about the block or the peer that sent it.
+    pub unreachable: Option<u64>,
     /// Set when the block that arrived is judged by rules this software does
     /// not have.
     ///
@@ -424,8 +447,8 @@ pub const JOIN_RATHER_THAN_READ: u64 = 1_024;
 
 /// Heights one peer may have outstanding at any moment.
 ///
-/// This was unbounded. Two messages a peer pays one unit each for — a chain it
-/// says it has, a block it says it found — both extended the set and both
+/// This was unbounded. Two messages a peer pays one unit each for (a chain it
+/// says it has, a block it says it found) both extended the set and both
 /// pushed back the only thing that emptied it, so a peer that kept talking
 /// kept the set and kept adding to it. A thousand of them, a fraction of one
 /// allowance window, held a hundred and twenty eight thousand heights.
@@ -434,7 +457,7 @@ pub const JOIN_RATHER_THAN_READ: u64 = 1_024;
 /// that asks for a stretch its peer has since let go of hears nothing back,
 /// and what moves it on is the next thing that peer says about its chain. With
 /// room for only the batch already outstanding, that arrived and was dropped,
-/// and the node waited out `BATCH_PATIENCE` instead — a minute of nothing, for
+/// and the node waited out `BATCH_PATIENCE` instead: a minute of nothing, for
 /// each stretch, on a sync that should take seconds. Four is still four
 /// kilobytes and still a ceiling; unbounded was the defect, not the size.
 const MAX_AWAITING: usize = MAX_REQUESTED * 4;
@@ -514,6 +537,22 @@ fn follow_up(chain: &ChainStore, peer: &mut PeerState, now: u64) -> Reaction {
     Reaction::idle()
 }
 
+/// Whether a block whose parent this node does not hold is one it can never
+/// hold, rather than one it has merely not caught up to.
+///
+/// The floor is the lowest height this node holds anything at, which is zero
+/// for a node that read its chain and the height it was handed on for a node
+/// that joined. A block at or below that floor needs a parent under it, and
+/// the only blocks such a node can ever apply are ones building on what it
+/// already has, so nothing will ever put that parent within reach.
+///
+/// Conservative on purpose. A block above the floor whose parent is missing
+/// may still be part of a branch arriving bottom up, and calling that
+/// unreachable would turn an ordinary sync into an alarm.
+fn below_everything_held(chain: &ChainStore, height: u64) -> bool {
+    chain.branch_start().is_some_and(|floor| height <= floor)
+}
+
 // The last two arms answer the same way for opposite reasons, and collapsing
 // them would bury which is which.
 #[allow(clippy::match_same_arms)]
@@ -534,7 +573,19 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
         // Missing history rather than a bad peer: the block is fine, this node
         // simply has not caught up to where it hangs. Asking again from a fresh
         // locator resolves it.
-        Err(ChainError::UnknownParent(_) | ChainError::NotGenesis) => follow_up(chain, peer, now),
+        //
+        // Unless it hangs below everything this node holds, which is not
+        // history it is missing but history it can never have. Nothing is held
+        // against the peer there either; the difference is only that waiting
+        // will not fix it, and that used to go unrecorded.
+        Err(ChainError::UnknownParent(_) | ChainError::NotGenesis) => {
+            let out_of_reach = below_everything_held(chain, height);
+            let mut reaction = follow_up(chain, peer, now);
+            if out_of_reach {
+                reaction.unreachable = Some(height);
+            }
+            reaction
+        }
         // The peer did nothing wrong and this node cannot judge what it sent.
         // Named rather than counted against the peer, and the node stops.
         Err(error) if error.outdated().is_some() => Reaction {
@@ -542,13 +593,58 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
             ..Reaction::idle()
         },
         // A branch this node cannot reach is not a peer's fault. It means this
-        // node is somewhere it cannot get back from — which is what happens to
+        // node is somewhere it cannot get back from, which is what happens to
         // one that was handed a chain and later meets the real one. Dropping
         // the messenger there is the worst possible answer: it keeps the wrong
         // chain and cuts off the only party telling it so. Nothing is held
         // against the peer, and the block is simply not taken.
-        Err(ChainError::ForkTooDeep { .. } | ChainError::TooOld { .. }) => Reaction::idle(),
+        //
+        // Not taken, and now said: this is the one refusal that means the node
+        // itself is in the wrong place, and it used to pass in silence.
+        Err(ChainError::ForkTooDeep { .. } | ChainError::TooOld { .. }) => Reaction {
+            unreachable: Some(height),
+            ..Reaction::idle()
+        },
         Err(_) => Reaction::close(DropReason::BadBlock { id }),
+    }
+}
+
+/// What answering one message will cost, taken before it is spent.
+///
+/// What is counted is work this peer causes: what it asks for, and what it
+/// sends that nobody asked it for. A block this node asked for is not charged,
+/// because refusing to take delivery of what you requested is a way of never
+/// finishing a sync. An unasked one is, because that is a stranger handing
+/// this node work.
+fn cost_of(message: &Message, peer: &PeerState) -> u32 {
+    match message {
+        Message::GetChain { .. } => COST_CHAIN,
+        // The largest thing a peer can ask for, and the only one that is worth
+        // more to it than it costs this node, so it is charged accordingly: a
+        // peer joining gets through in a handful of windows and one asking
+        // over and over gets nowhere.
+        Message::GetJoin { .. } => COST_JOIN,
+        Message::Block(block) => {
+            if peer.awaiting.contains(&block.header.height) {
+                COST_TRIVIAL
+            } else {
+                COST_BLOCK
+            }
+        }
+        Message::Transaction(_) => COST_TRANSFER,
+        Message::GetBlocks(ids) => {
+            let wanted = u32::try_from(ids.len().min(MAX_REQUESTED)).unwrap_or(u32::MAX);
+            wanted.saturating_mul(COST_PER_BLOCK_SERVED)
+        }
+        Message::GetHeaders { count, .. } => {
+            let wanted = u32::try_from((*count).min(MAX_HEADERS as u64)).unwrap_or(u32::MAX);
+            wanted.saturating_mul(COST_PER_HEADER_SERVED)
+        }
+        // A run of headers offered rather than asked for. Charged as one
+        // message and not as five hundred writes, because a run from anybody
+        // but the peer this node is filling from is refused before a byte of
+        // it is written, so what an unwanted one costs is a comparison.
+        _ => COST_TRIVIAL,
     }
 }
 
@@ -573,55 +669,29 @@ pub fn on_message(
         });
     }
 
-    // What answering this will cost, taken before it is spent.
-    //
-    // What is counted is work this peer causes: what it asks for, and what it
-    // sends that nobody asked it for. A block this node asked for is not
-    // charged, because refusing to take delivery of what you requested is a
-    // way of never finishing a sync. An unasked one is, because that is a
-    // stranger handing this node work.
-    //
     // A peer that has used its window is answered with silence rather than
     // closed. What it asked for is not wrong, there has only been a lot of it,
     // and it asks again a moment later against a fresh window.
-    let cost = match &message {
-        Message::GetChain { .. } => COST_CHAIN,
-        // The largest thing a peer can ask for, and the only one that is worth
-        // more to it than it costs this node, so it is charged accordingly: a
-        // peer joining gets through in a handful of windows and one asking
-        // over and over gets nowhere.
-        Message::GetJoin { .. } => COST_JOIN,
-        Message::Block(block) => {
-            if peer.awaiting.contains(&block.header.height) {
-                COST_TRIVIAL
-            } else {
-                COST_BLOCK
-            }
-        }
-        Message::Transaction(_) => COST_TRANSFER,
-        Message::GetBlocks(ids) => {
-            let wanted = u32::try_from(ids.len().min(MAX_REQUESTED)).unwrap_or(u32::MAX);
-            wanted.saturating_mul(COST_PER_BLOCK_SERVED)
-        }
-        Message::GetHeaders { count, .. } => {
-            let wanted = u32::try_from((*count).min(MAX_HEADERS as u64)).unwrap_or(u32::MAX);
-            wanted.saturating_mul(COST_PER_HEADER_SERVED)
-        }
-        _ => COST_TRIVIAL,
-    };
-    if !peer.afford(cost, now) {
+    if !peer.afford(cost_of(&message, peer), now) {
         return Reaction::idle();
     }
 
     match message {
         // A pong needs no answer, a second introduction was already refused
-        // above, and a piece of a join answer, or a run of headers, belongs to
-        // whoever asked for it rather than here.
-        Message::Pong(_)
-        | Message::Hello(_)
-        | Message::Welcome(_)
-        | Message::JoinPart { .. }
-        | Message::Headers { .. } => Reaction::idle(),
+        // above, and a piece of a join answer belongs to whoever is collecting
+        // one rather than here.
+        Message::Pong(_) | Message::Hello(_) | Message::Welcome(_) | Message::JoinPart { .. } => {
+            Reaction::idle()
+        }
+        // Headers from before this node arrived. Named rather than taken, and
+        // named here rather than earlier: this is where a peer has to have
+        // introduced itself and to have an allowance left, and a run that
+        // reached a disk before either was asked was a run any stranger could
+        // hand this node.
+        Message::Headers { from, headers } => Reaction {
+            offered_headers: Some((from, headers)),
+            ..Reaction::idle()
+        },
         Message::Ping(nonce) => Reaction::reply(vec![Message::Pong(nonce)]),
         Message::GetChain { locator } => Reaction {
             locate: Some(locator),

@@ -1,8 +1,8 @@
 //! What the wallet's own history does when a branch it had read is undone.
 //!
 //! The ledger the node keeps is put back correctly on a reorganisation (that
-//! was the fix in the most recent commit). The wallet's *history* — its own
-//! "What happened" account, read forward block by block — is a separate store,
+//! was the fix in the most recent commit). The wallet's *history* (its own
+//! "What happened" account, read forward block by block) is a separate store,
 //! and this checks whether it survives the same event.
 
 #![allow(

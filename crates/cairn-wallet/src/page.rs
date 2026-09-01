@@ -5,7 +5,7 @@
 //! behaviour, someone else gets to change.
 //!
 //! Slate and lichen, which is the chain's own palette: one living colour, and
-//! it means the same thing here as everywhere else — green for what a node
+//! it means the same thing here as everywhere else. Green for what a node
 //! holds itself, blue for what it has let go of and keeps only as hashes. A
 //! note that has fallen is blue on this page for exactly the reason it is blue
 //! in the design document.
@@ -245,7 +245,7 @@ async function refresh() {
   } catch (_) { return; }
 
   text("network", state.network);
-  text("height", state.height === null ? "—" : state.height);
+  text("height", state.height === null ? "…" : state.height);
   text("peers", state.peers);
   text("address", state.address);
   text("spendable", state.spendable.replace(" CAIRN", ""));

@@ -1,4 +1,4 @@
-//! The two invariants that, broken, split the chain — on sequences nobody chose.
+//! The two invariants that, broken, split the chain, on sequences nobody chose.
 //!
 //! Every other test in this suite runs a case its author had in mind. That is
 //! the wrong shape for these two, because the failure they guard against is by
@@ -7,8 +7,8 @@
 //!
 //! The first invariant is that undoing a block puts the state back exactly as
 //! it stood. `disconnect_block` is written as the step-by-step inverse of
-//! `connect_block`, and nothing but two length assertions — which a release
-//! build compiles out — checks that it is. An asymmetry there does not look
+//! `connect_block`, and nothing but two length assertions, which a release
+//! build compiles out, checks that it is. An asymmetry there does not look
 //! like a bug at the node that has it: it looks like the rest of the network
 //! being wrong.
 //!
@@ -21,9 +21,9 @@
 //! shape `cairn-net`'s fuzz campaigns already use, so a failure names a seed
 //! and an index rather than a run that cannot be had again. The hot capacity
 //! is set low so that notes fall to the cold set, the grace window fills, and
-//! proofs are needed — the interaction the design review named as the least
-//! covered part of the system. What was actually reached is asserted at the
-//! end of each test, because a generator that quietly stopped producing
+//! proofs are needed, which is the interaction the design review named as the
+//! least covered part of the system. What was actually reached is asserted at
+//! the end of each test, because a generator that quietly stopped producing
 //! spends would leave both of these passing while checking nothing.
 
 #![allow(
@@ -175,7 +175,7 @@ struct Reached {
 /// Where a note sits decides how it is spent: still hot, or fallen but inside
 /// the grace window, and it goes in by identifier alone; fallen out of it, and
 /// it needs its position and a proof. Reading that from the state rather than
-/// tracking it here is deliberate — a spend built on this test's idea of where
+/// tracking it here is deliberate: a spend built on this test's idea of where
 /// a note sits would test this test.
 fn draw_transfers(
     state: &LedgerState,
@@ -196,7 +196,7 @@ fn draw_transfers(
         // Half the draws go looking for a note that has left the grace window,
         // because a uniform draw almost never finds one: a note is spent within
         // a few blocks of being made, and the window is sixty four deep. The
-        // bias is deliberate and it is the point — the cold path is the one
+        // bias is deliberate and it is the point: the cold path is the one
         // nothing else here covers, and a generator that reaches it twice in a
         // thousand blocks has not covered it either.
         let picked = if rng.next() % 2 == 0 {
@@ -259,8 +259,8 @@ fn draw_transfers(
 
 /// Mines and connects one block, or gives up on this one and says so.
 ///
-/// Assembly can refuse for reasons that are not what is under test — a block
-/// too large, a height that overflowed — and a sequence that hit one of those
+/// Assembly can refuse for reasons that are not what is under test (a block
+/// too large, a height that overflowed), and a sequence that hit one of those
 /// is not a failure, it is a sequence with one block fewer.
 fn advance(
     state: &mut LedgerState,
@@ -350,7 +350,7 @@ fn undoing_any_sequence_of_blocks_restores_the_state_exactly() {
         );
 
         // Backwards, one at a time. Each step has to land on the fingerprint
-        // taken before that very block went on — not merely on something that
+        // taken before that very block went on, not merely on something that
         // hashes the same.
         for (before, block, connected) in applied.iter().rev() {
             disconnect_block(&mut state, connected);
