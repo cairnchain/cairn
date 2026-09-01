@@ -12,6 +12,7 @@
 //! lower bound, which a forger claiming *more* work satisfies for free.
 
 #![allow(
+    clippy::too_many_lines,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,

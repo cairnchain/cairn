@@ -48,7 +48,7 @@ fn a_twin_with_its_signatures_removed_does_not_lock_the_real_one_out() {
     let payee = wallet(2);
 
     let mut state = LedgerState::new();
-    let mut store = ChainStore::new(params.clone());
+    let mut store = ChainStore::new(params);
     let mut clock = NOW;
     for _ in 0..3 {
         let height = state.next_height().unwrap();
@@ -66,7 +66,6 @@ fn a_twin_with_its_signatures_removed_does_not_lock_the_real_one_out() {
     let (id, entry) = state
         .hot_notes()
         .find(|(_, entry)| entry.note.owner == miner.public_key())
-        .map(|(id, entry)| (id, entry))
         .expect("the miner was paid");
     let note = entry.note;
     let half = note.value.as_pebbles() / 2;

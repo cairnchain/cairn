@@ -51,14 +51,47 @@ const FIRST_ANSWER_PATIENCE: u64 = 30;
 /// the serving side, so an honest one on a slow link fits well inside this.
 const ATTEMPT_PATIENCE: u64 = 180;
 
-/// Seconds after the first successful weighing before unshown heavier claims
-/// stop holding the node off the chain it has proved.
+/// Seconds after the first successful weighing before the node stops handing
+/// out turns to claims nobody has backed.
 ///
 /// Claims are chased heaviest first and each failed one stops counting, so
 /// this only matters against a supply of fresh claims from fresh addresses.
-/// However many arrive, once this has passed the node takes the heaviest
-/// chain anybody actually showed it.
+/// However many arrive, once this has passed no unshown claim is given a turn
+/// it did not already have, and the node takes the heaviest chain anybody
+/// actually showed it as soon as the one attempt still in flight is over.
 const PROVEN_PATIENCE: u64 = 120;
+
+/// Seconds after the first successful weighing before the last claim owed a
+/// turn stops being owed one.
+///
+/// The turns come out of one budget shared by every claim that was standing
+/// when the proof landed, not out of a budget each. A budget each was the
+/// shape that made the wait grow with the number of connections a stranger
+/// held: each claim had to be asked and had to run its own answering window
+/// out before the node might commit, so forty seven addresses bought forty
+/// seven windows, and dribbling rather than going quiet bought six times that
+/// again. One budget is one number. However many claims arrive, the last turn
+/// is handed out by this moment, and nothing a stranger can buy moves it.
+///
+/// It is the patience above plus one answering window, because whoever is at
+/// the head of the queue when the patience runs out is owed a turn and not a
+/// formality: a claim asked at the last moment gets the window everybody else
+/// got.
+const OWED_PATIENCE: u64 = PROVEN_PATIENCE.saturating_add(FIRST_ANSWER_PATIENCE);
+
+/// The longest, in seconds, that a node can be held off a chain it has already
+/// proved, whatever it is told and by however many strangers.
+///
+/// The budget above, and then the one attempt that may still be in flight when
+/// it ends: an attempt that is delivering is not words, and cutting a peer off
+/// mid-handover to meet a deadline is how the node would lose the honest
+/// heavier chain it was waiting for. Nothing in either term counts claims, so
+/// a stranger pays the same wait with one address as with a full peer table.
+///
+/// Stated here rather than left to be worked out because it is the property
+/// the whole patience exists for, and `tests/audit_owed_a_turn.rs` measures a
+/// running chooser against it.
+pub const HELD_OFF_AT_MOST: u64 = OWED_PATIENCE.saturating_add(ATTEMPT_PATIENCE);
 
 /// Seconds before a peer whose claim already failed is worth asking again,
 /// once nobody with an unbroken claim is left.
@@ -345,7 +378,10 @@ impl Chooser {
         // was never once asked has not refused anything, and shutting it out
         // on a deadline it never got a turn in is how a stranger with a
         // handful of addresses made a node adopt the lighter of two chains it
-        // could see. The ceiling now only closes on claims that were tried.
+        // could see. So the ceiling stays open to a claim still owed a turn,
+        // and the turns come out of one shared budget rather than one each,
+        // which is what keeps the whole thing bounded by [`HELD_OFF_AT_MOST`]
+        // however many claims there are.
         let ceiling = self.proven.and_then(|(best, at)| {
             (now.saturating_sub(at) >= PROVEN_PATIENCE).then_some((best, at))
         });
@@ -363,7 +399,6 @@ impl Chooser {
         Step::Ask(peer, approach)
     }
 
-    /// The heaviest claim still standing, and how to ask about it.
     /// Whether a claim is still owed the turn the patience is about to close.
     ///
     /// The patience exists so that words alone cannot hold a node off its
@@ -384,11 +419,26 @@ impl Chooser {
     /// runs out. Being asked is not the same as having answered, so the turn
     /// is owed until that window closes, not from the moment the question
     /// leaves.
+    ///
+    /// The two halves are counted differently, and that is what keeps the
+    /// repair from costing the bound it replaced. A turn already handed out
+    /// runs its own window, because that is what makes it a turn. A turn not
+    /// yet handed out comes out of [`OWED_PATIENCE`], which the whole set
+    /// shares: written the other way, with every claim owed a window of its
+    /// own, a stranger holding forty seven connections bought forty seven of
+    /// them one after another and kept a joining node off the network for
+    /// twenty three minutes, or for two hours by dribbling instead of going
+    /// quiet. Whoever has not been reached by the time the shared budget is
+    /// spent has had the node's whole attention for two minutes and is out of
+    /// it.
     fn owed_a_turn(claim: &Claim, proven_at: u64, now: u64) -> bool {
-        claim.heard <= proven_at
-            && claim
-                .tried
-                .is_none_or(|at| now.saturating_sub(at) < FIRST_ANSWER_PATIENCE)
+        if claim.heard > proven_at {
+            return false;
+        }
+        match claim.tried {
+            Some(at) => now.saturating_sub(at) < FIRST_ANSWER_PATIENCE,
+            None => now.saturating_sub(proven_at) < OWED_PATIENCE,
+        }
     }
 
     fn pick(&self, ceiling: Option<(u128, u64)>, now: u64) -> Option<(u64, Approach)> {

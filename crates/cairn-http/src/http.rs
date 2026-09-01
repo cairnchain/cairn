@@ -8,7 +8,7 @@
 //!
 //! A thread each is only affordable because a connection is bounded three
 //! ways: how many are served at once, how many come from one address, and how
-//! long any one of them may take to ask its question.
+//! long any one of them may take to ask its question and take its answer.
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, Write};
@@ -61,11 +61,49 @@ const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// go the moment it connects, so ten seconds is already thousands of times
 /// what an honest one needs on a bad link. Past that the caller is not slow,
 /// it is not coming.
+///
+/// It is the first part of what a connection may cost. The rest is
+/// [`ANSWER_DEADLINE`], because a caller that asks properly and then takes the
+/// answer back in sips holds a slot exactly as well as one that never finishes
+/// asking: `WRITE_TIMEOUT` is per write, and every byte the caller consents to
+/// take resets it.
 pub const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
+/// The slowest link an answer is written for, in bytes a second.
+///
+/// Four kilobytes a second is thirty two kilobits, under any link somebody is
+/// reading a website on: a phone on the oldest data network still in service
+/// manages several times it, and anything genuinely slower would not have got
+/// its request head in under the deadline that let it this far.
+const SLOWEST_LINK: u64 = 4 * 1024;
+/// The most time a caller can be given to take its answer, however long the
+/// answer is.
+///
+/// The asking half can be a flat number because a request head is a few
+/// hundred bytes whatever it asks for. An answer is not, so what it is worth
+/// is worked out from its length at the rate above, and this is the ceiling on
+/// that. Thirty seconds is a hundred and twenty kilobytes at that rate, and
+/// the largest thing this server sends is well inside it: the biggest document
+/// compiled in is some fifty kilobytes, and the API pages are capped at a
+/// couple of hundred rows. So for everything actually served the length is
+/// what decides, and this only ever catches an answer nobody has written yet.
+///
+/// A ceiling as well as a rate, because a length is only a bound while
+/// somebody keeps the answers short. And the rate is read off the length
+/// rather than off the writing, because nothing here can see how much of an
+/// answer the caller has really taken: what a write reports is what the kernel
+/// accepted, and a loopback socket swallows the best part of a megabyte before
+/// it blocks, so paying by bytes written would hand a caller that read nothing
+/// at all several minutes for the buffering.
+pub const ANSWER_DEADLINE: Duration = Duration::from_secs(30);
 /// Bytes a form body may reach. A spend names an address, an amount and a
 /// fee; anything past this is not one.
 const MAX_BODY_BYTES: usize = 4096;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long to leave a socket alone that has no room for more of the answer.
+///
+/// Short enough that the deadline is what ends a connection rather than this,
+/// long enough that a caller reading at a human pace is not a spin.
+const WRITE_POLL: Duration = Duration::from_millis(50);
 
 /// What a caller asked for, once the head has been read.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -201,9 +239,12 @@ where
 
         let host = stream.peer_addr().ok().map(|address| address.ip());
         let Some(slot) = slots.take(host) else {
-            let mut stream = stream;
+            let _ = stream.set_nonblocking(true);
             let _ = write_response(
-                &mut stream,
+                &mut Timed {
+                    stream: &stream,
+                    until: deadline(accepted, Duration::ZERO),
+                },
                 &Response::error(503, "too many connections"),
                 true,
             );
@@ -215,7 +256,7 @@ where
         let _ = thread::Builder::new()
             .name("explorer-http".to_owned())
             .spawn(move || {
-                handle(stream, answer.as_ref(), accepted);
+                handle(&stream, answer.as_ref(), accepted);
                 // Mentioned so the closure owns the slot, which is what
                 // gives it back on the ways out that never reach this line.
                 drop(slot);
@@ -314,16 +355,14 @@ impl Drop for Held {
     }
 }
 
-fn handle<F>(mut stream: TcpStream, answer: &F, accepted: Instant)
+fn handle<F>(stream: &TcpStream, answer: &F, accepted: Instant)
 where
     F: Fn(&Request) -> Response,
 {
-    let until = accepted
-        .checked_add(REQUEST_DEADLINE)
-        .unwrap_or_else(Instant::now);
+    let asking = deadline(accepted, Duration::ZERO);
     let response = match read_request(&mut BufReader::new(Timed {
-        stream: &stream,
-        until,
+        stream,
+        until: asking,
     })) {
         Ok(Some(request)) => {
             let head_only = request.head_only;
@@ -332,33 +371,106 @@ where
         Ok(None) => (Response::error(405, "only GET and HEAD are served"), false),
         Err(status) => (Response::error(status, "malformed request"), false),
     };
-    let _ = write_response(&mut stream, &response.0, response.1);
+    let sent = if response.1 { 0 } else { response.0.body.len() };
+    let until = deadline(accepted, answering(sent));
+    // A blocking write comes back only when the whole slice has gone, and the
+    // socket's own timeout is reset by every byte that moves, so one write of
+    // a long answer sails past the deadline while the caller sips at it. A
+    // socket that refuses to block is what puts the deadline back in charge.
+    let _ = stream.set_nonblocking(true);
+    let _ = write_response(&mut Timed { stream, until }, &response.0, response.1);
     let _ = stream.shutdown(Shutdown::Both);
 }
 
-/// A reader that stops at a fixed moment, however slowly the bytes come.
+/// When a connection accepted at `accepted` is over, given `answering` to say
+/// what is written back.
 ///
-/// The socket's own timeout is per read, so a caller that sends a byte
-/// whenever it is about to run out resets it forever and keeps its slot for
-/// almost nothing. This one is fixed when the connection is accepted. It also
-/// hands the socket whatever is left of that budget as its own timeout, so a
-/// caller that goes quiet at the last moment cannot buy another read timeout's
-/// worth of silence on top.
+/// One moment for the whole connection rather than one for each half, so that
+/// a caller cannot spend the asking budget slowly and then start again on the
+/// answering one.
+fn deadline(accepted: Instant, answering: Duration) -> Instant {
+    accepted
+        .checked_add(REQUEST_DEADLINE)
+        .and_then(|at| at.checked_add(answering))
+        .unwrap_or_else(Instant::now)
+}
+
+/// What an answer of `bytes` is worth in time, which is how long it takes on
+/// the slowest link this server writes for, and never more than
+/// [`ANSWER_DEADLINE`].
+///
+/// Worked out from the length rather than from the writing, so that the number
+/// is settled before a byte of it moves and nothing the caller does can add to
+/// it. An answer of a few hundred bytes is worth almost nothing and is held to
+/// the asking deadline alone; the long pages are worth their length; and past
+/// the ceiling nothing is worth any more.
+fn answering(bytes: usize) -> Duration {
+    let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+    Duration::from_secs(bytes.checked_div(SLOWEST_LINK).unwrap_or(0)).min(ANSWER_DEADLINE)
+}
+
+/// A reader and a writer that stop at a fixed moment, however slowly the bytes
+/// come or go.
+///
+/// The socket's own timeouts are per read and per write, so a caller that
+/// moves a byte whenever it is about to run out resets them forever and keeps
+/// its slot for almost nothing. It works in both directions: dribble the
+/// request, or ask properly and then take the answer back a byte at a time.
+/// This moment is fixed before either half starts and nothing the caller does
+/// moves it. It also hands the socket whatever is left of that budget as its
+/// own timeout, so a caller that goes quiet at the last moment cannot buy
+/// another timeout's worth of silence on top.
+///
+/// The reading half checks the moment a byte at a time, which is how the head
+/// is read anyway. The writing half cannot: one write of a long answer is one
+/// call that comes back when the whole slice has gone, and the timeout under
+/// it is reset by every byte that moves, so the moment would only be looked at
+/// once. So the socket is asked not to block and the waiting is done here,
+/// where the moment is.
 #[derive(Debug)]
 struct Timed<'a> {
     stream: &'a TcpStream,
     until: Instant,
 }
 
-impl io::Read for Timed<'_> {
-    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+impl Timed<'_> {
+    /// What is left of the budget, or nothing when it is spent.
+    fn left(&self) -> io::Result<Duration> {
         let left = self.until.saturating_duration_since(Instant::now());
         if left.is_zero() {
             return Err(io::Error::from(io::ErrorKind::TimedOut));
         }
+        Ok(left)
+    }
+}
+
+impl io::Read for Timed<'_> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let left = self.left()?;
         let _ = self.stream.set_read_timeout(Some(left.min(READ_TIMEOUT)));
         let mut source = self.stream;
         source.read(out)
+    }
+}
+
+impl Write for Timed<'_> {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        loop {
+            let left = self.left()?;
+            // Set as well as polled: a socket that could not be put into
+            // non-blocking mode has nothing else to stop it.
+            let _ = self.stream.set_write_timeout(Some(left.min(WRITE_TIMEOUT)));
+            let mut sink = self.stream;
+            match sink.write(data) {
+                Err(error) if would_wait(&error) => thread::sleep(WRITE_POLL.min(left)),
+                outcome => return outcome,
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let mut sink = self.stream;
+        sink.flush()
     }
 }
 
@@ -468,7 +580,15 @@ fn read_line<R: io::Read>(reader: &mut R, consumed: &mut usize) -> Result<String
     }
 }
 
-fn write_response(stream: &mut TcpStream, response: &Response, head_only: bool) -> io::Result<()> {
+/// Whether a socket said "not now" rather than "no".
+fn would_wait(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+    )
+}
+
+fn write_response<W: Write>(out: &mut W, response: &Response, head_only: bool) -> io::Result<()> {
     let mut head = String::new();
     head.push_str("HTTP/1.1 ");
     head.push_str(&response.status.to_string());
@@ -487,11 +607,11 @@ fn write_response(stream: &mut TcpStream, response: &Response, head_only: bool) 
     head.push_str(SECURITY_HEADERS);
     head.push_str("connection: close\r\n\r\n");
 
-    stream.write_all(head.as_bytes())?;
+    out.write_all(head.as_bytes())?;
     if !head_only {
-        stream.write_all(&response.body)?;
+        out.write_all(&response.body)?;
     }
-    stream.flush()
+    out.flush()
 }
 
 /// Sent with every answer.
@@ -567,10 +687,13 @@ pub fn bind(address: SocketAddr) -> io::Result<TcpListener> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{percent_decode, Request, Slots, MAX_CONNECTIONS, MAX_PER_HOST};
+    use super::{
+        answering, percent_decode, Request, Slots, ANSWER_DEADLINE, MAX_CONNECTIONS, MAX_PER_HOST,
+    };
     use std::fmt::Write as _;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
+    use std::time::Duration;
 
     fn request(path: &str, query: &str) -> Request {
         Request {
@@ -718,6 +841,32 @@ mod tests {
         let request = request("/api/block/17", "");
         assert_eq!(request.after("/api/block/"), Some("17"));
         assert_eq!(request.after("/api/tx/"), None);
+    }
+
+    /// What an answer is worth in time is its length at the slowest link, so a
+    /// short one is worth almost nothing and cannot be spun out into a held
+    /// slot, and the pages this server really sends are worth their length
+    /// rather than the ceiling.
+    #[test]
+    fn an_answer_is_worth_its_length_and_no_more_than_the_ceiling() {
+        assert_eq!(answering(0), Duration::ZERO, "an empty body buys no time");
+        assert_eq!(
+            answering(500),
+            Duration::ZERO,
+            "and neither does a short one"
+        );
+        let seconds = |bytes: usize| answering(bytes).as_secs();
+        assert_eq!(
+            seconds(54 * 1024),
+            13,
+            "the largest document compiled in, at four kilobytes a second"
+        );
+        assert_eq!(seconds(4 * 1024 * 4), 4, "four seconds of the slowest link");
+        assert_eq!(
+            answering(usize::MAX),
+            ANSWER_DEADLINE,
+            "and nothing is worth more than the ceiling"
+        );
     }
 
     /// One machine on the open network cannot be the whole flood.

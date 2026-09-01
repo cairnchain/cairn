@@ -90,7 +90,7 @@ fn a_payment_undone_by_a_reorganisation_goes_back_in_the_pool() {
     let params = params();
 
     let mut source = Source::new();
-    let mut store = ChainStore::new(params.clone());
+    let mut store = ChainStore::new(params);
     for _ in 0..3 {
         let block = source.mine(&miner, Vec::new());
         store.add_block(block, NOW).unwrap();
@@ -160,7 +160,7 @@ fn a_payment_the_winning_branch_also_carries_does_not_come_back() {
     let params = params();
 
     let mut source = Source::new();
-    let mut store = ChainStore::new(params.clone());
+    let mut store = ChainStore::new(params);
     for _ in 0..3 {
         let block = source.mine(&miner, Vec::new());
         store.add_block(block, NOW).unwrap();
@@ -185,7 +185,7 @@ fn a_payment_the_winning_branch_also_carries_does_not_come_back() {
     // The same ledger, so the same notes: this branch carries the payment too,
     // and then goes further.
     let mut rival = Source {
-        params: params.clone(),
+        params,
         state: source.state.clone(),
         clock: source.clock,
     };

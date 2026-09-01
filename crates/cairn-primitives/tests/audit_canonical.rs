@@ -17,9 +17,8 @@
 
 use cairn_primitives::amount::Amount;
 use cairn_primitives::codec::{CodecError, Decode, Encode, MAX_SEQUENCE_LEN};
-use cairn_primitives::hash::{hash, Domain, Hash32, Hasher, HASH_LEN};
 use cairn_primitives::hex;
-use cairn_primitives::merkle::{merkle_leaf, merkle_root};
+use cairn_primitives::Hash32;
 
 /// Deterministic generator, so any failure here can be replayed exactly.
 struct Rng(u64);
@@ -48,25 +47,6 @@ impl Rng {
         } else {
             (self.next_u64() as usize) % bound
         }
-    }
-}
-
-/// The direction people skip: whatever the decoder took, the encoder must
-/// write back byte for byte.
-fn re_encodes_to_itself<T: Encode + Decode>(bytes: &[u8]) -> bool {
-    match T::decode(bytes) {
-        Ok(value) => {
-            let written = value.encode();
-            assert_eq!(
-                written,
-                bytes,
-                "decoder accepted {} but its encoder writes {}",
-                hex::encode(bytes),
-                hex::encode(&written)
-            );
-            true
-        }
-        Err(_) => false,
     }
 }
 
