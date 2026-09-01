@@ -41,8 +41,13 @@ fn wallet(seed: u8) -> SecretKey {
     SecretKey::from_bytes(&[seed; 32])
 }
 
+/// A reward is spendable at once here.
+///
+/// These tests all spend a coinbase shortly after mining it, and none of them
+/// is about the wait that normally stands between the two. What the wait is
+/// worth is audited in `cairn-ledger/tests/audit_coinbase_maturity.rs`.
 fn params() -> ConsensusParams {
-    ConsensusParams::testnet()
+    ConsensusParams::testnet().with_coinbase_maturity(0)
 }
 
 /// Produces real (mined, valid) blocks on a private copy of the ledger.

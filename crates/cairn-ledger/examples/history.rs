@@ -29,7 +29,11 @@ const BUSY: usize = 64;
 /// Validates `SAMPLE` blocks carrying `transfers_each` transfers, and reports
 /// the cost of one block.
 fn measure(transfers_each: usize) -> (usize, f64, f64) {
-    let params = ConsensusParams::testnet();
+    // A reward is spendable at once here. What is being measured is the cost
+    // of validating a busy block, and every transfer in one of these spends a
+    // coinbase paid a few blocks earlier; making them wait a thousand blocks
+    // would measure the same block after a longer setup.
+    let params = ConsensusParams::testnet().with_coinbase_maturity(0);
     let miner = SecretKey::from_bytes(&[1; 32]);
     let spender = SecretKey::from_bytes(&[2; 32]);
     let mut state = LedgerState::new();

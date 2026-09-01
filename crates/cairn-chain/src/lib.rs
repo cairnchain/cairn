@@ -180,6 +180,17 @@ pub const MAX_REORG_DEPTH: usize = 1_024;
 /// number moves again, this stops the build rather than the network.
 const _: () = assert!(cairn_ledger::handover::BURIAL <= MAX_REORG_DEPTH as u64);
 
+/// A coinbase becomes spendable when its block can no longer be undone, and
+/// this is where "can no longer be undone" is decided, so the two numbers have
+/// to be the same one.
+///
+/// Written down for the same reason as the line above: they live in different
+/// crates, and the whole claim the maturity rule makes is that a reward cannot
+/// be spent while the block that paid it is still reachable by a
+/// reorganisation. A maturity shorter than this depth quietly stops being that
+/// claim, and nothing else would say so.
+const _: () = assert!(cairn_ledger::validation::COINBASE_MATURITY == MAX_REORG_DEPTH as u64);
+
 /// Blocks kept off the followed branch before the unreachable ones are
 /// dropped.
 ///

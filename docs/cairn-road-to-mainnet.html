@@ -220,7 +220,7 @@
       <div>
         <h3>Ce qui tourne en ce moment</h3>
         <ul>
-          <li><span class="mono">testnet-5</span>, ouvert le 1er septembre</li>
+          <li><span class="mono">testnet-6</span>, ouvert le 1er septembre</li>
           <li><span class="mono">cairnchain.org</span> le site, sous certificat</li>
           <li>Trois serveurs chez trois hébergeurs</li>
           <li>Un mineur, la chaîne avance à un bloc la minute</li>
@@ -239,7 +239,7 @@
           Une mise à jour ne touche à aucun réglage : la machine garde le
           réseau, le port, les pairs et le minage qu'elle avait. Pour en
           changer un, on le nomme ; pour le remettre par défaut, on le nomme
-          vide. Rien à effacer au passage en testnet-5 : un nœud met de côté
+          vide. Rien à effacer au passage en testnet-6 : un nœud met de côté
           les blocs de l'ancienne chaîne et repart du nouveau premier bloc.
         </p>
       </div>
@@ -313,16 +313,25 @@
       <span class="mono">testnet-5</span> le 1er septembre : un inconnu pouvait
       livrer à un nouveau venu une chaîne que personne n'avait minée, pour un
       seul calcul, et un mineur pouvait faire tomber la difficulté à zéro en
-      datant ses blocs en avance. La seconde change la difficulté que chaque
-      bloc doit porter, donc aucun bloc miné sous l'ancienne règle n'est
-      valide sous la nouvelle.
+      datant ses blocs en avance. Puis
+      <span class="mono">testnet-6</span> le même jour, et celui-là est le plus
+      instructif des trois : un registre dont la fenêtre de grâce contenait un
+      billet dépensé ne pouvait pas être transmis du tout. Comme cette fenêtre
+      se renouvelle en douze blocs quand les blocs sont pleins, rejoindre le
+      réseau sans rejouer la chaîne entière était cassé en permanence, ce qui
+      est précisément la chose que tout ce travail existe pour éviter. Deux
+      autres règles ont changé avec elle : une récompense de bloc ne peut plus
+      bouger avant que son bloc ne soit hors d'atteinte d'une réorganisation,
+      et la racine d'état porte désormais la masse monétaire, pour que de la
+      monnaie sortie de rien devienne une divergence au lieu d'une chose sur
+      laquelle tous les nœuds s'accordent.
     </p>
 
     <div class="tasks">
       <div class="task finished">
         <div class="task-what">
           <b>Le protocole et les programmes</b>
-          <span>Nœud, portefeuille, explorateur, site. Le premier bloc de testnet-5 est miné et inscrit dans le code.</span>
+          <span>Nœud, portefeuille, explorateur, site. Le premier bloc de testnet-6 est miné et inscrit dans le code.</span>
         </div>
         <div class="who me">moi</div>
         <div class="cost">terminé</div>

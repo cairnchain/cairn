@@ -5,6 +5,10 @@ use std::fmt;
 /// Number of indivisible units in one CAIRN.
 pub const PEBBLES_PER_CAIRN: u64 = 100_000_000;
 
+/// What an amount is written with, so printing and parsing cannot drift
+/// apart again.
+const UNIT: &str = " CAIRN";
+
 /// A quantity of money, counted in pebbles.
 ///
 /// Every operation is checked. The type deliberately implements no `Add` or
@@ -57,11 +61,19 @@ impl Amount {
     /// Parses a decimal amount in whole CAIRN, such as `12.5`.
     ///
     /// The counterpart of what [`Display`](std::fmt::Display) prints, so an
-    /// amount a person reads on screen can be typed straight back in. No
-    /// separators, no sign, and no more than eight decimals, because a ninth
-    /// would be silently discarded and money is not a place for that.
+    /// amount a person reads on screen can be typed straight back in. That
+    /// sentence was here before the unit was, and was false for as long as it
+    /// was: `Display` writes `1.50000000 CAIRN` and this refused it, because
+    /// the fraction it split off still had the unit stuck to it. Somebody
+    /// copying a figure out of the wallet's own page and pasting it into the
+    /// send box was told it was not an amount of CAIRN. The unit is taken off
+    /// if it is there, and the sentence is true again.
+    ///
+    /// No separators, no sign, and no more than eight decimals, because a
+    /// ninth would be silently discarded and money is not a place for that.
     pub fn from_cairn(text: &str) -> Option<Self> {
         let text = text.trim();
+        let text = text.strip_suffix(UNIT.trim()).map_or(text, str::trim_end);
         let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
         if whole.is_empty() && fraction.is_empty() {
             return None;
@@ -103,7 +115,7 @@ impl fmt::Display for Amount {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let whole = self.0.checked_div(PEBBLES_PER_CAIRN).unwrap_or_default();
         let fraction = self.0.checked_rem(PEBBLES_PER_CAIRN).unwrap_or_default();
-        write!(f, "{whole}.{fraction:08} CAIRN")
+        write!(f, "{whole}.{fraction:08}{UNIT}")
     }
 }
 

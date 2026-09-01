@@ -25,8 +25,15 @@ use cairn_primitives::Amount;
 const NOW: u64 = 1_000_000_000;
 const CAPACITY: usize = 8;
 
+/// A reward is spendable at once here.
+///
+/// These tests all spend a coinbase shortly after mining it, and none of them
+/// is about the wait that normally stands between the two. What the wait is
+/// worth is audited in `audit_coinbase_maturity.rs`.
 fn params() -> ConsensusParams {
-    ConsensusParams::testnet().with_hot_capacity(CAPACITY)
+    ConsensusParams::testnet()
+        .with_hot_capacity(CAPACITY)
+        .with_coinbase_maturity(0)
 }
 
 fn wallet(seed: u8) -> SecretKey {
@@ -145,7 +152,8 @@ fn the_hot_set_never_grows_past_its_cap() {
 fn a_block_may_not_push_out_more_notes_than_the_rules_allow() {
     let params = ConsensusParams::testnet()
         .with_hot_capacity(CAPACITY)
-        .with_max_evictions(2);
+        .with_max_evictions(2)
+        .with_coinbase_maturity(0);
     let miner = wallet(1);
     let mut state = LedgerState::archiving();
     let notes = mine_empty(&mut state, &params, &miner, CAPACITY as u64);
@@ -358,9 +366,15 @@ fn a_note_spent_out_of_the_grace_window_cannot_be_spent_again() {
     };
 
     mine(&mut state, &params, &miner, vec![spend(&wallet(2))]);
-    // Still inside the window, which is exactly the case worth checking: the
-    // window makes a fallen note spendable, and must not make a spent one so.
-    assert!(state.within_grace(&fallen).is_some());
+    // The spend takes the note out of the window on the way through, which is
+    // the case worth checking: the window makes a fallen note spendable
+    // without a proof, and a note that has been spent may not be spent at all.
+    // It used to stay until it aged out, with its leaf emptied and the proof
+    // let go of, so the window went on naming a note nothing could prove.
+    assert!(
+        state.within_grace(&fallen).is_none(),
+        "a spent note has no place in the window"
+    );
 
     let coinbase = CoinbaseTransaction::new(
         state.next_height().unwrap(),

@@ -24,6 +24,15 @@ const NOW: u64 = 2_000_000_000;
 const SPACING: u64 = 600;
 const MINING_ATTEMPTS: u64 = 1 << 22;
 
+/// A reward is spendable at once here.
+///
+/// These tests all spend a coinbase shortly after mining it, and none of them
+/// is about the wait that normally stands between the two. What the wait is
+/// worth is audited in `audit_coinbase_maturity.rs`.
+fn params() -> ConsensusParams {
+    ConsensusParams::testnet().with_coinbase_maturity(0)
+}
+
 fn wallet(seed: u8) -> SecretKey {
     SecretKey::from_bytes(&[seed; 32])
 }
@@ -71,7 +80,7 @@ fn coinbase_note(block: &Block, params: &ConsensusParams, miner: &SecretKey) -> 
 
 #[test]
 fn mining_finds_a_nonce_at_a_real_difficulty() {
-    let mut params = ConsensusParams::testnet();
+    let mut params = params();
     params.genesis_difficulty = 4_096;
     let miner = wallet(1);
     let mut state = LedgerState::archiving();
@@ -90,7 +99,7 @@ fn mining_finds_a_nonce_at_a_real_difficulty() {
 
 #[test]
 fn a_block_without_enough_work_is_refused() {
-    let mut params = ConsensusParams::testnet();
+    let mut params = params();
     params.genesis_difficulty = 4_096;
     let miner = wallet(1);
     let mut state = LedgerState::archiving();
@@ -118,7 +127,7 @@ fn a_block_without_enough_work_is_refused() {
 
 #[test]
 fn a_block_cannot_choose_its_own_difficulty() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let miner = wallet(1);
     let mut state = LedgerState::archiving();
 
@@ -139,7 +148,7 @@ fn a_block_cannot_choose_its_own_difficulty() {
 
 #[test]
 fn a_block_backdated_below_the_recent_median_is_refused() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let miner = wallet(1);
     let mut state = LedgerState::archiving();
 
@@ -172,7 +181,7 @@ fn a_block_backdated_below_the_recent_median_is_refused() {
 
 #[test]
 fn undoing_a_block_restores_the_state_exactly() {
-    let params = ConsensusParams::testnet().with_hot_capacity(4);
+    let params = params().with_hot_capacity(4);
     let miner = wallet(1);
     let alice = wallet(2);
     let mut state = LedgerState::archiving();
@@ -241,7 +250,7 @@ fn undoing_a_block_restores_the_state_exactly() {
 
 #[test]
 fn several_blocks_undo_in_reverse_order() {
-    let params = ConsensusParams::testnet().with_hot_capacity(4);
+    let params = params().with_hot_capacity(4);
     let miner = wallet(1);
     let mut state = LedgerState::archiving();
 
@@ -274,7 +283,7 @@ fn several_blocks_undo_in_reverse_order() {
 
 #[test]
 fn undoing_restores_a_header_that_had_left_the_window() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let miner = wallet(1);
     let mut state = LedgerState::archiving();
 
@@ -302,7 +311,7 @@ fn undoing_restores_a_header_that_had_left_the_window() {
 
 #[test]
 fn a_reapplied_block_produces_the_same_state() {
-    let params = ConsensusParams::testnet().with_hot_capacity(4);
+    let params = params().with_hot_capacity(4);
     let miner = wallet(1);
     let mut state = LedgerState::archiving();
 
@@ -326,7 +335,7 @@ fn a_reapplied_block_produces_the_same_state() {
 #[test]
 fn the_reward_follows_the_schedule_rather_than_the_miner() {
     // A halving every four blocks, so the whole schedule fits in a test.
-    let mut params = ConsensusParams::testnet();
+    let mut params = params();
     params.halving_interval = 4;
     params.tail_reward = Amount::from_cairn("3").unwrap();
 
@@ -378,13 +387,35 @@ fn the_reward_follows_the_schedule_rather_than_the_miner() {
     ));
 }
 
+/// A network whose first block this test mined, so the two rules below can be
+/// checked without depending on bytes that are published elsewhere.
+///
+/// They used to be checked against devnet's own first block, which read well
+/// and tied two rules to a block that only changes when the network is
+/// renumbered. What is being tested is the pinning and the opening, neither of
+/// which is about which block was pinned.
+fn a_network_of_its_own(miner: &SecretKey) -> (ConsensusParams, Block) {
+    let plain = params();
+    let coinbase =
+        CoinbaseTransaction::new(0, vec![Note::new(plain.initial_reward, miner.public_key())]);
+    let first =
+        assemble_block(&LedgerState::new(), coinbase, Vec::new(), &plain, 90_000, 0).unwrap();
+    let pinned = ConsensusParams {
+        genesis: Some(first.id()),
+        opens_at: first.header.timestamp,
+        ..plain
+    };
+    (pinned, first)
+}
+
 #[test]
 fn a_pinned_network_refuses_a_chain_that_starts_elsewhere() {
-    let params = ConsensusParams::for_network("devnet").expect("devnet exists");
     let miner = wallet(1);
+    let (params, opening) = a_network_of_its_own(&miner);
     let mut state = LedgerState::new();
 
-    // A first block of one's own, perfectly valid on its own terms.
+    // A first block of one's own, perfectly valid on its own terms: the same
+    // block a minute later, which is a different block.
     let coinbase = CoinbaseTransaction::new(
         0,
         vec![Note::new(params.initial_reward, miner.public_key())],
@@ -411,18 +442,15 @@ fn a_pinned_network_refuses_a_chain_that_starts_elsewhere() {
     );
 
     // The one the network actually starts from is taken.
-    let opening = cairn_ledger::genesis::block(params.network).expect("devnet has one");
     assert!(connect_block(&mut state, &opening, &params, NOW).is_ok());
     assert_eq!(state.tip().unwrap().id, params.genesis.unwrap());
 }
 
 #[test]
 fn nothing_may_be_dated_before_the_network_opened() {
-    let params = ConsensusParams::for_network("devnet").expect("devnet exists");
     let miner = wallet(1);
+    let (params, opening) = a_network_of_its_own(&miner);
     let mut state = LedgerState::new();
-
-    let opening = cairn_ledger::genesis::block(params.network).unwrap();
     connect_block(&mut state, &opening, &params, NOW).unwrap();
 
     let coinbase = CoinbaseTransaction::new(
@@ -449,7 +477,7 @@ fn nothing_may_be_dated_before_the_network_opened() {
 fn a_first_block_already_takes_real_work() {
     // Otherwise the opening seconds are a race the rest of the world has not
     // been told about yet.
-    for name in ["testnet-5", "devnet"] {
+    for name in ["testnet-6", "devnet"] {
         let params = ConsensusParams::for_network(name).expect("it exists");
         assert!(
             params.genesis_difficulty > 1_000_000,
@@ -475,7 +503,7 @@ mod joining_without_the_whole_chain {
     /// would prove nothing.
     #[test]
     fn a_header_cannot_overstate_the_work_behind_it() {
-        let params = ConsensusParams::testnet();
+        let params = params();
         let miner = wallet(1);
         let mut state = LedgerState::new();
         mine(&mut state, &params, &miner, Vec::new());
@@ -494,7 +522,7 @@ mod joining_without_the_whole_chain {
 
     #[test]
     fn a_header_cannot_understate_the_work_behind_it() {
-        let params = ConsensusParams::testnet();
+        let params = params();
         let miner = wallet(1);
         let mut state = LedgerState::new();
         mine(&mut state, &params, &miner, Vec::new());
@@ -512,7 +540,7 @@ mod joining_without_the_whole_chain {
     /// Work accumulates exactly, block by block.
     #[test]
     fn the_work_a_header_states_is_everything_behind_it() {
-        let params = ConsensusParams::testnet();
+        let params = params();
         let miner = wallet(1);
         let mut state = LedgerState::new();
 
@@ -529,7 +557,7 @@ mod joining_without_the_whole_chain {
     /// this chain did not produce.
     #[test]
     fn a_header_cannot_claim_a_history_it_did_not_follow() {
-        let params = ConsensusParams::testnet();
+        let params = params();
         let miner = wallet(1);
         let mut state = LedgerState::new();
         mine(&mut state, &params, &miner, Vec::new());
@@ -548,7 +576,7 @@ mod joining_without_the_whole_chain {
     /// applied rather than lagging behind it.
     #[test]
     fn the_history_commitment_takes_in_each_block_as_it_lands() {
-        let params = ConsensusParams::testnet();
+        let params = params();
         let miner = wallet(1);
         let mut state = LedgerState::new();
 
@@ -575,7 +603,7 @@ mod joining_without_the_whole_chain {
     /// depends on.
     #[test]
     fn undoing_a_block_puts_the_history_back() {
-        let params = ConsensusParams::testnet();
+        let params = params();
         let miner = wallet(1);
         let mut state = LedgerState::new();
         mine(&mut state, &params, &miner, Vec::new());
@@ -594,7 +622,7 @@ mod joining_without_the_whole_chain {
     /// makes it worth putting in a header at all.
     #[test]
     fn two_nodes_given_the_same_blocks_commit_to_the_same_history() {
-        let params = ConsensusParams::testnet();
+        let params = params();
         let miner = wallet(1);
         let mut ours = LedgerState::new();
         let mut blocks = Vec::new();
@@ -622,7 +650,7 @@ mod joining_without_the_whole_chain {
 /// node actually received.
 #[test]
 fn a_block_larger_than_the_rules_allow_is_refused() {
-    let mut params = ConsensusParams::testnet();
+    let mut params = params();
     // Small enough that a handful of notes passes it, so this test builds a
     // block rather than a gigabyte.
     params.max_block_bytes = 512;

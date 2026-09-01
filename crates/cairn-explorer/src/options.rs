@@ -36,7 +36,7 @@ cairn-explorer, a Cairn node that also serves a website
                          error if a setting is one this build does not
                          accept, which is how a script can find out that a
                          network it was told to use has been retired
-  --network <name>       testnet-5 or devnet (default: testnet-5)
+  --network <name>       testnet-6 or devnet (default: testnet-6)
   --help                 print this and stop
 
 The explorer always keeps the cold set, because answering questions about
@@ -123,7 +123,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         if name == "mainnet" {
             "mainnet does not exist yet: its first block has not been mined".to_owned()
         } else {
-            format!("unknown network `{name}`, try testnet-5 or devnet")
+            format!("unknown network `{name}`, try testnet-6 or devnet")
         }
     })?;
 

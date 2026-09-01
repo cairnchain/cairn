@@ -29,8 +29,13 @@ const ATTEMPTS: u64 = 1 << 22;
 /// other than the floor itself.
 const PLAIN_FEE: u64 = 10_000;
 
+/// A reward is spendable at once here.
+///
+/// These tests all spend a coinbase shortly after mining it, and none of them
+/// is about the wait that normally stands between the two. What the wait is
+/// worth is audited in `cairn-ledger/tests/audit_coinbase_maturity.rs`.
 fn params() -> ConsensusParams {
-    ConsensusParams::testnet()
+    ConsensusParams::testnet().with_coinbase_maturity(0)
 }
 
 fn wallet(seed: u8) -> SecretKey {
@@ -198,6 +203,42 @@ fn a_valid_transfer_is_taken_once() {
     );
     assert_eq!(store.pool_len(), 1);
     assert_eq!(store.pooled(&transfer.id()), Some(&transfer));
+}
+
+/// A spend of a reward that has not matured never reaches the pool either.
+///
+/// The pool is the same rules asked one block early, so a transfer that no
+/// block could carry is refused here rather than waiting for one that will
+/// never come. Whoever sent it is told why, and can send it again once the
+/// wait is over: a transfer's identity does not include its witness, so it is
+/// the same transfer offered again.
+#[test]
+fn a_spend_of_a_reward_that_has_not_matured_never_reaches_the_pool() {
+    let waiting = ConsensusParams::testnet().with_coinbase_maturity(8);
+    let miner = wallet(1);
+    let (mut store, notes) = funded_under(waiting, 3, &miner);
+
+    let early = spend(
+        &waiting,
+        notes[0].0,
+        notes[0].1,
+        &miner,
+        &wallet(2),
+        pebbles(PLAIN_FEE),
+    );
+    assert!(
+        matches!(
+            store.accept_transfer(early.clone()),
+            Err(TransferError::ImmatureCoinbase { matures_at: 8, .. })
+        ),
+        "the pool held a transfer no block could carry"
+    );
+    assert_eq!(store.pool_len(), 0);
+
+    // The same transfer, once the wait is over, is taken.
+    let (mut store, _) = funded_under(waiting, 9, &miner);
+    assert_eq!(store.accept_transfer(early), Ok(true));
+    assert_eq!(store.pool_len(), 1);
 }
 
 #[test]

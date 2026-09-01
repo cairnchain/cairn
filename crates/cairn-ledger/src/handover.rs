@@ -13,7 +13,8 @@
 //!
 //! Nothing here is taken on trust. Every piece is rebuilt and the result is
 //! compared against what the header already said: the two tiers, the grace
-//! window, and the headers behind it. A handover that does not reproduce the
+//! window, the coinbases still waiting to be spendable, what the chain has
+//! issued, and the headers behind it. A handover that does not reproduce the
 //! header is refused, and the header itself was accepted by the sampling that
 //! came before.
 
@@ -21,12 +22,14 @@ use std::collections::VecDeque;
 
 use cairn_accumulator::forest::{Forest, ForestProof};
 use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
-use cairn_primitives::Hash32;
+use cairn_primitives::{Amount, Hash32};
 
 use crate::block::{BlockHeader, HeaderSummary};
 use crate::note::{Note, NoteId};
 use crate::pow::{median_time_past, meets_target, next_difficulty, work_of, RECENT_HEADERS};
-use crate::state::{header_leaf, HotEntry, LedgerState, GRACE_BLOCKS, GRACE_NOTES};
+use crate::state::{
+    header_leaf, HotEntry, LedgerState, Maturing, Pieces, GRACE_BLOCKS, GRACE_NOTES,
+};
 use crate::validation::ConsensusParams;
 
 /// Blocks a handed over ledger must sit below the tip it belongs to.
@@ -50,8 +53,7 @@ use crate::validation::ConsensusParams;
 /// ability to be moved off it by a heavier chain.
 pub const BURIAL: u64 = 1_024;
 
-/// What fell in one block: the note, where it landed, and what it was.
-pub type Fallen = (NoteId, u64, Note);
+pub use crate::state::Fallen;
 
 /// A ledger as it stood at one header, and everything needed to check it.
 #[derive(Clone, Debug)]
@@ -99,7 +101,28 @@ pub struct Handover {
     /// paths through a set nobody keeps. Each one is checked against the cold
     /// commitment before it is kept, so a wrong one is refused here rather
     /// than believed and used later.
+    ///
+    /// Every note in the window has one, and that is a property of the window
+    /// rather than of a sender's diligence: a note whose leaf was emptied by a
+    /// spend leaves the window with it. It did not, and a handover made after
+    /// any spend inside the window was refused by every receiver, which on a
+    /// chain with traffic was every handover.
     pub grace_proofs: Vec<(u64, ForestProof)>,
+    /// Coinbases whose notes are not spendable yet, oldest first.
+    ///
+    /// A newcomer cannot work these out. They are what the last thousand
+    /// blocks paid, and it has none of those blocks. Without them it would
+    /// start with an empty window and accept, until it had mined its way past
+    /// the depth, spends the rest of the network refuses: the same fork with
+    /// nobody at fault that the grace window was found to cause. The header
+    /// commits to them, so a sender cannot choose them either.
+    pub maturing: Vec<Maturing>,
+    /// Every pebble the chain had issued at this header.
+    ///
+    /// Committed to like everything else here, which is what makes it worth
+    /// having: a newcomer learns the supply from the header rather than by
+    /// adding up a history it was not there for.
+    pub supply: Amount,
     /// The header forest as it stood before `at`, which `at` commits to.
     pub headers: Forest,
     /// Every header between the ledger's own and the tip, oldest first, the
@@ -137,6 +160,8 @@ pub enum HandoverError {
     HeaderWithoutWork,
     #[error("the hot set holds {held} notes, more than the {limit} allowed")]
     HotSetTooLarge { held: usize, limit: usize },
+    #[error("the maturity window holds {held} coinbases, more than the {limit} allowed")]
+    MaturityWindowTooLarge { held: usize, limit: u64 },
     #[error("the ledger rebuilt from this does not produce the header's state root")]
     StateRootMismatch,
     #[error("the headers handed over are not the ones the header commits to")]
@@ -181,6 +206,9 @@ impl LedgerState {
     /// The last few headers come along because the difficulty rule and the
     /// timestamp rule read them, and a node that cannot check the next block
     /// has not really been handed anything.
+    /// A note in the window with no path here would go out with none, and be
+    /// refused at the other end rather than believed. Nothing produces one:
+    /// what a spend empties, it also takes off the window.
     #[must_use]
     pub fn handover(
         &self,
@@ -206,6 +234,8 @@ impl LedgerState {
             cold: self.cold_roots(),
             grace,
             grace_proofs,
+            maturing: self.maturing(),
+            supply: self.supply(),
             headers: self.headers_before_tip(),
             buried,
             recent,
@@ -258,6 +288,15 @@ pub fn accept(handover: &Handover, params: &ConsensusParams) -> Result<LedgerSta
             limit: hot_capacity,
         });
     }
+    // For the same reason, and against the rule this chain runs under rather
+    // than against the ceiling the wire enforces: a window holding more than
+    // the maturity depth is not a window this network ever produced.
+    if u64::try_from(handover.maturing.len()).unwrap_or(u64::MAX) > params.coinbase_maturity {
+        return Err(HandoverError::MaturityWindowTooLarge {
+            held: handover.maturing.len(),
+            limit: params.coinbase_maturity,
+        });
+    }
     if handover.headers.commitment() != at.history {
         return Err(HandoverError::HistoryMismatch);
     }
@@ -273,11 +312,15 @@ pub fn accept(handover: &Handover, params: &ConsensusParams) -> Result<LedgerSta
     )?;
 
     let mut state = LedgerState::rebuilt(
-        handover.hot.clone(),
-        handover.cold.clone(),
-        VecDeque::from(handover.grace.clone()),
-        handover.headers.clone(),
-        summaries(&handover.recent),
+        Pieces {
+            hot: handover.hot.clone(),
+            cold: handover.cold.clone(),
+            grace: VecDeque::from(handover.grace.clone()),
+            maturing: VecDeque::from(handover.maturing.clone()),
+            supply: handover.supply,
+            headers_before_tip: handover.headers.clone(),
+            recent: summaries(&handover.recent),
+        },
         at,
     );
 
@@ -511,6 +554,15 @@ impl Encode for Handover {
             proof.encode_to(out);
         }
 
+        u32::try_from(self.maturing.len())
+            .unwrap_or(u32::MAX)
+            .encode_to(out);
+        for (matures_at, coinbase) in &self.maturing {
+            matures_at.encode_to(out);
+            coinbase.encode_to(out);
+        }
+        self.supply.encode_to(out);
+
         u32::try_from(self.recent.len())
             .unwrap_or(u32::MAX)
             .encode_to(out);
@@ -541,6 +593,8 @@ impl Decode for Handover {
         let hot = decode_hot(reader)?;
         let grace = decode_grace(reader)?;
         let grace_proofs = decode_proofs(reader)?;
+        let maturing = decode_maturing(reader)?;
+        let supply = Amount::decode_from(reader)?;
         let recent = decode_recent(reader)?;
         let buried = decode_buried(reader)?;
 
@@ -553,11 +607,37 @@ impl Decode for Handover {
             cold,
             grace,
             grace_proofs,
+            maturing,
+            supply,
             headers,
             buried,
             recent,
         })
     }
+}
+
+/// The most coinbases a maturity window may hold on any network this code
+/// knows.
+///
+/// The rules a chain runs under decide the real depth, and `accept` checks
+/// against that. This is the ceiling on what will be read off a wire at all,
+/// so a sender cannot make a reader reserve for a window no network allows.
+const MAX_MATURING: usize = 1 << 16;
+
+fn decode_maturing(reader: &mut Reader<'_>) -> Result<Vec<Maturing>, CodecError> {
+    let count = usize::try_from(u32::decode_from(reader)?).unwrap_or(usize::MAX);
+    if count > MAX_MATURING {
+        return Err(CodecError::InvalidValue {
+            type_name: "Handover maturity window",
+        });
+    }
+    let mut maturing = Vec::with_capacity(count.min(1024));
+    for _ in 0..count {
+        let matures_at = u64::decode_from(reader)?;
+        let coinbase = Hash32::decode_from(reader)?;
+        maturing.push((matures_at, coinbase));
+    }
+    Ok(maturing)
 }
 
 /// Reads the run between the ledger and the tip, refusing a length no chain

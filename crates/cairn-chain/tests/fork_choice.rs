@@ -24,8 +24,13 @@ fn wallet(seed: u8) -> SecretKey {
     SecretKey::from_bytes(&[seed; 32])
 }
 
+/// A reward is spendable at once here.
+///
+/// These tests all spend a coinbase shortly after mining it, and none of them
+/// is about the wait that normally stands between the two. What the wait is
+/// worth is audited in `cairn-ledger/tests/audit_coinbase_maturity.rs`.
 fn params() -> ConsensusParams {
-    ConsensusParams::testnet()
+    ConsensusParams::testnet().with_coinbase_maturity(0)
 }
 
 /// Produces blocks on a private copy of the ledger, so a branch can be built
@@ -303,6 +308,17 @@ fn a_heavier_branch_takes_over_and_undoes_what_the_other_did() {
         store.contains(&paying_blocks[0].id()),
         "the abandoned blocks are still known"
     );
+
+    // And the money the node says exists is the money the winning branch made,
+    // not the sum of both branches. A total that is right going forward and
+    // wrong coming back would fork nodes that did nothing wrong, and nothing
+    // else in the state would say so.
+    assert_eq!(
+        store.state().supply(),
+        quiet.state.supply(),
+        "the supply came back from the reorganisation wrong"
+    );
+    assert_eq!(store.state().state_root(), quiet.state.state_root());
 }
 
 #[test]

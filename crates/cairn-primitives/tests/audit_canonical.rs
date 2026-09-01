@@ -188,3 +188,55 @@ fn a_secret_no_longer_passes_through_a_heap_buffer() {
         }
     );
 }
+
+/// What a person reads on screen has to be what they can type back in.
+///
+/// The parser's own doc said so and it was false: `Display` writes the unit
+/// and the parser split the fraction off with the unit still attached, so
+/// `1.50000000 CAIRN` was refused. It bit in the one place it matters, since
+/// the wallet renders amounts with the unit and reads them back with this,
+/// so somebody copying a figure out of the wallet's own page was told it was
+/// not an amount of CAIRN.
+#[test]
+fn what_is_printed_can_be_typed_back_in() {
+    let cases = [
+        0u64,
+        1,
+        99_999_999,
+        100_000_000,
+        150_000_000,
+        123_456_789,
+        5_000_000_000,
+        Amount::MAX_MONEY.as_pebbles(),
+    ];
+    for pebbles in cases {
+        let amount = Amount::from_pebbles(pebbles).expect("inside the ceiling");
+        let shown = amount.to_string();
+        assert_eq!(
+            Amount::from_cairn(&shown),
+            Some(amount),
+            "{shown} is what the amount prints as and is not what it parses from"
+        );
+        // And without the unit, which is how a person often retypes it.
+        let bare = shown.trim_end_matches(" CAIRN");
+        assert_eq!(Amount::from_cairn(bare), Some(amount), "{bare}");
+    }
+
+    // Taking the unit off does not make the parser looser about the rest.
+    for bad in [
+        "CAIRN",
+        " CAIRN",
+        "-1 CAIRN",
+        "1 cairn",
+        "1 CAIRNS",
+        "1.234567891 CAIRN",
+        "1 CAIRN CAIRN",
+        "1,5 CAIRN",
+    ] {
+        assert_eq!(
+            Amount::from_cairn(bad),
+            None,
+            "{bad} was taken as an amount"
+        );
+    }
+}

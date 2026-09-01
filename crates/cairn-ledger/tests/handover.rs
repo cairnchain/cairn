@@ -18,7 +18,7 @@ use cairn_ledger::pow::RECENT_HEADERS;
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
 use cairn_ledger::LedgerState;
-use cairn_primitives::Amount;
+use cairn_primitives::{Amount, Hash32};
 
 const NOW: u64 = 2_000_000_000;
 /// Small enough that notes fall out of it during the run, which is the whole
@@ -29,10 +29,16 @@ const HOT: usize = 8;
 /// reach a ledger anyone would hand over.
 const BURIAL: u64 = 8;
 
+/// Short, for the same reason, and not nothing: a handover has to carry the
+/// coinbases still waiting, so these tests are worth more with a window that
+/// has something in it.
+const MATURITY: u64 = 4;
+
 fn params() -> ConsensusParams {
     ConsensusParams::testnet()
         .with_hot_capacity(HOT)
         .with_burial(BURIAL)
+        .with_coinbase_maturity(MATURITY)
 }
 
 fn wallet(seed: u8) -> SecretKey {
@@ -302,6 +308,106 @@ fn a_grace_window_the_header_does_not_commit_to_is_refused() {
         Some(HandoverError::StateRootMismatch),
         "an empty window is a different ledger, and the header says which"
     );
+}
+
+/// The same, for the coinbases still waiting.
+///
+/// A newcomer cannot work these out: they are what the last blocks paid, and
+/// it has none of those blocks. Handed an empty window it would accept spends
+/// of rewards the rest of the network is still refusing, for as long as it
+/// took to mine past the depth. That is a fork with nobody at fault, which is
+/// the same fault the grace window was found to have, so it is closed the same
+/// way: the header commits to the window and a different one is a different
+/// ledger.
+#[test]
+fn a_maturity_window_the_header_does_not_commit_to_is_refused() {
+    let params = params();
+    let miner = wallet(1);
+    let mut node = Node::new();
+    node.mine_empty(&miner, RECENT_HEADERS + 8);
+
+    let honest = node.handover();
+    assert!(
+        !honest.maturing.is_empty(),
+        "nothing was waiting, so nothing is being tested"
+    );
+    assert_eq!(
+        accept(&honest, &params).map(|state| state.maturing()),
+        Ok(node.buried().maturing()),
+        "the window arrives as it stood"
+    );
+
+    let mut emptied = node.handover();
+    emptied.maturing.clear();
+    assert_eq!(
+        accept(&emptied, &params).err(),
+        Some(HandoverError::StateRootMismatch),
+        "a newcomer told nothing is waiting would spend what everyone else refuses"
+    );
+
+    // And one that says a reward matures later than it does, which is the lie
+    // in the other direction: a newcomer refusing what everyone else takes.
+    let mut delayed = node.handover();
+    delayed.maturing[0].0 += 1;
+    assert_eq!(
+        accept(&delayed, &params).err(),
+        Some(HandoverError::StateRootMismatch)
+    );
+}
+
+/// A window longer than any this network produces, refused on the size before
+/// the ledger it belongs to is built.
+#[test]
+fn a_maturity_window_past_the_depth_is_refused_before_it_is_built() {
+    let params = params();
+    let miner = wallet(1);
+    let mut node = Node::new();
+    node.mine_empty(&miner, RECENT_HEADERS + 8);
+
+    let mut handover = node.handover();
+    handover.maturing = (0..=MATURITY)
+        .map(|index| (1_000 + index, Hash32::from_bytes([index as u8; 32])))
+        .collect();
+
+    assert_eq!(
+        accept(&handover, &params).err(),
+        Some(HandoverError::MaturityWindowTooLarge {
+            held: MATURITY as usize + 1,
+            limit: MATURITY,
+        })
+    );
+}
+
+/// What the chain has issued travels too, and cannot be made up.
+///
+/// A supply is only worth having if it is the chain's rather than the sender's.
+/// A newcomer that took one on somebody's word would go on adding to a number
+/// that was wrong from the moment it arrived, and would say it out loud to
+/// anyone who asked.
+#[test]
+fn a_supply_the_header_does_not_commit_to_is_refused() {
+    let params = params();
+    let miner = wallet(1);
+    let mut node = Node::new();
+    node.mine_empty(&miner, RECENT_HEADERS + 8);
+
+    let handover = node.handover();
+    let fresh = accept(&handover, &params).expect("it checks out");
+    assert_eq!(fresh.supply(), node.buried().supply());
+    assert_ne!(fresh.supply(), Amount::ZERO, "the chain has paid somebody");
+
+    for lie in [Amount::ZERO, params.initial_reward] {
+        let mut bent = node.handover();
+        bent.supply = lie;
+        if lie == handover.supply {
+            continue;
+        }
+        assert_eq!(
+            accept(&bent, &params).err(),
+            Some(HandoverError::StateRootMismatch),
+            "a chain's supply is the chain's to state, not the sender's"
+        );
+    }
 }
 
 /// Headers from somewhere else, or none at all.

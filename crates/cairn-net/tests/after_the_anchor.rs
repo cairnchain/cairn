@@ -705,6 +705,8 @@ fn an_anchor_cannot_state_whatever_work_it_likes() {
             })
             .collect(),
         headers: anchor_state.headers_before_tip(),
+        maturing: anchor_state.maturing(),
+        supply: anchor_state.supply(),
         buried: source.headers[anchor_height + 1..=tip_height as usize].to_vec(),
         recent: recent.clone(),
     };

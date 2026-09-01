@@ -42,7 +42,7 @@ Network options
                        same directory a node is using)
   --seed <address>     a peer to start from; repeat for more. Without one,
                        the addresses written into the program are used
-  --network <name>     testnet-5 or devnet (default: testnet-5); it has to
+  --network <name>     testnet-6 or devnet (default: testnet-6); it has to
                        be the same network the node is on
   --wait <seconds>     how long to spend catching up (default: 30)
   --fee <cairn>        what to pay to be carried. Without one, the least
@@ -202,6 +202,20 @@ fn show_balance(arguments: &[String]) -> Result<(), String> {
 
     show_waiting(&wallet);
     show_undone(&wallet);
+
+    if holdings.ripening > Amount::ZERO {
+        println!();
+        println!(
+            "Another {} is in block rewards that cannot be spent yet.",
+            holdings.ripening
+        );
+        match holdings.ripe_at {
+            Some(at) => println!("The first of them moves at block {at}."),
+            None => println!("They move once their blocks are settled."),
+        }
+        println!("A reward is the one kind of money whose existence depends on its");
+        println!("block surviving, so the rules hold it still until nothing can undo it.");
+    }
 
     if holdings.stranded > Amount::ZERO {
         println!();
@@ -404,12 +418,12 @@ fn spend(arguments: &[String]) -> Result<(), String> {
 }
 
 fn rules_of(flags: &Flags) -> Result<ConsensusParams, String> {
-    let name = flags.value("network").unwrap_or("testnet-5");
+    let name = flags.value("network").unwrap_or("testnet-6");
     ConsensusParams::for_network(name).ok_or_else(|| {
         if name == "mainnet" {
             "mainnet does not exist yet: its first block has not been mined".to_owned()
         } else {
-            format!("unknown network `{name}`, try testnet-5 or devnet")
+            format!("unknown network `{name}`, try testnet-6 or devnet")
         }
     })
 }

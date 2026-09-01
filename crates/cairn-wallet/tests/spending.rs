@@ -30,7 +30,11 @@ const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
 
 fn params() -> ConsensusParams {
-    ConsensusParams::testnet()
+    // These tests mine a block and spend its reward straight away, which the
+    // maturity rule exists to stop. Shortened rather than worked around, so
+    // the rule is still in force and still tested; the wallet's own maturity
+    // handling is exercised in `a_reward_is_kept_out_of_what_can_be_spent`.
+    ConsensusParams::testnet().with_coinbase_maturity(0)
 }
 
 fn scratch(name: &str) -> PathBuf {

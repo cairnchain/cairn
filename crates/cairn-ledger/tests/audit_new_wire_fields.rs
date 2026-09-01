@@ -20,7 +20,7 @@ use cairn_ledger::handover::{Handover, MOST_BURIED};
 use cairn_ledger::note::NetworkId;
 use cairn_ledger::sampling::{Sample, SampledStart, SAMPLES};
 use cairn_primitives::codec::{Decode, Encode};
-use cairn_primitives::Hash32;
+use cairn_primitives::{Amount, Hash32};
 use std::time::Instant;
 
 fn header(height: u64) -> BlockHeader {
@@ -197,6 +197,8 @@ fn minimal_handover() -> Handover {
         cold: Forest::new(),
         grace: Vec::new(),
         grace_proofs: Vec::new(),
+        maturing: Vec::new(),
+        supply: Amount::ZERO,
         headers: Forest::new(),
         buried: Vec::new(),
         recent: Vec::new(),

@@ -41,6 +41,7 @@ pub const HTML: &str = r#"<!doctype html>
     <div class="amount"><span id="spendable">…</span><span class="unit">CAIRN</span></div>
     <p class="note-line" id="held-line">Reading the chain.</p>
     <div class="stranded" id="waiting" hidden></div>
+    <div class="stranded" id="ripening" hidden></div>
     <div class="stranded" id="stranded" hidden></div>
     <div class="stranded" id="undone" hidden></div>
   </section>
@@ -303,6 +304,17 @@ async function refresh() {
       "were in this wallet's account of itself and the chain no longer " +
       "carries them: " + lines.join("; ") + ". The money is back in the " +
       "balance above. Whoever you were paying has not been paid.";
+  }
+
+  const ripening = $("ripening");
+  const ripeningZero = state.ripening.startsWith("0.00000000");
+  ripening.hidden = ripeningZero;
+  if (!ripeningZero) {
+    ripening.textContent = state.ripening + " is in block rewards that " +
+      "cannot be spent yet" +
+      (state.ripeAt === null ? ". " : ", the first at block " + state.ripeAt + ". ") +
+      "A reward is the one kind of money whose existence depends on its " +
+      "block surviving, so the rules hold it still until nothing can undo it.";
   }
 
   const stranded = $("stranded");

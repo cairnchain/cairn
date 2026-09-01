@@ -349,6 +349,8 @@ fn an_invented_ledger_cannot_borrow_a_weight_it_did_not_earn() {
             })
             .collect(),
         headers: anchor_state.headers_before_tip(),
+        maturing: anchor_state.maturing(),
+        supply: anchor_state.supply(),
         recent: recent.clone(),
     };
 

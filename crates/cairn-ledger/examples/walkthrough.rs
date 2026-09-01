@@ -13,15 +13,22 @@ use cairn_ledger::LedgerState;
 
 const NOW: u64 = 1_800_000_000;
 const HOT_CAPACITY: usize = 4;
+/// Blocks a reward waits before it can be spent. Four here rather than the
+/// thousand a real network uses, so the walk stays a page long; the reason for
+/// the wait is the same either way, and is in `validation::COINBASE_MATURITY`.
+const MATURITY: u64 = 4;
 
 fn main() {
-    let params = ConsensusParams::testnet().with_hot_capacity(HOT_CAPACITY);
+    let params = ConsensusParams::testnet()
+        .with_hot_capacity(HOT_CAPACITY)
+        .with_coinbase_maturity(MATURITY);
     let miner = SecretKey::from_bytes(&[1; 32]);
     let alice = SecretKey::from_bytes(&[2; 32]);
 
     println!("network        {:#010x}", params.network.as_u32());
     println!("block reward   {}", params.initial_reward);
     println!("hot capacity   {HOT_CAPACITY} notes");
+    println!("reward waits   {MATURITY} blocks");
     println!();
     println!(
         "{:<5} {:<36} {:>5} {:>6}",

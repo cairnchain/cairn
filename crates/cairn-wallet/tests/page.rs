@@ -44,7 +44,7 @@ struct Running {
 
 impl Running {
     fn start(name: &str, seed: u8, blocks: usize) -> Self {
-        let params = ConsensusParams::testnet();
+        let params = ConsensusParams::testnet().with_coinbase_maturity(0);
         let directory = std::env::temp_dir().join(format!(
             "cairn-page-{name}-{}-{:?}",
             std::process::id(),
@@ -168,7 +168,7 @@ fn the_page_answers_its_own_and_nothing_else() {
         body.contains("\"spendable\":\"100.00000000 CAIRN\""),
         "{body}"
     );
-    assert!(body.contains("\"network\":\"testnet-5\""), "{body}");
+    assert!(body.contains("\"network\":\"testnet-6\""), "{body}");
 
     // Without the secret, whoever is asking.
     assert_eq!(running.get("/api/state", &host, "").0, 403);

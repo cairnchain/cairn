@@ -314,6 +314,18 @@ impl History {
         }
     }
 
+    /// Notes this key has been paid and has not spent, as this wallet's own
+    /// record rather than the node's.
+    ///
+    /// The two can differ, and the difference is the point. A node follows the
+    /// proof for a fallen note only while it has room, and past that ceiling
+    /// it stops following the least valuable ones. Without a record of its
+    /// own a wallet would simply stop seeing those notes, and money that
+    /// quietly leaves a balance is the worst way to be told anything.
+    pub fn held(&self) -> impl Iterator<Item = (NoteId, Amount)> + '_ {
+        self.held.iter().map(|(id, value)| (*id, *value))
+    }
+
     fn record(&mut self, movement: Movement) {
         // A block carries it, so whatever branch it was read on before, it is
         // on this one now and was never undone.

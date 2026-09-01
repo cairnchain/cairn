@@ -20,6 +20,15 @@ use cairn_primitives::{Amount, Hash32};
 
 const NOW: u64 = 1_000_000_000;
 
+/// A reward is spendable at once here.
+///
+/// These tests all spend a coinbase shortly after mining it, and none of them
+/// is about the wait that normally stands between the two. What the wait is
+/// worth is audited in `audit_coinbase_maturity.rs`.
+fn params() -> ConsensusParams {
+    ConsensusParams::testnet().with_coinbase_maturity(0)
+}
+
 fn wallet(seed: u8) -> SecretKey {
     SecretKey::from_bytes(&[seed; 32])
 }
@@ -64,7 +73,7 @@ fn chain_with_genesis(params: &ConsensusParams, miner: &SecretKey) -> (LedgerSta
 
 #[test]
 fn a_genesis_block_connects_and_pays_the_miner() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let miner = wallet(1);
     let (state, _, note) = chain_with_genesis(&params, &miner);
 
@@ -77,7 +86,7 @@ fn a_genesis_block_connects_and_pays_the_miner() {
 
 #[test]
 fn a_transfer_moves_value_and_pays_a_fee() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let miner = wallet(1);
     let recipient = wallet(2);
     let (mut state, funded_id, funded) = chain_with_genesis(&params, &miner);
@@ -127,7 +136,7 @@ fn a_transfer_moves_value_and_pays_a_fee() {
 
 #[test]
 fn a_transfer_cannot_create_value() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let miner = wallet(1);
     let (state, funded_id, funded) = chain_with_genesis(&params, &miner);
 
@@ -151,7 +160,7 @@ fn a_transfer_cannot_create_value() {
 
 #[test]
 fn the_same_note_cannot_be_spent_twice_in_one_block() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let miner = wallet(1);
     let (state, funded_id, funded) = chain_with_genesis(&params, &miner);
 
@@ -180,7 +189,7 @@ fn the_same_note_cannot_be_spent_twice_in_one_block() {
 
 #[test]
 fn a_note_spent_in_an_earlier_block_cannot_be_spent_again() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let miner = wallet(1);
     let (mut state, funded_id, funded) = chain_with_genesis(&params, &miner);
 
@@ -211,7 +220,7 @@ fn a_note_spent_in_an_earlier_block_cannot_be_spent_again() {
 
 #[test]
 fn a_note_can_only_be_spent_by_its_owner() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let miner = wallet(1);
     let thief = wallet(9);
     let (state, funded_id, funded) = chain_with_genesis(&params, &miner);
@@ -235,7 +244,7 @@ fn a_note_can_only_be_spent_by_its_owner() {
 
 #[test]
 fn changing_an_output_after_signing_breaks_the_signature() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let miner = wallet(1);
     let attacker = wallet(9);
     let (state, funded_id, funded) = chain_with_genesis(&params, &miner);
@@ -260,7 +269,7 @@ fn changing_an_output_after_signing_breaks_the_signature() {
 
 #[test]
 fn a_signature_from_another_network_does_not_replay() {
-    let mut params = ConsensusParams::testnet();
+    let mut params = params();
     let miner = wallet(1);
     let (state, funded_id, funded) = chain_with_genesis(&params, &miner);
 
@@ -286,7 +295,7 @@ fn a_signature_from_another_network_does_not_replay() {
 
 #[test]
 fn the_coinbase_cannot_claim_more_than_the_reward_and_fees() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let miner = wallet(1);
     let state = LedgerState::new();
 
@@ -298,7 +307,7 @@ fn the_coinbase_cannot_claim_more_than_the_reward_and_fees() {
 
 #[test]
 fn a_tampered_state_root_is_rejected_and_leaves_the_state_untouched() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let miner = wallet(1);
     let mut state = LedgerState::new();
 
@@ -316,7 +325,7 @@ fn a_tampered_state_root_is_rejected_and_leaves_the_state_untouched() {
 
 #[test]
 fn a_tampered_transaction_root_is_rejected() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let miner = wallet(1);
     let mut state = LedgerState::new();
 
@@ -332,7 +341,7 @@ fn a_tampered_transaction_root_is_rejected() {
 
 #[test]
 fn a_block_must_extend_the_current_tip() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let miner = wallet(1);
     let (mut state, _, _) = chain_with_genesis(&params, &miner);
 
@@ -357,7 +366,7 @@ fn a_block_must_extend_the_current_tip() {
 
 #[test]
 fn a_block_from_the_far_future_is_rejected() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let miner = wallet(1);
     let mut state = LedgerState::new();
 
@@ -380,7 +389,7 @@ fn a_block_from_the_far_future_is_rejected() {
 
 #[test]
 fn a_block_must_be_later_than_the_recent_median() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let miner = wallet(1);
     let (mut state, _, _) = chain_with_genesis(&params, &miner);
 
@@ -398,7 +407,7 @@ fn a_block_must_be_later_than_the_recent_median() {
 
 #[test]
 fn a_block_from_another_network_is_rejected() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let mut foreign = params;
     foreign.network = NetworkId::MAINNET;
 
@@ -415,7 +424,7 @@ fn a_block_from_another_network_is_rejected() {
 
 #[test]
 fn identical_histories_produce_identical_state_roots() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let miner = wallet(1);
 
     let build = || {
@@ -436,11 +445,11 @@ fn identical_histories_produce_identical_state_roots() {
 
 #[test]
 fn the_state_root_notices_a_single_changed_pebble() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let miner = wallet(1);
     let (state, _, _) = chain_with_genesis(&params, &miner);
 
-    let mut shifted = ConsensusParams::testnet();
+    let mut shifted = params;
     shifted.initial_reward = params.initial_reward.checked_sub(pebbles(1)).unwrap();
     let (other, _, _) = chain_with_genesis(&shifted, &miner);
 
@@ -449,7 +458,7 @@ fn the_state_root_notices_a_single_changed_pebble() {
 
 #[test]
 fn a_block_survives_a_round_trip_through_the_wire_format() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let miner = wallet(1);
     let (state, funded_id, funded) = chain_with_genesis(&params, &miner);
 
@@ -470,7 +479,7 @@ fn a_block_survives_a_round_trip_through_the_wire_format() {
 
 #[test]
 fn a_chain_of_many_blocks_stays_consistent() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let miner = wallet(1);
     let recipient = wallet(2);
     let (mut state, mut funded_id, mut funded) = chain_with_genesis(&params, &miner);

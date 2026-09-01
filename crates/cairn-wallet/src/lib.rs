@@ -168,6 +168,16 @@ struct Draft {
 pub struct Holdings {
     /// What can be spent right now.
     pub spendable: Amount,
+    /// Block rewards this wallet holds that cannot move yet.
+    ///
+    /// A reward is the one kind of note whose existence depends on its block
+    /// surviving, so the rules keep it still until its block is past any
+    /// reorganisation. Counted apart rather than hidden: a miner who saw a
+    /// balance drop by fifty CAIRN with no explanation would reasonably think
+    /// something had gone wrong.
+    pub ripening: Amount,
+    /// The height the first of them can move at, if any are waiting.
+    pub ripe_at: Option<u64>,
     /// Money handed to a payment that no block has carried yet.
     ///
     /// Counted apart from what can be spent, and taken out of it, because a
@@ -692,8 +702,16 @@ impl Wallet {
 
     /// One reading of the chain answering both, since the pool decides what is
     /// spendable and the notes decide what the pool is holding.
+    #[allow(clippy::too_many_lines)]
     fn reckon(&self) -> (Holdings, Vec<Waiting>) {
         let mine = self.address();
+        // This wallet's own account of what it has been paid, which is what
+        // lets it notice a note the node has stopped following.
+        let recorded: BTreeMap<NoteId, Amount> = self
+            .history
+            .lock()
+            .map(|history| history.held().collect())
+            .unwrap_or_default();
         self.node.with_chain(|chain| {
             let state = chain.state();
             let mut held: Vec<Held> = state
@@ -721,6 +739,24 @@ impl Wallet {
                         fallen: Some((position, proof)),
                     }),
                     None => unprovable.push((id, note.value)),
+                }
+            }
+
+            // A note this wallet was paid that the node holds in neither
+            // tier it can reach. The node follows a fallen note's proof only
+            // while it has room, and past that it lets the least valuable
+            // ones go, so a wallet reading only the node would watch money
+            // leave its balance with nothing said. It is not lost: it is a
+            // note whose proof has to be rebuilt by somebody who kept the
+            // set, which is what an archivist is for.
+            let seen: BTreeSet<NoteId> = held
+                .iter()
+                .map(|one| one.id)
+                .chain(unprovable.iter().map(|(id, _)| *id))
+                .collect();
+            for (id, value) in &recorded {
+                if !seen.contains(id) {
+                    unprovable.push((*id, *value));
                 }
             }
 
@@ -768,10 +804,19 @@ impl Wallet {
             let mut notes = Vec::with_capacity(held.len());
             let mut spendable = Amount::ZERO;
             let mut promised = Amount::ZERO;
+            let mut ripening = Amount::ZERO;
+            let mut ripe_at: Option<u64> = None;
             for one in held {
                 let value = one.note.value;
                 if committed.contains(&one.id) {
                     promised = promised.checked_add(value).unwrap_or(promised);
+                } else if let Some(at) = state.coinbase_matures_at(&one.id.source) {
+                    // A block reward cannot move until its block is past
+                    // reorganisation. Offering it as spendable would have the
+                    // wallet build transfers the network turns away, which
+                    // reads to its owner as their own money being refused.
+                    ripening = ripening.checked_add(value).unwrap_or(ripening);
+                    ripe_at = Some(ripe_at.map_or(at, |soonest: u64| soonest.min(at)));
                 } else {
                     spendable = spendable.checked_add(value).unwrap_or(spendable);
                     notes.push(one);
@@ -790,6 +835,8 @@ impl Wallet {
                 Holdings {
                     spendable,
                     waiting: promised,
+                    ripening,
+                    ripe_at,
                     stranded,
                     notes,
                 },

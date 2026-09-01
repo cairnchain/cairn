@@ -183,6 +183,11 @@ fn state(wallet: &Wallet) -> Response {
     }
     json.field_str("spendable", &holdings.spendable.to_string());
     json.field_str("waiting", &holdings.waiting.to_string());
+    json.field_str("ripening", &holdings.ripening.to_string());
+    match holdings.ripe_at {
+        Some(at) => json.field_str("ripeAt", &at.to_string()),
+        None => json.field_null("ripeAt"),
+    }
     json.field_str("stranded", &holdings.stranded.to_string());
     json.field_bool("anything", !holdings.notes.is_empty());
     json.field_usize("held", holdings.notes.len());

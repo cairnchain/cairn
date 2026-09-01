@@ -19,7 +19,8 @@ pub mod validation;
 pub use block::{Block, BlockHeader, HeaderSummary};
 pub use note::{NetworkId, Note, NoteId};
 pub use state::{
-    cold_leaf, note_key, BlockUndo, ColdSet, ColdSpend, HotEntry, LedgerState, StateTransition, Tip,
+    cold_leaf, note_key, BlockUndo, ColdSet, ColdSpend, HotEntry, LedgerState, Maturing,
+    StateTransition, Tip,
 };
 pub use transaction::{CoinbaseTransaction, ColdWitness, Input, Transfer, Witness};
 pub use validation::{

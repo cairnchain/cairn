@@ -29,21 +29,21 @@ what it borrows and what limit it accepts.
 
 ## Status
 
-Pre-alpha, and running in public. `testnet-5` opened on 1 September 2026, on
+Pre-alpha, and running in public. `testnet-6` opened on 1 September 2026, on
 three machines at three hosts. Its money is worth nothing, is meant to be
 worth nothing, and the network will be reset.
 
-It is the fifth because an audit pass found two things, either of which would
-have been enough on its own. A stranger could hand a newcomer a chain nobody
-mined, for a single hash: it took the honest chain's headers, which any node
-serves to anyone who asks, put them in a forest of its own with an anchor of
-its invention, and mined a tip at the difficulty floor claiming one unit more
-work than the honest chain. And a miner dating its blocks six minutes ahead
-could talk the difficulty down to nothing, because a gap running backwards
-counted as one second while a gap running forwards counted as three hundred
-and sixty; past a sixth of the hash rate there was no equilibrium at all. The
-second changes what difficulty every block must carry, so no block mined under
-the old rule is valid under this one and the chain was not carried forward.
+It is the sixth because three audit passes in one day found three things, and
+the last of them was not a hole an attacker exploits but the central mechanism
+not working at all. A ledger whose grace window held a note somebody had spent
+could not be handed to a newcomer, and that window turns over in twelve blocks
+on a busy chain, so joining without reading every block was broken essentially
+always. Nothing complained, because nobody had yet tried to join a chain that
+had seen traffic. Alongside it: a block reward could be spent before its block
+was settled, so a two-block reorganisation could take back money somebody had
+already been paid; and the ledger could not state how much money existed, so a
+defect that minted a pebble would have been agreed by every node and noticed by
+none. All three change what a header commits to.
 
 There is no mainnet. A network exists once its first block does, and that one
 will be mined in the open on the day it is announced.
@@ -115,8 +115,8 @@ how many people can be paid in a minute.
 
 | Network | Starts from | Opens at | Block time |
 | --- | --- | --- | --- |
-| `testnet-5` | `00000003c0f3...` | 1788242679 | 60 s |
-| `devnet` | `000000d86525...` | 1788186545 | 5 s |
+| `testnet-6` | `0000000c0b3f...` | 1788277685 | 60 s |
+| `devnet` | `00000196168c...` | 1788279694 | 5 s |
 | `mainnet` | not made yet | | |
 
 There is an explorer, which is a node that also serves a website: the chain in

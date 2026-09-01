@@ -22,15 +22,27 @@ use crate::transaction::{
     TRANSFER_VERSION,
 };
 
-const fn amount_or_zero(pebbles: u64) -> Amount {
+/// A reward written in pebbles, as an amount.
+///
+/// This used to map anything above the monetary ceiling to zero. Nothing was
+/// wrong with the constants it was given, and that is the point: an edit that
+/// pushed one over the ceiling would have compiled, shipped, and paid nobody,
+/// with every node agreeing that nobody was owed anything. There is no amount
+/// that stands in for one too large, so there is no fallback. Its only two
+/// uses are the `const` items below, where this runs while the crate is being
+/// built and a constant it cannot represent stops the build instead.
+// A panic is denied across this workspace because a panic at run time is a
+// node that stops. This one never reaches run time.
+#[allow(clippy::panic)]
+const fn reward_of(pebbles: u64) -> Amount {
     match Amount::from_pebbles(pebbles) {
         Some(amount) => amount,
-        None => Amount::ZERO,
+        None => panic!("a block reward above the monetary ceiling would pay nobody"),
     }
 }
 
-const INITIAL_REWARD: Amount = amount_or_zero(emission::INITIAL_REWARD_PEBBLES);
-const TAIL_REWARD: Amount = amount_or_zero(emission::TAIL_REWARD_PEBBLES);
+const INITIAL_REWARD: Amount = reward_of(emission::INITIAL_REWARD_PEBBLES);
+const TAIL_REWARD: Amount = reward_of(emission::TAIL_REWARD_PEBBLES);
 
 /// How many notes stay in the hot set.
 ///
@@ -49,6 +61,29 @@ const DEFAULT_HOT_CAPACITY: usize = 1 << 17;
 
 /// Seconds a block is meant to take. Provisional.
 const DEFAULT_TARGET_BLOCK_TIME: u64 = 60;
+
+/// Blocks a coinbase's notes must wait before anyone can spend them.
+///
+/// The reward is the one note in the chain that has no parent. Every other
+/// note survives a reorganisation, because the transfer that made it can be
+/// mined again on the branch that wins; a coinbase cannot, since it belongs to
+/// one block and dies with it. So a miner paid at height N and spending at
+/// N+1 hands its recipient money that a reorganisation removes and no honest
+/// miner can put back. The recipient loses it and no rule was broken, which is
+/// why nothing complains: the ledger stays right and the person does not.
+///
+/// The depth is the deepest reorganisation a node will accept, so a coinbase
+/// becomes spendable exactly when its block can no longer be taken away. That
+/// is a statement worth being able to make and it needs no number of its own
+/// to justify: it is the number the rest of the design already runs on, and
+/// the same one a handover is buried at. At a minute a block it is about
+/// seventeen hours, which is close to what a Bitcoin miner already waits at a
+/// hundred blocks of ten minutes.
+///
+/// Bitcoin waits a hundred blocks and Monero sixty, both of them far past
+/// their own reorganisation depths. This one is exactly at it, which is the
+/// most that can be argued for from the design rather than from custom.
+pub const COINBASE_MATURITY: u64 = crate::handover::BURIAL;
 
 /// Rules a node applies to every block it evaluates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,6 +134,13 @@ pub struct ConsensusParams {
     /// consensus rule like any other: two nodes that disagreed about it would
     /// disagree about which handovers are worth taking.
     pub burial: u64,
+    /// Blocks a coinbase's notes must wait before anyone can spend them.
+    ///
+    /// See [`COINBASE_MATURITY`]. Consensus in the strongest sense: the window
+    /// of coinbases still waiting is in the state root, so two nodes with
+    /// different depths do not merely disagree about one spend, they compute
+    /// different roots for every block.
+    pub coinbase_maturity: u64,
     /// Seconds the retarget aims for between blocks.
     pub target_block_time: u64,
     /// Difficulty the first block carries, before any history exists.
@@ -160,10 +202,10 @@ impl ConsensusParams {
             // Not yet made. A network exists once its first block does, and
             // that block will be mined in the open on the day it is announced.
             "mainnet" => None,
-            "testnet" | "testnet-5" => Some(Self {
-                network: NetworkId::TESTNET_5,
-                genesis: crate::genesis::pinned(NetworkId::TESTNET_5),
-                opens_at: crate::genesis::opens_at(NetworkId::TESTNET_5),
+            "testnet" | "testnet-6" => Some(Self {
+                network: NetworkId::TESTNET_6,
+                genesis: crate::genesis::pinned(NetworkId::TESTNET_6),
+                opens_at: crate::genesis::opens_at(NetworkId::TESTNET_6),
                 genesis_difficulty: 1 << 27,
                 ..Self::testnet()
             }),
@@ -181,6 +223,9 @@ impl ConsensusParams {
                 // A throwaway network reaches this in minutes rather than in
                 // most of a day, which is the whole point of having one.
                 burial: 32,
+                // And for the same reason, and kept equal to the burial for
+                // the same reason the two are equal everywhere else.
+                coinbase_maturity: 32,
                 ..Self::testnet()
             }),
             _ => None,
@@ -191,7 +236,7 @@ impl ConsensusParams {
     pub fn network_name(&self) -> &'static str {
         match self.network {
             NetworkId::DEVNET => "devnet",
-            NetworkId::TESTNET_5 => "testnet-5",
+            NetworkId::TESTNET_6 => "testnet-6",
             // Mainnet lands here too until it has a first block, which is the
             // honest answer: it is not a network yet.
             _ => "unnamed",
@@ -216,6 +261,7 @@ impl ConsensusParams {
             // are stuffed, emptying it takes at least that many of them.
             max_evictions_per_block: DEFAULT_HOT_CAPACITY >> 7,
             burial: crate::handover::BURIAL,
+            coinbase_maturity: COINBASE_MATURITY,
             target_block_time: DEFAULT_TARGET_BLOCK_TIME,
             genesis_difficulty: MIN_DIFFICULTY,
             max_transfers_per_block: 4096,
@@ -277,6 +323,15 @@ impl ConsensusParams {
         self.burial = blocks;
         self
     }
+
+    /// The same, for how long a coinbase waits. For tests, which would
+    /// otherwise have to mine a thousand blocks before they could spend
+    /// anything at all.
+    #[must_use]
+    pub const fn with_coinbase_maturity(mut self, blocks: u64) -> Self {
+        self.coinbase_maturity = blocks;
+        self
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -311,6 +366,11 @@ pub enum TransferError {
     MissingProof { note_id: NoteId },
     #[error("the proof for note {note_id:?} does not match the cold commitment")]
     InvalidProof { note_id: NoteId },
+    #[error(
+        "note {note_id:?} was paid by a coinbase and cannot be spent before height \
+         {matures_at}, because until then the block that paid it can still be undone"
+    )]
+    ImmatureCoinbase { note_id: NoteId, matures_at: u64 },
     #[error("output {index} carries no value")]
     ZeroValueOutput { index: usize },
     #[error("summing values overflowed the monetary ceiling")]
@@ -368,6 +428,22 @@ pub enum BlockError {
     CoinbaseOverpay { allowed: Amount, claimed: Amount },
     #[error("summing values overflowed the monetary ceiling")]
     ValueOverflow,
+    /// The issued total cannot be moved the way this block moves it.
+    ///
+    /// Either the chain would have issued more money than an amount can hold,
+    /// or this block destroys more in fees than the chain has ever issued. The
+    /// second cannot happen to a ledger that adds up, which is why it is worth
+    /// asking: the whole reason for keeping the total is to have somewhere a
+    /// pebble from nowhere can show up as a number rather than as a state
+    /// every node agrees on.
+    #[error(
+        "this block issues {minted} against {fees} in fees, which the total {supply} cannot take"
+    )]
+    SupplyDoesNotAddUp {
+        supply: Amount,
+        minted: Amount,
+        fees: Amount,
+    },
     #[error("timestamp {timestamp} is more than {drift} seconds ahead of this node")]
     TimestampTooFarAhead { timestamp: u64, drift: u64 },
     #[error("timestamp {found} is not past the median {median} of recent blocks")]
@@ -546,6 +622,21 @@ pub fn check_transfer_shape(
 /// Cold proofs are checked against the commitment as it stood before the
 /// block. Checking them against one that moves as the block is applied would
 /// make a transfer's validity depend on where it sits in the block.
+///
+/// Maturity is asked first, and it is asked of the note's source rather than
+/// of the note. Every note carries the identifier of the transaction that made
+/// it, so an immature coinbase is recognised before anything has been said
+/// about which tier its notes are in. That matters more than it looks: a hot
+/// note carries the height it was made at and a cold note does not, so a rule
+/// written against the tiers would have covered one and not the other, and
+/// letting a note fall would have been a way to launder it. This asks a
+/// question neither tier can answer differently.
+///
+/// The height it is asked at is read off the state rather than passed in. The
+/// block a transfer can go into is the one after the tip and nothing else, so
+/// there is nothing here for a caller to decide and no way for two callers to
+/// decide it differently. That is not the reasoning that keeps the clock out
+/// of this module: a clock is not in the state, and this is.
 fn resolve_input(
     state: &LedgerState,
     input: &Input,
@@ -555,6 +646,17 @@ fn resolve_input(
     let id = input.note_id;
     if spent_hot.contains(&id) || spent_cold.contains_key(&id) {
         return Err(TransferError::UnknownNote(id));
+    }
+    if let Some(matures_at) = state.coinbase_matures_at(&id.source) {
+        // A chain that has run out of heights has no next block to put this
+        // in, and every coinbase still waiting matures above zero, so falling
+        // back to zero refuses rather than waves through.
+        if state.next_height().unwrap_or(0) < matures_at {
+            return Err(TransferError::ImmatureCoinbase {
+                note_id: id,
+                matures_at,
+            });
+        }
     }
 
     match (state.hot_note(&id), &input.witness) {
@@ -806,12 +908,37 @@ pub fn evaluate_block_body(
             limit: params.max_evictions_per_block,
         });
     }
+    // The coinbase enters the maturity window by its own identifier, because
+    // that is what every note it paid carries as the source half of its own.
+    // One entry covers however many notes it paid, and a coinbase that paid
+    // nobody takes no place at all: there is nothing waiting.
+    let waiting = if coinbase.outputs.is_empty() {
+        None
+    } else {
+        // A height whose maturity cannot be counted to is one no chain
+        // reaches, and nothing above it could spend anything anyway.
+        height
+            .checked_add(params.coinbase_maturity)
+            .map(|matures_at| (matures_at, coinbase.id()))
+    };
     let transition = StateTransition {
         spent_hot: spent_hot.into_iter().collect(),
         spent_cold: spent_cold.into_values().collect(),
         created,
         evicted,
+        coinbase: waiting,
+        minted: claimed,
+        fees: total_fees,
     };
+    // Asked before the projection, so that a total that cannot be moved is
+    // reported as what it is rather than as a block that produces no root.
+    if state.supply_after(&transition).is_none() {
+        return Err(BlockError::SupplyDoesNotAddUp {
+            supply: state.supply(),
+            minted: claimed,
+            fees: total_fees,
+        });
+    }
     // A projection that cannot be made is a block that cannot be applied. It
     // means a note this block spends is not where its proof said, which the
     // checks above already refused, so reaching here is this node disagreeing
@@ -1095,7 +1222,14 @@ pub fn connect_block(
         });
     }
 
-    let undo = state.commit(header, &effect.transition);
+    // A refusal here is the node disagreeing with itself: this transition
+    // projected against this same state a moment ago, and the root that came
+    // out is the one checked just above. Nothing is applied when it happens,
+    // so the block is refused like any other rather than the tip being
+    // advanced over a state that is half a block old.
+    let undo = state
+        .commit(header, &effect.transition)
+        .ok_or(BlockError::NoteNotWhereProved)?;
     Ok(ConnectedBlock {
         transition: effect.transition,
         undo,

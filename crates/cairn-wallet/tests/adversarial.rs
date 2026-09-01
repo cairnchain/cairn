@@ -30,7 +30,11 @@ const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
 
 fn params() -> ConsensusParams {
-    ConsensusParams::testnet()
+    // These tests mine a block and spend its reward straight away, which the
+    // maturity rule exists to stop. Shortened rather than worked around, so
+    // the rule is still in force and still tested; the wallet's own maturity
+    // handling is exercised in `a_reward_is_kept_out_of_what_can_be_spent`.
+    ConsensusParams::testnet().with_coinbase_maturity(0)
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -968,6 +972,72 @@ fn a_world_readable_key_file_is_refused_and_says_how_to_mend_it() {
     assert_eq!(
         cairn_wallet::keyfile::read(&path).unwrap().to_bytes(),
         secret.to_bytes()
+    );
+
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// A block reward cannot move until its block is past reorganisation, and a
+/// wallet has to know that rather than finding out from a refusal.
+///
+/// The reward is the one kind of note whose existence depends on its block
+/// surviving: a transfer undone by a reorganisation can be mined again on the
+/// branch that won, a coinbase cannot. So the rules hold it still, and a
+/// wallet that offered it as spendable would build transfers the network turns
+/// away, which reads to its owner as their own money being refused. It is
+/// counted and said out loud instead, because a miner watching fifty CAIRN
+/// vanish from a balance with no explanation would reasonably think something
+/// had broken.
+#[test]
+fn a_reward_is_kept_out_of_what_can_be_spent_and_is_said_out_loud() {
+    let held = ConsensusParams::testnet().with_coinbase_maturity(4);
+    let directory = scratch("ripening");
+    std::fs::create_dir_all(&directory).unwrap();
+    let key_file = directory.join("key");
+    let secret = SecretKey::from_bytes(&[7; 32]);
+    cairn_wallet::keyfile::write(&key_file, &secret).unwrap();
+
+    let (wallet, _) = Wallet::open(&key_file, held, &directory.join("data")).unwrap();
+    let mut forge = Forge {
+        params: held,
+        state: LedgerState::new(),
+        clock: 1_000,
+    };
+    for _ in 0..3 {
+        let block = forge.mine(&secret.public_key(), Vec::new());
+        wallet.node().submit_block(block).unwrap();
+    }
+
+    let holdings = wallet.holdings();
+    assert_eq!(
+        holdings.spendable,
+        Amount::ZERO,
+        "every note this wallet holds is a reward too young to move"
+    );
+    assert!(
+        holdings.ripening > Amount::ZERO,
+        "and the money is counted rather than made to disappear"
+    );
+    assert!(holdings.notes.is_empty(), "so nothing is offered to spend");
+    assert_eq!(
+        holdings.ripe_at,
+        Some(4),
+        "the first of them moves once its block is past reorganisation"
+    );
+
+    // Past the window, and the oldest is ordinary money again.
+    for _ in 0..2 {
+        let block = forge.mine(&secret.public_key(), Vec::new());
+        wallet.node().submit_block(block).unwrap();
+    }
+    let holdings = wallet.holdings();
+    assert!(
+        holdings.spendable > Amount::ZERO,
+        "the reward from the block now four deep can move"
+    );
+    assert!(
+        !holdings.notes.is_empty(),
+        "and the wallet offers it, having held it back before"
     );
 
     let _ = std::fs::remove_dir_all(&directory);

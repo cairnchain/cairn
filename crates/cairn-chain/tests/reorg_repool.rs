@@ -27,8 +27,13 @@ use cairn_primitives::Amount;
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
 
+/// A reward is spendable at once here.
+///
+/// These tests all spend a coinbase shortly after mining it, and none of them
+/// is about the wait that normally stands between the two. What the wait is
+/// worth is audited in `cairn-ledger/tests/audit_coinbase_maturity.rs`.
 fn params() -> ConsensusParams {
-    ConsensusParams::testnet()
+    ConsensusParams::testnet().with_coinbase_maturity(0)
 }
 
 fn wallet(seed: u8) -> SecretKey {

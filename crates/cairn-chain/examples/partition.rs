@@ -60,7 +60,10 @@ impl Miner {
 }
 
 fn main() {
-    let params = ConsensusParams::testnet();
+    // A reward is spendable at once here, so the story stays eight blocks long.
+    // What it shows is two nodes splitting and settling, not the wait a reward
+    // serves before it can be paid on.
+    let params = ConsensusParams::testnet().with_coinbase_maturity(0);
     let miner = SecretKey::from_bytes(&[1; 32]);
     let other = SecretKey::from_bytes(&[9; 32]);
     let alice = SecretKey::from_bytes(&[2; 32]);

@@ -290,7 +290,15 @@ fn status(context: &Context<'_>) -> Response {
 
     json.key("supply");
     json.begin_object();
-    json.field_str("issued", &totals.issued().as_pebbles().to_string());
+    // The ledger states this now, so the explorer stops keeping its own books
+    // beside it. Two numbers for the same thing meant either could be wrong
+    // and nothing would say which, and the chain's own answer is the one a
+    // header commits to.
+    json.field_str("issued", &state.supply().as_pebbles().to_string());
+    // What the index made of the same chain, kept so the two can be compared
+    // rather than trusted. They are computed from different things: the
+    // ledger from emission accounting, this from the notes themselves.
+    json.field_str("counted", &totals.issued().as_pebbles().to_string());
     json.field_str("fees", &totals.fees.as_pebbles().to_string());
     json.field_str(
         "paidToMiners",
@@ -480,22 +488,44 @@ fn block_summary(json: &mut Writer, context: &Context<'_>, block: &Block) {
         Some(output) => json.field_str("miner", &output.owner.to_string()),
         None => json.field_null("miner"),
     }
-    json.field_str("fees", &block_fees(context, block).as_pebbles().to_string());
+    match block_fees(context, block) {
+        Some(fees) => json.field_str("fees", &fees.as_pebbles().to_string()),
+        None => json.field_null("fees"),
+    }
     json.end_object();
 }
 
-/// What senders paid in this block, which is what the coinbase carries beyond
-/// the emission schedule.
-fn block_fees(context: &Context<'_>, block: &Block) -> Amount {
-    let params = context.params();
-    let paid = block.coinbase.total_output().unwrap_or(Amount::ZERO);
-    let reward = reward_at(
-        block.header.height,
-        params.halving_interval,
-        params.initial_reward,
-        params.tail_reward,
-    );
-    paid.checked_sub(reward).unwrap_or(Amount::ZERO)
+/// What senders paid in this block, measured from the transfers rather than
+/// worked back from the coinbase.
+///
+/// Taking the coinbase minus the schedule looked equivalent and is not. A
+/// miner may claim less than it is owed, which is legal and burns the
+/// difference, and a block from such a miner then showed no fees at all next
+/// to transfers that plainly paid some. Worse, the running total on the same
+/// page is computed the honest way, so the two numbers disagreed and neither
+/// said why.
+///
+/// `None` where a note a transfer spent is not in the index, which happens
+/// while it is still reading its way up the chain. Saying so beats printing a
+/// zero that reads like an answer.
+fn block_fees(context: &Context<'_>, block: &Block) -> Option<Amount> {
+    let index = context.index;
+    let mut paid = Amount::ZERO;
+    for transfer in &block.transfers {
+        let mut spent = Amount::ZERO;
+        for input in &transfer.inputs {
+            let value = match &input.witness {
+                // A cold spender carries the note it is spending, so the
+                // value is in the block and needs nothing else.
+                Witness::Cold(cold) => cold.note.value,
+                Witness::Hot => index.note(&input.note_id)?.value,
+            };
+            spent = spent.checked_add(value)?;
+        }
+        let made = transfer.total_output()?;
+        paid = paid.checked_add(spent.checked_sub(made)?)?;
+    }
+    Some(paid)
 }
 
 fn block(context: &Context<'_>, reference: &str) -> Response {
@@ -533,8 +563,10 @@ fn block(context: &Context<'_>, reference: &str) -> Response {
         None => json.field_null("next"),
     }
 
-    let fees = block_fees(context, &block);
-    json.field_str("fees", &fees.as_pebbles().to_string());
+    match block_fees(context, &block) {
+        Some(fees) => json.field_str("fees", &fees.as_pebbles().to_string()),
+        None => json.field_null("fees"),
+    }
     json.field_str(
         "reward",
         &reward_at(

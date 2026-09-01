@@ -22,6 +22,7 @@
 //! why that is not a way in.
 
 #![allow(
+    clippy::too_many_lines,
     clippy::cast_possible_truncation,
     clippy::unwrap_used,
     clippy::expect_used,
@@ -136,6 +137,8 @@ fn a_floor_chain_has_a_cheap_burial_and_a_sender_cannot_claim_one() {
             })
             .collect(),
         headers: anchor_state.headers_before_tip(),
+        maturing: anchor_state.maturing(),
+        supply: anchor_state.supply(),
         buried: headers[(anchor_height as usize + 1)..].to_vec(),
         recent: recent.clone(),
     };
@@ -252,6 +255,8 @@ fn a_handover_at(anchor: u64, tip: u64) -> Handover {
             })
             .collect(),
         headers: anchor_state.headers_before_tip(),
+        maturing: anchor_state.maturing(),
+        supply: anchor_state.supply(),
         buried: headers[(anchor as usize + 1)..=tip as usize].to_vec(),
         recent: headers[from as usize..=anchor as usize].to_vec(),
     }

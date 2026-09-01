@@ -24,8 +24,15 @@ use cairn_ledger::{cold_leaf, Block, LedgerState};
 const NOW: u64 = 1_000_000_000;
 const CAPACITY: usize = 8;
 
+/// A reward is spendable at once here.
+///
+/// These tests all spend a coinbase shortly after mining it, and none of them
+/// is about the wait that normally stands between the two. What the wait is
+/// worth is audited in `audit_coinbase_maturity.rs`.
 fn params() -> ConsensusParams {
-    ConsensusParams::testnet().with_hot_capacity(CAPACITY)
+    ConsensusParams::testnet()
+        .with_hot_capacity(CAPACITY)
+        .with_coinbase_maturity(0)
 }
 
 fn wallet(seed: u8) -> SecretKey {

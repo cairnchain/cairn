@@ -78,8 +78,27 @@ impl NetworkId {
     /// a node still on testnet-4 is told plainly that it is on another network
     /// rather than failing somewhere confusing.
     pub const TESTNET_5: Self = Self(0x4341_5258);
+    /// The sixth, because a block reward could be spent before its block was
+    /// settled, a ledger could not say how much money existed, and a state
+    /// with a spent note in its grace window could not be handed over at all.
+    ///
+    /// The last of those was the one that mattered. A newcomer takes a ledger
+    /// rather than reading thirty years of blocks, and that ledger carries the
+    /// window of notes that fell recently. A note spent out of that window
+    /// left the window listing it while its proof had been dropped, so the
+    /// handover was refused, and the window turns over in twelve blocks on a
+    /// busy chain. Joining was therefore broken essentially always, which is
+    /// the one thing this whole design exists to prevent.
+    ///
+    /// A spend now takes the note off the window, which changes what a header
+    /// commits to. So do the other two: a reward that cannot move until its
+    /// block is past reorganisation, and a running supply the state root
+    /// carries so that money out of nothing becomes a fork rather than
+    /// something every node agrees about. Every block mined under the old
+    /// rules is invalid under these, so the network starts over.
+    pub const TESTNET_6: Self = Self(0x4341_5259);
     /// Kept as the name of whichever test network is current.
-    pub const TESTNET: Self = Self::TESTNET_5;
+    pub const TESTNET: Self = Self::TESTNET_6;
     /// A throwaway network with the same rules but a much shorter block time,
     /// for running the software on one machine.
     pub const DEVNET: Self = Self(0x4341_5244);

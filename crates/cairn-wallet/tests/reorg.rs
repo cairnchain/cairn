@@ -37,7 +37,7 @@ struct Chain {
 impl Chain {
     fn new() -> Self {
         Self {
-            params: ConsensusParams::testnet(),
+            params: ConsensusParams::testnet().with_coinbase_maturity(0),
             state: LedgerState::new(),
             clock: 1_000,
         }
@@ -95,7 +95,7 @@ fn a_reorganisation_does_not_leave_a_phantom_movement_in_the_history() {
     let stranger = SecretKey::from_bytes(&[7; 32]).public_key();
     cairn_wallet::keyfile::write(&key_file, &secret).unwrap();
 
-    let params = ConsensusParams::testnet();
+    let params = ConsensusParams::testnet().with_coinbase_maturity(0);
     let reward = params.initial_reward;
     let (wallet, _) = Wallet::open(&key_file, params, &directory.join("data")).unwrap();
 
@@ -174,7 +174,7 @@ fn a_reorganisation_does_not_lose_a_movement_that_only_the_winning_branch_has() 
     let stranger = SecretKey::from_bytes(&[7; 32]).public_key();
     cairn_wallet::keyfile::write(&key_file, &secret).unwrap();
 
-    let params = ConsensusParams::testnet();
+    let params = ConsensusParams::testnet().with_coinbase_maturity(0);
     let reward = params.initial_reward;
     let (wallet, _) = Wallet::open(&key_file, params, &directory.join("data")).unwrap();
 

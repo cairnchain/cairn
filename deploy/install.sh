@@ -97,7 +97,7 @@ resolve() {
 }
 
 listen=$(carried listen)
-resolve NETWORK "$(carried network)" testnet-5
+resolve NETWORK "$(carried network)" testnet-6
 resolve PORT "${listen##*:}" 9944
 resolve SEED "$(carried seed)" ""
 # A public key to pay block rewards to. Mining needs the address money goes to
@@ -229,9 +229,9 @@ say "Service"
 # only thing that knows which names this build has: a refusal here means the
 # name is gone, and the default is the current one.
 if [ -n "$NETWORK" ] && ! /usr/local/bin/cairnd --check --network "$NETWORK" >/dev/null 2>&1; then
-    echo "network  $NETWORK is not a network this build knows, so testnet-5 is used"
+    echo "network  $NETWORK is not a network this build knows, so testnet-6 is used"
     echo "         instead. Name one explicitly to choose another."
-    NETWORK=testnet-5
+    NETWORK=testnet-6
 fi
 
 # Written from the settings above rather than copied, so the unit says in full

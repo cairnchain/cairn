@@ -586,7 +586,7 @@
       "body": {
         "plain": ["This is how you get CAIRN on a test network. Your computer starts looking for blocks, and when it finds one the reward goes to your address. There is no other way to get any: nobody has a stock to hand out."],
         "curious": ["Single-threaded mining inside the node, which is enough for a test network. Rewards go to the key you name, and that key can live anywhere: the node is told an address and never sees the secret behind it."],
-        "technical": ["The opening difficulty of testnet-5 is 2^27, calibrated so the first block takes roughly the target block time on one ordinary core, at a measured 2.29 million hashes per second."]
+        "technical": ["The opening difficulty of testnet-6 is 2^27, calibrated so the first block takes roughly the target block time on one ordinary core, at a measured 2.29 million hashes per second."]
       }
     },
     "server": {

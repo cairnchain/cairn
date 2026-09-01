@@ -586,7 +586,7 @@
       "body": {
         "plain": ["C'est ainsi qu'on obtient des CAIRN sur un réseau de test. Votre ordinateur se met à chercher des blocs, et quand il en trouve un, la récompense va à votre adresse. Il n'y a aucun autre moyen d'en obtenir : personne n'a de stock à distribuer."],
         "curious": ["Minage sur un seul fil d'exécution dans le nœud, ce qui suffit pour un réseau de test. Les récompenses vont à la clé que vous indiquez, et cette clé peut vivre n'importe où : le nœud reçoit une adresse et ne voit jamais le secret qui est derrière."],
-        "technical": ["La difficulté d'ouverture de testnet-5 est 2^27, calibrée pour que le premier bloc prenne à peu près le temps de bloc visé sur un cœur ordinaire, à 2,29 millions d'empreintes par seconde mesurées."]
+        "technical": ["La difficulté d'ouverture de testnet-6 est 2^27, calibrée pour que le premier bloc prenne à peu près le temps de bloc visé sur un cœur ordinaire, à 2,29 millions d'empreintes par seconde mesurées."]
       }
     },
     "server": {

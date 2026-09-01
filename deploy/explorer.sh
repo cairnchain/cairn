@@ -105,7 +105,7 @@ resolve() {
 }
 
 listen=$(carried listen)
-resolve NETWORK "$(carried network)" testnet-5
+resolve NETWORK "$(carried network)" testnet-6
 resolve PORT "${listen##*:}" 9945
 resolve HTTP "$(carried http)" 127.0.0.1:8080
 resolve SEED "$(carried seed)" ""
@@ -160,9 +160,9 @@ say "Service"
 # a service that will not start. The explorer itself is asked, since it is the
 # only thing that knows which names this build has.
 if [ -n "$NETWORK" ] && ! /usr/local/bin/cairn-explorer --check --network "$NETWORK" >/dev/null 2>&1; then
-    echo "network  $NETWORK is not a network this build knows, so testnet-5 is used"
+    echo "network  $NETWORK is not a network this build knows, so testnet-6 is used"
     echo "         instead. Name one explicitly to choose another."
-    NETWORK=testnet-5
+    NETWORK=testnet-6
 fi
 
 # Written from the settings above rather than copied, so the unit says in full

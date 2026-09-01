@@ -156,18 +156,24 @@ fn forge(honest: &Honest, run: u64, delta: u128) -> Forgery {
     // Answering the draw. Every value the verifier asks about is spanned by
     // some header the forger holds, honest or invented.
     let wanted = draw(seed_of(&tip), SAMPLES, work_before(&tip), tip.height);
+    // The forger answers each draw with the header spanning it, or with the
+    // deepest thing it has when the draw lands in a gap of its own making.
+    // Answering badly and not answering at all are the same outcome here,
+    // which is a refusal, so the shape that cannot be built is not a shape
+    // that gets away with anything.
     let samples: Vec<Sample> = wanted
         .iter()
         .map(|value| {
-            let header = *headers
+            let header = headers
                 .iter()
                 .find(|header| {
                     let before = header.total_work - u128::from(header.difficulty);
                     before <= *value && header.total_work > *value
                 })
-                .unwrap_or_else(|| panic!("no header spans the work {value}"));
+                .copied()
+                .unwrap_or(tip);
             let proof = archive
-                .prove_in(header.height, tip.height)
+                .prove_in(header.height.min(tip.height - 1), tip.height)
                 .expect("the forger holds every leaf");
             Sample { header, proof }
         })

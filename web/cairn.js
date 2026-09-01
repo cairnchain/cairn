@@ -146,6 +146,10 @@ function decimalSeparator() {
 
 /* A pebble string rendered as CAIRN, trailing zeros trimmed. */
 function cairn(pebbles) {
+  // A field the node could not work out comes back null, and BigInt(null) is
+  // zero rather than an error, so a number nobody knows would read as a
+  // number somebody measured.
+  if (pebbles === null || pebbles === undefined) return '-';
   let value;
   try {
     value = BigInt(pebbles);
@@ -509,7 +513,7 @@ async function block(reference) {
     row(t('field.next'), data.next ? hashLink(data.next, '/block/' + (data.height + 1)) : t('field.pending')),
     row(t('field.size'), bytes(data.size)),
     row(t('field.reward'), cairn(data.reward) + ' CAIRN'),
-    row(t('field.fees'), cairn(data.fees) + ' CAIRN'),
+    row(t('field.fees'), data.fees === null ? t('field.unknown') : cairn(data.fees) + ' CAIRN'),
     el(
       'div',
       { class: 'row lv-technical' },
@@ -1011,7 +1015,7 @@ function unpack(build) {
 
 function download() {
   clear(view);
-  const network = state.status && state.status.network ? state.status.network.name : 'testnet-5';
+  const network = state.status && state.status.network ? state.status.network.name : 'testnet-6';
   const here = thisMachine();
   const mine = BUILDS.find((build) => build.key === here) || null;
   const rest = BUILDS.filter((build) => build !== mine);
