@@ -130,14 +130,16 @@ impl Node {
             .prove_in(anchor_height, tip.height)
             .expect("the header sits in the forest before the tip");
         let first = (anchor_height as usize + 1).saturating_sub(RECENT_HEADERS);
-        state.handover(
-            at,
-            tip,
-            tip_history,
-            anchor,
-            self.headers[(anchor_height as usize + 1)..].to_vec(),
-            self.headers[first..=anchor_height as usize].to_vec(),
-        )
+        state
+            .handover(
+                at,
+                tip,
+                tip_history,
+                anchor,
+                self.headers[(anchor_height as usize + 1)..].to_vec(),
+                self.headers[first..=anchor_height as usize].to_vec(),
+            )
+            .expect("every note in the window has a path")
     }
 }
 

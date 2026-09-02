@@ -8,7 +8,7 @@
 use std::cell::RefCell;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use cairn_chain::ChainStore;
+use cairn_chain::{ChainStore, Outdated};
 use cairn_crypto::PublicKey;
 use cairn_ledger::block::Block;
 use cairn_ledger::emission::reward_at;
@@ -16,11 +16,13 @@ use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::pow::work_of;
 use cairn_ledger::transaction::{Transfer, Witness};
 use cairn_ledger::validation::ConsensusParams;
+use cairn_net::joining::Joined;
+use cairn_net::node::{Probation, Stranded};
 use cairn_net::Node;
 use cairn_primitives::codec::Encode;
 use cairn_primitives::{hex, Amount, Hash32};
 
-use crate::index::{Index, NoteRecord};
+use crate::index::{Head, Held, Index, NoteRecord, Size};
 use cairn_http::Writer;
 use cairn_http::{Request, Response};
 
@@ -53,6 +55,23 @@ const ADDRESS_SCAN: usize = 10_000;
 /// figure, and so the number moves if the implementation ever changes.
 const HOT_BYTES_PER_NOTE: u64 = 516;
 
+/// Bytes one fallen note costs a node that keeps the whole cold set, measured
+/// the same way.
+///
+/// A slope and not a reading: the resident set was taken at five points over
+/// three million fallen notes, and this is what it climbed by. The same
+/// measurement on a node that keeps only the roots has no slope at all, which
+/// is the claim the protocol rests on and the reason this cost is an
+/// archivist's alone.
+const COLD_BYTES_PER_NOTE: u64 = 72;
+
+/// Bytes one note that has ever existed costs the index.
+///
+/// Named here so `/api/status` can carry both figures side by side. The site
+/// used to call the cold set the explorer's growing cost, and the index is
+/// seven times larger, so the page was pointing at the smaller half.
+const INDEX_BYTES_PER_NOTE: u64 = crate::index::BYTES_PER_NOTE;
+
 /// The node the explorer reads, plus what it keeps on top of it.
 pub(crate) struct Explorer {
     node: Node,
@@ -82,61 +101,134 @@ impl Explorer {
     }
 
     /// Reads whatever the chain has added since the last call.
+    ///
+    /// The chain is taken twice, for one question each, and let go of before
+    /// any block is read. It used to be held for the whole walk, with a seek
+    /// and a decode per block inside it, which made one ordinary
+    /// reorganisation of one block stop the entire node for as long as it
+    /// took to read the chain back: six seconds at half a million empty
+    /// blocks, minutes at a hundred notes a block, with incoming block
+    /// validation queued behind it the whole time.
     pub(crate) fn refresh(&self) {
         let mut index = self.index();
-        self.node.with_chain(|chain| {
-            index.refresh(chain, |height| {
-                chain
-                    .block_at(height)
-                    .cloned()
-                    .or_else(|| self.node.archived_at(height))
-            });
+        let last_read = index.covers().map(|(_, through)| through);
+        let head = self.node.with_chain(|chain| {
+            chain.height().map(|tip| Head {
+                tip,
+                at_last_read: last_read.and_then(|height| chain.id_at(height)),
+            })
         });
+        let Some(head) = head else {
+            return;
+        };
+        index.refresh(&head, |height| self.held_at(height));
+    }
+
+    /// One block of the followed branch, with the chain held for as little of
+    /// it as the answer allows.
+    ///
+    /// Everything the chain has to say is asked in one turn of its lock, and
+    /// the disk is only touched once that lock is gone. A node holds the
+    /// bodies of the blocks it could still have to undo and no more, so a
+    /// rebuild reads almost all of its blocks off a disk, and seeking a disk
+    /// with the chain held is what this whole shape exists to stop.
+    ///
+    /// Below where the log reaches, the log is the whole answer. It holds one
+    /// run of heights, so a height missing from under its top is one it
+    /// dropped off its bottom, and the chain let that body go long before.
+    /// Saying so, instead of saying nothing, is what lets the walk step over
+    /// it rather than stop at it for the rest of the run.
+    fn held_at(&self, height: u64) -> Held {
+        // The identifier the branch carries here, where the chain still holds
+        // one, and the body if the chain still holds that.
+        let (expected, in_memory) = self
+            .node
+            .with_chain(|chain| (chain.id_at(height), chain.block_at(height).cloned()));
+        if let Some(block) = in_memory {
+            return Held::Block(Box::new(block));
+        }
+
+        if let Some(block) = self.node.archived_at(height) {
+            // The log is brought level with the chain just after the chain
+            // moves, so for a moment after a reorganisation it still holds
+            // the branch this node has left. A block off that branch is one
+            // the index would go on to answer about as though it had
+            // happened. Where the chain still remembers what its branch
+            // carries at this height, the chain is the authority, and where
+            // it does not the height is too deep for anything to have
+            // changed under it.
+            return if expected.is_none_or(|id| id == block.id()) {
+                Held::Block(Box::new(block))
+            } else {
+                Held::Waiting
+            };
+        }
+
+        match self.node.written_through() {
+            // The disk reaches past this height and could not produce it, so
+            // it is one of the run this node dropped off the bottom.
+            Some(through) if height <= through => Held::Dropped,
+            Some(_) => Held::Waiting,
+            // A node keeping no blocks at all has nothing under the window
+            // its chain holds in memory, and nothing is coming.
+            None => Held::Dropped,
+        }
     }
 
     /// Routes one request, or reports that nothing here answers it.
     ///
-    /// Read twice at most, with both locks let go of in between. A node holds
-    /// the bodies of the blocks it could still have to undo and no more, so
-    /// most of what an answer quotes comes off a disk, and seeking a disk with
-    /// the chain held is one anonymous caller deciding how long every peer
-    /// waits. So the first reading answers from memory and *names* the heights
-    /// it could not have; those are fetched with nothing held; the second
-    /// reading is the answer. It is what the sync layer does with the blocks a
-    /// peer asks for, for the same reason.
+    /// Read twice, with both locks let go of in between. A node holds the
+    /// bodies of the blocks it could still have to undo and no more, so most
+    /// of what an answer quotes comes off a disk, and seeking a disk with the
+    /// chain held is one anonymous caller deciding how long every peer waits.
+    /// So the first reading answers from memory and *names* the heights it
+    /// could not have; those are fetched with nothing held; the second reading
+    /// is the answer. It is what the sync layer does with the blocks a peer
+    /// asks for, for the same reason.
     ///
-    /// The first answer is thrown away whenever there is a second. That costs
-    /// one write of a page that was going to be written anyway, and pages have
-    /// a ceiling, which is the cheap half of the trade.
+    /// The first reading is thrown away, and used to be a whole answer built
+    /// and discarded: every block re-encoded to report its size and every
+    /// input of every transfer looked up to work out a fee, twice, for any
+    /// page about history. It now skips both, which is the whole of what an
+    /// answer costs. What is left of it is a walk that names heights.
     pub(crate) fn answer(&self, request: &Request) -> Option<Response> {
         // Before either lock. Everything else this server serves (the page,
         // its script, the papers) would otherwise queue behind the indexer
         // for a chain it is never going to read.
         request.after("/api/")?;
 
-        let (answer, wanted) = self.read(request, &[]);
-        if wanted.is_empty() {
-            return answer;
-        }
+        // Before the chain, because two of these questions are answered out
+        // of the chain itself and asking them with it in hand is this node
+        // waiting on itself.
+        let health = Health::of(&self.node);
+
+        let (_, wanted) = self.read(request, &[], Pass::Naming, &health);
         let fetched: Vec<Block> = wanted
             .iter()
             .filter_map(|height| self.node.archived_at(*height))
             .collect();
         // Whatever the second reading still wants is a block this node does
         // not hold, and it is answered around rather than asked for again.
-        self.read(request, &fetched).0
+        self.read(request, &fetched, Pass::Answering, &health).0
     }
 
     /// One reading of the request, with the blocks fetched for it so far, and
     /// the heights it turned out to still want.
-    fn read(&self, request: &Request, fetched: &[Block]) -> (Option<Response>, Vec<u64>) {
+    fn read(
+        &self,
+        request: &Request,
+        fetched: &[Block],
+        pass: Pass,
+        health: &Health,
+    ) -> (Option<Response>, Vec<u64>) {
         let index = self.index();
         self.node.with_chain(|chain| {
             let context = Context {
                 chain,
                 index: &index,
-                node: &self.node,
+                health,
                 fetched,
+                pass,
                 wanted: RefCell::new(Vec::new()),
             };
             let answer = route(&context, request);
@@ -145,14 +237,61 @@ impl Explorer {
     }
 }
 
+/// What the node says about its own state.
+///
+/// The site asked it none of this. It called five `Node` methods and not one
+/// of them was about whether the node was still following the chain, so it
+/// went on serving a frozen tip, a frozen supply and a frozen list of blocks
+/// with no notice anywhere. Two of these mean the node has stopped and will
+/// not start again on its own, and from the outside all of them look exactly
+/// like a node that is working.
+#[derive(Debug)]
+struct Health {
+    outdated: Option<Outdated>,
+    stranded: Option<Stranded>,
+    probation: Option<Probation>,
+    joining: Joined,
+    out_of_reach: u64,
+    peers: usize,
+}
+
+impl Health {
+    /// Asked with nothing held. `probation` and `joining` read the chain, so
+    /// this cannot be done from inside a route.
+    fn of(node: &Node) -> Self {
+        Self {
+            outdated: node.outdated(),
+            stranded: node.stranded(),
+            probation: node.probation(),
+            joining: node.joining(),
+            out_of_reach: node.out_of_reach(),
+            peers: node.peer_count(),
+        }
+    }
+}
+
+/// Which of the two readings of a request this is.
+///
+/// The naming one exists to write down the heights the answer will need, and
+/// nothing it produces is sent, so it does not do the two things a route
+/// spends its time on. An anonymous GET used to buy twice the chain lock a
+/// peer's own request for the same blocks does, and what waits behind that
+/// lock is incoming block validation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pass {
+    Naming,
+    Answering,
+}
+
 /// Everything a route reads, held still for the length of one answer.
 struct Context<'a> {
     chain: &'a ChainStore,
     index: &'a Index,
-    node: &'a Node,
+    health: &'a Health,
     /// Blocks already fetched off the log for this request. A page's worth at
     /// most, which is what bounds the memory one answer stands for.
     fetched: &'a [Block],
+    pass: Pass,
     /// Heights this reading wanted and did not have, for the one after it.
     wanted: RefCell<Vec<u64>>,
 }
@@ -160,6 +299,14 @@ struct Context<'a> {
 impl Context<'_> {
     fn params(&self) -> &ConsensusParams {
         self.chain.params()
+    }
+
+    /// Whether this reading is the one whose answer is sent.
+    ///
+    /// What it guards is the work, not the shape: a field left out of the
+    /// reading nobody sees is a field nobody misses.
+    fn answering(&self) -> bool {
+        self.pass == Pass::Answering
     }
 
     /// The block at `height` on the followed branch, when it is already in
@@ -207,6 +354,19 @@ impl Context<'_> {
             .and_then(|tip| tip.checked_sub(height))
             .and_then(|behind| behind.checked_add(1))
             .unwrap_or(0)
+    }
+}
+
+/// Writes how large something is, in the reading that reports it.
+///
+/// Encoding a block again to count its bytes is the largest single thing a
+/// page of blocks does: a hundred and twenty eight of them at the byte
+/// ceiling is a hundred and twenty eight megabytes through the encoder. The
+/// naming reading does not need the number and no longer pays for it.
+fn field_size(json: &mut Writer, context: &Context<'_>, encode: impl FnOnce() -> usize) {
+    match context.answering().then(encode) {
+        Some(size) => json.field_usize("size", size),
+        None => json.field_null("size"),
     }
 }
 
@@ -262,9 +422,15 @@ fn status(context: &Context<'_>) -> Response {
     json.field_str("work", &context.chain.total_work().to_string());
     json.field_usize("blocksKnown", context.chain.len());
     json.field_usize("indexed", context.index.blocks_read());
-    json.field_usize("peers", context.node.peer_count());
+    json.field_usize("peers", context.health.peers);
     json.field_usize("pool", context.chain.pool_len());
     json.field_bool("archiving", context.chain.is_archiving());
+
+    json.key("index");
+    index_object(&mut json, context, tip_height);
+
+    json.key("node");
+    node_object(&mut json, context);
 
     json.key("hot");
     json.begin_object();
@@ -286,6 +452,8 @@ fn status(context: &Context<'_>) -> Response {
     json.field_str("notes", &state.cold().len().to_string());
     // What a node actually carries for the cold set, whatever its size.
     json.field_usize("roots", 64);
+    json.field_u64("bytesPerNote", COLD_BYTES_PER_NOTE);
+    json.field_bool("kept", state.cold().is_archiving());
     json.end_object();
 
     json.key("supply");
@@ -335,6 +503,101 @@ fn status(context: &Context<'_>) -> Response {
 
     json.end_object();
     Response::json(json.finish())
+}
+
+/// How much of the chain the index has read, and what it cost to read it.
+///
+/// Every number a page states about who owns what comes out of this index and
+/// is only as wide as the index is. Until this was reported, the one signal
+/// that it had read nothing at all was a count of blocks in the footer, in the
+/// palest ink on the page, with nothing to compare it against.
+fn index_object(json: &mut Writer, context: &Context<'_>, tip: Option<u64>) {
+    let covered = context.index.covers();
+    let size = context.index.size();
+    json.begin_object();
+    if let Some((from, through)) = covered {
+        json.field_u64("from", from);
+        json.field_u64("through", through);
+    } else {
+        json.field_null("from");
+        json.field_null("through");
+    }
+    json.field_u64(
+        "behind",
+        match (tip, covered) {
+            (Some(tip), Some((_, through))) => tip.saturating_sub(through),
+            (Some(tip), None) => tip.saturating_add(1),
+            _ => 0,
+        },
+    );
+    json.field_bool("fromTheStart", context.index.reads_from_the_start());
+    json.field_usize("blocks", context.index.blocks_read());
+    index_cost(json, size);
+    json.end_object();
+}
+
+/// What the index is made of, so an operator can find out what running this
+/// program will come to.
+fn index_cost(json: &mut Writer, size: Size) {
+    json.field_str("notes", &size.notes.to_string());
+    json.field_str("transactions", &size.transactions.to_string());
+    json.field_str("owners", &size.owners.to_string());
+    json.field_str("movements", &size.movements.to_string());
+    json.field_u64("bytesPerNote", INDEX_BYTES_PER_NOTE);
+    json.field_str("bytes", &size.bytes.to_string());
+}
+
+/// Whether the node under this website is still following the chain.
+///
+/// Two of these mean it has stopped and will not start again, and from the
+/// outside all of them look exactly like a node that is working: a height, a
+/// supply, a list of blocks, and no complaint. The website ran on its own flag
+/// and never asked, so it went on serving a tip that had stopped moving with
+/// nothing anywhere to say so. The wallet has a sentence for every one of
+/// them; this is where the site gets the same.
+fn node_object(json: &mut Writer, context: &Context<'_>) {
+    let node = context.health;
+    json.begin_object();
+
+    match node.outdated {
+        Some(outdated) => {
+            json.key("outdated");
+            json.begin_object();
+            json.field_u64("height", outdated.height);
+            json.field_u64("required", u64::from(outdated.required));
+            json.field_u64("known", u64::from(outdated.known));
+            json.end_object();
+        }
+        None => json.field_null("outdated"),
+    }
+
+    match node.stranded {
+        Some(stranded) => {
+            json.key("stranded");
+            json.begin_object();
+            json.field_u64("anchor", stranded.anchor);
+            json.field_u64("settlesAt", stranded.settles_at);
+            json.field_u64("waited", stranded.waited);
+            json.end_object();
+        }
+        None => json.field_null("stranded"),
+    }
+
+    match node.probation {
+        Some(probation) => {
+            json.key("probation");
+            json.begin_object();
+            json.field_u64("anchor", probation.anchor);
+            json.field_u64("checked", probation.checked());
+            json.field_u64("owed", probation.owed());
+            json.end_object();
+        }
+        None => json.field_null("probation"),
+    }
+
+    json.field_str("joining", &node.joining.to_string());
+    json.field_u64("outOfReach", node.out_of_reach);
+    json.end_object();
 }
 
 /// Blocks left before the reward halves.
@@ -449,8 +712,16 @@ fn blocks(context: &Context<'_>, request: &Request) -> Response {
     let mut height = from;
     let mut walked = 0usize;
     while walked < limit {
+        // The naming reading wants the heights and nothing else, and this is
+        // the page where that is the whole of the difference: a hundred and
+        // twenty eight blocks named costs a hundred and twenty eight lookups,
+        // where a hundred and twenty eight blocks written out is every one of
+        // them through the encoder and every input of every transfer looked
+        // up in the index.
         if let Some(block) = context.block_at(height) {
-            block_summary(&mut json, context, &block);
+            if context.answering() {
+                block_summary(&mut json, context, &block);
+            }
         }
         walked = walked.saturating_add(1);
         let Some(under) = height.checked_sub(1) else {
@@ -474,7 +745,7 @@ fn block_summary(json: &mut Writer, context: &Context<'_>, block: &Block) {
     json.field_u64("timestamp", block.header.timestamp);
     json.field_str("difficulty", &block.header.difficulty.to_string());
     json.field_usize("transfers", block.transfers.len());
-    json.field_usize("size", block.encode().len());
+    field_size(json, context, || block.encode().len());
     json.field_str(
         "paidToMiner",
         &block
@@ -509,6 +780,12 @@ fn block_summary(json: &mut Writer, context: &Context<'_>, block: &Block) {
 /// while it is still reading its way up the chain. Saying so beats printing a
 /// zero that reads like an answer.
 fn block_fees(context: &Context<'_>, block: &Block) -> Option<Amount> {
+    // The naming reading does not report this and does not pay for it: it is
+    // a lookup per input of every transfer in the block, which at the byte
+    // ceiling is three thousand of them.
+    if !context.answering() {
+        return None;
+    }
     let index = context.index;
     let mut paid = Amount::ZERO;
     for transfer in &block.transfers {
@@ -553,7 +830,7 @@ fn block(context: &Context<'_>, reference: &str) -> Response {
         &block.header.transactions_root.to_string(),
     );
     json.field_str("stateRoot", &block.header.state_root.to_string());
-    json.field_usize("size", block.encode().len());
+    field_size(&mut json, context, || block.encode().len());
     json.field_u64("confirmations", context.confirmations(height));
     match height
         .checked_add(1)
@@ -664,7 +941,21 @@ fn tier_of(context: &Context<'_>, id: &NoteId, record: &NoteRecord) -> &'static 
     if state.within_grace(id).is_some() {
         return "grace";
     }
-    "cold"
+    // The cold set is asked rather than assumed. "Neither hot nor in grace"
+    // used to be read as "in the cave", and a note the index still carries
+    // from a branch this node has left is neither of the three: for the half
+    // second between a reorganisation and the next refresh, a note that no
+    // longer exists anywhere was reported as sitting safely in the cold set.
+    // Only an archivist can answer, and an explorer is one.
+    let cold = state.cold();
+    if !cold.is_archiving()
+        || cold
+            .locate(id, &Note::new(record.value, record.owner))
+            .is_some()
+    {
+        return "cold";
+    }
+    "unknown"
 }
 
 fn transfer_object(json: &mut Writer, context: &Context<'_>, transfer: &Transfer, full: bool) {
@@ -672,10 +963,18 @@ fn transfer_object(json: &mut Writer, context: &Context<'_>, transfer: &Transfer
     json.begin_object();
     json.field_str("id", &id.to_string());
     json.field_str("kind", "transfer");
-    json.field_usize("size", transfer.encode().len());
+    field_size(json, context, || transfer.encode().len());
     json.field_u64("version", u64::from(transfer.version));
 
-    let mut consumed = Amount::ZERO;
+    // What the transfer spent, or nothing at all where one input could not be
+    // valued. It used to be the sum of the inputs it happened to find, printed
+    // under "Total spent" as though it were the whole, with a fee worked out
+    // from it that was understated and stated as a fact. The block-level
+    // figure a few lines above had already been repaired to say `null` in the
+    // same case; this one had not, so one request could produce a page reading
+    // "Fees: Not indexed" at the top and "fee 0 CAIRN" on every transfer
+    // under it.
+    let mut consumed = Some(Amount::ZERO);
     json.key("inputs");
     json.begin_array();
     for input in &transfer.inputs {
@@ -694,11 +993,22 @@ fn transfer_object(json: &mut Writer, context: &Context<'_>, transfer: &Transfer
             Witness::Cold(witness) => json.field_str("position", &witness.position.to_string()),
             Witness::Hot => json.field_null("position"),
         }
-        if let Some(record) = context.index.note(&input.note_id) {
-            consumed = consumed.checked_add(record.value).unwrap_or(consumed);
-            json.field_str("value", &record.value.as_pebbles().to_string());
-            json.field_str("owner", &record.owner.to_string());
+        // A cold spender carries the note it is spending, so the block itself
+        // says what the input was worth and the index is not consulted. Only
+        // a hot spend has to be looked up, and only that can come back empty.
+        let spent = match &input.witness {
+            Witness::Cold(cold) => Some((cold.note.value, cold.note.owner)),
+            Witness::Hot => context
+                .index
+                .note(&input.note_id)
+                .map(|record| (record.value, record.owner)),
+        };
+        if let Some((value, owner)) = spent {
+            consumed = consumed.and_then(|total| total.checked_add(value));
+            json.field_str("value", &value.as_pebbles().to_string());
+            json.field_str("owner", &owner.to_string());
         } else {
+            consumed = None;
             json.field_null("value");
             json.field_null("owner");
         }
@@ -715,9 +1025,12 @@ fn transfer_object(json: &mut Writer, context: &Context<'_>, transfer: &Transfer
     json.end_array();
 
     let produced = transfer.total_output().unwrap_or(Amount::ZERO);
-    json.field_str("totalIn", &consumed.as_pebbles().to_string());
+    match consumed {
+        Some(total) => json.field_str("totalIn", &total.as_pebbles().to_string()),
+        None => json.field_null("totalIn"),
+    }
     json.field_str("totalOut", &produced.as_pebbles().to_string());
-    match consumed.checked_sub(produced) {
+    match consumed.and_then(|total| total.checked_sub(produced)) {
         Some(fee) => json.field_str("fee", &fee.as_pebbles().to_string()),
         None => json.field_null("fee"),
     }
@@ -767,19 +1080,30 @@ fn transaction(context: &Context<'_>, reference: &str) -> Response {
         return Response::error(404, "no such transaction");
     };
 
+    // Whatever sits at that position has to be the transaction that was asked
+    // for. Between a reorganisation and the next refresh, which is half a
+    // second, the index still holds locations from the branch this node has
+    // left: a request for a transaction that was on it found a stale height
+    // and position and was handed whatever the new branch put there, or the
+    // new coinbase, under the identifier the reader had typed.
     let mut json = Writer::new();
     json.begin_object();
     json.field_bool("pooled", false);
     json.key("transaction");
     if location.position == 0 {
+        if block.coinbase.id() != id {
+            return Response::error(404, "no such transaction");
+        }
         coinbase_object(&mut json, context, &block);
     } else {
         let index = usize::try_from(location.position)
             .ok()
             .and_then(|position| position.checked_sub(1));
         match index.and_then(|index| block.transfers.get(index)) {
-            Some(transfer) => transfer_object(&mut json, context, transfer, true),
-            None => return Response::error(404, "no such transaction"),
+            Some(transfer) if transfer.id() == id => {
+                transfer_object(&mut json, context, transfer, true);
+            }
+            _ => return Response::error(404, "no such transaction"),
         }
     }
     json.end_object();
@@ -791,7 +1115,7 @@ fn coinbase_object(json: &mut Writer, context: &Context<'_>, block: &Block) {
     json.begin_object();
     json.field_str("id", &id.to_string());
     json.field_str("kind", "coinbase");
-    json.field_usize("size", block.coinbase.encode().len());
+    field_size(json, context, || block.coinbase.encode().len());
     json.field_u64("version", u64::from(block.coinbase.version));
     json.key("inputs");
     json.begin_array();
@@ -882,7 +1206,12 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
         json.field_usize("notes", 0);
         json.field_usize("unspentNotes", 0);
         json.field_bool("moreNotes", false);
-        json.field_bool("counted", true);
+        // Never an unqualified yes for an address nothing is known about. An
+        // index that does not reach the first block has never seen most of
+        // this chain, and answering "nought, and that is exact" about every
+        // address on it is the worst thing this program can do: a reader has
+        // no way at all to tell it from a real balance of nought.
+        json.field_bool("counted", context.index.reads_from_the_start());
         json.key("unspent");
         json.begin_array();
         json.end_array();
@@ -916,8 +1245,13 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
     json.field_bool("moreNotes", held.unspent > held.listed.len());
     // Whether that count is the whole of it, or the floor the walk stopped at.
     // A reader is owed the difference: a figure that quietly means "at least"
-    // is the kind of wrong nobody notices until it matters.
-    json.field_bool("counted", held.whole);
+    // is the kind of wrong nobody notices until it matters. Two ways it can
+    // be a floor, and one answer for both: the walk over this address stopped
+    // at its ceiling, or the index itself does not go back to the first block.
+    json.field_bool(
+        "counted",
+        held.whole && context.index.reads_from_the_start(),
+    );
 
     // One line per movement: a note arriving, and later the transfer that
     // spent it. The index records these as the chain produces them, so they

@@ -15,7 +15,11 @@
 //! restart did not clear it.
 //!
 //! These tests pin both directions, the half-written node in between, and the
-//! bound: an open works out what is missing and nothing else.
+//! bound: an open works out what is missing and nothing else. The bound leaked
+//! in one direction that the account above does not cover, a node of the right
+//! length holding the wrong bytes, and the last test here is where that is
+//! caught now: on the path a proof folds through, rather than on the machine
+//! of whoever was handed the proof.
 
 #![allow(
     clippy::unwrap_used,
@@ -233,29 +237,56 @@ fn bytes_that_do_not_make_a_whole_node_are_not_one() {
     let _ = std::fs::remove_dir_all(&leaves);
 }
 
-/// The bound on the mending: what is there is left alone.
+/// The bound on the mending, and where the bound used to leak.
 ///
 /// Only the nodes a level is short of are worked out again, so an ordinary
-/// open costs nothing and a torn append costs a handful of hashes. The price
-/// is that this repairs levels that cannot account for their own length, and
-/// not a node that was written whole and later went bad on the disk. Checking
-/// for that would mean rehashing the entire history at every start, which is
-/// the cost this forest exists to avoid; it is caught instead by the proofs
-/// failing against a root, where any other bad byte is caught.
+/// open costs nothing and a torn append costs a handful of hashes. An open
+/// still does not rehash the history, and it is not going to: that is the cost
+/// this forest exists to avoid.
+///
+/// What that used to mean was that a node written whole and later gone bad on
+/// the disk was believed. Agreement was measured in length alone, so a level
+/// of the right length holding the wrong bytes was never looked at: the forest
+/// opened with the right leaf count, every leaf read back right, and the proof
+/// it served carried the changed node. It folded to a root nobody else had,
+/// nothing here reported it, a restart did not clear it, and the only symptom
+/// was on the machine of whoever was handed the proof.
+///
+/// The proof is where it is caught now. Every node a path folds through is
+/// compared with the fold, so the damage is found on this node's own disk, at
+/// the moment somebody asks, and the proof is refused instead of served.
 #[test]
-fn mending_leaves_alone_what_is_not_missing() {
+fn a_node_changed_in_place_is_caught_when_a_proof_folds_through_it() {
     let directory = scratch("bounded");
     built(&directory, 4).unwrap();
     let marker = Hash32::from_bytes([0xcd; 32]);
     put(&level(&directory, 1), NODE_BYTES, marker.as_bytes());
 
+    // The open is still cheap and still says nothing, which is the bound
+    // holding: nothing was rehashed and nothing was recomputed.
     let tree = HeaderTree::open(&directory).unwrap();
     assert_eq!(tree.len(), 4);
     assert_eq!(
-        tree.prove_in(0, 4).unwrap().unwrap().siblings[1],
-        marker,
-        "an open recomputed a node that was not missing"
+        tree.leaf_at(2).unwrap(),
+        Some(leaf(2)),
+        "the leaves are untouched, so only the fold can tell"
     );
+
+    // The proof for leaf zero folds through the changed node.
+    assert!(
+        matches!(
+            tree.prove_in(0, 4),
+            Err(cairn_store::StoreError::Unfolded {
+                height: 2,
+                start: 0
+            })
+        ),
+        "a proof was served through a node that is not the leaves beneath it"
+    );
+
+    // And a proof that does not go near it is unaffected, so this refuses a
+    // path rather than a forest.
+    assert!(tree.prove_in(0, 2).unwrap().is_some());
 
     let _ = std::fs::remove_dir_all(&directory);
 }

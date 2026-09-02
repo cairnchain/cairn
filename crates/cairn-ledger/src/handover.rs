@@ -24,7 +24,7 @@ use cairn_accumulator::forest::{Forest, ForestProof};
 use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
 use cairn_primitives::{Amount, Hash32};
 
-use crate::block::{BlockHeader, HeaderSummary};
+use crate::block::{BlockHeader, HeaderSummary, BLOCK_VERSION};
 use crate::note::{Note, NoteId};
 use crate::pow::{median_time_past, meets_target, next_difficulty, work_of, RECENT_HEADERS};
 use crate::state::{
@@ -198,6 +198,15 @@ pub enum HandoverError {
     BuriedWorkDoesNotAddUp { at: u64 },
     #[error("the headers handed over do not run up to the tip that was weighed")]
     BuriedRunNotEndingAtTheTip,
+    #[error(
+        "the rules at height {height} are block version {required}, and this build knows \
+         only version {known}"
+    )]
+    SoftwareTooOld {
+        height: u64,
+        required: u16,
+        known: u16,
+    },
 }
 
 impl LedgerState {
@@ -206,10 +215,17 @@ impl LedgerState {
     /// The last few headers come along because the difficulty rule and the
     /// timestamp rule read them, and a node that cannot check the next block
     /// has not really been handed anything.
-    /// A note in the window with no path here would go out with none, and be
-    /// refused at the other end rather than believed. Nothing produces one:
-    /// what a spend empties, it also takes off the window.
-    #[must_use]
+    ///
+    /// Every note in the window needs a path, because the far end refuses a
+    /// ledger that arrives without one. This used to gather them with a
+    /// `filter_map`, so a note with no path was quietly left out and the
+    /// receiver reported [`HandoverError::MissingGraceProof`] about a ledger
+    /// the sender believed it had sent whole. Nothing produces that state:
+    /// what a spend empties, it also takes off the window, and a note is only
+    /// let go of once the window has stopped wanting it. The refusal is
+    /// reported here anyway, because a silence that depends on an invariant
+    /// holding elsewhere is the shape of the thing this crate has already had
+    /// to repair once.
     pub fn handover(
         &self,
         at: BlockHeader,
@@ -218,14 +234,19 @@ impl LedgerState {
         anchor: ForestProof,
         buried: Vec<BlockHeader>,
         recent: Vec<BlockHeader>,
-    ) -> Handover {
+    ) -> Result<Handover, HandoverError> {
         let grace = self.grace_window();
-        let grace_proofs = grace
-            .iter()
-            .flatten()
-            .filter_map(|(_, position, _)| Some((*position, self.cold().proof_of(*position)?)))
-            .collect();
-        Handover {
+        let mut grace_proofs = Vec::new();
+        for (_, position, _) in grace.iter().flatten() {
+            let proof =
+                self.cold()
+                    .proof_of(*position)
+                    .ok_or(HandoverError::MissingGraceProof {
+                        position: *position,
+                    })?;
+            grace_proofs.push((*position, proof));
+        }
+        Ok(Handover {
             at,
             tip,
             tip_history,
@@ -239,7 +260,7 @@ impl LedgerState {
             headers: self.headers_before_tip(),
             buried,
             recent,
-        }
+        })
     }
 }
 
@@ -255,6 +276,31 @@ pub fn accept(handover: &Handover, params: &ConsensusParams) -> Result<LedgerSta
     let tip = &handover.tip;
     if !meets_target(&at.id(), at.difficulty) || !meets_target(&tip.id(), tip.difficulty) {
         return Err(HandoverError::HeaderWithoutWork);
+    }
+
+    // Asked before anything else is looked at, because everything else is a
+    // judgement made under rules this build may not have.
+    //
+    // Nothing on this path used to consider a version at all. A node whose
+    // rules stop at some height took a ledger anchored above it, adopted it,
+    // reported that height, and answered balances out of a chain it had no
+    // rules for, while still saying it was up to date. It found out at the
+    // next block and not before, and in the meantime a wallet showed a
+    // checked-looking balance produced by rules the node could not check.
+    //
+    // The reverse matters more once a rule really does change: a newcomer one
+    // release behind would refuse an honest handover for carrying the wrong
+    // difficulty, which reads to whoever is watching as a peer having forged
+    // it. Saying "I am too old" instead is the difference between a node that
+    // waits to be updated and an operator hunting an attacker who is not
+    // there.
+    let required = params.version_at(tip.height);
+    if required > BLOCK_VERSION || tip.version > BLOCK_VERSION || at.version > BLOCK_VERSION {
+        return Err(HandoverError::SoftwareTooOld {
+            height: tip.height,
+            required: required.max(tip.version).max(at.version),
+            known: BLOCK_VERSION,
+        });
     }
 
     // Deep enough that whoever wrote this ledger had to go on mining for a

@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use cairn_ledger::block::{Block, BlockHeader};
+use cairn_ledger::block::{Block, BlockHeader, BLOCK_VERSION};
 use cairn_ledger::note::NoteId;
 use cairn_ledger::pow::{meets_target, work_of};
 use cairn_ledger::transaction::Transfer;
@@ -302,8 +302,18 @@ impl ChainError {
     /// by default. Refusing to remember costs one validation. Remembering
     /// wrongly costs a node the chain.
     ///
-    /// One verdict looks as though the header settles it and does not, which
-    /// is why it is named here rather than merely absent from the list.
+    /// Two verdicts look as though the header settles them and do not, which
+    /// is why they are named here rather than merely absent from the list.
+    ///
+    /// A version this build does not accept is the second. It is measured
+    /// against the schedule this node happens to be carrying, so it is a
+    /// judgement about the reader and not about the header, and it changes
+    /// the moment the reader is updated. Remembering it made an un-updated
+    /// node condemn the real chain for good, and then refuse every honest
+    /// peer that offered it. Nothing here is remembered any more, and a
+    /// version above what this build knows is answered as being too old
+    /// rather than as a bad block, so the node stops and says so rather than
+    /// quietly mining a chain of its own.
     /// A timestamp too far ahead is measured against the reading node's own
     /// clock, so it is the one refusal in the whole set that two honest nodes
     /// can disagree about, and that the same node reverses simply by waiting.
@@ -319,8 +329,7 @@ impl ChainError {
         };
         matches!(
             source,
-            BlockError::UnsupportedVersion { .. }
-                | BlockError::WrongNetwork { .. }
+            BlockError::WrongNetwork { .. }
                 | BlockError::WrongHeight { .. }
                 | BlockError::WrongParent { .. }
                 | BlockError::HeightOverflow
@@ -1329,7 +1338,46 @@ impl ChainStore {
             return Err(ChainError::Corrupt);
         }
 
+        // A ledger from a height this build has no rules for is one this node
+        // cannot stand behind, and standing behind it is exactly what adopting
+        // means. Nothing here used to ask: a node whose rules stopped at some
+        // height took the ledger, reported that height, and answered questions
+        // out of a chain it could not judge, while still saying it was up to
+        // date. The next block told it, and nothing before that did.
+        //
+        // Asked here as well as where a handover is checked, because this is
+        // the door a ledger comes through however it was obtained, and because
+        // the answer belongs with every other refusal a node reports about
+        // itself rather than about somebody else.
+        let required = self.params.version_at(tip.height);
+        if required > BLOCK_VERSION || last.version > BLOCK_VERSION {
+            return Err(ChainError::InvalidBlock {
+                id: tip.id,
+                source: BlockError::SoftwareTooOld {
+                    height: tip.height,
+                    required: required.max(last.version),
+                    known: BLOCK_VERSION,
+                },
+            });
+        }
+
+        // Who this node follows is a fact about this node. It lives in the
+        // ledger because that is where a falling note is seen, and a ledger
+        // handed over by somebody else knows nothing about it, so assigning
+        // one over the top used to forget it.
+        //
+        // What that cost was money. A wallet joining a live chain takes a
+        // handover rather than reading thirty years of blocks, which is the
+        // whole point, and its node then recorded no position for any of its
+        // owner's notes as they fell. About three hours later, when the first
+        // one fell, the wallet could no longer build a proof for it: the money
+        // was visible, correct, and unspendable, for good, with nobody
+        // attacking anything. It was the default path for a new wallet.
+        let following: Vec<_> = self.state.watching().collect();
         self.state = state;
+        for owner in following {
+            self.state.watch_owner(owner);
+        }
         self.branch = Branch::from_tail(recent);
         // Nothing here can be undone: undoing takes the record of what a block
         // did, and this node was not there when they were done. So the window

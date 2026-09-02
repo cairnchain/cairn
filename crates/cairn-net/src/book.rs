@@ -12,7 +12,7 @@
 //! second is what seeds are for.
 
 use std::collections::BTreeMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use crate::message::PeerAddress;
@@ -390,7 +390,13 @@ impl AddressBook {
     }
 }
 
-/// Whether an address is worth keeping at all.
+/// Whether an address is an address at all.
+///
+/// Everything the operator hands the book passes only this. Where a node runs
+/// is the operator's business: a lab on `10/8`, a devnet on loopback and a
+/// machine on the open internet are all somebody's real network, and a book
+/// that second-guessed the person who started the node would be refusing the
+/// one address they were sure about.
 fn is_dialable(address: &SocketAddr) -> bool {
     if address.port() == 0 {
         return false;
@@ -399,6 +405,117 @@ fn is_dialable(address: &SocketAddr) -> bool {
         IpAddr::V4(ip) => !ip.is_unspecified() && !ip.is_broadcast() && !ip.is_multicast(),
         IpAddr::V6(ip) => !ip.is_unspecified() && !ip.is_multicast(),
     }
+}
+
+/// Which part of the internet an address belongs to.
+///
+/// The book cares because these are not interchangeable in the one situation
+/// that matters: a stranger naming an address is choosing who this node opens
+/// a connection to. A peer out on the internet has no way of knowing anything
+/// true about the inside of this machine, or of the network this machine sits
+/// in, so an address there from such a peer is not a peer address that
+/// happens to be private. It is a door the stranger would like knocked on,
+/// from a host that is probably allowed to knock: a database with no password
+/// because it is only reachable from inside, an admin port, or
+/// `169.254.169.254`, which on a rented machine is where the credentials
+/// live.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Realm {
+    /// Reachable from anywhere, which is what a peer address is meant to be.
+    Open,
+    /// Inside this machine.
+    Loopback,
+    /// Inside whatever network this machine sits in.
+    Private,
+    /// Reachable with no router in between, which is where a rented machine
+    /// keeps the service that hands out its credentials.
+    LinkLocal,
+}
+
+/// Which part of the internet `ip` belongs to.
+///
+/// Not an inventory of every range anybody ever reserved. What is named here
+/// is what a stranger has a reason to name, and everything else is treated as
+/// out in the world: an address in some unallocated block costs this node one
+/// dial that fails, which is what the misses above are for.
+pub fn realm_of(ip: IpAddr) -> Realm {
+    match ip {
+        IpAddr::V4(v4) => realm_of_v4(v4),
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() {
+                return Realm::Loopback;
+            }
+            // A v4 address wearing a v6 hat is still that v4 address, and
+            // this is the whole of why the hat comes off: `::ffff:127.0.0.1`
+            // reaches the same place `127.0.0.1` does, and a rule that read
+            // the two differently would be a rule with a spelling anybody
+            // could use. Checked after loopback, because `::1` is inside the
+            // older of the two mappings and is not the address `0.0.0.1`.
+            if let Some(v4) = v6.to_ipv4() {
+                return realm_of_v4(v4);
+            }
+            let octets = v6.octets();
+            if octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80 {
+                Realm::LinkLocal
+            } else if (octets[0] & 0xfe) == 0xfc {
+                Realm::Private
+            } else {
+                Realm::Open
+            }
+        }
+    }
+}
+
+fn realm_of_v4(ip: Ipv4Addr) -> Realm {
+    if ip.is_loopback() {
+        Realm::Loopback
+    } else if ip.is_link_local() {
+        Realm::LinkLocal
+    } else if ip.is_private() || matches!(ip.octets(), [100, 64..=127, _, _]) {
+        // Carrier-grade translation sits with the private ranges: it is
+        // somebody's inside, and nothing out here can reach it.
+        Realm::Private
+    } else {
+        Realm::Open
+    }
+}
+
+/// Whether an address a peer named is one this node will write down.
+///
+/// The book has three doors and they are not equally trusted, which is the
+/// whole of the rule here.
+///
+/// The operator's door is [`AddressBook::insert_seed`], and it takes whatever
+/// it is given. The socket's door is the address a live peer is reachable at,
+/// which is the address the connection actually came from with the port the
+/// peer named; the part that matters there was observed by this node rather
+/// than asserted by anybody, so a stranger cannot use it to name a third
+/// party.
+///
+/// This is the third door, and everything through it is a stranger's choice
+/// of who this node talks to. An address out in the world is taken from
+/// anybody: that is how a network is learned, and the worst a bad one costs
+/// is a dial that fails. A loopback, private or link-local address is not
+/// taken from just anybody, because from out on the internet nobody can know
+/// anything true about the inside of this machine. It is taken when two
+/// things hold at once: this node went out and dialled the peer saying it,
+/// rather than answering a connection somebody else chose, and the peer is
+/// itself in the same part of the internet as the address it is naming.
+///
+/// Those two are what let a devnet on loopback and a lab on `10/8` work as
+/// they always have, since there every peer a node dials is in the same
+/// place as everything it will be told about. Out on the internet they hold
+/// for nobody, which is the point: no peer there is in the same realm as this
+/// machine's insides, so nothing there gets to name them.
+pub fn worth_hearing_about(address: &SocketAddr, teller: Option<IpAddr>, dialled: bool) -> bool {
+    if !is_dialable(address) {
+        return false;
+    }
+    let realm = realm_of(address.ip());
+    if realm == Realm::Open {
+        return true;
+    }
+    dialled && teller.is_some_and(|at| realm_of(at) == realm)
 }
 
 #[cfg(test)]
@@ -459,6 +576,81 @@ mod tests {
             "not even from an operator"
         );
         assert!(book.is_empty());
+    }
+
+    /// **A stranger used to choose which addresses a node dialled, and the
+    /// inside of the machine was among them.**
+    ///
+    /// Nothing refused loopback, `10/8`, `172.16/12`, `192.168/16` or
+    /// `169.254/16`, and any greeted peer could put sixty four addresses in
+    /// the book per message for one unit. The node then opened a TCP
+    /// connection to whatever was in there and wrote its own handshake into
+    /// it. Not a way of forging a request, since the bytes are fixed, but a
+    /// way of making a host that is probably allowed to reach an internal
+    /// service knock on it, and `169.254.169.254` is where a rented machine
+    /// keeps its credentials.
+    #[test]
+    fn a_peer_out_in_the_world_cannot_name_the_inside_of_this_machine() {
+        let far_away = Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4)));
+        for named in [
+            "127.0.0.1:22",
+            "10.0.0.5:6379",
+            "172.16.4.4:9200",
+            "192.168.1.1:80",
+            "169.254.169.254:80",
+            "[::ffff:127.0.0.1]:22",
+            "[::1]:22",
+            "[fd00::1]:9000",
+            "[fe80::1]:9000",
+        ] {
+            let address: SocketAddr = named.parse().unwrap();
+            assert!(
+                !worth_hearing_about(&address, far_away, true),
+                "{named} was taken from a peer out on the internet"
+            );
+        }
+        // And what a peer address is supposed to be still goes in from
+        // anybody, dialled or not: that is how a network is learned, and the
+        // worst a bad one costs is a dial that fails.
+        let open: SocketAddr = "198.51.100.9:9000".parse().unwrap();
+        assert!(worth_hearing_about(&open, far_away, false));
+        assert!(worth_hearing_about(&open, None, false));
+    }
+
+    /// The devnet and the lab, which are how this software is developed and
+    /// run, and where every address in sight is private.
+    #[test]
+    fn a_peer_in_the_same_place_may_name_addresses_there() {
+        let near: SocketAddr = "10.0.0.5:9000".parse().unwrap();
+        let neighbour = Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 6)));
+        assert!(
+            worth_hearing_about(&near, neighbour, true),
+            "a peer this node dialled inside the same network"
+        );
+        assert!(
+            !worth_hearing_about(&near, neighbour, false),
+            "but not one that dialled in: that connection is somebody else's choice"
+        );
+        assert!(
+            !worth_hearing_about(&near, Some(IpAddr::V4(Ipv4Addr::LOCALHOST)), true),
+            "and not from inside this machine, which is a different place again"
+        );
+
+        let here: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        assert!(worth_hearing_about(
+            &here,
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            true
+        ));
+    }
+
+    /// Whatever the operator says is where their node runs.
+    #[test]
+    fn the_operators_own_addresses_are_not_second_guessed() {
+        let mut book = AddressBook::new();
+        assert!(book.insert_seed("127.0.0.1:9000".parse().unwrap()));
+        assert!(book.insert_seed("10.0.0.5:9000".parse().unwrap()));
+        assert_eq!(book.seeds().len(), 2);
     }
 
     #[test]

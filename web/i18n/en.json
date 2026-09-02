@@ -117,6 +117,24 @@
         ]
       }
     },
+        "index": {
+      "title": "What this website costs",
+      "body": {
+        "plain": [
+          "This site is not just a node. It is a node plus a very large card index: for every note that has ever existed it remembers who was paid, when, and what became of it, so that you can type an address into the box above and be told what it holds. The chain itself refuses to make anybody carry that. It is here so that it is not there.",
+          "It costs about {perNote} bytes for every note that has ever existed, and it never stops growing. Keeping the cave, which this computer also does, costs about {coldPerNote} bytes for each note that has fallen. An ordinary node keeps neither and pays for neither."
+        ],
+        "curious": [
+          "The index is the explorer's own growing cost, and it is the larger of its two by about seven times: {perNote} bytes for every note ever created, against {coldPerNote} bytes for every note that has fallen into the cold set. Both are unbounded, and both are carried by whoever chooses to offer this service.",
+          "A plain node carries neither. Its memory does not move with the cold set at all, which is the claim the whole design rests on, and this page is what an exception to it looks like."
+        ],
+        "technical": [
+          "Owner to notes, note to record, transaction identifier to location, and one movement recorded per credit and per debit. Nothing is ever removed, so the size is a function of the chain's whole history rather than of its current state.",
+          "Measured on the running implementation: {perNote} bytes per note ever created for the index, {coldPerNote} bytes per fallen note for an archiving node's cold set, and no slope at all for a node that keeps only the sixty four roots.",
+          "None of it is bounded by a rule. One block filled to the byte limit can be three thousand dust notes to three thousand fresh addresses, which is about 1.6 MB of index for that one block, and about 810 GB a year at a block a minute. Whoever mines that block pays nothing for it: the fee floor is a node's own policy about what it will carry, not a rule of the chain."
+        ]
+      }
+    },
     "recent": { "title": "Latest blocks" }
   },
 
@@ -150,7 +168,7 @@
     "cold.explain": "No node holds this note any more. Spending it takes a proof, which its owner keeps.",
     "grace.explain": "It fell out of the drawer very recently, so nodes still hold it and no proof is needed yet.",
     "spent.explain": "This note has been spent. A note is created once and spent once.",
-    "unknown.explain": "This note is not in the index yet."
+    "unknown.explain": "This site cannot say where this note stands. Either it has not read that part of the chain yet, or the note was on a branch the network abandoned and no longer exists anywhere."
   },
 
   "direction": { "in": "received", "out": "sent" },
@@ -173,6 +191,15 @@
     "spentBy": "Spent by", "spentAt": "Spent in block", "position": "Position in the cave",
     "position.note": "where its proof points",
     "none": "None", "pending": "Not mined yet", "unknown": "Not indexed",
+    "indexNotes": "Notes it remembers",
+    "indexTransactions": "Transactions it can find",
+    "indexOwners": "Addresses it has seen",
+    "indexBytes": "What that comes to",
+    "indexBytes.note": "at {perNote} bytes a note",
+    "indexCovers": "Read so far",
+    "indexCovers.value": "blocks {from} to {through}",
+    "indexCovers.none": "nothing yet",
+    "indexCovers.note": "of a chain that has reached block {height}",
     "network": "Network", "networkId": "Network identifier", "genesis": "First block",
     "opensAt": "Opened at", "opensAt.note": "no block may be dated earlier",
     "initialReward": "First block reward", "halvingInterval": "Blocks between halvings",
@@ -201,6 +228,7 @@
     "spends": "Spends ({n})",
     "creates": "Creates ({n})",
     "fee": "fee {fee} CAIRN",
+    "fee.unknown": "fee not worked out",
     "waiting": "Waiting for a block",
     "included": "In the chain, {n} blocks deep"
   },
@@ -602,7 +630,7 @@
       "body": {
         "plain": ["This website is one of the three programs in the folder you downloaded. It serves these exact pages from your own machine, reading your own node. Nothing here needs to be taken on trust either."],
         "curious": ["The explorer is a node that also builds an index and serves the site. The index is a cost that grows with the chain, which is precisely why it lives here and not in the node everybody runs."],
-        "technical": ["The site is compiled into the binary; nothing is read from disk at runtime. The HTTP layer is standard library only, one thread per connection, GET and HEAD, no request body."]
+        "technical": ["The site is compiled into the binary; nothing is read from disk at runtime. The HTTP layer is standard library only, one thread per connection, GET and HEAD, no request body.", "Unlike a node, the explorer keeps every block on disk by default rather than a gigabyte of them. It builds its index by walking the chain from the first block up, so blocks dropped off the bottom are the ones it needs most. Use --keep to bound it anyway; the site then says on every page that it has only read the chain from the oldest block it still holds."]
       }
     },
     "build": {
@@ -615,6 +643,19 @@
     }
   },
 
+  "warn": {
+    "outdated": "This website is running a program that is too old for the chain it is watching. The rules from block {height} need version {required}, and this program knows only version {known}. It stopped following the chain there on purpose, so the height, the money and the blocks below are from before that moment and will not move again. Whoever runs this site has to install a newer version.",
+    "stranded": "The node behind this page was handed the ledger at block {anchor} and had to check its own way to block {settlesAt} before it could stand behind it. The blocks in between never arrived, and it holds nothing below block {anchor}, so there is no other way to reach them. Nothing on this page has been checked by this node. Whoever runs this site has to start it again from scratch.",
+    "probation": "The node behind this page has not yet checked the chain it is showing you. It was handed a ledger by another computer and has checked {checked} of the {owed} blocks it has to check before it can stand behind it. Until then, everything below is somebody else's account of the chain rather than this node's own reading. It carries on by itself; wait for this line to go.",
+    "joining": "The node behind this page is still being handed the chain by another computer. Nothing below is complete yet, and some of it is missing rather than wrong. It carries on by itself.",
+    "outOfReach": "The node behind this page has been offered {blocks} blocks it cannot reach, which means somebody is following a chain that parts from this one further back than this node can see. It cannot cross to that chain however much of it arrives. What is below may not be what most of the network agrees on.",
+    "indexEmpty": "This page has not read the chain yet. It is working through {blocks} blocks, and until it has finished, every address on this site will say it holds nothing, because nothing has been read rather than because nothing is there. Balances shown now are not balances.",
+    "indexPartial": "This site cannot see the whole chain. It has only read from block {from} upwards, because the computer behind it no longer keeps the blocks below that. Every balance and every total here is about that part of the chain and not about the chain: an address that was paid earlier and has spent nothing since will show as empty. Whoever runs this site can fix it by keeping every block.",
+    "indexBehind": "This site is {blocks} blocks behind the chain. What is below was true a while ago. Anything paid or spent since is not here yet.",
+    "alone": "The computer behind this page is not connected to anybody. It is showing you the chain as it last saw it, and it will not learn about a new block until somebody reaches it again.",
+    "supply": "The two ways this site counts the money in existence do not agree: the chain's own accounts say {issued} CAIRN and adding up the notes gives {counted} CAIRN. They are worked out from different things and should be the same number. One of them is wrong and this page cannot tell you which."
+  },
+
   "foot": {
     "whitepaper": "The paper",
     "design": "How it is built",
@@ -622,6 +663,6 @@
     "priorArt": "What came before",
     "source": "The source",
     "watching": "This page only reads. It holds no key, it can sign nothing, and it will never ask you for one.",
-    "node": "{network} · {blocks} blocks indexed · from {genesis}"
+    "node": "{network} · {blocks} of {height} blocks read · from {genesis}"
   }
 }

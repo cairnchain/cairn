@@ -142,6 +142,7 @@ fn handover_bytes(capacity: usize) -> usize {
             Vec::new(),
             headers[from..].to_vec(),
         )
+        .expect("every note in the window has a path")
         .encode()
         .len()
 }

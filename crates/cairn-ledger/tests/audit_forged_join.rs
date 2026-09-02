@@ -257,14 +257,16 @@ fn a_free_run_cannot_swallow_the_anchor_any_more() {
         before_at.add(header_leaf(&h.id()));
     }
 
-    let mut handover = donor.handover(
-        at,
-        tip,
-        archive.forest().roots_only(),
-        archive.prove_in(anchor_height, tip.height).unwrap(),
-        buried,
-        recent,
-    );
+    let mut handover = donor
+        .handover(
+            at,
+            tip,
+            archive.forest().roots_only(),
+            archive.prove_in(anchor_height, tip.height).unwrap(),
+            buried,
+            recent,
+        )
+        .unwrap();
     // The ledger is the donor's; the headers under it are the forgery's.
     handover.headers = before_at.forest().roots_only();
 

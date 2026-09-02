@@ -117,6 +117,24 @@
         ]
       }
     },
+        "index": {
+      "title": "Ce que coûte ce site",
+      "body": {
+        "plain": [
+          "Ce site n'est pas seulement un nœud. C'est un nœud doublé d'un très grand fichier : pour chaque billet ayant jamais existé, il retient qui a été payé, quand, et ce que le billet est devenu, de sorte que vous puissiez taper une adresse dans le champ ci-dessus et savoir ce qu'elle détient. La chaîne, elle, refuse d'imposer cela à qui que ce soit. C'est ici pour que ce ne soit pas là-bas.",
+          "Cela coûte environ {perNote} octets par billet ayant jamais existé, et cela ne cesse jamais de grandir. Garder la cave, ce que cet ordinateur fait aussi, coûte environ {coldPerNote} octets par billet tombé. Un nœud ordinaire ne garde ni l'un ni l'autre, et ne paie ni l'un ni l'autre."
+        ],
+        "curious": [
+          "L'index est le coût croissant propre à l'explorateur, et c'est le plus lourd de ses deux coûts, d'un facteur sept environ : {perNote} octets pour chaque billet jamais créé, contre {coldPerNote} octets pour chaque billet tombé dans l'ensemble froid. Aucun des deux n'est borné, et les deux pèsent sur qui choisit de rendre ce service.",
+          "Un nœud ordinaire ne porte ni l'un ni l'autre. Sa mémoire ne bouge pas du tout avec l'ensemble froid, et c'est là-dessus que repose toute la conception ; cette page montre à quoi ressemble une exception."
+        ],
+        "technical": [
+          "Propriétaire vers billets, billet vers fiche, identifiant de transaction vers emplacement, et un mouvement enregistré à chaque crédit comme à chaque débit. Rien n'en sort jamais : la taille dépend donc de toute l'histoire de la chaîne et non de son état courant.",
+          "Mesuré sur l'implémentation réelle : {perNote} octets par billet jamais créé pour l'index, {coldPerNote} octets par billet tombé pour l'ensemble froid d'un nœud archiviste, et aucune pente du tout pour un nœud qui ne garde que les soixante-quatre racines.",
+          "Rien de tout cela n'est borné par une règle. Un bloc rempli jusqu'à la limite d'octets peut contenir trois mille billets de poussière vers trois mille adresses neuves, soit environ 1,6 Mo d'index pour ce seul bloc, et environ 810 Go par an à raison d'un bloc par minute. Celui qui mine ce bloc ne paie rien pour cela : le plancher de frais est la politique de chaque nœud sur ce qu'il accepte de porter, pas une règle de la chaîne."
+        ]
+      }
+    },
     "recent": { "title": "Derniers blocs" }
   },
 
@@ -150,7 +168,7 @@
     "cold.explain": "Plus aucun nœud ne détient ce billet. Le dépenser demande une preuve, que son propriétaire conserve.",
     "grace.explain": "Il vient tout juste de sortir du tiroir, donc les nœuds l'ont encore et aucune preuve n'est nécessaire.",
     "spent.explain": "Ce billet a été dépensé. Un billet est créé une fois et dépensé une fois.",
-    "unknown.explain": "Ce billet n'est pas encore dans l'index."
+    "unknown.explain": "Ce site ne peut pas dire où en est ce billet. Soit il n'a pas encore lu cette partie de la chaîne, soit le billet était sur une branche que le réseau a abandonnée et il n'existe plus nulle part."
   },
 
   "direction": { "in": "reçu", "out": "envoyé" },
@@ -173,6 +191,15 @@
     "spentBy": "Dépensé par", "spentAt": "Dépensé au bloc", "position": "Position dans la cave",
     "position.note": "là où pointe sa preuve",
     "none": "Aucun", "pending": "Pas encore miné", "unknown": "Pas indexé",
+    "indexNotes": "Billets mémorisés",
+    "indexTransactions": "Transactions retrouvables",
+    "indexOwners": "Adresses rencontrées",
+    "indexBytes": "Ce que cela représente",
+    "indexBytes.note": "à {perNote} octets par billet",
+    "indexCovers": "Lu jusqu'ici",
+    "indexCovers.value": "des blocs {from} à {through}",
+    "indexCovers.none": "rien pour l'instant",
+    "indexCovers.note": "sur une chaîne qui en est au bloc {height}",
     "network": "Réseau", "networkId": "Identifiant de réseau", "genesis": "Premier bloc",
     "opensAt": "Ouvert le", "opensAt.note": "aucun bloc ne peut être daté avant",
     "initialReward": "Récompense du premier bloc", "halvingInterval": "Blocs entre deux halvings",
@@ -201,6 +228,7 @@
     "spends": "Dépense ({n})",
     "creates": "Crée ({n})",
     "fee": "frais {fee} CAIRN",
+    "fee.unknown": "frais non établis",
     "waiting": "En attente d'un bloc",
     "included": "Dans la chaîne, {n} blocs de profondeur"
   },
@@ -602,7 +630,7 @@
       "body": {
         "plain": ["Ce site est l'un des trois programmes du dossier que vous avez téléchargé. Il sert exactement ces pages depuis votre machine, en lisant votre propre nœud. Rien ici non plus n'a besoin d'être pris sur parole."],
         "curious": ["L'explorateur est un nœud qui construit en plus un index et sert le site. Cet index est un coût qui grandit avec la chaîne, et c'est précisément pour cela qu'il vit ici et pas dans le nœud que tout le monde fait tourner."],
-        "technical": ["Le site est compilé dans le binaire, rien n'est lu sur le disque à l'exécution. La couche HTTP n'utilise que la bibliothèque standard, un fil par connexion, GET et HEAD, sans corps de requête."]
+        "technical": ["Le site est compilé dans le binaire, rien n'est lu sur le disque à l'exécution. La couche HTTP n'utilise que la bibliothèque standard, un fil par connexion, GET et HEAD, sans corps de requête.", "Contrairement à un nœud, l'explorateur garde par défaut tous les blocs sur le disque, et non un gigaoctet. Il construit son index en parcourant la chaîne depuis le premier bloc : les blocs abandonnés par le bas sont donc précisément ceux dont il a le plus besoin. On peut malgré tout le borner avec --keep, et le site indique alors sur chaque page qu'il n'a lu la chaîne qu'à partir du plus ancien bloc qu'il détient encore."]
       }
     },
     "build": {
@@ -615,6 +643,19 @@
     }
   },
 
+  "warn": {
+    "outdated": "Ce site tourne sur un programme trop ancien pour la chaîne qu'il observe. Les règles à partir du bloc {height} demandent la version {required}, et ce programme ne connaît que la version {known}. Il a cessé de suivre la chaîne à cet endroit, volontairement : la hauteur, l'argent et les blocs affichés datent d'avant ce moment et ne bougeront plus. La personne qui tient ce site doit installer une version plus récente.",
+    "stranded": "Le nœud derrière cette page a reçu le grand livre au bloc {anchor}, et devait vérifier lui-même jusqu'au bloc {settlesAt} avant de pouvoir en répondre. Les blocs intermédiaires ne sont jamais arrivés, et il ne détient rien en dessous du bloc {anchor} : il n'a aucun autre moyen de les atteindre. Rien sur cette page n'a été vérifié par ce nœud. La personne qui tient ce site doit le relancer depuis le début.",
+    "probation": "Le nœud derrière cette page n'a pas encore vérifié la chaîne qu'il vous montre. Un autre ordinateur lui a remis un grand livre, et il a vérifié {checked} des {owed} blocs qu'il doit contrôler avant de pouvoir en répondre. D'ici là, tout ce qui suit est la parole de quelqu'un d'autre et non la lecture de ce nœud. Il continue tout seul : attendez que cette ligne disparaisse.",
+    "joining": "Un autre ordinateur est en train de remettre la chaîne au nœud derrière cette page. Rien de ce qui suit n'est encore complet, et ce qui manque manque plutôt qu'il n'est faux. Cela se termine tout seul.",
+    "outOfReach": "On a proposé au nœud derrière cette page {blocks} blocs qu'il ne peut pas atteindre : quelqu'un suit donc une chaîne qui se sépare de celle-ci plus loin en arrière que ce nœud ne voit. Il ne peut pas passer sur cette chaîne, quelle qu'en soit la part qui lui parvienne. Ce qui suit n'est peut-être pas ce sur quoi la majorité du réseau s'accorde.",
+    "indexEmpty": "Cette page n'a pas encore lu la chaîne. Elle est en train de parcourir {blocks} blocs, et tant qu'elle n'a pas fini, chaque adresse de ce site indiquera qu'elle ne détient rien : parce que rien n'a été lu, et non parce qu'il n'y a rien. Les soldes affichés maintenant ne sont pas des soldes.",
+    "indexPartial": "Ce site ne voit pas toute la chaîne. Il n'a lu qu'à partir du bloc {from}, parce que l'ordinateur qui le fait tourner ne garde plus les blocs situés en dessous. Chaque solde et chaque total ici porte sur cette portion de la chaîne et non sur la chaîne : une adresse payée plus tôt et qui n'a rien dépensé depuis apparaîtra vide. La personne qui tient ce site peut y remédier en gardant tous les blocs.",
+    "indexBehind": "Ce site a {blocks} blocs de retard sur la chaîne. Ce qui suit était vrai il y a un moment. Ce qui a été payé ou dépensé depuis n'y figure pas encore.",
+    "alone": "L'ordinateur derrière cette page n'est connecté à personne. Il vous montre la chaîne telle qu'il l'a vue en dernier, et il n'apprendra l'existence d'un nouveau bloc que quand quelqu'un le joindra de nouveau.",
+    "supply": "Les deux façons dont ce site compte l'argent en circulation ne concordent pas : la comptabilité de la chaîne donne {issued} CAIRN, et l'addition des billets donne {counted} CAIRN. Elles sont calculées à partir de choses différentes et devraient donner le même nombre. L'une des deux est fausse, et cette page ne peut pas vous dire laquelle."
+  },
+
   "foot": {
     "whitepaper": "Le papier",
     "design": "Comment c’est construit",
@@ -622,6 +663,6 @@
     "priorArt": "Ce qui existait avant",
     "source": "Le code source",
     "watching": "Cette page ne fait que lire. Elle ne détient aucune clé, elle ne peut rien signer, et elle ne vous en demandera jamais.",
-    "node": "{network} · {blocks} blocs indexés · depuis {genesis}"
+    "node": "{network} · {blocks} blocs lus sur {height} · depuis {genesis}"
   }
 }

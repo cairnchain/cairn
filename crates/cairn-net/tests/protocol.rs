@@ -16,7 +16,6 @@ use cairn_ledger::note::{NetworkId, Note};
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
-use cairn_net::book::AddressBook;
 use cairn_net::message::{Handshake, Message, PeerAddress, MAX_CHAIN, PROTOCOL_VERSION};
 use cairn_net::sync::{local_handshake, on_message, DropReason, Local, PeerState};
 use cairn_net::wire::{read_message, write_message, Incoming, WireError, MAX_FRAME_BYTES};
@@ -142,12 +141,10 @@ fn resolve(reaction: cairn_net::sync::Reaction, chain: &ChainStore) -> Vec<Messa
 /// Two nodes sharing a nonce would each take the other for itself, which is
 /// exactly what the nonce exists to detect.
 fn solo_as(chain: &mut ChainStore, nonce: u64) -> Local<'_> {
-    static EMPTY: std::sync::OnceLock<AddressBook> = std::sync::OnceLock::new();
     Local {
         shows_the_chain: true,
         nonce,
         chain,
-        book: EMPTY.get_or_init(AddressBook::new),
         listen: 4242,
     }
 }
@@ -615,32 +612,29 @@ fn an_introduction_asks_the_peer_who_else_it_knows() {
     );
 }
 
+/// A request for addresses is named here and answered by the node.
+///
+/// Named rather than answered, like the blocks and the headers, and for the
+/// same reason: the answer is drawn from the whole book, which has to be
+/// ordered before any of it can be shared, and this layer runs with the chain
+/// held. This layer used to be handed a copy of the book for every message
+/// from every peer to serve the one message that reads it.
 #[test]
-fn a_request_for_peers_is_answered_from_the_book() {
-    use std::net::Ipv4Addr;
-
+fn a_request_for_peers_is_named_rather_than_answered_here() {
     let params = params();
     let mut store = ChainStore::new(params);
 
-    let mut book = AddressBook::new();
-    for port in 9_000..9_004u16 {
-        book.insert(SocketAddr::from((Ipv4Addr::new(203, 0, 113, 7), port)));
-    }
-
     let mut peer = greeted_peer(0, 0);
-    let mut local = Local {
-        shows_the_chain: true,
-        chain: &mut store,
-        book: &book,
-        listen: 4242,
-        nonce: 1,
-    };
-    let reaction = on_message(&mut local, &mut peer, Message::GetPeers, NOW);
+    let reaction = on_message(&mut solo(&mut store), &mut peer, Message::GetPeers, NOW);
 
-    match reaction.reply.first() {
-        Some(Message::Peers(shared)) => assert_eq!(shared.len(), 4),
-        other => panic!("expected addresses, got {other:?}"),
-    }
+    assert!(
+        reaction.share_addresses,
+        "the node owes this peer addresses"
+    );
+    assert!(
+        reaction.reply.is_empty(),
+        "and nothing was drawn from the book with the chain held"
+    );
 }
 
 #[test]

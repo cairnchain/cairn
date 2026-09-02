@@ -15,12 +15,14 @@
 //! showing a history that starts nowhere in particular.
 
 use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::path::Path;
 
 use cairn_crypto::PublicKey;
 use cairn_ledger::block::Block;
 use cairn_ledger::note::NoteId;
 use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
+use cairn_primitives::hash::{hash, Domain, HASH_LEN};
 use cairn_primitives::{Amount, Hash32};
 
 /// Movements kept. Past this the oldest are dropped, so a wallet running for
@@ -416,16 +418,58 @@ impl History {
     pub fn load(path: &Path) -> Self {
         std::fs::read(path)
             .ok()
-            .and_then(|bytes| Self::decode(&bytes).ok())
+            .and_then(|bytes| Self::verified(&bytes))
             .unwrap_or_default()
+    }
+
+    /// The account in `bytes`, if the bytes are the ones that were written.
+    ///
+    /// A history that is short refuses to decode and costs a wallet a reread
+    /// of the chain, which is the ordinary torn write and is handled. A
+    /// history whose bytes changed without changing its length is a different
+    /// thing: every field here is a fixed-width number or a hash, so almost
+    /// any bytes decode into a plausible account. `Wallet::reckon` reads the
+    /// notes out of this file and reports any the node does not know about as
+    /// money whose proof cannot be produced, which is a real category, so a
+    /// fabricated note is indistinguishable from a stranded one and the
+    /// wallet shows money that does not exist.
+    ///
+    /// The stamp is not a defence against anybody: a file this wallet writes
+    /// is a file whoever holds the machine can rewrite, stamp and all. It is
+    /// a defence against a disk that changed under it, which is the failure
+    /// this file actually meets, and it costs one hash of a few kilobytes at
+    /// each start.
+    fn verified(bytes: &[u8]) -> Option<Self> {
+        let (body, stamp) = bytes.split_at_checked(bytes.len().checked_sub(HASH_LEN)?)?;
+        if hash(Domain::WalletHistory, body).as_bytes() != stamp {
+            return None;
+        }
+        Self::decode(body).ok()
     }
 
     /// Writes it beside itself and moves it into place, so a wallet stopped
     /// partway keeps the history it had rather than half of a new one.
+    ///
+    /// Synced before the move and the directory synced after it, because a
+    /// rename covers a process that stops and not a machine that stops: a
+    /// write returns when the bytes are in the page cache, so without this
+    /// the file can come back present and short.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let partial = path.with_extension("part");
-        std::fs::write(&partial, self.encode())?;
-        std::fs::rename(&partial, path)
+        let mut bytes = self.encode();
+        bytes.extend_from_slice(hash(Domain::WalletHistory, &bytes).as_bytes());
+        {
+            let mut file = std::fs::File::create(&partial)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+        }
+        std::fs::rename(&partial, path)?;
+        if let Some(directory) = path.parent() {
+            if let Ok(handle) = std::fs::File::open(directory) {
+                let _ = handle.sync_all();
+            }
+        }
+        Ok(())
     }
 }
 

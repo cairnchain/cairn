@@ -434,6 +434,8 @@ async function home() {
         )
       ),
 
+      indexPanel(status),
+
       panel(
         t('home.recent.title'),
         explainer('explain.blocks'),
@@ -441,6 +443,44 @@ async function home() {
         el('div', { class: 'more' }, el('a', { class: 'action', href: '/blocks', 'data-link': true, text: t('common.seeAll') }))
       ),
     ])
+  );
+}
+
+/*
+  What this website costs, as against what a node costs.
+
+  The site named the cold set as the explorer's growing cost, and the cold set
+  is the smaller half of it by seven times: a node that keeps the whole cave
+  carries seventy two bytes for each note that has fallen, a node that keeps
+  none carries nothing at all, and the index above both of them carries five
+  hundred bytes for every note that has ever existed. None of that was written
+  down anywhere, so nobody thinking of running one of these could find out
+  what they were taking on.
+*/
+function indexPanel(status) {
+  const index = status.index;
+  if (!index) return null;
+  return panel(
+    t('home.index.title'),
+    prose('home.index.body', {
+      perNote: count(index.bytesPerNote),
+      coldPerNote: count(status.cold.bytesPerNote),
+    }),
+    el(
+      'div',
+      { class: 'rows' },
+      row(t('field.indexNotes'), count(BigInt(index.notes))),
+      row(t('field.indexTransactions'), count(BigInt(index.transactions))),
+      row(t('field.indexOwners'), count(BigInt(index.owners))),
+      row(t('field.indexBytes'), bytes(Number(index.bytes)), el('span', { class: 'row-note', text: ' ' + t('field.indexBytes.note', { perNote: count(index.bytesPerNote) }) })),
+      row(
+        t('field.indexCovers'),
+        index.from === null
+          ? t('field.indexCovers.none')
+          : t('field.indexCovers.value', { from: count(index.from), through: count(index.through) }),
+        el('span', { class: 'row-note', text: ' ' + t('field.indexCovers.note', { height: count(status.tip ? status.tip.height : 0) }) })
+      )
+    )
   );
 }
 
@@ -602,6 +642,35 @@ function outputsTable(outputs) {
   );
 }
 
+/*
+  A fee the explorer could not work out is not a fee of nothing.
+
+  It used to render a null as `fee 0 CAIRN`, so a block page could say
+  "Fees: Not indexed" at the top and "fee 0 CAIRN" on every transfer under it,
+  from one request. A number is only printed where the API sent one.
+*/
+function feeLine(transfer) {
+  if (transfer.fee === null || transfer.fee === undefined) return t('transfer.fee.unknown');
+  return t('transfer.fee', { fee: cairn(transfer.fee) });
+}
+
+/*
+  The same on the transaction page, where a null used to render as "None".
+
+  "None" is the right word for a coinbase: nobody paid it, and there is
+  nothing to work out. For a transfer it was a statement the site had no
+  grounds for.
+*/
+function feeValue(it) {
+  if (it.fee !== null && it.fee !== undefined) return cairn(it.fee) + ' CAIRN';
+  return it.kind === 'coinbase' ? t('field.none') : t('field.unknown');
+}
+
+function amountOrUnknown(value) {
+  if (value === null || value === undefined) return t('field.unknown');
+  return cairn(value) + ' CAIRN';
+}
+
 function transferCard(transfer) {
   const inputs = el(
     'div',
@@ -636,7 +705,7 @@ function transferCard(transfer) {
       'div',
       { class: 'panel-head' },
       hashLink(transfer.id, '/tx/' + transfer.id, { head: 18, tail: 8 }),
-      el('span', { class: 'small dim', text: t('transfer.fee', { fee: cairn(transfer.fee || '0') }) })
+      el('span', { class: 'small dim', text: feeLine(transfer) })
     ),
     el('div', { class: 'split' }, inputs, outputs)
   );
@@ -657,9 +726,9 @@ async function transaction(id) {
       : row(t('field.status'), el('span', { class: 'chip hot', text: t('transfer.included', { n: count(it.confirmations) }) })),
     !data.pooled && it.block ? row(t('field.block'), hashLink(it.block, '/block/' + it.height)) : null,
     !data.pooled && it.timestamp ? row(t('field.time'), moment(it.timestamp), el('span', { class: 'row-note', text: ' ' + ago(it.timestamp) })) : null,
-    row(t('field.totalIn'), cairn(it.totalIn) + ' CAIRN'),
-    row(t('field.totalOut'), cairn(it.totalOut) + ' CAIRN'),
-    row(t('field.fee'), it.fee === null || it.fee === undefined ? t('field.none') : cairn(it.fee) + ' CAIRN'),
+    row(t('field.totalIn'), amountOrUnknown(it.totalIn)),
+    row(t('field.totalOut'), amountOrUnknown(it.totalOut)),
+    row(t('field.fee'), feeValue(it)),
     row(t('field.size'), bytes(it.size)),
     it.extraText ? row(t('field.message'), el('span', { text: it.extraText })) : null
   );
@@ -1213,10 +1282,93 @@ searchForm.addEventListener('submit', async (event) => {
   }
 });
 
+/* ---------- what is wrong, when something is ---------- */
+
+/*
+  How far the index may trail the chain before the page says so.
+
+  It reads what the node has added every half second, so one block behind is
+  ordinary and eight is not: at a block a minute that is somebody's afternoon.
+*/
+const BEHIND_ENOUGH = 8;
+
+/*
+  The one sentence about why the numbers beside it may not be what they look
+  like, or nothing at all.
+
+  The wallet has had this for every one of these states and this site had it
+  for none. From the outside they all look exactly like something that is
+  working: a height, a supply, a list of blocks, and no complaint. Two of them
+  mean the height stopped moving some time ago and will not start again on its
+  own, and one means every balance on the site is about part of the chain
+  rather than about the chain.
+
+  In order of what it costs a reader to be wrong about.
+*/
+function trouble(status) {
+  const node = status.node || {};
+  const index = status.index || {};
+
+  if (node.outdated) {
+    return t('warn.outdated', {
+      height: count(node.outdated.height),
+      required: count(node.outdated.required),
+      known: count(node.outdated.known),
+    });
+  }
+  if (node.stranded) {
+    return t('warn.stranded', {
+      anchor: count(node.stranded.anchor),
+      settlesAt: count(node.stranded.settlesAt),
+    });
+  }
+  if (node.probation) {
+    return t('warn.probation', {
+      checked: count(node.probation.checked),
+      owed: count(node.probation.owed),
+    });
+  }
+  if (node.joining && node.joining !== 'no' && node.joining !== 'done') {
+    return t('warn.joining');
+  }
+  if (node.outOfReach > 0) {
+    return t('warn.outOfReach', { blocks: count(node.outOfReach) });
+  }
+  // Only once there is a chain to have read. A node that holds no chain at
+  // all has not fallen behind one; it has not been given one, and the lines
+  // above and below say so.
+  if (status.tip && !index.blocks) {
+    return t('warn.indexEmpty', { blocks: count(index.behind) });
+  }
+  if (index.fromTheStart === false) {
+    return t('warn.indexPartial', { from: count(index.from) });
+  }
+  if (index.behind > BEHIND_ENOUGH) {
+    return t('warn.indexBehind', { blocks: count(index.behind) });
+  }
+  if (!status.peers) return t('warn.alone');
+
+  /*
+    The comparison `supply.counted` was added for and which nothing made.
+    Two counts of the same money worked out from different things: the ledger
+    from what each block was allowed to pay, the index from the notes
+    themselves. They agree or one of them is wrong, and nobody could tell
+    which while only one of the two was ever shown.
+  */
+  if (index.behind === 0 && status.supply.issued !== status.supply.counted) {
+    return t('warn.supply', {
+      issued: cairn(status.supply.issued),
+      counted: cairn(status.supply.counted),
+    });
+  }
+  return null;
+}
+
 /* ---------- the ticker ---------- */
 
 const ticker = document.getElementById('ticker');
 const footNode = document.getElementById('foot-node');
+const notice = document.getElementById('notice');
 
 async function refreshTicker() {
   let status;
@@ -1226,6 +1378,11 @@ async function refreshTicker() {
     return;
   }
   state.status = status;
+
+  const said = trouble(status);
+  clear(notice);
+  if (said) notice.append(el('p', { text: said }));
+  notice.hidden = !said;
 
   const items = [
     [t('tick.network'), status.network.name, true],
@@ -1249,9 +1406,13 @@ async function refreshTicker() {
   );
   ticker.hidden = false;
 
+  // Against the tip, which is the comparison this line existed without. A
+  // count of blocks read means nothing on its own: the whole of what it says
+  // is whether it is the same number as the chain's.
   footNode.textContent = t('foot.node', {
     network: status.network.name,
     blocks: count(status.indexed),
+    height: count(status.tip ? status.tip.height + 1 : 0),
     genesis: shorten(status.network.genesis || '-', 12, 8),
   });
 }

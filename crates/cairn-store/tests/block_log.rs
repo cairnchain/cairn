@@ -304,17 +304,60 @@ fn a_partial_offset_is_cut_back() {
     assert_eq!(read_back(&log), blocks);
 }
 
+/// An absurd length is never reserved, and what happens instead depends on
+/// whether the bytes it claims are there.
+///
+/// Four bytes of length and nothing after them is a write that stopped between
+/// the two, which is what a crash mid append leaves: it is cut, and the node
+/// starts. This used to refuse the start instead, and go on refusing it, which
+/// on an unattended node means a node that never comes back over a torn tail.
+///
+/// A length that is longer than any block the rules allow but short enough
+/// that the file really does hold it is not a torn write. Nothing is reserved
+/// for it either, and the bytes are left alone rather than cut, because that
+/// is damage and a start that misread it once may read it back.
 #[test]
-fn an_absurd_record_length_is_refused_before_anything_is_reserved() {
-    let directory = scratch("absurd");
-    std::fs::create_dir_all(&directory).unwrap();
-    std::fs::write(directory.join(BLOCK_LOG), [0xff, 0xff, 0xff, 0xff]).unwrap();
+fn an_absurd_record_length_is_never_reserved() {
+    let torn = scratch("absurd-torn");
+    std::fs::create_dir_all(&torn).unwrap();
+    std::fs::write(torn.join(BLOCK_LOG), [0xff, 0xff, 0xff, 0xff]).unwrap();
 
-    let outcome = BlockLog::open(&directory);
-    assert!(matches!(
-        outcome,
-        Err(StoreError::RecordTooLarge { index: 0, .. })
-    ));
+    let (log, recovered) = BlockLog::open(&torn).unwrap();
+    assert!(log.is_empty());
+    assert_eq!(recovered.discarded_bytes, 4);
+    assert_eq!(recovered.unreadable, None, "the file ended inside it");
+    drop(log);
+    assert_eq!(
+        std::fs::metadata(torn.join(BLOCK_LOG)).unwrap().len(),
+        0,
+        "bytes a record ends inside can never become one"
+    );
+
+    // One byte over the ceiling, in a file long enough to hold what it claims.
+    // Sparse, so this costs no disk: what matters is the length.
+    let present = scratch("absurd-present");
+    std::fs::create_dir_all(&present).unwrap();
+    let over = u32::try_from(cairn_store::MAX_RECORD_BYTES).unwrap() + 1;
+    std::fs::write(present.join(BLOCK_LOG), over.to_le_bytes()).unwrap();
+    OpenOptions::new()
+        .write(true)
+        .open(present.join(BLOCK_LOG))
+        .unwrap()
+        .set_len(u64::from(over) + 8)
+        .unwrap();
+
+    let (log, recovered) = BlockLog::open(&present).unwrap();
+    assert!(log.is_empty(), "nothing was reserved and nothing was read");
+    assert_eq!(recovered.unreadable, Some(0), "reported as damage");
+    drop(log);
+    assert_eq!(
+        std::fs::metadata(present.join(BLOCK_LOG)).unwrap().len(),
+        u64::from(over) + 8,
+        "and left on the disk for somebody to look at"
+    );
+
+    let _ = std::fs::remove_dir_all(&torn);
+    let _ = std::fs::remove_dir_all(&present);
 }
 
 #[test]
@@ -334,6 +377,78 @@ fn the_log_can_be_cut_back_to_a_prefix() {
     assert_eq!(recovered.blocks, 3);
     assert_eq!(read_back(&reopened), blocks[..3]);
     assert_eq!(recovered.discarded_bytes, 0);
+}
+
+/// A cut interrupted between its two files stays cut.
+///
+/// The order matters and it is the opposite of an append's. An append writes
+/// its record before the offset naming it, so a crash between the two leaves
+/// the log ahead of the index, and recovery reads the record forward and keeps
+/// it: the block was accepted and synced and deserves to survive. A cut has to
+/// leave the disagreement the other way round, or the same recovery reads the
+/// abandoned records back out of the log and puts them where the cut had just
+/// taken them from.
+///
+/// This is the shape of a machine stopping after the log was cut and before
+/// the index was, which is the only shape a log-first cut can be caught in.
+#[test]
+fn a_cut_interrupted_between_its_two_files_stays_cut() {
+    let directory = scratch("torn-cut");
+    let blocks = chain(8);
+
+    let end = {
+        let (mut log, _) = BlockLog::open(&directory).unwrap();
+        for block in &blocks {
+            log.append(block).unwrap();
+        }
+        // Where record two ends, which is what keeping three would cut to.
+        let index = std::fs::read(directory.join(cairn_store::BLOCK_INDEX)).unwrap();
+        u64::from_le_bytes(index[16..24].try_into().unwrap())
+    };
+    OpenOptions::new()
+        .write(true)
+        .open(directory.join(BLOCK_LOG))
+        .unwrap()
+        .set_len(end)
+        .unwrap();
+
+    let (log, _) = BlockLog::open(&directory).unwrap();
+    assert_eq!(log.len(), 3, "the cut was undone by the start after it");
+    assert_eq!(read_back(&log), blocks[..3]);
+    drop(log);
+
+    // And the index was written to match, so the next start is quick.
+    assert_eq!(
+        std::fs::metadata(directory.join(cairn_store::BLOCK_INDEX))
+            .unwrap()
+            .len(),
+        3 * 8
+    );
+    drop(std::fs::remove_dir_all(&directory));
+
+    // The state the other order would be caught in, spelled out because it is
+    // the reason for the order rather than a thing that can happen now: the
+    // index cut and the log not. Recovery reads the log forward from where the
+    // index stops, which is exactly right for an interrupted append and
+    // exactly wrong for an interrupted cut, and there is nothing in either
+    // file that tells the two apart.
+    let other = scratch("torn-cut-other");
+    {
+        let (mut log, _) = BlockLog::open(&other).unwrap();
+        for block in &blocks {
+            log.append(block).unwrap();
+        }
+    }
+    OpenOptions::new()
+        .write(true)
+        .open(other.join(cairn_store::BLOCK_INDEX))
+        .unwrap()
+        .set_len(3 * 8)
+        .unwrap();
+    let (log, _) = BlockLog::open(&other).unwrap();
+    assert_eq!(log.len(), blocks.len(), "the records are read back");
+    drop(log);
+    let _ = std::fs::remove_dir_all(&other);
 }
 
 /// A node that has forgotten a block it once applied has to be able to get it

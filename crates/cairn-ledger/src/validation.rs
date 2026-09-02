@@ -182,9 +182,62 @@ pub struct ConsensusParams {
     /// Consensus like every other field here, and for the same reason: two
     /// nodes with different schedules disagree about which blocks are valid
     /// while believing they are on the same chain. The first entry is what the
-    /// network opened under.
+    /// network opened under, and it sits at height zero.
+    ///
+    /// Oldest first is consensus too, and that is easy to miss because it
+    /// reads as tidiness. [`ConsensusParams::version_at`] walks the list
+    /// backwards and takes the first entry at or below the height it is
+    /// asked about, which is only the right answer for an ascending list. Two
+    /// builds carrying the same three changes, one of them written out of
+    /// order, put the same height under different rules and neither says a
+    /// word. So `schedule_is_sound` checks the shape at build time rather
+    /// than leaving it to whoever makes the next edit.
     pub activations: &'static [Activation],
 }
+
+/// The version every network here opened under.
+///
+/// Kept apart from [`BLOCK_VERSION`], which is the newest this build knows.
+/// They are the same number today and mean different things, and the day they
+/// stop being the same is the day confusing them costs a chain: one is a fact
+/// about a network's past, the other is a fact about a binary's present.
+const OPENING_VERSION: u16 = 1;
+
+/// The schedule a network that has never changed a rule carries.
+const OPENED: &[Activation] = &[Activation {
+    height: 0,
+    version: OPENING_VERSION,
+}];
+
+/// Whether a schedule is one [`ConsensusParams::version_at`] can read.
+///
+/// Ascending, starting at height zero, and never naming a version this build
+/// has never heard of below one it has. Checked at build time for every
+/// shipped network, because every one of these being wrong is a chain split
+/// produced by an ordinary edit rather than by an attacker.
+const fn schedule_is_sound(activations: &[Activation]) -> bool {
+    let [opening, rest @ ..] = activations else {
+        return false;
+    };
+    if opening.height != 0 {
+        return false;
+    }
+    let mut below = opening;
+    let mut rest = rest;
+    while let [next, tail @ ..] = rest {
+        if next.height <= below.height || next.version <= below.version {
+            return false;
+        }
+        below = next;
+        rest = tail;
+    }
+    true
+}
+
+const _: () = assert!(
+    schedule_is_sound(OPENED),
+    "a schedule has to start at height zero and rise"
+);
 
 impl ConsensusParams {
     /// The rules of a named network.
@@ -272,10 +325,7 @@ impl ConsensusParams {
             max_timestamp_drift: 2 * 60 * 60,
             // Nothing has changed yet, so the schedule says only what the
             // network opened under. A rule that changes appends to this.
-            activations: &[Activation {
-                height: 0,
-                version: BLOCK_VERSION,
-            }],
+            activations: OPENED,
         }
     }
 
@@ -288,7 +338,14 @@ impl ConsensusParams {
             .iter()
             .rev()
             .find(|activation| height >= activation.height)
-            .map_or(BLOCK_VERSION, |activation| activation.version)
+            // Unreachable while the first entry sits at height zero, which
+            // `schedule_is_sound` below stops the build without. It used to
+            // answer with this build's own ceiling, which reads as harmless
+            // only because that number and the opening version are the same
+            // today: the release that raises it would have made every block
+            // below the first entry require the new version, and the chain
+            // would have stopped replaying from its own first block.
+            .map_or(OPENING_VERSION, |activation| activation.version)
     }
 
     /// What a block at `height` pays whoever produced it.
@@ -1084,6 +1141,25 @@ fn check_header(
         });
     }
     if header.version != required {
+        // A version above anything this build knows is not a judgement about
+        // the block, and it is not one this layer can make.
+        //
+        // Two wrong answers were tried here and both are worth writing down.
+        // The first was to say nothing special: the refusal was remembered
+        // against the block for good and the peer was banned for offering it,
+        // so an un-updated node condemned the real chain and every honest
+        // messenger, which is the opposite of what the machinery exists for.
+        // The second was to answer that this node is too old, which stops it:
+        // that made stopping a node something a stranger could ask for by
+        // writing a number in a field, and on a chain at the difficulty floor
+        // it costs nothing to ask.
+        //
+        // So the answer is the honest one, that this build cannot judge the
+        // block, and it is no longer remembered, because it is a judgement
+        // about the reader and an update reverses it. Deciding that a run of
+        // these means the chain has moved rather than that somebody is
+        // talking nonsense needs evidence from more than one block and more
+        // than one peer, and that belongs where peers are counted.
         return Err(BlockError::UnsupportedVersion(header.version));
     }
 

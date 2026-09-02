@@ -1042,3 +1042,72 @@ fn a_reward_is_kept_out_of_what_can_be_spent_and_is_said_out_loud() {
 
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// A history file whose bytes changed makes a wallet show money that never
+/// existed, and it used to do so in a way nothing could tell from the truth.
+///
+/// Every field in that file is a fixed-width number or a hash, so almost any
+/// bytes decode into a plausible account. `reckon` reads the notes out of it
+/// and reports any the node does not know about as money whose proof cannot be
+/// produced, which is a real category with a real message attached, so a
+/// fabricated note was indistinguishable from a stranded one. The file now
+/// carries a stamp over its own contents. That is no defence against anybody
+/// who holds the machine, and it is not meant to be: it is a defence against a
+/// disk that changed under the wallet, which is the failure this file meets.
+#[test]
+fn a_history_whose_bytes_changed_is_refused_rather_than_believed() {
+    let directory = scratch("stamped");
+    std::fs::create_dir_all(&directory).unwrap();
+    let file = directory.join("history");
+
+    // A real account: three blocks paying this key, so the file holds notes a
+    // corrupted copy could invent more of.
+    let secret = SecretKey::from_bytes(&[11; 32]);
+    let mine = secret.public_key();
+    let mut forge = Forge::new();
+    let mut history = cairn_wallet::history::History::new();
+    for _ in 0..3 {
+        let block = forge.mine(&mine, Vec::new());
+        history.take(&block, mine);
+    }
+    let notes = history.held().count();
+    assert_eq!(notes, 3, "the account holds what it was paid");
+    history.save(&file).expect("written");
+    let honest = std::fs::read(&file).unwrap();
+    assert_eq!(
+        cairn_wallet::history::History::load(&file).held().count(),
+        notes,
+        "what was written comes back whole"
+    );
+
+    // One byte, anywhere, without changing the length.
+    for at in [0usize, honest.len() / 3, honest.len() - 40] {
+        let mut bent = honest.clone();
+        if let Some(byte) = bent.get_mut(at) {
+            *byte ^= 0xff;
+        }
+        std::fs::write(&file, &bent).unwrap();
+        assert!(
+            cairn_wallet::history::History::load(&file)
+                .held()
+                .next()
+                .is_none(),
+            "a file changed at byte {at} is refused, not believed"
+        );
+    }
+
+    // And the stamp itself cannot be made to agree with different contents by
+    // truncating the file, which is the ordinary torn write.
+    for keep in [0usize, 1, 8, honest.len() - 1] {
+        std::fs::write(&file, &honest[..keep.min(honest.len())]).unwrap();
+        assert!(
+            cairn_wallet::history::History::load(&file)
+                .held()
+                .next()
+                .is_none(),
+            "a file cut to {keep} bytes is refused"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&directory);
+}

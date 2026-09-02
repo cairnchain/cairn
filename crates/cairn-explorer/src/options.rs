@@ -15,7 +15,9 @@ use cairn_net::seeds;
 ///
 /// An unknown name stops it rather than being passed over, so an operator
 /// never runs something other than what they wrote.
-const KNOWN: [&str; 7] = ["data", "listen", "http", "seed", "network", "help", "check"];
+const KNOWN: [&str; 8] = [
+    "data", "listen", "http", "seed", "network", "keep", "help", "check",
+];
 const DEFAULT_DATA: &str = "cairn-explorer-data";
 const DEFAULT_LISTEN: &str = "0.0.0.0:9945";
 const DEFAULT_HTTP: &str = "127.0.0.1:8080";
@@ -31,6 +33,17 @@ cairn-explorer, a Cairn node that also serves a website
                          (default: 127.0.0.1:8080)
   --seed <address>       a peer to start from; repeat for more. Without one,
                        the addresses written into the program are used
+  --keep <size|all>      how much of the chain to keep on disk, in bytes, or
+                         `all` (default: all). A plain node keeps a gigabyte
+                         and drops the oldest blocks past it, because it does
+                         not need them: it has the ledger they add up to. An
+                         explorer does need them, and this is the one program
+                         whose whole job is answering about every block ever,
+                         so it keeps every block unless an operator says
+                         otherwise. Below `all` the index starts wherever the
+                         oldest kept block is, and every page says so rather
+                         than reporting a shorter chain as the whole of it.
+                         Accepts suffixes: 512MB, 8GB
   --check                work out what this explorer would do and print it,
                          then stop without starting anything. Exits with an
                          error if a setting is one this build does not
@@ -41,7 +54,10 @@ cairn-explorer, a Cairn node that also serves a website
 
 The explorer always keeps the cold set, because answering questions about
 notes that have fallen is the whole point of it. That is a cost which grows
-with the chain, which is exactly what a plain node refuses to carry.";
+with the chain, which is exactly what a plain node refuses to carry. The
+index it builds on top grows faster still: about five hundred bytes for every
+note that has ever existed, against seventy two for every note that has
+fallen. Both are reported live at /api/status.";
 
 /// Everything the explorer needs to start.
 #[derive(Clone, Debug)]
@@ -54,6 +70,8 @@ pub(crate) struct Options {
     /// none of them resolved at the moment it started.
     pub(crate) seed_names: Vec<String>,
     pub(crate) params: ConsensusParams,
+    /// Bytes of blocks to keep on disk, `u64::MAX` for every one of them.
+    pub(crate) keep: u64,
 }
 
 #[derive(Debug, Default)]
@@ -132,6 +150,11 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
     let seed_names = seeds::names_for(given.all("seed"), params.network);
     let seeds = seeds::start_from(given.all("seed"), params.network)?;
 
+    let keep = match given.first("keep") {
+        None => KEEP_EVERYTHING,
+        Some(text) => parse_size(text)?,
+    };
+
     Ok(Some(Options {
         data,
         listen,
@@ -139,7 +162,58 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         seeds,
         seed_names,
         params,
+        keep,
     }))
+}
+
+/// What an explorer keeps unless it is told otherwise: all of it.
+///
+/// A node's default is a gigabyte, and it is right for a node: what it needs
+/// is the ledger those blocks add up to, and it holds that. It keeps any
+/// blocks at all as a service to peers a little behind. An explorer's whole
+/// purpose is the opposite service, answering about every block ever, and it
+/// reads its index by walking the chain from the first block up. Left on a
+/// node's default it passed a gigabyte, dropped the oldest blocks, and then
+/// the first reorganisation left it with an index it could not rebuild.
+pub(crate) const KEEP_EVERYTHING: u64 = u64::MAX;
+
+/// A size as an operator writes one.
+fn parse_size(text: &str) -> Result<u64, String> {
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case("all") {
+        return Ok(KEEP_EVERYTHING);
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let (digits, scale) = if let Some(rest) = lower.strip_suffix("gb") {
+        (rest, 1_000_000_000u64)
+    } else if let Some(rest) = lower.strip_suffix("mb") {
+        (rest, 1_000_000)
+    } else if let Some(rest) = lower.strip_suffix("kb") {
+        (rest, 1_000)
+    } else {
+        (lower.as_str(), 1)
+    };
+    let count: u64 = digits
+        .trim()
+        .parse()
+        .map_err(|_| format!("`{text}` is not a size; try 8GB, 512MB, or all"))?;
+    Ok(count.saturating_mul(scale))
+}
+
+/// A size as an operator would read it back.
+pub(crate) fn size(bytes: u64) -> String {
+    if bytes == KEEP_EVERYTHING {
+        "every one ever accepted".to_owned()
+    } else if bytes >= 1_000_000_000 {
+        format!(
+            "{} GB, older ones dropped",
+            bytes.saturating_div(1_000_000_000)
+        )
+    } else if bytes >= 1_000_000 {
+        format!("{} MB, older ones dropped", bytes.saturating_div(1_000_000))
+    } else {
+        format!("{bytes} bytes, older ones dropped")
+    }
 }
 
 #[cfg(test)]
@@ -167,6 +241,30 @@ mod tests {
     fn mainnet_is_refused_by_name() {
         let error = resolve_options(&arguments(&["--network", "mainnet"])).unwrap_err();
         assert!(error.contains("does not exist yet"), "{error}");
+    }
+
+    /// An explorer left on a node's block budget passes it, drops the oldest
+    /// blocks, and then cannot rebuild its index after the next
+    /// reorganisation: it walks from the first block up, and the first block
+    /// is the one it no longer has. So the default here is the opposite of
+    /// the node's, and an operator who cannot afford it says so.
+    #[test]
+    fn an_explorer_keeps_every_block_unless_told_otherwise() {
+        let options = resolve_options(&arguments(&[])).unwrap().unwrap();
+        assert_eq!(options.keep, super::KEEP_EVERYTHING);
+
+        let options = resolve_options(&arguments(&["--keep", "8GB"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(options.keep, 8_000_000_000);
+
+        let options = resolve_options(&arguments(&["--keep", "all"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(options.keep, super::KEEP_EVERYTHING);
+
+        let error = resolve_options(&arguments(&["--keep", "plenty"])).unwrap_err();
+        assert!(error.contains("is not a size"), "{error}");
     }
 
     #[test]

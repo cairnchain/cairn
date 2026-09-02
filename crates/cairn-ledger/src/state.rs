@@ -607,9 +607,24 @@ impl ColdSet {
 
     /// Stops keeping a path current, writing down what it was so an undo can
     /// start again.
+    ///
+    /// For a path let go of because the window or the ceiling stopped wanting
+    /// it. Nothing else in the block says what it was, so this is the one
+    /// thing an undo record pays for.
     fn unwatch(&mut self, position: u64, before: &mut PathsBefore) {
         if let Self::Roots(forest) = self {
             forest.unwatch_keeping(position, before);
+        }
+    }
+
+    /// The same for a path let go of because the block spent the note under
+    /// it, which costs the place and nothing more.
+    ///
+    /// The proof the spend was checked with is that path, and it stays in the
+    /// transition for as long as the block can be undone.
+    fn unwatch_spent(&mut self, position: u64, before: &mut PathsBefore) {
+        if let Self::Roots(forest) = self {
+            forest.unwatch_spent(position, before);
         }
     }
 
@@ -635,13 +650,9 @@ impl ColdSet {
     /// state whose root has already been checked and will not be checked
     /// again, so two arms that disagreed would have let one kind of node carry
     /// on with a half emptied forest.
-    fn remove_batch(
-        &mut self,
-        removals: &[(u64, Hash32, ForestProof)],
-        before: &mut PathsBefore,
-    ) -> bool {
+    fn remove_batch(&mut self, removals: &[(u64, Hash32, ForestProof)]) -> bool {
         match self {
-            Self::Roots(forest) => forest.remove_batch_keeping(removals, before),
+            Self::Roots(forest) => forest.remove_batch(removals),
             Self::Archive(archive) => {
                 for (position, leaf, proof) in removals {
                     if !archive.forest().verify(*position, *leaf, proof) {
@@ -672,18 +683,26 @@ impl ColdSet {
     ///
     /// A plain node mends the paths it was keeping current rather than being
     /// handed a copy of them, because a copy per block is nine gigabytes at
-    /// this network's numbers. An archivist keeps no paths and rebuilds any of
-    /// them from its leaves, so `disturbed` is nothing to it.
+    /// this network's numbers. Most of the mending is worked out from
+    /// `restored`, which is what the block emptied and the proofs it emptied
+    /// them with. An archivist keeps no paths and rebuilds any of them from
+    /// its leaves, so `disturbed` is nothing to it.
     fn rewind(
         &mut self,
         before: &Forest,
         disturbed: &PathsBefore,
         appended: usize,
-        restored: &[(u64, Hash32)],
+        restored: &[(u64, Hash32, ForestProof)],
     ) {
         match self {
-            Self::Roots(forest) => forest.rewind_to(before, disturbed),
-            Self::Archive(archive) => archive.rewind(before, appended, restored),
+            Self::Roots(forest) => forest.rewind_to(before, restored, disturbed),
+            Self::Archive(archive) => {
+                let leaves: Vec<(u64, Hash32)> = restored
+                    .iter()
+                    .map(|(position, leaf, _)| (*position, *leaf))
+                    .collect();
+                archive.rewind(before, appended, &leaves);
+            }
         }
     }
 }
@@ -744,15 +763,31 @@ pub struct BlockUndo {
     /// note in the grace window: three hundred and twenty one megabytes at a
     /// small scale and nine gigabytes at this network's, held once per block a
     /// node could still undo, against a stated ceiling of sixty eight. What
-    /// makes the roots enough is the field below.
+    /// makes the roots enough is the field below and the transition this
+    /// record travels beside.
     cold_before: Forest,
-    /// The watched paths this block did not merely lengthen.
+    /// The watched paths nothing else says how to put back.
     ///
+    /// Three of the four things a block does to a path cost nothing here.
     /// Adding a leaf only ever pushes siblings onto the end of a path, and how
     /// long a path should be is decided by the leaf count, so undoing an
-    /// addition is a truncation and needs nothing written down. What does need
-    /// writing down is the paths beside a leaf the block emptied, and the ones
-    /// the block stopped watching altogether. A block touches few of either.
+    /// addition is a truncation. A path beside a leaf the block emptied lost
+    /// exactly one sibling, and it folds back out of the leaf and the proof
+    /// that took it out, both of which sit in the transition. A path the block
+    /// stopped keeping because it spent the note under it is that same proof.
+    ///
+    /// What is left is a path let go of because the grace window aged past it
+    /// or a followed owner's ceiling displaced it. Nothing in the block
+    /// accounts for those, so those are written down, and they are the whole
+    /// of what a record costs.
+    ///
+    /// It used to be all four, and the removal was the expensive one because
+    /// its size was decided by how much of the watched map sat in the emptied
+    /// leaf's tree rather than by anything the block did. Measured off a real
+    /// chain in `tests/audit_undo_record_size.rs`: 8133 paths and 911 kB for
+    /// one ordinary block, 933.7 MB over the records a node keeps, and 1549.6
+    /// MB for a node following an owner at its ceiling. Which is the order the
+    /// whole repair set out to remove.
     disturbed: PathsBefore,
     /// Notes this block spent out of the grace window, with the block and the
     /// place in it each held.
@@ -802,6 +837,10 @@ impl BlockUndo {
     /// `examples/blocksize.rs` already accounts for. Nothing stated it and
     /// nothing measured it, and what went unstated was a full path per note in
     /// the grace window, held a thousand and twenty five times over.
+    ///
+    /// `tests/audit_undo_record_size.rs` measures this off a real chain rather
+    /// than off a forest built by hand, which is what let a figure stand that
+    /// had only ever seen one of the two ways a path gets written down.
     pub fn paths_held(&self) -> usize {
         self.disturbed.len()
     }
@@ -844,7 +883,7 @@ fn replay(
     // It is the one step here that can refuse, so it goes before anything is
     // touched, and it is all or nothing in itself. A refusal therefore leaves
     // the state exactly as it was and the caller can say no to the block.
-    if !cold.remove_batch(&removals, disturbed) {
+    if !cold.remove_batch(&removals) {
         return None;
     }
     for id in &transition.spent_hot {
@@ -868,7 +907,7 @@ fn replay(
         }
     }
     for spend in &transition.spent_cold {
-        cold.unwatch(spend.position, disturbed);
+        cold.unwatch_spent(spend.position, disturbed);
     }
     Some(fallen)
 }
@@ -1012,6 +1051,15 @@ impl LedgerState {
 
     pub fn is_watching(&self, owner: &PublicKey) -> bool {
         self.watching.contains(owner)
+    }
+
+    /// Who this ledger is following.
+    ///
+    /// Read when a ledger is replaced by one from somewhere else, because who
+    /// a node follows is a fact about the node and not about the chain, and a
+    /// ledger arriving from a stranger has no business deciding it.
+    pub fn watching(&self) -> impl Iterator<Item = PublicKey> + '_ {
+        self.watching.iter().copied()
     }
 
     /// Fallen notes belonging to a watched owner, with where they sit.
@@ -1529,10 +1577,19 @@ impl LedgerState {
             }
         }
 
-        let restored: Vec<(u64, Hash32)> = transition
+        // The leaves the block emptied, and the proofs it emptied them with.
+        // Those proofs were checked against the roots this is winding back to,
+        // which is what makes them the paths those places had.
+        let restored: Vec<(u64, Hash32, ForestProof)> = transition
             .spent_cold
             .iter()
-            .map(|spend| (spend.position, cold_leaf(&spend.id, &spend.note)))
+            .map(|spend| {
+                (
+                    spend.position,
+                    cold_leaf(&spend.id, &spend.note),
+                    spend.proof.clone(),
+                )
+            })
             .collect();
         self.cold.now.rewind(
             &undo.cold_before,
@@ -1836,13 +1893,9 @@ mod tests {
         let proof = keeper.prove(3).expect("an archivist can prove it");
         let doubled = [(3u64, leaf(3), proof.clone()), (3u64, leaf(3), proof)];
 
-        assert!(plain
-            .now
-            .remove_batch(&doubled, &mut PathsBefore::default()));
+        assert!(plain.now.remove_batch(&doubled));
         assert!(
-            keeper
-                .now
-                .remove_batch(&doubled, &mut PathsBefore::default()),
+            keeper.now.remove_batch(&doubled),
             "the archivist used to refuse this, and the forest used to accept it"
         );
         assert_eq!(plain.commitment(), keeper.commitment());
@@ -1866,8 +1919,8 @@ mod tests {
         let batch = [(2u64, leaf(2), good), (5u64, leaf(5), wrong)];
 
         let commitment = plain.commitment();
-        assert!(!plain.now.remove_batch(&batch, &mut PathsBefore::default()));
-        assert!(!keeper.now.remove_batch(&batch, &mut PathsBefore::default()));
+        assert!(!plain.now.remove_batch(&batch));
+        assert!(!keeper.now.remove_batch(&batch));
         assert_eq!(plain.commitment(), commitment);
         assert_eq!(keeper.commitment(), commitment);
         assert_eq!(plain.len(), 16);
@@ -1884,9 +1937,7 @@ mod tests {
         assert!(tier.verify(3, leaf(3), &proof));
 
         // The note is spent, which is what the block records.
-        assert!(tier
-            .now
-            .remove_batch(&[(3, leaf(3), proof.clone())], &mut PathsBefore::default()));
+        assert!(tier.now.remove_batch(&[(3, leaf(3), proof.clone())]));
 
         assert!(
             !tier.verify(3, leaf(3), &proof),

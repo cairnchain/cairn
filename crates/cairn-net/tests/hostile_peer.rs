@@ -15,7 +15,6 @@ use std::time::{Duration, Instant};
 
 use cairn_chain::ChainStore;
 use cairn_ledger::validation::ConsensusParams;
-use cairn_net::book::AddressBook;
 use cairn_net::message::{Message, MAX_HEADERS, MAX_REQUESTED};
 use cairn_net::node::TARGET_PEERS;
 use cairn_net::sync::{on_message, Local, PeerState};
@@ -47,12 +46,10 @@ fn wait_until(patience: Duration, mut ready: impl FnMut() -> bool) -> bool {
 // ---------------------------------------------------------------------------
 
 fn solo(chain: &mut ChainStore) -> Local<'_> {
-    static EMPTY: std::sync::OnceLock<AddressBook> = std::sync::OnceLock::new();
     Local {
         shows_the_chain: true,
         nonce: 1,
         chain,
-        book: EMPTY.get_or_init(AddressBook::new),
         listen: 4242,
     }
 }

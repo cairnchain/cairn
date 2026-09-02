@@ -21,9 +21,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cairn_accumulator::forest::{Forest, ForestProof};
-use cairn_chain::{Accepted, Bodies, ChainError, ChainStore, Located, Outdated};
+use cairn_chain::{Accepted, Bodies, ChainError, ChainStore, Located, Outdated, MAX_REORG_DEPTH};
 use cairn_crypto::PublicKey;
-use cairn_ledger::block::{Block, BlockHeader};
+use cairn_ledger::block::{Block, BlockHeader, BLOCK_VERSION};
 use cairn_ledger::genesis;
 use cairn_ledger::handover::{accept, Handover};
 use cairn_ledger::note::NetworkId;
@@ -41,9 +41,13 @@ use cairn_store::{BlockLog, DirectoryLock, HeaderLog, HeaderTree, StoreError, HA
 use crate::book::AddressBook;
 use crate::choosing::{self, Approach, Chooser, JoinProgress};
 use crate::joining::{Collecting, Joined, Progress};
-use crate::message::{Joining, Message, JOIN_PART_BYTES, MAX_CHAIN, MAX_HEADERS};
+use crate::message::{
+    Joining, Message, JOIN_PART_BYTES, MAX_CHAIN, MAX_HEADERS, MAX_SHARED_ADDRESSES,
+};
 use crate::refusal::{can_be_refused, Refusals};
-use crate::sync::{local_handshake, on_message, Local, PeerState, Reaction};
+use crate::sync::{
+    a_window_has_turned, local_handshake, on_message, Allowance, Local, PeerState, Reaction, Window,
+};
 use crate::wire::{read_message, write_message, Incoming, WireError};
 
 /// Connections a node dials for itself.
@@ -61,6 +65,16 @@ pub const MAX_PEERS: usize = 48;
 /// A single machine opening every slot would leave a node surrounded by one
 /// peer wearing many hats, which is the cheapest way to isolate it.
 const MAX_PER_HOST: usize = 2;
+
+/// Addresses whose allowance is counted separately at once.
+///
+/// The table is fed by whoever connects, so without a ceiling an attacker
+/// holding one IPv6 range would decide how much memory this node spends
+/// remembering what everybody spent. The same reasoning, and the same number,
+/// as [`crate::refusal::MAX_REFUSED`]. Only addresses with a live connection
+/// or a window still running are held at all, so this is far above what an
+/// honest node ever reaches.
+const MAX_ADDRESS_WINDOWS: usize = 1_024;
 
 /// How long a dial may hang before it is given up on.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(3);
@@ -164,6 +178,73 @@ const STRANDING_PATIENCE: u64 = 3_600;
 /// Seconds the peer a node is filling its headers in from may go without
 /// adding one before another peer is asked instead.
 const HEADER_PATIENCE: u64 = 30;
+
+/// Blocks the chain may run ahead of the block log before the node stops.
+///
+/// Not a preference about disk, the way [`KEEP_BLOCK_BYTES`] is. A chain lets
+/// go of a block body once it is more than [`MAX_REORG_DEPTH`] below the tip,
+/// on a schedule of its own that knows nothing about what reached the disk,
+/// and bringing a log level again means reading those bodies back out of
+/// memory. So a log further behind than that window can never be brought level
+/// however much room comes back, and somewhere below that number a node whose
+/// disk has stopped taking writes has to stop with it.
+///
+/// A quarter of the window rather than the edge of it. What the other three
+/// quarters buy is the operator: the line saying the disk has stopped taking
+/// what this node writes appears on the first block that fails, and this is
+/// how long they have to free some room before carrying on stops being worth
+/// more than what it costs. Past here every block accepted is work that will
+/// be done again, and the disk the node would be restarted from only falls
+/// further behind the chain it is meant to be a copy of.
+pub const MAX_BEHIND: u64 = 256;
+
+const _: () = assert!(MAX_BEHIND < MAX_REORG_DEPTH as u64);
+
+/// Blocks written under rules this build does not have, before it says out
+/// loud that it looks too old for the chain it is on.
+///
+/// One of these is not evidence of anything. The version is a number in a
+/// field, the work behind a block claiming an unknown version is whatever
+/// difficulty that block claims, and the check that would catch a lie about
+/// the difficulty sits below the check that reads the version. So a stranger
+/// can manufacture these cheaply, and a node that concluded anything from one
+/// would be letting a stranger write its diagnosis.
+///
+/// A run of them, from several peers, spread over time, is a different thing:
+/// that is what a chain whose rules moved on looks like from a node that was
+/// not updated. Even then this is only said and never acted on, for the same
+/// reason.
+const UNJUDGED_BLOCKS: u64 = 8;
+
+/// Connections those blocks have to have arrived on.
+///
+/// Two rather than one, because one peer is one machine and one machine is
+/// what a stranger has. It is not proof either: whoever holds several
+/// addresses holds several connections. It is the cheapest condition that
+/// makes the claim cost more than a single message.
+const UNJUDGED_PEERS: usize = 2;
+
+/// Seconds the first and the last of them have to be apart.
+///
+/// A burst is one peer's idea; a chain that has moved on goes on producing
+/// these for as long as this node is running, because every updated peer
+/// announces every new block.
+const UNJUDGED_STRETCH: u64 = 300;
+
+/// Seconds of meeting none of them before the count starts again.
+///
+/// A rule change renews its own evidence, so nothing is lost by forgetting an
+/// old one. What is gained is that a handful met over a year, which is the
+/// ordinary background of a network somebody is testing something on, never
+/// adds up to a claim about this build.
+const UNJUDGED_MEMORY: u64 = 3_600;
+
+/// Connections counted towards [`UNJUDGED_PEERS`] at once.
+///
+/// The table is fed by whoever connects, so it needs a ceiling like every
+/// other table here. What is being asked of it is whether more than one peer
+/// is involved, and this is far above the number that settles that.
+const UNJUDGED_SENDERS: usize = 64;
 
 /// A gap between two rounds of maintenance that means the machine was away.
 ///
@@ -303,6 +384,16 @@ pub struct Restored {
     pub refused: usize,
     /// Bytes dropped from the end of the log because a write never finished.
     pub discarded_bytes: u64,
+    /// The record a walk of the log stopped at, when what stopped it was a
+    /// whole record that would not decode rather than one cut short.
+    ///
+    /// Told apart from `discarded_bytes` because the two mean opposite things
+    /// to whoever is running the node. Bytes at the end are the ordinary trace
+    /// of a machine that stopped mid write, and they cost one block. A whole
+    /// record the store cannot read is damage, and nothing was cut for it: the
+    /// bytes are still on the disk to be looked at, and a node that read them
+    /// wrongly once can read them again.
+    pub unreadable: Option<usize>,
     /// Whether the log was set aside because it does not start at the first
     /// block of the chain.
     ///
@@ -317,6 +408,130 @@ pub struct Restored {
     pub addresses: usize,
 }
 
+/// What a node was putting on its disk when the disk would not take it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Writing {
+    /// The blocks it has accepted. The one that costs the chain: a node that
+    /// stops writing these comes back at the height of what it last wrote and
+    /// asks for the rest again, and can only be given them while somebody else
+    /// still has them.
+    Blocks,
+    /// The headers, and the forest of them a node proves things against. What
+    /// a node that stops writing these loses is the ability to show a newcomer
+    /// which chain carries the most work. It goes on following the chain
+    /// correctly and goes on saying it can answer.
+    Headers,
+    /// The ledger a node writes down so its next start does not begin at the
+    /// first block, and the blocks below it that writing one lets go. The
+    /// cheapest of the three to lose, and the one that fails first on a disk
+    /// with nothing left, because getting under a disk budget starts by
+    /// writing several megabytes.
+    Ledger,
+}
+
+impl Writing {
+    /// Which of two refusals is the one worth saying, highest first.
+    ///
+    /// The order is what each one costs to lose, and it is not a nicety. A
+    /// node over its disk budget asks for its ledger to be written once every
+    /// round of upkeep, so on a disk with nothing left the ledger fails once a
+    /// second; without an order between them, that would replace the account
+    /// of the blocks that are not reaching the disk at all, every second, for
+    /// as long as the node ran.
+    const fn costs(self) -> u8 {
+        match self {
+            Self::Blocks => 2,
+            Self::Headers => 1,
+            Self::Ledger => 0,
+        }
+    }
+}
+
+impl std::fmt::Display for Writing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Blocks => "the blocks it has accepted",
+            Self::Headers => "the headers it shows the chain with",
+            Self::Ledger => "the ledger it starts from",
+        })
+    }
+}
+
+/// What this node has taken on and not managed to put on its disk.
+///
+/// A node whose disk has stopped taking writes goes on doing everything else.
+/// It takes blocks, it validates them, it climbs in height, it announces what
+/// it applied, and every line it prints is the line a healthy node prints.
+/// What it is not doing is keeping any of it, and the gap that opens is not
+/// one it closes later: the catch-up reads block bodies out of memory, and a
+/// chain lets go of a body once it is more than [`MAX_REORG_DEPTH`] below the
+/// tip. Measured on a real full disk, a node accepted a thousand and eighty
+/// four blocks against a log frozen at thirty three, and came back at thirty
+/// two.
+///
+/// So this is said while the gap is still small enough to be worth acting on,
+/// and the node stops itself at [`MAX_BEHIND`] rather than carrying on making
+/// its own disk less worth restarting from.
+///
+/// `None` on a node whose disk is taking what it writes, which is every
+/// healthy one. A write that failed once and was made good by the next block
+/// never reaches this: the next block writes everything the log is missing, so
+/// an ordinary hiccup closes itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unwritten {
+    /// What this node was writing when the disk last refused it.
+    pub what: Writing,
+    /// What the disk said, in its own words: no space left on device,
+    /// permission denied, input/output error. It is the difference between an
+    /// operator who has to free some room and one who has a failing drive, and
+    /// this node is in no position to tell them which.
+    pub because: String,
+    /// The height the chain had reached the last time this was looked at.
+    pub reached: u64,
+    /// The highest block that is on the disk, or `None` for a log holding
+    /// nothing at all.
+    pub written_through: Option<u64>,
+    /// Blocks accepted and not written, which is what a restart costs.
+    pub blocks: u64,
+    /// Whether those blocks could still reach the disk if the room came back.
+    ///
+    /// False once the gap has passed [`MAX_BEHIND`], and false for good. The
+    /// blocks in it are no longer anywhere this node can read them from, so
+    /// nothing an operator does now puts them on the disk; what is left is a
+    /// node that stops, and a directory that is still worth starting from
+    /// because it stopped falling further behind.
+    pub within_reach: bool,
+}
+
+/// What says this build is too old for the chain it is on.
+///
+/// A block written under rules this software does not have is not a bad block
+/// and its sender is not a bad peer: an update makes the same block readable,
+/// so the judgement is about the reader. The node therefore refuses it,
+/// remembers nothing against it, blames nobody, and carries on. The cost of
+/// getting that right is that an un-updated node now refuses the real chain in
+/// silence rather than loudly, and its operator sees a height that has simply
+/// stopped moving.
+///
+/// This is the silence answered. It is evidence and not a verdict: the node
+/// does not stop on it, because the version is a number a stranger can write
+/// in a field, and a node that stopped on one would be handing a stranger the
+/// power to stop it. A run of them, from more than one peer, spread over time,
+/// is worth a person's attention and nothing more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unjudged {
+    /// The highest block version this node was offered and could not read.
+    pub version: u16,
+    /// The highest version this build has the rules for.
+    pub known: u16,
+    /// Blocks it met.
+    pub blocks: u64,
+    /// Connections they arrived on.
+    pub peers: usize,
+    /// Seconds between the first of them and the last.
+    pub over: u64,
+}
+
 type PeerId = u64;
 
 /// One live connection, as the rest of the node sees it.
@@ -329,6 +544,18 @@ struct Peer {
     host: Option<IpAddr>,
     /// Where this peer says it listens, once it has said so.
     advertised: Option<SocketAddr>,
+    /// The address this node dialled to reach it, when it dialled.
+    ///
+    /// Kept beside `advertised` because that one arrives only with the
+    /// handshake, and an address that accepts a connection and then says
+    /// nothing never fills it in. Upkeep skips the addresses it already holds
+    /// a connection to, and reading only `advertised` meant a silent address
+    /// was never among them: it was dialled again the next round, and again,
+    /// until every outbound slot this node has went to the one address a
+    /// stranger had named. Nine connections to one address inside five
+    /// seconds, against a target of eight, and what the node then knew about
+    /// the chain came only through connections that stranger chose.
+    dialled_to: Option<SocketAddr>,
     /// Whether this node opened the connection, rather than answering one.
     ///
     /// A connection somebody else opened is a connection somebody else chose,
@@ -381,6 +608,22 @@ struct Shared {
     /// same directory.
     _lock: Option<DirectoryLock>,
     peers: Mutex<HashMap<PeerId, Peer>>,
+    /// The most any one connection from each address has spent this window.
+    ///
+    /// Held here rather than only beside the connection, and that is the whole
+    /// of the repair. An allowance kept on the socket was an allowance a peer
+    /// refilled by hanging up and dialling back, which costs it a TCP
+    /// handshake and a Hello and earns it no refusal, since asking is not
+    /// misbehaviour. A connection now starts where its address left off.
+    /// [`crate::sync::Allowance`] says what that changes and what it does not.
+    windows: Mutex<HashMap<IpAddr, Arc<Mutex<Window>>>>,
+    /// The mark shared by every address past the ceiling on that table.
+    ///
+    /// The table is fed by whoever connects, so it needs one, and running out
+    /// of room must not be a way of being handed a fresh allowance. Crowding
+    /// it therefore makes the crowd share a mark, which is the only direction
+    /// this can fail in safely.
+    crowded_window: Arc<Mutex<Window>>,
     /// Peers turned away for a while, for something they did earlier.
     refusals: Mutex<Refusals>,
     /// The last join answer built of each kind, kept so a newcomer asking for
@@ -398,8 +641,21 @@ struct Shared {
     /// A newcomer asking about a different tip replaces its kind, which costs
     /// the one it displaced a rebuild and no more.
     joined: Mutex<[Option<Prepared>; 2]>,
+    /// The tip the ledger on disk was written for, and the height that ledger
+    /// stands at.
+    ///
+    /// Upkeep asks for the ledger to be written every round for as long as the
+    /// block log is over its budget, and what it would write only changes when
+    /// the tip does. Without this a node past its budget unwound its ledger to
+    /// the burial, read a burial's worth of headers off the disk and rewrote
+    /// several megabytes, once a second, for the rest of its life.
+    written: Mutex<Option<(Hash32, Located)>>,
     /// How far this node is through joining a chain it was not on.
     joining: Mutex<Progress>,
+    /// When this node last asked again for a piece of a join answer that had
+    /// not arrived, so a slow piece is waited for rather than asked for once
+    /// a second.
+    join_asked_again_at: AtomicU64,
     /// What this node undertook when it took a ledger it was handed, while it
     /// still owes it.
     ///
@@ -443,12 +699,80 @@ struct Shared {
     threads: Mutex<Vec<JoinHandle<()>>>,
     next_id: AtomicU64,
     running: AtomicBool,
+    /// Whether somebody is already winding this node down.
+    ///
+    /// Separate from [`Shared::running`], which says whether the node is still
+    /// working. Two paths clear that from inside, a block from a height this
+    /// build has no rules for and a handed ledger nobody delivers the burial
+    /// for, and [`Node::shutdown`] used to read it as "already stopped" and
+    /// return having done none of what it says: no socket shut, no thread
+    /// joined, the address book unsaved, and the directory lock alive inside
+    /// whatever peer thread was still in a read. Winding down is a thing that
+    /// happens once, and this is what says whether it has.
+    winding_down: AtomicBool,
     /// Set once, if this node ever meets a height it has no rules for.
     ///
     /// Kept rather than only acted on, so whatever started the node can say
     /// why it stopped. Running on would mean following the chain of whoever
     /// had not updated either.
     outdated: Mutex<Option<Outdated>>,
+    /// What the last pass at the disk did not manage to put on it.
+    ///
+    /// A leaf, like [`Shared::stranded`]: the chain and the log may both be
+    /// held while this is taken, and neither may be taken while it is.
+    unwritten: Mutex<Option<Unwritten>>,
+    /// Blocks this build turned out not to be able to read, and who sent them.
+    ///
+    /// Also a leaf, and for the same reason: it is written from the thread
+    /// reading a peer, which has just let go of the chain.
+    unjudged: Mutex<Unreadable>,
+}
+
+/// Blocks written under rules this build does not have, as they add up.
+///
+/// Counted rather than acted on. What one of these means is settled in
+/// [`too_old_for_the_chain`], which is the whole of the rule and is kept apart
+/// from the counting so it can be read on its own.
+#[derive(Debug, Default)]
+struct Unreadable {
+    /// The highest version met, which is the one worth naming: a node told
+    /// about several is being told the chain moved past the furthest of them.
+    version: u16,
+    blocks: u64,
+    /// The connections they arrived on, up to [`UNJUDGED_SENDERS`].
+    peers: HashSet<PeerId>,
+    /// When the first arrived, and when the last did.
+    first: u64,
+    last: u64,
+}
+
+/// Whether what this node has met adds up to a build too old for its chain.
+///
+/// Three conditions and every one of them is needed, because each one on its
+/// own is something a stranger can produce for the price of a message. Kept
+/// out of the counting so that the rule is one function that can be read and
+/// tested without a network.
+fn too_old_for_the_chain(met: &Unreadable) -> Option<Unjudged> {
+    if met.blocks < UNJUDGED_BLOCKS || met.peers.len() < UNJUDGED_PEERS {
+        return None;
+    }
+    // A clock that went backwards says nothing about how long these have been
+    // arriving, so it says nothing at all rather than a negative stretch. The
+    // same reading `owed_this_round` takes of one.
+    if met.last < met.first {
+        return None;
+    }
+    let over = met.last.saturating_sub(met.first);
+    if over < UNJUDGED_STRETCH {
+        return None;
+    }
+    Some(Unjudged {
+        version: met.version,
+        known: BLOCK_VERSION,
+        blocks: met.blocks,
+        peers: met.peers.len(),
+        over,
+    })
 }
 
 /// The undertaking a node took on with a handed ledger, as it stands.
@@ -596,6 +920,48 @@ impl Shared {
         self.refusals.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The allowance a connection from `host` spends against.
+    ///
+    /// It carries the mark that address left behind, which is what makes
+    /// hanging up worth nothing. A connection with no address to speak of
+    /// keeps only its own count; nothing on a socket reaches this node
+    /// without an address, and refusing to answer at all would be a
+    /// stranger's way of closing a door on somebody else.
+    fn allowance_for(&self, host: Option<IpAddr>) -> Allowance {
+        let Some(host) = host else {
+            return Allowance::default();
+        };
+        let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(window) = windows.get(&host) {
+            return Allowance::at(window);
+        }
+        if windows.len() >= MAX_ADDRESS_WINDOWS {
+            return Allowance::at(&self.crowded_window);
+        }
+        let window = Arc::new(Mutex::new(Window::default()));
+        let allowance = Allowance::at(&window);
+        windows.insert(host, window);
+        allowance
+    }
+
+    /// Drops the marks of addresses that have gone and finished spending.
+    ///
+    /// A mark is kept while anything still holds it, so a live connection
+    /// never loses its count, and while the window it belongs to is still the
+    /// current one, so an address that hung up a second ago cannot come back
+    /// to a fresh allowance. Past both it is only a row in a table an
+    /// attacker feeds.
+    fn forget_spent_windows(&self, now: u64) {
+        let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
+        windows.retain(|_, window| {
+            Arc::strong_count(window) > 1
+                || window
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .current(now)
+        });
+    }
+
     /// Turns `host` away for a while.
     ///
     /// Only for peers that behaved badly, never for peers that merely belong
@@ -634,6 +1000,18 @@ impl Shared {
 
     fn choosing(&self) -> MutexGuard<'_, Chooser> {
         self.choosing.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn joining(&self) -> MutexGuard<'_, Progress> {
+        self.joining.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn joined(&self) -> MutexGuard<'_, [Option<Prepared>; 2]> {
+        self.joined.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn written(&self) -> MutexGuard<'_, Option<(Hash32, Located)>> {
+        self.written.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn undertaking(&self) -> MutexGuard<'_, Option<Undertaking>> {
@@ -720,6 +1098,124 @@ impl Shared {
         self.threads.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Why this node stopped following the chain, if it did.
+    ///
+    /// Taken past a poisoning like every other lock here. It used to be read
+    /// with `.lock().ok()`, which answers `None` for ever once any thread has
+    /// panicked while holding it, and this is the one answer a node owes
+    /// whoever started it: without it a debug build says nothing at all about
+    /// why it stopped, and whatever is watching goes on watching a node whose
+    /// `running` is already false.
+    fn outdated(&self) -> MutexGuard<'_, Option<Outdated>> {
+        self.outdated.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Why this node cannot get on from where it stands, if it cannot.
+    fn stranded(&self) -> MutexGuard<'_, Option<Stranded>> {
+        self.stranded.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Writes down what the last pass at the disk left behind, and stops the
+    /// node when what it left can no longer be made good.
+    ///
+    /// The height is passed in because both callers hold the chain already,
+    /// and taking it here would be a thread waiting on itself.
+    ///
+    /// A pass that wrote everything and refused nothing clears whatever was
+    /// held, so a disk that comes back says so by this going quiet.
+    fn note_writing(&self, wrote: &Wrote, reached: Option<u64>) {
+        let Some(reached) = reached else { return };
+        let behind = reached.saturating_add(1).saturating_sub(wrote.reaches);
+        let mut held = self
+            .unwritten
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Past saving already. Nothing later is a better account of it, and it
+        // is the answer this node owes whoever started it.
+        if held.as_ref().is_some_and(|held| !held.within_reach) {
+            return;
+        }
+        if behind == 0 && wrote.refusing.is_none() {
+            *held = None;
+            return;
+        }
+        let (what, because) = match (wrote.refusing.as_ref(), held.as_ref()) {
+            // The costlier of the two stands, for the reason in
+            // [`Writing::costs`].
+            (Some(fresh), Some(standing)) if standing.what.costs() > fresh.what.costs() => {
+                (standing.what, standing.because.clone())
+            }
+            (Some(fresh), _) => (fresh.what, fresh.because.clone()),
+            // A pass with nothing to write says nothing new about why the disk
+            // stopped taking things, so what opened the gap still stands.
+            (None, Some(standing)) => (standing.what, standing.because.clone()),
+            // A gap with nothing anywhere to explain it, which is a log that
+            // was already short when this node opened it. The next block
+            // applied tries to fill it and finds out why it cannot; guessing
+            // here would only put a made up sentence in front of an operator.
+            (None, None) => return,
+        };
+        let within_reach = behind <= MAX_BEHIND;
+        *held = Some(Unwritten {
+            what,
+            because,
+            reached,
+            written_through: wrote.reaches.checked_sub(1),
+            blocks: behind,
+            within_reach,
+        });
+        if !within_reach {
+            self.running.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// The same, for a write that is not the branch: the ledger this node
+    /// starts from, and the blocks that writing one lets it drop.
+    ///
+    /// Those run on their own round of upkeep rather than beside a block being
+    /// applied, so the heights are read here. Chain first and log second, as
+    /// everywhere, and this must be called with neither held.
+    fn note_refusal(&self, refusing: Refusing) {
+        let tip = self.chain().height();
+        let on_disk = {
+            let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+            log.as_ref().map_or(0, |store| store.blocks.reaches())
+        };
+        self.note_writing(
+            &Wrote {
+                reaches: on_disk,
+                refusing: Some(refusing),
+            },
+            tip,
+        );
+    }
+
+    /// Counts one block this build could not read, and who sent it.
+    ///
+    /// Nothing is held against the peer here or anywhere: it is carrying what
+    /// its own chain carries, and this node is the one that cannot read it.
+    fn cannot_judge(&self, from: PeerId, version: u16, now: u64) {
+        let mut met = self.unjudged.lock().unwrap_or_else(PoisonError::into_inner);
+        // A stretch with none of these in it ends the count. A chain whose
+        // rules moved on renews its own evidence every block, so nothing that
+        // matters is lost by forgetting; what is gained is that a stray one a
+        // year ago never adds up to a claim about this build.
+        let lapsed =
+            met.blocks > 0 && (now < met.last || now.saturating_sub(met.last) > UNJUDGED_MEMORY);
+        if lapsed {
+            *met = Unreadable::default();
+        }
+        if met.blocks == 0 {
+            met.first = now;
+        }
+        met.version = met.version.max(version);
+        met.blocks = met.blocks.saturating_add(1);
+        met.last = now;
+        if met.peers.len() < UNJUDGED_SENDERS {
+            met.peers.insert(from);
+        }
+    }
+
     fn network(&self) -> NetworkId {
         self.params.network
     }
@@ -737,8 +1233,12 @@ impl Shared {
     fn persist(&self, accepted: &Accepted, chain: &mut ChainStore) {
         let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(log) = log.as_mut() {
-            write_branch(log, accepted, chain);
+            let wrote = write_branch(log, accepted, chain);
+            // Bodies now on disk, and far enough back that no ordinary
+            // reorganisation reads them. Said after writing, never before: a
+            // body let go of before it was written is a body nobody has.
             chain.release_bodies(log.blocks.first_height(), log.blocks.reaches());
+            self.note_writing(&wrote, chain.height());
         }
     }
 
@@ -775,8 +1275,11 @@ impl Shared {
             return;
         }
 
-        let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(log) = log.as_mut() {
+        // Taken and let go of again, because saying what it refused means
+        // reading the chain, and this node takes the chain before the log.
+        let refusing = {
+            let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+            let Some(log) = log.as_mut() else { return };
             // A log that no longer reaches that height was rewritten by a
             // reorganisation between the two checks above, and dropping
             // against it would throw away blocks this node still holds.
@@ -786,9 +1289,20 @@ impl Shared {
 
             let held = u64::try_from(log.blocks.len()).unwrap_or(u64::MAX);
             let cut = cut_for(at.height, held, log.blocks.bytes(), keep);
-            if cut > log.blocks.first_height() {
-                let _ = log.blocks.keep_from(cut);
+            if cut <= log.blocks.first_height() {
+                return;
             }
+            log.blocks
+                .keep_from(cut)
+                .err()
+                .map(|error| Refusing::at(Writing::Ledger, &error))
+        };
+        // A node that cannot drop what it has already written down is a node
+        // whose disk only grows, which on the disk this fails on is the whole
+        // of the trouble. It used to be the one write here that said nothing
+        // at all.
+        if let Some(refusing) = refusing {
+            self.note_refusal(refusing);
         }
     }
 
@@ -798,11 +1312,37 @@ impl Shared {
     /// steps and a machine can stop between them. Writing first is what makes
     /// that survivable: what is left is a ledger and more blocks than needed,
     /// rather than neither.
+    ///
+    /// Asked for once a round while the log is over its budget, and the answer
+    /// only changes when the tip does, so a tip already written for is
+    /// answered from what was written. Everything below then happens once a
+    /// block instead of once a second.
+    ///
+    /// What is left under the chain lock is the ledger being unwound to the
+    /// burial, which is the chain's own work and nothing else's. The headers,
+    /// the forest paths, the encoding and the write itself run with the chain
+    /// let go of; they used to run with it held, and the node stopped for
+    /// them.
     fn write_ledger(&self) -> Option<Located> {
-        let bytes = self.own_ledger()?;
-        let at = Handover::decode(&bytes).ok()?.at;
-        self.keep_ledger(&bytes)
-            .then(|| Located::new(at.height, at.id()))
+        let tip = self.chain().tip()?;
+        if let Some((for_tip, at)) = *self.written() {
+            if for_tip == tip {
+                return Some(at);
+            }
+        }
+        let ground = self.ground_for(Joining::Ledger)?;
+        let anchor_height = ground.at.height.checked_sub(self.params.burial)?;
+        let bytes = self.build_join(Joining::Ledger, &ground)?;
+        let anchor = self.header_off_disk(anchor_height)?;
+        if !self.keep_ledger(&bytes) {
+            return None;
+        }
+        let at = Located::new(anchor_height, anchor.id());
+        // What is recorded is the tip this file was built against, not the tip
+        // now: the chain may have moved while it was being built, and then the
+        // next round finds a tip it has nothing written for and writes again.
+        *self.written() = Some((ground.at.id, at));
+        Some(at)
     }
 
     /// Keeps the ledger this node was handed, so it can start again without
@@ -813,13 +1353,23 @@ impl Shared {
     /// than half of a new one, which for a file a node cannot start without is
     /// the difference between an interrupted write and a node that never comes
     /// back.
+    /// Called with no lock held, because saying what the disk refused takes
+    /// the chain and then the log.
     fn keep_ledger(&self, bytes: &[u8]) -> bool {
         let Some(directory) = self.directory.as_ref() else {
             return false;
         };
         let target = directory.join(HANDED_LEDGER);
         let partial = directory.join(format!("{HANDED_LEDGER}.part"));
-        std::fs::write(&partial, bytes).is_ok() && std::fs::rename(&partial, &target).is_ok()
+        if let Err(error) = std::fs::write(&partial, bytes) {
+            self.note_refusal(Refusing::at(Writing::Ledger, &error));
+            return false;
+        }
+        if let Err(error) = std::fs::rename(&partial, &target) {
+            self.note_refusal(Refusing::at(Writing::Ledger, &error));
+            return false;
+        }
+        true
     }
 
     /// How far this node's branch runs past the last position in `locator` it
@@ -1160,7 +1710,10 @@ impl Node {
         let mut headers = HeaderLog::open(&directory)?;
         catch_up_headers(&mut headers, &log)?;
         let mut forest = HeaderTree::open(&directory)?;
-        grow_forest(&mut forest, &headers);
+        // A refusal here is not lost by being dropped: nothing has been
+        // started yet that could carry it, and the first block this node
+        // applies runs the same pass again and reports what it finds.
+        let _ = grow_forest(&mut forest, &headers);
         let mut filling = HeaderLog::open_named(&directory, FILLING_LOG)?;
         // What was being collected is only useful while it leads up to the
         // oldest header held. A restart in the middle of a reorganisation, or
@@ -1173,6 +1726,7 @@ impl Node {
             headers,
             forest,
             filling,
+            filling_epoch: 0,
         };
 
         // What this node still owes on a ledger it was handed, carried across
@@ -1187,6 +1741,7 @@ impl Node {
             blocks: applied,
             refused,
             discarded_bytes: recovered.discarded_bytes,
+            unreadable: recovered.unreadable,
             rejoining,
             addresses: book.len(),
         };
@@ -1232,9 +1787,13 @@ impl Node {
             keep_bytes: AtomicU64::new(KEEP_BLOCK_BYTES),
             _lock: lock,
             peers: Mutex::new(HashMap::new()),
+            windows: Mutex::new(HashMap::new()),
+            crowded_window: Arc::new(Mutex::new(Window::default())),
             refusals: Mutex::new(Refusals::new()),
             joined: Mutex::new([None, None]),
+            written: Mutex::new(None),
             joining: Mutex::new(Progress::Idle),
+            join_asked_again_at: AtomicU64::new(0),
             probation: Mutex::new(probation),
             stranding_patience: AtomicU64::new(STRANDING_PATIENCE),
             out_of_reach: AtomicU64::new(0),
@@ -1243,7 +1802,10 @@ impl Node {
             threads: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(0),
             running: AtomicBool::new(true),
+            winding_down: AtomicBool::new(false),
             outdated: Mutex::new(None),
+            unwritten: Mutex::new(None),
+            unjudged: Mutex::new(Unreadable::default()),
         });
 
         {
@@ -1313,10 +1875,25 @@ impl Node {
 
     /// Opens a connection to a peer, introduces this node, and remembers the
     /// address for next time.
+    /// Dials one address and keeps the connection, if there is room for it.
+    ///
+    /// The address is remembered either way: it answered, which is more than
+    /// most of the book can say, and the next round of upkeep can dial it when
+    /// a slot comes free. What is not done is taking the connection past the
+    /// ceiling or onto a node that has stopped: this is the third way into the
+    /// peer table, after the accept loop and upkeep dialling, and it was the
+    /// one that consulted neither.
     pub fn connect(&self, address: SocketAddr) -> Result<(), NodeError> {
         let stream = TcpStream::connect_timeout(&address, DIAL_TIMEOUT)?;
         self.shared.book().insert(address);
-        attach_peer(&self.shared, stream, true);
+        if !self
+            .shared
+            .has_room_for(stream.peer_addr().ok().map(|at| at.ip()))
+        {
+            let _ = stream.shutdown(Shutdown::Both);
+            return Ok(());
+        }
+        attach_peer(&self.shared, stream, Some(address));
         Ok(())
     }
 
@@ -1410,6 +1987,9 @@ impl Node {
     /// that. Read from the undertaking rather than from the join so that it
     /// survives a restart: the join lives in this process, the undertaking is
     /// on the disk.
+    ///
+    /// Takes the chain lock, so it cannot be called from inside
+    /// [`Self::with_chain`]. See [`Self::probation`].
     pub fn joining(&self) -> Joined {
         if self.probation().is_some() {
             return Joined::Done;
@@ -1428,6 +2008,11 @@ impl Node {
     /// one that was handed a ledger and has since validated its way past the
     /// tip that ledger was buried under. The two are the same thing here: a
     /// node whose own work stands behind everything it answers about.
+    /// Takes the chain lock, so it cannot be called from inside
+    /// [`Self::with_chain`]: the mutex is not reentrant and the process stops
+    /// there with nothing said. The same is true of [`Self::joining`]. Read
+    /// them before taking the chain, which is what a face wanting both does
+    /// anyway.
     pub fn probation(&self) -> Option<Probation> {
         self.shared.probation()
     }
@@ -1441,7 +2026,75 @@ impl Node {
     /// nothing will ever stand behind. Unlike that one the cure is the
     /// operator's, and it is to start again from an empty directory.
     pub fn stranded(&self) -> Option<Stranded> {
-        self.shared.stranded.lock().ok().and_then(|held| *held)
+        *self.shared.stranded()
+    }
+
+    /// The highest block this node has on its disk, or `None` for one keeping
+    /// nothing.
+    ///
+    /// The height in a status line is the chain's, which is memory. This is
+    /// the disk, and on a healthy node the two are the same number. Where they
+    /// are not, this is the one an operator needs: it is where a restart
+    /// begins, it is the highest block this node can serve to a peer that is
+    /// behind, and until now there was nowhere at all to ask for it.
+    pub fn written_through(&self) -> Option<u64> {
+        let log = self
+            .shared
+            .log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        log.as_ref()?.blocks.reaches().checked_sub(1)
+    }
+
+    /// The lowest block on the disk.
+    ///
+    /// The pair of [`Self::written_through`], and what tells a height the log
+    /// has let go of from one it has not reached. The log holds one run, so
+    /// anything between these two numbers is there and anything outside them
+    /// is not, which is the whole of what somebody walking the chain from the
+    /// bottom needs: without it, a block dropped off the bottom and a block
+    /// not yet written look the same, and stopping at the first of them is
+    /// how the explorer's index came to read nothing at all and say the
+    /// answer was exact.
+    pub fn blocks_from(&self) -> Option<u64> {
+        let log = self
+            .shared
+            .log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Some(log.as_ref()?.blocks.first_height())
+    }
+
+    /// What this node has accepted and not managed to put on its disk.
+    ///
+    /// `None` on a node whose disk is taking what it writes. A node whose disk
+    /// has stopped shows nothing else: it climbs in height, it announces, and
+    /// its status line is a healthy node's. This is the only place that says
+    /// otherwise, and once [`Unwritten::within_reach`] is false the node has
+    /// stopped, for the reason written there.
+    pub fn unwritten(&self) -> Option<Unwritten> {
+        self.shared
+            .unwritten
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Whether the blocks arriving say this build is too old for its chain.
+    ///
+    /// `None` until a run of blocks this software cannot read has come from
+    /// more than one peer over a stretch of time. The node does not stop on
+    /// it, on purpose: what makes a block unreadable is a number in a field,
+    /// and stopping on that would be a door a stranger could walk through.
+    /// Somebody who can compare it against a height that has stopped moving is
+    /// the right reader for it.
+    pub fn unjudged(&self) -> Option<Unjudged> {
+        let met = self
+            .shared
+            .unjudged
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        too_old_for_the_chain(&met)
     }
 
     /// Blocks this node was offered and can never reach.
@@ -1544,24 +2197,43 @@ impl Node {
     /// purpose: the alternative is to refuse every updated peer and go on
     /// answering from a chain the network has left.
     pub fn outdated(&self) -> Option<Outdated> {
-        self.shared.outdated.lock().ok().and_then(|held| *held)
+        *self.shared.outdated()
     }
 
     /// Closes every connection, stops the listener, and saves what is worth
     /// keeping.
+    ///
+    /// What decides whether this has already been done is [`Shared::winding_down`]
+    /// and not [`Shared::running`]. A node can clear `running` from inside: a
+    /// block from a height this build has no rules for, or a handed ledger
+    /// whose burial nobody delivers. Reading that as "already stopped" meant
+    /// this did none of what it says on exactly the two occasions it mattered
+    /// most, and said nothing about it: the caller saw `shutdown` return, saw
+    /// `Drop` return, and had a node that looked stopped while a peer thread
+    /// went on holding the directory lock for as long as a stranger cared to
+    /// keep feeding it a frame.
     pub fn shutdown(&self) {
-        if !self.shared.running.swap(false, Ordering::SeqCst) {
+        self.shared.running.store(false, Ordering::SeqCst);
+        if self.shared.winding_down.swap(true, Ordering::SeqCst) {
             return;
         }
         save_book(&self.shared);
-        for peer in self.shared.peers().values() {
-            let _ = peer.stream.shutdown(Shutdown::Both);
-        }
-        // Nothing has to be woken: the accept loop polls, and every peer
-        // thread is either reading with a deadline or on a socket just shut.
-        let handles = std::mem::take(&mut *self.shared.threads());
-        for handle in handles {
-            let _ = handle.join();
+        // Until the table stays empty. Nothing has to be woken: the accept
+        // loop polls, and every peer thread is either reading with a deadline
+        // or on a socket just shut. What the round is for is a connection
+        // taken while this was joining, which adds its thread after the table
+        // was taken.
+        loop {
+            for peer in self.shared.peers().values() {
+                let _ = peer.stream.shutdown(Shutdown::Both);
+            }
+            let handles = std::mem::take(&mut *self.shared.threads());
+            if handles.is_empty() {
+                break;
+            }
+            for handle in handles {
+                let _ = handle.join();
+            }
         }
     }
 }
@@ -1643,162 +2315,235 @@ fn take_join_part(
     bytes: Vec<u8>,
 ) -> Option<Message> {
     let now = unix_now();
-    let mut joining = shared
-        .joining
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    // Filing the piece is all that happens with the collector held. What
+    // follows once the last piece lands is a weighing of four thousand samples
+    // or a ledger accepted, adopted and written to disk in one multi-megabyte
+    // go, and none of it is anybody else's business: upkeep asks this same
+    // collector how the join is going once a second, and whatever is showing a
+    // status asks every hundred milliseconds. Both used to wait out the whole
+    // landing.
+    let (next, whole, weighed) = {
+        let mut joining = shared.joining();
 
-    // A node that already has a chain is not joining one. This arrives when an
-    // answer outlived the question, which costs nothing to ignore.
-    if !shared.chain().is_empty() {
-        *joining = Progress::Landed;
-        return None;
+        // A node that already has a chain is not joining one. This arrives
+        // when an answer outlived the question, which costs nothing to ignore.
+        if !shared.chain().is_empty() {
+            *joining = Progress::Landed;
+            return None;
+        }
+
+        let (next, whole) = take_piece(
+            &mut joining,
+            shared,
+            from,
+            what,
+            at,
+            part,
+            parts,
+            bytes,
+            now,
+        );
+        // The tip the weighing settled on, which the ledger has to belong to.
+        let weighed = match &*joining {
+            Progress::Fetching { tip, .. } | Progress::Weighed { tip, .. } => Some(*tip),
+            _ => None,
+        };
+        (next, whole, weighed)
+    };
+    let Some(whole) = whole else {
+        return next;
+    };
+    match what {
+        Joining::Weight => weigh_what_was_shown(shared, from, &whole, now),
+        Joining::Ledger => land_the_ledger(shared, from, &whole, weighed, now),
     }
+}
 
+/// Files one piece, and says what to ask for next and whether the answer is
+/// whole.
+#[allow(clippy::too_many_arguments)]
+fn take_piece(
+    joining: &mut Progress,
+    shared: &Arc<Shared>,
+    from: PeerId,
+    what: Joining,
+    at: Hash32,
+    part: u32,
+    parts: u32,
+    bytes: Vec<u8>,
+    now: u64,
+) -> (Option<Message>, Option<Vec<u8>>) {
     // What state this piece leaves the attempt in, and what to ask next.
-    let (next, whole) = match std::mem::take(&mut *joining) {
-        Progress::Landed => return None,
+    match std::mem::take(joining) {
+        Progress::Landed => (None, None),
         // The first piece of the weighing, which is where a join starts.
         Progress::Idle => {
             let Some(started) = Collecting::started(what, at, part, parts, bytes, now) else {
-                return fail_attempt(&mut joining, shared, from, now);
+                return (fail_attempt(joining, shared, from, now), None);
             };
-            step(&mut joining, started, None)
+            step(joining, started, None)
         }
         // The first piece of the ledger. The tip carries over from the
         // weighing, because the ledger has to be the one belonging to the
         // chain that was weighed.
         Progress::Weighed { tip, .. } => {
             let Some(started) = Collecting::started(what, at, part, parts, bytes, now) else {
-                return fail_attempt(&mut joining, shared, from, now);
+                return (fail_attempt(joining, shared, from, now), None);
             };
-            step(&mut joining, started, Some(tip))
+            step(joining, started, Some(tip))
         }
         Progress::Weighing(mut collecting) => {
             if !collecting.take(what, at, part, bytes, now) {
                 // The pieces held cannot be completed, so the attempt is
                 // dropped and this node falls back to reading the chain.
-                return fail_attempt(&mut joining, shared, from, now);
+                return (fail_attempt(joining, shared, from, now), None);
             }
-            step(&mut joining, collecting, None)
+            step(joining, collecting, None)
         }
         Progress::Fetching {
             tip,
             mut collecting,
         } => {
             if !collecting.take(what, at, part, bytes, now) {
-                return fail_attempt(&mut joining, shared, from, now);
+                return (fail_attempt(joining, shared, from, now), None);
             }
-            step(&mut joining, collecting, Some(tip))
-        }
-    };
-    let Some(whole) = whole else {
-        return next;
-    };
-
-    match what {
-        Joining::Weight => {
-            let weighed = SampledStart::decode(&whole).ok().and_then(|start| {
-                let weighed = check_start(&start, SAMPLES, now, &shared.params).ok()?;
-                Some((weighed, start.tip))
-            });
-            let Some((shown, tip)) = weighed else {
-                return fail_attempt(&mut joining, shared, from, now);
-            };
-
-            // What weighing settles is that *this* chain's work was really
-            // done. It does not settle that no heavier chain exists, and the
-            // two were treated as the same thing here, which is the whole of
-            // what a newcomer had to get right.
-            //
-            // Difficulty follows whatever hashrate is present, so a forger
-            // with a small share can mine a slow, entirely self-consistent
-            // chain for weeks and have it prove itself. It never out-mines
-            // anybody. It only has to answer first.
-            //
-            // So the chooser is told what was shown, and a chain that proves
-            // itself goes forward only while nobody credible claims more.
-            // When somebody does, this attempt ends and that somebody is
-            // asked to show it, which costs a slow start rather than a wrong
-            // one. The peer here did nothing wrong and its showing is kept:
-            // if the heavier claim cannot be shown, this chain is the one
-            // that comes back.
-            if !shared.choosing().shown(from, shown.total_work, now) {
-                *joining = Progress::Idle;
-                return None;
-            }
-
-            *joining = Progress::Weighed { tip, since: now };
-            Some(Message::GetJoin {
-                what: Joining::Ledger,
-                part: 0,
-            })
-        }
-        Joining::Ledger => {
-            let (expected, weighed_work) = match &*joining {
-                Progress::Fetching { tip, .. } | Progress::Weighed { tip, .. } => {
-                    (tip.id(), tip.total_work)
-                }
-                _ => return None,
-            };
-            // The last look before the one commitment this node gets to
-            // make. A heavier claim can have arrived while the ledger was
-            // crossing, and adopting past it would be taking the best answer
-            // so far while a better one is said to exist.
-            if !shared.choosing().allows(from, weighed_work, now) {
-                *joining = Progress::Idle;
-                return None;
-            }
-            let landed = Handover::decode(&whole)
-                .ok()
-                // The ledger has to belong to the chain that was weighed. A
-                // peer that weighed one and handed over another would
-                // otherwise have its second answer taken on the strength of
-                // the first.
-                // The tip it names has to be the one that was weighed. What
-                // ties the ledger to that tip is inside `accept`: the ledger's
-                // own header is proved to sit in the tip's header forest, and
-                // to sit far enough below it.
-                .filter(|handover| handover.tip.id() == expected)
-                .and_then(|handover| {
-                    let state = accept(&handover, &shared.params).ok()?;
-                    shared.chain().adopt(state, &handover.recent).ok()?;
-                    // What the anchor was taken on: the blocks between it and
-                    // the tip it names, which `accept` asks nothing about.
-                    // Written down before anything else, because from this
-                    // moment the node is holding a ledger nobody has stood
-                    // behind and everything it does with it has to know that.
-                    let anchor = handover.at.height;
-                    shared.undertake(
-                        anchor,
-                        settles_at(anchor, handover.tip.height, &shared.params),
-                        now,
-                    );
-                    // Kept only once it has been taken, so what is on disk is
-                    // a ledger this node checked and adopted rather than one
-                    // it merely received.
-                    shared.keep_ledger(&whole);
-                    // The run of headers the ledger came with, written down.
-                    // Without them this node has no oldest header of its own,
-                    // and so nothing to check a filled-in run against: it
-                    // would never be able to take anyone in.
-                    shared.seed_headers(&handover.recent);
-                    Some(())
-                });
-            if landed.is_none() {
-                return fail_attempt(&mut joining, shared, from, now);
-            }
-            *joining = Progress::Landed;
-            // A ledger arrives from below the tip on purpose, so landing one
-            // is not arriving: the blocks between it and the tip are the part
-            // this node checks for itself, and it has to go and ask for them.
-            // Nothing else would: what drives a sync forward is a block
-            // landing, and none is on its way.
-            Some(Message::GetChain {
-                locator: shared.chain().locator(),
-            })
+            step(joining, collecting, Some(tip))
         }
     }
+}
+
+/// Weighs a whole showing of what work stands behind a chain.
+///
+/// Four thousand and ninety six samples, each with a path through the tip's
+/// forest to check. The collector is not held for it: nothing about this
+/// touches the collection, and everything that asks how a join is going does.
+fn weigh_what_was_shown(
+    shared: &Arc<Shared>,
+    from: PeerId,
+    whole: &[u8],
+    now: u64,
+) -> Option<Message> {
+    let weighed = SampledStart::decode(whole).ok().and_then(|start| {
+        let weighed = check_start(&start, SAMPLES, now, &shared.params).ok()?;
+        Some((weighed, start.tip))
+    });
+    let mut joining = shared.joining();
+    // The attempt may have been given up on while this was being weighed:
+    // upkeep starts a fresh one when the chooser turns to somebody else, and
+    // an answer to the old question must not be filed against the new one.
+    if !matches!(*joining, Progress::Weighing(_)) {
+        return None;
+    }
+    let Some((shown, tip)) = weighed else {
+        return fail_attempt(&mut joining, shared, from, now);
+    };
+
+    // What weighing settles is that *this* chain's work was really done. It
+    // does not settle that no heavier chain exists, and the two were treated
+    // as the same thing here, which is the whole of what a newcomer had to get
+    // right.
+    //
+    // Difficulty follows whatever hashrate is present, so a forger with a
+    // small share can mine a slow, entirely self-consistent chain for weeks
+    // and have it prove itself. It never out-mines anybody. It only has to
+    // answer first.
+    //
+    // So the chooser is told what was shown, and a chain that proves itself
+    // goes forward only while nobody credible claims more. When somebody does,
+    // this attempt ends and that somebody is asked to show it, which costs a
+    // slow start rather than a wrong one. The peer here did nothing wrong and
+    // its showing is kept: if the heavier claim cannot be shown, this chain is
+    // the one that comes back.
+    if !shared.choosing().shown(from, shown.total_work, now) {
+        *joining = Progress::Idle;
+        return None;
+    }
+
+    *joining = Progress::Weighed { tip, since: now };
+    Some(Message::GetJoin {
+        what: Joining::Ledger,
+        part: 0,
+    })
+}
+
+/// Takes a whole ledger, checks it, adopts it and writes it down.
+///
+/// `weighed` is the tip the showing settled on, read off the collection before
+/// it was let go of. The ledger has to belong to that chain: a peer that
+/// weighed one and handed over another would otherwise have its second answer
+/// taken on the strength of the first. The tip it names has to be the one that
+/// was weighed, and what ties the ledger to that tip is inside `accept`: the
+/// ledger's own header is proved to sit in the tip's header forest, and to sit
+/// far enough below it.
+///
+/// None of this runs with the collector held. Checking the handover, adopting
+/// it and writing several megabytes to disk is the longest single stretch of
+/// work in a join, and it has nothing to say to the round of upkeep that asks
+/// how the join is going once a second.
+fn land_the_ledger(
+    shared: &Arc<Shared>,
+    from: PeerId,
+    whole: &[u8],
+    weighed: Option<BlockHeader>,
+    now: u64,
+) -> Option<Message> {
+    let tip = weighed?;
+    // The last look before the one commitment this node gets to make. A
+    // heavier claim can have arrived while the ledger was crossing, and
+    // adopting past it would be taking the best answer so far while a better
+    // one is said to exist.
+    //
+    // Read into a variable rather than asked inside the `if`, so the chooser
+    // is let go of before the collector is taken. Everywhere else takes those
+    // two the other way round, and a condition holds its guard for the whole
+    // of the statement it is in.
+    let allowed = shared.choosing().allows(from, tip.total_work, now);
+    if !allowed {
+        *shared.joining() = Progress::Idle;
+        return None;
+    }
+    let landed = Handover::decode(whole)
+        .ok()
+        .filter(|handover| handover.tip.id() == tip.id())
+        .and_then(|handover| {
+            let state = accept(&handover, &shared.params).ok()?;
+            shared.chain().adopt(state, &handover.recent).ok()?;
+            // What the anchor was taken on: the blocks between it and the tip
+            // it names, which `accept` asks nothing about. Written down before
+            // anything else, because from this moment the node is holding a
+            // ledger nobody has stood behind and everything it does with it
+            // has to know that.
+            let anchor = handover.at.height;
+            shared.undertake(
+                anchor,
+                settles_at(anchor, handover.tip.height, &shared.params),
+                now,
+            );
+            // Kept only once it has been taken, so what is on disk is a ledger
+            // this node checked and adopted rather than one it merely
+            // received.
+            shared.keep_ledger(whole);
+            // The run of headers the ledger came with, written down. Without
+            // them this node has no oldest header of its own, and so nothing
+            // to check a filled-in run against: it would never be able to take
+            // anyone in.
+            shared.seed_headers(&handover.recent);
+            Some(())
+        });
+    let mut joining = shared.joining();
+    if landed.is_none() {
+        return fail_attempt(&mut joining, shared, from, now);
+    }
+    *joining = Progress::Landed;
+    drop(joining);
+    // A ledger arrives from below the tip on purpose, so landing one is not
+    // arriving: the blocks between it and the tip are the part this node
+    // checks for itself, and it has to go and ask for them. Nothing else
+    // would: what drives a sync forward is a block landing, and none is on its
+    // way.
+    Some(Message::GetChain {
+        locator: shared.chain().locator(),
+    })
 }
 
 /// Ends a join attempt whose answer does not add up, and says so.
@@ -1877,9 +2622,26 @@ struct Store {
     /// they are a stranger's word. A node that wrote them straight in would be
     /// taking that word, which is the one thing this design does not do.
     filling: HeaderLog,
+    /// Which collection the run above belongs to.
+    ///
+    /// Counted because the run is checked against a commitment with the log
+    /// let go of between records, and what is merged has to be what was
+    /// checked. Nothing appends past the point that ends the collection, so
+    /// the only thing that can happen meanwhile is the whole of it being
+    /// thrown away and started again, and this is what says whether it was.
+    /// A length would not: a run thrown away and refilled to the same length
+    /// is a different run.
+    filling_epoch: u64,
 }
 
 impl Store {
+    /// Throws the collected run away, and says that what comes next is a
+    /// different collection.
+    fn discard_filling(&mut self) {
+        let _ = self.filling.clear();
+        self.filling_epoch = self.filling_epoch.saturating_add(1);
+    }
+
     /// Whether this node holds the whole header forest, back to the first
     /// block.
     ///
@@ -1912,6 +2674,39 @@ struct Prepared {
     bytes: Vec<u8>,
 }
 
+/// One piece of an answer already built.
+fn piece_of(ready: &Prepared, part: u32) -> Option<Message> {
+    let parts = ready.bytes.len().div_ceil(JOIN_PART_BYTES).max(1);
+    let index = usize::try_from(part).ok()?;
+    let start = index.checked_mul(JOIN_PART_BYTES)?;
+    let end = start.saturating_add(JOIN_PART_BYTES).min(ready.bytes.len());
+    let bytes = ready.bytes.get(start..end)?.to_vec();
+
+    Some(Message::JoinPart {
+        what: ready.what,
+        at: ready.at,
+        part,
+        parts: u32::try_from(parts).unwrap_or(u32::MAX),
+        bytes,
+    })
+}
+
+/// Everything the chain has to say about one of these answers.
+///
+/// Taken in one go, so that the reading and encoding that follow can run with
+/// the chain let go of. What is here is memory and nothing else: the tip, the
+/// forest of sixty four hashes it commits to, and, for the answer that carries
+/// a ledger, that ledger unwound to the burial. Everything the build goes on
+/// to need is on the disk, and the disk is not the chain's to hold shut.
+struct Ground {
+    /// The tip all of this was taken against, so what is built from it can be
+    /// weighed against the chain again before it is used.
+    at: Located,
+    history: Forest,
+    /// The ledger a burial below the tip, for the answer that carries one.
+    buried: Option<LedgerState>,
+}
+
 impl Shared {
     /// One piece of what a newcomer asked for, building the whole only if the
     /// last one built is not it.
@@ -1920,33 +2715,113 @@ impl Shared {
     /// that validates and nothing more: proving where a header sits takes a
     /// path through the header forest, and everybody else holds sixty four
     /// hashes.
+    ///
+    /// The build runs with nothing held at all. It used to run under the join
+    /// cache, the chain and the log at once, so one stranger asking to be
+    /// handed the chain stopped every other thread in the node for as long as
+    /// the answer took: four thousand and ninety six binary searches over the
+    /// headers, a header read off the disk at every step of each, and a forest
+    /// path with every sample. No block was validated and no transfer taken
+    /// meanwhile, and the cost was paid again on every new block, because this
+    /// cache is keyed on the tip.
     fn serve_join(&self, what: Joining, part: u32) -> Option<Message> {
-        let mut held = self.joined.lock().unwrap_or_else(PoisonError::into_inner);
-        let tip = self.chain().tip()?;
-
-        let slot = held.get_mut(what.slot())?;
-        if slot.as_ref().is_none_or(|ready| ready.at != tip) {
-            *slot = Some(Prepared {
-                what,
-                at: tip,
-                bytes: self.build_join(what)?,
-            });
+        if let Some(piece) = self.held_join(what, part) {
+            return Some(piece);
         }
-        let ready = slot.as_ref()?;
-
-        let parts = ready.bytes.len().div_ceil(JOIN_PART_BYTES).max(1);
-        let index = usize::try_from(part).ok()?;
-        let start = index.checked_mul(JOIN_PART_BYTES)?;
-        let end = start.saturating_add(JOIN_PART_BYTES).min(ready.bytes.len());
-        let bytes = ready.bytes.get(start..end)?.to_vec();
-
-        Some(Message::JoinPart {
-            what: ready.what,
-            at: ready.at,
+        let ground = self.ground_for(what)?;
+        let bytes = self.build_join(what, &ground)?;
+        self.keep_join(
+            Prepared {
+                what,
+                at: ground.at.id,
+                bytes,
+            },
+            &ground.at,
             part,
-            parts: u32::try_from(parts).unwrap_or(u32::MAX),
-            bytes,
+        )
+    }
+
+    /// One piece of the answer already held, when it is the answer to the
+    /// question being asked.
+    fn held_join(&self, what: Joining, part: u32) -> Option<Message> {
+        let held = self.joined();
+        let tip = self.chain().tip()?;
+        let ready = held.get(what.slot())?.as_ref()?;
+        if ready.at != tip {
+            return None;
+        }
+        piece_of(ready, part)
+    }
+
+    /// Puts a freshly built answer in its slot, and takes one piece of it.
+    ///
+    /// `None` when the chain left the tip it was built against while it was
+    /// being built. Keeping it would put an answer about a chain this node is
+    /// no longer on where the answer about the chain it is on belongs, and
+    /// whoever was collecting that one would have to have it built again. The
+    /// peer that asked hears nothing this round and asks again, which is the
+    /// cheaper of the two.
+    ///
+    /// A tip once left is never returned to: a branch is followed for carrying
+    /// more work than the last, so the work behind the tip only rises. That is
+    /// what makes this check enough on its own. If the chain still stands
+    /// where it did, it never went anywhere in between, and every header read
+    /// off the disk during the build belonged to this branch.
+    fn keep_join(&self, prepared: Prepared, from: &Located, part: u32) -> Option<Message> {
+        let mut held = self.joined();
+        if !self.chain().agrees_with(from) {
+            return None;
+        }
+        let slot = held.get_mut(prepared.what.slot())?;
+        *slot = Some(prepared);
+        piece_of(slot.as_ref()?, part)
+    }
+
+    /// What the chain has to say about an answer of this kind.
+    ///
+    /// The chain is held for this and for nothing else.
+    fn ground_for(&self, what: Joining) -> Option<Ground> {
+        let chain = self.chain();
+        let height = chain.height()?;
+        let buried = match what {
+            Joining::Weight => None,
+            // The one thing here that is not a copy of something small. Only
+            // the chain can unwind its own ledger, since what undoes a block
+            // is held there and nowhere else, so this is the part that has to
+            // happen under the lock.
+            Joining::Ledger => Some(chain.ledger_at(height.checked_sub(self.params.burial)?)?),
+        };
+        Some(Ground {
+            at: Located::new(height, chain.id_at(height)?),
+            history: chain.state().headers_before_tip(),
+            buried,
         })
+    }
+
+    /// One header off the disk.
+    ///
+    /// The log is taken for the read and let go of again, rather than held
+    /// across a build that does thousands of these. [`Shared::persist`] takes
+    /// the log with the chain already in hand, so a build holding the log
+    /// would stop the chain just as surely as holding the chain itself: the
+    /// next thread to validate a block would be waiting on the log with the
+    /// chain in its own hand, and everybody else behind it.
+    fn header_off_disk(&self, height: u64) -> Option<BlockHeader> {
+        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        let store = log.as_ref()?;
+        // The header log first: a node keeps every header and only the most
+        // recent blocks, so this is the one that answers about the far end of
+        // the chain.
+        if let Ok(Some(header)) = store.headers.read_at(height) {
+            return Some(header);
+        }
+        Some(store.blocks.read_at(height).ok()??.header)
+    }
+
+    /// Where a header sits in the forest a chain of `leaves` committed to.
+    fn proof_off_disk(&self, height: u64, leaves: u64) -> Option<ForestProof> {
+        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        log.as_ref()?.forest.prove_in(height, leaves).ok()?
     }
 
     /// Whether this node can show a newcomer which chain carries the most
@@ -2032,7 +2907,7 @@ impl Shared {
     fn clear_filling(&self) {
         let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(store) = log.as_mut() {
-            let _ = store.filling.clear();
+            store.discard_filling();
         }
     }
 
@@ -2096,71 +2971,121 @@ impl Shared {
 
     /// The collecting half of [`Shared::take_headers`], with the question of
     /// who sent the run already settled.
+    ///
+    /// Three steps, and only the first and last hold the log. Filing a run is
+    /// a few hundred records at most, which is what arrives in one message.
+    /// Weighing the whole collection against the commitment is a read per
+    /// header of everything before this node arrived, which for a node that
+    /// joined a million and a half blocks up is a million and a half reads;
+    /// holding the log across those stops every thread that wants to write a
+    /// block down, because they take the chain first and the log second and so
+    /// wait here with the chain in hand.
     fn fill_headers(&self, from: u64, headers: &[BlockHeader]) -> Filled {
-        let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(store) = log.as_mut() else {
-            return Filled::Ignored;
-        };
-        let oldest = store.headers.first_height();
-        if oldest == 0 || headers.is_empty() {
-            return Filled::Ignored;
-        }
-        let expected = if store.filling.is_empty() {
-            0
-        } else {
-            store.filling.reaches()
-        };
-        if from != expected {
-            return Filled::Ignored;
-        }
-
-        let held = store.filling.reaches();
-        for header in headers {
-            if header.height >= oldest {
-                break;
-            }
-            if store.filling.append(header).is_err() {
-                let _ = store.filling.clear();
-                return Filled::Discarded;
-            }
-        }
-        if store.filling.reaches() < oldest {
-            return if store.filling.reaches() > held {
-                Filled::Grew
-            } else {
-                Filled::Ignored
+        let (oldest, epoch) = {
+            let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+            let Some(store) = log.as_mut() else {
+                return Filled::Ignored;
             };
-        }
+            let oldest = store.headers.first_height();
+            if oldest == 0 || headers.is_empty() {
+                return Filled::Ignored;
+            }
+            let expected = if store.filling.is_empty() {
+                0
+            } else {
+                store.filling.reaches()
+            };
+            if from != expected {
+                return Filled::Ignored;
+            }
+
+            let held = store.filling.reaches();
+            for header in headers {
+                if header.height >= oldest {
+                    break;
+                }
+                if store.filling.append(header).is_err() {
+                    store.discard_filling();
+                    return Filled::Discarded;
+                }
+            }
+            if store.filling.reaches() < oldest {
+                return if store.filling.reaches() > held {
+                    Filled::Grew
+                } else {
+                    Filled::Ignored
+                };
+            }
+            (oldest, store.filling_epoch)
+        };
 
         // Everything that came before the oldest header held is here. The one
         // question left is whether it is the truth, and that header answers
         // it: what it carries is the commitment to every header before it.
-        let Ok(Some(anchor)) = store.headers.read_at(oldest) else {
+        let Some(anchor) = self.header_off_disk(oldest) else {
             return Filled::Ignored;
         };
         let mut forest = cairn_accumulator::Archive::new();
         for height in 0..oldest {
-            let Ok(Some(header)) = store.filling.read_at(height) else {
-                let _ = store.filling.clear();
-                return Filled::Discarded;
+            let Some(header) = self.filling_at(height, epoch) else {
+                return self.throw_the_run_away(epoch);
             };
             forest.add(header_leaf(&header.id()));
         }
         if forest.commitment() != anchor.history {
             // Somebody made them up, or sent the wrong chain's. Start over
             // rather than keep any of it, and give somebody else the turn.
-            let _ = store.filling.clear();
-            return Filled::Discarded;
+            return self.throw_the_run_away(epoch);
         }
 
         // Only now are they this node's own headers. Written in front of what
         // it had, and the forest built again over the whole.
+        let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(store) = log.as_mut() else {
+            return Filled::Ignored;
+        };
+        // What is merged has to be what was weighed. The epoch says the
+        // collection was not thrown away and started again while the log was
+        // let go of, and the oldest header says nobody merged it first.
+        if store.filling_epoch != epoch
+            || store.headers.first_height() != oldest
+            || store.filling.reaches() < oldest
+        {
+            return Filled::Ignored;
+        }
         if !join_logs(&mut store.headers, &store.filling) {
             return Filled::Discarded;
         }
-        let _ = store.filling.clear();
-        grow_forest(&mut store.forest, &store.headers);
+        store.discard_filling();
+        // As at the open: the next block applied runs this again and says what
+        // it found, and this one is holding the log.
+        let _ = grow_forest(&mut store.forest, &store.headers);
         Filled::Grew
+    }
+
+    /// One record of the run being collected, with the log taken for the read
+    /// alone.
+    ///
+    /// `None` once the collection it belongs to has been thrown away, which is
+    /// what stops a reading of one run being weighed as a reading of another.
+    fn filling_at(&self, height: u64, epoch: u64) -> Option<BlockHeader> {
+        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        let store = log.as_ref()?;
+        if store.filling_epoch != epoch {
+            return None;
+        }
+        store.filling.read_at(height).ok()?
+    }
+
+    /// Throws away the run that was being collected, if it is still that run.
+    fn throw_the_run_away(&self, epoch: u64) -> Filled {
+        let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(store) = log.as_mut() {
+            if store.filling_epoch == epoch {
+                store.discard_filling();
+            }
+        }
+        Filled::Discarded
     }
 
     /// A run of headers off the disk, for a node filling in what came before
@@ -2186,30 +3111,26 @@ impl Shared {
         headers
     }
 
-    /// Builds the whole of what a newcomer asked for.
+    /// Builds the whole of what a newcomer asked for, holding nothing.
     ///
     /// Both answers reach for headers all over the chain, and a node holds the
-    /// bodies of only the ones it could still undo, so everything older is
-    /// read from the log. Chain first and log second, as everywhere.
-    fn build_join(&self, what: Joining) -> Option<Vec<u8>> {
-        let chain = self.chain();
-        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-        let header_at = |height: u64| -> Option<BlockHeader> {
-            if let Some(block) = chain.block_at(height) {
-                return Some(block.header);
-            }
-            let store = log.as_ref()?;
-            // The header log first: a node keeps every header and only the
-            // most recent blocks, so this is the one that answers about the
-            // far end of the chain.
-            if let Ok(Some(header)) = store.headers.read_at(height) {
-                return Some(header);
-            }
-            Some(store.blocks.read_at(height).ok()??.header)
-        };
-
-        let state = chain.state();
-        let tip = header_at(chain.height()?)?;
+    /// bodies of only the ones it could still undo, so everything is read from
+    /// the log: for the far end of the chain that was always true, and for the
+    /// near end it costs a page cache hit rather than the chain lock.
+    ///
+    /// This is also what a node writes down for itself. It used to be written
+    /// twice, once here and once in a second copy of the same walk, and the
+    /// second copy said in as many words that it was doing what this does.
+    ///
+    /// `None` when the log has not caught up with the chain `ground` was taken
+    /// against. That is a node that cannot answer yet rather than one with a
+    /// wrong answer, and it says nothing rather than answering badly.
+    fn build_join(&self, what: Joining, ground: &Ground) -> Option<Vec<u8>> {
+        let header_at = |height: u64| self.header_off_disk(height);
+        let tip = header_at(ground.at.height)?;
+        if tip.id() != ground.at.id {
+            return None;
+        }
 
         match what {
             Joining::Weight => {
@@ -2217,10 +3138,8 @@ impl Shared {
                 // one the tip's own header vouches for, and read from disk
                 // rather than from memory: holding it in memory would be a
                 // gigabyte at thirty years.
-                let before_tip = tip.height;
-                let prove = |height: u64| log.as_ref()?.forest.prove_in(height, before_tip).ok()?;
-                let start =
-                    open_start(&tip, state.headers_before_tip(), SAMPLES, header_at, prove)?;
+                let prove = |height: u64| self.proof_off_disk(height, tip.height);
+                let start = open_start(&tip, ground.history.clone(), SAMPLES, header_at, prove)?;
                 Some(start.encode())
             }
             Joining::Ledger => {
@@ -2228,68 +3147,22 @@ impl Shared {
                 // below the tip that whoever wrote it had to keep mining over
                 // it, which is the only thing a newcomer can lean on: it
                 // cannot check a ledger, having watched no transaction go
-                // past.
+                // past. The same one this node keeps for itself, for the same
+                // reason: one path, one set of rules, and a node that reads
+                // its own disk back checks it the way anybody else would.
                 let anchor_height = tip.height.checked_sub(self.params.burial)?;
-                let buried = chain.ledger_at(anchor_height)?;
-                let anchor = log
-                    .as_ref()?
-                    .forest
-                    .prove_in(anchor_height, tip.height)
-                    .ok()??;
+                let anchor = self.proof_off_disk(anchor_height, tip.height)?;
                 build_ledger(
-                    &buried,
+                    ground.buried.as_ref()?,
                     &header_at(anchor_height)?,
                     &tip,
-                    state.headers_before_tip(),
+                    ground.history.clone(),
                     anchor,
                     header_at,
                 )
                 .map(|held| held.encode())
             }
         }
-    }
-
-    /// This node's own ledger, written down so it can start from it.
-    ///
-    /// The same thing it would hand a newcomer, kept for itself. A node that
-    /// has one does not have to read its way back from the first block, which
-    /// is what lets it stop keeping every block it ever accepted.
-    fn own_ledger(&self) -> Option<Vec<u8>> {
-        let chain = self.chain();
-        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-        let header_at = |height: u64| -> Option<BlockHeader> {
-            if let Some(block) = chain.block_at(height) {
-                return Some(block.header);
-            }
-            let store = log.as_ref()?;
-            // The header log first: a node keeps every header and only the
-            // most recent blocks, so this is the one that answers about the
-            // far end of the chain.
-            if let Ok(Some(header)) = store.headers.read_at(height) {
-                return Some(header);
-            }
-            Some(store.blocks.read_at(height).ok()??.header)
-        };
-        let tip = header_at(chain.height()?)?;
-        // The same buried ledger it would hand a stranger, and for the same
-        // reason: one path, one set of rules, and a node that reads its own
-        // disk back checks it the way anybody else would.
-        let anchor_height = tip.height.checked_sub(self.params.burial)?;
-        let buried = chain.ledger_at(anchor_height)?;
-        let anchor = log
-            .as_ref()?
-            .forest
-            .prove_in(anchor_height, tip.height)
-            .ok()??;
-        build_ledger(
-            &buried,
-            &header_at(anchor_height)?,
-            &tip,
-            chain.state().headers_before_tip(),
-            anchor,
-            header_at,
-        )
-        .map(|held| held.encode())
     }
 }
 
@@ -2306,12 +3179,54 @@ impl Shared {
 /// The cost is that a reorganisation rewrites the tail. That is bounded by how
 /// deep a reorganisation may go, and reorganisations are rare.
 ///
-/// A failure here costs blocks on the next restart, not the chain this node is
-/// following, so it does not stop the node.
-fn write_branch(store: &mut Store, accepted: &Accepted, chain: &ChainStore) {
-    write_headers(&mut store.headers, chain);
-    grow_forest(&mut store.forest, &store.headers);
-    write_blocks(&mut store.blocks, accepted, chain);
+/// A failure here does not stop the node on the spot: it costs blocks on the
+/// next restart rather than the chain this node is following, and a disk that
+/// refuses one write often takes the next. What it does is report, so that
+/// [`Shared::note_writing`] can watch the gap and stop the node before the gap
+/// stops being one anything can close.
+fn write_branch(store: &mut Store, accepted: &Accepted, chain: &ChainStore) -> Wrote {
+    // All three run whatever the others said. The forest is what the header
+    // log says it is and follows it either way, and the blocks are a separate
+    // file with a separate way of failing.
+    let headers = write_headers(&mut store.headers, chain);
+    let forest = grow_forest(&mut store.forest, &store.headers);
+    let blocks = write_blocks(&mut store.blocks, accepted, chain);
+    Wrote {
+        reaches: store.blocks.reaches(),
+        // The blocks first when more than one refused. They are the half that
+        // costs a restart the chain rather than the ability to show it.
+        refusing: blocks.or(headers).or(forest),
+    }
+}
+
+/// What one pass at bringing the disk in line with the branch managed.
+struct Wrote {
+    /// The height the block log now reaches, one past the highest block on
+    /// the disk.
+    reaches: u64,
+    /// What stopped the pass, when something did.
+    refusing: Option<Refusing>,
+}
+
+/// A write the disk would not take, in the words the store used.
+///
+/// The words matter more than the fact. "No space left on device" and
+/// "input/output error" call for two different afternoons, and nothing in here
+/// is in a position to tell them apart, so both are carried up whole to
+/// somebody who is.
+#[derive(Clone, Debug)]
+struct Refusing {
+    what: Writing,
+    because: String,
+}
+
+impl Refusing {
+    fn at(what: Writing, because: &impl std::fmt::Display) -> Self {
+        Self {
+            what,
+            because: because.to_string(),
+        }
+    }
 }
 
 /// Brings the header forest in line with the header log.
@@ -2323,12 +3238,26 @@ fn write_branch(store: &mut Store, accepted: &Accepted, chain: &ChainStore) {
 /// Only a log that starts at the first block can make a forest at all. A node
 /// handed a ledger has headers from where it was handed on, and no path
 /// through what came before them exists to be built.
-fn grow_forest(forest: &mut HeaderTree, headers: &HeaderLog) {
+/// A record the store refuses to read is not a record that is not there, and
+/// this is the walk where the difference used to be lost. Every read here was
+/// taken with `.ok().flatten()`, so a header the store would not vouch for
+/// read as absent: the leaf it should have matched matched nothing, the walk
+/// went on down, and it has no floor, so one damaged record took the forest
+/// back to nothing. The gentler ending was as bad and quieter: the loop that
+/// fills the forest in stopped at the first refused read, the forest stayed
+/// short, and this node went on running as one that had simply decided not to
+/// show anyone the chain.
+///
+/// So a refusal ends the pass where it happens, nothing is cut on the strength
+/// of it, and it is carried up to be said out loud.
+fn grow_forest(forest: &mut HeaderTree, headers: &HeaderLog) -> Option<Refusing> {
     if headers.first_height() != 0 {
-        return;
+        return None;
     }
-    if forest.len() > headers.reaches() && forest.keep_first(headers.reaches()).is_err() {
-        return;
+    if forest.len() > headers.reaches() {
+        if let Err(error) = forest.keep_first(headers.reaches()) {
+            return Some(Refusing::at(Writing::Headers, &error));
+        }
     }
     // Where the two part company, walked back from the end. A reorganisation
     // replaces headers without shortening the log, so the lengths agreeing is
@@ -2336,28 +3265,35 @@ fn grow_forest(forest: &mut HeaderTree, headers: &HeaderLog) {
     let mut common = forest.len().min(headers.reaches());
     while common > 0 {
         let at = common.saturating_sub(1);
-        let held = forest.leaf_at(at).ok().flatten();
-        let now = headers
-            .read_at(at)
-            .ok()
-            .flatten()
-            .map(|header| header_leaf(&header.id()));
+        let held = match forest.leaf_at(at) {
+            Ok(leaf) => leaf,
+            Err(error) => return Some(Refusing::at(Writing::Headers, &error)),
+        };
+        let now = match headers.read_at(at) {
+            Ok(header) => header.map(|header| header_leaf(&header.id())),
+            Err(error) => return Some(Refusing::at(Writing::Headers, &error)),
+        };
         if held.is_some() && held == now {
             break;
         }
         common = at;
     }
-    if forest.len() > common && forest.keep_first(common).is_err() {
-        return;
-    }
-    for height in forest.len()..headers.reaches() {
-        let Some(header) = headers.read_at(height).ok().flatten() else {
-            break;
-        };
-        if forest.append(header_leaf(&header.id())).is_err() {
-            break;
+    if forest.len() > common {
+        if let Err(error) = forest.keep_first(common) {
+            return Some(Refusing::at(Writing::Headers, &error));
         }
     }
+    for height in forest.len()..headers.reaches() {
+        let header = match headers.read_at(height) {
+            Ok(Some(header)) => header,
+            Ok(None) => break,
+            Err(error) => return Some(Refusing::at(Writing::Headers, &error)),
+        };
+        if let Err(error) = forest.append(header_leaf(&header.id())) {
+            return Some(Refusing::at(Writing::Headers, &error));
+        }
+    }
+    None
 }
 
 /// Brings the header log in line with the branch this node follows.
@@ -2369,17 +3305,31 @@ fn grow_forest(forest: &mut HeaderTree, headers: &HeaderLog) {
 /// A reorganisation takes the tail off and the new branch is written over the
 /// same ground, which is the same shape as the block log and bounded the same
 /// way.
-fn write_headers(headers: &mut HeaderLog, chain: &ChainStore) {
-    let Some(tip) = chain.height() else { return };
-    let reaches = tip.saturating_add(1);
+fn write_headers(headers: &mut HeaderLog, chain: &ChainStore) -> Option<Refusing> {
+    let reaches = chain.height()?.saturating_add(1);
 
     // Where the log and the branch part company. Walking back from the tip
     // rather than trusting the log, since a reorganisation may have replaced
     // headers the log still holds without shortening it.
+    //
+    // A refusal from the store is kept rather than returned on the spot. It
+    // tells this walk nothing about the branch, so the walk goes on and the
+    // log is written again from the chain wherever the chain still holds the
+    // blocks, which is what a node did with a damaged record before any of
+    // this reported anything. What the refusal is for is the operator: one
+    // changed byte in a header file is a disk worth hearing about, whether or
+    // not the node managed to put itself right afterwards.
+    let mut refusing = None;
     let mut common = headers.reaches().min(reaches);
     while common > headers.first_height() {
         let at = common.saturating_sub(1);
-        let held = headers.read_at(at).ok().flatten().map(|header| header.id());
+        let held = match headers.read_at(at) {
+            Ok(header) => header.map(|header| header.id()),
+            Err(error) => {
+                refusing.get_or_insert_with(|| Refusing::at(Writing::Headers, &error));
+                None
+            }
+        };
         let now = chain
             .block_at(at)
             .map(|block| block.header.id())
@@ -2392,8 +3342,16 @@ fn write_headers(headers: &mut HeaderLog, chain: &ChainStore) {
             _ => common = at,
         }
     }
-    if headers.reaches() > common && headers.keep_below(common).is_err() {
-        return;
+    // The cut goes ahead whatever the walk had to say. Headers that no longer
+    // follow the branch are worse than headers missing: what the log holds is
+    // what this node shows a newcomer, and a forest is built over it and
+    // proved against, so leaving an abandoned branch in place would have this
+    // node handing out proofs that fold to a root nobody else has. Short is
+    // the safe direction; wrong is not.
+    if headers.reaches() > common {
+        if let Err(error) = headers.keep_below(common) {
+            return Some(Refusing::at(Writing::Headers, &error));
+        }
     }
 
     let mut height = if headers.is_empty() {
@@ -2402,19 +3360,35 @@ fn write_headers(headers: &mut HeaderLog, chain: &ChainStore) {
         headers.reaches()
     };
     while height < reaches {
+        // Nothing here can write this one. A chain keeps block bodies for a
+        // window behind its tip and reads the rest back off the block log, and
+        // this walk holds the chain, so what it cannot see in memory it cannot
+        // have. The log stops where it stops, which costs this node the
+        // ability to show a newcomer the chain and costs the chain itself
+        // nothing. Said, because a node that has quietly stopped being able to
+        // answer goes on looking exactly like one that can.
         let Some(header) = chain.block_at(height).map(|block| block.header) else {
-            break;
+            return refusing.or_else(|| {
+                Some(Refusing::at(
+                    Writing::Headers,
+                    &format!(
+                        "the header at height {height} cannot be written down: the chain has \
+                         let go of the block it comes from"
+                    ),
+                ))
+            });
         };
-        if headers.append(&header).is_err() {
-            break;
+        if let Err(error) = headers.append(&header) {
+            return Some(Refusing::at(Writing::Headers, &error));
         }
         height = height.saturating_add(1);
     }
+    refusing
 }
 
-fn write_blocks(log: &mut BlockLog, accepted: &Accepted, chain: &ChainStore) {
+fn write_blocks(log: &mut BlockLog, accepted: &Accepted, chain: &ChainStore) -> Option<Refusing> {
     let added = match accepted {
-        Accepted::Duplicate | Accepted::SideBranch => return,
+        Accepted::Duplicate | Accepted::SideBranch => return None,
         // The block just applied is the tip, and the log ends one short.
         Accepted::Extended => 1usize,
         Accepted::Reorganised { added, .. } => added.len(),
@@ -2427,11 +3401,12 @@ fn write_blocks(log: &mut BlockLog, accepted: &Accepted, chain: &ChainStore) {
     // from the wrong end, and every record past that point would sit at a
     // position that is not its height. A node reading its own log by position
     // would serve the wrong blocks, confidently, to everyone catching up.
-    let Some(tip) = chain.height() else { return };
-    let reaches = tip.saturating_add(1);
+    let reaches = chain.height()?.saturating_add(1);
     let common = reaches.saturating_sub(added as u64);
-    if log.reaches() > common && log.keep_below(common).is_err() {
-        return;
+    if log.reaches() > common {
+        if let Err(error) = log.keep_below(common) {
+            return Some(Refusing::at(Writing::Blocks, &error));
+        }
     }
     // Everything the branch carries beyond what the log holds. Usually one
     // block; more if a write failed earlier and the log fell behind.
@@ -2447,16 +3422,27 @@ fn write_blocks(log: &mut BlockLog, accepted: &Accepted, chain: &ChainStore) {
         log.reaches()
     };
     while height < reaches {
-        // A block the chain has already let go of cannot be written, so the
-        // log stays short and the rest is asked for again after a restart.
+        // A block the chain has already let go of cannot be written. This is
+        // the end of the road for a log that fell behind: the catch-up reads
+        // bodies out of memory, and past the reorganisation window there are
+        // none. Said rather than broken out of, because a gap that has reached
+        // this is a gap nothing will ever close, and until now nothing
+        // anywhere reported it.
         let Some(block) = chain.block_at(height) else {
-            break;
+            return Some(Refusing::at(
+                Writing::Blocks,
+                &format!(
+                    "the block at height {height} left memory before the disk took it, \
+                     so there is nowhere left to read it from"
+                ),
+            ));
         };
-        if log.append(block).is_err() {
-            break;
+        if let Err(error) = log.append(block) {
+            return Some(Refusing::at(Writing::Blocks, &error));
         }
         height = height.saturating_add(1);
     }
+    None
 }
 
 /// Answers the questions the sync layer set aside, now that nothing is held.
@@ -2502,6 +3488,19 @@ fn answer_deferred(
             return false;
         }
     }
+    // Addresses, drawn now that the chain is nobody's. The book has to be
+    // ordered before any of it can be shared, and doing that under the chain
+    // was the one place where the size of a stranger's book decided how long
+    // everybody else waited.
+    //
+    // The clock decides which half of the book rotates into this answer, so a
+    // peer asking twice does not hear the same names twice.
+    if reaction.share_addresses {
+        let sample = shared.book().sample(MAX_SHARED_ADDRESSES, unix_now());
+        if outbound.try_send(Message::Peers(sample)).is_err() {
+            return false;
+        }
+    }
     true
 }
 
@@ -2544,7 +3543,7 @@ fn accept_loop(shared: &Arc<Shared>, listener: &TcpListener) {
                     let _ = stream.shutdown(Shutdown::Both);
                     continue;
                 }
-                attach_peer(shared, stream, false);
+                attach_peer(shared, stream, None);
             }
             Err(error) if polling && error.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(ACCEPT_POLL);
@@ -2598,8 +3597,10 @@ fn maintenance_loop(shared: &Arc<Shared>) {
             shared.send_to(peer, asking);
         }
         keep_the_undertaking(shared, &connected, now);
+        ask_again_for_the_join(shared, now);
         drive_choosing(shared, now);
         shared.refusals().forget_expired(now);
+        shared.forget_spent_windows(now);
     }
 }
 
@@ -2634,11 +3635,76 @@ fn keep_the_undertaking(shared: &Arc<Shared>, connected: &[PeerId], now: u64) {
         // behind, which for a wallet reading a balance is a confident wrong
         // answer rather than a slow one.
         Owed::GivenUp(stranded) => {
-            if let Ok(mut held) = shared.stranded.lock() {
-                held.get_or_insert(stranded);
-            }
+            shared.stranded().get_or_insert(stranded);
             shared.running.store(false, Ordering::SeqCst);
         }
+    }
+}
+
+/// Asks again for the piece of a join answer that has not arrived.
+///
+/// The one thing the collection cannot do for itself. A join is a chain of
+/// questions, each piece that lands asking for the next, and nothing else
+/// ever asks. So the first question that goes unanswered ends the whole
+/// exchange, and half a minute later [`JOIN_PATIENCE`] gives up on it and
+/// starts again from the first piece. The collector was written expecting a
+/// node to ask again for what it is missing; no part of the node ever did.
+///
+/// A question goes unanswered for one ordinary reason above all others: the
+/// peer serving it had spent the allowance window it was asked in. A handover
+/// is deliberately the most expensive thing a peer can ask for, at an eighth
+/// of a window per piece, so any join of more than eight pieces runs that
+/// window out by design and is meant to carry on in the next one.
+///
+/// Which is why the question is asked again when that window has turned,
+/// rather than after some number of seconds. It is the moment the answer can
+/// change, it needs no guess about how fast a piece travels, and it cannot
+/// fire more than once a window however long the collection is still.
+///
+/// Asked of the same peer, because a collection belongs to the peer it was
+/// started from and a piece from anybody else is refused.
+fn ask_again_for_the_join(shared: &Arc<Shared>, now: u64) {
+    let Some((peer, asked_at)) = shared.choosing().asking_join() else {
+        return;
+    };
+    let last = shared.join_asked_again_at.load(Ordering::Relaxed);
+    if !a_window_has_turned(last, now) {
+        return;
+    }
+    let asking = {
+        let joining = shared
+            .joining
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // When the last piece landed, or when the peer was asked if none has:
+        // the first question is as droppable as the rest, and the one nobody
+        // else would ever ask again.
+        let since = joining.moved().unwrap_or(asked_at);
+        if a_window_has_turned(since, now) {
+            still_wanted(&joining)
+        } else {
+            None
+        }
+    };
+    let Some((what, part)) = asking else {
+        return;
+    };
+    shared.join_asked_again_at.store(now, Ordering::Relaxed);
+    shared.send_to(peer, Message::GetJoin { what, part });
+}
+
+/// The piece a join is waiting on, or `None` when it is waiting on nothing.
+fn still_wanted(joining: &Progress) -> Option<(Joining, u32)> {
+    match joining {
+        // Asked and nothing back at all, which is where a join is when the
+        // question that starts it is the one that went missing.
+        Progress::Idle => Some((Joining::Weight, 0)),
+        Progress::Landed => None,
+        Progress::Weighing(collecting) => Some((Joining::Weight, collecting.wanted()?)),
+        // Between the two halves, with nothing yet to count: the first piece
+        // of the ledger is the one that says how many there are.
+        Progress::Weighed { .. } => Some((Joining::Ledger, 0)),
+        Progress::Fetching { collecting, .. } => Some((Joining::Ledger, collecting.wanted()?)),
     }
 }
 
@@ -2675,7 +3741,12 @@ fn build_ledger(
     for height in at.height.checked_add(1)?..=tip.height {
         buried.push(header_at(height)?);
     }
-    Some(state.handover(*at, *tip, tip_history, anchor, buried, recent))
+    // `None` when the ledger cannot show where one of the notes in its grace
+    // window sits, which is a node that has nothing to hand over rather than
+    // one with a bad answer.
+    state
+        .handover(*at, *tip, tip_history, anchor, buried, recent)
+        .ok()
 }
 
 /// Fills the header log in from the blocks, for the stretch it is missing.
@@ -2799,7 +3870,6 @@ fn decide(
     // Chain first and log second, here and everywhere, so two threads never
     // take these two the other way round from each other.
     let mut chain = shared.chain();
-    let book = shared.book().clone();
 
     // The log is taken twice rather than held across the decision, because the
     // decision may itself read a block body off it: a chain that let go of a
@@ -2813,7 +3883,6 @@ fn decide(
     };
     let mut local = Local {
         chain: &mut chain,
-        book: &book,
         shows_the_chain: shows,
         listen: shared.address.port(),
         nonce: shared.nonce,
@@ -2823,13 +3892,22 @@ fn decide(
     // Written while the chain is still held, so the log cannot record a branch
     // the chain has already moved off.
     if let Some(accepted) = reaction.applied.as_ref() {
-        let mut log = shared.log.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(log) = log.as_mut() {
-            write_branch(log, accepted, &chain);
-            // Bodies now on disk, and far enough back that no ordinary
-            // reorganisation reads them. Said after writing, never before: a
-            // body let go of before it was written is a body nobody has.
-            chain.release_bodies(log.blocks.first_height(), log.blocks.reaches());
+        let wrote = {
+            let mut log = shared.log.lock().unwrap_or_else(PoisonError::into_inner);
+            log.as_mut().map(|log| {
+                let wrote = write_branch(log, accepted, &chain);
+                // Bodies now on disk, and far enough back that no ordinary
+                // reorganisation reads them. Said after writing, never before:
+                // a body let go of before it was written is a body nobody has.
+                chain.release_bodies(log.blocks.first_height(), log.blocks.reaches());
+                wrote
+            })
+        };
+        // Once the log is let go of, because what this reads next is a leaf
+        // and the order the locks are taken in is the whole of what keeps two
+        // threads from waiting on each other.
+        if let Some(wrote) = wrote {
+            shared.note_writing(&wrote, chain.height());
         }
     }
     let passing: Vec<Transfer> = reaction
@@ -3006,8 +4084,19 @@ fn look_up_seed_names(shared: &Arc<Shared>, now: u64) {
 fn dial_from_book(shared: &Arc<Shared>, now: u64) {
     let (connected, count) = {
         let peers = shared.peers();
-        let connected: HashSet<SocketAddr> =
-            peers.values().filter_map(|peer| peer.advertised).collect();
+        // Both the address a peer introduced itself at and the address this
+        // node dialled to reach it. Only the first was read here, and it is
+        // filled in by the handshake: an address that accepts a connection
+        // and never speaks has none, so it was never among the ones already
+        // held, and every round dialled it again. One such address took every
+        // outbound slot the node had, and the node then saw the chain only
+        // through connections a stranger had chosen for it, which is the
+        // eclipse `MAX_PER_GROUP` is written against arriving by another door.
+        let connected: HashSet<SocketAddr> = peers
+            .values()
+            .flat_map(|peer| [peer.advertised, peer.dialled_to])
+            .flatten()
+            .collect();
         // Only the ones this node went out and opened. A connection somebody
         // else opened does not tell this node anything about the network: the
         // stranger chose it. Counting those was enough to stop a node dialling
@@ -3043,7 +4132,7 @@ fn dial_from_book(shared: &Arc<Shared>, now: u64) {
             continue;
         }
         match TcpStream::connect_timeout(&address, DIAL_TIMEOUT) {
-            Ok(stream) => attach_peer(shared, stream, true),
+            Ok(stream) => attach_peer(shared, stream, Some(address)),
             // An address that never answers would otherwise be dialled every
             // second forever, and handed to every peer that asks.
             Err(_) => {
@@ -3092,11 +4181,28 @@ fn loses_the_tie(ours: SocketAddr, theirs: SocketAddr, initiator: bool) -> bool 
     }
 }
 
-fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, initiator: bool) {
+/// Takes a connection into the peer table and starts its two threads.
+///
+/// `dialled` names the address this node went out to, and is `None` for a
+/// connection somebody else opened. It is not the same thing as the address
+/// the peer will introduce itself at, and the difference is what a silent
+/// address used to live in.
+fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAddr>) {
+    let initiator = dialled.is_some();
+    // Nothing is attached to a node that has stopped. Checked here and again
+    // under the thread table below, because between the two a shutdown can
+    // take that table and this thread would then never be joined.
+    if !shared.running.load(Ordering::SeqCst) {
+        let _ = stream.shutdown(Shutdown::Both);
+        return;
+    }
     let Ok(writing_end) = stream.try_clone() else {
         return;
     };
     let Ok(shutdown_end) = stream.try_clone() else {
+        return;
+    };
+    let Ok(closing_end) = stream.try_clone() else {
         return;
     };
     let remote = stream.peer_addr().ok().map(|address| address.ip());
@@ -3120,6 +4226,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, initiator: bool) {
             stream: shutdown_end,
             host: remote,
             advertised: None,
+            dialled_to: dialled,
         },
     );
 
@@ -3150,12 +4257,33 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, initiator: bool) {
 
     let reading = Arc::clone(shared);
     let handle = thread::spawn(move || {
-        read_loop(&reading, stream, id, &outbound, remote, initiator);
-        reading.peers().remove(&id);
+        read_loop(&reading, stream, id, &outbound, remote, dialled);
         drop(outbound);
+        // The writer waits on the channel closing, and the channel cannot
+        // close while the peer table still holds a sender for it. So the
+        // table's sender is swapped for one nobody reads: the slot stays
+        // counted, which is what it is for, and what was queued behind it is
+        // let go of. The connection is given up only once both threads are
+        // finished with it, so nothing this node still holds for a peer sits
+        // outside its own accounting: before this, the slot went first, the
+        // same host could take another, and up to a queue's worth of answers
+        // and two threads went on living for a peer already given up on.
+        if let Some(peer) = reading.peers().get_mut(&id) {
+            let (nowhere, _) = mpsc::sync_channel(1);
+            peer.outbound = nowhere;
+        }
         let _ = writer.join();
+        reading.peers().remove(&id);
     });
-    shared.threads().push(handle);
+    // Under the thread table, so a connection taken while a shutdown is
+    // emptying it is not left with a thread nobody joins. A shutdown that got
+    // here first has already cleared `running`, and the socket is shut so the
+    // read fails at once rather than waiting out a deadline.
+    let mut threads = shared.threads();
+    if !shared.running.load(Ordering::SeqCst) {
+        let _ = closing_end.shutdown(Shutdown::Both);
+    }
+    threads.push(handle);
 }
 
 /// Whether a framing failure is the peer's fault rather than the network's.
@@ -3202,10 +4330,15 @@ fn read_loop(
     id: PeerId,
     outbound: &SyncSender<Message>,
     remote: Option<IpAddr>,
-    initiator: bool,
+    dialled: Option<SocketAddr>,
 ) {
+    let initiator = dialled.is_some();
     let network = shared.network();
     let mut peer = PeerState::new(remote);
+    // The window belongs to the address, not to this socket, so what a peer
+    // spent on the connection before this one is already gone from it.
+    peer.allowance = shared.allowance_for(remote);
+    peer.dialled = initiator;
     let mut announced = false;
     let mut last_heard = unix_now();
     let mut window_start = last_heard;
@@ -3216,7 +4349,13 @@ fn read_loop(
     // waiting on a peer that may never speak again. Two silences are told
     // apart: a peer with nothing to say between frames is fine and stays, and
     // a peer holding a frame open is not and goes.
-    while shared.running.load(Ordering::SeqCst) {
+    //
+    // Labelled because every way out of it has to reach the socket at the
+    // bottom. Three of them used to return instead, and a peer that stopped
+    // reading its answers took one of those: the socket was left open, so the
+    // writing thread stayed inside a write nobody was taking, holding
+    // everything queued behind it.
+    'reading: while shared.running.load(Ordering::SeqCst) {
         let message = match read_message(&mut stream, network) {
             Ok(Incoming::Message(message)) => {
                 last_heard = unix_now();
@@ -3252,7 +4391,7 @@ fn read_loop(
         // is this node rather than the layer that reads messages.
         let message = match join_piece(shared, id, message, outbound) {
             Taken::Handled => continue,
-            Taken::Failed => return,
+            Taken::Failed => break 'reading,
             Taken::Other(message) => message,
         };
 
@@ -3287,13 +4426,13 @@ fn read_loop(
             // A full queue means the peer is not reading what it asked for, so
             // the answer would be stale by the time it arrived.
             if outbound.try_send(reply).is_err() {
-                return;
+                break 'reading;
             }
         }
         // What the sync layer named rather than answered, because answering
         // either reaches a disk and it runs with the chain held.
         if !answer_deferred(shared, &reaction, outbound) {
-            return;
+            break 'reading;
         }
         // Headers from before this node arrived, taken now that the chain has
         // been let go of: they are written to a log and weighed against a
@@ -3310,6 +4449,16 @@ fn read_loop(
         if reaction.unreachable.is_some() {
             shared.out_of_reach.fetch_add(1, Ordering::Relaxed);
         }
+        // A block written under rules this build does not have. Nothing is
+        // held against the peer, which is why it is here rather than among the
+        // reasons to drop one: it is carrying what its own chain carries, and
+        // this node is the one that cannot read it. Counted, because a node
+        // that has met a run of these from several peers has almost certainly
+        // been left behind by the network, and that used to show up as nothing
+        // but a height that had stopped moving.
+        if let Some(version) = reaction.unjudged {
+            shared.cannot_judge(id, version, last_heard);
+        }
         if !reaction.broadcast.is_empty() {
             shared.broadcast(Some(id), &Message::Announce(reaction.broadcast));
         }
@@ -3319,9 +4468,7 @@ fn read_loop(
         // Not this peer's fault and not something to disconnect over: every
         // peer that has updated would send the same block. The node stops.
         if let Some(outdated) = reaction.outdated {
-            if let Ok(mut held) = shared.outdated.lock() {
-                held.get_or_insert(outdated);
-            }
+            shared.outdated().get_or_insert(outdated);
             shared.running.store(false, Ordering::SeqCst);
             break;
         }
@@ -3331,12 +4478,149 @@ fn read_loop(
         }
     }
 
+    note_the_ending(shared, remote, dialled, misbehaved, peer.greeted);
+    // Always, however the loop ended. It is what frees the writing thread: a
+    // write on a socket just shut fails at once, wherever in a frame it was.
+    let _ = stream.shutdown(Shutdown::Both);
+}
+
+/// What the node holds against an address once its connection has ended.
+///
+/// Two different judgements, and neither is about the message that happened
+/// to be last. A peer that behaved badly is turned away for a while. And an
+/// address this node went out to, that took the connection and then never
+/// introduced itself, has a miss counted against it exactly as one that
+/// refused the dial outright does. It is worse than a refusal, in fact: a
+/// refused dial costs a syscall, and this one held an outbound slot until
+/// `PEER_SILENCE` was up. Without it such an address stays in the book for
+/// good and is dialled again every ninety seconds for the life of the node.
+fn note_the_ending(
+    shared: &Arc<Shared>,
+    remote: Option<IpAddr>,
+    dialled: Option<SocketAddr>,
+    misbehaved: bool,
+    greeted: bool,
+) {
+    let now = unix_now();
     if misbehaved {
         if let Some(host) = remote {
-            shared.refuse(host, unix_now());
+            shared.refuse(host, now);
         }
     }
-    let _ = stream.shutdown(Shutdown::Both);
+    if let Some(address) = dialled {
+        if !greeted {
+            shared.book().missed(&address, now);
+        }
+    }
+}
+
+/// What it takes before a node says its build is too old for its chain.
+///
+/// AUDIT: nothing counted these at all. A version above what this build knows
+/// stopped being remembered against the block and stopped being blamed on the
+/// peer, which is right, and the whole of what an un-updated node then did
+/// about the real chain was refuse it in silence.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+mod unjudged_tests {
+    use super::{
+        too_old_for_the_chain, Unreadable, UNJUDGED_BLOCKS, UNJUDGED_PEERS, UNJUDGED_STRETCH,
+    };
+
+    /// A record of `blocks` of them from `peers` peers, spread over `over`.
+    fn met(blocks: u64, peers: u64, over: u64) -> Unreadable {
+        Unreadable {
+            version: 7,
+            blocks,
+            peers: (0..peers).collect(),
+            first: 1_000,
+            last: 1_000 + over,
+        }
+    }
+
+    /// The claim: this is evidence, and each half of it on its own is
+    /// something a stranger can produce for the price of a message.
+    #[test]
+    fn every_condition_is_needed_and_none_of_them_is_enough() {
+        let enough = met(UNJUDGED_BLOCKS, UNJUDGED_PEERS as u64, UNJUDGED_STRETCH);
+        let said = too_old_for_the_chain(&enough).expect("all three met");
+        assert_eq!(said.version, 7, "and it names the version it saw");
+        assert_eq!(said.peers, UNJUDGED_PEERS);
+        assert_eq!(said.over, UNJUDGED_STRETCH);
+
+        assert!(
+            too_old_for_the_chain(&met(
+                UNJUDGED_BLOCKS - 1,
+                UNJUDGED_PEERS as u64,
+                UNJUDGED_STRETCH
+            ))
+            .is_none(),
+            "a handful of blocks is a handful of numbers in a field"
+        );
+        assert!(
+            too_old_for_the_chain(&met(UNJUDGED_BLOCKS, 1, UNJUDGED_STRETCH)).is_none(),
+            "one peer is one machine, and one machine is what a stranger has"
+        );
+        assert!(
+            too_old_for_the_chain(&met(
+                UNJUDGED_BLOCKS,
+                UNJUDGED_PEERS as u64,
+                UNJUDGED_STRETCH - 1
+            ))
+            .is_none(),
+            "a burst is one idea; a chain that moved on goes on producing these"
+        );
+    }
+
+    /// A clock that went backwards says nothing about how long these have been
+    /// arriving, so it is not allowed to say anything at all.
+    #[test]
+    fn a_clock_that_went_backwards_proves_nothing() {
+        let mut backwards = met(UNJUDGED_BLOCKS, UNJUDGED_PEERS as u64, UNJUDGED_STRETCH);
+        backwards.last = backwards.first - 1;
+        assert!(too_old_for_the_chain(&backwards).is_none());
+    }
+
+    /// Nothing met is nothing said, which is the answer for every healthy node
+    /// on a chain whose rules have not moved.
+    #[test]
+    fn a_node_that_has_met_none_of_them_says_nothing() {
+        assert!(too_old_for_the_chain(&Unreadable::default()).is_none());
+    }
+}
+
+/// How far a node lets its disk fall behind before it stops.
+///
+/// AUDIT: nothing measured the gap and nothing bounded it. A node with a full
+/// disk climbed in height for as long as it was left running, and the blocks
+/// it had accepted left memory on a schedule that knew nothing about what had
+/// reached the disk.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic, clippy::arithmetic_side_effects)]
+mod behind_tests {
+    use super::{MAX_BEHIND, MAX_REORG_DEPTH};
+
+    /// The claim from [`MAX_BEHIND`]: a log further behind than the window a
+    /// chain keeps bodies for can never be brought level, so the number a node
+    /// stops at has to sit below that window rather than at it.
+    #[test]
+    fn a_node_stops_inside_the_window_it_could_still_catch_up_over() {
+        let window = u64::try_from(MAX_REORG_DEPTH).unwrap();
+        assert!(
+            MAX_BEHIND < window,
+            "stopping at or past {window} is stopping after the blocks are already gone"
+        );
+        assert!(
+            MAX_BEHIND.saturating_mul(2) <= window,
+            "and there has to be room left over for an operator to act in"
+        );
+    }
 }
 
 /// The rules a node handed a ledger keeps itself to.
@@ -3548,6 +4832,7 @@ mod tests {
             headers: HeaderLog::open(&directory).unwrap(),
             forest: HeaderTree::open(&directory).unwrap(),
             filling: HeaderLog::open_named(&directory, FILLING_LOG).unwrap(),
+            filling_epoch: 0,
         };
 
         let mut chain = ChainStore::new(params);
@@ -3560,7 +4845,9 @@ mod tests {
 
         let accepted = chain.add_block(blocks[5].clone(), 2_000_000_000).unwrap();
         assert_eq!(accepted, Accepted::Extended);
-        write_branch(&mut store, &accepted, &chain);
+        let wrote = write_branch(&mut store, &accepted, &chain);
+        assert!(wrote.refusing.is_none(), "nothing was refused");
+        assert_eq!(wrote.reaches, 6, "and the log says how far it now reaches");
 
         assert_eq!(
             store.blocks.len(),

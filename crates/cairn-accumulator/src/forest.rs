@@ -22,7 +22,7 @@
 //! a forest that never shrinks, and buys a holder who can keep their own proof
 //! current from what every block already carries.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
@@ -129,28 +129,45 @@ impl ForestProof {
     }
 }
 
-/// The watched paths a change did not merely lengthen, as they stood before
-/// it.
+/// What a rewind cannot work out for itself, as it stood before the change.
 ///
 /// Undoing a change to the forest has to leave the watched paths where they
-/// were, and a holder that keeps sixty four hashes cannot work a path out
-/// again. Keeping the whole map from before is the obvious answer and the
+/// were, and a holder that keeps sixty four hashes cannot walk a tree it does
+/// not have. Keeping the whole map from before is the obvious answer and the
 /// expensive one: the map is the largest thing a node holds, and a node holds
 /// one such record per block it could still undo. That was nine gigabytes.
 ///
-/// Two things cut it down. The first is that almost nothing needs keeping at
-/// all: adding a leaf only ever pushes siblings onto the end of a path, and
-/// how long a path should be is decided by the leaf count alone, so undoing an
-/// addition is a truncation. What is left is the paths a change rewrote or
-/// dropped, which is the ones beside a leaf that was emptied and the ones
-/// their holder stopped watching.
+/// Almost none of it has to be kept, and the reason is that a forest changes
+/// in describable ways rather than arbitrary ones.
 ///
-/// The second is that those paths are nearly the same path. A path is a walk
-/// up one tree, so two places that are near each other part company low down
-/// and share every step above it. What a block lets go of is what fell in one
-/// block, which took consecutive places, so the whole run costs about two
-/// nodes a place rather than one node a level. The siblings are therefore held
-/// once each, named by what they are rather than by whose path they are on.
+/// Adding a leaf only ever pushes siblings onto the end of a path, and how
+/// long a path should be is decided by the leaf count alone, so undoing an
+/// addition is a truncation.
+///
+/// Emptying a leaf moves exactly one sibling on each path beside it: the
+/// subtree the leaf sits in, and nothing above or below. That subtree folds
+/// out of the leaf that was there and the proof that took it out, both of
+/// which travelled in the block, so [`Forest::rewind_to`] is handed them and
+/// works the old sibling out instead of reading it back. Writing those paths
+/// down was where the nine gigabytes came back: one removal in a forest whose
+/// leaf count makes one tree wrote down every watched path a node held.
+///
+/// A place that stopped being watched because the block emptied its leaf is
+/// the same story, since the proof that emptied it is the path it had. Only
+/// the place is kept, because a place the block emptied was not necessarily
+/// being watched.
+///
+/// What is left is the paths a holder let go of for reasons of its own: a note
+/// that aged off a grace window, or one displaced from a followed owner's
+/// ceiling. Nothing in the block accounts for those, so they are written down,
+/// and they are the whole of what a record costs.
+///
+/// Those paths are nearly the same path. A path is a walk up one tree, so two
+/// places that are near each other part company low down and share every step
+/// above it. What ages off a window is what fell in one block, which took
+/// consecutive places, so the whole run costs about two nodes a place rather
+/// than one node a level. The siblings are therefore held once each, named by
+/// what they are rather than by whose path they are on.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PathsBefore {
     /// Leaves the forest held before the change.
@@ -167,6 +184,14 @@ pub struct PathsBefore {
     /// The siblings those paths are made of, each named by its level and by
     /// the run of leaves it covers.
     nodes: BTreeMap<(u8, u64), Hash32>,
+    /// Places that were being watched when the change emptied the leaf under
+    /// them.
+    ///
+    /// The fact and not the path, because the path is the remover's own proof.
+    /// The fact still has to be kept: a rewind that put back a path nobody was
+    /// keeping would leave a forest that compares unequal to the one it came
+    /// from, and a node that believed it watched a place it does not.
+    emptied: BTreeSet<u64>,
 }
 
 impl PathsBefore {
@@ -177,6 +202,7 @@ impl PathsBefore {
             leaves,
             depths: BTreeMap::new(),
             nodes: BTreeMap::new(),
+            emptied: BTreeSet::new(),
         }
     }
 
@@ -226,18 +252,32 @@ impl PathsBefore {
         Some(ForestProof { siblings })
     }
 
+    /// Writes down that `position` was being watched when its leaf went.
+    fn mark_emptied(&mut self, position: u64) {
+        self.emptied.insert(position);
+    }
+
+    /// Whether it was.
+    fn was_emptied(&self, position: u64) -> bool {
+        self.emptied.contains(&position)
+    }
+
     /// The places written down.
     pub fn places(&self) -> impl Iterator<Item = u64> + '_ {
         self.depths.keys().copied()
     }
 
     /// Paths written down.
+    ///
+    /// A place the block emptied is not one of them: it costs the place and
+    /// nothing else, so counting it here would make a record look like it held
+    /// paths it does not.
     pub fn len(&self) -> usize {
         self.depths.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.depths.is_empty()
+        self.depths.is_empty() && self.emptied.is_empty()
     }
 
     /// What this takes in memory.
@@ -247,10 +287,12 @@ impl PathsBefore {
     pub fn bytes_held(&self) -> usize {
         let node = std::mem::size_of::<((u8, u64), Hash32)>();
         let place = std::mem::size_of::<(u64, u8)>();
+        let marked = std::mem::size_of::<u64>();
         self.nodes
             .len()
             .saturating_mul(node)
             .saturating_add(self.depths.len().saturating_mul(place))
+            .saturating_add(self.emptied.len().saturating_mul(marked))
     }
 }
 
@@ -370,8 +412,9 @@ impl Decode for Forest {
 /// not: it put the cold set back by assigning a clone of the forest from
 /// before, so the record of every block a node might undo held a copy of the
 /// watched map. That was nine gigabytes at this network's numbers. The paths
-/// come back through [`Self::rewind_to`] now, which needs the roots and the
-/// few paths the block did not merely lengthen.
+/// come back through [`Self::rewind_to`] now, which needs the roots, what the
+/// block emptied, and only those paths their holder let go of for reasons the
+/// block does not account for.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Forest {
     roots: Vec<Option<Hash32>>,
@@ -421,9 +464,26 @@ impl Forest {
     }
 
     /// The same, writing down what was there so an undo can put it back.
+    ///
+    /// For a holder that let go of a place for reasons of its own. Nothing in
+    /// the change accounts for such a path, so this is where a record's whole
+    /// cost comes from.
     pub fn unwatch_keeping(&mut self, position: u64, before: &mut PathsBefore) {
         if let Some(proof) = self.watched.remove(&position) {
             before.keep(position, &proof);
+        }
+    }
+
+    /// The same for a place the change emptied, which costs the place alone.
+    ///
+    /// The proof that emptied the leaf was checked against the roots from
+    /// before the change, so it is exactly the path that place had, and
+    /// [`Self::rewind_to`] is handed it. All that has to be written down is
+    /// that somebody was watching, since a place a block empties is often one
+    /// nobody was.
+    pub fn unwatch_spent(&mut self, position: u64, before: &mut PathsBefore) {
+        if self.watched.remove(&position).is_some() {
+            before.mark_emptied(position);
         }
     }
 
@@ -454,27 +514,44 @@ impl Forest {
         }
     }
 
-    /// Puts the forest back as it stood, given the roots from that moment and
-    /// the paths the change did not merely lengthen.
+    /// Puts the forest back as it stood, given the roots from that moment, the
+    /// leaves the change emptied, and the paths nothing else accounts for.
     ///
     /// The roots go back wholesale, since there are sixty four of them. The
     /// watched paths are mended in place, which is what makes this affordable:
     /// a copy of the map would be the largest thing a node kept per block.
     ///
-    /// Three kinds of path, and only one of them costs anything to keep.
-    /// A place that did not exist before is dropped. A path that grew because
+    /// `emptied` is the removals as they were proved against `roots`: the
+    /// place, the leaf that was standing there, and the proof that took it
+    /// out. A node already holds all three, because they travelled in the
+    /// block it is undoing.
+    ///
+    /// Four kinds of path, and only one of them costs anything to keep. A
+    /// place that did not exist before is dropped. A path that grew because
     /// leaves arrived is cut back to the length the old leaf count gives it,
-    /// which is exact: adding a leaf only ever pushes siblings onto the end.
-    /// A path that was rewritten beside an emptied leaf, or dropped because
-    /// its holder stopped watching, is the one that has to have been written
-    /// down, and `before` is where.
-    pub fn rewind_to(&mut self, roots: &Self, before: &PathsBefore) {
+    /// which is exact: adding a leaf only ever pushes siblings onto the end. A
+    /// path beside a leaf that was emptied lost one sibling and no others, and
+    /// that sibling folds back out of `emptied`. A path dropped because its
+    /// holder stopped watching for reasons of its own is the one that has to
+    /// have been written down, and `before` is where.
+    pub fn rewind_to(
+        &mut self,
+        roots: &Self,
+        emptied: &[(u64, Hash32, ForestProof)],
+        before: &PathsBefore,
+    ) {
         self.roots.clone_from(&roots.roots);
         self.leaves = roots.leaves;
         self.live = roots.live;
 
         let leaves = self.leaves;
         self.watched.retain(|position, _| *position < leaves);
+
+        for (position, _, proof) in emptied {
+            if *position < leaves && before.was_emptied(*position) {
+                self.watched.insert(*position, proof.clone());
+            }
+        }
         for position in before.places() {
             if position >= leaves {
                 continue;
@@ -488,6 +565,23 @@ impl Forest {
                 None => self.watched.remove(&position),
             };
         }
+
+        // Last, and over the whole map, because a path written down was
+        // written down as it stood when its holder let go of it, which is
+        // after the change had already been through it. Mending puts an
+        // outright value in each slot rather than stepping one back, so a path
+        // that was already the one from before comes out of it unchanged and
+        // the order any of this happened in does not matter.
+        for (position, leaf, proof) in emptied {
+            let Some((height, offset)) = tree_of(leaves, *position) else {
+                continue;
+            };
+            let Some(index) = position.checked_sub(offset) else {
+                continue;
+            };
+            self.rewrite_beside(height, offset, index, *leaf, proof);
+        }
+
         for (position, proof) in &mut self.watched {
             let Some((height, _)) = tree_of(leaves, *position) else {
                 continue;
@@ -620,28 +714,10 @@ impl Forest {
     /// The proof comes from whoever is spending. Nobody else has a reason to
     /// have kept it, and nobody else needs to.
     pub fn remove(&mut self, position: u64, leaf: Hash32, proof: &ForestProof) -> bool {
-        self.empty_place(position, leaf, proof, None)
+        self.empty_place(position, leaf, proof)
     }
 
-    /// The same, writing down the watched paths it rewrote so an undo can put
-    /// them back.
-    pub fn remove_keeping(
-        &mut self,
-        position: u64,
-        leaf: Hash32,
-        proof: &ForestProof,
-        before: &mut PathsBefore,
-    ) -> bool {
-        self.empty_place(position, leaf, proof, Some(before))
-    }
-
-    fn empty_place(
-        &mut self,
-        position: u64,
-        leaf: Hash32,
-        proof: &ForestProof,
-        before: Option<&mut PathsBefore>,
-    ) -> bool {
+    fn empty_place(&mut self, position: u64, leaf: Hash32, proof: &ForestProof) -> bool {
         // An emptied place proves itself: after a removal the root above it is
         // exactly what folding the empty leaf gives, so a second removal of the
         // same place verifies and would count a leaf that is not there. The
@@ -671,44 +747,69 @@ impl Forest {
             None => return false,
         }
         self.live = self.live.saturating_sub(1);
-        self.refresh_watched(height, offset, index, proof, before);
+        self.rewrite_beside(height, offset, index, empty_leaf(), proof);
         true
     }
 
-    /// Brings every watched proof in the same tree up to date after a removal,
-    /// keeping what each one said first.
+    /// Puts `standing` where the leaf at `index` sits, on every watched path
+    /// that has a sibling there.
     ///
-    /// A tree is the run of positions from its offset to its offset plus its
-    /// size, and the map is sorted by position, so the run is asked for rather
-    /// than found by walking the map and asking which tree each place belongs
-    /// to. The walk cost a pass over everything watched, with a climb through
-    /// sixty four heights inside it, for a removal that can only ever touch
-    /// one tree.
-    fn refresh_watched(
+    /// This is both directions at once. Emptying a leaf passes the empty leaf
+    /// and the proof that took it out; undoing that passes the leaf that was
+    /// there and the proof that was checked against the older roots. Nothing
+    /// else about the walk differs, which is the argument that the two are
+    /// inverse: a path beside an emptied leaf loses one sibling and no others,
+    /// and it is the subtree the leaf sits in.
+    ///
+    /// Neither direction reads what it overwrites. Each slot is given the
+    /// value it has to hold, so running this over a path that already holds
+    /// that value changes nothing, and a rewind can run it over every path it
+    /// has put back without having to know which of them had been through the
+    /// change and which had not.
+    ///
+    /// The walk climbs from the leaf, and at each level the node above it is
+    /// the sibling of every watched place in the subtree beside it and of no
+    /// other place at all. So the map is asked for that run once per level.
+    /// Searching every path for the one sibling that moved cost a pass over
+    /// everything watched with a climb inside it, for a change that can only
+    /// ever touch one tree.
+    fn rewrite_beside(
         &mut self,
         height: usize,
         offset: u64,
-        emptied: u64,
-        emptied_proof: &ForestProof,
-        mut before: Option<&mut PathsBefore>,
+        index: u64,
+        leaf: Hash32,
+        proof: &ForestProof,
     ) {
-        let Some(span) = 1u64.checked_shl(u32::try_from(height).unwrap_or(u32::MAX)) else {
-            return;
-        };
-        let Some(end) = offset.checked_add(span) else {
-            return;
-        };
-        for (position, proof) in self.watched.range_mut(offset..end) {
-            let Some(index) = position.checked_sub(offset) else {
-                continue;
+        let mut standing = leaf;
+        for level in 0..height {
+            let shift = u32::try_from(level).unwrap_or(u32::MAX);
+            let (Some(span), Some(block)) = (1u64.checked_shl(shift), index.checked_shr(shift))
+            else {
+                return;
             };
-            if index == emptied {
-                continue;
+            let Some(start) = (block ^ 1)
+                .checked_mul(span)
+                .and_then(|at| offset.checked_add(at))
+            else {
+                return;
+            };
+            let Some(end) = start.checked_add(span) else {
+                return;
+            };
+            for path in self.watched.range_mut(start..end).map(|(_, at)| at) {
+                if let Some(slot) = path.siblings.get_mut(level) {
+                    *slot = standing;
+                }
             }
-            if let Some(kept) = before.as_deref_mut() {
-                kept.keep(*position, proof);
-            }
-            refresh(index, proof, emptied, emptied_proof);
+            let Some(sibling) = proof.siblings.get(level) else {
+                return;
+            };
+            standing = if block & 1 == 0 {
+                node_hash(standing, *sibling)
+            } else {
+                node_hash(*sibling, standing)
+            };
         }
     }
 
@@ -729,41 +830,19 @@ impl Forest {
     /// costs a copy of sixty four hashes, which is what [`Self::roots_only`]
     /// is for.
     pub fn remove_batch(&mut self, removals: &[(u64, Hash32, ForestProof)]) -> bool {
-        self.empty_places(removals, None)
-    }
-
-    /// The same, writing down the watched paths it rewrote so an undo can put
-    /// them back.
-    pub fn remove_batch_keeping(
-        &mut self,
-        removals: &[(u64, Hash32, ForestProof)],
-        before: &mut PathsBefore,
-    ) -> bool {
-        self.empty_places(removals, Some(before))
-    }
-
-    fn empty_places(
-        &mut self,
-        removals: &[(u64, Hash32, ForestProof)],
-        before: Option<&mut PathsBefore>,
-    ) -> bool {
         for (position, leaf, proof) in removals {
             if !self.verify(*position, *leaf, proof) {
                 return false;
             }
         }
-        if !self.roots_only().apply_batch(removals, None) {
+        if !self.roots_only().apply_batch(removals) {
             return false;
         }
-        self.apply_batch(removals, before)
+        self.apply_batch(removals)
     }
 
     /// Empties the batch, having already been told it goes through.
-    fn apply_batch(
-        &mut self,
-        removals: &[(u64, Hash32, ForestProof)],
-        mut before: Option<&mut PathsBefore>,
-    ) -> bool {
+    fn apply_batch(&mut self, removals: &[(u64, Hash32, ForestProof)]) -> bool {
         let mut pending: Vec<(u64, Hash32, ForestProof)> = removals.to_vec();
         pending.sort_by_key(|(position, _, _)| *position);
         pending.dedup_by_key(|(position, _, _)| *position);
@@ -773,7 +852,7 @@ impl Forest {
             let Some((position, leaf, proof)) = pending.get(index).cloned() else {
                 return false;
             };
-            if !self.empty_place(position, leaf, &proof, before.as_deref_mut()) {
+            if !self.empty_place(position, leaf, &proof) {
                 return false;
             }
             let Some((height, offset)) = tree_of(self.leaves, position) else {

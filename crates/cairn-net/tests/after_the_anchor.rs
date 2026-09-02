@@ -34,7 +34,6 @@ use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
 use cairn_ledger::LedgerState;
-use cairn_net::book::AddressBook;
 use cairn_net::joining::Joined;
 use cairn_net::message::{Handshake, Message, PROTOCOL_VERSION};
 use cairn_net::node::{Node, Refused};
@@ -131,14 +130,16 @@ impl Chain {
         let anchor = self.history.prove_in(anchor_height, tip.height).unwrap();
         let from = anchor_height.saturating_sub(90) as usize;
         let recent: Vec<BlockHeader> = self.headers[from..=anchor_height as usize].to_vec();
-        let handover = state.handover(
-            at,
-            tip,
-            self.state.headers_before_tip(),
-            anchor,
-            self.headers[(anchor_height as usize + 1)..].to_vec(),
-            recent.clone(),
-        );
+        let handover = state
+            .handover(
+                at,
+                tip,
+                self.state.headers_before_tip(),
+                anchor,
+                self.headers[(anchor_height as usize + 1)..].to_vec(),
+                recent.clone(),
+            )
+            .expect("a node can hand over what it holds");
         (handover, recent)
     }
 
@@ -299,10 +300,8 @@ fn a_chain_forking_below_the_anchor_is_refused_and_now_says_so() {
     assert!(honest.state.total_work() > chain.total_work());
 
     let mut peer = PeerState::new(None);
-    let book = AddressBook::new();
     let mut local = Local {
         chain: &mut chain,
-        book: &book,
         shows_the_chain: false,
         listen: 9_000,
         nonce: 7,

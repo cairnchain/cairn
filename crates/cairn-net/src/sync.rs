@@ -7,13 +7,15 @@
 
 use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use cairn_chain::{Accepted, ChainError, ChainStore, Located, Outdated};
 use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::note::NetworkId;
+use cairn_ledger::validation::BlockError;
 use cairn_primitives::Hash32;
 
-use crate::book::AddressBook;
+use crate::book::worth_hearing_about;
 use crate::message::{
     Handshake, Joining, Message, PeerAddress, MAX_ANNOUNCED, MAX_HEADERS, MAX_REQUESTED,
     MAX_SHARED_ADDRESSES, PROTOCOL_VERSION,
@@ -23,7 +25,6 @@ use crate::message::{
 #[derive(Debug)]
 pub struct Local<'a> {
     pub chain: &'a mut ChainStore,
-    pub book: &'a AddressBook,
     /// Whether this node holds the whole header forest, and so can show a
     /// newcomer which chain carries the most work.
     ///
@@ -67,10 +68,25 @@ pub struct PeerState {
     pub asked_at: u64,
     /// Where the connection came from, filled in by whoever opened it.
     pub remote: Option<IpAddr>,
+    /// Whether this node went out and opened this connection.
+    ///
+    /// The one thing about a peer that is not the peer's to decide. A
+    /// connection somebody else opened is a connection somebody else chose,
+    /// and what such a peer says about the rest of the network is weighed
+    /// accordingly: see [`worth_hearing_about`].
+    pub dialled: bool,
     /// Where this peer says it can be reached, which is its own port on the
     /// address the connection came from.
     pub advertised: Option<SocketAddr>,
     pub last_message: u64,
+    /// What answering this one connection has cost so far.
+    ///
+    /// Kept for the sake of being readable rather than because anything
+    /// decides on it. What decides is [`PeerState::allowance`], which belongs
+    /// to the address and not to the socket.
+    ///
+    /// Held by [`PeerState::afford`]; nothing else should touch it.
+    pub spent: u32,
     /// Work this peer may still ask for in the current window.
     ///
     /// Nothing here stops a peer asking as fast as its connection allows, and
@@ -79,14 +95,127 @@ pub struct PeerState {
     /// ceiling, how much a node spends answering is decided by whoever
     /// connects to it, which is the cheapest attack there is on a program that
     /// answers strangers.
-    /// Held by [`PeerState::afford`]; nothing else should touch it.
-    pub spent: u32,
-    /// When the current window began.
-    pub window_started: u64,
+    pub allowance: Allowance,
 }
 
 /// How long a peer's allowance lasts before it is handed out again.
 const WINDOW_SECONDS: u64 = 10;
+
+/// Whether `now` falls in a later allowance window than `then`.
+///
+/// For the one party outside this layer that has to know: a node collecting a
+/// handover, whose next question went unanswered because the peer serving it
+/// had spent the window it was asked in. When that window has turned is
+/// exactly when asking again is worth anything, and it is the only thing
+/// about the accounting anybody out there needs.
+pub fn a_window_has_turned(then: u64, now: u64) -> bool {
+    let window = |at: u64| at.checked_div(WINDOW_SECONDS).unwrap_or(0);
+    window(now) > window(then)
+}
+
+/// What has been spent inside one window, and which window that was.
+///
+/// Windows are counted off the clock rather than from whenever a peer first
+/// spoke, so that a connection and the address it arrived from are always
+/// talking about the same ten seconds. Without that they could not hand the
+/// count between them, which is what the whole of this exists to do.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Window {
+    spent: u32,
+    window: u64,
+}
+
+impl Window {
+    /// Moves to the window `now` falls in, saying whether that is a new one.
+    fn roll(&mut self, now: u64) -> bool {
+        let window = now.checked_div(WINDOW_SECONDS).unwrap_or(0);
+        if window == self.window {
+            return false;
+        }
+        self.window = window;
+        self.spent = 0;
+        true
+    }
+
+    /// Whether this still says anything about what may be spent now.
+    ///
+    /// A window that has passed is worth nothing to anybody, which is what
+    /// lets the node drop the ones belonging to addresses that have gone.
+    pub fn current(&self, now: u64) -> bool {
+        self.window == now.checked_div(WINDOW_SECONDS).unwrap_or(0)
+    }
+}
+
+/// What one connection may still ask for, and what its address has already
+/// asked for this window.
+///
+/// The second half is the repair, and it is a narrow one. The window used to
+/// live on the socket and nothing else, so a peer refilled it by hanging up:
+/// greet, spend it, close, dial back. That costs a TCP handshake and a Hello,
+/// and it earns no refusal, because asking is not misbehaviour and neither is
+/// reconnecting. One address drew six thousand chain answers in six seconds
+/// across six connections, where the allowance intends one thousand per ten.
+///
+/// So a connection now begins where the address it came from left off. What
+/// it deliberately does not do is pool: two connections open at once each
+/// spend their own, because that is what an honest pair of nodes behind one
+/// address is, and what the address keeps is the largest of them rather than
+/// the sum. The ceiling on one address is therefore `MAX_PER_HOST` allowances
+/// a window instead of as many as it cares to dial, which is a number this
+/// node chooses rather than one a stranger does.
+///
+/// Shared state in a layer that is otherwise a pure function of what it is
+/// handed, and the exception is deliberate: what is being repaired is
+/// precisely that this state used to begin again with each socket. A peer
+/// built without an address keeps only its own count, which is what a test
+/// handing messages to [`on_message`] gets and what a node never uses.
+#[derive(Clone, Debug, Default)]
+pub struct Allowance {
+    mine: Window,
+    address: Option<Arc<Mutex<Window>>>,
+}
+
+impl Allowance {
+    /// The allowance of a connection from an address the node keeps a count
+    /// for.
+    pub fn at(address: &Arc<Mutex<Window>>) -> Self {
+        Self {
+            mine: Window::default(),
+            address: Some(Arc::clone(address)),
+        }
+    }
+
+    /// Takes `cost`, saying whether it was there.
+    ///
+    /// A poisoned lock means a thread panicked holding it, which the release
+    /// profile turns into an abort. Carrying on with the count is better than
+    /// a second panic.
+    fn afford(&mut self, cost: u32, now: u64) -> bool {
+        if self.mine.roll(now) {
+            // A connection starts where its address left off, so hanging up
+            // is not a way of being handed a fresh window.
+            let carried = self.address.as_ref().map(|window| {
+                let mut held = window.lock().unwrap_or_else(PoisonError::into_inner);
+                held.roll(now);
+                held.spent
+            });
+            if let Some(spent) = carried {
+                self.mine.spent = spent;
+            }
+        }
+        let after = self.mine.spent.saturating_add(cost);
+        if after > ALLOWANCE {
+            return false;
+        }
+        self.mine.spent = after;
+        if let Some(window) = self.address.as_ref() {
+            let mut held = window.lock().unwrap_or_else(PoisonError::into_inner);
+            held.roll(now);
+            held.spent = held.spent.max(after);
+        }
+        true
+    }
+}
 
 /// What a peer may ask for within one window.
 ///
@@ -126,6 +255,21 @@ const COST_PER_BLOCK_SERVED: u32 = 1;
 /// reads, which is the whole of the difference between a limit that counts
 /// what answering costs and one that counts messages.
 const COST_PER_HEADER_SERVED: u32 = 1;
+/// What one address handed to a peer that asked costs.
+///
+/// The cheapest message there is drew the largest answer a peer can get for
+/// nothing: nine bytes on the wire bought twelve hundred, a hundred and
+/// thirty five times over, and the asker set the size of it by filling the
+/// book with IPv6 addresses first, which weigh nineteen bytes each against
+/// seven. At one unit an allowance window bought eight thousand of those
+/// answers, which is ten megabytes out of a node for a kilobyte in.
+///
+/// Charged as what the largest answer costs rather than as what this node's
+/// book happens to hold, for the same reason the header charge is on the ask
+/// and not on the reply: a price that moves with the book is a price whoever
+/// fills the book gets to set. At this cost a window answers a hundred and
+/// twenty eight, and an honest peer asks about once a second.
+const COST_PER_ADDRESS_SERVED: u32 = 1;
 /// What one piece of a join answer costs to build and send.
 ///
 /// An eighth of a window, so a newcomer collecting twenty two pieces takes
@@ -144,18 +288,13 @@ impl PeerState {
 
     /// Takes `cost` from this peer's allowance, saying whether it was there.
     ///
-    /// A window that has run out is refilled rather than carried over, so a
-    /// peer that was quiet for a minute does not get a minute's worth at once.
+    /// The window is the address's rather than the connection's, so what a
+    /// peer spends here is spent whether or not it stays.
     fn afford(&mut self, cost: u32, now: u64) -> bool {
-        if now.saturating_sub(self.window_started) >= WINDOW_SECONDS {
-            self.window_started = now;
-            self.spent = 0;
-        }
-        let after = self.spent.saturating_add(cost);
-        if after > ALLOWANCE {
+        if !self.allowance.afford(cost, now) {
             return false;
         }
-        self.spent = after;
+        self.spent = self.spent.saturating_add(cost);
         true
     }
 }
@@ -250,6 +389,18 @@ pub struct Reaction {
     /// under that lock is a peer deciding how long everyone else waits. The
     /// node gathers them once it has let go, in the order they were asked for.
     pub fetch: Vec<u64>,
+    /// Set when a peer asked for addresses.
+    ///
+    /// Named rather than answered here, for the same reason the blocks and
+    /// the headers are. The answer is drawn from the whole book, which holds
+    /// up to `MAX_ADDRESSES` entries in two maps and has to be ordered before
+    /// any of it can be shared, and this runs with the chain held. Worse,
+    /// this layer used to be handed a copy of that book for *every* message
+    /// from every peer, so serving a seventeen byte ping cost an amount the
+    /// asker set with address lists that cost it one unit each, inside the
+    /// node's one global lock. Nothing here reads the book any more, and the
+    /// one message that needs it is answered once the chain is let go of.
+    pub share_addresses: bool,
     /// Addresses worth adding to the book.
     pub learned: Vec<SocketAddr>,
     /// Addresses worth taking out of it.
@@ -283,6 +434,24 @@ pub struct Reaction {
     /// which is worse than not running: a wallet reading a balance off an
     /// abandoned chain is answered confidently and wrongly.
     pub outdated: Option<Outdated>,
+    /// The version of a block this build could not read, when one arrived.
+    ///
+    /// Not a bad block and not a bad peer. A block written under rules this
+    /// software does not have becomes readable the moment the software is
+    /// updated, so refusing it is a judgement about the reader; the block is
+    /// not remembered as bad and the messenger is not blamed for carrying it.
+    ///
+    /// That correctness had a cost, which this is here to pay. Before it,
+    /// these fell through to the last arm below and the connection was closed
+    /// and the host refused, so an un-updated node banned everyone who had
+    /// updated. After it, the same node refused the real chain in total
+    /// silence and its operator saw only a height that had stopped moving.
+    ///
+    /// So the version is named and passed up, where peers are counted. One of
+    /// these means nothing: it is a number in a field, and the check that
+    /// would catch a lie about the work behind the block sits below the check
+    /// that reads the version.
+    pub unjudged: Option<u16>,
 }
 
 impl Reaction {
@@ -605,6 +774,23 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
             unreachable: Some(height),
             ..Reaction::idle()
         },
+        // A block written under rules this build does not have. The chain
+        // stopped remembering these against the block, because an update
+        // reverses them; this stops holding them against the peer, for the
+        // same reason and with the same weight of argument. Without it an
+        // un-updated node closed the connection and refused the host, which is
+        // every peer that had updated, one message each.
+        //
+        // Counted where peers are counted, and nothing more is done about it
+        // here: what a run of these from several peers means is a question
+        // about this node, and this layer is not the one that can see it.
+        Err(ChainError::InvalidBlock {
+            source: BlockError::UnsupportedVersion(version),
+            ..
+        }) => Reaction {
+            unjudged: Some(version),
+            ..Reaction::idle()
+        },
         Err(_) => Reaction::close(DropReason::BadBlock { id }),
     }
 }
@@ -639,6 +825,10 @@ fn cost_of(message: &Message, peer: &PeerState) -> u32 {
         Message::GetHeaders { count, .. } => {
             let wanted = u32::try_from((*count).min(MAX_HEADERS as u64)).unwrap_or(u32::MAX);
             wanted.saturating_mul(COST_PER_HEADER_SERVED)
+        }
+        Message::GetPeers => {
+            let carried = u32::try_from(MAX_SHARED_ADDRESSES).unwrap_or(u32::MAX);
+            carried.saturating_mul(COST_PER_ADDRESS_SERVED)
         }
         // A run of headers offered rather than asked for. Charged as one
         // message and not as five hundred writes, because a run from anybody
@@ -742,9 +932,10 @@ pub fn on_message(
             join: Some((what, part)),
             ..Reaction::idle()
         },
-        Message::GetPeers => Reaction::reply(vec![Message::Peers(
-            local.book.sample(MAX_SHARED_ADDRESSES, now),
-        )]),
+        Message::GetPeers => Reaction {
+            share_addresses: true,
+            ..Reaction::idle()
+        },
         // The last two arms say nothing for opposite reasons, and collapsing
         // them would bury which is which.
         #[allow(clippy::match_same_arms)]
@@ -764,11 +955,15 @@ pub fn on_message(
                 Err(_) => Reaction::idle(),
             }
         }
+        // Whoever sends this is choosing who the node opens a connection to,
+        // which is why the list is weighed rather than written down. A
+        // stranger naming `169.254.169.254` is not passing on a peer.
         Message::Peers(addresses) => {
             let learned = addresses
                 .into_iter()
                 .take(MAX_SHARED_ADDRESSES)
                 .map(|PeerAddress(address)| address)
+                .filter(|address| worth_hearing_about(address, peer.remote, peer.dialled))
                 .collect();
             Reaction {
                 learned,

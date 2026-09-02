@@ -6,7 +6,19 @@
 //!
 //! There is no checksum on a record. Every block is verified cryptographically
 //! when it is replayed, which catches anything a checksum would and a great
-//! deal more.
+//! deal more. What a checksum would have been for on the other two files is
+//! there already and cheaper: a header carries its parent's identifier, and a
+//! forest node is the two beneath it folded together, so both are checked
+//! against bytes that are already on the disk.
+//!
+//! The other rule this file keeps is about which of two files wins. The log is
+//! the record; the index beside it is worked out from the log and never the
+//! other way about. So recovery repairs the index in both directions and never
+//! shortens the log, and the only bytes it takes off the end are a record the
+//! file stops inside, which cannot become a record however often it is read.
+//! `BlockLog::open` can then fail only because a file could not be reached,
+//! never because of what is written in one, which is what an unattended node
+//! needs from a start.
 //!
 //! What a record does have is durability. An append returns once the record
 //! and the offset naming it are on the disk, in that order, because `flush`
@@ -43,7 +55,10 @@ pub const BLOCK_LOG: &str = "blocks.log";
 /// avoid, and it would have to read every block at every start to work them
 /// out again.
 ///
-/// Derived, never authoritative. Lose it and it is rebuilt from the log.
+/// Derived, never authoritative, in either direction. Lose it and it is
+/// rebuilt from the log; find it shorter than the log and it is written on
+/// rather than believed. Nothing it says shortens the log, and nothing it says
+/// is acted on without being checked against the record it describes.
 pub const BLOCK_INDEX: &str = "blocks.idx";
 
 /// Bytes one entry of the index takes.
@@ -66,8 +81,19 @@ pub use headers::{HeaderLog, HEADER_BYTES, HEADER_LOG};
 /// Largest record the log will read or write.
 ///
 /// A length read from disk is not necessarily a length this process wrote, so
-/// it is checked before anything is reserved for it.
+/// it is checked before anything is reserved for it. Everywhere: the rebuild,
+/// the replay and the single read all reserve against this and never against
+/// the difference between two offsets, which is a number the index holds and
+/// the index is a file like any other.
 pub const MAX_RECORD_BYTES: usize = 4 * 1024 * 1024;
+
+/// The most a whole record can take on disk: a body at the ceiling, and the
+/// four bytes that say how long it is.
+fn max_record_on_disk() -> u64 {
+    u64::try_from(MAX_RECORD_BYTES)
+        .unwrap_or(u64::MAX)
+        .saturating_add(4)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -97,6 +123,32 @@ pub enum StoreError {
     OutOfOrder { expected: u64, found: u64 },
     #[error("the header forest has no node of height {height} at {start}")]
     MissingNode { height: usize, start: u64 },
+    #[error("the index puts record {index} between {start} and {end}, in {held} bytes of log")]
+    Misindexed {
+        index: usize,
+        start: u64,
+        end: u64,
+        held: u64,
+    },
+    #[error("record {index} says it holds {declared} bytes, the index gives it {indexed}")]
+    Mismatched {
+        index: usize,
+        declared: usize,
+        indexed: u64,
+    },
+    #[error("the header at position {position} says its height is {found}, not {expected}")]
+    Displaced {
+        position: u64,
+        found: u64,
+        expected: u64,
+    },
+    #[error("the header at height {height} and the record beside it do not name each other")]
+    Unlinked { height: u64 },
+    #[error(
+        "the forest node of height {height} covering the leaves from {start} is not the two \
+         beneath it folded together"
+    )]
+    Unfolded { height: usize, start: u64 },
 }
 
 /// What opening a log found on disk.
@@ -110,12 +162,25 @@ pub enum StoreError {
 pub struct Recovered {
     /// Records the log holds.
     pub blocks: usize,
-    /// Bytes dropped from the end because they were incomplete or unreadable.
+    /// Bytes at the end of the log that no record accounts for.
     ///
-    /// A torn record at the end is the ordinary trace of a crash during a
-    /// write, and dropping it costs one block that will simply be fetched
-    /// again.
+    /// A record the file stops in the middle of is the ordinary trace of a
+    /// crash during a write, and setting it aside costs one block that will
+    /// simply be fetched again. Those bytes are cut away, because a record the
+    /// file ends inside cannot become one however often it is read.
+    ///
+    /// A whole record that will not decode is a different thing and is counted
+    /// here too, but the bytes are left where they are: see `unreadable`.
     pub discarded_bytes: u64,
+    /// The record a walk of the log stopped at, when what stopped it was a
+    /// whole record that would not decode rather than one cut short.
+    ///
+    /// This is damage, not an interrupted write, and the two must not be
+    /// reported to an operator in the same words. Nothing is cut for it: the
+    /// bytes stay on the disk until the log grows over them, so a start that
+    /// misread them once can read them back, and a person can still look at
+    /// what is there.
+    pub unreadable: Option<usize>,
 }
 
 /// Opens a scratch file, for holding a handle somewhere harmless.
@@ -179,6 +244,13 @@ pub struct BlockLog {
     first: u64,
     /// Byte offset just past the last record.
     end: u64,
+    /// Bytes past that offset which recovery found and did not cut.
+    ///
+    /// Only a walk that stopped at a whole record it could not read leaves
+    /// any, and it leaves them on purpose. They go when the log next grows
+    /// over them, which is the moment nothing could reach them again anyway,
+    /// and going then is what stops every later start from walking them.
+    trailing: u64,
 }
 
 impl BlockLog {
@@ -218,6 +290,7 @@ impl BlockLog {
             count: 0,
             first: 0,
             end: 0,
+            trailing: 0,
         };
         let recovered = log.recover()?;
         Ok((log, recovered))
@@ -351,18 +424,24 @@ impl BlockLog {
         self.count = ends.len();
         self.first = height;
         self.end = offset;
+        self.trailing = 0;
         Ok(())
     }
 
     /// Drops everything, leaving a log that starts wherever the next block does.
+    ///
+    /// The log goes first, for the reason [`BlockLog::keep_first`] sets out: a
+    /// crash between the two has to leave the index ahead of the log and not
+    /// behind it, or the next start reads the whole log back.
     pub fn clear(&mut self) -> Result<(), StoreError> {
-        self.index.set_len(0)?;
-        self.index.sync_data()?;
         self.file.set_len(0)?;
         self.file.sync_data()?;
+        self.index.set_len(0)?;
+        self.index.sync_data()?;
         self.count = 0;
         self.first = 0;
         self.end = 0;
+        self.trailing = 0;
         Ok(())
     }
 
@@ -400,6 +479,14 @@ impl BlockLog {
         length.encode_to(&mut record);
         record.extend_from_slice(&body);
 
+        // Bytes recovery set aside and did not cut. Writing over them is the
+        // moment they stop being reachable by anything, so this is where they
+        // go: leaving them would have every later start walk them again.
+        if self.trailing > 0 {
+            self.file.set_len(self.end)?;
+            self.trailing = 0;
+        }
+
         let start = self.end;
         self.file.seek(SeekFrom::Start(start))?;
         self.file.write_all(&record)?;
@@ -432,16 +519,35 @@ impl BlockLog {
     }
 
     /// Where record `index` ends, and where it starts.
+    ///
+    /// Two numbers off a disk, so they are checked before anything acts on
+    /// them. `recover` only ever compares the last offset with the length of
+    /// the log, which leaves every other entry to be checked here or nowhere:
+    /// one flipped byte in the middle of the index used to pass the open
+    /// untouched and hand `read` a record size chosen by the file, and near
+    /// `u64::MAX` that is an allocation failure, which in Rust is a process
+    /// abort with no message.
     fn bounds(&self, index: usize) -> Result<Option<(u64, u64)>, StoreError> {
         if index >= self.count {
             return Ok(None);
         }
+        let checked = |start: u64, end: u64| {
+            if end <= start || end > self.end || end.saturating_sub(start) > max_record_on_disk() {
+                return Err(StoreError::Misindexed {
+                    index,
+                    start,
+                    end,
+                    held: self.end,
+                });
+            }
+            Ok(Some((start, end)))
+        };
         let mut file = &self.index;
         if index == 0 {
             let mut end = [0u8; 8];
             file.seek(SeekFrom::Start(0))?;
             file.read_exact(&mut end)?;
-            return Ok(Some((0, u64::from_le_bytes(end))));
+            return checked(0, u64::from_le_bytes(end));
         }
         // The two offsets sit next to each other, so one read finds both.
         let mut pair = [0u8; 16];
@@ -460,28 +566,48 @@ impl BlockLog {
                 .and_then(|s| s.try_into().ok())
                 .unwrap_or([0; 8]),
         );
-        Ok(Some((start, end)))
+        checked(start, end)
     }
 
     /// Reads the record at `index`.
     ///
     /// Every read seeks, so this is for one block at a time. Reading the whole
     /// log in order is what [`BlockLog::replay`] is for.
+    ///
+    /// A record says how long it is and so does the index, and only one of the
+    /// two is the record. What is reserved comes from the log: the four bytes
+    /// the seek used to skip over are read and checked against the ceiling and
+    /// against the pair of offsets, which costs the four bytes and a
+    /// comparison and is what puts `MAX_RECORD_BYTES` on this path at last.
     pub fn read(&self, index: usize) -> Result<Option<Block>, StoreError> {
         let Some((start, end)) = self.bounds(index)? else {
             return Ok(None);
         };
-        let length = usize::try_from(end.saturating_sub(start)).unwrap_or(0);
-        let body = length.saturating_sub(4);
-        if body == 0 {
-            return Ok(None);
-        }
 
         // `&File` reads and seeks, so this needs no exclusive borrow and no
         // second handle on the file.
         let mut file = &self.file;
-        file.seek(SeekFrom::Start(start.saturating_add(4)))?;
-        let mut bytes = vec![0u8; body];
+        file.seek(SeekFrom::Start(start))?;
+        let mut header = [0u8; 4];
+        file.read_exact(&mut header)?;
+        let declared = usize::try_from(u32::from_le_bytes(header)).unwrap_or(usize::MAX);
+        if declared > MAX_RECORD_BYTES {
+            return Err(StoreError::RecordTooLarge { index, declared });
+        }
+        let indexed = end.saturating_sub(start);
+        if u64::try_from(declared)
+            .unwrap_or(u64::MAX)
+            .saturating_add(4)
+            != indexed
+        {
+            return Err(StoreError::Mismatched {
+                index,
+                declared,
+                indexed,
+            });
+        }
+
+        let mut bytes = vec![0u8; declared];
         file.read_exact(&mut bytes)?;
         let block =
             Block::decode(&bytes).map_err(|source| StoreError::Malformed { index, source })?;
@@ -508,9 +634,23 @@ impl BlockLog {
 
     /// Cuts the log back to its first `count` records.
     ///
-    /// The index is cut first. Between the two the index is the shorter of the
-    /// pair, which is the state a torn append leaves and which the next start
-    /// already knows how to repair.
+    /// The log is cut first, and the order is the opposite of an append's for
+    /// the same reason an append's is what it is: whichever file is left
+    /// disagreeing has to be the one recovery will put right rather than
+    /// believe. An append writes its record before the offset, so a crash
+    /// between the two leaves the log ahead of the index and the record is
+    /// read forward and kept, which is what a block that was accepted and
+    /// synced deserves. A cut leaves the index ahead of the log, which
+    /// recovery already treats as an index to be worked out again, so the
+    /// records this decided to drop stay dropped.
+    ///
+    /// Cutting the index first would have the next start read the abandoned
+    /// records back out of the log and put them where this had just taken them
+    /// from. That was safe only while a short index won, which is the rule
+    /// this file no longer keeps.
+    ///
+    /// Both cuts are waited for. A `set_len` that has not reached the disk is
+    /// a file that comes back longer than this asked for.
     pub fn keep_first(&mut self, count: usize) -> Result<(), StoreError> {
         if count >= self.count {
             return Ok(());
@@ -520,29 +660,46 @@ impl BlockLog {
             Some(last) => self.bounds(last)?.map_or(0, |(_, end)| end),
         };
         let entries = (count as u64).saturating_mul(OFFSET_BYTES);
-        self.index.set_len(entries)?;
-        self.index.flush()?;
         self.file.set_len(end)?;
-        self.file.flush()?;
+        self.file.sync_data()?;
+        self.index.set_len(entries)?;
+        self.index.sync_data()?;
         self.count = count;
         self.end = end;
+        self.trailing = 0;
         if count == 0 {
             self.first = 0;
         }
         Ok(())
     }
 
-    /// Works out what the log holds, rebuilding the index only when it has to.
+    /// Works out what the log holds, and puts the index back in line with it
+    /// when the two disagree.
     ///
     /// The usual start reads sixteen bytes: how long the index is, and where
     /// the last record ends. Nothing is decoded and nothing is walked, so
     /// opening a log costs the same on a chain of ten blocks and one of ten
     /// million. Every block is still verified when it is replayed, which is
-    /// where a record that cannot be read is found and where the log is cut.
+    /// where a record that cannot be read is found.
     ///
-    /// The index is rebuilt from the log when it is missing, when it is
-    /// shorter than the log, or when it claims records the log does not reach.
-    /// It is derived, so losing it costs one slow start and nothing else.
+    /// When those sixteen bytes do not account for the whole log, the log
+    /// wins, in both directions. It is the record and the index is worked out
+    /// from it, so an index that reaches past the log is written again from
+    /// the front, and one that stops short has the records past it read and
+    /// named. Neither shortens the log.
+    ///
+    /// The asymmetry that used to sit here cost the chain. Only an index
+    /// reaching too far was rebuilt; one that was merely short was believed,
+    /// and the log cut back to it. `rebuild` writes the index with no sync and
+    /// is exactly what runs after a crash, so a second crash before that write
+    /// reached the platter left a short index and a whole log, and the start
+    /// after it deleted every block the index no longer named. Six blocks
+    /// measured, eight bytes of index left, five of them gone from a file that
+    /// still held all six, reported to the operator as bytes of an unfinished
+    /// write.
+    ///
+    /// The one thing recovery still cuts is a record the file ends inside,
+    /// which is not a record whatever else is true.
     fn recover(&mut self) -> Result<Recovered, StoreError> {
         let logged = self.file.metadata()?.len();
         let indexed = self.index.metadata()?.len();
@@ -551,7 +708,7 @@ impl BlockLog {
         let whole = indexed.saturating_sub(indexed % OFFSET_BYTES);
         if whole != indexed {
             self.index.set_len(whole)?;
-            self.index.flush()?;
+            self.index.sync_data()?;
         }
         let count = usize::try_from(whole / OFFSET_BYTES).unwrap_or(0);
 
@@ -573,8 +730,8 @@ impl BlockLog {
         (&self.index).read_exact(&mut last)?;
         let end = u64::from_le_bytes(last);
 
-        // The index reaches past the log, so one of them is not what this
-        // process last wrote. The log is the record; the index is derived.
+        // The index reaches past the log, so there is nothing in it to build
+        // on and it has to be worked out from the front.
         if end > logged {
             return self.rebuild();
         }
@@ -582,18 +739,29 @@ impl BlockLog {
         self.count = count;
         self.end = end;
 
-        // Bytes past the last offset are a record that was being written when
-        // something stopped, or the block of an index entry that never landed.
-        // Either way they are not a record anything points at.
-        let discarded = logged.saturating_sub(end);
-        if discarded > 0 {
-            self.file.set_len(end)?;
-            self.file.flush()?;
+        if end < logged {
+            // Splicing onto an offset that is not a record boundary would name
+            // records that are not there, so the last entry the index does
+            // have is checked before the rest are added after it. One record
+            // decoded, on the crash path only.
+            if self.read(count.saturating_sub(1)).is_err() {
+                return self.rebuild();
+            }
+            return self.extend(logged);
         }
-        self.first = self.height_of_first()?;
+
+        // Where the log starts is read back from its first record rather than
+        // written down anywhere it could disagree. A first record that will
+        // not read leaves the index with no meaning, so the log answers for
+        // itself instead.
+        match self.height_of_first() {
+            Ok(first) => self.first = first,
+            Err(_) => return self.rebuild(),
+        }
         Ok(Recovered {
             blocks: count,
-            discarded_bytes: discarded,
+            discarded_bytes: 0,
+            unreadable: None,
         })
     }
 
@@ -608,70 +776,149 @@ impl BlockLog {
         Ok(self.read(0)?.map_or(0, |block| block.header.height))
     }
 
-    /// Reads every complete record, cutting the file back at the first one that
-    /// cannot be read, and writes the index out again from what it found.
+    /// Reads every record the log holds and writes the index out again from
+    /// what it found.
     fn rebuild(&mut self) -> Result<Recovered, StoreError> {
-        self.file.seek(SeekFrom::Start(0))?;
         let total = self.file.metadata()?.len();
-        let mut reader = BufReader::new(&self.file);
+        let walk = self.walk(0, 0, total)?;
+        self.count = walk.ends.len();
+        self.end = walk.offset;
+        self.write_offsets(&walk.ends, 0)?;
+        self.settle(walk.unreadable, total)
+    }
 
-        let mut recovered = Recovered::default();
-        let mut offset = 0u64;
-        let mut ends = Vec::new();
+    /// Reads the records the index does not reach and names them too.
+    ///
+    /// What lies past the last offset is either a record whose offset never
+    /// landed, which is what a crash between the two writes of an append
+    /// leaves and which is a block this node accepted and vouched for, or a
+    /// record that stopped partway, which is not a record. Cutting the log to
+    /// the index would throw the first away along with the second; reading
+    /// forward costs one record on the ordinary crash and gets it back.
+    fn extend(&mut self, total: u64) -> Result<Recovered, StoreError> {
+        let from = self.count;
+        let walk = self.walk(self.end, from, total)?;
+        self.count = from.saturating_add(walk.ends.len());
+        self.end = walk.offset;
+        self.write_offsets(&walk.ends, from)?;
+        self.settle(walk.unreadable, total)
+    }
 
+    /// Reads records forward from `from`, stopping at the first thing that is
+    /// not one.
+    ///
+    /// Nothing is kept but where each record ends. Blocks are decoded and
+    /// thrown away, because the walk has to know whether a record can be read
+    /// and the block itself is read again when somebody wants it.
+    fn walk(&self, from: u64, index_from: usize, total: u64) -> Result<Walk, StoreError> {
+        let mut file = &self.file;
+        file.seek(SeekFrom::Start(from))?;
+        let mut reader = BufReader::new(file);
+
+        let mut walk = Walk {
+            ends: Vec::new(),
+            offset: from,
+            unreadable: None,
+        };
         loop {
+            let index = index_from.saturating_add(walk.ends.len());
             let mut header = [0u8; 4];
-            match reader.read_exact(&mut header) {
-                Ok(()) => {}
-                Err(_) => break,
-            }
-            let declared = usize::try_from(u32::from_le_bytes(header)).unwrap_or(usize::MAX);
-            if declared > MAX_RECORD_BYTES {
-                return Err(StoreError::RecordTooLarge {
-                    index: ends.len(),
-                    declared,
-                });
-            }
-
-            let mut body = vec![0u8; declared];
-            if reader.read_exact(&mut body).is_err() {
-                // The tail was cut short, which is what a crash mid write
-                // leaves behind.
+            if reader.read_exact(&mut header).is_err() {
                 break;
             }
-            // Decoded and thrown away: the scan has to know whether a record
-            // can be read, because that is where the file is cut, but the
-            // block itself is read again when it is wanted.
-            Block::decode(&body).map_err(|source| StoreError::Malformed {
-                index: ends.len(),
-                source,
-            })?;
-
-            offset = offset.saturating_add(4).saturating_add(declared as u64);
-            ends.push(offset);
-            recovered.blocks = recovered.blocks.saturating_add(1);
+            let declared = usize::try_from(u32::from_le_bytes(header)).unwrap_or(usize::MAX);
+            let left = total.saturating_sub(walk.offset).saturating_sub(4);
+            if u64::try_from(declared).unwrap_or(u64::MAX) > left {
+                // The file ends inside this record, so it is not one whatever
+                // its length says. A write cut short is exactly this shape,
+                // and so is a length prefix a bad byte made enormous: an
+                // oversized length in the last record used to refuse the
+                // start for ever instead of being read as the torn tail it is.
+                break;
+            }
+            if declared > MAX_RECORD_BYTES {
+                // The bytes are all there and there are more of them than any
+                // block the rules allow, so this is not a length this process
+                // wrote. Nothing is reserved for it.
+                walk.unreadable = Some(index);
+                break;
+            }
+            let mut body = vec![0u8; declared];
+            if reader.read_exact(&mut body).is_err() {
+                break;
+            }
+            if Block::decode(&body).is_err() {
+                walk.unreadable = Some(index);
+                break;
+            }
+            walk.offset = walk
+                .offset
+                .saturating_add(4)
+                .saturating_add(u64::try_from(declared).unwrap_or(u64::MAX));
+            walk.ends.push(walk.offset);
         }
+        Ok(walk)
+    }
 
-        drop(reader);
-        recovered.discarded_bytes = total.saturating_sub(offset);
-        self.count = ends.len();
-        self.end = offset;
-        if recovered.discarded_bytes > 0 {
-            self.file.set_len(offset)?;
-            self.file.flush()?;
+    /// Settles what a walk left: the tail, and where the log starts.
+    ///
+    /// A walk that ran out of file cuts what it could not use, since those
+    /// bytes can never become a record. A walk that stopped at a whole record
+    /// it could not read cuts nothing: that is damage rather than an
+    /// interrupted write, a start that misread it once may read it back, and
+    /// a node that deleted the rest of its log over one bad byte would be
+    /// doing more harm than the byte did. It comes back with the prefix, says
+    /// so, and asks for the rest again.
+    fn settle(&mut self, unreadable: Option<usize>, total: u64) -> Result<Recovered, StoreError> {
+        let discarded = total.saturating_sub(self.end);
+        self.trailing = 0;
+        if discarded > 0 {
+            if unreadable.is_none() {
+                self.file.set_len(self.end)?;
+                self.file.sync_data()?;
+            } else {
+                self.trailing = discarded;
+            }
         }
+        self.first = self.height_of_first()?;
+        Ok(Recovered {
+            blocks: self.count,
+            discarded_bytes: discarded,
+            unreadable,
+        })
+    }
 
+    /// Writes where records `from` onward end, and waits for them.
+    ///
+    /// The wait is the point. Without it the index is a file that can come
+    /// back from a crash holding a prefix of what was written, and an index
+    /// that has to be worked out again at every start is a slow start at every
+    /// start. It used to be worse than slow: a short index was believed.
+    fn write_offsets(&mut self, ends: &[u64], from: usize) -> Result<(), StoreError> {
+        let at = (from as u64).saturating_mul(OFFSET_BYTES);
         let mut written = Vec::with_capacity(ends.len().saturating_mul(8));
-        for end in &ends {
+        for end in ends {
             written.extend_from_slice(&end.to_le_bytes());
         }
-        self.index.set_len(0)?;
-        self.index.seek(SeekFrom::Start(0))?;
+        self.index.set_len(at)?;
+        self.index.seek(SeekFrom::Start(at))?;
         self.index.write_all(&written)?;
-        self.index.flush()?;
-        self.first = self.height_of_first()?;
-        Ok(recovered)
+        self.index.sync_data()?;
+        Ok(())
     }
+}
+
+/// What reading records forward from one offset found.
+#[derive(Debug)]
+struct Walk {
+    /// Where each record read ends, oldest first.
+    ends: Vec<u64>,
+    /// Where the last of them ends, or where the walk started if there were
+    /// none.
+    offset: u64,
+    /// The record the walk stopped at, when it stopped at a whole one that
+    /// would not decode rather than at the end of the file.
+    unreadable: Option<usize>,
 }
 
 /// Every block in a log, in the order they were written.

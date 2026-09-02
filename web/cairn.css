@@ -267,6 +267,31 @@ button, select, input { font: inherit; color: inherit; }
   background: var(--surface);
 }
 
+/*
+  What is wrong with the numbers below it.
+
+  Above the content rather than beside it, and in the one colour this palette
+  keeps for a warning. Everything it can say is a case where the page looks
+  exactly like a page that is working, so a reader who has to go looking for
+  it will not find it.
+*/
+.notice {
+  max-width: var(--page);
+  margin: var(--gap) auto 0;
+  padding: 0 clamp(1rem, 3vw, 2rem);
+}
+
+.notice p {
+  padding: 0.85rem 1.05rem;
+  border: 1px solid var(--warn);
+  border-left-width: 4px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 0.94rem;
+  line-height: 1.55;
+}
+
 .ticker-inner {
   max-width: var(--page);
   margin: 0 auto;

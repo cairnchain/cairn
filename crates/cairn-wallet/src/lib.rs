@@ -29,7 +29,7 @@ use cairn_crypto::{random_bytes, PublicKey, SecretKey};
 use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::transaction::{Input, Transfer};
 use cairn_ledger::validation::{ConsensusParams, TransferError};
-use cairn_net::node::{Probation, Refused, Stranded};
+use cairn_net::node::{Probation, Refused, Stranded, Unjudged, Unwritten};
 use cairn_net::{Joined, Node};
 use cairn_primitives::codec::Encode;
 use cairn_primitives::{Amount, Hash32};
@@ -237,7 +237,7 @@ pub struct Waiting {
 }
 
 /// Where this wallet's node has got to.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Progress {
     pub height: Option<u64>,
     pub peers: usize,
@@ -256,6 +256,26 @@ pub struct Progress {
     pub outdated: Option<Outdated>,
     /// Why the node cannot get on from where it stands, if it cannot.
     pub stranded: Option<Stranded>,
+    /// What the node under this wallet was writing when its disk last refused
+    /// it, if it did.
+    ///
+    /// A node whose disk is full keeps validating and keeps climbing, and
+    /// writes nothing. From the outside that is a wallet working normally,
+    /// until the machine restarts and comes back where the disk left off.
+    pub unwritten: Option<Unwritten>,
+    /// Blocks the node met that this build has no rules to judge, if enough of
+    /// them came from enough peers to mean anything.
+    pub unjudged: Option<Unjudged>,
+    /// Whether this wallet's own account of what it was paid is reaching the
+    /// disk.
+    ///
+    /// It keeps working from memory when it is not, which is right: refusing
+    /// to show a balance because a file will not write helps nobody. Saying
+    /// nothing is not right. This account is the only record of what this key
+    /// was paid outside the chain itself, and a wallet that has stopped
+    /// keeping it is one restart away from reading its way back from the
+    /// oldest block its node still holds.
+    pub keeping_its_account: bool,
 }
 
 impl Progress {
@@ -269,6 +289,48 @@ impl Progress {
     /// own reading. None of them is worth hiding to keep a page tidy.
     #[must_use]
     pub fn warning(&self) -> Option<String> {
+        if let Some(unwritten) = &self.unwritten {
+            let kept = unwritten.written_through.map_or_else(
+                || "nothing at all".to_owned(),
+                |height| format!("block {height}"),
+            );
+            let lost = if unwritten.within_reach {
+                "They can still reach it if the room comes back."
+            } else {
+                "They are no longer anywhere this node can read them from, so \
+                 nothing done now will put them on the disk."
+            };
+            return Some(format!(
+                "The disk under the node this wallet runs is not taking what it writes. \
+                 It said: {}. The chain has reached block {} and the disk holds {}, so {} \
+                 blocks have been accepted and not kept, and a restart begins at the \
+                 disk's number. {} The balance beside this is right for the chain as it \
+                 stands; what is at risk is having to read it all again.",
+                unwritten.because, unwritten.reached, kept, unwritten.blocks, lost
+            ));
+        }
+        if let Some(unjudged) = &self.unjudged {
+            return Some(format!(
+                "This program looks too old for the chain it is on. It met {} blocks \
+                 built under rules it does not have, from {} different peers over {} \
+                 seconds, the newest of them written for version {} where this build \
+                 knows version {}. Nothing has stopped: anyone can write a version \
+                 number into a block, so this is a reason to look rather than a verdict. \
+                 If the height beside this has also stopped moving, install a newer \
+                 version. Nothing on disk is lost and the key file is not touched.",
+                unjudged.blocks, unjudged.peers, unjudged.over, unjudged.version, unjudged.known
+            ));
+        }
+        if !self.keeping_its_account {
+            return Some(
+                "This wallet cannot write down its own account of what you have been \
+                 paid. The balance beside this is still right, and it is being kept in \
+                 memory only: if the wallet is closed it will have to read its way back \
+                 through the chain, and anything older than the blocks your node still \
+                 keeps will be gone. The usual cause is a disk with nothing left on it."
+                    .to_owned(),
+            );
+        }
         if let Some(outdated) = self.outdated {
             return Some(format!(
                 "This wallet is too old for the chain it is on. The rules from block {} need \
@@ -399,6 +461,8 @@ pub struct Wallet {
     history: Mutex<History>,
     /// Where that account is written down.
     history_file: PathBuf,
+    /// Whether the last attempt to write it down worked.
+    wrote_history: Mutex<bool>,
 }
 
 impl std::fmt::Debug for Wallet {
@@ -433,6 +497,7 @@ impl Wallet {
                 params,
                 history: Mutex::new(history),
                 history_file,
+                wrote_history: Mutex::new(true),
             },
             restored.blocks,
         ))
@@ -538,6 +603,9 @@ impl Wallet {
             probation: self.node.probation(),
             outdated: self.node.outdated(),
             stranded: self.node.stranded(),
+            unwritten: self.node.unwritten(),
+            unjudged: self.node.unjudged(),
+            keeping_its_account: self.wrote_history.lock().map_or(true, |wrote| *wrote),
         }
     }
 
@@ -606,7 +674,7 @@ impl Wallet {
             self.node.archived_at(height).map(|block| block.id())
         }) {
             history.forget();
-            let _ = history.save(&self.history_file);
+            self.write_history(&history);
         }
 
         let mut taken = 0usize;
@@ -628,7 +696,7 @@ impl Wallet {
         }
 
         if taken > 0 {
-            let _ = history.save(&self.history_file);
+            self.write_history(&history);
         }
         taken
     }
@@ -698,6 +766,22 @@ impl Wallet {
     #[must_use]
     pub fn waiting(&self) -> Vec<Waiting> {
         self.reckon().1
+    }
+
+    /// Writes the account down, and remembers if it could not.
+    ///
+    /// A wallet keeps working from memory when its disk is full, which is the
+    /// right thing to do: refusing to show a balance because a file cannot be
+    /// written would help nobody. What is not right is saying nothing. The
+    /// account is the only record of what this key was paid that exists
+    /// anywhere outside the chain, and a wallet that has stopped keeping it
+    /// is one restart away from having to read its way back from the oldest
+    /// block its node still holds.
+    fn write_history(&self, history: &History) {
+        let kept = history.save(&self.history_file).is_ok();
+        if let Ok(mut wrote) = self.wrote_history.lock() {
+            *wrote = kept;
+        }
     }
 
     /// One reading of the chain answering both, since the pool decides what is
@@ -810,11 +894,21 @@ impl Wallet {
                 let value = one.note.value;
                 if committed.contains(&one.id) {
                     promised = promised.checked_add(value).unwrap_or(promised);
-                } else if let Some(at) = state.coinbase_matures_at(&one.id.source) {
+                } else if let Some(at) = state
+                    .coinbase_matures_at(&one.id.source)
+                    .filter(|at| state.next_height().is_none_or(|next| next < *at))
+                {
                     // A block reward cannot move until its block is past
                     // reorganisation. Offering it as spendable would have the
                     // wallet build transfers the network turns away, which
                     // reads to its owner as their own money being refused.
+                    //
+                    // Being in the window is not the same as being held back,
+                    // and reading it that way cost a miner one block. The
+                    // ledger drops an entry once the tip has reached the
+                    // height it names, and refuses a spend while the next
+                    // block would sit below it, so on the block where the two
+                    // meet the entry is still there and the money can move.
                     ripening = ripening.checked_add(value).unwrap_or(ripening);
                     ripe_at = Some(ripe_at.map_or(at, |soonest: u64| soonest.min(at)));
                 } else {
@@ -1186,6 +1280,9 @@ mod tests {
     #[test]
     fn a_ledger_this_wallet_has_not_checked_is_said_to_be_one() {
         let healthy = Progress {
+            keeping_its_account: true,
+            unwritten: None,
+            unjudged: None,
             height: Some(10),
             peers: 1,
             joining: Joined::Done,

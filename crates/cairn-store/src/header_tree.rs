@@ -137,6 +137,31 @@ impl HeaderTree {
     /// `leaves` rather than what is held now, because what a chain commits to
     /// is the forest from before its tip. A proof built against the wrong one
     /// of those two checks out nowhere.
+    ///
+    /// The path is folded as it is gathered and every fold is compared with
+    /// the node the forest holds in that place. Every one of them is held: the
+    /// tree a position belongs to is complete, so each node above the leaf was
+    /// written when the leaf beneath it completed it, and there is no
+    /// arithmetic here that the forest does not already have an answer for.
+    ///
+    /// That is what turns a level of the right length holding the wrong bytes
+    /// from something believed into something refused. `mend_levels` measures
+    /// agreement in length alone, so it cannot see a node changed in place;
+    /// one node zeroed used to give a forest that opened with the right leaf
+    /// count and served a proof with a zero where a hash belongs, and the only
+    /// symptom was on the machine of whoever was handed it.
+    ///
+    /// Nothing is repaired here, on purpose. A node that disagrees with the
+    /// two beneath it is one of the three that is wrong, and which one is not
+    /// knowable from inside this file: rewriting the node from its children
+    /// would launder a bad leaf into a forest that is consistent and still
+    /// serves a root nobody has, and would erase the disagreement that is the
+    /// only evidence there was. Refusing one proof leaves the node running,
+    /// following the chain and serving headers, which is not the same kind of
+    /// cost as refusing to start.
+    ///
+    /// It costs one read of the leaf, one more node read per level, and one
+    /// hash per level, against a path that was already one read per level.
     pub fn prove_in(&self, position: u64, leaves: u64) -> Result<Option<ForestProof>, StoreError> {
         if position >= leaves || leaves > self.leaves {
             return Ok(None);
@@ -148,6 +173,7 @@ impl HeaderTree {
         let Some(mut index) = position.checked_sub(offset) else {
             return Ok(None);
         };
+        let mut carry = self.node(0, position)?;
         for level in 0..height {
             let Some(span) = 1u64.checked_shl(u32::try_from(level).unwrap_or(u32::MAX)) else {
                 return Ok(None);
@@ -158,8 +184,31 @@ impl HeaderTree {
             else {
                 return Ok(None);
             };
-            siblings.push(self.node(level, start)?);
+            let sibling = self.node(level, start)?;
+            siblings.push(sibling);
+            carry = if index & 1 == 0 {
+                node_hash(carry, sibling)
+            } else {
+                node_hash(sibling, carry)
+            };
             index = index.checked_shr(1).unwrap_or(0);
+
+            let above = level.saturating_add(1);
+            let Some(covers) = 1u64.checked_shl(u32::try_from(above).unwrap_or(u32::MAX)) else {
+                return Ok(None);
+            };
+            let Some(from) = index
+                .checked_mul(covers)
+                .and_then(|at| offset.checked_add(at))
+            else {
+                return Ok(None);
+            };
+            if self.node(above, from)? != carry {
+                return Err(StoreError::Unfolded {
+                    height: above,
+                    start: from,
+                });
+            }
         }
         Ok(Some(ForestProof { siblings }))
     }
@@ -208,6 +257,12 @@ impl HeaderTree {
     /// which is the price of not trusting a file that cannot account for
     /// itself.
     ///
+    /// What this cannot see is a node of the right length holding the wrong
+    /// bytes, and it is not going to: seeing that means rehashing the history
+    /// at every start, which is the cost this forest exists to avoid.
+    /// [`HeaderTree::prove_in`] catches it instead, on the path it is asked
+    /// for and nowhere else.
+    ///
     /// Trailing bytes that do not make a whole node are not a node, so they
     /// are dropped before anything is counted. A flush is not a sync, and
     /// under a power cut any level can stop mid-write.
@@ -225,7 +280,11 @@ impl HeaderTree {
             if held != cut {
                 let file = self.level(height)?;
                 file.set_len(cut)?;
-                file.flush()?;
+                // Waited for, unlike the writes: a cut that does not land is a
+                // level that comes back holding nodes this decided the leaves
+                // do not account for, and being cut is the whole of what says
+                // they are gone.
+                file.sync_data()?;
             }
             // Level zero is the record itself, and there is nothing beneath it
             // to rebuild from. Above it the loop runs upward so that a level

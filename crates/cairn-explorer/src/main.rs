@@ -64,7 +64,14 @@ fn run(arguments: &[String]) -> Result<(), String> {
 
     let (node, restored) = Node::open_archiving(options.params, options.listen, &options.data)
         .map_err(|error| format!("could not start: {error}"))?;
+    // Before anything else this node does. A node's own budget is a gigabyte
+    // and it drops the oldest blocks past it, which for an explorer is the
+    // blocks it needs most: the index is built by walking from the first block
+    // up, so a trimmed log costs it not the blocks that were trimmed but every
+    // block there is.
+    node.keep_blocks(options.keep);
     println!("listening    {}", node.address());
+    println!("blocks       {} kept on disk", options::size(options.keep));
     println!(
         "restored     {} blocks, {} addresses",
         restored.blocks, restored.addresses
@@ -105,9 +112,11 @@ fn run(arguments: &[String]) -> Result<(), String> {
             .map_err(|error| format!("could not start the indexer: {error}"))?
     };
 
-    // First pass before the door opens, so the page is not empty for the first
-    // half second after a restart.
-    explorer.refresh();
+    // The door opens now, and not after the first pass over the chain. It used
+    // to wait for it: on a chain of any size that is minutes of a bound socket
+    // with nobody answering, so a visitor got a page that hung rather than one
+    // that said what was going on. The site can say "still reading the chain",
+    // and it does, which is better than saying nothing slowly.
 
     let languages: Vec<&str> = assets::LOCALES.iter().map(|(code, _, _)| *code).collect();
     println!("languages    {}", languages.join(", "));

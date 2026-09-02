@@ -474,7 +474,7 @@ fn no_two_trees_in_one_forest_share_a_height() {
 }
 
 /// What a record of one block's worth of change to the watched map costs,
-/// measured rather than reasoned about.
+/// measured over the whole of what a block does rather than half of it.
 ///
 /// A `Forest` is described as sixty four hashes, and its roots are. Its
 /// watched map is not: it holds one full path per position, and a `Clone` of
@@ -484,83 +484,132 @@ fn no_two_trees_in_one_forest_share_a_height() {
 /// mature cold set has, and the thousand and twenty four records a node keeps,
 /// that was nine gigabytes.
 ///
-/// What is kept now is the paths a block did not merely lengthen, and their
-/// siblings once each rather than once per path. This measures both, against
-/// what a copy of the map would have cost, and checks that every path really
-/// does come back out of the record.
+/// The measurement that replaced it watched only the places one block lets go
+/// of and never emptied a leaf, so it never reached the other half of the
+/// case. Emptying a leaf brings every watched path in that leaf's tree up to
+/// date, and writing down what each of those said first was a path apiece: for
+/// a forest whose leaf count is a power of two, every path the node held. The
+/// figure it produced was out by an order of magnitude and more.
+///
+/// So this plays a whole block: it empties a leaf out of the window, appends
+/// what fell, lets go of what aged off, and only then measures. What comes out
+/// has to be the run that aged off and nothing else, because a removal now
+/// carries what it takes to undo itself.
 ///
 /// Run with `--nocapture` to see the figures.
 #[test]
 fn a_record_of_one_blocks_change_to_the_watched_map_is_kilobytes() {
-    /// The ledger's `GRACE_NOTES`, restated so this crate stands alone.
-    const GRACE_NOTES: usize = 8_192;
-    /// Depth of a path in a cold set of about a billion notes.
-    const DEPTH: usize = 30;
+    /// The ledger's `GRACE_NOTES`.
+    const GRACE_NOTES: u64 = 8_192;
+    /// The ledger's `WATCHED_NOTES`, followed on behalf of one owner.
+    const FOLLOWED: u64 = 8_192;
     /// Notes a full block pushes out of the hot set, from
     /// `cairn-ledger/examples/blocksize.rs`. They take consecutive places, and
     /// one block's worth is what ages out of the window as the next lands.
     const FALLING: u64 = 686;
     /// Undo records a node keeps, which is `cairn_chain::MAX_REORG_DEPTH`.
     const RECORDS: usize = 1_024;
+    /// A cold set of a million notes, which is a path of twenty hashes. A
+    /// mature one is thirty, and every per path figure here scales with it.
+    const DEPTH: usize = 20;
 
     let leaves = 1u64 << DEPTH;
-    let run = (leaves - FALLING)..leaves;
-
-    // Paths whose siblings are decided by the place they cover rather than by
-    // whose path they are on, which is what a real forest gives: two places
-    // near each other share every step above the level where they part.
-    let mut forest = Forest::new();
-    for position in run.clone() {
-        forest.watch(position, path_at(position, DEPTH));
+    let mut archive = Archive::new();
+    for index in 0..leaves {
+        archive.add(leaf(index)).unwrap();
     }
-    let snapshot: usize = run
-        .clone()
-        .filter_map(|at| forest.proof_of(at))
-        .map(cairn_accumulator::ForestProof::size_in_bytes)
+    let mut forest = archive.forest().clone();
+
+    // The window is what fell most recently, so it takes the last places. What
+    // is followed for an owner fell whenever that owner was paid, so it is
+    // spread across the whole set and shares almost no siblings with anything.
+    let window: Vec<u64> = ((leaves - GRACE_NOTES)..leaves).collect();
+    let followed: Vec<u64> = (0..FOLLOWED)
+        .map(|index| scramble(index) % (leaves - GRACE_NOTES))
+        .collect();
+    for position in window.iter().chain(followed.iter()) {
+        forest.watch(*position, archive.prove(*position).unwrap());
+    }
+    let watching = forest.watched_count();
+    let whole_map: usize = window
+        .iter()
+        .chain(followed.iter())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|at| forest.proof_of(*at))
+        .map(ForestProof::size_in_bytes)
         .sum();
-    let whole_map = GRACE_NOTES * (DEPTH * 32 + 4);
 
+    let untouched = forest.clone();
+    let roots = forest.roots_only();
     let mut before = PathsBefore::before(leaves);
-    for position in run.clone() {
-        forest.unwatch_keeping(position, &mut before);
+
+    // An ordinary block. One note out of the window is spent, which empties a
+    // leaf in whatever tree it sits in and stops that path being kept.
+    let spent = window[GRACE_NOTES as usize / 3];
+    let emptied = vec![(spent, leaf(spent), archive.prove(spent).unwrap())];
+    assert!(forest.remove_batch(&emptied));
+    forest.unwatch_spent(spent, &mut before);
+
+    // What fell in this block, appended and watched.
+    for index in leaves..(leaves + FALLING) {
+        let (position, proof) = forest.add(leaf(index)).unwrap();
+        forest.watch(position, proof);
     }
-    assert_eq!(before.len(), FALLING as usize, "every one was written down");
-    assert_eq!(forest.watched_count(), 0);
+
+    // And what aged off the far end of the window, let go of after the
+    // additions have already lengthened its path.
+    for position in window.iter().take(FALLING as usize) {
+        forest.unwatch_keeping(*position, &mut before);
+    }
 
     let held = before.bytes_held();
+    let run: usize = window
+        .iter()
+        .take(FALLING as usize)
+        .filter_map(|at| untouched.proof_of(*at))
+        .map(ForestProof::size_in_bytes)
+        .sum();
+
     println!(
-        "a watched map of {GRACE_NOTES} paths at depth {DEPTH} is {whole_map} B, \
+        "a watched map of {watching} paths at depth {DEPTH} is {whole_map} B, \
          and a copy in each of {RECORDS} records was {:.1} GB",
         (whole_map * RECORDS) as f64 / 1e9
     );
     println!(
-        "the {FALLING} paths one block lets go of are {snapshot} B written out one \
-         by one, {held} B written down as this does it"
+        "one block spending a note out of the window, landing {FALLING} and letting \
+         go of {FALLING}: {} paths written down, {held} B",
+        before.len()
     );
     println!(
-        "over {RECORDS} records that is {:.1} MB",
+        "the same {FALLING} paths written out one by one are {run} B; \
+         over {RECORDS} records the record is {:.1} MB",
         (held * RECORDS) as f64 / 1e6
     );
 
+    assert_eq!(
+        before.len(),
+        FALLING as usize,
+        "the record holds the run that aged off and nothing else; a removal that \
+         wrote down what it rewrote would add every watched path in its tree"
+    );
     assert!(
-        held.saturating_mul(6) < snapshot,
-        "holding the siblings once each bought less than six times: \
-         {held} B against {snapshot} B"
+        held.saturating_mul(4) < run,
+        "holding the siblings once each bought less than four times: \
+         {held} B against {run} B"
     );
     assert!(
         held.saturating_mul(50) < whole_map,
         "a record is {held} B against a copy of the map at {whole_map} B, and a \
          node keeps {RECORDS} records"
     );
-}
 
-/// A path whose every sibling is decided by the run of leaves it covers, which
-/// is the one thing about a real path this test depends on.
-fn path_at(position: u64, depth: usize) -> ForestProof {
-    let siblings = (0..depth)
-        .map(|level| leaf(((position >> level) ^ 1) | ((level as u64) << 40)))
-        .collect();
-    ForestProof { siblings }
+    // And the whole of it comes back, which is what the record is for.
+    forest.rewind_to(&roots, &emptied, &before);
+    assert_eq!(
+        forest, untouched,
+        "the rewind did not put the forest back exactly"
+    );
 }
 
 /// Every path written down comes back out of the record exactly as it went in.
@@ -591,7 +640,7 @@ fn a_path_written_down_comes_back_the_same_path() {
         // Put back the way an undo puts them back, and every one of them still
         // proves the leaf it was taken for.
         let mut back = archive.forest().clone();
-        back.rewind_to(&archive.forest().roots_only(), &before);
+        back.rewind_to(&archive.forest().roots_only(), &[], &before);
         assert_eq!(back.watched_count(), count as usize);
         for position in 0..count {
             let kept = back.proof_of(position).expect("it was written down");
@@ -608,16 +657,17 @@ fn a_path_written_down_comes_back_the_same_path() {
 /// Applying a block costs what the block does, not what the node watches.
 ///
 /// It used to cost both. `extend_watched` runs once per merge inside `add` and
-/// `refresh_watched` once per `remove`, and both walked every watched position
-/// from end to end, with a climb through sixty four heights inside the removal
-/// one. A thousand additions took a quarter of a millisecond watching nothing
-/// and a sixth of a second watching sixty five thousand places, which is seven
-/// hundred times, and on a wallet's node what it watches is decided partly by
-/// whoever pays notes to an address it follows.
+/// the removal's own step runs once per `remove`, and both walked every watched
+/// position from end to end, with a climb through sixty four heights inside the
+/// removal one. A thousand additions took a quarter of a millisecond watching
+/// nothing and a sixth of a second watching sixty five thousand places, which
+/// is seven hundred times, and on a wallet's node what it watches is decided
+/// partly by whoever pays notes to an address it follows.
 ///
 /// Both ask the map for the run of places they can touch instead. A merge
-/// touches the two halves it merged and a removal touches one tree, and the
-/// map is sorted by position, so both runs were there to be asked for.
+/// touches the two halves it merged, and `rewrite_beside` climbs from the
+/// emptied leaf asking for the one subtree beside it at each level. The map is
+/// sorted by position, so both runs were there to be asked for.
 ///
 /// Timed rather than argued. Run with `--nocapture` for the figures.
 #[test]

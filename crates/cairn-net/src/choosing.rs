@@ -100,6 +100,24 @@ pub const HELD_OFF_AT_MOST: u64 = OWED_PATIENCE.saturating_add(ATTEMPT_PATIENCE)
 /// broken peer every round would be a tight loop of nothing.
 const RETRY_PAUSE: u64 = 30;
 
+/// Addresses whose claims went unshown that are remembered at once.
+///
+/// The set exists so that a peer cannot wash a broken claim clean by
+/// reconnecting, so it deliberately outlives connections; what it must not
+/// also do is outlive the reason for holding it. It was written to and never
+/// read out of, one address per host that claimed a chain and failed to show
+/// it, and the window in which it grows is exactly the window in which a node
+/// has no chain, which is the window an attacker keeping it there decides the
+/// length of. One IPv6 range supplies the addresses.
+///
+/// So there is a ceiling, and past it nothing further is written down, the
+/// same shape and the same number as [`crate::refusal::MAX_REFUSED`]. What
+/// filling it buys is the ability to make a fresh claim look fresh, which is
+/// what a fresh address buys anyway; what it no longer buys is deciding how
+/// much memory this node spends. The whole set is dropped the moment the
+/// choice is made, which is the only thing it was ever for.
+const MAX_UNBACKED_HOSTS: usize = 1_024;
+
 /// What one peer says stands behind its chain, and what has become of the
 /// claim since.
 #[derive(Clone, Debug)]
@@ -255,6 +273,21 @@ impl Chooser {
             .is_some_and(|(asked, approach, _)| asked == peer && approach == Approach::Join)
     }
 
+    /// The peer a handover is being collected from and when it was asked, if
+    /// one is.
+    ///
+    /// For the one thing the collection cannot do for itself: ask again. A
+    /// join is a chain of questions, each piece asking for the next, so a
+    /// question that goes unanswered stops the whole exchange with nobody
+    /// left to restart it. The moment comes with it because the first
+    /// question is the one most likely to be dropped and the one the
+    /// collection cannot date: until a piece arrives there is no collection.
+    #[must_use]
+    pub fn asking_join(&self) -> Option<(u64, u64)> {
+        self.asked
+            .and_then(|(peer, approach, at)| (approach == Approach::Join).then_some((peer, at)))
+    }
+
     /// A weighing completed: `peer` showed that `work` really stands behind
     /// its chain. Says whether to go on and take the ledger.
     ///
@@ -309,7 +342,9 @@ impl Chooser {
             claim.unbacked = true;
             claim.tried = Some(now);
             if let Some(host) = claim.host {
-                self.unbacked_hosts.insert(host);
+                if self.unbacked_hosts.len() < MAX_UNBACKED_HOSTS {
+                    self.unbacked_hosts.insert(host);
+                }
             }
         }
         if self.asked.is_some_and(|(asked, _, _)| asked == peer) {
@@ -498,6 +533,11 @@ impl Chooser {
             })
             .map(|(peer, _)| *peer)
             .collect();
+        // Nothing here is read again for the rest of the node's life, and
+        // both of these were fed by strangers. Kept until now and not a
+        // moment longer.
+        self.claims = HashMap::new();
+        self.unbacked_hosts = HashSet::new();
         if behind.is_empty() {
             return Step::Quiet;
         }
@@ -509,7 +549,7 @@ impl Chooser {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     use super::*;
 
@@ -637,6 +677,47 @@ mod tests {
             "the fresh number changes nothing about the failed address"
         );
         assert!(chooser.shown(1, 900, 220));
+    }
+
+    /// **The one table here that a stranger filled and nothing emptied.**
+    ///
+    /// A failed claim stops counting for the address it came from and not
+    /// only for the connection, which is what stops a peer washing it clean
+    /// by dialling back. The set that remembers those addresses was written
+    /// to and never read out of: one entry per host that claimed a chain and
+    /// could not show it, while the claims beside it were pruned to the
+    /// connected peers every round. What made that worth doing is that the
+    /// window in which it grows is exactly the window in which a node has no
+    /// chain, and how long that lasts is decided by whoever is keeping it
+    /// there. One IPv6 range supplies as many addresses as anyone wants.
+    ///
+    /// Now there is a ceiling, and the whole set goes the moment the choice
+    /// it exists for is made.
+    #[test]
+    fn the_addresses_of_broken_claims_do_not_pile_up_without_limit() {
+        let mut chooser = Chooser::new();
+        for index in 0..u64::try_from(MAX_UNBACKED_HOSTS)
+            .unwrap_or(0)
+            .saturating_add(500)
+        {
+            let high = u16::try_from(index >> 16).unwrap_or(0);
+            let low = u16::try_from(index & 0xffff).unwrap_or(0);
+            let host = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, high, low, 0, 0, 0, 1));
+            chooser.noted(index, Some(host), 900, LONG, true, 100);
+            chooser.failed(index, 100);
+        }
+        assert!(
+            chooser.unbacked_hosts.len() <= MAX_UNBACKED_HOSTS,
+            "a stranger with one range decided how much this node remembers: \
+             {} addresses written down",
+            chooser.unbacked_hosts.len(),
+        );
+
+        // And once the node has a chain there is nothing left here at all:
+        // neither the addresses nor the claims are ever read again.
+        chooser.step(200, false, 10, JoinProgress::NothingYet, &[]);
+        assert!(chooser.unbacked_hosts.is_empty());
+        assert!(chooser.claims.is_empty());
     }
 
     #[test]

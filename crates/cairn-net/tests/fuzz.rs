@@ -305,16 +305,18 @@ fn valid_join_answers() -> (Handover, SampledStart) {
     // where it sits, which would make this campaign bend nothing.
     let anchor_height = tip.height - params.burial;
     let at = headers[usize::try_from(anchor_height).unwrap()];
-    let handover = past[usize::try_from(anchor_height).unwrap()].handover(
-        at,
-        tip,
-        state.headers_before_tip(),
-        archive
-            .prove_in(anchor_height, tip.height)
-            .expect("it can prove its own history"),
-        headers[usize::try_from(anchor_height).unwrap() + 1..].to_vec(),
-        recent,
-    );
+    let handover = past[usize::try_from(anchor_height).unwrap()]
+        .handover(
+            at,
+            tip,
+            state.headers_before_tip(),
+            archive
+                .prove_in(anchor_height, tip.height)
+                .expect("it can prove its own history"),
+            headers[usize::try_from(anchor_height).unwrap() + 1..].to_vec(),
+            recent,
+        )
+        .expect("a node can hand over what it holds");
     let start = cairn_ledger::sampling::open_start(
         &tip,
         state.headers_before_tip(),
@@ -369,16 +371,18 @@ fn valid_messages() -> Vec<Vec<u8>> {
     };
     // Only ever encoded, never accepted: this campaign feeds shapes to the
     // decoder, and what a decoder does with nonsense is the whole question.
-    let handover = state.handover(
-        tip.header,
-        tip.header,
-        cairn_accumulator::forest::Forest::new(),
-        cairn_accumulator::forest::ForestProof {
-            siblings: Vec::new(),
-        },
-        Vec::new(),
-        vec![tip.header],
-    );
+    let handover = state
+        .handover(
+            tip.header,
+            tip.header,
+            cairn_accumulator::forest::Forest::new(),
+            cairn_accumulator::forest::ForestProof {
+                siblings: Vec::new(),
+            },
+            Vec::new(),
+            vec![tip.header],
+        )
+        .expect("a node can hand over what it holds");
 
     vec![
         Message::Hello(handshake).encode(),

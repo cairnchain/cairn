@@ -284,6 +284,25 @@
       They were in the design from the first day, for an intuition. Section 8
       explains why they turn out to be structural rather than convenient.
     </p>
+    <p>
+      What an archivist costs is a number that had never been written down,
+      and it is worth writing down beside the claim it is the exception to.
+      Measured over 3.2 million notes falling to the cold set, a plain node's
+      resident memory has no slope at all: not a small one, none. An archiving
+      node costs <strong>72 bytes for every note that has ever fallen</strong>,
+      which is 259 MB at that count. That is the size of the exception, and it
+      is the price of being able to rebuild a proof for somebody who lost
+      theirs.
+    </p>
+    <p>
+      One thing an audit found and the design had not faced: there is no
+      message in this protocol by which a wallet can ask an archivist for a
+      proof. A wallet whose own node kept the position can build one; a wallet
+      whose node did not has nowhere to turn, and the error it shows names an
+      archivist as though asking one were possible. Compensation was the open
+      question here and it was the second one. The first is that the role has
+      no protocol, and that is an omission rather than a trade-off.
+    </p>
   </div>
 </section>
 
@@ -377,6 +396,28 @@
       promise is verifiability in thirty years cannot rest its security budget
       on an open question. The price is a known, small and permanently
       decreasing rate of dilution.
+    </p>
+    <p>
+      A block reward cannot be spent until its block is past the deepest
+      reorganisation the rules accept. It is the one kind of note whose
+      existence depends on its own block surviving: a payment undone by a
+      reorganisation can be mined again on the branch that won, a reward
+      cannot. Without the wait, a two-block reorganisation took back money
+      somebody had already been paid, with no rule broken and nothing to
+      complain, which is why it is a rule here rather than a convention. The
+      question is asked of the coinbase every note names, not of the tier the
+      note is sitting in, because the hot set, the grace window and the cold
+      set are three ways of holding the same note and a rule covering one of
+      them would be a way to launder the other two.
+    </p>
+    <p>
+      The state root carries the money as well as the notes. A node can say
+      how much exists and a header commits to the answer, so a defect that
+      minted a pebble is a fork rather than something every node agrees about.
+      That is not hypothetical: this chain was renumbered once for a defect
+      whose own description reads <em>money out of nothing, agreed by every
+      node, so nothing forked and nothing complained</em>. Eight bytes and one
+      checked addition per block buys the ability to notice.
     </p>
   </div>
 </section>

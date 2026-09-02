@@ -137,14 +137,16 @@ impl Node {
             .prove_in(anchor_height, tip.height)
             .expect("the header sits in the forest before the tip");
         let first = (anchor_height as usize + 1).saturating_sub(RECENT_HEADERS);
-        state.handover(
-            at,
-            tip,
-            tip_history,
-            anchor,
-            self.headers[(anchor_height as usize + 1)..].to_vec(),
-            self.headers[first..=anchor_height as usize].to_vec(),
-        )
+        state
+            .handover(
+                at,
+                tip,
+                tip_history,
+                anchor,
+                self.headers[(anchor_height as usize + 1)..].to_vec(),
+                self.headers[first..=anchor_height as usize].to_vec(),
+            )
+            .expect("every note in the window has a path")
     }
 }
 
@@ -609,16 +611,19 @@ fn a_ledger_at_the_tip_is_refused_however_good_it_looks() {
     // An honest and internally perfect handover, but of the ledger as it stands.
     // Every commitment in it is real; it is refused for where it sits.
     let tip = *node.headers.last().unwrap();
-    let at_the_tip = node.state.handover(
-        tip,
-        tip,
-        node.state.headers_before_tip(),
-        node.history
-            .prove_in(tip.height, tip.height.saturating_add(1))
-            .expect("it can prove its own tip"),
-        Vec::new(),
-        node.headers[node.headers.len() - RECENT_HEADERS..].to_vec(),
-    );
+    let at_the_tip = node
+        .state
+        .handover(
+            tip,
+            tip,
+            node.state.headers_before_tip(),
+            node.history
+                .prove_in(tip.height, tip.height.saturating_add(1))
+                .expect("it can prove its own tip"),
+            Vec::new(),
+            node.headers[node.headers.len() - RECENT_HEADERS..].to_vec(),
+        )
+        .expect("every note in the window has a path");
 
     assert_eq!(
         accept(&at_the_tip, &params).err(),
