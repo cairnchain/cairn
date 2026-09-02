@@ -122,6 +122,26 @@ pub(crate) struct Index {
     /// Worked out once per refresh rather than once per request.
     richest: Vec<(PublicKey, Amount)>,
     holders: usize,
+    /// Whether anything has gone into the index, or been thrown out of it,
+    /// since the two above were last worked out.
+    ///
+    /// This used to be read off the block count: take it before the walk,
+    /// compare it after. A walk that threw the index away partway and then
+    /// read back exactly as many blocks as it had before came out equal, so
+    /// the distribution was not worked out again over a table the reset had
+    /// emptied, and the site answered that nobody on the chain held anything.
+    /// Kept here rather than in the walk because a walk now stops on a batch
+    /// bound and the debt outlives the turn that ran up.
+    stock_due: bool,
+    /// The height the next turn of the walk asks for.
+    ///
+    /// The walk used to work this out from the span, which is only set once a
+    /// block has gone in. That was enough while a walk ran to the tip in one
+    /// go, and is not enough now that it stops on a bound: a node that has
+    /// dropped more blocks off its bottom than one turn steps over would have
+    /// left the span empty at the end of every turn, and every turn would have
+    /// started again at height zero.
+    resume: u64,
 }
 
 /// The run of blocks the index has read, and what stood at the top of it.
@@ -163,13 +183,19 @@ pub(crate) struct Head {
 
 /// What a node could produce for one height of the branch it follows.
 ///
-/// Three answers and not two. A node keeps one run of blocks and drops the
+/// Four answers and not two. A node keeps one run of blocks and drops the
 /// oldest as the run grows past what its operator allows it, so a height it
-/// cannot produce is either one it has let go of, which will never come back,
-/// or one that has not reached its disk yet, which will. Reading the two the
-/// same way is what left this index stopped at the first hole for the rest of
-/// the run: an explorer past its block budget answered every question about
-/// every address with nought, and called the figure exact.
+/// cannot produce is one of three things: one it has let go of, which will
+/// never come back; one that has not reached its disk yet, which will; or one
+/// inside the run it is holding that the disk would not give back, which is a
+/// fault in the machine and not an answer about the chain.
+///
+/// Reading the first two the same way is what left this index stopped at the
+/// first hole for the rest of the run: an explorer past its block budget
+/// answered every question about every address with nought, and called the
+/// figure exact. Reading the third as the first was worse and lasted longer:
+/// the walk stepped over a block that was there, threw away every block it had
+/// read under it, and never came back for any of them while the process ran.
 #[derive(Debug)]
 pub(crate) enum Held {
     /// The block, ready to read.
@@ -178,20 +204,64 @@ pub(crate) enum Held {
     Dropped,
     /// Not on this node yet, and expected.
     Waiting,
+    /// Inside the run this node holds, and the disk would not hand it back: a
+    /// torn record, a misindexed one, a bad sector. The block is neither gone
+    /// nor late, so the walk stops and asks for the same height again rather
+    /// than going on without it.
+    Refused,
 }
 
 /// Owners listed in the holders table.
 const RICHEST: usize = 50;
+
+/// Heights one turn of the walk gets through before it puts the index down.
+///
+/// The walk holds the index while it reads, and every question the site
+/// answers wants the index too, so a walk that runs all the way to the tip in
+/// one turn is a site that answers nothing at all until it gets there. On a
+/// chain of any size that is minutes of a bound socket with nobody answering,
+/// which is exactly what opening the door early was meant to remove. So the
+/// walk stops here, says there is more, and is called straight back. What it
+/// costs is the lock taken again per turn, which is nothing beside one block
+/// off a disk; what it buys is that a visitor waits for a turn rather than for
+/// the chain.
+const BATCH: u64 = 64;
+
+/// How far one turn of the walk got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reading {
+    /// Nothing more to read for now: level with the tip it was given, or
+    /// stopped at a height this node cannot produce yet.
+    Done,
+    /// Stopped on the batch bound with the chain still above it. The caller
+    /// lets go of the index and comes straight back.
+    More,
+}
 
 /// Bytes one note that has ever existed costs the index, measured on the
 /// running implementation.
 ///
 /// Every note ever made, spent or not, with its owner, its value, the two
 /// heights and the movements on both sides of it. It is the explorer's real
-/// growing cost and it is seven times the one the site used to name: a node
-/// that keeps the whole cold set carries seventy two bytes for each note that
-/// has fallen, and a node that keeps none carries nothing at all.
-pub(crate) const BYTES_PER_NOTE: u64 = 500;
+/// growing cost and it is nearly eight times the one the site used to name: a
+/// node that keeps the whole cold set carries seventy two bytes for each note
+/// that has fallen, and a node that keeps none carries nothing at all.
+///
+/// A note is what is counted, and a note is not the whole of what is kept: the
+/// index also holds an entry per transaction and a movement per side of every
+/// note, and neither of those is fixed per note. So the cost per note moves
+/// with the shape of the traffic, and `audit_index_cost.rs` weighs three
+/// shapes of it, one test each. The dearest is the ordinary payment, one note
+/// to the payee and one back as change, which has the fewest notes to spread
+/// the rest over: 565 bytes a note. The wide fan-outs come out between five
+/// hundred and six and five hundred and thirty.
+///
+/// The dearest is the one quoted. It was five hundred, which is rounder than
+/// any of the readings and under all of them, and it was calibrated on the
+/// widest fan-out alone, which is the cheapest per note and which nobody
+/// sends. An operator sizing a machine off this figure is not helped by the
+/// friendliest shape of traffic.
+pub(crate) const BYTES_PER_NOTE: u64 = 565;
 
 /// What the index is made of, for the operator who has to pay for it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -220,7 +290,19 @@ impl Index {
     /// A node lets go of the bodies of blocks too deep to be undone, and an
     /// index built from the start of the chain wants exactly those, so this
     /// goes to a disk and must be called with no lock held.
-    pub(crate) fn refresh(&mut self, head: &Head, block_at: impl Fn(u64) -> Held) {
+    ///
+    /// One call reads at most [`BATCH`] heights and then says whether there is
+    /// more. Reading to the tip in one call was minutes with this index held,
+    /// and the site cannot answer a single question without it: the sentence
+    /// the page exists to show while the chain is being read was the one thing
+    /// that could not be served while the chain was being read.
+    ///
+    /// `head` is about what this index has read, so a caller coming back for
+    /// the next turn works it out again: `at_last_read` is the identifier the
+    /// branch carries at the highest height read, and after a turn that is a
+    /// different height. Handing the same one back says the branch changed
+    /// under the index, and the whole of it is read again.
+    pub(crate) fn refresh(&mut self, head: &Head, block_at: impl Fn(u64) -> Held) -> Reading {
         // Whether what was read last time is still on the branch. Only the
         // last block has to be checked: everything under it was checked when
         // it was read, and a branch that changed under one of them changed
@@ -237,18 +319,22 @@ impl Index {
             }
         }
 
-        let before = self.totals.blocks;
-        let mut height = match self.span {
-            Some(span) => span.through.saturating_add(1),
-            // Height zero, and the walk steps over whatever of the bottom of
-            // the chain this node no longer holds rather than stopping there.
-            None => 0,
-        };
+        // Height zero on a fresh index, and the walk steps over whatever of
+        // the bottom of the chain this node no longer holds rather than
+        // stopping there.
+        let mut height = self.resume;
+        let mut reading = Reading::Done;
+        let mut walked = 0u64;
         while height <= head.tip {
+            if walked >= BATCH {
+                reading = Reading::More;
+                break;
+            }
             match block_at(height) {
                 Held::Block(block) => {
                     let id = block.id();
                     self.apply(&block);
+                    self.stock_due = true;
                     self.span = Some(match self.span {
                         Some(span) => Span {
                             through: height,
@@ -270,15 +356,33 @@ impl Index {
                     // wrongly rather than shortly, so it starts again here.
                     if self.span.is_some() {
                         *self = Self::new();
+                        self.stock_due = true;
                     }
                 }
-                Held::Waiting => break,
+                // Both stop the walk where it stands, and the next turn
+                // asks for this same height again. Waiting is a height that
+                // has not reached this node's disk yet; refused is one that
+                // is on it and would not read, which may be a fault that
+                // passes and may be a disk on its way out. Stepping over
+                // either would leave a hole under everything above it, and
+                // an index with a hole in it answers wrongly rather than
+                // shortly.
+                Held::Waiting | Held::Refused => break,
             }
             height = height.saturating_add(1);
+            // Written down as the walk goes, so that a turn which stepped over
+            // nothing but dropped heights still leaves the next one further up
+            // the chain than it started.
+            self.resume = height;
+            walked = walked.saturating_add(1);
         }
-        if self.totals.blocks != before {
+        // Not between batches: sorting every owner is the one thing here that
+        // costs more than the blocks do, and a rebuild would otherwise pay for
+        // it once per turn all the way up the chain.
+        if self.stock_due && reading == Reading::Done {
             self.take_stock();
         }
+        reading
     }
 
     fn apply(&mut self, block: &Block) {
@@ -447,6 +551,7 @@ impl Index {
 
     /// Works out the distribution once, after the chain has moved.
     fn take_stock(&mut self) {
+        self.stock_due = false;
         let mut held: Vec<(PublicKey, Amount)> = self
             .owners
             .iter()

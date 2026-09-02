@@ -10,7 +10,7 @@
 //! which this module calls while holding the chain, and to the consensus rules
 //! underneath it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cairn_accumulator::forest::{Forest, ForestProof};
 use cairn_chain::{Accepted, Bodies, ChainError, ChainStore, Located, Outdated, MAX_REORG_DEPTH};
@@ -42,7 +42,8 @@ use crate::book::AddressBook;
 use crate::choosing::{self, Approach, Chooser, JoinProgress};
 use crate::joining::{Collecting, Joined, Progress};
 use crate::message::{
-    Joining, Message, JOIN_PART_BYTES, MAX_CHAIN, MAX_HEADERS, MAX_SHARED_ADDRESSES,
+    Joining, Keeps, Message, Placed, JOIN_PART_BYTES, MAX_CHAIN, MAX_HEADERS, MAX_PROVEN,
+    MAX_SHARED_ADDRESSES,
 };
 use crate::refusal::{can_be_refused, Refusals};
 use crate::sync::{
@@ -257,6 +258,23 @@ const AWAY_GAP: u64 = 30;
 /// Maintenance sleeps in slices so a shutdown does not wait out a full period.
 const SLEEP_SLICE: Duration = Duration::from_millis(50);
 
+/// How often a node waiting on a path looks to see whether one has arrived.
+///
+/// An answer is one round trip on a connection that is already open, so this
+/// is the granularity of a wait measured in tens of milliseconds rather than a
+/// poll of anything slow.
+const RECOVERY_POLL: Duration = Duration::from_millis(50);
+
+/// Addresses dialled when a node needs a path and knows nobody who can build
+/// one.
+///
+/// Small on purpose. This is a node opening connections because of something
+/// its own operator asked for, and the ordinary upkeep is what fills the rest
+/// of its connections. Four is enough that one machine being down does not end
+/// the attempt, and few enough that it cannot become a way of spending this
+/// node's connections.
+const REACH_FOR_ARCHIVISTS: usize = 4;
+
 #[derive(Debug, thiserror::Error)]
 pub enum NodeError {
     #[error("could not open the connection: {0}")]
@@ -353,6 +371,42 @@ pub struct Stranded {
     pub out_of_reach: u64,
 }
 
+/// What came of asking the network where a wallet's fallen notes sit.
+///
+/// A note that has fallen out of the set every node keeps can only be spent
+/// alongside a path showing where it sits, and that path moves every time
+/// another note falls. A wallet whose own node stopped keeping one has money
+/// it can see and cannot move, and the only cure is to ask somebody who kept
+/// the whole set. This is the account of that asking, so that whatever is
+/// showing the balance can say what happened rather than naming a service and
+/// leaving the person to find it.
+#[derive(Clone, Debug, Default)]
+pub struct Recovered {
+    /// Peers the question went to. Zero means there was nobody to ask at all.
+    pub asked: usize,
+    /// How many of those said they keep the whole cold set.
+    ///
+    /// Told apart from the rest because it is the difference between having
+    /// asked the wrong people and having nobody to ask. A wallet with peers
+    /// but no archivist among them is one connection away from an answer.
+    pub archivists: usize,
+    /// Peers that answered at all, whatever the answer was.
+    pub answered: usize,
+    /// The paths that folded to this node's own commitment, by place.
+    ///
+    /// Nothing else comes out of here. A path that did not fold is not a
+    /// weaker answer, it is no answer, and it is counted below instead.
+    pub proofs: BTreeMap<u64, ForestProof>,
+    /// Answers refused because the path did not reach this node's commitment.
+    ///
+    /// Not necessarily a peer behaving badly, which is why nothing is held
+    /// against one for it. The cold set moves whenever a note falls, and a
+    /// path built a moment before a block landed no longer reaches the
+    /// commitment that is there now. A wrong answer and a late one look the
+    /// same from here, so both are simply not used.
+    pub refused: usize,
+}
+
 /// Why this node would not take something offered to it.
 #[derive(Debug, thiserror::Error)]
 pub enum Refused {
@@ -382,8 +436,18 @@ pub struct Restored {
     /// Neither loses anything but time. What was cut is asked for again, and
     /// a node that was following the heaviest branch still is.
     pub refused: usize,
-    /// Bytes dropped from the end of the log because a write never finished.
+    /// Bytes cut off the end of the log because a write never finished.
+    ///
+    /// Zero when `unreadable` is set: nothing is cut for damage, and a count
+    /// saying bytes were thrown away while they are still on the disk sends an
+    /// operator looking for a backup instead of at the file.
     pub discarded_bytes: u64,
+    /// Bytes left on the disk past the last record that could be read.
+    ///
+    /// The other half, and only ever set alongside `unreadable`. Nothing was
+    /// removed: this is how much of the log is standing there unread, which is
+    /// what says whether the damage cost one block or a day of them.
+    pub left_in_place: u64,
     /// The record a walk of the log stopped at, when what stopped it was a
     /// whole record that would not decode rather than one cut short.
     ///
@@ -562,6 +626,15 @@ struct Peer {
     /// and counting it as one of this node's own is how a stranger decides who
     /// it talks to.
     dialled: bool,
+    /// Whether this peer said it keeps the cold set, and so can rebuild a path
+    /// for a note that fell long ago.
+    ///
+    /// A claim and nothing more, which is all it has to be: what such a peer
+    /// hands over is folded against a commitment this node worked out itself,
+    /// so a lie costs the liar a message and this node a comparison. What the
+    /// claim saves is asking every peer in turn and waiting on the ones that
+    /// were never going to answer.
+    archives: bool,
 }
 
 struct Shared {
@@ -726,6 +799,66 @@ struct Shared {
     /// Also a leaf, and for the same reason: it is written from the thread
     /// reading a peer, which has just let go of the chain.
     unjudged: Mutex<Unreadable>,
+    /// What this node is asking the network about where fallen notes sit.
+    ///
+    /// Empty on a node nobody has asked to recover anything, which is every
+    /// node that is not carrying a wallet.
+    asking: Mutex<Asking>,
+}
+
+/// One question about where fallen notes sit, and what has come back.
+///
+/// The asker's side of the exchange, and the only side that keeps anything.
+/// An answerer is handed places, looks them up, answers and forgets: it holds
+/// nothing per asker, which is what stops a stranger making a node remember
+/// things on its behalf. Somebody has to remember what was asked while the
+/// answers travel, and it is the one who wants the answer.
+///
+/// One question at a time. A second one replaces the first, for the same
+/// reason a fresh join attempt starts from nothing: what came back for a
+/// question nobody is waiting on any more is not worth the room.
+///
+/// A leaf, like [`Shared::stranded`]: the chain may be taken while this is
+/// held nowhere, and this is never held while the chain is.
+#[derive(Debug, Default)]
+struct Asking {
+    /// The places asked about, and the leaf each answer has to fold to.
+    ///
+    /// The leaf is what makes an answer checkable without trusting anybody. A
+    /// path is folded with it from the place named upward, and what comes out
+    /// either is the commitment this node worked out for itself or the answer
+    /// is worth nothing.
+    wanted: BTreeMap<u64, Hash32>,
+    /// Connections the question went to, so an answer from anybody else is
+    /// dropped before it costs this node a look at the chain.
+    asked: HashSet<PeerId>,
+    /// Connections that answered, whatever they said.
+    answered: HashSet<PeerId>,
+    /// Paths that folded.
+    found: BTreeMap<u64, ForestProof>,
+    /// Answers that did not.
+    refused: usize,
+}
+
+impl Asking {
+    /// Whether every place asked about has been answered for.
+    fn satisfied(&self) -> bool {
+        !self.wanted.is_empty() && self.found.len() >= self.wanted.len()
+    }
+}
+
+/// The account of one question about where fallen notes sit.
+///
+/// Taken from the collection rather than kept alongside it, so there is one
+/// record of what happened and not two that can disagree.
+fn finished(asking: &Asking, archivists: usize) -> Recovered {
+    Recovered {
+        asked: asking.asked.len(),
+        archivists,
+        answered: asking.answered.len(),
+        proofs: asking.found.clone(),
+        refused: asking.refused,
+    }
 }
 
 /// Blocks written under rules this build does not have, as they add up.
@@ -1438,6 +1571,129 @@ impl Shared {
         found.into_iter().flatten().collect()
     }
 
+    /// The paths for the places in the cold set a peer asked about, in the
+    /// order it asked about them.
+    ///
+    /// Answered by whoever can, which is the point. A node that kept the whole
+    /// set rebuilds a path from the leaves it holds; a node following an owner
+    /// already holds the path for that owner's notes and hands it over as it
+    /// stands. Neither has to know which of the two it is, because the cold
+    /// set answers the same question for both. A node that is neither says so
+    /// with nothing where the path would be, which is not the same as saying
+    /// nothing.
+    ///
+    /// The chain is taken here and let go of again rather than held across the
+    /// whole reaction, which is why this is not answered where the message was
+    /// read. A path is a walk up one tree, sixty four hashes at the very most,
+    /// so the whole of a full request is measured in microseconds; what it must
+    /// not do is queue behind, or in front of, a block being validated.
+    fn place(&self, positions: &[u64]) -> Vec<Placed> {
+        let chain = self.chain();
+        let cold = chain.state().cold();
+        positions
+            .iter()
+            .map(|position| Placed {
+                position: *position,
+                proof: cold.proof_of(*position),
+            })
+            .collect()
+    }
+
+    fn asking(&self) -> MutexGuard<'_, Asking> {
+        self.asking.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Writes down what a peer said it keeps, beside the connection and in the
+    /// book.
+    ///
+    /// Beside the connection so a wallet needing a path knows who to ask now.
+    /// In the book so one that comes back tomorrow, needing a path and
+    /// connected to nobody who can build one, has somewhere to knock. Neither
+    /// is trusted for anything: what an archivist hands over is checked, and
+    /// this only decides who is asked first.
+    fn note_what_it_keeps(&self, id: PeerId, advertised: Option<SocketAddr>, archives: bool) {
+        if let Some(peer) = self.peers().get_mut(&id) {
+            peer.archives = archives;
+        }
+        if let Some(address) = advertised {
+            self.book().keeps_the_cold_set(&address, archives);
+        }
+    }
+
+    /// Connections worth asking where a fallen note sits, and how many of them
+    /// said they keep the whole set.
+    ///
+    /// Peers that claim the service, when there are any. When there are none,
+    /// everybody, and the reason is that the claim is only a claim in the
+    /// other direction too: a node that never said it archives still holds the
+    /// path for every note of an owner it follows, which is what a second
+    /// wallet on the same key is. Asking costs one small message each and is
+    /// answered plainly either way, and it beats telling somebody their money
+    /// is out of reach without having asked anyone.
+    fn worth_asking(&self) -> (Vec<PeerId>, usize) {
+        let peers = self.peers();
+        let archivists: Vec<PeerId> = peers
+            .iter()
+            .filter(|(_, peer)| peer.archives)
+            .map(|(id, _)| *id)
+            .collect();
+        let archiving = archivists.len();
+        if archiving > 0 {
+            return (archivists, archiving);
+        }
+        (peers.keys().copied().collect(), 0)
+    }
+
+    /// Takes an answer about where fallen notes sit, keeping only the paths
+    /// that fold.
+    ///
+    /// Only from a connection this node asked, and only about the places it
+    /// asked about. An answer from anybody else is a stranger handing this
+    /// node work to do with the chain in hand, which is what the join
+    /// collector had to be taught to refuse for the same reason.
+    ///
+    /// The chain is taken between two turns of this node's own state rather
+    /// than while it is held, because the order the locks are taken in is the
+    /// whole of what keeps two threads from waiting on each other.
+    fn take_placed(&self, from: PeerId, placed: &[Placed]) {
+        let checking: Vec<(u64, Hash32, ForestProof)> = {
+            let mut asking = self.asking();
+            if !asking.asked.contains(&from) {
+                return;
+            }
+            asking.answered.insert(from);
+            placed
+                .iter()
+                .filter_map(|entry| {
+                    let leaf = *asking.wanted.get(&entry.position)?;
+                    Some((entry.position, leaf, entry.proof.clone()?))
+                })
+                .collect()
+        };
+        if checking.is_empty() {
+            return;
+        }
+        let folded: Vec<(u64, ForestProof, bool)> = {
+            let chain = self.chain();
+            let cold = chain.state().cold();
+            checking
+                .into_iter()
+                .map(|(position, leaf, proof)| {
+                    let holds = cold.verify(position, leaf, &proof);
+                    (position, proof, holds)
+                })
+                .collect()
+        };
+        let mut asking = self.asking();
+        for (position, proof, holds) in folded {
+            if holds {
+                asking.found.insert(position, proof);
+            } else {
+                asking.refused = asking.refused.saturating_add(1);
+            }
+        }
+    }
+
     /// Takes addresses out of the book, so they are not dialled again.
     fn forget(&self, addresses: &[SocketAddr]) {
         if addresses.is_empty() {
@@ -1741,6 +1997,7 @@ impl Node {
             blocks: applied,
             refused,
             discarded_bytes: recovered.discarded_bytes,
+            left_in_place: recovered.left_in_place,
             unreadable: recovered.unreadable,
             rejoining,
             addresses: book.len(),
@@ -1806,6 +2063,7 @@ impl Node {
             outdated: Mutex::new(None),
             unwritten: Mutex::new(None),
             unjudged: Mutex::new(Unreadable::default()),
+            asking: Mutex::new(Asking::default()),
         });
 
         {
@@ -2185,6 +2443,115 @@ impl Node {
         self.with_chain(ChainStore::is_archiving)
     }
 
+    /// Connected peers that say they keep the whole cold set.
+    ///
+    /// For whatever is showing a wallet its money: a note whose path this node
+    /// cannot build is money that can be seen and not moved, and the first
+    /// thing its owner needs to know is whether anybody here could help.
+    pub fn archiving_peers(&self) -> usize {
+        self.shared
+            .peers()
+            .values()
+            .filter(|peer| peer.archives)
+            .count()
+    }
+
+    /// Asks the network where these fallen notes sit, and checks what comes
+    /// back against this node's own commitment.
+    ///
+    /// `wanted` is the place each note is believed to sit and the leaf it must
+    /// fold to, which is what makes the answer worth taking from a stranger.
+    /// Whoever answers is handed a list of places and nothing else: not the
+    /// notes, not the owner, not who is asking about what.
+    ///
+    /// Nothing here trusts anybody. A path is folded from the place named up
+    /// to a commitment this node worked out for itself, block by block, and
+    /// one that does not reach it is simply not used. That is why this can be
+    /// asked of an anonymous peer at all, and why a peer that answers wrongly
+    /// is not held to have misbehaved: the cold set moves whenever a note
+    /// falls, so an honest path built a moment too early fails in exactly the
+    /// same way as an invented one.
+    ///
+    /// Waits, because there is nothing useful for the caller to do meanwhile
+    /// and the answer is one round trip. It gives up early once every place
+    /// has been answered for.
+    pub fn recover_proofs(&self, wanted: &[(u64, Hash32)], patience: Duration) -> Recovered {
+        if wanted.is_empty() {
+            return Recovered::default();
+        }
+        // Capped here as well as on the wire, so a caller that asks about more
+        // than one message carries is answered about what fits rather than
+        // having its question silently truncated by a peer.
+        let asked_about: BTreeMap<u64, Hash32> = wanted.iter().take(MAX_PROVEN).copied().collect();
+        let positions: Vec<u64> = asked_about.keys().copied().collect();
+        *self.shared.asking() = Asking {
+            wanted: asked_about,
+            ..Asking::default()
+        };
+
+        // Nobody here keeps the set, so reach for somebody this node has met
+        // who said they did. A claim heard on an earlier connection is the
+        // only lead there is, and following it costs a dial.
+        if self.archiving_peers() == 0 {
+            self.reach_for_an_archivist();
+        }
+
+        let deadline = Instant::now().checked_add(patience);
+        loop {
+            let (worth_asking, archivists) = self.shared.worth_asking();
+            let fresh: Vec<PeerId> = {
+                let mut asking = self.shared.asking();
+                worth_asking
+                    .into_iter()
+                    .filter(|peer| asking.asked.insert(*peer))
+                    .collect()
+            };
+            for peer in fresh {
+                self.shared
+                    .send_to(peer, Message::GetProofs(positions.clone()));
+            }
+            {
+                let asking = self.shared.asking();
+                // Every place answered for, or everyone asked has answered and
+                // there is nothing further to wait on.
+                if asking.satisfied()
+                    || (!asking.asked.is_empty() && asking.answered.len() >= asking.asked.len())
+                {
+                    return finished(&asking, archivists);
+                }
+            }
+            if deadline.is_none_or(|end| Instant::now() >= end) {
+                let asking = self.shared.asking();
+                return finished(&asking, archivists);
+            }
+            thread::sleep(RECOVERY_POLL);
+        }
+    }
+
+    /// Opens a connection to an address that said it keeps the cold set.
+    ///
+    /// Only reached by a node that needs a path and is connected to nobody who
+    /// can build one, which for a wallet is the moment its owner is looking at
+    /// money it cannot move. One address at a time and only ones already in
+    /// the book, so this is an ordinary dial made a few seconds early rather
+    /// than a second way of choosing who this node talks to.
+    fn reach_for_an_archivist(&self) {
+        let known: Vec<SocketAddr> = self.shared.book().archivists();
+        let connected: Vec<SocketAddr> = self
+            .shared
+            .peers()
+            .values()
+            .filter_map(|peer| peer.advertised.or(peer.dialled_to))
+            .collect();
+        for address in known
+            .into_iter()
+            .filter(|address| !connected.contains(address))
+            .take(REACH_FOR_ARCHIVISTS)
+        {
+            let _ = self.connect(address);
+        }
+    }
+
     /// Transfers waiting for a block.
     pub fn pool_len(&self) -> usize {
         self.shared.chain().pool_len()
@@ -2293,6 +2660,29 @@ fn join_piece(
         return Taken::Failed;
     }
     Taken::Handled
+}
+
+/// Hands a message to whichever of this node's own collections it answers.
+///
+/// Two things this node goes out and asks for: the pieces of a chain it is
+/// joining, and the paths for notes it can no longer place. Both are answers
+/// to a question this node asked, both belong to a collection it is keeping
+/// rather than to any decision about the peer that sent them, and an answer
+/// nobody asked for is dropped before it costs anything. That last part is
+/// what makes it safe to take these before the chain has been near them.
+fn collected(
+    shared: &Arc<Shared>,
+    from: PeerId,
+    message: Message,
+    outbound: &SyncSender<Message>,
+) -> Taken {
+    match join_piece(shared, from, message, outbound) {
+        Taken::Other(Message::Proofs(placed)) => {
+            shared.take_placed(from, &placed);
+            Taken::Handled
+        }
+        other => other,
+    }
 }
 
 /// Takes one piece of a join answer, and says what to ask for next.
@@ -3354,8 +3744,20 @@ fn write_headers(headers: &mut HeaderLog, chain: &ChainStore) -> Option<Refusing
         }
     }
 
+    // Where the chain can still answer, not where its branch begins. A branch
+    // remembers identifiers by milestones far below the blocks themselves, and
+    // a block is dropped once it is past undoing, so starting at the branch's
+    // beginning asks for headers this chain let go of on purpose and is
+    // refused at the first step.
+    //
+    // On a node that joined a chain, that first step was its whole life: the
+    // header log stayed empty for ever, so it could show a newcomer none of
+    // the chain while its own introduction said it could, and every block it
+    // applied reported a write it could not make on a disk with nothing wrong
+    // with it. Starting at the anchor is the honest answer, and the chain
+    // below it is one that node was never given.
     let mut height = if headers.is_empty() {
-        chain.branch_start().unwrap_or(0)
+        chain.held_from()
     } else {
         headers.reaches()
     };
@@ -3367,7 +3769,15 @@ fn write_headers(headers: &mut HeaderLog, chain: &ChainStore) -> Option<Refusing
         // ability to show a newcomer the chain and costs the chain itself
         // nothing. Said, because a node that has quietly stopped being able to
         // answer goes on looking exactly like one that can.
-        let Some(header) = chain.block_at(height).map(|block| block.header) else {
+        // The header, not the block. A chain keeps a header for every block on
+        // its branch whatever happens to the body, and a header log wants
+        // headers. Asking for the block meant a node was refused a hundred and
+        // eighty two bytes for the want of a body it had no use for, and on a
+        // node that joined a chain that refusal came on the very first height:
+        // its header log stayed empty for the rest of its life, so it could
+        // show a newcomer none of the chain while its own introduction said it
+        // could.
+        let Some(header) = chain.header_at(height) else {
             return refusing.or_else(|| {
                 Some(Refusing::at(
                     Writing::Headers,
@@ -3476,6 +3886,17 @@ fn answer_deferred(
             if outbound.try_send(piece).is_err() {
                 return false;
             }
+        }
+    }
+    // Paths through the cold set, built now that the chain is nobody's. The
+    // answer always names every place that was asked about, including the ones
+    // this node cannot place: a wallet with money it cannot move has to be
+    // able to tell a node that cannot help from a node that has gone away, and
+    // go and ask somebody else.
+    if let Some(positions) = reaction.prove.as_ref() {
+        let placed = shared.place(positions);
+        if outbound.try_send(Message::Proofs(placed)).is_err() {
+            return false;
         }
     }
     if let Some((from, count)) = reaction.headers {
@@ -3881,9 +4302,13 @@ fn decide(
         log.as_ref()
             .is_some_and(|store| store.can_show_the_chain(reaches))
     };
+    let keeps = Keeps {
+        headers: shows,
+        cold_set: chain.is_archiving(),
+    };
     let mut local = Local {
         chain: &mut chain,
-        shows_the_chain: shows,
+        keeps,
         listen: shared.address.port(),
         nonce: shared.nonce,
     };
@@ -3943,7 +4368,7 @@ fn note_claim(shared: &Arc<Shared>, id: PeerId, peer: &PeerState) {
         peer.remote,
         peer.total_work,
         peer.height,
-        peer.archives,
+        peer.keeps.headers,
         unix_now(),
     );
 }
@@ -4227,6 +4652,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
             host: remote,
             advertised: None,
             dialled_to: dialled,
+            archives: false,
         },
     );
 
@@ -4245,9 +4671,13 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
         let hello = {
             let chain = shared.chain();
             let shows = shared.shows_the_chain(&chain);
+            let keeps = Keeps {
+                headers: shows,
+                cold_set: chain.is_archiving(),
+            };
             Message::Hello(local_handshake(
                 &chain,
-                shows,
+                keeps,
                 shared.address.port(),
                 shared.nonce,
             ))
@@ -4387,9 +4817,10 @@ fn read_loop(
             continue;
         }
 
-        // A piece of a join answer belongs to whoever is collecting one, which
-        // is this node rather than the layer that reads messages.
-        let message = match join_piece(shared, id, message, outbound) {
+        // An answer to something this node went out and asked for belongs to
+        // whoever is collecting it, which is this node rather than the layer
+        // that reads messages.
+        let message = match collected(shared, id, message, outbound) {
             Taken::Handled => continue,
             Taken::Failed => break 'reading,
             Taken::Other(message) => message,
@@ -4405,6 +4836,11 @@ fn read_loop(
 
         if introduction && peer.greeted {
             note_claim(shared, id, &peer);
+            // Written down beside the connection and in the book. Beside the
+            // connection so a wallet can pick who to ask now; in the book so
+            // one that comes back tomorrow, needing a proof and connected to
+            // nobody who can give it, has a door to knock on.
+            shared.note_what_it_keeps(id, peer.advertised, peer.keeps.cold_set);
         }
 
         shared.remember(&reaction.learned);

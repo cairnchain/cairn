@@ -83,6 +83,13 @@ const DEFAULT_TARGET_BLOCK_TIME: u64 = 60;
 /// Bitcoin waits a hundred blocks and Monero sixty, both of them far past
 /// their own reorganisation depths. This one is exactly at it, which is the
 /// most that can be argued for from the design rather than from custom.
+///
+/// A network that lowers this lowers its burial with it, and the depth a node
+/// refuses to undo past follows the burial rather than this constant. That is
+/// what keeps the claim true on such a network instead of leaving it a
+/// sentence about the default: devnet settles at thirty two and undoes no
+/// further, so a reward there is still spendable exactly when its block stops
+/// being reachable.
 pub const COINBASE_MATURITY: u64 = crate::handover::BURIAL;
 
 /// Rules a node applies to every block it evaluates.
@@ -140,6 +147,10 @@ pub struct ConsensusParams {
     /// of coinbases still waiting is in the state root, so two nodes with
     /// different depths do not merely disagree about one spend, they compute
     /// different roots for every block.
+    ///
+    /// Never above [`Self::burial`], or a reward would be spendable while the
+    /// block that paid it can still be undone, which is the one thing the rule
+    /// exists to prevent. Every network here sets the two equal.
     pub coinbase_maturity: u64,
     /// Seconds the retarget aims for between blocks.
     pub target_block_time: u64,
@@ -454,6 +465,15 @@ pub enum BlockError {
     },
     #[error("block version {0} is not supported")]
     UnsupportedVersion(u16),
+    #[error(
+        "the rules at height {height} are block version {required}, and this block \
+         carries version {found}"
+    )]
+    WrongVersion {
+        height: u64,
+        found: u16,
+        required: u16,
+    },
     #[error("coinbase version {0} is not supported")]
     UnsupportedCoinbaseVersion(u16),
     #[error("block belongs to network {found:?}, this node follows {expected:?}")]
@@ -1140,7 +1160,7 @@ fn check_header(
             known: BLOCK_VERSION,
         });
     }
-    if header.version != required {
+    if header.version > BLOCK_VERSION {
         // A version above anything this build knows is not a judgement about
         // the block, and it is not one this layer can make.
         //
@@ -1161,6 +1181,27 @@ fn check_header(
         // talking nonsense needs evidence from more than one block and more
         // than one peer, and that belongs where peers are counted.
         return Err(BlockError::UnsupportedVersion(header.version));
+    }
+    if header.version != required {
+        // The other half, and the opposite answer. This build knows the
+        // version the block carries and knows the rules where it sits, so it
+        // can say the block is wrong rather than that it cannot tell. Both
+        // used to come back as "cannot tell", which was wrong twice over: a
+        // block from the abandoned side of a rule change was let through the
+        // door meant for blocks nobody can judge yet, and a stranger could
+        // make any node report itself out of date by writing a number in a
+        // field, on a chain at the difficulty floor, for the price of one
+        // hash.
+        //
+        // Remembered against the block, because this verdict is about the
+        // block and no update reverses it. Not held against the peer: on the
+        // day a rule changes, every node that has not updated sends these in
+        // good faith, and they belong elsewhere rather than behaving badly.
+        return Err(BlockError::WrongVersion {
+            height: expected_height,
+            found: header.version,
+            required,
+        });
     }
 
     if expected_height == 0 {

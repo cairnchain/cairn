@@ -163,6 +163,11 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 
 fn state(wallet: &Wallet) -> Response {
     let progress = wallet.progress();
+    // Before the money is counted, because it decides part of the answer: a
+    // note whose path has been rebuilt is money that can move again. Asked at
+    // most once every so often however often this page redraws, and it costs
+    // nothing at all when there is nothing stuck.
+    let recovery = wallet.recover_stranded();
     let holdings = wallet.holdings();
 
     let mut json = Writer::new();
@@ -189,6 +194,12 @@ fn state(wallet: &Wallet) -> Response {
         None => json.field_null("ripeAt"),
     }
     json.field_str("stranded", &holdings.stranded.to_string());
+    // What was done about it, in words, rather than a page of its own that
+    // would have to be kept saying the same thing.
+    match recovery.words() {
+        Some(words) => json.field_str("strandedNote", &words),
+        None => json.field_null("strandedNote"),
+    }
     json.field_bool("anything", !holdings.notes.is_empty());
     json.field_usize("held", holdings.notes.len());
 

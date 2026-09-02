@@ -17,22 +17,22 @@ use cairn_primitives::Hash32;
 
 use crate::book::worth_hearing_about;
 use crate::message::{
-    Handshake, Joining, Message, PeerAddress, MAX_ANNOUNCED, MAX_HEADERS, MAX_REQUESTED,
-    MAX_SHARED_ADDRESSES, PROTOCOL_VERSION,
+    Handshake, Joining, Keeps, Message, PeerAddress, MAX_ANNOUNCED, MAX_HEADERS, MAX_PROVEN,
+    MAX_REQUESTED, MAX_SHARED_ADDRESSES, PROTOCOL_VERSION,
 };
 
 /// Everything of the surrounding node this layer is allowed to see.
 #[derive(Debug)]
 pub struct Local<'a> {
     pub chain: &'a mut ChainStore,
-    /// Whether this node holds the whole header forest, and so can show a
-    /// newcomer which chain carries the most work.
+    /// What this node kept, which is what it can be asked for: the headers,
+    /// so a newcomer can be shown which chain carries the most work, and the
+    /// cold set, so a wallet can be told where one of its fallen notes sits.
     ///
-    /// Not the same question as archiving the cold set. That is a service for
-    /// a wallet that lost a proof; this is what lets anyone join at all, and
-    /// it costs 182 bytes a block rather than a set that grows with every note
-    /// ever spent. Almost every node can answer yes.
-    pub shows_the_chain: bool,
+    /// Two answers rather than one. They cost nothing alike, almost every node
+    /// gives the first and almost none gives the second, and while they shared
+    /// a field the second was claimed by everybody and offered by nobody.
+    pub keeps: Keeps,
     /// The port this node listens on, so peers can pass its address along.
     pub listen: u16,
     /// What this node calls itself on the wire, so it can recognise its own
@@ -48,9 +48,10 @@ pub struct PeerState {
     pub greeted: bool,
     pub height: u64,
     pub total_work: u128,
-    /// Whether the peer said it can show a newcomer the whole chain, which
-    /// is what choosing whom to join has to know about everyone who spoke.
-    pub archives: bool,
+    /// What the peer said it kept. Choosing whom to join has to know the
+    /// first about everyone who spoke, and a wallet looking for somebody to
+    /// rebuild a path has to know the second.
+    pub keeps: Keeps,
     /// Heights asked for and not yet received. While this is non empty the node
     /// is mid batch and does not ask for more.
     ///
@@ -270,6 +271,23 @@ const COST_PER_HEADER_SERVED: u32 = 1;
 /// fills the book gets to set. At this cost a window answers a hundred and
 /// twenty eight, and an honest peer asks about once a second.
 const COST_PER_ADDRESS_SERVED: u32 = 1;
+/// What one place proved costs to answer for.
+///
+/// A path is about a kilobyte on a chain with a million fallen notes, which is
+/// five headers' worth of wire for a fraction of the disk, so the wire is what
+/// this is priced on. Eight rather than five because building one is done with
+/// the chain in hand: a header comes off a disk while everybody else carries
+/// on, and this does not.
+///
+/// Charged on what is asked for rather than on what comes back, like the
+/// header charge and for the same reason. A node that cannot prove a place
+/// still had to look, and a price that only applied to answers found would let
+/// a peer ask for places nobody has, for nothing, all day.
+///
+/// At this price an allowance window buys sixteen full requests, which is a
+/// thousand and twenty four paths, and a wallet recovering asks once.
+const COST_PER_PLACE_PROVED: u32 = 8;
+
 /// What one piece of a join answer costs to build and send.
 ///
 /// An eighth of a window, so a newcomer collecting twenty two pieces takes
@@ -312,6 +330,15 @@ pub enum DropReason {
     WrongNetwork { theirs: NetworkId },
     #[error("peer follows a chain starting at {theirs}, which is not this one")]
     ForeignChain { theirs: Hash32 },
+    #[error(
+        "peer sent a block for height {height} carrying version {found}, where the \
+         rules this node follows are version {required}"
+    )]
+    ForeignRules {
+        height: u64,
+        found: u16,
+        required: u16,
+    },
     #[error("peer sent a block this node rejects")]
     BadBlock { id: Hash32 },
     #[error("this connection is this node talking to itself")]
@@ -334,6 +361,12 @@ impl DropReason {
             Self::WrongVersion { .. }
             | Self::WrongNetwork { .. }
             | Self::ForeignChain { .. }
+            // On the day a rule changes, every node that has not updated sends
+            // blocks under the old version in good faith. They belong to the
+            // chain this node left rather than to a peer doing anything wrong,
+            // and refusing the host would turn the first minutes of a fork
+            // into an updated node banning most of the network.
+            | Self::ForeignRules { .. }
             | Self::Ourselves => false,
         }
     }
@@ -372,6 +405,18 @@ pub struct Reaction {
     /// Named rather than read here, for the same reason blocks are: they come
     /// off a disk, and this runs with the chain held.
     pub headers: Option<(u64, u64)>,
+    /// Places in the cold set a peer asked to have proved.
+    ///
+    /// Named rather than answered here, for the same reason the blocks are.
+    /// Building a path means walking the archive a level at a time, and this
+    /// runs with the chain held; sixty four of those under that lock is a
+    /// stranger deciding how long everyone else waits, which is what an audit
+    /// found a join request doing for a hundred and fifty eight milliseconds.
+    ///
+    /// An option rather than an empty list standing for no question, so that a
+    /// peer that asked about nothing is told apart from a peer that asked
+    /// nothing. The first is owed an answer, even an empty one.
+    pub prove: Option<Vec<u64>>,
     /// A run of headers a peer offered as the ones from before this node
     /// arrived, and the height it says they start at.
     ///
@@ -475,12 +520,7 @@ impl Reaction {
 }
 
 /// What this node says about itself.
-pub fn local_handshake(
-    chain: &ChainStore,
-    shows_the_chain: bool,
-    listen: u16,
-    nonce: u64,
-) -> Handshake {
+pub fn local_handshake(chain: &ChainStore, keeps: Keeps, listen: u16, nonce: u64) -> Handshake {
     Handshake {
         version: PROTOCOL_VERSION,
         network: chain.params().network,
@@ -488,7 +528,7 @@ pub fn local_handshake(
         tip: chain.tip().unwrap_or(Hash32::ZERO),
         height: chain.height().unwrap_or_default(),
         total_work: chain.total_work(),
-        archives: shows_the_chain,
+        keeps,
         listen,
         nonce,
     }
@@ -545,7 +585,7 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
     peer.greeted = true;
     peer.height = theirs.height;
     peer.total_work = theirs.total_work;
-    peer.archives = theirs.archives;
+    peer.keeps = theirs.keeps;
 
     let mut reaction = Reaction::idle();
     // The peer names its own port; the address it is reachable at is that port
@@ -563,7 +603,7 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
     if answer {
         reaction.reply.push(Message::Welcome(local_handshake(
             local.chain,
-            local.shows_the_chain,
+            local.keeps,
             local.listen,
             local.nonce,
         )));
@@ -791,6 +831,26 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
             unjudged: Some(version),
             ..Reaction::idle()
         },
+        // The other side of a rule change. The chain remembers the block,
+        // because this build knows both numbers and no update reverses the
+        // verdict, and the peer is disconnected without being refused: it is
+        // somewhere else, not misbehaving. Counted nowhere, which is the point
+        // of telling it apart from the arm above: a stranger writing a number
+        // into a field must not be able to make this node report itself out of
+        // date.
+        Err(ChainError::InvalidBlock {
+            source:
+                BlockError::WrongVersion {
+                    height,
+                    found,
+                    required,
+                },
+            ..
+        }) => Reaction::close(DropReason::ForeignRules {
+            height,
+            found,
+            required,
+        }),
         Err(_) => Reaction::close(DropReason::BadBlock { id }),
     }
 }
@@ -825,6 +885,10 @@ fn cost_of(message: &Message, peer: &PeerState) -> u32 {
         Message::GetHeaders { count, .. } => {
             let wanted = u32::try_from((*count).min(MAX_HEADERS as u64)).unwrap_or(u32::MAX);
             wanted.saturating_mul(COST_PER_HEADER_SERVED)
+        }
+        Message::GetProofs(positions) => {
+            let wanted = u32::try_from(positions.len().min(MAX_PROVEN)).unwrap_or(u32::MAX);
+            wanted.saturating_mul(COST_PER_PLACE_PROVED)
         }
         Message::GetPeers => {
             let carried = u32::try_from(MAX_SHARED_ADDRESSES).unwrap_or(u32::MAX);
@@ -870,9 +934,11 @@ pub fn on_message(
         // A pong needs no answer, a second introduction was already refused
         // above, and a piece of a join answer belongs to whoever is collecting
         // one rather than here.
-        Message::Pong(_) | Message::Hello(_) | Message::Welcome(_) | Message::JoinPart { .. } => {
-            Reaction::idle()
-        }
+        Message::Pong(_)
+        | Message::Hello(_)
+        | Message::Welcome(_)
+        | Message::JoinPart { .. }
+        | Message::Proofs(_) => Reaction::idle(),
         // Headers from before this node arrived. Named rather than taken, and
         // named here rather than earlier: this is where a peer has to have
         // introduced itself and to have an allowance left, and a run that
@@ -889,6 +955,13 @@ pub fn on_message(
         },
         Message::GetHeaders { from, count } => Reaction {
             headers: Some((from, count.min(MAX_HEADERS as u64))),
+            ..Reaction::idle()
+        },
+        // Named rather than answered here, and capped here rather than
+        // wherever the answer is built: what a peer asks for is the one number
+        // in this exchange a peer chooses.
+        Message::GetProofs(positions) => Reaction {
+            prove: Some(positions.into_iter().take(MAX_PROVEN).collect()),
             ..Reaction::idle()
         },
         Message::Chain { from, count } => {

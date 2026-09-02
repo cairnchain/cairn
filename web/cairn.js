@@ -332,9 +332,42 @@ async function api(path) {
   if (!response.ok) {
     const error = new Error((body && body.error) || 'request failed');
     error.status = response.status;
+    // How much of the chain was looked in before this came back empty. A
+    // refusal from a site that has read a tenth of the chain is not the same
+    // answer as one from a site that has read all of it, and the page says
+    // different words for the two.
+    error.coverage = body && body.coverage;
     throw error;
   }
   return body;
+}
+
+/*
+  What this site has read, in one sentence, or nothing when it has read the
+  chain from its first block to where the chain now reaches.
+
+  Every answer that comes out of the index carries this, because the index is
+  not the chain: it is however much of the chain this site has read since it
+  started, and for the first minutes of every run that is a small part of it.
+  A page that leaves that out states as a fact about the chain something that
+  is only a fact about its own reading.
+*/
+function readSoFar(coverage) {
+  if (!coverage || coverage.whole !== false) return null;
+  if (coverage.through === null || coverage.through === undefined) {
+    return t('coverage.none', { blocks: count(coverage.behind) });
+  }
+  return t('coverage.part', {
+    from: count(coverage.from),
+    through: count(coverage.through),
+    blocks: count(coverage.behind),
+  });
+}
+
+/* The same, as a line to put at the foot of a panel. */
+function coverageLine(coverage) {
+  const said = readSoFar(coverage);
+  return said ? el('p', { class: 'small dim', text: said }) : null;
 }
 
 /* ---------- views ---------- */
@@ -346,12 +379,33 @@ function showLoading() {
   view.append(el('div', { class: 'loading', text: t('common.loading') }));
 }
 
+/*
+  Why the page is empty, in the words the answer supports.
+
+  "There is nothing on this chain with that name" is a statement about the
+  chain, and the site is only entitled to it once it has read the chain. Asked
+  about a transaction while it was still reading, it said exactly that about a
+  transfer it was printing on another page at the same moment.
+*/
 function showError(error) {
+  const missing = error && error.status === 404;
+  const coverage = error && error.coverage;
+  let said = t('error.unreachable');
+  if (missing) {
+    const partial = coverage && coverage.whole === false;
+    if (partial && (coverage.through === null || coverage.through === undefined)) {
+      said = t('error.notReadAny', { blocks: count(coverage.behind) });
+    } else if (partial) {
+      said = t('error.notRead', { through: count(coverage.through), blocks: count(coverage.behind) });
+    } else {
+      said = t('error.missing');
+    }
+  }
   clear(view);
   view.append(
     panel(
       t('error.title'),
-      el('div', { class: 'prose' }, el('p', { text: error && error.status === 404 ? t('error.missing') : t('error.unreachable') })),
+      el('div', { class: 'prose' }, el('p', { text: said })),
       el('p', { class: 'small dim', text: String((error && error.message) || error) })
     )
   );
@@ -610,7 +664,11 @@ async function block(reference) {
         el('p', { class: 'eyebrow', text: t('block.eyebrow') }),
         el('h1', { text: t('block.title', { height: count(data.height) }) })
       ),
-      panel(null, explainer('explain.block'), rows),
+      // This page comes off the chain and the state of its notes comes off
+      // the index, so it is where the two can be seen disagreeing: the block
+      // is here, and whether what it paid has since been spent may not be
+      // known yet.
+      panel(null, explainer('explain.block'), rows, coverageLine(data.coverage)),
       coinbasePanel,
       panel(
         t('block.transfers.title', { n: count(data.transfers.length) }),
@@ -916,7 +974,13 @@ async function holders() {
               cell(cairn(holder.balance) + ' CAIRN', { numeric: true, mono: true })
             )
           )
-        )
+        ),
+        // The whole of this page is a claim about every owner on the chain,
+        // so it is the last place that should leave out how much of the chain
+        // was counted. An unread chain used to answer it with an empty table
+        // and nothing else, which is what a chain nobody owns anything on
+        // would look like too.
+        coverageLine(data.coverage)
       )
     )
   );
@@ -1270,8 +1334,20 @@ searchForm.addEventListener('submit', async (event) => {
   try {
     const answer = await api('search?q=' + encodeURIComponent(query));
     if (answer.target) {
+      // A transaction identifier and an address are both thirty two bytes, so
+      // anything the site has not read falls through to the address page. It
+      // used to go there without a word, and somebody looking up their own
+      // transaction was told, in effect, that it was an address holding
+      // nothing. The page is still shown, because an address nobody has paid
+      // is not in the index either; what is no longer left out is that this
+      // was a guess made off part of a chain.
+      const guessed = answer.kind === 'address' && answer.coverage && answer.coverage.whole === false;
       searchInput.value = '';
       go(answer.target);
+      if (guessed) {
+        searchNote.textContent = t('search.guessed');
+        searchNote.hidden = false;
+      }
     } else {
       searchNote.textContent = t('search.nothing');
       searchNote.hidden = false;

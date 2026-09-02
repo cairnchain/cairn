@@ -22,7 +22,7 @@
 
 use cairn_accumulator::Archive;
 use cairn_crypto::SecretKey;
-use cairn_ledger::block::BlockHeader;
+use cairn_ledger::block::{Activation, BlockHeader, BLOCK_VERSION};
 use cairn_ledger::handover::{check_buried, HandoverError, MOST_BURIED};
 use cairn_ledger::note::Note;
 use cairn_ledger::pow::RECENT_HEADERS;
@@ -262,4 +262,61 @@ fn a_run_longer_than_the_ceiling_is_refused() {
         matches!(refused, Err(HandoverError::BuriedRunWrongLength { .. })),
         "and said {refused:?}"
     );
+}
+
+/// A rule change scheduled inside the run a newcomer checks for itself.
+///
+/// The run is the one thing in a handover a newcomer verifies rather than
+/// takes on trust, so it is the one place a chain built under rules this build
+/// does not have must be refused rather than walked past. Everything else in
+/// the run was checked and the version was not, so a run crossing a change
+/// this node has never heard of came back as a chain it had verified.
+#[test]
+fn a_run_crossing_a_rule_change_this_build_lacks_is_refused() {
+    let chain = built();
+    let handed = handed(&chain);
+    let inside = handed.buried[handed.buried.len() / 2].height;
+
+    let ahead = ConsensusParams {
+        activations: Box::leak(Box::new([
+            Activation {
+                height: 0,
+                version: BLOCK_VERSION,
+            },
+            Activation {
+                height: inside,
+                version: BLOCK_VERSION + 1,
+            },
+        ])),
+        ..params()
+    };
+
+    let refused = check_buried(
+        &handed.at,
+        &handed.tip,
+        &handed.before_at,
+        &handed.buried,
+        &handed.recent,
+        &ahead,
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(HandoverError::SoftwareTooOld { height, required, known })
+                if height == inside && required == BLOCK_VERSION + 1 && known == BLOCK_VERSION
+        ),
+        "a run this build cannot judge came back judged, and it said {refused:?}"
+    );
+
+    // And the same run under the rules it was actually mined under is fine, so
+    // the refusal is about the schedule rather than about the run.
+    check_buried(
+        &handed.at,
+        &handed.tip,
+        &handed.before_at,
+        &handed.buried,
+        &handed.recent,
+        &params(),
+    )
+    .expect("the run itself is honest");
 }

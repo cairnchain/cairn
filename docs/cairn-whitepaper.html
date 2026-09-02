@@ -288,11 +288,23 @@
       What an archivist costs is a number that had never been written down,
       and it is worth writing down beside the claim it is the exception to.
       Measured over 3.2 million notes falling to the cold set, a plain node's
-      resident memory has no slope at all: not a small one, none. An archiving
-      node costs <strong>72 bytes for every note that has ever fallen</strong>,
-      which is 259 MB at that count. That is the size of the exception, and it
-      is the price of being able to rebuild a proof for somebody who lost
-      theirs.
+      ledger stays flat between 15 and 20 MB, from 319 000 notes to ten times
+      that. An archiving node costs <strong>about 64 bytes for every note that
+      has ever fallen</strong>. That is the size of the exception, and it is
+      the price of being able to rebuild a proof for somebody who lost theirs.
+    </p>
+    <p>
+      Both of those numbers were first published wrong, and how is worth more
+      than the correction. They were read with <code>ps</code>, which reports
+      the pages a process has resident. A cold set is written once and never
+      read again, which is exactly what an operating system's memory
+      compressor takes away, so the instrument was measuring the one thing it
+      could not see: it reported 9 MB where the process was actually holding
+      204. A twenty-one-fold under-report, in the direction that flatters. The
+      figures above are read with the footprint the kernel actually charges.
+      The lesson is not that the first number was wrong, it is that a measured
+      number is worth exactly what the instrument is worth, and nobody had
+      asked what this one measured.
     </p>
     <p>
       One thing an audit found and the design had not faced: there is no
@@ -364,11 +376,20 @@
     </p>
     <p>
       Undo records are kept for the most recent
-      <code>MAX_REORG_DEPTH = 1 024</code> blocks and a deeper switch is
-      refused. This is a local safety policy rather than a consensus rule: two
-      nodes with different limits build the same chain and differ only after a
-      reorganisation deeper than either would accept, which on a live network
-      means an attack or a partition lasting most of a day.
+      <code>MAX_REORG_DEPTH = 1 024</code> blocks. The switch is refused at the
+      network&rsquo;s own burial, which is the same 1 024 here and which is
+      what a handover is anchored at and what a reward matures at. Those three
+      are one number on purpose: a node that undid past its burial would hand a
+      newcomer a ledger anchored at a block it went on to orphan, and would
+      take back a reward its own rules had called spendable. Keeping records
+      further back than the refusal would be harmless, and a shorter test
+      network makes use of that.
+    </p>
+    <p>
+      The depth itself is a local safety policy rather than a consensus rule:
+      two nodes with different limits build the same chain and differ only
+      after a reorganisation deeper than either would accept, which on a live
+      network means an attack or a partition lasting most of a day.
     </p>
   </div>
 </section>
@@ -793,6 +814,7 @@
       <div><span class="k">Maximum retarget</span><span class="v">factor 4</span></div>
       <div><span class="k">Maximum reorganisation depth</span><span class="v">1 024 blocks</span></div>
       <div><span class="k">Burial before a ledger is taken</span><span class="v">1 024 blocks</span></div>
+      <div><span class="k">Coinbase maturity</span><span class="v">1 024 blocks</span></div>
       <div><span class="k">Initial reward</span><span class="v">50 CAIRN</span></div>
       <div><span class="k">Halving interval</span><span class="v">1 051 200 blocks</span></div>
       <div><span class="k">Tail reward</span><span class="v">0.01 CAIRN, perpetual</span></div>

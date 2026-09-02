@@ -33,6 +33,7 @@ use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
 use cairn_net::message::{Handshake, Message, PROTOCOL_VERSION};
+use cairn_net::Keeps;
 use cairn_primitives::codec::{Decode, Encode};
 use cairn_primitives::{Amount, Hash32};
 
@@ -365,7 +366,10 @@ fn valid_messages() -> Vec<Vec<u8>> {
         tip: tip.id(),
         height: 2,
         total_work: 3,
-        archives: true,
+        keeps: Keeps {
+            headers: true,
+            cold_set: false,
+        },
         listen: 9944,
         nonce: 77,
     };
@@ -397,6 +401,20 @@ fn valid_messages() -> Vec<Vec<u8>> {
         .encode(),
         tip.encode(),
         tip.header.encode(),
+        Message::GetProofs(vec![0, 1, u64::MAX]).encode(),
+        Message::Proofs(vec![
+            cairn_net::message::Placed {
+                position: 1,
+                proof: Some(cairn_accumulator::ForestProof {
+                    siblings: vec![tip.id()],
+                }),
+            },
+            cairn_net::message::Placed {
+                position: 2,
+                proof: None,
+            },
+        ])
+        .encode(),
         transfer.encode(),
         handover.encode(),
     ]

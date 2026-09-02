@@ -197,9 +197,15 @@ fn a_record_that_is_not_a_block_is_reported_when_it_is_read() {
     assert!(replayed[1].is_err(), "the walk reports it too");
 }
 
-/// Bytes past the last record are what a write that never finished leaves.
+/// A whole record past the last good one, holding bytes that are not a block.
+///
+/// This is damage rather than an interrupted write: the file does not end
+/// inside the record, it ends after it. So nothing is cut, and what the count
+/// reports is how much is standing there unread. It used to report those same
+/// bytes as thrown away while they sat on the disk, and the test asserted it,
+/// which is how the contradiction survived a suite.
 #[test]
-fn bytes_the_index_does_not_reach_are_dropped() {
+fn a_record_that_is_not_a_block_is_named_and_left_alone() {
     let directory = scratch("trailing");
     let blocks = chain(2);
 
@@ -218,10 +224,19 @@ fn bytes_the_index_does_not_reach_are_dropped() {
         .unwrap();
     drop(file);
 
+    let whole = std::fs::metadata(directory.join(BLOCK_LOG)).unwrap().len();
     let (log, recovered) = BlockLog::open(&directory).unwrap();
     assert_eq!(recovered.blocks, 2);
-    assert_eq!(recovered.discarded_bytes, 8);
+    assert_eq!(recovered.unreadable, Some(2), "damage, not a torn write");
+    assert_eq!(recovered.discarded_bytes, 0, "and nothing was cut for it");
+    assert_eq!(recovered.left_in_place, 8);
     assert_eq!(read_back(&log), blocks);
+    drop(log);
+    assert_eq!(
+        std::fs::metadata(directory.join(BLOCK_LOG)).unwrap().len(),
+        whole,
+        "the bytes it reported are still where an operator can look at them"
+    );
 }
 
 /// The index is derived, so losing it costs one slow start and nothing else.
@@ -349,6 +364,15 @@ fn an_absurd_record_length_is_never_reserved() {
     let (log, recovered) = BlockLog::open(&present).unwrap();
     assert!(log.is_empty(), "nothing was reserved and nothing was read");
     assert_eq!(recovered.unreadable, Some(0), "reported as damage");
+    assert_eq!(
+        recovered.discarded_bytes, 0,
+        "nothing was cut, so nothing is reported as thrown away"
+    );
+    assert_eq!(
+        recovered.left_in_place,
+        u64::from(over) + 8,
+        "and the whole of it is reported as standing there unread"
+    );
     drop(log);
     assert_eq!(
         std::fs::metadata(present.join(BLOCK_LOG)).unwrap().len(),

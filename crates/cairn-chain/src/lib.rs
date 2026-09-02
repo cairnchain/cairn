@@ -189,6 +189,10 @@ const _: () = assert!(cairn_ledger::handover::BURIAL <= MAX_REORG_DEPTH as u64);
 /// be spent while the block that paid it is still reachable by a
 /// reorganisation. A maturity shorter than this depth quietly stops being that
 /// claim, and nothing else would say so.
+///
+/// This ties the two constants. A network that lowers its own burial and
+/// maturity together, as devnet does, keeps the claim through
+/// [`ChainStore::undo_limit`], which is where the rule is actually applied.
 const _: () = assert!(cairn_ledger::validation::COINBASE_MATURITY == MAX_REORG_DEPTH as u64);
 
 /// Blocks kept off the followed branch before the unreachable ones are
@@ -247,10 +251,10 @@ pub enum ChainError {
         source: BlockError,
     },
     #[error(
-        "switching branches here would undo {depth} blocks, past the {MAX_REORG_DEPTH} \
-         this node keeps undo records for"
+        "switching branches here would undo {depth} blocks, past the {limit} this \
+         network calls settled"
     )]
-    ForkTooDeep { depth: usize },
+    ForkTooDeep { depth: usize, limit: u64 },
     #[error(
         "a block at height {height} is below {floor}, the oldest this node could \
          still reorganise onto"
@@ -339,6 +343,7 @@ impl ChainError {
                 | BlockError::WrongDifficulty { .. }
                 | BlockError::InsufficientWork { .. }
                 | BlockError::WrongTotalWork { .. }
+                | BlockError::WrongVersion { .. }
         )
     }
 
@@ -836,6 +841,22 @@ impl ChainStore {
     /// Zero for a node that read its chain from the first block, and the
     /// height it was handed for a node that joined. What a log written from
     /// what this node holds has to start at.
+    /// The lowest height this chain can still answer a header for.
+    ///
+    /// Below [`Self::branch_start`] on a chain that has been running: the
+    /// branch remembers identifiers far further back than the blocks
+    /// themselves, by milestones, and what a block was is dropped entirely
+    /// once it is past undoing. So a walk that wants headers has to start
+    /// here, and starting at the branch's own beginning asks for blocks this
+    /// chain let go of on purpose.
+    ///
+    /// On a node that joined a chain this is its anchor, which is the honest
+    /// answer: the chain below it is one that node was never given.
+    #[must_use]
+    pub fn held_from(&self) -> u64 {
+        self.undo_from
+    }
+
     pub fn branch_start(&self) -> Option<u64> {
         if self.branch.is_empty() {
             return None;
@@ -874,6 +895,19 @@ impl ChainStore {
     pub fn block_at(&self, height: u64) -> Option<&Block> {
         let id = self.branch.id_at(height)?;
         self.block(&id)
+    }
+
+    /// The header of the branch's block at `height`, body or no body.
+    ///
+    /// A header is kept for every block on the branch whatever happens to its
+    /// body, so this answers where [`Self::block_at`] stops. Anything that
+    /// wants a header and asks for the block instead is asking for a hundred
+    /// and eighty two bytes and being refused for the want of a hundred and
+    /// twenty eight kilobytes it has no use for.
+    #[must_use]
+    pub fn header_at(&self, height: u64) -> Option<BlockHeader> {
+        let id = self.branch.id_at(height)?;
+        self.blocks.get(&id).map(|stored| stored.header)
     }
 
     /// The first block of the followed branch.
@@ -1361,6 +1395,20 @@ impl ChainStore {
             });
         }
 
+        // And the other half, which asking only about "too new" leaves open. A
+        // block carries exactly the version its height demands, so a tip that
+        // carries anything else is a tip no chain accepted. Without this, a
+        // node running one rule set adopts, whole and without a word, a ledger
+        // built under a rule set it does not run: mapped onto a real
+        // activation, an updated node handed the abandoned pre-fork chain
+        // takes it, reports itself up to date, and answers balances out of it.
+        if last.version != required {
+            return Err(ChainError::InvalidBlock {
+                id: tip.id,
+                source: BlockError::UnsupportedVersion(last.version),
+            });
+        }
+
         // Who this node follows is a fact about this node. It lives in the
         // ledger because that is where a falling note is seen, and a ledger
         // handed over by somebody else knows nothing about it, so assigning
@@ -1427,7 +1475,7 @@ impl ChainStore {
         // memory for a branch that ends in the same refusal, and a peer could
         // make a node hold a thousand of them by sending old history.
         if let Some(tip) = self.height() {
-            let floor = tip.saturating_sub(u64::try_from(MAX_REORG_DEPTH).unwrap_or(u64::MAX));
+            let floor = tip.saturating_sub(self.undo_limit());
             if block.header.height < floor {
                 return Err(ChainError::TooOld {
                     height: block.header.height,
@@ -1522,9 +1570,12 @@ impl ChainStore {
         // word on the rule it enforces, rather than as a check that happens to
         // be unreachable today.
         let keep = fork_position.map_or(0, |height| height.saturating_add(1));
-        let depth = usize::try_from(self.branch.len().saturating_sub(keep)).unwrap_or(usize::MAX);
-        if depth > MAX_REORG_DEPTH {
-            return Err(ChainError::ForkTooDeep { depth });
+        let depth = self.branch.len().saturating_sub(keep);
+        if depth > self.undo_limit() {
+            return Err(ChainError::ForkTooDeep {
+                depth: usize::try_from(depth).unwrap_or(usize::MAX),
+                limit: self.undo_limit(),
+            });
         }
 
         let rolled_back = self.rewind_to(fork_position)?;
@@ -1685,10 +1736,18 @@ impl ChainStore {
             if self.pool.len() >= MAX_POOLED || self.pool_bytes >= MAX_POOL_BYTES {
                 return;
             }
-            let Some(block) = self.block(id) else {
+            // Read through the disk, not out of memory. A body is let go of
+            // once it is more than `WARM_BODIES` below the tip and written,
+            // so reading only what is still in memory made this work for a
+            // shallow reorganisation and quietly do nothing for a deep one.
+            // The tests in this crate wire up no disk at all, which is why
+            // they could not see it: without one there is nothing to let go
+            // of, so every body was still in memory and the walk was right by
+            // accident.
+            let Some(block) = self.body_of(id) else {
                 continue;
             };
-            for transfer in block.transfers.clone() {
+            for transfer in block.transfers {
                 if self.pool.len() >= MAX_POOLED || self.pool_bytes >= MAX_POOL_BYTES {
                     return;
                 }
@@ -1744,6 +1803,29 @@ impl ChainStore {
     #[must_use]
     pub fn held_bytes(&self) -> usize {
         self.held_bytes
+    }
+
+    /// The deepest switch this node will make on the network it is on.
+    ///
+    /// [`MAX_REORG_DEPTH`] is what this build can undo; the burial is what the
+    /// network says is settled. A node must not undo past its own network's
+    /// burial, and the reason is not the number itself: a handover is anchored
+    /// there and a reward matures there. Undoing deeper would hand a newcomer
+    /// a ledger anchored at a block this node went on to orphan, and would
+    /// take back a reward the rules had already called spendable.
+    ///
+    /// Only the rule uses this. What is held in memory stays sized by the
+    /// constant, because holding more of the chain than can be undone is
+    /// harmless and every ceiling written against the constant stays true.
+    ///
+    /// On every public network the two are the same number. Devnet lowers
+    /// both so a throwaway chain settles in minutes, and this is what carries
+    /// the claim down with them.
+    #[must_use]
+    pub fn undo_limit(&self) -> u64 {
+        u64::try_from(MAX_REORG_DEPTH)
+            .unwrap_or(u64::MAX)
+            .min(self.params.burial)
     }
 
     /// The most this node will ever hold in blocks.

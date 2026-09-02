@@ -43,6 +43,7 @@ use cairn_ledger::LedgerState;
 use cairn_net::message::{Handshake, Joining, Message, PROTOCOL_VERSION};
 use cairn_net::node::MAX_PEERS;
 use cairn_net::wire::write_message;
+use cairn_net::Keeps;
 use cairn_net::Node;
 use cairn_primitives::codec::Encode;
 use cairn_primitives::Hash32;
@@ -131,7 +132,10 @@ fn hello(nonce: u64) -> Message {
         total_work: 0,
         listen: 0,
         nonce,
-        archives: false,
+        keeps: Keeps {
+            headers: false,
+            cold_set: false,
+        },
     })
 }
 

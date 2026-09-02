@@ -39,6 +39,7 @@ use cairn_net::message::{Handshake, Message, PROTOCOL_VERSION};
 use cairn_net::node::{Node, Refused};
 use cairn_net::sync::{local_handshake, on_message, Local, PeerState};
 use cairn_net::wire::{read_message, write_message, Incoming};
+use cairn_net::Keeps;
 use cairn_primitives::codec::Encode;
 use cairn_primitives::Hash32;
 
@@ -302,11 +303,22 @@ fn a_chain_forking_below_the_anchor_is_refused_and_now_says_so() {
     let mut peer = PeerState::new(None);
     let mut local = Local {
         chain: &mut chain,
-        shows_the_chain: false,
+        keeps: Keeps {
+            headers: false,
+            cold_set: false,
+        },
         listen: 9_000,
         nonce: 7,
     };
-    let hello = local_handshake(&honest.state_as_chain(), true, 9_100, 11);
+    let hello = local_handshake(
+        &honest.state_as_chain(),
+        Keeps {
+            headers: true,
+            cold_set: false,
+        },
+        9_100,
+        11,
+    );
     let greeting = on_message(&mut local, &mut peer, Message::Hello(hello), NOW);
     assert!(greeting.drop_peer.is_none());
     assert!(
@@ -429,7 +441,10 @@ fn a_node_on_probation_asks_somebody_other_than_its_supplier() {
         total_work: 0,
         listen: 1,
         nonce: 424_242,
-        archives: false,
+        keeps: Keeps {
+            headers: false,
+            cold_set: false,
+        },
     });
     write_message(&mut peer, params().network, &hello).unwrap();
     peer.flush().unwrap();
@@ -517,7 +532,10 @@ fn a_bare_peer(node: &Node, nonce: u64) -> TcpStream {
         total_work: 0,
         listen: 0,
         nonce,
-        archives: false,
+        keeps: Keeps {
+            headers: false,
+            cold_set: false,
+        },
     });
     write_message(&mut peer, params().network, &hello).unwrap();
     peer.flush().unwrap();

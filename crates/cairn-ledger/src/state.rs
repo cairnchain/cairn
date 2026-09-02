@@ -1047,6 +1047,52 @@ impl LedgerState {
     /// the notes fall.
     pub fn watch_owner(&mut self, owner: PublicKey) {
         self.watching.insert(owner);
+
+        // And take up the ones that have already fallen and are still in the
+        // grace window, which this ledger is holding a path for whether or not
+        // anybody had asked for them.
+        //
+        // Without this the repair to `adopt` closed half its case. A node
+        // handed a ledger follows its owner from that moment, so notes falling
+        // afterwards are followed; the ones that fell in the sixty-four blocks
+        // before the anchor arrived with a proof each, sat in the window
+        // unclaimed, and were let go of when the window aged past them. The
+        // handover went to the trouble of carrying a proof and the node threw
+        // it away, and the money it belonged to became unspendable in exactly
+        // the case the repair was written for.
+        //
+        // A note taken up here has no record of having fallen, so an undo
+        // cannot put it back where it was. That is right for the case this
+        // exists for, where the node was handed the window and can undo
+        // nothing below its anchor. Where an undo could reach it, the entry
+        // goes stale rather than wrong: the path stops folding to the
+        // commitment, and a wallet is told the proof cannot be produced, which
+        // is the safe direction and what it is already told about a note
+        // nobody kept a path for.
+        let taken: Vec<Fallen> = self
+            .grace
+            .iter()
+            .flatten()
+            .filter(|(_, _, note)| note.owner == owner)
+            .copied()
+            .collect();
+        for (id, position, note) in taken {
+            if self.watched_notes.insert(id, (position, note)).is_none() {
+                self.watched_by_worth.insert((note.value, position, id));
+            }
+        }
+
+        // The grace window can hold as many notes as the ceiling allows, so a
+        // back-fill on top of a full set would put it over. The same trim
+        // brings it back, cheapest first, which is the policy that makes the
+        // ceiling worth having rather than a place a note is dropped at random.
+        //
+        // Its record of what it let go of is dropped, because none of this is
+        // part of a block. Following a note is a fact about this node, not
+        // about the chain, and the worst an undo that cannot reach it can do
+        // is leave a cheap note unfollowed, which is where it started.
+        let mut nothing_to_undo = BlockUndo::default();
+        self.trim_followed(&mut nothing_to_undo);
     }
 
     pub fn is_watching(&self, owner: &PublicKey) -> bool {

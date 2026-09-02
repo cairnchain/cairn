@@ -18,6 +18,7 @@ use cairn_ledger::validation::ConsensusParams;
 use cairn_net::message::{Message, MAX_HEADERS, MAX_REQUESTED};
 use cairn_net::node::TARGET_PEERS;
 use cairn_net::sync::{on_message, Local, PeerState};
+use cairn_net::Keeps;
 use cairn_net::Node;
 
 fn params() -> ConsensusParams {
@@ -47,7 +48,10 @@ fn wait_until(patience: Duration, mut ready: impl FnMut() -> bool) -> bool {
 
 fn solo(chain: &mut ChainStore) -> Local<'_> {
     Local {
-        shows_the_chain: true,
+        keeps: Keeps {
+            headers: true,
+            cold_set: false,
+        },
         nonce: 1,
         chain,
         listen: 4242,

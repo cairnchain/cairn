@@ -22,6 +22,7 @@ use cairn_ledger::validation::{assemble_block, connect_block, mine_block, Consen
 use cairn_ledger::LedgerState;
 use cairn_net::message::{Handshake, Message, PROTOCOL_VERSION};
 use cairn_net::wire::write_message;
+use cairn_net::Keeps;
 use cairn_net::{Joined, Node};
 use cairn_primitives::codec::Encode;
 use cairn_primitives::Hash32;
@@ -37,6 +38,19 @@ const BURIAL: u64 = 8;
 
 fn params() -> ConsensusParams {
     ConsensusParams::testnet().with_burial(BURIAL)
+}
+
+/// The rules a network doing deep reorganisations has to have.
+///
+/// A node will not undo past what its own network buries at, because that
+/// depth is also where a handover is anchored and where a reward matures, and
+/// undoing past it would take back money the rules had already settled. So the
+/// shallow burial above, which exists to keep handover tests quick, is not a
+/// setting a chain that reorganises eighty blocks can be on. The two tests
+/// that reach that far are about bodies leaving memory and being read back,
+/// and have nothing to do with handovers, so they run on the real depth.
+fn deep_params() -> ConsensusParams {
+    ConsensusParams::testnet()
 }
 
 fn loopback() -> SocketAddr {
@@ -379,7 +393,10 @@ fn a_peer_that_sends_a_bad_block_is_dropped() {
         total_work: 0,
         listen: 1,
         nonce: 424_242,
-        archives: false,
+        keeps: Keeps {
+            headers: false,
+            cold_set: false,
+        },
     });
     write_message(&mut rude, params().network, &hello).unwrap();
     write_message(
@@ -1473,7 +1490,7 @@ fn invented_headers_are_refused_however_well_formed_they_are() {
 /// and reads them back when a reorganisation reaches that far.
 #[test]
 fn a_node_lets_go_of_block_bodies_and_reads_them_back() {
-    let params = params();
+    let params = deep_params();
     let mut shared_chain = Forge::new(params);
     // Past the window of bodies kept warm, so letting go has something to do
     // and a deep enough switch has to read.
@@ -1546,7 +1563,7 @@ fn a_node_lets_go_of_block_bodies_and_reads_them_back() {
 /// read them would be left holding neither branch.
 #[test]
 fn a_switch_that_fails_puts_back_a_branch_read_off_the_disk() {
-    let params = params();
+    let params = deep_params();
     let mut shared_chain = Forge::new(params);
     let common = shared_chain.mine_many(200);
 

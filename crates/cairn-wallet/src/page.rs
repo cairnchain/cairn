@@ -318,12 +318,11 @@ async function refresh() {
   }
 
   const stranded = $("stranded");
-  const strandedZero = state.stranded.startsWith("0.00000000");
-  stranded.hidden = strandedZero;
-  if (!strandedZero) {
-    stranded.innerHTML = "<b>" + state.stranded + "</b> sits in notes this " +
-      "node cannot prove. It is yours and it is not lost, but spending one " +
-      "takes a proof, and rebuilding a proof takes an archivist.";
+  stranded.hidden = state.strandedNote === null;
+  if (state.strandedNote !== null) {
+    const zero = state.stranded.startsWith("0.00000000");
+    stranded.innerHTML = (zero ? "" : "<b>" + state.stranded + "</b> is in " +
+      "notes that cannot move yet. ") + state.strandedNote;
   }
 
   const rows = $("rows");

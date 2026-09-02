@@ -950,9 +950,13 @@ fn a_record_the_store_cannot_read_is_named_rather_than_counted_in_bytes() {
         restored.blocks, 5,
         "and the node starts from the ones before"
     );
+    assert_eq!(
+        restored.discarded_bytes, 0,
+        "nothing was cut for it, so nothing is reported as thrown away"
+    );
     assert!(
-        restored.discarded_bytes > 0,
-        "the rest is set aside rather than replayed"
+        restored.left_in_place > 0,
+        "and what is standing there unread is what says how much this cost"
     );
     assert_eq!(node.written_through(), Some(4));
     drop(node);

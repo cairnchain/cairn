@@ -304,7 +304,16 @@ fn a_corrupt_record_with_no_index_comes_back_on_the_prefix() {
             Some(held),
             "attempt {attempt}: the damage is named, and not as a torn write"
         );
-        assert!(recovered.discarded_bytes > 0);
+        assert_eq!(
+            recovered.discarded_bytes, 0,
+            "attempt {attempt}: nothing was cut, and the count that says bytes \
+             were thrown away must not say so while they are still on the disk"
+        );
+        assert!(
+            recovered.left_in_place > 0,
+            "attempt {attempt}: what is standing there unread is what says \
+             whether this cost one block or a day of them"
+        );
 
         // Every record it does claim is one of the ones that went in.
         let back: Vec<Block> = log.replay().map(Result::unwrap).collect();

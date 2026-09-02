@@ -35,11 +35,44 @@ use cairn_primitives::codec::{Decode, Encode};
 
 use crate::StoreError;
 
+/// A header with nothing in it, for measuring what one encodes to.
+///
+/// Every field is fixed width, so any header answers the question and this is
+/// the one that needs no chain to exist.
+fn a_header() -> BlockHeader {
+    BlockHeader {
+        version: 0,
+        network: cairn_ledger::note::NetworkId::MAINNET,
+        height: 0,
+        previous: cairn_primitives::Hash32::ZERO,
+        transactions_root: cairn_primitives::Hash32::ZERO,
+        state_root: cairn_primitives::Hash32::ZERO,
+        history: cairn_primitives::Hash32::ZERO,
+        timestamp: 0,
+        difficulty: 0,
+        total_work: 0,
+        nonce: 0,
+    }
+}
+
 /// The name the header log takes inside a node's directory.
 pub const HEADER_LOG: &str = "headers.log";
 
 /// Bytes one header takes on disk, which is what it takes on the wire.
-pub const HEADER_BYTES: usize = 182;
+///
+/// The log has no record boundaries: a header is found by multiplying its
+/// index by this, so a header that stopped being this size would not be read
+/// wrongly at one place, it would be read wrongly everywhere after the first.
+/// Nothing about that is loud. The file is still the right shape, every record
+/// still decodes into a plausible header, and a node reads a chain of nonsense
+/// out of its own disk.
+///
+/// So it is taken from the header itself rather than written out, and checked
+/// against what this build actually encodes at every open rather than only in
+/// a test that has to be run. Adding a field to
+/// [`BlockHeader`] and forgetting this number stops a node from starting
+/// instead of teaching it a chain that was never mined.
+pub const HEADER_BYTES: usize = BlockHeader::ENCODED_BYTES;
 
 /// Every header this node has accepted, oldest first.
 #[derive(Debug)]
@@ -75,6 +108,11 @@ impl HeaderLog {
         let directory = directory.as_ref();
         std::fs::create_dir_all(directory)?;
         let path = directory.join(name);
+        let found = a_header().encode().len();
+        if found != HEADER_BYTES {
+            return Err(StoreError::HeaderSizeChanged { found });
+        }
+
         let file = OpenOptions::new()
             .read(true)
             .write(true)

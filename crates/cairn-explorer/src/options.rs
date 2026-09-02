@@ -55,9 +55,9 @@ cairn-explorer, a Cairn node that also serves a website
 The explorer always keeps the cold set, because answering questions about
 notes that have fallen is the whole point of it. That is a cost which grows
 with the chain, which is exactly what a plain node refuses to carry. The
-index it builds on top grows faster still: about five hundred bytes for every
-note that has ever existed, against seventy two for every note that has
-fallen. Both are reported live at /api/status.";
+index it builds on top grows faster still: 565 bytes for every note that has
+ever existed, against seventy two for every note that has fallen. Both are
+reported live at /api/status.";
 
 /// Everything the explorer needs to start.
 #[derive(Clone, Debug)]
@@ -72,6 +72,8 @@ pub(crate) struct Options {
     pub(crate) params: ConsensusParams,
     /// Bytes of blocks to keep on disk, `u64::MAX` for every one of them.
     pub(crate) keep: u64,
+    /// Whether the operator asked for the settings and nothing else.
+    pub(crate) check: bool,
 }
 
 #[derive(Debug, Default)]
@@ -120,6 +122,14 @@ fn parse_arguments(arguments: &[String]) -> Result<Given, String> {
         let Some(value) = arguments.get(index) else {
             return Err(format!("`--{name}` needs a value"));
         };
+        // A value that begins with two dashes is a value the operator left
+        // out. Taking it as one gave `--data --check` a chain directory called
+        // `--check`, and swallowed the flag on the way past.
+        if value.starts_with("--") {
+            return Err(format!(
+                "`--{name}` needs a value, and `{value}` is another option"
+            ));
+        }
         index = index.saturating_add(1);
         given.push(name, value.clone());
     }
@@ -163,6 +173,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         seed_names,
         params,
         keep,
+        check: given.has("check"),
     }))
 }
 
@@ -219,7 +230,7 @@ pub(crate) fn size(bytes: u64) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{parse_arguments, resolve_options};
+    use super::{parse_arguments, resolve_options, HELP};
 
     fn arguments(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| (*part).to_owned()).collect()
@@ -265,6 +276,38 @@ mod tests {
 
         let error = resolve_options(&arguments(&["--keep", "plenty"])).unwrap_err();
         assert!(error.contains("is not a size"), "{error}");
+    }
+
+    /// `--check` is a setting, so it is read off the settings.
+    ///
+    /// It used to be found by looking through the words the operator typed for
+    /// one that read `--check`, which found it in the one place it was not:
+    /// standing where another option's value belongs. `--data --check` printed
+    /// the settings, stopped, and exited nought, having never started the site
+    /// and never said why.
+    #[test]
+    fn a_flag_standing_where_a_value_belongs_is_not_the_flag() {
+        let options = resolve_options(&arguments(&["--check"])).unwrap().unwrap();
+        assert!(options.check, "asked for plainly");
+
+        let error = resolve_options(&arguments(&["--data", "--check"])).unwrap_err();
+        assert!(error.contains("another option"), "{error}");
+
+        let options = resolve_options(&arguments(&["--data", "somewhere"]))
+            .unwrap()
+            .unwrap();
+        assert!(!options.check, "and nothing here asked for it at all");
+    }
+
+    /// The help text quotes what one note costs the index. An operator sizes a
+    /// machine off that figure, so it is held to the one the program reports.
+    #[test]
+    fn the_help_quotes_the_figure_the_index_uses() {
+        let figure = crate::index::BYTES_PER_NOTE.to_string();
+        assert!(
+            HELP.contains(&figure),
+            "the help says something other than {figure} bytes a note"
+        );
     }
 
     #[test]

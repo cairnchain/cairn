@@ -103,6 +103,12 @@ pub enum StoreError {
     RecordTooLarge { index: usize, declared: usize },
     #[error("block would not fit in one record")]
     BlockTooLarge,
+    #[error(
+        "this build encodes a header in {found} bytes and the log is laid out for \
+         {HEADER_BYTES}, so every record after the first would be read at the wrong \
+         offset"
+    )]
+    HeaderSizeChanged { found: usize },
     #[error("{path} is already in use by {holder}, which is still running")]
     Locked { path: String, holder: String },
     #[error(
@@ -162,16 +168,28 @@ pub enum StoreError {
 pub struct Recovered {
     /// Records the log holds.
     pub blocks: usize,
-    /// Bytes at the end of the log that no record accounts for.
+    /// Bytes cut off the end of the log, which no record accounted for.
     ///
     /// A record the file stops in the middle of is the ordinary trace of a
     /// crash during a write, and setting it aside costs one block that will
     /// simply be fetched again. Those bytes are cut away, because a record the
     /// file ends inside cannot become one however often it is read.
     ///
-    /// A whole record that will not decode is a different thing and is counted
-    /// here too, but the bytes are left where they are: see `unreadable`.
+    /// Zero when `unreadable` is set, and the two must not be added together.
+    /// This used to count that case as well, so a log damaged rather than cut
+    /// short reported bytes as thrown away while they were still sitting on
+    /// the disk, and the count was the whole tail from the bad record on
+    /// rather than a fragment. An operator told bytes are gone looks for a
+    /// backup; an operator told bytes are unreadable and still there looks at
+    /// them.
     pub discarded_bytes: u64,
+    /// Bytes left on the disk past the last record that could be read.
+    ///
+    /// Only ever set alongside `unreadable`, and set instead of
+    /// `discarded_bytes` rather than beside it. Nothing was removed: this is
+    /// how much of the log is standing there unread, which is what says
+    /// whether the damage cost one block or a day of them.
+    pub left_in_place: u64,
     /// The record a walk of the log stopped at, when what stopped it was a
     /// whole record that would not decode rather than one cut short.
     ///
@@ -761,6 +779,7 @@ impl BlockLog {
         Ok(Recovered {
             blocks: count,
             discarded_bytes: 0,
+            left_in_place: 0,
             unreadable: None,
         })
     }
@@ -870,20 +889,21 @@ impl BlockLog {
     /// doing more harm than the byte did. It comes back with the prefix, says
     /// so, and asks for the rest again.
     fn settle(&mut self, unreadable: Option<usize>, total: u64) -> Result<Recovered, StoreError> {
-        let discarded = total.saturating_sub(self.end);
+        let beyond = total.saturating_sub(self.end);
         self.trailing = 0;
-        if discarded > 0 {
-            if unreadable.is_none() {
-                self.file.set_len(self.end)?;
-                self.file.sync_data()?;
-            } else {
-                self.trailing = discarded;
-            }
-        }
+        let cut = if beyond > 0 && unreadable.is_none() {
+            self.file.set_len(self.end)?;
+            self.file.sync_data()?;
+            beyond
+        } else {
+            self.trailing = beyond;
+            0
+        };
         self.first = self.height_of_first()?;
         Ok(Recovered {
             blocks: self.count,
-            discarded_bytes: discarded,
+            discarded_bytes: cut,
+            left_in_place: beyond.saturating_sub(cut),
             unreadable,
         })
     }

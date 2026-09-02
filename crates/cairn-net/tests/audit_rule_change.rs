@@ -34,6 +34,7 @@ use cairn_ledger::LedgerState;
 use cairn_net::message::{Handshake, Message, PROTOCOL_VERSION};
 use cairn_net::sync::{on_message, Local, PeerState};
 use cairn_net::wire::write_message;
+use cairn_net::Keeps;
 use cairn_net::Node;
 use cairn_primitives::Hash32;
 
@@ -108,7 +109,10 @@ fn greeted() -> PeerState {
 
 fn solo(chain: &mut ChainStore) -> Local<'_> {
     Local {
-        shows_the_chain: true,
+        keeps: Keeps {
+            headers: true,
+            cold_set: false,
+        },
         nonce: 1,
         chain,
         listen: 4242,
@@ -129,7 +133,10 @@ fn hello(nonce: u64) -> Message {
         total_work: 0,
         listen: 4_242,
         nonce,
-        archives: false,
+        keeps: Keeps {
+            headers: false,
+            cold_set: false,
+        },
     })
 }
 

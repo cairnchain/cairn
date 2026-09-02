@@ -89,6 +89,16 @@ struct Known {
     quiet_until: u64,
     /// Given at the start rather than learned along the way.
     seed: bool,
+    /// Whether this address said, last time it introduced itself, that it
+    /// keeps the cold set.
+    ///
+    /// Not written down either, and for a reason of its own beyond the one
+    /// above: whether a machine archives is its operator's choice and can stop
+    /// being true between one start and the next, so a file carrying it would
+    /// be a file that sends a wallet somewhere that has stopped answering.
+    /// Heard again on the first handshake of every connection, which costs
+    /// nothing, and it is only ever used to decide who to ask first.
+    archives: bool,
 }
 
 impl Known {
@@ -274,6 +284,34 @@ impl AddressBook {
     /// node cannot tell which, and it does not need to. What it can tell is
     /// that the whole world went quiet at once, and the whole world does not
     /// go quiet at once.
+    /// Writes down what an address said about keeping the cold set.
+    ///
+    /// Only for an address already in the book. Learning about an archivist is
+    /// not a reason to write down an address that would not otherwise be kept,
+    /// because who this node dials is decided by the book's own rules and not
+    /// by what a stranger says it can do for anyone.
+    pub fn keeps_the_cold_set(&mut self, address: &SocketAddr, archives: bool) {
+        if let Some(known) = self.known.get_mut(address) {
+            known.archives = archives;
+        }
+    }
+
+    /// Addresses that said they keep the cold set, newest first.
+    ///
+    /// For a wallet that needs a path rebuilt and is connected to nobody who
+    /// can rebuild one. Ordered by when each last spoke, because the one that
+    /// spoke most recently is the one most likely to answer a dial.
+    pub fn archivists(&self) -> Vec<SocketAddr> {
+        let mut found: Vec<(u64, SocketAddr)> = self
+            .known
+            .iter()
+            .filter(|(_, known)| known.archives)
+            .map(|(address, known)| (known.heard, *address))
+            .collect();
+        found.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+        found.into_iter().map(|(_, address)| address).collect()
+    }
+
     pub fn forgive_all(&mut self) {
         for known in self.known.values_mut() {
             known.misses = 0;
@@ -1015,5 +1053,41 @@ mod tests {
         .unwrap();
         let book = AddressBook::load(&directory);
         assert_eq!(book.len(), 1, "the readable lines are kept");
+    }
+
+    #[test]
+    fn an_address_that_keeps_the_cold_set_can_be_found_again() {
+        let mut book = AddressBook::new();
+        let plain: SocketAddr = "203.0.113.1:9000".parse().unwrap();
+        let keeper: SocketAddr = "203.0.113.2:9000".parse().unwrap();
+        book.insert(plain);
+        book.insert(keeper);
+        book.answered(&plain, 100);
+        book.answered(&keeper, 200);
+        book.keeps_the_cold_set(&plain, false);
+        book.keeps_the_cold_set(&keeper, true);
+
+        assert_eq!(
+            book.archivists(),
+            vec![keeper],
+            "the one that said it keeps the set, and only that one"
+        );
+
+        // An operator can stop archiving between one connection and the next,
+        // and the claim is heard again on every handshake.
+        book.keeps_the_cold_set(&keeper, false);
+        assert!(book.archivists().is_empty());
+    }
+
+    #[test]
+    fn what_an_address_keeps_is_not_a_reason_to_write_it_down() {
+        let mut book = AddressBook::new();
+        let stranger: SocketAddr = "203.0.113.9:9000".parse().unwrap();
+        book.keeps_the_cold_set(&stranger, true);
+        assert!(
+            book.is_empty(),
+            "who this node dials is decided by the book's own rules, not by \
+             what somebody says they could do for anyone"
+        );
     }
 }

@@ -58,7 +58,14 @@ fn run(arguments: &[String]) -> Result<(), String> {
     // second: a retired test network leaves its name in a unit file, and an
     // explorer that will not start is a worse answer than a script that saw
     // the refusal and asked for the current name instead.
-    if arguments.iter().any(|argument| argument == "--check") {
+    //
+    // Read from the settings rather than by looking through the words the
+    // operator typed. Looking through them found `--check` wherever it stood,
+    // including where it stood as the value of something else, so
+    // `--data --check` printed the settings and stopped without ever starting
+    // the site, and the operator who meant to name a directory got an exit
+    // code of nought for it.
+    if options.check {
         return Ok(());
     }
 
@@ -116,7 +123,14 @@ fn run(arguments: &[String]) -> Result<(), String> {
     // to wait for it: on a chain of any size that is minutes of a bound socket
     // with nobody answering, so a visitor got a page that hung rather than one
     // that said what was going on. The site can say "still reading the chain",
-    // and it does, which is better than saying nothing slowly.
+    // and it does.
+    //
+    // It could not, for a while, and the door being open was the whole of what
+    // had been fixed. The indexer above holds the index while it reads and
+    // every route wants the index, so opening early bought a socket that
+    // accepted connections and then answered nobody until the first pass was
+    // over. The walk now stops every so often and lets go, which is what makes
+    // the sentence above true rather than intended.
 
     let languages: Vec<&str> = assets::LOCALES.iter().map(|(code, _, _)| *code).collect();
     println!("languages    {}", languages.join(", "));

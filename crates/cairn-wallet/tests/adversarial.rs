@@ -1075,7 +1075,7 @@ fn a_history_whose_bytes_changed_is_refused_rather_than_believed() {
     history.save(&file).expect("written");
     let honest = std::fs::read(&file).unwrap();
     assert_eq!(
-        cairn_wallet::history::History::load(&file).held().count(),
+        cairn_wallet::history::History::load(&file).0.held().count(),
         notes,
         "what was written comes back whole"
     );
@@ -1089,6 +1089,7 @@ fn a_history_whose_bytes_changed_is_refused_rather_than_believed() {
         std::fs::write(&file, &bent).unwrap();
         assert!(
             cairn_wallet::history::History::load(&file)
+                .0
                 .held()
                 .next()
                 .is_none(),
@@ -1102,6 +1103,7 @@ fn a_history_whose_bytes_changed_is_refused_rather_than_believed() {
         std::fs::write(&file, &honest[..keep.min(honest.len())]).unwrap();
         assert!(
             cairn_wallet::history::History::load(&file)
+                .0
                 .held()
                 .next()
                 .is_none(),

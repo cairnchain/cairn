@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::history::{History, Movement};
+use crate::history::{Discarded, History, Movement};
 use cairn_accumulator::ForestProof;
 use cairn_chain::Outdated;
 use cairn_crypto::{random_bytes, PublicKey, SecretKey};
@@ -200,6 +200,13 @@ pub struct Holdings {
     /// total would show a balance that quietly went down, which is the worst
     /// thing a wallet can tell anyone.
     pub stranded: Amount,
+    /// The notes that money is in, so a wallet can go and ask for what it
+    /// takes to move them.
+    ///
+    /// Named rather than only counted. A total says there is a problem; this
+    /// says which notes have it and where each one landed, which is everything
+    /// somebody who kept the whole record needs to be asked.
+    pub unprovable: Vec<Unprovable>,
     /// The notes a spend can reach for, so a face can show where the money
     /// sits.
     ///
@@ -217,6 +224,127 @@ impl Holdings {
             .checked_add(self.waiting)
             .and_then(|sum| sum.checked_add(self.stranded))
             .unwrap_or(self.spendable)
+    }
+}
+
+/// One note this key owns whose path this wallet's node cannot produce.
+///
+/// Real money in an awkward place. A note that has fallen out of the set every
+/// node keeps can only be spent alongside a path showing where it sits, that
+/// path changes every time another note falls, and no node keeps one for ever
+/// for somebody it is not following. What is left is this: the note, and where
+/// it landed.
+#[derive(Clone, Copy, Debug)]
+pub struct Unprovable {
+    pub id: NoteId,
+    pub note: Note,
+    /// Where it landed, if this wallet's own account saw it land.
+    ///
+    /// Without it there is nobody to ask. The set is a list of hashes with no
+    /// name attached to any of them, so where a note sits is the only handle
+    /// anyone has on it, and a wallet that never saw one of its notes fall
+    /// never had that handle.
+    pub fell_at: Option<u64>,
+}
+
+/// What came of asking somebody to rebuild the paths this wallet is missing.
+///
+/// Kept so that whatever is showing the balance can say what happened, rather
+/// than naming a service and leaving the person holding the wallet to go and
+/// find it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Recovery {
+    /// Notes that could not be spent when this ran.
+    pub stranded: usize,
+    /// How many of those this wallet could not even ask about, having never
+    /// seen where they landed.
+    pub unplaceable: usize,
+    /// Peers the question went to. Zero means there was nobody to ask.
+    pub asked: usize,
+    /// How many of those said they keep the whole record.
+    pub archivists: usize,
+    /// Peers that answered at all, whatever the answer was.
+    pub answered: usize,
+    /// Notes that can move again, because somebody rebuilt what it takes.
+    pub rebuilt: usize,
+    /// Answers this wallet would not use, because what came back did not fit
+    /// the chain its own node has checked.
+    pub refused: usize,
+}
+
+impl Recovery {
+    /// What to tell the person holding the wallet, in words that do not
+    /// assume they know how any of this works.
+    ///
+    /// `None` when there is nothing to say, which is a wallet with no money in
+    /// this state at all.
+    #[must_use]
+    pub fn words(&self) -> Option<String> {
+        if self.stranded == 0 {
+            return None;
+        }
+        let notes = if self.stranded == 1 {
+            "one note".to_owned()
+        } else {
+            format!("{} notes", self.stranded)
+        };
+        if self.rebuilt > 0 && self.rebuilt >= self.stranded {
+            return Some(format!(
+                "Spending a note that has been put away needs a small piece of \
+                 evidence that goes stale, and this wallet's own copy had gone \
+                 stale for {notes}. It asked {} of the machines it is connected \
+                 to, got fresh evidence back, and checked it against the chain it \
+                 has verified itself. That money can move again.",
+                self.asked
+            ));
+        }
+        if self.rebuilt > 0 {
+            return Some(format!(
+                "Spending a note that has been put away needs a small piece of \
+                 evidence that goes stale, and this wallet's own copy had gone \
+                 stale for {notes}. It asked around and got fresh evidence for {} \
+                 of them, checked against the chain it has verified itself. The \
+                 rest is still stuck, and asking again later may find it.",
+                self.rebuilt
+            ));
+        }
+        if self.unplaceable >= self.stranded {
+            return Some(format!(
+                "This wallet holds {notes} it cannot spend and cannot ask about. \
+                 Spending a note that has been put away needs to know where it \
+                 was put, and this wallet was not running when that happened, so \
+                 it has no way to say which note to ask after. The money is not \
+                 lost: it is on the chain and it is yours. Nothing here can reach \
+                 it."
+            ));
+        }
+        if self.asked == 0 {
+            return Some(format!(
+                "This wallet holds {notes} it cannot spend yet. Spending a note \
+                 that has been put away needs a small piece of evidence that goes \
+                 stale, and this wallet's copy has. Rebuilding one takes a machine \
+                 that kept the whole record, and this wallet is not connected to \
+                 anything at all. Connect to a peer that was started with \
+                 --archive, or start one yourself."
+            ));
+        }
+        if self.archivists == 0 {
+            return Some(format!(
+                "This wallet holds {notes} it cannot spend yet. Spending a note \
+                 that has been put away needs a small piece of evidence that goes \
+                 stale, and this wallet's copy has. Rebuilding one takes a machine \
+                 that kept the whole record, and none of the {} this wallet is \
+                 connected to says it did. Connect to a peer started with \
+                 --archive, or start one yourself.",
+                self.asked
+            ));
+        }
+        Some(format!(
+            "This wallet holds {notes} it cannot spend yet. It asked {} machines \
+             that keep the whole record, and none of them could say where these \
+             notes sit. Asking again later may do better; so may a different peer.",
+            self.archivists
+        ))
     }
 }
 
@@ -276,17 +404,63 @@ pub struct Progress {
     /// keeping it is one restart away from reading its way back from the
     /// oldest block its node still holds.
     pub keeping_its_account: bool,
+    /// Why the account this wallet had written down was not read back, if it
+    /// was there and was not used.
+    ///
+    /// Set once at start and left set, because what it costs does not go away
+    /// when the rescan catches up: the movements below where the reading
+    /// restarts are gone whatever the height says afterwards.
+    pub lost_its_account: Option<Discarded>,
+}
+
+/// The line for a wallet whose own account of what it was paid did not read
+/// back.
+///
+/// Its own function because the three reasons need three different sentences
+/// and the one thing they must not do is share a vague one: an operator told
+/// their disk is suspect looks at hardware, and one told their wallet is a
+/// version behind looks at the version.
+fn lost_its_account(why: Discarded) -> String {
+    let because = match why {
+        Discarded::BeforeTheStamp => {
+            "It was written by an older version of this wallet, which did not stamp \
+             the file, and this one only reads back a file it can tell is the one it \
+             wrote. This happens once."
+        }
+        Discarded::DidNotVerify => {
+            "It was there and its contents were not the ones this wallet wrote, which \
+             means the disk changed it. This is worth looking into."
+        }
+        Discarded::FromANewerVersion => {
+            "It was written by a newer version of this wallet and holds things this \
+             one has no reader for. The file is whole and your disk is fine. Going \
+             back to the newer version reads it again."
+        }
+    };
+    format!(
+        "This wallet did not read back the account it had written down. {because} It is \
+         reading the chain again to rebuild it, so the balance beside this becomes right \
+         on its own. What does not come back is the list of payments older than the \
+         oldest block your node still holds. Nothing is lost on the chain and the key \
+         file is not touched."
+    )
 }
 
 impl Progress {
     /// What is wrong with the numbers beside this, in words a face can show
     /// without knowing what a node is.
     ///
-    /// All three of these look, from the outside, exactly like a wallet that
-    /// is working: a height, a balance, and no complaint. Two of them mean the
-    /// height stopped moving some time ago and will not start again, and the
-    /// third means the balance is a stranger's word rather than this wallet's
-    /// own reading. None of them is worth hiding to keep a page tidy.
+    /// All of these look, from the outside, exactly like a wallet that is
+    /// working: a height, a balance, and no complaint. Some of them mean the
+    /// height stopped moving some time ago and will not start again, and one
+    /// means the balance is a stranger's word rather than this wallet's own
+    /// reading. None of them is worth hiding to keep a page tidy.
+    ///
+    /// Only one line is shown, so the order is a ranking. The ones that mean
+    /// the numbers beside them are wrong or frozen come first; the account
+    /// this wallet lost comes last, because the balance is right and becomes
+    /// right again on its own, and what it costs is a record rather than
+    /// money.
     #[must_use]
     pub fn warning(&self) -> Option<String> {
         if let Some(unwritten) = &self.unwritten {
@@ -352,6 +526,9 @@ impl Progress {
                 stranded.anchor, stranded.settles_at, stranded.anchor
             ));
         }
+        if let Some(why) = self.lost_its_account {
+            return Some(lost_its_account(why));
+        }
         if let Some(probation) = self.probation {
             return Some(format!(
                 "This wallet has not yet checked the chain it is showing you. It was handed the \
@@ -416,8 +593,50 @@ pub struct Sent {
     pub handed_on: bool,
 }
 
+/// A path somebody rebuilt for this wallet, if it still reaches the set as it
+/// stands.
+///
+/// Checked rather than remembered, and checked here rather than where it
+/// arrived. A path folds from the place a note sits up to a single value the
+/// whole set comes to, and that value changes every time a note falls
+/// anywhere, so a path that was right a minute ago can be wrong now. This is
+/// the same check the network itself will make when the note is spent, which
+/// is why doing it here is worth anything: a wallet that offered a stale one
+/// would be building a payment nobody will carry.
+fn current(
+    rebuilt: &BTreeMap<NoteId, (u64, ForestProof)>,
+    state: &cairn_ledger::LedgerState,
+    id: NoteId,
+    note: Note,
+) -> Option<(u64, ForestProof)> {
+    let (position, proof) = rebuilt.get(&id)?;
+    let leaf = cairn_ledger::state::cold_leaf(&id, &note);
+    state
+        .cold()
+        .verify(*position, leaf, proof)
+        .then(|| (*position, proof.clone()))
+}
+
 /// What the history is written to, inside the wallet's own directory.
 const HISTORY_FILE: &str = "history.dat";
+
+/// How long a wallet waits for somebody to rebuild the paths it is missing.
+///
+/// One round trip on connections that are already open, so this is generous
+/// rather than tight. What it is generous for is the case where nobody
+/// connected keeps the record and the node has to open a connection to
+/// somebody who does before it can ask at all.
+const RECOVERY_PATIENCE: Duration = Duration::from_secs(3);
+
+/// How long between two attempts at the same thing.
+///
+/// A page redraws itself every second, and each redraw counts the money. Asking
+/// the network every time would be a wallet with an awkward note in it sending
+/// a stranger a question a second for as long as it was left open. Fifteen
+/// seconds is short enough that somebody who has just connected to an
+/// archivist sees their money come back while they are still looking at the
+/// screen.
+const RECOVERY_PAUSE: Duration = Duration::from_secs(15);
 
 /// Blocks read into the history in one go.
 ///
@@ -463,6 +682,41 @@ pub struct Wallet {
     history_file: PathBuf,
     /// Whether the last attempt to write it down worked.
     wrote_history: Mutex<bool>,
+    /// Why the account on disk was not read back at start, if it was not.
+    lost_its_account: Option<Discarded>,
+    /// Paths somebody else rebuilt, for notes this wallet's node cannot place.
+    ///
+    /// Held here rather than handed to the node, because the node has no way
+    /// to keep them current: a path is worth what it is worth against the set
+    /// as it stands, and this node's cold set moves every time a note falls
+    /// anywhere. So each one is checked again, against the set as it stands,
+    /// every time the money is counted. One that has gone stale is simply not
+    /// offered, and asking again costs one message.
+    rebuilt: Mutex<BTreeMap<NoteId, (u64, ForestProof)>>,
+    /// What came of the last time this wallet asked.
+    ///
+    /// Kept because a face reads this as often as it redraws, and the asking
+    /// is a round trip to a stranger.
+    last_recovery: Mutex<Asked>,
+}
+
+/// The last time this wallet asked the network for paths, and what came of it.
+#[derive(Clone, Debug, Default)]
+struct Asked {
+    report: Recovery,
+    /// When, so a face redrawing itself once a second does not send a stranger
+    /// a question once a second.
+    at: Option<Instant>,
+    /// The places that were asked about and not answered for.
+    ///
+    /// What decides whether asking again is worth anything. A wallet stuck on
+    /// the same places, with the same peers, would get the same nothing, and
+    /// waiting is the right answer. A wallet stuck on a place that was
+    /// answered for last time is a different matter: the path it was given has
+    /// gone stale, which happens whenever enough notes fall to change the
+    /// shape of the set, and its owner is looking at money that worked a
+    /// moment ago. That one asks again at once.
+    unresolved: BTreeSet<u64>,
 }
 
 impl std::fmt::Debug for Wallet {
@@ -489,7 +743,7 @@ impl Wallet {
         let (node, restored) = Node::open_watching(params, listen, data, &[mine])
             .map_err(|error| WalletError::CouldNotStart(error.to_string()))?;
         let history_file = data.join(HISTORY_FILE);
-        let history = History::load(&history_file);
+        let (history, lost_its_account) = History::load(&history_file);
         Ok((
             Self {
                 node,
@@ -498,6 +752,9 @@ impl Wallet {
                 history: Mutex::new(history),
                 history_file,
                 wrote_history: Mutex::new(true),
+                rebuilt: Mutex::new(BTreeMap::new()),
+                last_recovery: Mutex::new(Asked::default()),
+                lost_its_account,
             },
             restored.blocks,
         ))
@@ -606,6 +863,7 @@ impl Wallet {
             unwritten: self.node.unwritten(),
             unjudged: self.node.unjudged(),
             keeping_its_account: self.wrote_history.lock().map_or(true, |wrote| *wrote),
+            lost_its_account: self.lost_its_account,
         }
     }
 
@@ -698,7 +956,54 @@ impl Wallet {
         if taken > 0 {
             self.write_history(&history);
         }
+        drop(history);
+        self.note_where_they_landed();
         taken
+    }
+
+    /// Writes down where this key's fallen notes landed, while the node can
+    /// still say.
+    ///
+    /// It cannot always. A node keeps track of a fallen note for the owners it
+    /// follows and for as long as it has room, and past that it lets the least
+    /// valuable ones go; a node restarted from a ledger it wrote down keeps
+    /// none of them at all, because where a note landed is a fact about this
+    /// machine rather than about the chain and a ledger carries neither the
+    /// asking nor the answer.
+    ///
+    /// The place is the half worth keeping. It is fixed the moment a note
+    /// falls and never moves again, while the path up to it moves every time
+    /// another note falls, which is why nobody keeps paths for strangers and
+    /// why the place is what a wallet has to be able to name later.
+    ///
+    /// Walked rather than watched for, because there is nowhere to hang the
+    /// watching: what the node knows is a map, and comparing it against this
+    /// account is a pass over the wallet's own notes. Nothing is written
+    /// unless something was learned.
+    fn note_where_they_landed(&self) {
+        let mine = self.address();
+        let landed: Vec<(NoteId, u64)> = self.node.with_chain(|chain| {
+            chain
+                .state()
+                .watched_notes()
+                .filter(|(_, _, note)| note.owner == mine)
+                .map(|(id, position, _)| (id, position))
+                .collect()
+        });
+        if landed.is_empty() {
+            return;
+        }
+        let mut history = self
+            .history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut learned = false;
+        for (id, position) in landed {
+            learned |= history.fell_at(id, position);
+        }
+        if learned {
+            self.write_history(&history);
+        }
     }
 
     /// This key's own account of what happened to it, newest first.
@@ -768,6 +1073,129 @@ impl Wallet {
         self.reckon().1
     }
 
+    /// Asks the network to rebuild what it takes to spend the notes this
+    /// wallet's own node can no longer place, and says what happened.
+    ///
+    /// Money in this state is real, correct and unspendable, and until now the
+    /// only thing a wallet did about it was name a service and leave its owner
+    /// to go and find one. This is the wallet going and finding one.
+    ///
+    /// Nothing is trusted. What comes back is a path, and a path either folds
+    /// to a value this wallet's own node worked out from the blocks it checked
+    /// itself, or it is thrown away. So the question can be put to an
+    /// anonymous stranger, which is the whole reason it is a question a node
+    /// asks another node rather than a request to a website somebody has to
+    /// keep running.
+    ///
+    /// Waits, because it is one round trip and there is nothing useful to do
+    /// meanwhile, and asks again at most every [`RECOVERY_PAUSE`], because
+    /// whatever is showing the balance calls this every time it redraws.
+    pub fn recover_stranded(&self) -> Recovery {
+        let holdings = self.holdings();
+        if holdings.unprovable.is_empty() {
+            let mut last = self
+                .last_recovery
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            last.report = Recovery::default();
+            last.unresolved.clear();
+            return Recovery::default();
+        }
+
+        // The place is what is asked about and the leaf is what the answer has
+        // to fold to. Neither says whose money it is: a leaf is a hash, and a
+        // place is a number, so what a wallet hands an archivist is a list of
+        // positions in a set that archivist already holds in full.
+        let wanted: Vec<(u64, Hash32)> = holdings
+            .unprovable
+            .iter()
+            .filter_map(|one| {
+                Some((
+                    one.fell_at?,
+                    cairn_ledger::state::cold_leaf(&one.id, &one.note),
+                ))
+            })
+            .collect();
+        let places: BTreeSet<u64> = wanted.iter().map(|(at, _)| *at).collect();
+        {
+            let last = self
+                .last_recovery
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let paused = last
+                .at
+                .is_some_and(|asked| asked.elapsed() < RECOVERY_PAUSE);
+            // Three ways the pause does not apply, and each of them is a
+            // moment somebody is waiting on. Asking about a place that was
+            // answered for before means the path has gone stale rather than
+            // that nobody has one. Somebody worth asking arriving is the whole
+            // of what an empty-handed wallet was waiting for. And a wallet
+            // that had nobody at all to ask has a fresh question the moment it
+            // has anybody.
+            let same_question = places.is_subset(&last.unresolved);
+            let better_now = self.node.archiving_peers() > last.report.archivists
+                || (last.report.asked == 0 && self.node.peer_count() > 0);
+            if paused && same_question && !better_now {
+                return last.report;
+            }
+        }
+
+        let unplaceable = holdings.unprovable.len().saturating_sub(wanted.len());
+        let answer = self.node.recover_proofs(&wanted, RECOVERY_PATIENCE);
+
+        // Back from places to notes. The answer is about places because that
+        // is all the answerer was told, and this wallet is the only party that
+        // knows which of its notes each one is.
+        let mut rebuilt = self
+            .rebuilt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut mended = 0usize;
+        for one in &holdings.unprovable {
+            let Some(position) = one.fell_at else {
+                continue;
+            };
+            let Some(proof) = answer.proofs.get(&position) else {
+                continue;
+            };
+            rebuilt.insert(one.id, (position, proof.clone()));
+            mended = mended.saturating_add(1);
+        }
+        drop(rebuilt);
+
+        let recovery = Recovery {
+            stranded: holdings.unprovable.len(),
+            unplaceable,
+            asked: answer.asked,
+            archivists: answer.archivists,
+            answered: answer.answered,
+            rebuilt: mended,
+            refused: answer.refused,
+        };
+        let mut last = self
+            .last_recovery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        last.unresolved = places
+            .into_iter()
+            .filter(|at| !answer.proofs.contains_key(at))
+            .collect();
+        last.report = recovery;
+        last.at = Some(Instant::now());
+        recovery
+    }
+
+    /// What the last asking came to, without asking again.
+    ///
+    /// For a face that has already asked once and is redrawing.
+    #[must_use]
+    pub fn last_recovery(&self) -> Recovery {
+        self.last_recovery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .report
+    }
+
     /// Writes the account down, and remembers if it could not.
     ///
     /// A wallet keeps working from memory when its disk is full, which is the
@@ -790,11 +1218,28 @@ impl Wallet {
     fn reckon(&self) -> (Holdings, Vec<Waiting>) {
         let mine = self.address();
         // This wallet's own account of what it has been paid, which is what
-        // lets it notice a note the node has stopped following.
-        let recorded: BTreeMap<NoteId, Amount> = self
+        // lets it notice a note the node has stopped following, and where each
+        // one landed, which is what lets it ask about one.
+        let (recorded, landed): (BTreeMap<NoteId, Amount>, BTreeMap<NoteId, u64>) = self
             .history
             .lock()
-            .map(|history| history.held().collect())
+            .map(|history| {
+                let held: BTreeMap<NoteId, Amount> = history.held().collect();
+                let landed = held
+                    .keys()
+                    .filter_map(|id| Some((*id, history.where_it_fell(id)?)))
+                    .collect();
+                (held, landed)
+            })
+            .unwrap_or_default();
+        // Paths somebody else rebuilt for this wallet. Each is checked below
+        // against the set as it stands rather than remembered as good, because
+        // the set moves whenever a note falls and a path is worth exactly what
+        // it is worth now.
+        let rebuilt = self
+            .rebuilt
+            .lock()
+            .map(|held| held.clone())
             .unwrap_or_default();
         self.node.with_chain(|chain| {
             let state = chain.state();
@@ -809,20 +1254,49 @@ impl Wallet {
                 .collect();
 
             // Notes that have fallen out of the set every node keeps. Ours
-            // either way; spendable only while this node can still prove where
-            // one sits.
-            let mut unprovable: Vec<(NoteId, Amount)> = Vec::new();
+            // either way; spendable only while a path to one can be produced,
+            // by this node or by somebody who rebuilt it for us.
+            let mut unprovable: Vec<Unprovable> = Vec::new();
+            // Three places a path can come from, in the order they are worth
+            // trying. What the node says it is watching is this node's own
+            // bookkeeping and is taken as it stands. What this wallet wrote
+            // down about where a note landed is trusted about as far as the
+            // file it came out of, so a path found through it is folded before
+            // it is offered. And a path somebody else rebuilt is folded for
+            // that reason and one more: the set moves whenever a note falls
+            // anywhere, so it may simply have gone stale since it arrived.
+            let place = |id: NoteId, note: Note, watched: Option<u64>| {
+                let recorded = landed.get(&id).copied();
+                let fallen = watched
+                    .and_then(|at| Some((at, state.cold().proof_of(at)?)))
+                    .or_else(|| {
+                        let at = recorded?;
+                        let proof = state.cold().proof_of(at)?;
+                        let leaf = cairn_ledger::state::cold_leaf(&id, &note);
+                        state.cold().verify(at, leaf, &proof).then_some((at, proof))
+                    })
+                    .or_else(|| current(&rebuilt, state, id, note));
+                match fallen {
+                    Some(fallen) => Ok(Held {
+                        id,
+                        note,
+                        fallen: Some(fallen),
+                    }),
+                    None => Err(Unprovable {
+                        id,
+                        note,
+                        fell_at: watched.or(recorded),
+                    }),
+                }
+            };
+
             for (id, position, note) in state.watched_notes() {
                 if note.owner != mine {
                     continue;
                 }
-                match state.cold().proof_of(position) {
-                    Some(proof) => held.push(Held {
-                        id,
-                        note,
-                        fallen: Some((position, proof)),
-                    }),
-                    None => unprovable.push((id, note.value)),
+                match place(id, note, Some(position)) {
+                    Ok(one) => held.push(one),
+                    Err(one) => unprovable.push(one),
                 }
             }
 
@@ -836,18 +1310,23 @@ impl Wallet {
             let seen: BTreeSet<NoteId> = held
                 .iter()
                 .map(|one| one.id)
-                .chain(unprovable.iter().map(|(id, _)| *id))
+                .chain(unprovable.iter().map(|one| one.id))
                 .collect();
             for (id, value) in &recorded {
-                if !seen.contains(id) {
-                    unprovable.push((*id, *value));
+                if seen.contains(id) {
+                    continue;
+                }
+                let note = Note::new(*value, mine);
+                match place(*id, note, None) {
+                    Ok(one) => held.push(one),
+                    Err(one) => unprovable.push(one),
                 }
             }
 
             let values: BTreeMap<NoteId, Amount> = held
                 .iter()
                 .map(|one| (one.id, one.note.value))
-                .chain(unprovable.iter().copied())
+                .chain(unprovable.iter().map(|one| (one.id, one.note.value)))
                 .collect();
 
             // An input names a note and not its owner, so which pooled
@@ -917,11 +1396,14 @@ impl Wallet {
                 }
             }
             let mut stranded = Amount::ZERO;
-            for (id, value) in unprovable {
-                if committed.contains(&id) {
+            let mut out_of_reach = Vec::new();
+            for one in unprovable {
+                let value = one.note.value;
+                if committed.contains(&one.id) {
                     promised = promised.checked_add(value).unwrap_or(promised);
                 } else {
                     stranded = stranded.checked_add(value).unwrap_or(stranded);
+                    out_of_reach.push(one);
                 }
             }
 
@@ -932,6 +1414,7 @@ impl Wallet {
                     ripening,
                     ripe_at,
                     stranded,
+                    unprovable: out_of_reach,
                     notes,
                 },
                 waiting,
@@ -1281,6 +1764,7 @@ mod tests {
     fn a_ledger_this_wallet_has_not_checked_is_said_to_be_one() {
         let healthy = Progress {
             keeping_its_account: true,
+            lost_its_account: None,
             unwritten: None,
             unjudged: None,
             height: Some(10),

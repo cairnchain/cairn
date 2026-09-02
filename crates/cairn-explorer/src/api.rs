@@ -22,7 +22,7 @@ use cairn_net::Node;
 use cairn_primitives::codec::Encode;
 use cairn_primitives::{hex, Amount, Hash32};
 
-use crate::index::{Head, Held, Index, NoteRecord, Size};
+use crate::index::{Head, Held, Index, NoteRecord, Reading, Size};
 use cairn_http::Writer;
 use cairn_http::{Request, Response};
 
@@ -69,13 +69,21 @@ const COLD_BYTES_PER_NOTE: u64 = 72;
 ///
 /// Named here so `/api/status` can carry both figures side by side. The site
 /// used to call the cold set the explorer's growing cost, and the index is
-/// seven times larger, so the page was pointing at the smaller half.
+/// nearly eight times larger, so the page was pointing at the smaller half.
 const INDEX_BYTES_PER_NOTE: u64 = crate::index::BYTES_PER_NOTE;
 
 /// The node the explorer reads, plus what it keeps on top of it.
 pub(crate) struct Explorer {
     node: Node,
     index: Mutex<Index>,
+    /// How many callers are waiting for the index at this moment.
+    ///
+    /// Read by the walk between turns. A lock is not a queue on any of these
+    /// platforms: the walk let go of the index nineteen times over one
+    /// measured rebuild and was handed it straight back every time, while one
+    /// `/api/status` waited half the rebuild out. This is how the walk knows
+    /// somebody is there.
+    waiting: std::sync::atomic::AtomicUsize,
 }
 
 impl std::fmt::Debug for Explorer {
@@ -89,6 +97,7 @@ impl Explorer {
         Self {
             node,
             index: Mutex::new(Index::new()),
+            waiting: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -96,8 +105,13 @@ impl Explorer {
         &self.node
     }
 
+    /// The index, counted as waited for while it is waited for.
     fn index(&self) -> MutexGuard<'_, Index> {
-        self.index.lock().unwrap_or_else(PoisonError::into_inner)
+        use std::sync::atomic::Ordering;
+        self.waiting.fetch_add(1, Ordering::Relaxed);
+        let index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
+        self.waiting.fetch_sub(1, Ordering::Relaxed);
+        index
     }
 
     /// Reads whatever the chain has added since the last call.
@@ -109,7 +123,47 @@ impl Explorer {
     /// took to read the chain back: six seconds at half a million empty
     /// blocks, minutes at a hundred notes a block, with incoming block
     /// validation queued behind it the whole time.
+    ///
+    /// The index is taken and put down once per turn of the walk rather than
+    /// once for the whole of it, which is the other half of the same thing.
+    /// Every route on this site takes the index on its first line, so a walk
+    /// that held it to the tip answered nobody until it got there: measured at
+    /// a thousand two hundred blocks, `/api/status` was answered no times at
+    /// all while the walk ran, and the one request in flight waited the whole
+    /// of it. That is the site the door was opened early to avoid.
     pub(crate) fn refresh(&self) {
+        loop {
+            let began = std::time::Instant::now();
+            if self.read_a_batch() == Reading::Done {
+                return;
+            }
+            self.stand_aside(began.elapsed());
+        }
+    }
+
+    /// Waits for whoever wanted the index to have had it, for no longer than
+    /// the turn just taken.
+    ///
+    /// Letting go of a lock and asking for it back in the same breath is a
+    /// request these platforms are glad to grant: the thread still running is
+    /// the one that gets it, and the request that arrived while it ran waits
+    /// on. Measured, the walk let go nineteen times over one rebuild and one
+    /// `/api/status` still waited half of that rebuild out.
+    ///
+    /// Bounded by what the turn cost, because the index has to be built whether
+    /// anyone is asking or not: however hard this site is being asked, reading
+    /// the chain cannot come to more than twice what it would come to with
+    /// nobody looking.
+    fn stand_aside(&self, took: std::time::Duration) {
+        use std::sync::atomic::Ordering;
+        let began = std::time::Instant::now();
+        while self.waiting.load(Ordering::Relaxed) > 0 && began.elapsed() < took {
+            std::thread::yield_now();
+        }
+    }
+
+    /// One turn of the walk, with the index taken for that turn alone.
+    fn read_a_batch(&self) -> Reading {
         let mut index = self.index();
         let last_read = index.covers().map(|(_, through)| through);
         let head = self.node.with_chain(|chain| {
@@ -119,9 +173,9 @@ impl Explorer {
             })
         });
         let Some(head) = head else {
-            return;
+            return Reading::Done;
         };
-        index.refresh(&head, |height| self.held_at(height));
+        index.refresh(&head, |height| self.held_at(height))
     }
 
     /// One block of the followed branch, with the chain held for as little of
@@ -133,11 +187,21 @@ impl Explorer {
     /// rebuild reads almost all of its blocks off a disk, and seeking a disk
     /// with the chain held is what this whole shape exists to stop.
     ///
-    /// Below where the log reaches, the log is the whole answer. It holds one
-    /// run of heights, so a height missing from under its top is one it
-    /// dropped off its bottom, and the chain let that body go long before.
-    /// Saying so, instead of saying nothing, is what lets the walk step over
-    /// it rather than stop at it for the rest of the run.
+    /// The log holds one run of heights and says where both ends of it are, so
+    /// a height it will not produce is under the run, over it, or inside it.
+    /// The last is a fault in the machine: the record is there and the disk
+    /// would not read it back. Only the first is a block that is gone for
+    /// good, and only for the first may the walk step over the height and
+    /// carry on above it.
+    ///
+    /// Asking [`Node::written_through`] alone could not tell the third from
+    /// the first, because every way a read can fail arrives as `None`. So one
+    /// unreadable record in the middle of an archive was read as the bottom of
+    /// the run moving up: the index threw away every block it had read under
+    /// it and started again above it, and since each refresh resumes from
+    /// where the last one stopped, nothing went back for them while the
+    /// process ran. [`Node::blocks_from`] is the other end of the run, it
+    /// exists for exactly this, and it was one call away the whole time.
     fn held_at(&self, height: u64) -> Held {
         // The identifier the branch carries here, where the chain still holds
         // one, and the body if the chain still holds that.
@@ -164,15 +228,7 @@ impl Explorer {
             };
         }
 
-        match self.node.written_through() {
-            // The disk reaches past this height and could not produce it, so
-            // it is one of the run this node dropped off the bottom.
-            Some(through) if height <= through => Held::Dropped,
-            Some(_) => Held::Waiting,
-            // A node keeping no blocks at all has nothing under the window
-            // its chain holds in memory, and nothing is coming.
-            None => Held::Dropped,
-        }
+        nothing_at(height, self.node.blocks_from(), self.node.written_through())
     }
 
     /// Routes one request, or reports that nothing here answers it.
@@ -234,6 +290,37 @@ impl Explorer {
             let answer = route(&context, request);
             (answer, context.wanted.into_inner())
         })
+    }
+}
+
+/// Which kind of nothing a height is, when the node would not produce a block
+/// for it.
+///
+/// `from` and `through` are the two ends of the one run of blocks the log
+/// holds. Under the run the block is gone for good and the walk may step over
+/// it. Over the run it has not been written yet. Between them the record is
+/// there and the disk would not hand it back, and that is a fault in the
+/// machine rather than an answer about the chain: the walk stops on it and
+/// asks again next time.
+///
+/// Kept apart from its caller because it is the whole of the repair. It used
+/// to read `through` alone, so a record that would not read looked exactly
+/// like the bottom of the run moving up, and one bad sector cost the index
+/// every block underneath it for as long as the process ran.
+pub(crate) fn nothing_at(height: u64, from: Option<u64>, through: Option<u64>) -> Held {
+    match (from, through) {
+        (Some(from), Some(through)) => {
+            if height < from {
+                Held::Dropped
+            } else if height <= through {
+                Held::Refused
+            } else {
+                Held::Waiting
+            }
+        }
+        // A node keeping no blocks at all has nothing under the window its
+        // chain holds in memory, and nothing is coming.
+        _ => Held::Dropped,
     }
 }
 
@@ -522,18 +609,75 @@ fn index_object(json: &mut Writer, context: &Context<'_>, tip: Option<u64>) {
         json.field_null("from");
         json.field_null("through");
     }
-    json.field_u64(
-        "behind",
-        match (tip, covered) {
-            (Some(tip), Some((_, through))) => tip.saturating_sub(through),
-            (Some(tip), None) => tip.saturating_add(1),
-            _ => 0,
-        },
-    );
+    json.field_u64("behind", behind_of(tip, covered));
     json.field_bool("fromTheStart", context.index.reads_from_the_start());
     json.field_usize("blocks", context.index.blocks_read());
     index_cost(json, size);
     json.end_object();
+}
+
+/// Blocks of the branch the index has not read.
+fn behind_of(tip: Option<u64>, covered: Option<(u64, u64)>) -> u64 {
+    match (tip, covered) {
+        (Some(tip), Some((_, through))) => tip.saturating_sub(through),
+        (Some(tip), None) => tip.saturating_add(1),
+        _ => 0,
+    }
+}
+
+/// What the index had read when this answer was written.
+///
+/// Every route under here answers out of the index, and the index is not the
+/// chain: it is as much of the chain as this program has read since it
+/// started. The gap between the two is not a corner case. It is the first
+/// minutes of every run and every restart, and the door is deliberately opened
+/// during it, so it is a window strangers are invited into.
+///
+/// Inside that window four answers were stated as facts about the chain. A
+/// note the chain had already spent was published as unspent. `/api/tx` said
+/// "no such transaction" about a transfer `/api/block` was printing in the
+/// same instant off the same program. The search box, given a transaction
+/// identifier, announced it as an address. And the holders table answered that
+/// nobody on this chain holds anything. One thing was missing from all four:
+/// how much of the chain had been read. It is written here, once, and carried
+/// by every answer that comes out of the index.
+fn coverage(json: &mut Writer, context: &Context<'_>) {
+    let covered = context.index.covers();
+    let behind = behind_of(context.height(), covered);
+    json.key("coverage");
+    json.begin_object();
+    if let Some((from, through)) = covered {
+        json.field_u64("from", from);
+        json.field_u64("through", through);
+    } else {
+        json.field_null("from");
+        json.field_null("through");
+    }
+    json.field_u64("behind", behind);
+    // The chain from its first block to where it now reaches. Anything short
+    // of that and something this answer does not carry may still be on the
+    // chain, which is the difference between "there is no such thing" and "I
+    // have not got there yet".
+    json.field_bool("whole", context.index.reads_from_the_start() && behind == 0);
+    json.end_object();
+}
+
+/// A four hundred and four that says how much of the chain was looked in.
+///
+/// The status stays what it was: this program does not have the thing. What it
+/// carries now is whether it could have. A bare 404 from an index that has read
+/// a tenth of the chain reads as "no such transaction" and means "not yet",
+/// and the page says different words for the two.
+fn not_found(context: &Context<'_>, message: &str) -> Response {
+    let mut json = Writer::new();
+    json.begin_object();
+    json.field_str("error", message);
+    coverage(&mut json, context);
+    json.end_object();
+    Response {
+        status: 404,
+        ..Response::json(json.finish())
+    }
 }
 
 /// What the index is made of, so an operator can find out what running this
@@ -890,6 +1034,10 @@ fn block(context: &Context<'_>, reference: &str) -> Response {
     }
     json.end_array();
 
+    // This page is read off the chain and its notes are read off the index, so
+    // it is the one place the two can be seen disagreeing: the block is here,
+    // and whether its notes have been spent may not be known yet.
+    coverage(&mut json, context);
     json.end_object();
     Response::json(json.finish())
 }
@@ -920,7 +1068,12 @@ fn output_object(json: &mut Writer, context: &Context<'_>, id: &NoteId, note: &N
         }
         json.field_str("tier", tier_of(context, id, &record));
     } else {
-        json.field_bool("spent", false);
+        // Nothing known about this note, which for a note printed off a block
+        // means the index has not read that far. It used to say `false` here,
+        // and false is the answer to a question this program had not asked:
+        // a note the chain had spent years ago was published as unspent, on
+        // the strength of a lookup that came back empty.
+        json.field_null("spent");
         json.field_null("spentBy");
         json.field_null("spentAt");
         json.field_str("tier", "unknown");
@@ -1069,15 +1222,16 @@ fn transaction(context: &Context<'_>, reference: &str) -> Response {
         json.field_bool("pooled", true);
         json.key("transaction");
         transfer_object(&mut json, context, transfer, true);
+        coverage(&mut json, context);
         json.end_object();
         return Response::json(json.finish());
     }
 
     let Some(location) = context.index.locate(&id) else {
-        return Response::error(404, "no such transaction");
+        return not_found(context, "no such transaction");
     };
     let Some(block) = context.block_at(location.height) else {
-        return Response::error(404, "no such transaction");
+        return not_found(context, "no such transaction");
     };
 
     // Whatever sits at that position has to be the transaction that was asked
@@ -1092,7 +1246,7 @@ fn transaction(context: &Context<'_>, reference: &str) -> Response {
     json.key("transaction");
     if location.position == 0 {
         if block.coinbase.id() != id {
-            return Response::error(404, "no such transaction");
+            return not_found(context, "no such transaction");
         }
         coinbase_object(&mut json, context, &block);
     } else {
@@ -1103,9 +1257,10 @@ fn transaction(context: &Context<'_>, reference: &str) -> Response {
             Some(transfer) if transfer.id() == id => {
                 transfer_object(&mut json, context, transfer, true);
             }
-            _ => return Response::error(404, "no such transaction"),
+            _ => return not_found(context, "no such transaction"),
         }
     }
+    coverage(&mut json, context);
     json.end_object();
     Response::json(json.finish())
 }
@@ -1220,6 +1375,7 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
         json.end_array();
         json.field_usize("movements", 0);
         json.field_null("next");
+        coverage(&mut json, context);
         json.end_object();
         return Response::json(json.finish());
     };
@@ -1283,6 +1439,7 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
         json.field_null("next");
     }
 
+    coverage(&mut json, context);
     json.end_object();
     Response::json(json.finish())
 }
@@ -1292,7 +1449,7 @@ fn note(context: &Context<'_>, reference: &str) -> Response {
         return Response::error(400, "not a note identifier");
     };
     let Some(record) = context.index.note(&id) else {
-        return Response::error(404, "no such note");
+        return not_found(context, "no such note");
     };
     let mut json = Writer::new();
     json.begin_object();
@@ -1321,6 +1478,7 @@ fn note(context: &Context<'_>, reference: &str) -> Response {
         Some(position) => json.field_str("position", &position.to_string()),
         None => json.field_null("position"),
     }
+    coverage(&mut json, context);
     json.end_object();
     Response::json(json.finish())
 }
@@ -1355,6 +1513,13 @@ fn pool(context: &Context<'_>, request: &Request) -> Response {
     Response::json(json.finish())
 }
 
+/// Who holds the most, out of what has been read.
+///
+/// The whole content of this answer is a claim about every owner on the chain,
+/// and it was the one route that said nothing at all about how much of the
+/// chain it had counted. An index that has read nothing answered `holders: 0`
+/// with an empty table, which is the shape of a complete answer and reads as
+/// one.
 fn holders(context: &Context<'_>) -> Response {
     let mut json = Writer::new();
     json.begin_object();
@@ -1368,15 +1533,22 @@ fn holders(context: &Context<'_>) -> Response {
         json.end_object();
     }
     json.end_array();
+    coverage(&mut json, context);
     json.end_object();
     Response::json(json.finish())
 }
 
 /// Works out what someone pasted into the search box.
 ///
-/// A block identifier, a transaction identifier and an address are all thirty
-/// two bytes, so the text alone cannot say which it is. Each is looked up in
-/// turn and the first that exists wins.
+/// The answer carries what the index had read when it was worked out, because
+/// the last step of the walk below is a guess and the guess is only as good as
+/// the index. A transaction identifier the index has not reached falls past
+/// every lookup and lands on `parse_owner`, which succeeds for any thirty two
+/// bytes that make a point, so the site announced somebody's transaction as an
+/// address and took them to a page saying it held nothing. The guess is still
+/// made, because an address that has never been paid is not in the index either
+/// and looking it up is a reasonable thing to want. What is no longer left out
+/// is that it was a guess made off part of a chain.
 fn search(context: &Context<'_>, request: &Request) -> Response {
     let query = request.parameter("q").unwrap_or_default();
     let query = query.trim();
@@ -1384,51 +1556,48 @@ fn search(context: &Context<'_>, request: &Request) -> Response {
     let mut json = Writer::new();
     json.begin_object();
     json.field_str("query", query);
+    if let Some((kind, target)) = matched(context, query) {
+        json.field_str("kind", kind);
+        json.field_str("target", &target);
+    } else {
+        json.field_str("kind", "unknown");
+        json.field_null("target");
+    }
+    coverage(&mut json, context);
+    json.end_object();
+    Response::json(json.finish())
+}
 
+/// What the text turns out to be, and where that lives.
+///
+/// A block identifier, a transaction identifier and an address are all thirty
+/// two bytes, so the text alone cannot say which it is. Each is looked up in
+/// turn and the first that exists wins; an address is last because it is the
+/// only one that needs nothing to exist.
+fn matched(context: &Context<'_>, query: &str) -> Option<(&'static str, String)> {
     if let Ok(height) = query.parse::<u64>() {
         if context.block_at(height).is_some() {
-            json.field_str("kind", "block");
-            json.field_str("target", &format!("/block/{height}"));
-            json.end_object();
-            return Response::json(json.finish());
+            return Some(("block", format!("/block/{height}")));
         }
     }
 
     if let Some(id) = parse_note(query) {
         if context.index.note(&id).is_some() {
-            json.field_str("kind", "note");
-            json.field_str("target", &format!("/note/{}", note_reference(&id)));
-            json.end_object();
-            return Response::json(json.finish());
+            return Some(("note", format!("/note/{}", note_reference(&id))));
         }
     }
 
     if let Some(hash) = parse_hash(query) {
         if let Some(block) = context.block(&hash) {
-            json.field_str("kind", "block");
-            json.field_str("target", &format!("/block/{}", block.header.height));
-            json.end_object();
-            return Response::json(json.finish());
+            return Some(("block", format!("/block/{}", block.header.height)));
         }
         if context.index.locate(&hash).is_some() || context.chain.pooled(&hash).is_some() {
-            json.field_str("kind", "transaction");
-            json.field_str("target", &format!("/tx/{hash}"));
-            json.end_object();
-            return Response::json(json.finish());
+            return Some(("transaction", format!("/tx/{hash}")));
         }
     }
 
-    if let Some(owner) = parse_owner(query) {
-        json.field_str("kind", "address");
-        json.field_str("target", &format!("/address/{owner}"));
-        json.end_object();
-        return Response::json(json.finish());
-    }
-
-    json.field_str("kind", "unknown");
-    json.field_null("target");
-    json.end_object();
-    Response::json(json.finish())
+    let owner = parse_owner(query)?;
+    Some(("address", format!("/address/{owner}")))
 }
 
 /// How a note is written down: the transaction that made it, then which output.

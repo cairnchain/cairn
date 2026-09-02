@@ -54,9 +54,12 @@ cairnd, a Cairn node
                          accept, which is how a script can find out that a
                          network it was told to use has been retired
   --mine <public key>    produce blocks, paying rewards to this key
-  --archive              keep the cold set, so this node can rebuild a proof
-                         for a wallet that lost its own. Costs a set that
-                         grows; without it a node keeps sixty four hashes
+  --archive              keep the cold set, so this node can answer a wallet
+                         that asks where one of its put-away notes sits and
+                         cannot work it out for itself. Says so on the
+                         handshake, so wallets can find this node. Costs a set
+                         that grows with every note ever spent; without it a
+                         node keeps sixty four hashes
   --keep <size|all>      how much of the chain to keep on disk, in bytes, or
                          `all` to keep every block ever accepted (default:
                          1GB). A node does not need old blocks: it keeps the
@@ -362,7 +365,8 @@ pub(crate) fn describe(options: &Options) -> String {
         text,
         "keeping      {}",
         if options.archive {
-            "the whole cold set (archivist)"
+            "the whole cold set (archivist: this node answers wallets that \
+             have lost their own path to a put-away note)"
         } else {
             "sixty four hashes"
         }

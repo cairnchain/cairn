@@ -39,7 +39,8 @@
   "search": {
     "placeholder": "Hauteur, bloc, transaction, adresse, billet",
     "action": "Chercher",
-    "nothing": "Rien sur cette chaîne ne correspond."
+    "nothing": "Rien sur cette chaîne ne correspond.",
+    "guessed": "Rien de ce que ce site a lu ne correspond. Cela peut être une adresse, alors c'est une adresse qui vous est montrée. Si vous avez collé une transaction, elle est peut-être dans la partie de la chaîne que ce site n'a pas encore lue."
   },
 
   "common": {
@@ -60,8 +61,15 @@
   "error": {
     "title": "Ça n'a pas marché",
     "missing": "Rien sur cette chaîne ne porte ce nom.",
+    "notRead": "Ce site n'a pas cela, et il n'a pas fini de lire la chaîne : il l'a lue jusqu'au bloc {through}, et il lui en reste {blocks}. Ce que vous cherchez est peut-être dans la partie qu'il n'a pas encore atteinte. Il lit au fur et à mesure : cela vaut la peine de redemander dans une minute.",
+    "notReadAny": "Ce site n'a pas cela, et il n'a encore rien lu de la chaîne : {blocks} blocs l'attendent. Ce que vous cherchez s'y trouve sans doute. Il lit au fur et à mesure : cela vaut la peine de redemander dans une minute.",
     "unreachable": "Le nœud derrière cette page n'a pas répondu. Il redémarre peut-être, ou il rattrape encore son retard.",
     "noPage": "Aucune page à cette adresse."
+  },
+
+  "coverage": {
+    "part": "Lu jusqu'ici : les blocs {from} à {through}, et il en reste {blocks}. Tout ce qui, ici, dépend de qui possède quoi ne parle que de cette partie de la chaîne, pas de la chaîne entière.",
+    "none": "Rien n'a encore été lu : {blocks} blocs attendent. D'ici là, cette page ne peut pas dire qui possède quoi."
   },
 
   "tick": {

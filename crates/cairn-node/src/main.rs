@@ -303,6 +303,12 @@ fn say_what_was_restored(restored: &Restored, directory: &str) {
             restored.discarded_bytes
         );
     }
+    if restored.left_in_place > 0 {
+        println!(
+            "             {} bytes past it are still on the disk, unread",
+            restored.left_in_place
+        );
+    }
     // Told apart from the line above, because they mean opposite things. Bytes
     // at the end of the file are a machine that stopped mid write, and they
     // cost one block. A whole record that will not read is damage, and it is

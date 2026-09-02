@@ -174,6 +174,10 @@ fn show_balance(arguments: &[String]) -> Result<(), String> {
     let flags = Flags::parse(arguments)?;
     let wallet = join(&flags)?;
     let progress = wallet.progress();
+    // Before the money is counted, because this is what decides part of the
+    // answer: a note whose path has been rebuilt is money that can move, and
+    // one whose path nobody would rebuild is money that cannot.
+    let recovery = wallet.recover_stranded();
     let holdings = wallet.holdings();
     let fallen = holdings.notes.iter().filter(|held| held.is_cold()).count();
 
@@ -217,15 +221,17 @@ fn show_balance(arguments: &[String]) -> Result<(), String> {
         println!("block surviving, so the rules hold it still until nothing can undo it.");
     }
 
-    if holdings.stranded > Amount::ZERO {
+    if let Some(words) = recovery.words() {
         println!();
-        println!(
-            "Another {} sits in notes this node cannot prove. They are",
-            holdings.stranded
-        );
-        println!("yours and they are not lost, but spending one takes a proof, and");
-        println!("rebuilding a proof takes an archivist. Ask one, or run this wallet");
-        println!("against a node started with --archive.");
+        if holdings.stranded > Amount::ZERO {
+            println!(
+                "Another {} is in notes that cannot move yet.",
+                holdings.stranded
+            );
+        }
+        for line in wrapped(&words) {
+            println!("{line}");
+        }
     }
     if holdings.notes.is_empty() {
         println!();

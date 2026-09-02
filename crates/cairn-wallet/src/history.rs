@@ -142,6 +142,31 @@ impl Decode for Owned {
     }
 }
 
+/// Where one of this key's notes landed when it fell, for writing down.
+///
+/// A pair would do everywhere except on the wire, like [`Owned`] above.
+#[derive(Clone, Copy, Debug)]
+struct Fell {
+    id: NoteId,
+    position: u64,
+}
+
+impl Encode for Fell {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        self.id.encode_to(out);
+        self.position.encode_to(out);
+    }
+}
+
+impl Decode for Fell {
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        Ok(Self {
+            id: NoteId::decode_from(reader)?,
+            position: u64::decode_from(reader)?,
+        })
+    }
+}
+
 /// This key's own account of its money.
 #[derive(Clone, Debug, Default)]
 pub struct History {
@@ -151,6 +176,21 @@ pub struct History {
     /// which notes are ours, a transfer spending one of them is
     /// indistinguishable from a transfer between two other people.
     held: BTreeMap<NoteId, Amount>,
+    /// Where each of those notes landed when it fell out of the set every node
+    /// keeps, for the ones that have.
+    ///
+    /// Written down while the node can still say, because the node will not
+    /// always be able to. A place is fixed for good the moment a note falls
+    /// and never moves again; what moves is the path up to it, which changes
+    /// every time another note falls and is nobody's to keep for ever. So the
+    /// wallet keeps the half that lasts, and the half that does not can be
+    /// asked for by anyone holding this.
+    ///
+    /// Without it there is nothing to ask about. A wallet that knows only that
+    /// it owns a note knows the one thing an archivist cannot look up: the set
+    /// is a list of hashes with no name attached, so a note has to be found by
+    /// where it sits.
+    fell: BTreeMap<NoteId, u64>,
     /// Newest last.
     movements: Vec<Movement>,
     /// What the account said before the chain changed under it, less whatever
@@ -179,6 +219,32 @@ pub struct History {
     /// replaces every block above the fork, so this one is enough to detect
     /// one: if it is still where it was, nothing below it moved either.
     last: Option<Hash32>,
+}
+
+/// Why a history file that was there was not used.
+///
+/// Either way the wallet reads the chain again rather than trusting it,
+/// and either way the money is safe, because the chain is what the money
+/// is on and this file is only a record of what was already read. What is
+/// lost is the list of movements below the height the wallet restarts its
+/// reading at, and that is worth one line on the face rather than nothing
+/// at all: a wallet that quietly forgot what it had shown yesterday is a
+/// wallet nobody can tell apart from one that is wrong.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Discarded {
+    /// Written by a release from before the stamp existed.
+    ///
+    /// Expected exactly once per wallet, and nobody's fault.
+    BeforeTheStamp,
+    /// Present, the right shape, and not the bytes that were written.
+    DidNotVerify,
+    /// Written by a wallet that knows more than this one.
+    ///
+    /// The stamp holds, so nothing changed the file. It carries fields this
+    /// build has no reader for, which is what a downgrade looks like from
+    /// here, and telling somebody their disk is suspect over it would send
+    /// them looking at hardware that is fine.
+    FromANewerVersion,
 }
 
 impl History {
@@ -273,6 +339,7 @@ impl History {
         let mut gave = Amount::ZERO;
         for input in &transfer.inputs {
             if let Some(value) = self.held.remove(&input.note_id) {
+                self.fell.remove(&input.note_id);
                 gave = gave.checked_add(value).unwrap_or(gave);
             }
         }
@@ -326,6 +393,30 @@ impl History {
     /// quietly leaves a balance is the worst way to be told anything.
     pub fn held(&self) -> impl Iterator<Item = (NoteId, Amount)> + '_ {
         self.held.iter().map(|(id, value)| (*id, *value))
+    }
+
+    /// Writes down where a note landed, saying whether that was news.
+    ///
+    /// Only for a note this account knows about: a place on its own says
+    /// nothing, and one written down for a note that was never this key's
+    /// would be a claim about somebody else's money kept in this key's file.
+    ///
+    /// The first answer stands. A place is fixed when the note falls and never
+    /// moves, so anything later saying different is a second opinion about a
+    /// settled fact, and taking it would mean a wallet could be talked out of
+    /// where its own money sits.
+    pub fn fell_at(&mut self, id: NoteId, position: u64) -> bool {
+        if !self.held.contains_key(&id) || self.fell.contains_key(&id) {
+            return false;
+        }
+        self.fell.insert(id, position);
+        true
+    }
+
+    /// Where a note landed, if this account saw it land.
+    #[must_use]
+    pub fn where_it_fell(&self, id: &NoteId) -> Option<u64> {
+        self.fell.get(id).copied()
     }
 
     fn record(&mut self, movement: Movement) {
@@ -415,11 +506,35 @@ impl History {
     /// this is one person's notes about their own money, and the chain can
     /// always be read again.
     #[must_use]
-    pub fn load(path: &Path) -> Self {
-        std::fs::read(path)
-            .ok()
-            .and_then(|bytes| Self::verified(&bytes))
-            .unwrap_or_default()
+    pub fn load(path: &Path) -> (Self, Option<Discarded>) {
+        let Ok(bytes) = std::fs::read(path) else {
+            return (Self::default(), None);
+        };
+        if let Some(history) = Self::verified(&bytes) {
+            return (history, None);
+        }
+        // Three ways a file can fail to be read back, and they are three
+        // different pieces of news. Guessing wrong sends somebody looking at a
+        // disk that is fine, or shrugging at one that is not.
+        //
+        // A file that is exactly a body, with nothing where the stamp goes, is
+        // what the release before the stamp wrote: it happens once, to
+        // everybody, on the day they update.
+        //
+        // A file whose stamp is over bytes this build cannot decode was
+        // written by a wallet that knows more fields than this one. The stamp
+        // holding is the whole of the evidence: nothing changed the file, it
+        // is simply newer, which is what a downgrade looks like from here.
+        //
+        // Anything else is a file that was there and is not what was written.
+        let why = if Self::decode(&bytes).is_ok() {
+            Discarded::BeforeTheStamp
+        } else if Self::stamped(&bytes) {
+            Discarded::FromANewerVersion
+        } else {
+            Discarded::DidNotVerify
+        };
+        (Self::default(), Some(why))
     }
 
     /// The account in `bytes`, if the bytes are the ones that were written.
@@ -439,6 +554,20 @@ impl History {
     /// a defence against a disk that changed under it, which is the failure
     /// this file actually meets, and it costs one hash of a few kilobytes at
     /// each start.
+    /// Whether the last thirty two bytes are this build's stamp over the rest.
+    ///
+    /// Separate from decoding on purpose: a stamp that holds over bytes that
+    /// will not decode says the file is whole and this build is behind it.
+    fn stamped(bytes: &[u8]) -> bool {
+        let Some(split) = bytes.len().checked_sub(HASH_LEN) else {
+            return false;
+        };
+        let Some((body, stamp)) = bytes.split_at_checked(split) else {
+            return false;
+        };
+        hash(Domain::WalletHistory, body).as_bytes() == stamp
+    }
+
     fn verified(bytes: &[u8]) -> Option<Self> {
         let (body, stamp) = bytes.split_at_checked(bytes.len().checked_sub(HASH_LEN)?)?;
         if hash(Domain::WalletHistory, body).as_bytes() != stamp {
@@ -489,6 +618,15 @@ impl Encode for History {
             .collect();
         held.encode_to(out);
         self.undone.encode_to(out);
+        let fell: Vec<Fell> = self
+            .fell
+            .iter()
+            .map(|(id, position)| Fell {
+                id: *id,
+                position: *position,
+            })
+            .collect();
+        fell.encode_to(out);
     }
 }
 
@@ -500,8 +638,21 @@ impl Decode for History {
         let last = Hash32::decode_from(reader)?;
         let held = Vec::<Owned>::decode_from(reader)?;
         let undone = Vec::<Movement>::decode_from(reader)?;
+        // Where fallen notes landed. A file written before this wallet learned
+        // to keep places simply ends here, and is read rather than thrown
+        // away: the account of what this key was paid is the expensive part
+        // and the places are found again from the node as notes go past.
+        let fell = if reader.remaining() > 0 {
+            Vec::<Fell>::decode_from(reader)?
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             held: held.into_iter().map(|held| (held.id, held.value)).collect(),
+            fell: fell
+                .into_iter()
+                .map(|fell| (fell.id, fell.position))
+                .collect(),
             movements,
             next,
             from: (from != u64::MAX).then_some(from),
@@ -764,5 +915,79 @@ mod tests {
             history.movements().next().unwrap()
         );
         assert_eq!(read.encode(), bytes, "and the writing is canonical");
+    }
+
+    #[test]
+    fn where_a_note_landed_is_written_down_and_read_back() {
+        let mine = key(1);
+        let mut history = History::new();
+        history.take(&block(0, mine, Vec::new()), mine);
+        let (id, _) = history.held().next().unwrap();
+
+        assert_eq!(history.where_it_fell(&id), None, "it has not fallen yet");
+        assert!(history.fell_at(id, 41));
+        assert_eq!(history.where_it_fell(&id), Some(41));
+        assert!(
+            !history.fell_at(id, 9),
+            "a place is fixed when a note falls and never moves, so nothing \
+             later gets to say otherwise"
+        );
+        assert_eq!(history.where_it_fell(&id), Some(41));
+
+        let read = History::decode(&history.encode()).unwrap();
+        assert_eq!(read.where_it_fell(&id), Some(41));
+        assert_eq!(read.encode(), history.encode());
+    }
+
+    #[test]
+    fn a_place_is_kept_only_for_a_note_this_account_holds() {
+        let mine = key(1);
+        let mut history = History::new();
+        let stranger = NoteId::new(Hash32::from_bytes([9; 32]), 0);
+        assert!(!history.fell_at(stranger, 3));
+        assert_eq!(history.where_it_fell(&stranger), None);
+
+        // And a note that is spent takes its place with it, so the account
+        // never carries a handle to money it no longer holds.
+        history.take(&block(0, mine, Vec::new()), mine);
+        let (id, _) = history.held().next().unwrap();
+        assert!(history.fell_at(id, 5));
+        let spend = Transfer::new(vec![Input::hot(id)], vec![Note::new(amount("49"), key(2))]);
+        history.take(&block(1, key(2), vec![spend]), mine);
+        assert_eq!(history.where_it_fell(&id), None);
+    }
+
+    #[test]
+    fn an_account_written_before_places_were_kept_is_still_read() {
+        let mine = key(1);
+        let mut history = History::new();
+        history.take(&block(0, mine, Vec::new()), mine);
+
+        // What the file looked like before: everything up to the undone list
+        // and nothing after it.
+        let mut older = Vec::new();
+        history.next.encode_to(&mut older);
+        history.from.unwrap_or(u64::MAX).encode_to(&mut older);
+        history.movements.encode_to(&mut older);
+        history.last.unwrap_or(Hash32::ZERO).encode_to(&mut older);
+        let held: Vec<Owned> = history
+            .held
+            .iter()
+            .map(|(id, value)| Owned {
+                id: *id,
+                value: *value,
+            })
+            .collect();
+        held.encode_to(&mut older);
+        history.undone.encode_to(&mut older);
+
+        let read = History::decode(&older).unwrap();
+        assert_eq!(read.len(), history.len());
+        assert_eq!(read.held().count(), 1);
+        assert_eq!(
+            read.where_it_fell(&history.held().next().unwrap().0),
+            None,
+            "it knows nothing about places, and finds them again from the node"
+        );
     }
 }

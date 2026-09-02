@@ -207,6 +207,15 @@ pub enum HandoverError {
         required: u16,
         known: u16,
     },
+    #[error(
+        "the header at height {height} carries version {found}, and the rules there \
+         are block version {required}"
+    )]
+    WrongVersion {
+        height: u64,
+        found: u16,
+        required: u16,
+    },
 }
 
 impl LedgerState {
@@ -301,6 +310,26 @@ pub fn accept(handover: &Handover, params: &ConsensusParams) -> Result<LedgerSta
             required: required.max(tip.version).max(at.version),
             known: BLOCK_VERSION,
         });
+    }
+
+    // Above is the half that says this build cannot judge. This is the half
+    // that judges: a block carries exactly the version the rules require where
+    // it sits, so a header that carries anything else is a header no chain
+    // accepted. Checking only that the version was not too high let a handover
+    // arrive under a version below the schedule and be taken, while the very
+    // same header offered as a block would have been refused. That gap is the
+    // whole of what the schedule is for: it is how a rule change is announced,
+    // and a header free to understate its version is a header free to ask to
+    // be judged by the rules from before the change.
+    for header in [at, tip] {
+        let wanted = params.version_at(header.height);
+        if header.version != wanted {
+            return Err(HandoverError::WrongVersion {
+                height: header.height,
+                found: header.version,
+                required: wanted,
+            });
+        }
     }
 
     // Deep enough that whoever wrote this ledger had to go on mining for a
@@ -501,6 +530,27 @@ pub fn check_buried(
         }
         if !meets_target(&header.id(), header.difficulty) {
             return Err(HandoverError::BuriedWithoutWork { at: header.height });
+        }
+
+        // Each of these is a block, so each carries exactly the version the
+        // rules require where it sits. Left unchecked, the one run of headers
+        // a newcomer verifies for itself was the one place a chain could be
+        // built out of blocks that never had to name the rules they were mined
+        // under, which is what the whole run exists to establish.
+        let wanted = params.version_at(header.height);
+        if wanted > BLOCK_VERSION {
+            return Err(HandoverError::SoftwareTooOld {
+                height: header.height,
+                required: wanted,
+                known: BLOCK_VERSION,
+            });
+        }
+        if header.version != wanted {
+            return Err(HandoverError::WrongVersion {
+                height: header.height,
+                found: header.version,
+                required: wanted,
+            });
         }
         let demanded = next_difficulty(&window, params.target_block_time);
         if header.difficulty != demanded {

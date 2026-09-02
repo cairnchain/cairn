@@ -253,3 +253,96 @@ fn an_undo_puts_back_the_notes_the_ceiling_let_go_of() {
     }
     assert!(trimmed > 0, "the ceiling never bit, so nothing was tested");
 }
+
+/// **Asking to follow an owner again does not climb over the ceiling.**
+///
+/// `watch_owner` takes up the notes for that owner already sitting in the
+/// grace window, which is what lets a node handed a ledger keep the paths the
+/// handover went to the trouble of carrying. The window can hold as many notes
+/// as the ceiling allows, and the cheapest of them are exactly the ones the
+/// ceiling has already let go of, so asking again on a full set puts every one
+/// of them back and the set ends up over a bound that exists to stop a public
+/// address being a way to make somebody else's node grow for ever.
+///
+/// A ceiling a supported path walks past is not a ceiling, so the same trim
+/// runs there, cheapest first, and the set comes back under it before the call
+/// returns.
+#[test]
+fn asking_to_follow_again_does_not_climb_over_the_ceiling() {
+    let params = params();
+    let miner = wallet(1);
+    let alice = wallet(2);
+    let mut state = LedgerState::new();
+    state.watch_owner(alice.public_key());
+    let mut source = LedgerState::archiving();
+
+    let mut coinbase_notes: Vec<(NoteId, Note)> = Vec::new();
+    let rounds = (WATCHED_NOTES as u64 / SPRAY) + 6;
+    for round in 0..rounds {
+        let height = source.next_height().unwrap();
+        let mut transfers = Vec::new();
+        if let Some((id, note)) = coinbase_notes.pop() {
+            let mut left = note.value.as_pebbles();
+            let mut outputs = Vec::new();
+            for index in 0..SPRAY {
+                let value = 1 + ((index * 7919 + round * 104_729) % 4_096);
+                if left <= value {
+                    break;
+                }
+                left -= value;
+                outputs.push(Note::new(
+                    Amount::from_pebbles(value).unwrap(),
+                    alice.public_key(),
+                ));
+            }
+            outputs.push(Note::new(
+                Amount::from_pebbles(left).unwrap(),
+                alice.public_key(),
+            ));
+            let mut transfer = Transfer::new(vec![Input::hot(id)], outputs);
+            transfer.sign_input(params.network, 0, &note, &miner);
+            transfers.push(transfer);
+        }
+
+        let coinbase = CoinbaseTransaction::new(
+            height,
+            vec![Note::new(params.reward_at(height), miner.public_key())],
+        );
+        let block = assemble_block(
+            &source,
+            coinbase,
+            transfers,
+            &params,
+            1_000 + height * 600,
+            0,
+        )
+        .unwrap();
+        connect_block(&mut source, &block, &params, NOW).unwrap();
+        connect_block(&mut state, &block, &params, NOW).unwrap();
+
+        coinbase_notes.push((
+            NoteId::new(block.coinbase.id(), 0),
+            Note::new(params.reward_at(height), miner.public_key()),
+        ));
+    }
+
+    let full = state.watched_notes().count();
+    assert_eq!(full, WATCHED_NOTES, "the ceiling was never reached");
+
+    // The window is holding notes this owner was paid that the ceiling has
+    // already let go of, which is what makes asking again a way over it.
+    assert!(
+        state.watched_paths() > full,
+        "the window holds nothing beyond the followed set, so this test is no \
+         longer testing what it says"
+    );
+
+    for _ in 0..4 {
+        state.watch_owner(alice.public_key());
+        assert!(
+            state.watched_notes().count() <= WATCHED_NOTES,
+            "asking again left {} followed notes, past the ceiling of {WATCHED_NOTES}",
+            state.watched_notes().count()
+        );
+    }
+}

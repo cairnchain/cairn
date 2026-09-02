@@ -85,6 +85,27 @@ pub struct BlockHeader {
 }
 
 impl BlockHeader {
+    /// Bytes a header takes encoded, which is the same for every header
+    /// because every field in one is fixed width.
+    ///
+    /// Written as the sum of the fields rather than as the number it comes to,
+    /// because the header log finds a record by multiplying its index by this
+    /// and has no boundaries of its own. A header that stopped being this size
+    /// would not be read wrongly in one place, it would be read wrongly
+    /// everywhere after the first, and every record would still decode into a
+    /// plausible header. `cairn-store` takes its record size from here, and
+    /// `block_log.rs` encodes real headers and checks they come to it, so a
+    /// field added without a line here fails a test rather than teaching a
+    /// node a chain that was never mined.
+    pub const ENCODED_BYTES: usize = size_of::<u16>()
+        + size_of::<u32>()
+        + size_of::<u64>()
+        + 4 * cairn_primitives::hash::HASH_LEN
+        + size_of::<u64>()
+        + size_of::<u64>()
+        + size_of::<u128>()
+        + size_of::<u64>();
+
     /// The identifier, which is also what proof of work is measured against.
     pub fn id(&self) -> Hash32 {
         cairn_primitives::hash::hash(Domain::BlockHeaderId, &self.encode())

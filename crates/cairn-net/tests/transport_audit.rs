@@ -50,6 +50,7 @@ use cairn_net::message::{
     PROTOCOL_VERSION,
 };
 use cairn_net::wire::{read_message, write_message, Incoming, FRAME_PATIENCE, MAX_FRAME_BYTES};
+use cairn_net::Keeps;
 use cairn_net::Node;
 use cairn_primitives::codec::Encode;
 use cairn_primitives::Hash32;
@@ -72,7 +73,10 @@ fn hello(nonce: u64, listen: u16) -> Message {
         total_work: 0,
         listen,
         nonce,
-        archives: false,
+        keeps: Keeps {
+            headers: false,
+            cold_set: false,
+        },
     })
 }
 

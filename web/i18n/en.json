@@ -39,7 +39,8 @@
   "search": {
     "placeholder": "Block height, block, transaction, address, note",
     "action": "Look up",
-    "nothing": "Nothing on this chain matches that."
+    "nothing": "Nothing on this chain matches that.",
+    "guessed": "Nothing this site has read matches that. It could be an address, so an address is what you were shown. If you pasted a transaction, it may be in the part of the chain this site has not read yet."
   },
 
   "common": {
@@ -60,8 +61,15 @@
   "error": {
     "title": "That did not work",
     "missing": "There is nothing on this chain with that name.",
+    "notRead": "This site does not have that, and it has not finished reading the chain: it has read up to block {through}, with {blocks} still to go. What you asked for may be in the part it has not reached. It reads as it goes, so it is worth asking again in a minute.",
+    "notReadAny": "This site does not have that, and it has not read any of the chain yet: {blocks} blocks are waiting. What you asked for may well be there. It reads as it goes, so it is worth asking again in a minute.",
     "unreachable": "The node behind this page did not answer. It may be restarting, or still catching up.",
     "noPage": "No page lives at this address."
+  },
+
+  "coverage": {
+    "part": "Read so far: blocks {from} to {through}, with {blocks} still to go. Anything here that depends on who owns what is about that part of the chain and not about all of it.",
+    "none": "Nothing has been read yet: {blocks} blocks are waiting. Until that is done, this page cannot say who owns what."
   },
 
   "tick": {

@@ -125,7 +125,7 @@ struct Claim {
     work: u128,
     height: u64,
     /// Whether the peer can show the chain, which is what a join takes.
-    archives: bool,
+    shows_the_chain: bool,
     /// The address the claim came from, so a failed one outlives the
     /// connection that made it.
     host: Option<IpAddr>,
@@ -221,7 +221,7 @@ impl Chooser {
         host: Option<IpAddr>,
         work: u128,
         height: u64,
-        archives: bool,
+        shows_the_chain: bool,
         now: u64,
     ) {
         if self.done || work == 0 {
@@ -239,7 +239,7 @@ impl Chooser {
             Claim {
                 work,
                 height,
-                archives,
+                shows_the_chain,
                 host,
                 unbacked,
                 tried: None,
@@ -487,7 +487,7 @@ impl Chooser {
                 })
             })
             .max_by_key(|(peer, claim)| (claim.work, **peer))?;
-        let approach = if claim.archives && claim.height >= JOIN_RATHER_THAN_READ {
+        let approach = if claim.shows_the_chain && claim.height >= JOIN_RATHER_THAN_READ {
             Approach::Join
         } else {
             Approach::Read

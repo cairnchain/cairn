@@ -7,6 +7,7 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
+use cairn_accumulator::ForestProof;
 use cairn_chain::{Located, MAX_LOCATOR};
 use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::note::NetworkId;
@@ -16,7 +17,21 @@ use cairn_primitives::Hash32;
 
 /// Bumped when the meaning of a message changes. Peers on another version are
 /// refused rather than misunderstood.
-pub const PROTOCOL_VERSION: u32 = 5;
+///
+/// Six carries the two changes that made the archivist real. There is a
+/// question a wallet can ask about where one of its fallen notes sits, and the
+/// handshake now says separately whether a node kept the headers and whether
+/// it kept the cold set. Those were one field before, computed from the
+/// headers and named after the cold set, so every node claimed the service and
+/// none of them offered it.
+///
+/// A node on five and a node on six turn each other away at the handshake,
+/// which is the gentlest way this could have gone. The alternative was to add
+/// the question without saying so: a node on five meeting it would not be able
+/// to decode it, would take that for a peer that is broken or probing, and
+/// would refuse the address for an hour. A wallet looking for an archivist
+/// would then work its way through the network banning itself from it.
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Identifiers one announcement may carry.
 pub const MAX_ANNOUNCED: usize = 512;
@@ -34,6 +49,16 @@ pub const MAX_SHARED_ADDRESSES: usize = 64;
 /// answer, which is under what the wire carries and enough that filling in a
 /// long chain is thousands of exchanges rather than millions.
 pub const MAX_HEADERS: usize = 512;
+
+/// Places one request may ask to have proved.
+///
+/// A wallet asking is recovering, which happens once and covers whatever it
+/// has: sixty four notes is more than most wallets ever hold fallen at one
+/// time, and a wallet holding more asks again. The number is small because the
+/// answer is the expensive half, not the question: one path is about a
+/// kilobyte on a mature chain, so a full answer is the size of a block, and
+/// the asker must not be the one who decides how large that gets.
+pub const MAX_PROVEN: usize = 64;
 
 /// A peer's listening address, in a form the wire can carry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -76,6 +101,58 @@ impl Decode for PeerAddress {
     }
 }
 
+/// What a node claims to have kept.
+///
+/// Two claims, two quite different bargains, and until now one bit. Keeping
+/// the headers costs 182 bytes a block and is what lets anybody join a chain
+/// at all, so almost every node does it. Keeping the cold set costs a set that
+/// grows with every note ever spent, and is what lets a wallet that has lost
+/// the path to one of its own fallen notes get another; almost no node does
+/// it. One field answered both, filled in from the header log and named after
+/// the cold set, so every node on the network offered the second service and
+/// none of them performed it.
+///
+/// Claims and not facts, and neither is taken on trust. Everything either kind
+/// of node hands over is checked against something the asker worked out for
+/// itself. What the claims save is asking the wrong node and waiting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Keeps {
+    /// The headers, so this node can show a newcomer what work stands behind
+    /// the chain it follows.
+    pub headers: bool,
+    /// The whole cold set, so this node can rebuild the path to a note that
+    /// fell long ago. This is the archivist.
+    pub cold_set: bool,
+}
+
+impl Encode for Keeps {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        u8::from(self.headers).encode_to(out);
+        u8::from(self.cold_set).encode_to(out);
+    }
+}
+
+impl Decode for Keeps {
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        Ok(Self {
+            headers: claimed(reader)?,
+            cold_set: claimed(reader)?,
+        })
+    }
+}
+
+/// One claim about what a node kept.
+///
+/// Anything but zero or one is a peer saying something this version does not
+/// understand, and reading it as true would be guessing on the peer's behalf.
+fn claimed(reader: &mut Reader<'_>) -> Result<bool, CodecError> {
+    match u8::decode_from(reader)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(CodecError::InvalidValue { type_name: "Keeps" }),
+    }
+}
+
 /// What a node tells a peer about itself when the connection opens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Handshake {
@@ -100,19 +177,8 @@ pub struct Handshake {
     /// number the node drew for itself can. Seeing your own means the
     /// connection is your own.
     pub nonce: u64,
-    /// Whether this node kept the history, and can therefore prove things
-    /// about it.
-    ///
-    /// Only a node that kept the headers can show a newcomer what work stands
-    /// behind a chain, and only one that kept the cold set can rebuild a proof
-    /// for a wallet that lost one. Both are the same service and the same
-    /// bargain, so they are one answer.
-    ///
-    /// A claim, not a fact, and it costs nothing to make. Nothing is taken on
-    /// the strength of it: everything an archivist hands over is checked
-    /// against what a header commits to. What it saves is asking the wrong
-    /// node and waiting.
-    pub archives: bool,
+    /// What this node kept, and therefore what it can be asked for.
+    pub keeps: Keeps,
 }
 
 impl Encode for Handshake {
@@ -125,7 +191,7 @@ impl Encode for Handshake {
         self.total_work.encode_to(out);
         self.listen.encode_to(out);
         self.nonce.encode_to(out);
-        u8::from(self.archives).encode_to(out);
+        self.keeps.encode_to(out);
     }
 }
 
@@ -140,17 +206,7 @@ impl Decode for Handshake {
             total_work: u128::decode_from(reader)?,
             listen: u16::decode_from(reader)?,
             nonce: u64::decode_from(reader)?,
-            // Anything but zero or one is a node saying something this version
-            // does not understand, and taking it for true would be guessing.
-            archives: match u8::decode_from(reader)? {
-                0 => false,
-                1 => true,
-                _ => {
-                    return Err(CodecError::InvalidValue {
-                        type_name: "Handshake",
-                    })
-                }
-            },
+            keeps: Keeps::decode_from(reader)?,
         })
     }
 }
@@ -239,6 +295,70 @@ pub enum Message {
         parts: u32,
         bytes: Vec<u8>,
     },
+    /// Where do these fallen notes sit? Send me the paths.
+    ///
+    /// The one thing a wallet cannot work out for itself. A note that has
+    /// fallen out of the set every node holds can only be spent alongside a
+    /// path showing where it sits, that path changes with every block that
+    /// buries another note, and a wallet whose node stopped keeping it current
+    /// has money it can see and cannot move.
+    ///
+    /// Places rather than notes, because a place is what both kinds of
+    /// answerer can look up: an archivist rebuilds the path from the leaves it
+    /// kept, and a node following the owner already holds it. Naming the note
+    /// instead would have made the archivist the only possible answerer and
+    /// would have told it whose money it was being asked about.
+    GetProofs(Vec<u64>),
+    /// One answer per place asked about, in the order they were asked about.
+    ///
+    /// Nothing here is taken on the sender's word, and nothing needs to be: a
+    /// path either folds to the commitment the asker's own node already holds
+    /// or it is worth nothing, and the asker checks. That is why this can be
+    /// asked of a stranger at all.
+    Proofs(Vec<Placed>),
+}
+
+/// What one node could say about one place in the cold set.
+///
+/// A node that cannot produce the path says so, with nothing where the path
+/// would be, rather than leaving the place out of its answer or saying
+/// nothing. Silence from a peer is indistinguishable from a peer that has hung
+/// up, and a wallet waiting on the one thing that would let it spend its money
+/// has to be able to tell those apart and go and ask somebody else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Placed {
+    pub position: u64,
+    /// The path from that place up to the commitment, when this node has one.
+    pub proof: Option<ForestProof>,
+}
+
+impl Encode for Placed {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        self.position.encode_to(out);
+        match &self.proof {
+            None => 0u8.encode_to(out),
+            Some(proof) => {
+                1u8.encode_to(out);
+                proof.encode_to(out);
+            }
+        }
+    }
+}
+
+impl Decode for Placed {
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        let position = u64::decode_from(reader)?;
+        let proof = match u8::decode_from(reader)? {
+            0 => None,
+            1 => Some(ForestProof::decode_from(reader)?),
+            _ => {
+                return Err(CodecError::InvalidValue {
+                    type_name: "Placed",
+                })
+            }
+        };
+        Ok(Self { position, proof })
+    }
 }
 
 /// What a newcomer is asking to be shown.
@@ -325,6 +445,8 @@ impl Message {
             Self::JoinPart { .. } => "join part",
             Self::GetHeaders { .. } => "get headers",
             Self::Headers { .. } => "headers",
+            Self::GetProofs(_) => "get proofs",
+            Self::Proofs(_) => "proofs",
         }
     }
 
@@ -346,6 +468,8 @@ impl Message {
             Self::JoinPart { .. } => 13,
             Self::GetHeaders { .. } => 14,
             Self::Headers { .. } => 15,
+            Self::GetProofs(_) => 16,
+            Self::Proofs(_) => 17,
         }
     }
 }
@@ -410,6 +534,8 @@ impl Encode for Message {
                 from.encode_to(out);
                 headers.encode_to(out);
             }
+            Self::GetProofs(positions) => positions.encode_to(out),
+            Self::Proofs(placed) => placed.encode_to(out),
         }
     }
 }
@@ -491,6 +617,16 @@ impl Decode for Message {
                     });
                 }
                 Ok(Self::Headers { from, headers })
+            }
+            16 => Ok(Self::GetProofs(decode_heights(reader, MAX_PROVEN)?)),
+            17 => {
+                let placed = Vec::<Placed>::decode_from(reader)?;
+                if placed.len() > MAX_PROVEN {
+                    return Err(CodecError::InvalidValue {
+                        type_name: "Proofs",
+                    });
+                }
+                Ok(Self::Proofs(placed))
             }
             _ => Err(CodecError::InvalidValue {
                 type_name: "Message",

@@ -52,7 +52,33 @@ use cairn_ledger::validation::{assemble_block, connect_block, mine_block, Consen
 use cairn_ledger::LedgerState;
 use cairn_primitives::codec::{Decode, Encode};
 
-use index::{Head, Held, Index};
+use index::{Head, Held, Index, Reading};
+
+/// Reads until the walk is level with the tip, which is what
+/// `Explorer::refresh` does with it.
+///
+/// One call reads a batch and says whether there is more, so that the site can
+/// be answered between turns; a caller that wants the whole chain read comes
+/// straight back for the next one. Every figure in this file is about a whole
+/// read, so they all go through here.
+///
+/// The head is worked out again for every turn, because it is a statement
+/// about what the index has read and that changes with each turn. `Explorer`
+/// does the same, for the same reason.
+fn read_all(
+    index: &mut Index,
+    head: impl Fn(&Index) -> Option<Head>,
+    block_at: impl Fn(u64) -> Held,
+) {
+    loop {
+        let Some(now) = head(index) else {
+            return;
+        };
+        if index.refresh(&now, &block_at) == Reading::Done {
+            return;
+        }
+    }
+}
 
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
@@ -263,13 +289,17 @@ fn a_reorganisation_rereads_the_whole_chain_and_holds_nothing_while_it_does() {
         let mut index = Index::new();
         let head = head_of(&store, &index).unwrap();
         let started = Instant::now();
-        index.refresh(&head, |height| {
-            reads.set(reads.get() + 1);
-            if store.block_at(height).is_none() {
-                off_shelf.set(off_shelf.get() + 1);
-            }
-            shelf.held(&store, height)
-        });
+        read_all(
+            &mut index,
+            |_| Some(head),
+            |height| {
+                reads.set(reads.get() + 1);
+                if store.block_at(height).is_none() {
+                    off_shelf.set(off_shelf.get() + 1);
+                }
+                shelf.held(&store, height)
+            },
+        );
         let first = started.elapsed();
         let first_reads = reads.get();
         assert_eq!(index.blocks_read(), length, "the whole chain was indexed");
@@ -279,12 +309,15 @@ fn a_reorganisation_rereads_the_whole_chain_and_holds_nothing_while_it_does() {
         shelf.add(&extra);
         feed(&mut store, std::slice::from_ref(&extra));
         reads.set(0);
-        let head = head_of(&store, &index).unwrap();
         let started = Instant::now();
-        index.refresh(&head, |height| {
-            reads.set(reads.get() + 1);
-            shelf.held(&store, height)
-        });
+        read_all(
+            &mut index,
+            |index| head_of(&store, index),
+            |height| {
+                reads.set(reads.get() + 1);
+                shelf.held(&store, height)
+            },
+        );
         let extend = started.elapsed();
         let extend_reads = reads.get();
 
@@ -301,15 +334,18 @@ fn a_reorganisation_rereads_the_whole_chain_and_holds_nothing_while_it_does() {
 
         reads.set(0);
         off_shelf.set(0);
-        let head = head_of(&store, &index).unwrap();
         let started = Instant::now();
-        index.refresh(&head, |height| {
-            reads.set(reads.get() + 1);
-            if store.block_at(height).is_none() {
-                off_shelf.set(off_shelf.get() + 1);
-            }
-            shelf.held(&store, height)
-        });
+        read_all(
+            &mut index,
+            |index| head_of(&store, index),
+            |height| {
+                reads.set(reads.get() + 1);
+                if store.block_at(height).is_none() {
+                    off_shelf.set(off_shelf.get() + 1);
+                }
+                shelf.held(&store, height)
+            },
+        );
         let after = started.elapsed();
         let after_reads = reads.get();
 
@@ -356,18 +392,22 @@ fn the_walk_can_be_interrupted_by_the_node_it_reads() {
     };
 
     let taken = Cell::new(0usize);
-    index.refresh(&head, |height| {
-        // What the node itself does between blocks, and what used to queue
-        // behind the whole rebuild.
-        let chain = store
-            .try_lock()
-            .expect("the chain is not held while a block is read");
-        taken.set(taken.get() + 1);
-        match chain.block_at(height) {
-            Some(block) => Held::Block(Box::new(block.clone())),
-            None => Held::Waiting,
-        }
-    });
+    read_all(
+        &mut index,
+        |_| Some(head),
+        |height| {
+            // What the node itself does between blocks, and what used to queue
+            // behind the whole rebuild.
+            let chain = store
+                .try_lock()
+                .expect("the chain is not held while a block is read");
+            taken.set(taken.get() + 1);
+            match chain.block_at(height) {
+                Some(block) => Held::Block(Box::new(block.clone())),
+                None => Held::Waiting,
+            }
+        },
+    );
 
     assert_eq!(index.blocks_read(), 200);
     assert_eq!(taken.get(), 200, "and every block was read the same way");
@@ -433,8 +473,11 @@ fn a_trimmed_log_costs_the_index_only_the_blocks_that_were_trimmed() {
 
     let mut index = Index::new();
     for _ in 0..5 {
-        let head = head_of(&store, &index).unwrap();
-        index.refresh(&head, |height| shelf.held(&store, height));
+        read_all(
+            &mut index,
+            |index| head_of(&store, index),
+            |height| shelf.held(&store, height),
+        );
     }
 
     assert_eq!(
@@ -488,8 +531,11 @@ fn a_reorganisation_on_a_trimmed_log_rebuilds_from_where_the_blocks_start() {
         shelf.add(block);
     }
     let mut index = Index::new();
-    let head = head_of(&store, &index).unwrap();
-    index.refresh(&head, |height| shelf.held(&store, height));
+    read_all(
+        &mut index,
+        |index| head_of(&store, index),
+        |height| shelf.held(&store, height),
+    );
     assert_eq!(index.blocks_read(), 1_500);
     assert!(index.reads_from_the_start());
     let before = index
@@ -501,8 +547,11 @@ fn a_reorganisation_on_a_trimmed_log_rebuilds_from_where_the_blocks_start() {
     // Upkeep trims the log to its budget. Nothing breaks: the index only ever
     // asks for heights above what it has.
     shelf.trim_to(100);
-    let head = head_of(&store, &index).unwrap();
-    index.refresh(&head, |height| shelf.held(&store, height));
+    read_all(
+        &mut index,
+        |index| head_of(&store, index),
+        |height| shelf.held(&store, height),
+    );
     assert_eq!(
         index.blocks_read(),
         1_500,
@@ -516,8 +565,11 @@ fn a_reorganisation_on_a_trimmed_log_rebuilds_from_where_the_blocks_start() {
     feed(&mut store, &bad_blocks);
     assert_eq!(store.tip(), bad_blocks.last().map(Block::id));
 
-    let head = head_of(&store, &index).unwrap();
-    index.refresh(&head, |height| shelf.held(&store, height));
+    read_all(
+        &mut index,
+        |index| head_of(&store, index),
+        |height| shelf.held(&store, height),
+    );
 
     assert_eq!(
         index.blocks_read(),
@@ -544,8 +596,11 @@ fn a_reorganisation_on_a_trimmed_log_rebuilds_from_where_the_blocks_start() {
 
     // And it stays there, however long the site runs.
     for _ in 0..20 {
-        let head = head_of(&store, &index).unwrap();
-        index.refresh(&head, |height| shelf.held(&store, height));
+        read_all(
+            &mut index,
+            |index| head_of(&store, index),
+            |height| shelf.held(&store, height),
+        );
     }
     assert_eq!(index.blocks_read(), 1_401);
 }
@@ -668,13 +723,17 @@ fn what_a_block_of_dust_costs_the_index() {
     let mut index = Index::new();
     let head = head_of(&store, &index).unwrap();
     let started = Instant::now();
-    index.refresh(&head, |height| {
-        if height < blocks as u64 {
-            Held::Block(Box::new(dust_block(height, miner, &owners, &params)))
-        } else {
-            Held::Waiting
-        }
-    });
+    read_all(
+        &mut index,
+        |_| Some(head),
+        |height| {
+            if height < blocks as u64 {
+                Held::Block(Box::new(dust_block(height, miner, &owners, &params)))
+            } else {
+                Held::Waiting
+            }
+        },
+    );
     let took = started.elapsed();
     let grew = rss_kb().saturating_sub(baseline);
 
@@ -711,6 +770,168 @@ fn what_a_block_of_dust_costs_the_index() {
     assert!(size.bytes > 0);
 }
 
+/// A block of transfers that each pay `fan_out` owners and spend the one
+/// before them, cycling through the pool of owners as they go.
+///
+/// `dust_block` is this at its widest, where a transfer pays two hundred and
+/// fifty six. The fan-out is a number here because what a note costs the index
+/// is not decided by the note: the index also keeps an entry per transaction
+/// and a movement per side of every note, and the narrower the transfers the
+/// fewer notes those are spread over.
+fn payment_block(
+    height: u64,
+    miner: PublicKey,
+    owners: &[PublicKey],
+    fan_out: usize,
+    params: &ConsensusParams,
+) -> Block {
+    let dust = cairn_primitives::Amount::from_pebbles(1).unwrap();
+    let coinbase = CoinbaseTransaction::new(height, vec![Note::new(params.initial_reward, miner)]);
+    let mut transfers: Vec<Transfer> = Vec::new();
+    let mut bytes = 200 + coinbase.encode().len();
+    let mut previous = cairn_ledger::note::NoteId::new(coinbase.id(), 0);
+    let mut at = 0usize;
+    loop {
+        let outputs: Vec<Note> = (0..fan_out)
+            .map(|step| Note::new(dust, owners[(at + step) % owners.len()]))
+            .collect();
+        let transfer = Transfer::new(
+            vec![cairn_ledger::transaction::Input::hot(previous)],
+            outputs,
+        );
+        let size = transfer.encode().len();
+        if bytes + size > params.max_block_bytes {
+            break;
+        }
+        bytes += size;
+        at += fan_out;
+        previous = cairn_ledger::note::NoteId::new(transfer.id(), 0);
+        transfers.push(transfer);
+    }
+    let mut block = Block {
+        header: cairn_ledger::block::BlockHeader {
+            version: 1,
+            network: params.network,
+            height,
+            previous: cairn_primitives::Hash32::ZERO,
+            transactions_root: cairn_primitives::Hash32::ZERO,
+            state_root: cairn_primitives::Hash32::ZERO,
+            history: cairn_primitives::Hash32::ZERO,
+            timestamp: 1_000 + height,
+            difficulty: 1,
+            total_work: u128::from(height),
+            nonce: height,
+        },
+        coinbase,
+        transfers,
+    };
+    block.header.transactions_root = block.transactions_root();
+    assert!(block.encode().len() <= params.max_block_bytes);
+    block
+}
+
+/// Weighs the index over thirty blocks of one shape, and says what one note
+/// really cost against what [`index::BYTES_PER_NOTE`] says it costs.
+///
+/// Returns what the index came to hold, so the caller can hold the two ratios
+/// that explain the reading: notes per transaction and movements per note.
+/// Those are counted rather than measured, so they stand however busy the
+/// machine is, and the bytes are printed for whoever is reading the run.
+fn weigh_shape(label: &str, fan_out: usize) -> index::Size {
+    let params = params();
+    let miner = wallet(1).public_key();
+    let owners = fresh_owners(3_072);
+    let blocks = 30u64;
+    let head = Head {
+        tip: blocks,
+        at_last_read: None,
+    };
+
+    let baseline = rss_kb();
+    let mut index = Index::new();
+    read_all(
+        &mut index,
+        |_| Some(head),
+        |height| {
+            if height < blocks {
+                Held::Block(Box::new(payment_block(
+                    height, miner, &owners, fan_out, &params,
+                )))
+            } else {
+                Held::Waiting
+            }
+        },
+    );
+    let grew = rss_kb().saturating_sub(baseline);
+    let size = index.size();
+    println!(
+        "{label}: {} notes, {} transactions, {} owners, {} movements, \
+         {:.1} notes a transaction, {:.2} movements a note",
+        size.notes,
+        size.transactions,
+        size.owners,
+        size.movements,
+        size.notes as f64 / size.transactions.max(1) as f64,
+        size.movements as f64 / size.notes.max(1) as f64,
+    );
+    println!(
+        "  the index says {} bytes a note; the resident set says {} bytes a note",
+        index::BYTES_PER_NOTE,
+        grew * 1024 / size.notes.max(1),
+    );
+    std::hint::black_box(&index);
+    size
+}
+
+/// The ordinary payment: one note to the payee, one back as change.
+///
+/// The dearest shape there is per note, and what almost every transfer on any
+/// chain actually is. It is where `BYTES_PER_NOTE` comes from, and it is why
+/// the figure is 565 and not the five hundred the site used to state: five
+/// hundred was calibrated on the widest fan-out alone, which is the cheapest
+/// per note and which nobody sends.
+///
+/// A note is what the index counts, and a note is not the whole of what it
+/// keeps: there is an entry per transaction and a movement per side of every
+/// note as well, and this shape has the fewest notes to spread them over.
+#[test]
+fn what_an_ordinary_payment_costs_the_index() {
+    let size = weigh_shape("2 outputs a transfer (payee and change)", 2);
+    assert!(
+        size.movements * 10 > size.notes * 14,
+        "this shape spends nearly every note it makes, so it runs to about \
+         three movements for every two notes"
+    );
+    assert!(
+        size.notes < size.transactions * 3,
+        "and to two notes a transaction"
+    );
+}
+
+/// A small fan-out, as a miner paying a pool would send.
+#[test]
+fn what_a_small_fan_out_costs_the_index() {
+    let size = weigh_shape("8 outputs a transfer", 8);
+    assert!(size.notes > size.transactions * 6);
+    assert!(size.movements < size.notes * 13 / 10);
+}
+
+/// The widest fan-out a transfer may have, which is the shape the five hundred
+/// was calibrated on: 236 notes to a transaction and one movement a note, so
+/// everything the index keeps besides the notes is spread thin.
+#[test]
+fn what_a_wide_fan_out_costs_the_index() {
+    let size = weigh_shape("256 outputs a transfer", 256);
+    assert!(
+        size.notes > size.transactions * 100,
+        "the transaction entries are spread over hundreds of notes each"
+    );
+    assert!(
+        size.movements < size.notes * 11 / 10,
+        "and one transfer spends one note however many it makes"
+    );
+}
+
 /// The same bytes, sent to one address instead of many: what the movements
 /// list costs, and what bounds it.
 #[test]
@@ -737,13 +958,17 @@ fn what_a_single_address_can_be_made_to_carry() {
     let mut index = Index::new();
     let head = head_of(&store, &index).unwrap();
     let started = Instant::now();
-    index.refresh(&head, |height| {
-        if height < blocks as u64 {
-            Held::Block(Box::new(dust_block(height, miner, &owners, &params)))
-        } else {
-            Held::Waiting
-        }
-    });
+    read_all(
+        &mut index,
+        |_| Some(head),
+        |height| {
+            if height < blocks as u64 {
+                Held::Block(Box::new(dust_block(height, miner, &owners, &params)))
+            } else {
+                Held::Waiting
+            }
+        },
+    );
     let took = started.elapsed();
     let grew = rss_kb().saturating_sub(baseline);
 
@@ -901,13 +1126,17 @@ fn what_one_anonymous_page_of_blocks_costs() {
 
     let mut index = Index::new();
     let head = head_of(&store, &index).unwrap();
-    index.refresh(&head, |height| {
-        if height < 160 {
-            Held::Block(Box::new(dust_block(height, miner, &owners, &params)))
-        } else {
-            Held::Waiting
-        }
-    });
+    read_all(
+        &mut index,
+        |_| Some(head),
+        |height| {
+            if height < 160 {
+                Held::Block(Box::new(dust_block(height, miner, &owners, &params)))
+            } else {
+                Held::Waiting
+            }
+        },
+    );
 
     let page: Vec<Block> = (0..128)
         .map(|height| dust_block(height, miner, &owners, &params))
