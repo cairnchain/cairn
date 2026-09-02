@@ -57,16 +57,39 @@ const HEADER_BYTES: usize = 8;
 /// peers, because that loop only runs between frames.
 ///
 /// So the frame is what a peer is judged on. Twenty seconds is four times the
-/// read deadline and the whole of a frame rather than a call, which puts a
-/// floor of about twenty six kilobytes a second on a peer that is mid frame:
-/// far below any link that could follow a chain of hundred kilobyte blocks,
-/// and far above what a stranger holding a megabyte of this node open is
-/// entitled to spend.
+/// read deadline and belongs to the frame rather than to a call.
+///
+/// What it does not do any more is bound the whole frame. A fixed twenty
+/// seconds for anything from eight bytes to a megabyte set a floor of about
+/// twenty six kilobytes a second on whoever was mid frame, and the claim that
+/// no link worth having is below that was an assumption about links rather
+/// than a fact about them: a phone on a weak signal, or a rural line, delivers
+/// under it steadily. On a design whose whole point is that anyone can run a
+/// full node, the frames that floor cut off were the large ones, which is to
+/// say the ones a node is handed when it joins.
+///
+/// So this is what a frame may go without getting on with it, and
+/// [`PROGRESS_BYTES`] renews it. A link that keeps delivering keeps its frame;
+/// one that stops loses it inside twenty seconds either way.
 ///
 /// The socket deadlines are still needed and are not replaced. This can only
 /// be looked at between syscalls, so without them one call could block for
 /// ever and never come back to be judged.
 pub const FRAME_PATIENCE: Duration = Duration::from_secs(20);
+
+/// What a frame has to move to be given [`FRAME_PATIENCE`] again.
+///
+/// The floor this sets is sixty four kilobytes in twenty seconds, about three
+/// and a quarter kilobytes a second, which is a link that can still follow a
+/// chain of hundred kilobyte blocks a minute apart and is eight times below
+/// what a whole-frame deadline demanded.
+///
+/// It is also what a stranger has to keep paying. Under the old rule a held
+/// connection cost the peer almost nothing for twenty seconds; under this one
+/// it costs three kilobytes a second for as long as it is held, and a frame is
+/// capped at [`MAX_FRAME_BYTES`], so the longest anyone can hold one is
+/// sixteen renewals.
+pub const PROGRESS_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WireError {
@@ -120,7 +143,11 @@ enum Filled {
 /// that finds nothing. A peer that opens a frame and dribbles is caught by
 /// `by`, because it never lets that deadline fire: every byte it sends starts
 /// the next one, and it can go on doing that for as long as the frame is long.
-fn fill<R: Read>(reader: &mut R, buffer: &mut [u8], by: Instant) -> Result<Filled, WireError> {
+fn fill<R: Read>(
+    reader: &mut R,
+    buffer: &mut [u8],
+    patience: &mut Patience,
+) -> Result<Filled, WireError> {
     let wanted = buffer.len();
     let mut read = 0usize;
     while read < wanted {
@@ -140,7 +167,7 @@ fn fill<R: Read>(reader: &mut R, buffer: &mut [u8], by: Instant) -> Result<Fille
             }
             Err(error) => return Err(WireError::Io(error)),
         }
-        if read < wanted && Instant::now() >= by {
+        if read < wanted && !patience.holds(read) {
             return Err(WireError::Stalled { had: read, wanted });
         }
     }
@@ -155,6 +182,41 @@ fn patience_from(now: Instant) -> Instant {
     now.checked_add(FRAME_PATIENCE).unwrap_or(now)
 }
 
+/// How long a frame may go without getting on with it.
+///
+/// Carried across both halves of a read, so the header and the body are one
+/// frame and not two deadlines.
+#[derive(Debug)]
+struct Patience {
+    by: Instant,
+    /// Bytes moved when the deadline was last renewed.
+    marked: usize,
+}
+
+impl Patience {
+    fn started() -> Self {
+        Self {
+            by: patience_from(Instant::now()),
+            marked: 0,
+        }
+    }
+
+    /// Whether a frame that has moved `moved` bytes may carry on.
+    ///
+    /// Renewed by progress rather than by time, which is the difference
+    /// between judging a peer on how fast it is and judging it on whether it
+    /// is still going. A link too slow to move [`PROGRESS_BYTES`] in
+    /// [`FRAME_PATIENCE`] is one that cannot follow this chain at all.
+    fn holds(&mut self, moved: usize) -> bool {
+        if moved.saturating_sub(self.marked) >= PROGRESS_BYTES {
+            self.marked = moved;
+            self.by = patience_from(Instant::now());
+            return true;
+        }
+        Instant::now() < self.by
+    }
+}
+
 /// Writes the whole of `bytes` by `by`, or gives up on the peer.
 ///
 /// The mirror of [`fill`], and there for the mirror reason: `write_all` loops
@@ -162,7 +224,7 @@ fn patience_from(now: Instant) -> Instant {
 /// accepting one byte per deadline restarts it every time. What that held was
 /// not only the writing thread: everything queued behind it was held with it,
 /// for a peer that had already decided not to read.
-fn drain<W: Write>(writer: &mut W, bytes: &[u8], by: Instant) -> Result<(), WireError> {
+fn drain<W: Write>(writer: &mut W, bytes: &[u8], patience: &mut Patience) -> Result<(), WireError> {
     let size = bytes.len();
     let mut sent = 0usize;
     while sent < size {
@@ -175,7 +237,7 @@ fn drain<W: Write>(writer: &mut W, bytes: &[u8], by: Instant) -> Result<(), Wire
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(WireError::Io(error)),
         }
-        if sent < size && Instant::now() >= by {
+        if sent < size && !patience.holds(sent) {
             return Err(WireError::Unaccepted { sent, size });
         }
     }
@@ -199,7 +261,7 @@ pub fn write_message<W: Write>(
     length.encode_to(&mut frame);
     frame.extend_from_slice(&body);
 
-    drain(writer, &frame, patience_from(Instant::now()))?;
+    drain(writer, &frame, &mut Patience::started())?;
     writer.flush()?;
     Ok(())
 }
@@ -214,9 +276,9 @@ pub fn read_message<R: Read>(reader: &mut R, network: NetworkId) -> Result<Incom
     // deadline out of the twenty seconds; a peer with nothing to say at all
     // never reaches it, because the header read returns `Quiet` first and the
     // next call starts again.
-    let by = patience_from(Instant::now());
+    let mut patience = Patience::started();
     let mut header = [0u8; HEADER_BYTES];
-    if fill(reader, &mut header, by)? == Filled::Nothing {
+    if fill(reader, &mut header, &mut patience)? == Filled::Nothing {
         return Ok(Incoming::Quiet);
     }
 
@@ -237,7 +299,7 @@ pub fn read_message<R: Read>(reader: &mut R, network: NetworkId) -> Result<Incom
     // cap above is checked first and why a node accepts a bounded number of
     // connections at once.
     let mut body = vec![0u8; declared];
-    if fill(reader, &mut body, by)? == Filled::Nothing {
+    if fill(reader, &mut body, &mut patience)? == Filled::Nothing {
         return Err(WireError::Stalled {
             had: 0,
             wanted: declared,

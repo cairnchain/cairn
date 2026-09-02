@@ -174,6 +174,11 @@ impl Window {
 pub struct Allowance {
     mine: Window,
     address: Option<Arc<Mutex<Window>>>,
+    /// Whether this connection has asked for anything yet.
+    ///
+    /// What decides whether it inherits its address's spend. See
+    /// [`Self::afford`].
+    opened: bool,
 }
 
 impl Allowance {
@@ -183,6 +188,7 @@ impl Allowance {
         Self {
             mine: Window::default(),
             address: Some(Arc::clone(address)),
+            opened: false,
         }
     }
 
@@ -192,9 +198,22 @@ impl Allowance {
     /// profile turns into an abort. Carrying on with the count is better than
     /// a second panic.
     fn afford(&mut self, cost: u32, now: u64) -> bool {
-        if self.mine.roll(now) {
-            // A connection starts where its address left off, so hanging up
-            // is not a way of being handed a fresh window.
+        let rolled = self.mine.roll(now);
+        // A connection starts where its address left off, so hanging up is not
+        // a way of being handed a fresh window.
+        //
+        // Only at its first question, which is the whole of what that defends.
+        // Doing it at every window boundary made the count shared for as long
+        // as both connections lived, and the harm was not to an attacker: two
+        // people behind one carrier NAT, or one office, or one cloud gateway,
+        // and whichever spoke second each window was answered with silence for
+        // as long as the other kept talking. Two hundred and forty messages
+        // over five minutes made a neighbour invisible, and window boundaries
+        // are `unix_time / 10`, which anybody can compute.
+        //
+        // A connection that stayed open across a boundary has nothing to
+        // inherit: it never hung up, so its own count is the honest one.
+        if rolled && !self.opened {
             let carried = self.address.as_ref().map(|window| {
                 let mut held = window.lock().unwrap_or_else(PoisonError::into_inner);
                 held.roll(now);
@@ -204,6 +223,7 @@ impl Allowance {
                 self.mine.spent = spent;
             }
         }
+        self.opened = true;
         let after = self.mine.spent.saturating_add(cost);
         if after > ALLOWANCE {
             return false;
@@ -341,6 +361,8 @@ pub enum DropReason {
     },
     #[error("peer sent a block this node rejects")]
     BadBlock { id: Hash32 },
+    #[error("this node could not read back a block of its own, so it left this connection")]
+    OwnStore,
     #[error("this connection is this node talking to itself")]
     Ourselves,
 }
@@ -367,6 +389,9 @@ impl DropReason {
             // and refusing the host would turn the first minutes of a fork
             // into an updated node banning most of the network.
             | Self::ForeignRules { .. }
+            // The peer asked for a switch and this node could not make it.
+            // Whatever went wrong is on this side of the wire.
+            | Self::OwnStore
             | Self::Ourselves => false,
         }
     }
@@ -524,7 +549,7 @@ pub fn local_handshake(chain: &ChainStore, keeps: Keeps, listen: u16, nonce: u64
     Handshake {
         version: PROTOCOL_VERSION,
         network: chain.params().network,
-        genesis: chain.genesis().unwrap_or(Hash32::ZERO),
+        genesis: first_block(chain).unwrap_or(Hash32::ZERO),
         tip: chain.tip().unwrap_or(Hash32::ZERO),
         height: chain.height().unwrap_or_default(),
         total_work: chain.total_work(),
@@ -549,7 +574,7 @@ fn accept_handshake(chain: &ChainStore, theirs: &Handshake) -> Result<(), DropRe
     // take the genesis it is about to be handed. Choosing whom to ask first is
     // what a seed address is: the one piece of trust in the whole protocol, and
     // it belongs to whoever runs the node, not to the network.
-    if let Some(ours) = chain.genesis() {
+    if let Some(ours) = first_block(chain) {
         if theirs.genesis != ours && theirs.genesis != Hash32::ZERO {
             return Err(DropReason::ForeignChain {
                 theirs: theirs.genesis,
@@ -557,6 +582,21 @@ fn accept_handshake(chain: &ChainStore, theirs: &Handshake) -> Result<(), DropRe
         }
     }
     Ok(())
+}
+
+/// The block this node's chain starts at, for saying and for checking.
+///
+/// The rules first, because a named network pins its first block and that is
+/// known before a single one arrives. The branch second, for a rule set that
+/// pins nothing, which is what tests run on.
+///
+/// Reading only the branch was a hole with no attacker in it and no noise: a
+/// node handed a ledger has a branch that starts at its anchor and no first
+/// milestone, so it answered nothing, introduced itself with a genesis of
+/// zeroes, and let every peer past the one check that says "you are on another
+/// chain". The nodes it failed for were the ones that had just arrived.
+fn first_block(chain: &ChainStore) -> Option<Hash32> {
+    chain.params().genesis.or_else(|| chain.genesis())
 }
 
 fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: bool) -> Reaction {
@@ -851,6 +891,18 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
             found,
             required,
         }),
+        // This node's own store, not the block and not the peer. It is
+        // reachable without anybody doing anything wrong: a heavier branch is
+        // offered, this node rewinds its own to take it, the new branch fails,
+        // and putting the old one back needs a body the log no longer holds.
+        // What comes back says the tree lost a block it had recorded, which is
+        // true and is about this machine.
+        //
+        // So the peer is disconnected and not refused. The chain is short and
+        // this node knows it: the next peer it talks to offers the blocks
+        // again, and they are applied to what it has. Banning the messenger
+        // was the one response that made that slower.
+        Err(ChainError::Corrupt) => Reaction::close(DropReason::OwnStore),
         Err(_) => Reaction::close(DropReason::BadBlock { id }),
     }
 }

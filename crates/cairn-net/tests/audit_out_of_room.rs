@@ -34,7 +34,7 @@ use cairn_ledger::transaction::CoinbaseTransaction;
 use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
 use cairn_ledger::LedgerState;
 use cairn_net::book::AddressBook;
-use cairn_net::node::{Node, Writing, MAX_BEHIND};
+use cairn_net::node::{Node, NodeError, Writing, MAX_BEHIND};
 use cairn_primitives::codec::Encode;
 use cairn_store::{
     BlockLog, HeaderLog, HeaderTree, BLOCK_INDEX, BLOCK_LOG, HANDED_LEDGER, HEADER_LOG,
@@ -215,29 +215,27 @@ fn a_torn_handed_ledger_deletes_the_whole_block_log() {
     // name is there and the bytes are not.
     std::fs::write(directory.join(HANDED_LEDGER), &ledger[..ledger.len() / 2]).unwrap();
 
-    let (node, restored) = Node::open(params(), loopback(), &directory)
-        .expect("the node starts, which is the part that is right");
+    let refused = Node::open(params(), loopback(), &directory);
     let after = std::fs::metadata(directory.join(BLOCK_LOG)).unwrap().len();
-    drop(node);
-
-    // It says so, which is the part that is right.
     assert!(
-        restored.rejoining,
-        "the operator is told the stored blocks start partway up the chain"
+        matches!(refused, Err(NodeError::UnusableLedger { .. })),
+        "a ledger file that is there and will not decode is not a node that \
+         never had one: {:?}",
+        refused.map(|_| ())
     );
-    // And then it deletes them.
     assert_eq!(
-        after, 0,
-        "the block log survived; it was {before} bytes and is now {after}"
+        after, before,
+        "the block log was {before} bytes and is now {after}; nothing may be \
+         cut over a file that can be put back"
     );
     let _ = std::fs::remove_dir_all(&directory);
 }
 
 /// The same, one byte at a time, to show it is not a property of where the cut
-/// falls: every truncation of the handed ledger except none at all costs the
-/// node every block it holds.
+/// falls: no truncation of the handed ledger costs the node a block, and the
+/// empty file is not a special case of it either.
 #[test]
-fn every_cut_of_the_handed_ledger_costs_the_same() {
+fn no_cut_of_the_handed_ledger_costs_a_block() {
     let mut source = Chain::new();
     source.run(&wallet(9), 40);
     let handover = source.handover();
@@ -257,20 +255,25 @@ fn every_cut_of_the_handed_ledger_costs_the_same() {
                 log.append(block).unwrap();
             }
         }
-        let (node, restored) = Node::open(params(), loopback(), &directory).unwrap();
-        drop(node);
+        let before = std::fs::metadata(directory.join(BLOCK_LOG)).unwrap().len();
+        let opened = Node::open(params(), loopback(), &directory);
+        let stopped = matches!(opened, Err(NodeError::UnusableLedger { .. }));
+        drop(opened);
         let held = std::fs::metadata(directory.join(BLOCK_LOG)).unwrap().len();
-        kept.push((cut, restored.rejoining, held));
+        kept.push((cut, stopped, before, held));
         let _ = std::fs::remove_dir_all(&directory);
     }
 
-    for (cut, rejoining, held) in &kept {
-        eprintln!("ledger cut to {cut:>4} bytes: rejoining {rejoining}, log left {held} bytes");
+    for (cut, stopped, before, held) in &kept {
+        eprintln!("ledger cut to {cut:>4} bytes: stopped {stopped}, log {before} -> {held} bytes");
     }
     assert!(
-        kept.iter()
-            .all(|(_, rejoining, held)| *rejoining && *held == 0),
-        "some cut left the log alone: {kept:?}"
+        kept.iter().all(|(_, stopped, _, _)| *stopped),
+        "some cut was read as a node that never had a ledger: {kept:?}"
+    );
+    assert!(
+        kept.iter().all(|(_, _, before, held)| before == held),
+        "some cut cost the node blocks: {kept:?}"
     );
 }
 

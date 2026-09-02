@@ -395,12 +395,17 @@ fn a_handover_at_the_rules_ceiling_against_what_the_wire_carries() {
 /// lands in the second of those three, and a rule change past this build's
 /// schedule lands in the third.
 ///
-/// What `None` then means to the code below it is `start = 0`. The block log
-/// of a node that joined begins above zero, so `rejoining` is true, `reached`
-/// is zero, and `log.keep_below(0)` empties it. The node comes back with
-/// neither the ledger nor the blocks that stood on it.
+/// `None` used to mean `start = 0` to the code below it. The block log of a
+/// node that joined begins above zero, so `rejoining` was true, `reached` was
+/// zero, and `log.keep_below(0)` emptied it: the node came back with neither
+/// the ledger nor the blocks that stood on it.
+///
+/// The three are told apart now. Only a file that is not there is a node that
+/// never had one; a file that is there and will not be used stops the node
+/// with the reason, and nothing on the disk is touched, which is what lets the
+/// file be put back.
 #[test]
-fn a_ledger_file_the_disk_refuses_costs_the_node_every_block_it_holds() {
+fn a_ledger_file_the_disk_refuses_costs_the_node_nothing_it_holds() {
     let directory = std::env::temp_dir().join(format!(
         "cairn-seam-ledger-{}-{:?}",
         std::process::id(),
@@ -452,14 +457,15 @@ fn a_ledger_file_the_disk_refuses_costs_the_node_every_block_it_holds() {
     // arrives here as the same `None`.
     std::fs::write(directory.join(cairn_store::HANDED_LEDGER), b"not a ledger").unwrap();
 
-    let (node, restored) = cairn_net::node::Node::open(params(), listen, &directory).unwrap();
+    let refused = cairn_net::node::Node::open(params(), listen, &directory);
     assert!(
-        restored.rejoining,
-        "the node read its own log as beginning above where it thinks it starts"
+        matches!(
+            refused,
+            Err(cairn_net::node::NodeError::UnusableLedger { .. })
+        ),
+        "the node read a file it could not use as a node that never had one: {:?}",
+        refused.map(|_| ())
     );
-    assert_eq!(restored.blocks, 0);
-    node.shutdown();
-    drop(node);
 
     let left = {
         let (log, _) = cairn_store::BlockLog::open(&directory).unwrap();
@@ -467,12 +473,11 @@ fn a_ledger_file_the_disk_refuses_costs_the_node_every_block_it_holds() {
     };
     assert_eq!(
         left,
-        0,
-        "and every block it held is gone: keep_below(0) over a log that began \
-         at {}",
+        held,
+        "every block it held must still be there: the log began at {} and \
+         nothing may cut it over a file that can be put back",
         anchor + 1
     );
-    println!("block log went from {held} records to {left}");
 
     let _ = std::fs::remove_dir_all(&directory);
 }

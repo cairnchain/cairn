@@ -281,6 +281,17 @@ pub enum NodeError {
     Io(#[from] io::Error),
     #[error("could not reach the block log: {0}")]
     Store(#[from] StoreError),
+    /// The ledger this node starts from is there and cannot be used.
+    ///
+    /// Deliberately fatal, and deliberately before anything is written. The
+    /// blocks on the disk build on this ledger, so without it they lead
+    /// nowhere, and the one thing a node must not do about that is decide it
+    /// never had a chain and clear the disk to match.
+    #[error(
+        "{because}. The blocks on this disk build on that ledger, so nothing has been \
+         changed: put the file back, or start this node in an empty directory"
+    )]
+    UnusableLedger { because: String },
 }
 
 /// What a node handed a ledger has still to check before it stands behind it.
@@ -1895,12 +1906,33 @@ impl Node {
         // could only start while an archivist happened to be reachable, which
         // would tie every node that ever joined to the archive service staying
         // up for the rest of its life.
-        let handed = read_handed_ledger(&directory, &params).and_then(
-            |(state, recent, anchor, promised)| {
-                chain.adopt(state, &recent).ok()?;
+        // A file that is there and will not be taken is not the same news as
+        // no file at all, and reading the two the same way cost a node its
+        // whole history. The replay would start at block zero, the log begins
+        // above that on any node that has written a ledger, and the gap
+        // between them is read as a log that leads nowhere and cut to nothing.
+        //
+        // So this stops instead, with the disk untouched and the reason said.
+        // An operator can put the file back or start somewhere else; neither
+        // is possible once the blocks are gone. Every node writes this file as
+        // it runs, so what used to be at stake was not only a node that joined
+        // a chain: a rules update that refused a node's own stored ledger
+        // would have emptied it.
+        let handed = match read_handed_ledger(&directory, &params) {
+            Ok(handed) => handed,
+            Err(because) => return Err(NodeError::UnusableLedger { because }),
+        };
+        let handed = match handed {
+            Some((state, recent, anchor, promised)) => {
+                chain
+                    .adopt(state, &recent)
+                    .map_err(|error| NodeError::UnusableLedger {
+                        because: format!("{HANDED_LEDGER} could not be adopted: {error}"),
+                    })?;
                 Some((recent, anchor, promised))
-            },
-        );
+            }
+            None => None,
+        };
         let from = handed
             .as_ref()
             .and_then(|(recent, _, _)| recent.last())
@@ -4261,20 +4293,36 @@ fn settles_at(anchor: u64, tip: u64, params: &ConsensusParams) -> u64 {
     anchor.saturating_add(params.burial).min(tip)
 }
 
+/// A ledger read back off the disk: the state, the headers below its tip, the
+/// height it is anchored at, and the height this node must reach on its own
+/// before it will stand behind it.
+type Handed = (LedgerState, Vec<BlockHeader>, u64, u64);
+
+/// Reads the ledger a node starts from, telling a file that is not there apart
+/// from one that is and will not be used.
 fn read_handed_ledger(
     directory: &Path,
     params: &ConsensusParams,
-) -> Option<(LedgerState, Vec<BlockHeader>, u64, u64)> {
-    let bytes = std::fs::read(directory.join(HANDED_LEDGER)).ok()?;
-    let handover = Handover::decode(&bytes).ok()?;
-    let state = accept(&handover, params).ok()?;
+) -> Result<Option<Handed>, String> {
+    let bytes = match std::fs::read(directory.join(HANDED_LEDGER)) {
+        Ok(bytes) => bytes,
+        // The one failure that means what the caller used to assume of all of
+        // them. A node with no ledger file has not written one yet, which is
+        // every node before its first, and it starts from its own log.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("{HANDED_LEDGER} could not be read: {error}")),
+    };
+    let handover = Handover::decode(&bytes)
+        .map_err(|error| format!("{HANDED_LEDGER} is not a ledger this build can read: {error}"))?;
+    let state = accept(&handover, params)
+        .map_err(|error| format!("{HANDED_LEDGER} was refused: {error}"))?;
     let anchor = handover.at.height;
-    Some((
+    Ok(Some((
         state,
         handover.recent,
         anchor,
         settles_at(anchor, handover.tip.height, params),
-    ))
+    )))
 }
 
 /// Works out what to do about one message, and writes down anything it

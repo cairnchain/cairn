@@ -492,7 +492,28 @@ pub fn realm_of(ip: IpAddr) -> Realm {
             if let Some(v4) = v6.to_ipv4() {
                 return realm_of_v4(v4);
             }
+            // The other hat, and the one a phone actually wears. On an
+            // IPv6-only network a NAT64 gateway carries a v4 address inside
+            // RFC 6052's well known prefix, so `10.0.0.1` arrives as
+            // `64:ff9b::a00:1`. Read as it stands it is an open address in a
+            // range nobody owns, and this node would write somebody's inside
+            // into its book and pass it on to everyone else.
+            //
+            // RFC 8215 reserves `64:ff9b:1::/48` for a network's own choice of
+            // prefix, and its last thirty two bits carry the address the same
+            // way. Both are taken off here; a gateway using some other prefix
+            // of its own is not something this can know about from the address
+            // alone.
             let octets = v6.octets();
+            let well_known = octets[..4] == [0x00, 0x64, 0xff, 0x9b]
+                && octets[4..12].iter().all(|byte| *byte == 0);
+            let local_use = octets[..6] == [0x00, 0x64, 0xff, 0x9b, 0x00, 0x01]
+                && octets[6..12].iter().all(|byte| *byte == 0);
+            if well_known || local_use {
+                return realm_of_v4(Ipv4Addr::new(
+                    octets[12], octets[13], octets[14], octets[15],
+                ));
+            }
             if octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80 {
                 Realm::LinkLocal
             } else if (octets[0] & 0xfe) == 0xfc {
