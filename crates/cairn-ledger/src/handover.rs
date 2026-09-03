@@ -18,7 +18,7 @@
 //! header is refused, and the header itself was accepted by the sampling that
 //! came before.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 use cairn_accumulator::forest::{Forest, ForestProof};
 use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
@@ -160,6 +160,8 @@ pub enum HandoverError {
     HeaderWithoutWork,
     #[error("the hot set holds {held} notes, more than the {limit} allowed")]
     HotSetTooLarge { held: usize, limit: usize },
+    #[error("the hot set names note {0:?} twice")]
+    DuplicateHotNote(NoteId),
     #[error("the maturity window holds {held} coinbases, more than the {limit} allowed")]
     MaturityWindowTooLarge { held: usize, limit: u64 },
     #[error("the ledger rebuilt from this does not produce the header's state root")]
@@ -362,6 +364,35 @@ pub fn accept(handover: &Handover, params: &ConsensusParams) -> Result<LedgerSta
             held: handover.hot.len(),
             limit: hot_capacity,
         });
+    }
+    // And each note once, which the state root below cannot ask. The hot set
+    // is committed to as a tree keyed by note identifier, so a list naming a
+    // note twice folds to exactly the root of the list naming it once: the
+    // second entry rides in free, past every check a handover has, and the
+    // root matches the header.
+    //
+    // What it buys is not a note but a place in the eviction order, which is
+    // kept by age beside the tree and is the one structure a receiver builds
+    // from the list rather than from the commitment. Two entries for one note
+    // at two heights are two places there and one entry in the tree.
+    //
+    // Measured, with fifteen notes handed over and one of them named a second
+    // time at another height. A release build took the ledger, took two
+    // blocks, and refused the third for a state root it did not produce, and
+    // every honest block after it for the same reason: its tier had stopped
+    // being the tier the network was keeping. A debug build did not get that
+    // far, because the first block applied trips the assertion that the two
+    // structures are the same size, so a stranger offering a ledger could
+    // stop any node built that way.
+    //
+    // The eviction order is also written in one place now rather than two,
+    // which is what makes this a second line rather than the only one: see
+    // `LedgerState::from_handover`.
+    let mut once = BTreeSet::new();
+    for (id, _) in &handover.hot {
+        if !once.insert(*id) {
+            return Err(HandoverError::DuplicateHotNote(*id));
+        }
     }
     // For the same reason, and against the rule this chain runs under rather
     // than against the ceiling the wire enforces: a window holding more than

@@ -1244,12 +1244,28 @@ impl LedgerState {
         // from before it, because that is the one the tip vouches for.
         state.headers.add(header_leaf(&at.id()));
 
+        // Through `remember_hot` rather than by writing the structures out
+        // again here. They were written out here, and the copy was not the
+        // same function: `remember_hot` takes the stale entry out of the age
+        // index when it replaces one, and this did not. So a handed hot set
+        // naming a note twice, at two heights, left the index holding a place
+        // the map had already forgotten, and the eviction order is the one
+        // structure a receiver builds from the list rather than from the
+        // commitment the header carries.
+        //
+        // A repeated identifier is refused before this runs, in
+        // `handover::accept`, which is where the reasoning and the measurement
+        // are written down. So nothing reaches this with a duplicate any more
+        // and no test can make it: what is left is that the structure has one
+        // definition instead of two, which is worth having on its own and is
+        // not a guard. `handed_hot_set.rs` checks the property either way
+        // round, that a ledger taken from a handover and the same ledger
+        // replayed evict in the same order.
         for (id, entry) in hot {
             state
                 .hot_tree
                 .insert(note_key(&id), hot_value(&entry.note, entry.height));
-            state.hot_by_age.insert((entry.height, id));
-            state.hot.insert(id, entry);
+            state.remember_hot(id, entry.note, entry.height);
         }
         for block in &grace {
             for (id, position, note) in block {
