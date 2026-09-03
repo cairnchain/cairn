@@ -17,7 +17,7 @@
 //! what to do, and never reads a clock or touches a socket, so the whole of
 //! it can be tested by handing it moments.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::IpAddr;
 
 use crate::sync::JOIN_RATHER_THAN_READ;
@@ -102,19 +102,22 @@ const RETRY_PAUSE: u64 = 30;
 
 /// Addresses whose claims went unshown that are remembered at once.
 ///
-/// The set exists so that a peer cannot wash a broken claim clean by
-/// reconnecting, so it deliberately outlives connections; what it must not
-/// also do is outlive the reason for holding it. It was written to and never
-/// read out of, one address per host that claimed a chain and failed to show
-/// it, and the window in which it grows is exactly the window in which a node
-/// has no chain, which is the window an attacker keeping it there decides the
-/// length of. One IPv6 range supplies the addresses.
+/// This exists so that a peer cannot wash a broken claim clean by
+/// reconnecting, so it deliberately outlives connections. What is kept against
+/// each address is when it failed, because what an address buys is a pause and
+/// not a verdict: see [`Claim::held_off_until`].
+///
+/// It used to grow without a ceiling, one address per host that claimed a
+/// chain and failed to show it, and the window in which it grows is exactly
+/// the window in which a node has no chain, which is the window an attacker
+/// keeping it there decides the length of. One IPv6 range supplies the
+/// addresses.
 ///
 /// So there is a ceiling, and past it nothing further is written down, the
 /// same shape and the same number as [`crate::refusal::MAX_REFUSED`]. What
 /// filling it buys is the ability to make a fresh claim look fresh, which is
 /// what a fresh address buys anyway; what it no longer buys is deciding how
-/// much memory this node spends. The whole set is dropped the moment the
+/// much memory this node spends. The whole lot is dropped the moment the
 /// choice is made, which is the only thing it was ever for.
 const MAX_UNBACKED_HOSTS: usize = 1_024;
 
@@ -132,6 +135,27 @@ struct Claim {
     /// Set when the peer was asked to show this claim and could not. Words
     /// that failed once are not waited on twice.
     unbacked: bool,
+    /// When a claim inherited from its address stops being held back, if it
+    /// was.
+    ///
+    /// A claim from an address that failed recently is held off rather than
+    /// discredited. That distinction is the whole of the repair here: the
+    /// address is the only thing that survives a reconnection, so a peer that
+    /// failed and dialled back is indistinguishable from a second peer behind
+    /// the same gateway, and the old rule answered that by shutting both out
+    /// for as long as the choice was open.
+    ///
+    /// What it cost was not the attacker. A node behind one carrier NAT, one
+    /// office, or one machine running a devnet had its claim thrown out of
+    /// [`Chooser::pick`] outright, so the node went on to follow a chain it
+    /// could see was lighter, on the strength of who else shared an address
+    /// with the peer offering the heavier one.
+    ///
+    /// A pause does what the exclusion was for: a peer cannot wash a broken
+    /// claim clean by reconnecting, because it has to wait out
+    /// [`RETRY_PAUSE`] like the claim it broke. What it no longer does is
+    /// outlive that.
+    held_off_until: Option<u64>,
     /// When this peer was last asked, so the last resort does not ask the
     /// same broken peer every round.
     tried: Option<u64>,
@@ -190,7 +214,7 @@ pub struct Chooser {
     claims: HashMap<u64, Claim>,
     /// Addresses whose claims went unshown, kept apart from the claims
     /// because a claim leaves with its connection and this must not.
-    unbacked_hosts: HashSet<IpAddr>,
+    unbacked_hosts: HashMap<IpAddr, u64>,
     /// When the first claim long enough to be final arrived. Until one has,
     /// there is no choice to make: a short chain is never past the
     /// reorganisation limit, so following the wrong one is undone by the
@@ -230,7 +254,12 @@ impl Chooser {
         // A claim from an address that already failed to show one starts
         // failed. This is what stops a peer washing its claim clean by
         // reconnecting under a fresh connection number.
-        let unbacked = host.is_some_and(|host| self.unbacked_hosts.contains(&host));
+        // The claim itself is not discredited by the company it keeps; it
+        // waits out the same pause the broken claim at that address is
+        // waiting out.
+        let held_off_until = host
+            .and_then(|host| self.unbacked_hosts.get(&host).copied())
+            .map(|failed_at| failed_at.saturating_add(RETRY_PAUSE));
         // A peer that says something new keeps the moment it first spoke, so
         // revising a claim upward is not a way to jump the queue either.
         let heard = self.claims.get(&peer).map_or(now, |known| known.heard);
@@ -241,7 +270,8 @@ impl Chooser {
                 height,
                 shows_the_chain,
                 host,
-                unbacked,
+                unbacked: false,
+                held_off_until,
                 tried: None,
                 heard,
             },
@@ -343,7 +373,7 @@ impl Chooser {
             claim.tried = Some(now);
             if let Some(host) = claim.host {
                 if self.unbacked_hosts.len() < MAX_UNBACKED_HOSTS {
-                    self.unbacked_hosts.insert(host);
+                    self.unbacked_hosts.insert(host, now);
                 }
             }
         }
@@ -481,6 +511,7 @@ impl Chooser {
             .claims
             .iter()
             .filter(|(_, claim)| !claim.unbacked)
+            .filter(|(_, claim)| claim.held_off_until.is_none_or(|until| now >= until))
             .filter(|(_, claim)| {
                 ceiling.is_none_or(|(most, proven_at)| {
                     claim.work <= most || Self::owed_a_turn(claim, proven_at, now)
@@ -537,7 +568,7 @@ impl Chooser {
         // both of these were fed by strangers. Kept until now and not a
         // moment longer.
         self.claims = HashMap::new();
-        self.unbacked_hosts = HashSet::new();
+        self.unbacked_hosts = HashMap::new();
         if behind.is_empty() {
             return Step::Quiet;
         }
@@ -676,7 +707,35 @@ mod tests {
             Step::Ask(1, Approach::Join),
             "the fresh number changes nothing about the failed address"
         );
-        assert!(chooser.shown(1, 900, 220));
+
+        // What the fresh number does buy is a wait. The claim is not asked,
+        // and it is not discredited either, so the node will not settle on a
+        // lighter chain while it stands. That is the price of not throwing out
+        // a claim on the strength of who else shares its address, and it is
+        // paid in seconds rather than in following the wrong chain.
+        assert!(
+            !chooser.shown(1, 900, 220),
+            "a chain of 900 was adopted while a claim of 3000 stood, unasked"
+        );
+
+        // And it is bought once. Past the pause the claim is asked like any
+        // other, and once it has failed again it stops counting.
+        assert_eq!(
+            chooser.step(
+                211 + RETRY_PAUSE,
+                true,
+                0,
+                JoinProgress::NothingYet,
+                &[1, 2, 4]
+            ),
+            Step::Ask(4, Approach::Join),
+            "the wait never ended"
+        );
+        chooser.failed(4, 250);
+        assert!(
+            chooser.shown(1, 900, 251),
+            "and the claim that failed twice still held adoption off"
+        );
     }
 
     /// **The one table here that a stranger filled and nothing emptied.**
@@ -765,9 +824,26 @@ mod tests {
             "the asked peer is gone, so the next is asked"
         );
         chooser.noted(1, Some(host(1)), 900, LONG, true, 202);
+
+        // Coming back is not the same as never having gone: the claim waits
+        // out the pause its own failure earned. While it waits it is not
+        // asked, and the node does not settle under it either, because a claim
+        // waiting is a claim nobody has answered rather than one that has been
+        // answered badly.
         assert!(
-            chooser.shown(2, 500, 210),
-            "the claim that left when asked does not count on its return"
+            !chooser.shown(2, 500, 210),
+            "a chain of 500 was adopted while a claim of 900 stood, unasked"
+        );
+        assert_eq!(
+            chooser.step(
+                202 + RETRY_PAUSE,
+                true,
+                0,
+                JoinProgress::NothingYet,
+                &[1, 2]
+            ),
+            Step::Ask(1, Approach::Join),
+            "and the wait never ended"
         );
     }
 

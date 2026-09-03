@@ -1,8 +1,9 @@
-//! AUDIT PROBE. Not part of the shipped suite; delete after reading.
+//! What an address is allowed to say about the peers behind it.
 //!
-//! The refused-host set is bounded, and it is keyed by `IpAddr`. A claim that
-//! fails there condemns every peer at that address, including ones that never
-//! made a claim of their own.
+//! Everything a node keeps per address is a defence against one machine
+//! wearing many hats, and every one of them has the same cost: the people
+//! genuinely behind one address pay it too. These pin where that line sits, so
+//! moving it is a decision rather than a slip.
 
 #![allow(
     clippy::unwrap_used,
@@ -31,9 +32,14 @@ fn params() -> ConsensusParams {
 // CLAIM 4: which addresses a stranger may name.
 // ---------------------------------------------------------------------------
 
-/// The ranges the change does name, so the report can say what is covered.
+/// **Every range the address rules name, and how.**
+///
+/// The list a stranger's claim about an address is read against. What is not
+/// on it is read as open, so a range added to the internet and not to this is
+/// a range somebody can name at this node; the second half of this prints
+/// those rather than asserting about them.
 #[test]
-fn zz_what_the_range_list_does_cover() {
+fn the_ranges_the_address_rules_name() {
     let cases: [(&str, Realm); 14] = [
         ("127.0.0.1", Realm::Loopback),
         ("10.1.2.3", Realm::Private),
@@ -70,9 +76,13 @@ fn zz_what_the_range_list_does_cover() {
     }
 }
 
-/// A testnet run entirely on a LAN still learns its network.
+/// **A testnet run entirely on a LAN still learns its network.**
+///
+/// The rules refuse a private address named by a stranger out on the
+/// internet. They must not refuse one named by a peer that is itself on that
+/// network, or a chain run inside one building would never gossip at all.
 #[test]
-fn zz_a_lan_only_deployment_still_gossips() {
+fn a_lan_only_deployment_still_gossips() {
     let neighbour = Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)));
     let peer: SocketAddr = "192.168.1.21:9000".parse().unwrap();
     assert!(
@@ -107,13 +117,23 @@ fn hello(nonce: u64, listen: u16) -> Message {
     })
 }
 
+/// **A connection that opens into a spent window waits for the next one.**
+///
+/// The cost the address window keeps, deliberately. A connection cannot be
+/// told apart from the one that just hung up, so it starts where its address
+/// left off; every connection on one machine arrives from `127.0.0.1`, so on a
+/// devnet that is all of them.
+///
+/// One window, and no longer: the inheritance happens at a connection's first
+/// question and not at every boundary after it. `shared_allowance.rs` is where
+/// that is pinned; this is the same thing over a real socket.
 /// Every connection on one machine arrives from `127.0.0.1`, so a devnet, a
 /// test rig, and everything behind one NAT gateway share a single window.
 ///
 /// One socket spends it with ordinary `GetPeers` messages; a second socket,
 /// a different program that has spent nothing, is then answered with silence.
 #[test]
-fn zz_one_loopback_socket_starves_every_other_one() {
+fn a_connection_opening_into_a_spent_window_waits_for_the_next_one() {
     use std::net::TcpStream;
     use std::time::SystemTime;
 
@@ -166,13 +186,16 @@ fn zz_one_loopback_socket_starves_every_other_one() {
     println!("fresh connection was answered: {ponged} (window straddled: {straddled})");
     assert!(
         !ponged,
-        "the second connection was served, so the window was not shared"
+        "the window a connection opens into is not its own, so a peer could \
+         refill one by hanging up"
     );
 }
 
-/// The control: the same second connection, on a node nobody has drained.
+/// **The control: the same second connection, on a node nobody has drained.**
+///
+/// Without it the test above passes on a node that answers nobody.
 #[test]
-fn zz_the_control_a_fresh_node_answers_the_same_ping() {
+fn a_fresh_node_answers_the_same_ping() {
     use std::net::TcpStream;
     let node = cairn_net::Node::bind(params(), "127.0.0.1:0".parse().unwrap()).unwrap();
     let mut fresh = TcpStream::connect(node.address()).unwrap();
@@ -194,90 +217,4 @@ fn zz_the_control_a_fresh_node_answers_the_same_ping() {
     }
     node.shutdown();
     assert!(ponged, "the control did not answer either");
-}
-
-// ---------------------------------------------------------------------------
-// CLAIM 6 and its neighbour: the refused-host set is bounded, but it is keyed
-// by IpAddr, and a claim that fails there condemns every peer at that address.
-// ---------------------------------------------------------------------------
-
-/// A stranger that shares an address with an honest peer — one CGNAT pool,
-/// one office, one machine running a devnet — makes that honest peer's claim
-/// start life already discredited, and the chooser then follows a lighter
-/// chain it can see is lighter.
-#[test]
-fn zz_a_failed_claim_condemns_every_peer_at_the_same_address() {
-    use cairn_net::choosing::{Approach, Chooser, JoinProgress, Step};
-    use cairn_net::sync::JOIN_RATHER_THAN_READ;
-
-    let long = JOIN_RATHER_THAN_READ + 10;
-    let shared_ip = IpAddr::V4(Ipv4Addr::new(100, 100, 5, 5)); // one NAT gateway
-    let elsewhere = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
-
-    let mut chooser = Chooser::new();
-    // The stranger speaks first, from the shared address, and does not show.
-    chooser.noted(1, Some(shared_ip), 100, long, true, 1_000);
-    assert!(matches!(
-        chooser.step(1_003, true, 0, JoinProgress::NothingYet, &[1]),
-        Step::Ask(1, _)
-    ));
-    chooser.failed(1, 1_004);
-
-    // Now the honest peer behind the same gateway, with the heavier chain,
-    // and the stranger's second address with a lighter one.
-    chooser.noted(2, Some(shared_ip), 1_000, long, true, 1_005);
-    chooser.noted(3, Some(elsewhere), 500, long, true, 1_005);
-
-    let step = chooser.step(1_006, true, 0, JoinProgress::NothingYet, &[1, 2, 3]);
-    println!("with an honest 1000 and a stranger's 500 in front of it: {step:?}");
-    assert_eq!(
-        step,
-        Step::Ask(3, Approach::Join),
-        "the heavier honest claim was asked after all"
-    );
-
-    // And nothing about the heavier claim stops the lighter one being taken.
-    assert!(
-        chooser.shown(3, 500, 1_010),
-        "the lighter chain was not accepted"
-    );
-    assert!(
-        chooser.allows(3, 500, 1_010),
-        "the heavier claim held the commitment back"
-    );
-}
-
-/// The same thing with no attacker in it: every peer on one machine has the
-/// same address, so one stalled join marks all of them.
-#[test]
-fn zz_on_one_machine_a_single_stall_condemns_the_whole_devnet() {
-    use cairn_net::choosing::{Approach, Chooser, JoinProgress, Step};
-    use cairn_net::sync::JOIN_RATHER_THAN_READ;
-
-    let long = JOIN_RATHER_THAN_READ + 10;
-    let here = IpAddr::V4(Ipv4Addr::LOCALHOST);
-    let mut chooser = Chooser::new();
-    chooser.noted(1, Some(here), 100, long, true, 1_000);
-    chooser.step(1_003, true, 0, JoinProgress::NothingYet, &[1]);
-    // The join stalls — which on one machine is likely, because every peer
-    // there draws on one allowance window and a join piece costs an eighth
-    // of it.
-    chooser.failed(1, 1_004);
-
-    for peer in 2..6u64 {
-        chooser.noted(
-            peer,
-            Some(here),
-            1_000 + u128::from(peer),
-            long,
-            true,
-            1_005,
-        );
-    }
-    let step = chooser.step(1_006, true, 0, JoinProgress::NothingYet, &[1, 2, 3, 4, 5]);
-    println!("every local peer, after one stall: {step:?}");
-    match step {
-        Step::Ask(_, Approach::Read) => {}
-        other => panic!("expected the fallback read, got {other:?}"),
-    }
 }
