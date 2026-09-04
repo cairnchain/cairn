@@ -44,7 +44,17 @@ struct Running {
 
 impl Running {
     fn start(name: &str, seed: u8, blocks: usize) -> Self {
-        let params = ConsensusParams::testnet().with_coinbase_maturity(0);
+        Self::start_with(
+            name,
+            seed,
+            blocks,
+            ConsensusParams::testnet().with_coinbase_maturity(0),
+        )
+    }
+
+    /// The same, with the maturity rule left in force, so a test can serve a
+    /// wallet whose whole balance is a reward that cannot move yet.
+    fn start_with(name: &str, seed: u8, blocks: usize, params: ConsensusParams) -> Self {
         let directory = std::env::temp_dir().join(format!(
             "cairn-page-{name}-{}-{:?}",
             std::process::id(),
@@ -300,6 +310,57 @@ fn money_sent_from_the_page_leaves_the_wallet() {
             )
             .0,
         405
+    );
+
+    running.stop();
+}
+
+/// A wallet whose whole balance is a reward too young to move is not an empty
+/// wallet, and the page must not call it one.
+///
+/// `held` counts the notes a spend can reach for, and that is nought here, for
+/// a wallet holding a hundred and fifty CAIRN. The page read `held` to decide
+/// whether there was anything at all and printed "Nothing here yet. If this
+/// key should hold something, check the height above" in the line directly
+/// above its own sentence naming the amount. The same nought stands for two
+/// other states with money in them: every note promised to a payment waiting
+/// for a block, and every note fallen where this node cannot place it.
+#[test]
+fn a_page_showing_a_young_reward_does_not_say_the_wallet_is_empty() {
+    let running = Running::start_with(
+        "ripening",
+        8,
+        3,
+        ConsensusParams::testnet().with_coinbase_maturity(4),
+    );
+    let host = running.opened.address.to_string();
+    let secret = running.opened.secret.clone();
+    let (status, answer) = running.get(&format!("/api/state?k={secret}"), &host, "");
+    assert_eq!(status, 200);
+
+    assert!(
+        answer.contains("\"held\":0"),
+        "no note here can be spent yet: {answer}"
+    );
+    assert!(
+        answer.contains("\"ripening\":\"150.00000000 CAIRN\""),
+        "and the money is counted: {answer}"
+    );
+    assert!(
+        answer.contains("\"anything\":true"),
+        "so the page is told there is something here, which is what its \
+         \"Nothing here yet\" line is decided by: {answer}"
+    );
+
+    let holdings = running.wallet.holdings();
+    assert_eq!(
+        holdings.total(),
+        Amount::from_cairn("150").unwrap(),
+        "everything this key owns includes what cannot move yet"
+    );
+    assert!(
+        !holdings.empty_handed(),
+        "a wallet with a hundred and fifty CAIRN in it is not empty-handed"
     );
 
     running.stop();

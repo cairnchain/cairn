@@ -1113,3 +1113,41 @@ fn a_history_whose_bytes_changed_is_refused_rather_than_believed() {
 
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// A wallet whose every note is promised to a payment still holds the money,
+/// and both faces have to say so.
+///
+/// The line that says a wallet is empty was decided by whether a spend had
+/// anything to reach for, and that is nought here: the one note this key owns
+/// is committed to a transfer sitting in the pool. So the terminal printed
+/// "Nothing here yet. If this key should hold something, check that the wallet
+/// reached a peer and caught up to the height you expect" a few lines under
+/// its own list of payments waiting for a block, and sent somebody whose money
+/// was exactly where they had just put it off to check their connection.
+#[test]
+fn a_wallet_whose_notes_are_all_promised_is_not_an_empty_wallet() {
+    let (wallet, _forge, directory) = funded("all-promised", 23, 1);
+    let recipient = SecretKey::from_bytes(&[9; 32]).public_key();
+
+    let before = wallet.holdings();
+    assert_eq!(before.spendable, cairn("50"), "one block of reward");
+    assert_eq!(before.notes.len(), 1);
+
+    let fee = wallet.floor_for(recipient, cairn("40"));
+    wallet.send(recipient, cairn("40"), fee).unwrap();
+
+    let after = wallet.holdings();
+    assert!(
+        after.notes.is_empty(),
+        "no note is left for a second spend to reach for"
+    );
+    assert_eq!(after.waiting, cairn("50"), "and yet the money is all here");
+    assert_eq!(after.total(), cairn("50"));
+    assert!(
+        !after.empty_handed(),
+        "so nothing may tell this owner there is nothing here"
+    );
+
+    wallet.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+}

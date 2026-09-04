@@ -649,6 +649,103 @@ fn a_stranger_cannot_put_a_header_into_a_collection_it_was_not_asked_for() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// **One header per question held the turn to fill in a joined node's
+/// headers for ever.**
+///
+/// The turn belongs to one peer because a run half from one peer and half from
+/// another would be thrown out at the commitment check with neither of them
+/// shown to be wrong. It was kept while the collection had grown inside
+/// `HEADER_PATIENCE`, and it grew by one header.
+///
+/// So a peer that answered each question with a single header renewed the turn
+/// every time. Measured on the code before this test: over seventy five seconds
+/// the collection moved sixty eight places out of three hundred and one, and no
+/// other peer was asked once. A node in that state never fills its old headers
+/// in, so it can never show the chain to a newcomer, which is the ability this
+/// whole exchange exists to keep alive. One small message per patience window
+/// bought it.
+///
+/// Progress is now a run rather than a header, which is what `crate::wire`
+/// already does with a frame: a peer that keeps delivering keeps its turn, and
+/// one that only answers loses it.
+#[test]
+fn a_peer_that_answers_one_header_at_a_time_does_not_hold_the_turn() {
+    let (directory, source) = directory_holding_a_handover("dribbled");
+    let anchor_height = 120 - BURIAL - 1;
+    // Few enough seeded that the run below them is longer than this test
+    // watches for, so a holder feeding one header a second cannot finish it and
+    // pass on its own terms.
+    let oldest = anchor_height - 10;
+    {
+        let mut log = cairn_store::HeaderLog::open(&directory).unwrap();
+        for height in oldest..=anchor_height {
+            log.append(&source.headers[height as usize]).unwrap();
+        }
+    }
+    let (node, _restored) = Node::open(params(), loopback(), &directory).unwrap();
+
+    let mut holder = a_bare_peer(&node, 333_333);
+    until_it_sends(&mut holder, |message| {
+        matches!(message, Message::GetHeaders { from: 0, .. }).then_some(())
+    });
+    // Somebody who could answer the whole run in one message, and who is never
+    // asked for as long as the holder holds the turn.
+    let mut waiting = a_bare_peer(&node, 444_444);
+
+    let started = Instant::now();
+    let mut served = 0usize;
+    let mut passed_on = false;
+    while started.elapsed() < Duration::from_secs(90) && !passed_on {
+        for from in headers_wanted(&mut holder) {
+            if from < oldest {
+                write_message(
+                    &mut holder,
+                    params().network,
+                    &Message::Headers {
+                        from,
+                        headers: vec![source.headers[from as usize]],
+                    },
+                )
+                .unwrap();
+                holder.flush().unwrap();
+                served += 1;
+            }
+        }
+        passed_on = !headers_wanted(&mut waiting).is_empty();
+    }
+
+    assert!(
+        served > 5,
+        "the holder answered {served} questions, so this test never put the \
+         renewal it is about to the node"
+    );
+    assert!(
+        passed_on,
+        "the holder answered {served} questions with one header each and kept \
+         the turn for {:?}: a run of headers is what a turn is for, and a \
+         header at a time is not one",
+        started.elapsed()
+    );
+
+    node.shutdown();
+    drop(node);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Every `GetHeaders` waiting on this connection, by the height it starts at.
+///
+/// Drains rather than waits: the point is usually that nothing is there.
+fn headers_wanted(peer: &mut TcpStream) -> Vec<u64> {
+    let mut wanted = Vec::new();
+    loop {
+        match read_message(peer, params().network) {
+            Ok(Incoming::Message(Message::GetHeaders { from, .. })) => wanted.push(from),
+            Ok(Incoming::Message(_)) => {}
+            Ok(Incoming::Quiet) | Err(_) => return wanted,
+        }
+    }
+}
+
 /// **`at.total_work` used never to be checked, and it is what the node
 /// compares every peer against for the rest of its life.**
 ///

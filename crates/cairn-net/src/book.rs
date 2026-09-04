@@ -276,14 +276,6 @@ impl AddressBook {
         true
     }
 
-    /// Forgets every miss held against every address.
-    ///
-    /// For the one case where a run of failed dials says nothing about the
-    /// addresses: the machine itself was not on the network. A laptop that
-    /// slept, a cable pulled out, a connection that dropped for a minute. The
-    /// node cannot tell which, and it does not need to. What it can tell is
-    /// that the whole world went quiet at once, and the whole world does not
-    /// go quiet at once.
     /// Writes down what an address said about keeping the cold set.
     ///
     /// Only for an address already in the book. Learning about an archivist is
@@ -312,6 +304,14 @@ impl AddressBook {
         found.into_iter().map(|(_, address)| address).collect()
     }
 
+    /// Forgets every miss held against every address.
+    ///
+    /// For the one case where a run of failed dials says nothing about the
+    /// addresses: the machine itself was not on the network. A laptop that
+    /// slept, a cable pulled out, a connection that dropped for a minute. The
+    /// node cannot tell which, and it does not need to. What it can tell is
+    /// that the whole world went quiet at once, and the whole world does not
+    /// go quiet at once.
     pub fn forgive_all(&mut self) {
         for known in self.known.values_mut() {
             known.misses = 0;
@@ -504,11 +504,24 @@ pub fn realm_of(ip: IpAddr) -> Realm {
             // way. Both are taken off here; a gateway using some other prefix
             // of its own is not something this can know about from the address
             // alone.
+            //
+            // The reserved range is a `/48` and the well known one is a `/96`,
+            // and reading the first as though it were the second was a hole
+            // with the same shape as the one this whole passage exists to
+            // close. The extra forty eight bits are there so that a network
+            // can pick a translation prefix out of the range; requiring them
+            // to be zero recognised exactly one such choice out of every
+            // possible one. `64:ff9b:1:1::a9fe:a9fe` read as an open address
+            // in a range nobody owns, and so did this machine's own loopback.
+            //
+            // What is still not covered, and cannot be from the address alone:
+            // a gateway that uses the `/48` as a `/48`, where RFC 6052 splits
+            // the v4 address around the reserved octet instead of leaving it
+            // at the end.
             let octets = v6.octets();
             let well_known = octets[..4] == [0x00, 0x64, 0xff, 0x9b]
                 && octets[4..12].iter().all(|byte| *byte == 0);
-            let local_use = octets[..6] == [0x00, 0x64, 0xff, 0x9b, 0x00, 0x01]
-                && octets[6..12].iter().all(|byte| *byte == 0);
+            let local_use = octets[..6] == [0x00, 0x64, 0xff, 0x9b, 0x00, 0x01];
             if well_known || local_use {
                 return realm_of_v4(Ipv4Addr::new(
                     octets[12], octets[13], octets[14], octets[15],

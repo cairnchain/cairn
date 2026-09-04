@@ -302,10 +302,9 @@ fn the_same_reorg_keeps_the_payment_when_no_disk_is_wired_up() {
     );
 }
 
-/// **One record the disk will not give back, during a reorganisation that
-/// fails, silently truncates the node's chain and blames the peer.**
-///
-/// Three seams meet here.
+/// One record the disk will not give back, during a reorganisation that
+/// fails, still costs the node its height. What it must not cost is the way
+/// back.
 ///
 /// `cairn-store` reports every failure as a `StoreError`; `cairn-net`'s
 /// `FromLog::body` turns that into `None` with `.ok()?`; `cairn-chain`'s
@@ -315,15 +314,23 @@ fn the_same_reorg_keeps_the_payment_when_no_disk_is_wired_up() {
 /// `ChainStore::follow` then propagates that out of `restore` with `?`, after
 /// `restore` has already popped the branch it was putting back. Nothing puts
 /// it back a second time, so the node is left on a branch that stops wherever
-/// the unreadable record was, having silently thrown away everything above
-/// it, with the ledger unwound to match. The height simply drops.
+/// the unreadable record was, with the ledger unwound to match. The height
+/// drops, and that much is measured here rather than claimed to be fixed: a
+/// switch that reads its own disk halfway through is not all or nothing, and
+/// the answers to that were weighed and rejected. Reading every rolled back
+/// body before rewinding would refuse a heavier branch this node could take,
+/// for as long as the damaged height stayed inside the undo window, which is
+/// a node quietly following a minority chain.
 ///
-/// And `cairn-net`'s `on_block` names five `ChainError` variants and answers
-/// everything else with `DropReason::BadBlock`, whose `is_misbehaviour` is
-/// true. So the peer whose perfectly good block set this off is disconnected
-/// and refused.
+/// What is not a residual is what happens next. `cairn-net::sync` says of
+/// exactly this case that "the next peer it talks to offers the blocks again,
+/// and they are applied to what it has", and that was false: the blocks were
+/// still in memory, so `add_block` answered `Duplicate` to every one of them
+/// and the node stayed where it had fallen for the rest of its life.
+/// Ninety five blocks offered back, ninety five duplicates, height 9. Holding
+/// an entry is not having applied it, and the branch is what says which.
 #[test]
-fn one_unreadable_record_truncates_the_chain_and_the_peer_is_blamed() {
+fn a_chain_cut_short_by_its_own_disk_can_be_offered_back_and_climbs() {
     let miner = wallet(1);
     let shelf = Arc::new(Shelf::default());
     let mut store = ChainStore::new(params());
@@ -373,29 +380,40 @@ fn one_unreadable_record_truncates_the_chain_and_the_peer_is_blamed() {
     assert_eq!(
         store.height(),
         Some(9),
-        "and the node is now ninety five blocks shorter than it was a moment \
-         ago, with nothing logged and no branch to get back onto"
+        "the switch is not all or nothing, and the node is ninety five blocks \
+         shorter than it was a moment ago"
     );
-    println!(
-        "height went from {tip} to {} on one unreadable record",
-        store.height().unwrap()
-    );
-
-    // The mapping on the other side, stated rather than inferred. These are
-    // the variants `cairn-net::sync::on_block` names before its catch-all.
-    for named in [
-        "UnknownParent",
-        "NotGenesis",
-        "ForkTooDeep",
-        "TooOld",
-        "InvalidBlock(UnsupportedVersion)",
-    ] {
-        assert!(!named.is_empty());
-    }
     assert!(
         !format!("{}", ChainError::Corrupt).contains("peer"),
-        "Corrupt says nothing about a peer, and the catch-all below those \
-         five answers it with DropReason::BadBlock"
+        "and what it says is about this machine, which is what lets \
+         cairn-net answer it with DropReason::OwnStore rather than blame \
+         whoever asked for the switch"
+    );
+
+    // The disk comes back, or the node simply asks for the blocks again, which
+    // is what a peer offers it. This is the part that has to work.
+    shelf.put(&blocks[10]);
+    let mut answers = Vec::new();
+    for block in &blocks[10..] {
+        answers.push(store.add_block(block.clone(), NOW));
+    }
+    assert!(
+        answers.iter().all(|answer| matches!(
+            answer,
+            Ok(Accepted::Extended | Accepted::Reorganised { .. })
+        )),
+        "every block offered back is applied and none is waved off as \
+         already held: {:?}",
+        answers.iter().find(|answer| !matches!(
+            answer,
+            Ok(Accepted::Extended | Accepted::Reorganised { .. })
+        ))
+    );
+    assert_eq!(
+        store.height(),
+        Some(tip),
+        "so the node climbs back to where it was, which is what the sync \
+         layer already tells its operator will happen"
     );
 }
 
@@ -411,10 +429,11 @@ fn one_unreadable_record_truncates_the_chain_and_the_peer_is_blamed() {
 ///
 /// The same for the second assertion, `COINBASE_MATURITY == MAX_REORG_DEPTH`,
 /// whose stated purpose is that "a coinbase becomes spendable exactly when its
-/// block can no longer be taken away". On devnet the maturity is thirty two
-/// and the reorganisation depth is still a thousand and twenty four, so a
-/// matured coinbase can be undone by a switch this node would accept. The
-/// assertion passes.
+/// block can no longer be taken away". That is carried down to a network that
+/// lowers both by `ChainStore::undo_limit`, which is where the rule is
+/// applied, and this test holds the two together: the constants for what the
+/// build could undo, the field for what the network calls settled, and the
+/// limit that follows the smaller of them.
 #[test]
 fn the_assertions_guard_constants_and_the_network_runs_on_fields() {
     assert_eq!(cairn_ledger::handover::BURIAL, MAX_REORG_DEPTH as u64);
@@ -439,10 +458,21 @@ fn the_assertions_guard_constants_and_the_network_runs_on_fields() {
     assert_eq!(devnet.coinbase_maturity, 32);
     assert!(
         devnet.coinbase_maturity < MAX_REORG_DEPTH as u64,
-        "so on devnet a reward is spendable {} blocks before the block that \
-         paid it stops being reorganisable, which is the one thing the \
-         maturity rule claims it is not",
-        MAX_REORG_DEPTH as u64 - devnet.coinbase_maturity
+        "the maturity is a field too, and on devnet it is well under the \
+         constant"
+    );
+    assert_eq!(
+        ChainStore::new(devnet).undo_limit(),
+        devnet.coinbase_maturity,
+        "so what carries the maturity claim down is the limit following the \
+         network rather than the constant: a reward is spendable exactly when \
+         its block stops being reachable, and this used to be a thousand and \
+         twenty four against thirty two"
+    );
+    assert_eq!(
+        ChainStore::new(ConsensusParams::testnet()).undo_limit(),
+        MAX_REORG_DEPTH as u64,
+        "and where the network buries at the constant the two are one number"
     );
 
     // And nothing refuses a burial past what the chain keeps records for.
@@ -664,8 +694,21 @@ fn a_node_that_trimmed_its_log_to_the_burial_cannot_put_a_branch_back() {
          dropped {} blocks",
         tip - store.height().unwrap()
     );
-    println!(
-        "log cut to {cut}; height went from {tip} to {}",
-        store.height().unwrap()
+    let fell_to = store.height().unwrap();
+    println!("log cut to {cut}; height went from {tip} to {fell_to}");
+
+    // Not stranded there, which is the half that must hold however the bodies
+    // went missing. These are gone from the disk for good, so nothing this
+    // node holds can put them back; what puts them back is a peer offering
+    // them, and the node has to take them rather than answer that it already
+    // has what it is holding the name of.
+    for block in &blocks[(fell_to as usize + 1)..] {
+        store.add_block(block.clone(), NOW).unwrap();
+    }
+    assert_eq!(
+        store.height(),
+        Some(tip),
+        "a node that cut its own log too deep climbs back when the chain is \
+         offered to it again"
     );
 }

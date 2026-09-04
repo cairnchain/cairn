@@ -200,7 +200,10 @@ fn state(wallet: &Wallet) -> Response {
         Some(words) => json.field_str("strandedNote", &words),
         None => json.field_null("strandedNote"),
     }
-    json.field_bool("anything", !holdings.notes.is_empty());
+    // Whether this key holds anything at all, which is not the same question
+    // as whether a spend has anything to reach for. The page used to answer
+    // the second and print the first.
+    json.field_bool("anything", !holdings.empty_handed());
     json.field_usize("held", holdings.notes.len());
 
     // Payments handed over that no block carries yet. The one thing a person

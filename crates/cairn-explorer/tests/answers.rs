@@ -1071,3 +1071,61 @@ fn a_route_is_answered_while_the_index_is_being_built() {
 
     explorer.node().shutdown();
 }
+
+/// The lesson pages quote the same hot-set figure this program serves.
+///
+/// The site says three times, in two languages, what a note costs a node and
+/// what the drawer weighs full. Those were 813 bytes and 107 MB, from before a
+/// public key stopped carrying its decoded point. The papers were corrected to
+/// 516 and 68 six days later; the lessons were not, and `/api/status` had been
+/// serving 516 beside them the whole time. Somebody reading the page that
+/// exists to explain the thesis was told the number the thesis turns on, and
+/// told it half as large again as it is.
+///
+/// Read out of the running route rather than written down here, so the day the
+/// measurement moves this fails rather than drifts.
+#[test]
+fn the_lessons_quote_the_hot_set_this_program_serves() {
+    const EN: &str = include_str!("../../../web/i18n/en.json");
+    const FR: &str = include_str!("../../../web/i18n/fr.json");
+
+    let explorer = explorer(ConsensusParams::testnet());
+    let status = body(&ask(&explorer, "status"));
+    // Scoped to the hot object: `bytesPerNote` is also what the index costs
+    // and what a fallen note costs an archivist, and those are other numbers.
+    let hot = status.split_once("\"hot\":{").expect("a hot object").1;
+    let digits = |text: &str, key: &str| -> u64 {
+        let rest = text.split_once(key).expect("the field").1;
+        rest.chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .expect("a number")
+    };
+    let per_note = digits(hot, "\"bytesPerNote\"");
+    let at_capacity = digits(hot, "\"bytesAtCapacity\"");
+    let megabytes = at_capacity.saturating_add(500_000) / 1_000_000;
+    println!("the route says {per_note} bytes a note, {megabytes} MB at capacity");
+
+    for (language, text) in [("English", EN), ("French", FR)] {
+        assert!(
+            text.contains(&format!("{per_note} bytes per note"))
+                || text.contains(&format!("{per_note} octets par billet")),
+            "the {language} lesson does not quote the {per_note} bytes a note this build measures"
+        );
+        assert!(
+            text.contains(&format!("{megabytes} MB at capacity"))
+                || text.contains(&format!("{megabytes} Mo à pleine capacité")),
+            "the {language} lesson does not quote the {megabytes} MB the drawer comes to"
+        );
+        assert!(
+            !text.contains("107 MB")
+                && !text.contains("107 Mo")
+                && !text.contains("107 méga")
+                && !text.contains("107 mega"),
+            "the {language} lesson still carries the figure from before the correction"
+        );
+    }
+    explorer.node().shutdown();
+}

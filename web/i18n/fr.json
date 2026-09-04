@@ -413,15 +413,15 @@
       "body": {
         "plain": [
           "Chaque ordinateur du réseau garde un tiroir. Dedans se trouvent les billets qui ont bougé récemment, et il y a une limite dure au nombre qui y tient : 131072.",
-          "Cette limite n'est ni une suggestion ni une moyenne. C'est une règle sur laquelle tout le réseau est d'accord, donc le tiroir ne peut jamais dépasser cette taille, quelle que soit la popularité de Cairn. Plein, il fait environ 107 mégaoctets. Une fraction d'un téléphone.",
+          "Cette limite n'est ni une suggestion ni une moyenne. C'est une règle sur laquelle tout le réseau est d'accord, donc le tiroir ne peut jamais dépasser cette taille, quelle que soit la popularité de Cairn. Plein, il fait environ 68 mégaoctets. Une fraction d'un téléphone.",
           "Quand le tiroir est plein et qu'il faut de la place, les billets les plus anciens en sortent et descendent à la cave."
         ],
         "curious": [
-          "Un ensemble borné de 131072 billets, détenu en entier par chaque nœud, dans un arbre de Merkle creux pour que l'engagement d'état se recalcule à bas coût. Environ 107 Mo à pleine capacité, mesuré sur l'implémentation réelle.",
+          "Un ensemble borné de 131072 billets, détenu en entier par chaque nœud, dans un arbre de Merkle creux pour que l'engagement d'état se recalcule à bas coût. Environ 68 Mo à pleine capacité, mesuré sur l'implémentation réelle.",
           "L'éviction se fait par ancienneté, les plus vieux d'abord, par lots aux frontières de bloc. Chaque nœud évince les mêmes billets à la même hauteur, parce que la règle relève du consensus."
         ],
         "technical": [
-          "131072 billets, arbre de Merkle creux, persistant par partage de structure pour qu'une réorganisation puisse restaurer la racine précédente sans reconstruction. 813 octets par billet mesurés, soit environ 107 Mo à pleine capacité.",
+          "131072 billets, arbre de Merkle creux, persistant par partage de structure pour qu'une réorganisation puisse restaurer la racine précédente sans reconstruction. 516 octets par billet mesurés, soit environ 68 Mo à pleine capacité.",
           "L'arbre est la seule partie du système où il reste clairement de la marge : une représentation plus légère est l'optimisation la plus rentable qui reste, et elle ne change aucune règle."
         ]
       }
@@ -523,17 +523,17 @@
       "body": {
         "plain": [
           "Deux choses à dire clairement. D'abord, Cairn est nouvelle et n'a rien prouvé. Elle n'a pas été attaquée, elle n'a pas été auditée par des tiers, et le réseau actuel est un réseau de test dont la monnaie ne vaut rien et qui sera effacé.",
-          "Ensuite, rejoindre pour la première fois demande encore de télécharger toute l'histoire. Chaque bloc porte désormais ce qu'il faut pour que ce ne soit plus nécessaire, et la partie qui s'en sert n'est pas écrite. Donc aujourd'hui un nouveau venu télécharge tout ; le jour où ce travail sera fait, il en téléchargera environ un millième et vérifiera tout aussi sérieusement.",
+          "Ensuite, rejoindre le réseau sans en lire toute l'histoire fonctionne désormais, et le raisonnement sur lequel cela repose n'a été relu par personne d'extérieur au projet. Un nouveau venu tire au sort un échantillon de vieux blocs, en pèse le travail, puis reçoit l'état courant. La taille de cet échantillon a été établie par la mesure et non par une démonstration, et la première réponse était largement fausse. Elle est juste autant que quiconque ici peut le dire, ce qui n'est pas la même chose que juste.",
           "C'est écrit ici plutôt que laissé à votre découverte."
         ],
         "curious": [
-          "La synchronisation initiale télécharge et revalide encore chaque bloc. Le coût en régime établi est plat, celui du premier démarrage ne l'est pas, et la réparation est à moitié faite : chaque en-tête engage désormais le travail accumulé derrière la chaîne et tous les en-têtes qui le précèdent, si bien qu'un nouveau venu peut recevoir un échantillon plutôt que la totalité. Ce qui manque est le protocole qui sert cet échantillon.",
-          "Mesuré, à raison d'un bloc par minute : trente ans de chaîne chargée représentent environ quarante-huit gigaoctets à télécharger et cinq heures à revalider. Par l'échantillon, c'est quelques centaines de kilooctets d'en-têtes plus les cent mégaoctets d'état, vérifiés contre l'engagement inscrit dans le sommet. Aucun point de contrôle, aucun instantané de confiance, personne à croire.",
-          "Un coût grandit encore : un nœud garde en mémoire tous les blocs de la branche qu'il suit. C'est l'histoire, pas l'état contre lequel il valide, et le même engagement est ce qui lui permettra d'arrêter. Plus petit : un archiviste reconstruit une preuve en un temps proportionnel à l'ensemble qu'il détient."
+          "Un nouveau venu ouvre 4 096 vieux en-têtes, tirés contre le travail accumulé derrière eux plutôt que contre leur hauteur, vérifie que chacun se trouve bien là où il prétend être dans l'engagement inscrit au sommet, puis reçoit le grand livre en morceaux. Il valide lui-même les mille blocs qui séparent ce grand livre du sommet avant de répondre comme un nœud sur une chaîne, et tant qu'il ne l'a pas fait, il le dit en haut de cette page.",
+          "Mesuré, à raison d'un bloc par minute : trente ans de chaîne chargée représentent environ cent quatre-vingt-dix-sept gigaoctets à télécharger et près d'une journée à revalider. Par l'échantillon, c'est environ neuf mégaoctets d'en-têtes, onze d'état, et les mille blocs intermédiaires, chaque partie vérifiée contre l'engagement inscrit au sommet. Aucun point de contrôle, aucun instantané de confiance, personne à croire.",
+          "Un coût grandit encore, et il est petit et nommé : les en-têtes, et l'arbre qu'ils forment, à 129 Mo par an. Chaque nœud les garde pour que n'importe qui puisse rejoindre le réseau par n'importe lequel d'entre eux. Conserver tous les blocs depuis l'origine, et conserver tous les billets qui sont un jour tombés du tiroir, sont deux coûts qui grandissent sans borne ; ce sont aussi deux travaux facultatifs, dont le réseau se passe."
         ],
         "technical": [
           "Aucun audit externe à ce jour, et aucune des primitives cryptographiques n'est nouvelle : BLAKE3 avec des clés dérivées par domaine, Ed25519 avec rejet à la construction des clés de petit ordre et des encodages non canoniques. La nouveauté est dans la disposition de l'état, là où elle doit être si elle doit être quelque part.",
-          "Les délais d'attente, le plafond de connexions, la part par adresse, le refus temporaire, les enregistrements d'annulation bornés et les files d'envoi bornées sont en place : plus rien de ce qu'un inconnu fait ne décide de ce qu'un nœud dépense. Les en-têtes engagent le travail cumulé et une forêt de tous les en-têtes antérieurs, ce dont un démarrage échantillonné a besoin et ce qui n'aurait pas pu être ajouté une fois qu'un réseau porte de la valeur. Reste : le protocole d'échantillonnage lui-même, sortir l'histoire de la mémoire, et alléger la représentation de l'arbre chaud."
+          "Les délais d'attente, le plafond de connexions, la part par adresse, le refus temporaire, les enregistrements d'annulation bornés et les files d'envoi bornées sont en place : plus rien de ce qu'un inconnu fait ne décide de ce qu'un nœud dépense. Les en-têtes engagent le travail cumulé et une forêt de tous les en-têtes antérieurs, ce dont un démarrage échantillonné a besoin et ce qui n'aurait pas pu être ajouté une fois qu'un réseau porte de la valeur. Reste : un regard extérieur sur la borne d'échantillonnage, qui est mesurée et non prouvée, et une représentation plus légère de l'arbre chaud, qui est l'optimisation la plus évidente qui reste et ne change aucune règle."
         ]
       }
     },

@@ -380,11 +380,20 @@ impl BlockLog {
 
         // Read what is kept before anything is written, so a failure partway
         // leaves the log as it was rather than half moved.
-        let room = usize::try_from(self.end.saturating_sub(start)).unwrap_or(0);
-        let mut kept = Vec::with_capacity(room);
+        //
+        // Exactly the records, never to the end of the file. Recovery leaves
+        // the bytes of a record it could not read sitting past `self.end` on
+        // purpose, and reading to the end copied them into the compacted log
+        // and then set `trailing` to zero: the one thing that writes over them
+        // is the guard in `append`, and it was disarmed for bytes that were
+        // still there. A twenty record log damaged at its end came back from a
+        // compaction sixty eight bytes longer than it said it was, with
+        // nothing left that knew it.
+        let room = self.end.saturating_sub(start);
+        let mut kept = Vec::with_capacity(usize::try_from(room).unwrap_or(0));
         let mut file = &self.file;
         file.seek(SeekFrom::Start(start))?;
-        file.read_to_end(&mut kept)?;
+        file.take(room).read_to_end(&mut kept)?;
 
         let mut ends = Vec::new();
         let mut offset = 0u64;
@@ -760,9 +769,21 @@ impl BlockLog {
         if end < logged {
             // Splicing onto an offset that is not a record boundary would name
             // records that are not there, so the last entry the index does
-            // have is checked before the rest are added after it. One record
-            // decoded, on the crash path only.
-            if self.read(count.saturating_sub(1)).is_err() {
+            // have is checked before the rest are added after it.
+            //
+            // And the first, because `settle` reads record zero back to learn
+            // where the log starts and had no answer for that read failing.
+            // An index one entry short is the ordinary torn append; an index
+            // with a damaged first offset is a byte of rot in a derived file.
+            // Either alone was survivable and the two together were not: the
+            // start refused with "the index puts record 0 between 0 and 0",
+            // and an unattended node stayed down over a file this whole design
+            // says is worked out from the log and never believed. The same
+            // damage with the index at full length rebuilt and came back with
+            // all twenty blocks.
+            //
+            // Two records decoded, on the crash path only.
+            if self.read(count.saturating_sub(1)).is_err() || self.read(0).is_err() {
                 return self.rebuild();
             }
             return self.extend(logged);

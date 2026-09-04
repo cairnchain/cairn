@@ -1,10 +1,14 @@
-//! What a node's `trim_history` does to the block log.
+//! What asking a block log to keep from one past its tip does.
 //!
-//! `trim_history` writes the ledger down for the current tip and then calls
-//! `keep_from(tip + 1)` to drop "everything below the ledger". But the ledger
-//! stands for the tip, so `tip + 1` is the height just past the last record,
-//! and `keep_from` of that is `clear`: the whole log goes, including the
-//! window a reorganisation reads bodies back from.
+//! `keep_from(height)` drops everything below `height`, so `keep_from` of the
+//! height just past the last record drops everything: the whole log goes,
+//! including the window a reorganisation reads bodies back from. That is
+//! arithmetic rather than a defect, and it is written down here because it is
+//! still reachable from the outside. A node's `trim_history` no longer passes
+//! `tip + 1` unconditionally; it passes `cut_for(anchor, ...)`, which is
+//! `anchor + 1 - affordable`, and `affordable` is the operator's byte budget
+//! divided by the average record. A budget below one average block makes
+//! `affordable` zero, and `Node::keep_blocks` takes any number.
 
 #![allow(
     clippy::unwrap_used,
@@ -55,12 +59,13 @@ fn chain(count: usize) -> Vec<Block> {
         .collect()
 }
 
-/// The exact call `trim_history` makes on the block log: `keep_from(tip + 1)`,
-/// where `tip` is the height the ledger it just wrote stands for.
+/// `keep_from` of the height just past the last record empties the log
+/// entirely, so nothing below the tip can be read back afterwards. A node that
+/// let go of the deep bodies in memory (as it does once they are "on disk")
+/// would hold them nowhere.
 ///
-/// It empties the log entirely, so nothing below the tip can be read back
-/// afterwards. A node that let go of the deep bodies in memory (as it does
-/// once they are "on disk") now holds them nowhere.
+/// Held as the property it is, so that whatever computes the cut is read
+/// against it: this is what asking for one block too many costs.
 #[test]
 fn keep_from_one_past_the_tip_clears_the_whole_log() {
     let directory = scratch("clears");

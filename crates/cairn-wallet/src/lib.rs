@@ -218,12 +218,31 @@ pub struct Holdings {
 
 impl Holdings {
     /// Everything this key owns, spendable or not.
+    ///
+    /// All four, because every note this wallet holds is counted into exactly
+    /// one of them. Rewards inside the maturity window were left out of this
+    /// sum while the sentence above still said "everything", so a miner whose
+    /// only money was the block it had just found was told it owned nothing.
     #[must_use]
     pub fn total(&self) -> Amount {
-        self.spendable
-            .checked_add(self.waiting)
-            .and_then(|sum| sum.checked_add(self.stranded))
+        [self.waiting, self.ripening, self.stranded]
+            .into_iter()
+            .try_fold(self.spendable, Amount::checked_add)
             .unwrap_or(self.spendable)
+    }
+
+    /// Whether this key holds nothing at all.
+    ///
+    /// Not the same question as whether a spend has anything to reach for, and
+    /// the two were answered by one test. [`Holdings::notes`] holds what can be
+    /// spent right now, so it is empty for a wallet whose money is a young
+    /// reward, for one whose notes are all promised to a payment waiting for a
+    /// block, and for one whose notes have fallen where its node cannot place
+    /// them. Both faces read that as an empty wallet and said so, directly
+    /// beside their own sentence naming the amount.
+    #[must_use]
+    pub fn empty_handed(&self) -> bool {
+        self.total() == Amount::ZERO
     }
 }
 

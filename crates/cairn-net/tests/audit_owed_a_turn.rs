@@ -225,3 +225,109 @@ fn the_worst_arrangement_of_claims_stays_under_the_ceiling() {
     }
     println!("the worst arrangement cost {worst}s, against a ceiling of {HELD_OFF_AT_MOST}s");
 }
+
+/// Drives a chooser whose best proof belongs to a peer that has since failed,
+/// against one machine at one address holding two sockets.
+///
+/// Two and not one, offset by half an answering window, because one socket
+/// leaves a gap: the round in which its claim is asked and fails is a round
+/// with nothing heavier standing, and the node slips through it. Two staggered
+/// sockets is what one machine holding two connections looks like, and it is
+/// within `MAX_PER_HOST`.
+///
+/// Returns how long after the first showing the node committed, or `None` if it
+/// never did inside `watch`.
+fn seconds_until_after_a_lost_proof(watch: u64) -> Option<u64> {
+    let mut chooser = Chooser::new();
+    let start = 100u64;
+    // The heaviest claimant, and the one the node asks first.
+    chooser.noted(1, Some(host(1)), 2_000, LONG, true, start);
+    // The chain the node can actually be handed, which is lighter.
+    chooser.noted(2, Some(host(2)), 400, LONG, true, start);
+    let mut connected = vec![1u64, 2];
+
+    let mut now = start + 2;
+    assert_eq!(
+        chooser.step(now, true, 0, JoinProgress::NothingYet, &connected),
+        Step::Ask(1, Approach::Join),
+        "the heaviest claim is asked first"
+    );
+    let proven_at = now;
+    // It weighs its chain, really and checkably, and then goes away before the
+    // ledger lands. Nothing about that needs an attacker.
+    chooser.shown(1, 900, now);
+    chooser.failed(1, now + 1);
+
+    // The two sockets, and when each next hangs up and dials back.
+    let mut sockets = [
+        (50u64, proven_at + 1),
+        (51u64, proven_at + 1 + FIRST_ANSWER_WINDOW / 2),
+    ];
+    for (id, _) in sockets {
+        chooser.noted(id, Some(host(9)), u128::MAX / 2, LONG, true, now);
+        connected.push(id);
+    }
+    let mut next_id = 100u64;
+
+    for _ in 0..watch {
+        now += 1;
+        for socket in &mut sockets {
+            if now < socket.1 {
+                continue;
+            }
+            chooser.failed(socket.0, now);
+            connected.retain(|peer| *peer != socket.0);
+            next_id += 1;
+            socket.0 = next_id;
+            socket.1 = now + FIRST_ANSWER_WINDOW;
+            connected.push(socket.0);
+            chooser.noted(socket.0, Some(host(9)), u128::MAX / 2, LONG, true, now);
+        }
+        match chooser.step(now, true, 0, JoinProgress::NothingYet, &connected) {
+            Step::Ask(2, _) => {
+                if chooser.shown(2, 400, now) {
+                    return Some(now - proven_at);
+                }
+            }
+            Step::Nudge(_) => return Some(now - proven_at),
+            Step::Ask(_, _) | Step::Quiet => {}
+        }
+    }
+    None
+}
+
+/// Long enough for a claim that was asked to have run its answering window out.
+const FIRST_ANSWER_WINDOW: u64 = 30;
+
+/// **The ceiling was not a ceiling once the best proof belonged to a peer that
+/// had gone.**
+///
+/// `allows` opened its escape hatch only when what was being adopted weighed at
+/// least as much as the heaviest thing anybody had ever *shown*, and that figure
+/// never fell when the peer who showed it failed. So a peer that weighed its
+/// chain and then went away before handing the ledger over left behind a number
+/// no chain still on offer could match: the patience never opened, and any
+/// claim heavier than what was left blocked the commitment for ever. Claims
+/// cost a stranger a reconnection.
+///
+/// Measured on the code this was written against: one address, four times the
+/// ceiling, still holding. The whole file above measures arrangements where the
+/// node commits to the very chain it proved, which is the one case where the
+/// old comparison was true.
+#[test]
+fn a_proof_whose_owner_went_away_does_not_hold_the_node_off_for_ever() {
+    let watch = HELD_OFF_AT_MOST * 4;
+    let waited = seconds_until_after_a_lost_proof(watch);
+    let Some(waited) = waited else {
+        panic!(
+            "a node whose best proof belongs to a peer that failed was still \
+             held off a chain it had proved after {watch}s, against a ceiling \
+             of {HELD_OFF_AT_MOST}s, by one stranger at one address"
+        );
+    };
+    assert!(
+        waited <= HELD_OFF_AT_MOST,
+        "a lost proof cost {waited}s, past the {HELD_OFF_AT_MOST}s ceiling"
+    );
+    println!("a proof whose owner went away cost {waited}s, against {HELD_OFF_AT_MOST}s");
+}

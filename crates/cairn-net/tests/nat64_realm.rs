@@ -51,6 +51,45 @@ fn a_stranger_cannot_name_an_inside_address_through_nat64() {
     );
 }
 
+/// **The reserved range is a `/48`, and it was read as though it were a `/96`.**
+///
+/// RFC 6052's well known prefix is a `/96`: the address is the whole of what
+/// follows it, and requiring the bits in between to be zero is right. RFC 8215
+/// reserves a `/48`, and the extra forty eight bits are the point of it: a
+/// network picks its own translation prefix out of the range. Requiring those
+/// to be zero as well recognised exactly one such choice, and every other one
+/// walked past the rule.
+///
+/// So `64:ff9b:1:1::a9fe:a9fe` was an open address in a range nobody owns, and
+/// a stranger naming it was passing on a peer. So was `64:ff9b:1:1::7f00:1`,
+/// which is this machine.
+#[test]
+fn any_translation_prefix_out_of_the_reserved_range_is_unwrapped() {
+    let cases: [(&str, Realm); 6] = [
+        ("64:ff9b:1:1::a9fe:a9fe", Realm::LinkLocal), // 169.254.169.254
+        ("64:ff9b:1:abcd::7f00:1", Realm::Loopback),  // 127.0.0.1
+        ("64:ff9b:1:0:1::a00:1", Realm::Private),     // 10.0.0.1
+        ("64:ff9b:1:ffff:ffff:ffff:c0a8:101", Realm::Private), // 192.168.1.1
+        // A translated address that really is out in the world stays out in
+        // the world, whichever prefix carried it.
+        ("64:ff9b:1:1::c633:6404", Realm::Open), // 198.51.100.4
+        ("64:ff9b:1::c633:6404", Realm::Open),
+    ];
+    for (text, want) in cases {
+        let ip: IpAddr = text.parse().unwrap();
+        assert_eq!(realm_of(ip), want, "{text}");
+    }
+
+    // The consequence, which is the reason this is a rule and not a tidy.
+    let metadata: Ipv6Addr = "64:ff9b:1:1::a9fe:a9fe".parse().unwrap();
+    let far_away = Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4)));
+    assert!(
+        !worth_hearing_about(&SocketAddr::new(IpAddr::V6(metadata), 80), far_away, false),
+        "a stranger named a link local address through a translation prefix the \
+         rule knew the range of but not the spelling, and it was written down"
+    );
+}
+
 /// And nothing that is not one of those prefixes is unwrapped. `2001:db8::` is
 /// documentation space and its last thirty two bits are not an address.
 #[test]

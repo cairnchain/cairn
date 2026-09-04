@@ -40,9 +40,9 @@ use cairn_ledger::note::Note;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
-use cairn_net::message::{Handshake, Joining, Message, PROTOCOL_VERSION};
+use cairn_net::message::{Handshake, Joining, Message, PeerAddress, PROTOCOL_VERSION};
 use cairn_net::node::MAX_PEERS;
-use cairn_net::wire::write_message;
+use cairn_net::wire::{read_message, write_message, Incoming};
 use cairn_net::Keeps;
 use cairn_net::Node;
 use cairn_primitives::codec::Encode;
@@ -453,6 +453,206 @@ fn a_join_request_does_not_hold_the_chain_shut() {
          against {quiet:?} when nobody was asking. Every other peer, the miner and the \
          HTTP server waited that long, and it grew with the chain."
     );
+}
+
+/// **A `GetJoin` naming a part that is not in the answer rebuilt the answer.**
+///
+/// AUDIT, repaired. `serve_join` asked `held_join` for the piece and, on
+/// `None`, built the whole answer again. `held_join` ended in `piece_of`, which
+/// returns `None` for two different reasons: the answer this node holds is
+/// about another tip, and the answer this node holds has no such piece. The
+/// first is worth a rebuild and the second is not, and they were read as one.
+///
+/// `GetJoin.part` is a bare `u32` off the wire with no ceiling of its own, and
+/// a real answer runs to a couple of dozen pieces. So one seventeen byte
+/// message, repeatable eight times an allowance window, bought the whole build:
+/// four thousand and ninety six sampled heights, a binary search with a header
+/// read off the disk per step, and a forest proof with every sample. Measured
+/// on a chain of four hundred with the answer already built and the tip not
+/// moving: five hundred and seventy milliseconds against thirty four to hand
+/// over a piece that existed, and nothing went back to the asker either way.
+/// The cost grows with the chain.
+///
+/// Asserted against what a real piece costs on the same machine rather than
+/// against a number, because what is wrong is the ordering: a question this
+/// node can answer out of what it is already holding must not cost more than
+/// one it answers by sending half a megabyte.
+#[test]
+fn a_part_that_is_not_in_the_answer_does_not_rebuild_it() {
+    let directory = scratch("joinpart");
+    let (node, _) = Node::open_archiving(params(), loopback(), &directory).unwrap();
+    let mut forge = Forge::new(params());
+    for block in forge.mine_many(400) {
+        node.submit_block(block).unwrap();
+    }
+
+    let mut peer = TcpStream::connect(node.address()).unwrap();
+    peer.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    write_message(&mut peer, params().network, &hello(987_654)).unwrap();
+
+    // The first ask builds the answer whatever happens, and is not measured.
+    // Nothing mines here, so the tip does not move and the answer stays the
+    // one every later question is about.
+    what_it_cost(&mut peer, Joining::Weight, 0, 1);
+
+    // A join answer is charged an eighth of an allowance window, so the asking
+    // is paced to stay inside one rather than being answered with silence.
+    let mut real = Vec::new();
+    let mut absent = Vec::new();
+    for round in 0..4u64 {
+        thread::sleep(Duration::from_millis(1_600));
+        real.push(what_it_cost(&mut peer, Joining::Weight, 0, 100 + round));
+        thread::sleep(Duration::from_millis(1_600));
+        // Inside what the wire allows and far past the end of any answer.
+        absent.push(what_it_cost(
+            &mut peer,
+            Joining::Weight,
+            50_000,
+            200 + round,
+        ));
+    }
+    let real = middle(real);
+    let absent = middle(absent);
+
+    node.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert!(
+        absent < real,
+        "a part that is not in the answer cost {absent:?}, where handing over a \
+         part that is cost {real:?}. Asking for nothing must not cost more than \
+         asking for something: the answer is built again on every one of them."
+    );
+}
+
+/// What one `GetJoin` cost this node, timed from the outside.
+///
+/// A ping is put behind the question on the same connection. One connection is
+/// read in order, so the pong cannot be written until whatever the question
+/// cost has been paid, and this works for a question the node answers with
+/// silence, which is what a part that is not in the answer gets.
+fn what_it_cost(peer: &mut TcpStream, what: Joining, part: u32, nonce: u64) -> Duration {
+    write_message(peer, params().network, &Message::GetJoin { what, part }).unwrap();
+    write_message(peer, params().network, &Message::Ping(nonce)).unwrap();
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        match read_message(peer, params().network) {
+            Ok(Incoming::Message(Message::Pong(seen))) if seen == nonce => {
+                return started.elapsed()
+            }
+            Ok(_) => {}
+            Err(error) => panic!("the connection failed: {error}"),
+        }
+    }
+    panic!("the node never answered the ping behind the question");
+}
+
+fn middle(mut of: Vec<Duration>) -> Duration {
+    of.sort_unstable();
+    of[of.len() / 2]
+}
+
+/// **A stranger naming addresses that do not answer stopped the round of upkeep
+/// that everything else runs on.**
+///
+/// AUDIT, repaired. `dial_from_book` calls `TcpStream::connect_timeout`, which
+/// blocks, up to `TARGET_PEERS` times, on the one thread that also drives the
+/// choice a node with no chain is making, the turn to fill its old headers in,
+/// the join it is waiting on and the ledger it is on probation for. An address
+/// routed nowhere holds a dial for the whole of the dial timeout.
+///
+/// So one `Peers` message, charged a single unit of a peer's allowance, took a
+/// round of upkeep from just over a second to twenty five: measured as one
+/// round completed in forty seconds where an idle node completed eight in ten.
+/// The addresses cost nothing to invent, and a node reaches the dead only when
+/// it has not found enough live peers yet, which is exactly the node whose
+/// chooser can least afford to run once every twenty five seconds.
+///
+/// A round now spends a bounded amount of time dialling and goes back to the
+/// rest of its work.
+#[test]
+fn a_book_of_addresses_that_do_not_answer_does_not_stop_upkeep() {
+    let directory = scratch("dialstall");
+    let (node, _) = Node::open(params(), loopback(), &directory).unwrap();
+
+    let mut peer = TcpStream::connect(node.address()).unwrap();
+    peer.set_read_timeout(Some(Duration::from_millis(250)))
+        .unwrap();
+    write_message(&mut peer, params().network, &hello(777_777)).unwrap();
+
+    // What an idle node's round costs, as the baseline this is measured
+    // against. One `GetPeers` goes out per round, so counting them counts
+    // rounds.
+    let idle = rounds_seen(&mut peer, Duration::from_secs(10));
+
+    // Everything a peer is allowed to name in one answer, twice over, all of it
+    // in ranges reserved for documentation so that a dial hangs rather than
+    // being refused.
+    for _ in 0..2 {
+        write_message(&mut peer, params().network, &Message::Peers(nowhere(64))).unwrap();
+    }
+
+    let watched = Duration::from_secs(40);
+    let fed = rounds_seen(&mut peer, watched);
+    let known = node.known_addresses().len();
+
+    node.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert!(
+        known >= 32,
+        "only {known} of the named addresses went into the book, so this test \
+         never put a full book of the dead to the node"
+    );
+    assert!(
+        idle >= 4,
+        "an idle node only completed {idle} rounds in ten seconds, so the \
+         baseline this compares against is not a baseline"
+    );
+    assert!(
+        fed >= 4,
+        "with {known} addresses that do not answer in its book, the node \
+         completed {fed} rounds of upkeep in {watched:?}, against {idle} in ten \
+         seconds when its book was empty. Dialling blocks the one loop that \
+         also drives the chooser, the header turn and the undertaking."
+    );
+}
+
+/// Addresses in the ranges reserved for documentation, which nothing routes to,
+/// so a dial to one hangs until it is given up on rather than being refused.
+///
+/// Spread across neighbourhoods, because the book keeps only `MAX_PER_GROUP`
+/// from any one of them and the point here is a full book.
+fn nowhere(count: usize) -> Vec<PeerAddress> {
+    (0..count)
+        .map(|index| {
+            let group = u8::try_from(index / 24).unwrap_or(0);
+            let within = u8::try_from(index % 24).unwrap_or(0) + 1;
+            PeerAddress(SocketAddr::from((
+                Ipv4Addr::new(198, 51 + group, 100, within),
+                9_333,
+            )))
+        })
+        .collect()
+}
+
+/// Rounds of upkeep this node completed over `over`.
+///
+/// Counted from the outside by the `GetPeers` it broadcasts, which is one per
+/// round, so this measures the loop rather than anything this test does.
+fn rounds_seen(peer: &mut TcpStream, over: Duration) -> usize {
+    let mut rounds = 0usize;
+    let deadline = Instant::now() + over;
+    while Instant::now() < deadline {
+        match read_message(peer, params().network) {
+            Ok(Incoming::Message(Message::GetPeers)) => rounds += 1,
+            Ok(_) => {}
+            Err(_) => return rounds,
+        }
+    }
+    rounds
 }
 
 /// **The node does not stop itself every time it writes its own ledger down.**

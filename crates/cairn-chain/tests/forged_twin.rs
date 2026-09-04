@@ -11,8 +11,14 @@
 //! invalid, and then treats the honest B as a duplicate: the honest block is
 //! refused. This is a work-free, targeted relay DoS (the twin inherits B's PoW).
 //!
-//! This test asserts the honest block is still accepted after the twin. It
-//! FAILS on current code.
+//! The first test here asserts the honest block is still accepted after the
+//! twin, which is the case the identifier-keyed caches used to lose.
+//!
+//! The second is the other order. A twin of a block the node is *already*
+//! following inherits its work and its identifier, and the checks that stand
+//! between a stranger and this node's memory are all about the header, which
+//! the twin copies exactly. What decided the matter was the body it arrived
+//! with, and the body is the one part an identifier does not commit to.
 
 #![allow(
     clippy::doc_markdown,
@@ -152,4 +158,55 @@ fn an_invalid_twin_seen_first_must_not_lock_out_the_honest_block() {
         Some(12),
         "the node should have followed the honest block to height 12"
     );
+}
+
+/// A twin cannot take the body of a block this node already follows.
+///
+/// Same header, so the same identifier and the same work, and a body paying
+/// the reward to somebody else. The twin used to fall through the held-block
+/// check because the bodies differ, pass the work and the depth floor because
+/// the header is the real one's, and then have `hold` write its body over the
+/// real one. The node answered `SideBranch` and carried on at the same height,
+/// following the real block's identifier while holding the forgery under it.
+/// `block_at` is the accessor a node serves blocks from and writes its log
+/// from, so what it answers with at a height on the branch is not this
+/// crate's business alone.
+///
+/// It costs the sender a copy. The branch is what settles it: a block already
+/// on the branch was applied, and no body arriving later reopens that.
+#[test]
+fn a_twin_of_a_block_already_followed_cannot_take_its_body() {
+    let params = params();
+    let miner = wallet(1);
+    let thief = wallet(9);
+
+    let mut branch = Branch::new(params);
+    let blocks = branch.mine_empty(&miner, 12);
+
+    let mut store = ChainStore::new(params);
+    for block in &blocks {
+        store.add_block(block.clone(), NOW).unwrap();
+    }
+    assert_eq!(store.height(), Some(11));
+
+    let real = &blocks[5];
+    let mut twin = real.clone();
+    twin.coinbase =
+        CoinbaseTransaction::new(5, vec![Note::new(params.reward_at(5), thief.public_key())]);
+    assert_eq!(twin.id(), real.id(), "the twin shares the identifier");
+    assert_ne!(twin.encode(), real.encode(), "yet is a different block");
+
+    let outcome = store.add_block(twin.clone(), NOW);
+    assert_eq!(
+        outcome,
+        Ok(Accepted::Duplicate),
+        "a block already on the branch is settled, whatever body arrives \
+         under its identifier: {outcome:?}"
+    );
+    assert_eq!(
+        store.block_at(5),
+        Some(real),
+        "and what the node holds at that height is still the block it applied"
+    );
+    assert_eq!(store.height(), Some(11), "with nothing else disturbed");
 }

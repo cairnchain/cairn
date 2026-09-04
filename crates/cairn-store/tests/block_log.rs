@@ -19,7 +19,7 @@ use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
 use cairn_primitives::codec::Encode;
-use cairn_store::{BlockLog, StoreError, BLOCK_LOG};
+use cairn_store::{BlockLog, StoreError, BLOCK_INDEX, BLOCK_LOG};
 
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
@@ -622,4 +622,105 @@ fn headers_are_read_back_by_height_and_cut_back_by_reorganisation() {
     assert_eq!(log.reaches(), 10);
 
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// A compaction moves the records and leaves nothing behind it.
+///
+/// Recovery sets aside the bytes of a record it could not read, past the end
+/// of the log, on purpose: they stay until the log grows over them, and
+/// `append` is what writes over them. `keep_from` read to the end of the file
+/// rather than to the end of the records, so it copied those bytes into the
+/// compacted log and then reported nothing past the end, which disarmed the
+/// one thing that would have removed them. Sixty eight bytes of a twenty
+/// record log survived a compaction with nothing left that knew they were
+/// there.
+#[test]
+fn a_compaction_carries_the_records_and_not_what_lies_past_them() {
+    let directory = scratch("compaction-tail");
+    let blocks = chain(20);
+    {
+        let (mut log, _) = BlockLog::open(&directory).unwrap();
+        for block in &blocks {
+            log.append(block).unwrap();
+        }
+    }
+
+    // A whole record that will not decode: an honest length prefix and a body
+    // that is not a block. That is damage rather than a torn write, so
+    // recovery leaves it where it is and says so.
+    let path = directory.join(BLOCK_LOG);
+    let junk = vec![7u8; 64];
+    {
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(&u32::try_from(junk.len()).unwrap().to_le_bytes())
+            .unwrap();
+        file.write_all(&junk).unwrap();
+        file.flush().unwrap();
+    }
+
+    let (mut log, recovered) = BlockLog::open(&directory).unwrap();
+    assert_eq!(recovered.unreadable, Some(20));
+    assert_eq!(recovered.left_in_place, 68, "left where they are, not cut");
+
+    log.keep_from(10).unwrap();
+    assert_eq!(log.len(), 10);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        log.bytes(),
+        "the compacted log is exactly the records it says it holds"
+    );
+
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// A start refuses only over a file it could not reach.
+///
+/// The index is worked out from the log and never believed over it, so nothing
+/// written in it may keep a node down. Two failures together used to: an index
+/// one entry short of the log is the ordinary torn append, and a damaged first
+/// offset is a byte of rot in a derived file. On that path `recover` checked
+/// the last entry before splicing the log's tail onto it and nothing checked
+/// the first, which `settle` then reads back to learn where the log starts.
+/// The start refused with "the index puts record 0 between 0 and 0" and an
+/// unattended node stayed down. The same damage with the index at full length
+/// rebuilt and came back with every block.
+#[test]
+fn a_damaged_index_never_keeps_a_node_from_starting() {
+    let blocks = chain(20);
+    let entries = |directory: &PathBuf| {
+        std::fs::metadata(directory.join(BLOCK_INDEX))
+            .unwrap()
+            .len()
+            / 8
+    };
+
+    for short in [false, true] {
+        let directory = scratch(if short { "index-short" } else { "index-full" });
+        {
+            let (mut log, _) = BlockLog::open(&directory).unwrap();
+            for block in &blocks {
+                log.append(block).unwrap();
+            }
+        }
+        let held = entries(&directory);
+        {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .open(directory.join(BLOCK_INDEX))
+                .unwrap();
+            if short {
+                file.set_len((held - 1) * 8).unwrap();
+            }
+            file.write_all(&0u64.to_le_bytes()).unwrap();
+            file.flush().unwrap();
+        }
+
+        let (log, _) = BlockLog::open(&directory)
+            .unwrap_or_else(|error| panic!("short index = {short}: {error}"));
+        assert_eq!(log.len(), 20, "short index = {short}");
+        assert_eq!(log.first_height(), 0, "short index = {short}");
+        assert_eq!(read_back(&log), blocks, "short index = {short}");
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
 }

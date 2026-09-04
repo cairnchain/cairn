@@ -79,6 +79,29 @@ const MAX_ADDRESS_WINDOWS: usize = 1_024;
 
 /// How long a dial may hang before it is given up on.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long one round of upkeep may spend opening connections.
+///
+/// `TcpStream::connect_timeout` blocks the thread it is called on, and the
+/// thread it is called on is the one that also drives the choice a node with no
+/// chain is making, the turn to fill in its old headers, the join it is waiting
+/// on and the ledger it is on probation for. An address routed nowhere holds a
+/// dial for the whole of [`DIAL_TIMEOUT`], and a round dialled up to
+/// [`TARGET_PEERS`] of them one after another.
+///
+/// So one `Peers` message, which is charged a single unit of a peer's
+/// allowance, took a round of upkeep from just over a second to twenty five,
+/// measured. The addresses cost the stranger nothing to invent and they are
+/// reached first by a node that has not found enough live peers yet, which is
+/// the node whose chooser can least afford to run once every twenty five
+/// seconds.
+///
+/// A round now spends this much and goes back to the rest of its work; what is
+/// left is dialled on the next one. It is the time and not the number that is
+/// capped, because a dial that fails fast is not the problem: an address that
+/// refuses comes back in microseconds, so a book full of those is still worked
+/// through in one round. Only the ones that hang are rationed, and one of those
+/// per round is what this buys.
+const DIAL_BUDGET: Duration = Duration::from_secs(3);
 /// How long a read waits before the loop looks up to check on things.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a write may block before the peer is treated as gone.
@@ -177,8 +200,27 @@ const BURIAL_PATIENCE: u64 = 30;
 const STRANDING_PATIENCE: u64 = 3_600;
 
 /// Seconds the peer a node is filling its headers in from may go without
-/// adding one before another peer is asked instead.
+/// getting on with it before another peer is asked instead.
 const HEADER_PATIENCE: u64 = 30;
+
+/// Headers a turn has to collect to be given [`HEADER_PATIENCE`] again.
+///
+/// The turn used to be renewed by a single header, and a single header is what
+/// a peer sent. One connection answering each question with one header held the
+/// turn for as long as it cared to: measured over seventy five seconds it moved
+/// the collection sixty eight places out of three hundred and one and nobody
+/// else was asked once. The node then never fills its old headers in, so
+/// `Store::can_show_the_chain` stays false for the rest of its life and it can
+/// never take a newcomer in, which is the one thing this whole exchange exists
+/// to keep alive.
+///
+/// So progress is a run rather than a header, the shape [`crate::wire`] already
+/// uses for a frame: a link that keeps delivering keeps its turn, and one that
+/// stops loses it. One full answer per patience window is thirty times below
+/// what an honest peer manages, since the node asks once a second and an answer
+/// carries up to this many. Nothing shorter would do: the floor has to sit
+/// under the slowest honest supplier, and what it has to sit above is one.
+const HEADER_RUN: u64 = MAX_HEADERS as u64;
 
 /// Blocks the chain may run ahead of the block log before the node stops.
 ///
@@ -768,8 +810,8 @@ struct Shared {
     /// is: whatever started the node has to be able to say why it stopped, and
     /// this is the one stop whose cure is the operator's to apply.
     stranded: Mutex<Option<Stranded>>,
-    /// The peer this node is filling its old headers in from, and when that
-    /// peer last added one.
+    /// The peer this node is filling its old headers in from, and what its
+    /// turn has left to run.
     ///
     /// One peer at a time, and only that peer's runs are taken. There is a
     /// single collection and anybody may send headers, so before this a
@@ -779,7 +821,7 @@ struct Shared {
     /// repeated for the price of one message, which is a joined node that can
     /// never fill in its headers and so can never show the chain to anybody.
     /// The same defect [`join_piece`] was fixed for, in the other collection.
-    filling_from: Mutex<Option<(PeerId, u64)>>,
+    filling_from: Mutex<Option<Turn>>,
     threads: Mutex<Vec<JoinHandle<()>>>,
     next_id: AtomicU64,
     running: AtomicBool,
@@ -917,6 +959,22 @@ fn too_old_for_the_chain(met: &Unreadable) -> Option<Unjudged> {
         peers: met.peers.len(),
         over,
     })
+}
+
+/// Whose turn it is to supply the headers from before this node arrived.
+///
+/// The turn is one peer's from end to end, because a run half from one peer and
+/// half from another would be thrown out at the commitment check with neither
+/// of them shown to be wrong. What it costs an honest peer that goes quiet mid
+/// run is the part it had sent, once.
+#[derive(Clone, Copy, Debug)]
+struct Turn {
+    peer: PeerId,
+    /// When the turn was last renewed.
+    moved: u64,
+    /// How far the collection had reached then, so what renews the turn is a
+    /// run and not a header. See [`HEADER_RUN`].
+    marked: u64,
 }
 
 /// The undertaking a node took on with a handed ledger, as it stands.
@@ -1164,7 +1222,7 @@ impl Shared {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn filling_from(&self) -> MutexGuard<'_, Option<(PeerId, u64)>> {
+    fn filling_from(&self) -> MutexGuard<'_, Option<Turn>> {
         self.filling_from
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -2259,8 +2317,16 @@ impl Node {
         let now = unix_now();
         let peer = {
             let mut filling = self.shared.filling_from();
-            let peer = filling.map_or(0, |(peer, _)| peer);
-            *filling = Some((peer, now));
+            let held = *filling;
+            let peer = held.map_or(0, |turn| turn.peer);
+            // Renewed here rather than left to the run to earn, because this
+            // door is the operator's and not a stranger's: what arrives through
+            // it is as large as the caller chose to make it.
+            *filling = Some(Turn {
+                peer,
+                moved: now,
+                marked: held.map_or(0, |turn| turn.marked),
+            });
             peer
         };
         self.shared.take_headers(peer, from, headers, now);
@@ -3083,8 +3149,9 @@ impl Store {
 enum Filled {
     /// Nothing this node could use, and nothing lost.
     Ignored,
-    /// The collection grew, so whoever supplied it is answering.
-    Grew,
+    /// The collection grew, and how far it now reaches. The distance says
+    /// whether whoever supplied it is getting on with it or only answering.
+    Grew(u64),
     /// What was collected was thrown away, and has to be gathered again.
     Discarded,
 }
@@ -3094,6 +3161,21 @@ struct Prepared {
     what: Joining,
     at: Hash32,
     bytes: Vec<u8>,
+}
+
+/// What the join answer this node holds says about one question.
+///
+/// Three answers and not two, because the two ways of having no piece to send
+/// call for opposite things. An answer about another tip is worth rebuilding.
+/// A current answer that has no such part is not: building it again produces
+/// the same answer and the same silence, at the price of the whole build.
+enum Held {
+    /// The piece asked for.
+    Piece(Message),
+    /// The answer is current, and has no piece with that number.
+    NoSuchPart,
+    /// Nothing held that this question is about.
+    Nothing,
 }
 
 /// One piece of an answer already built.
@@ -3147,8 +3229,18 @@ impl Shared {
     /// meanwhile, and the cost was paid again on every new block, because this
     /// cache is keyed on the tip.
     fn serve_join(&self, what: Joining, part: u32) -> Option<Message> {
-        if let Some(piece) = self.held_join(what, part) {
-            return Some(piece);
+        match self.held_join(what, part) {
+            Held::Piece(piece) => return Some(piece),
+            // The answer this node holds is the current one and simply has no
+            // such piece. That is a fact about the question, and it used to be
+            // read as a fact about the cache: one `GetJoin` naming a part past
+            // the end rebuilt the whole answer, every time it was sent, and
+            // nothing went back for it. Seventeen bytes bought five hundred and
+            // seventy milliseconds on a chain of four hundred, against thirty
+            // four to hand over a piece that existed, and the cost grows with
+            // the chain.
+            Held::NoSuchPart => return None,
+            Held::Nothing => {}
         }
         let ground = self.ground_for(what)?;
         let bytes = self.build_join(what, &ground)?;
@@ -3163,16 +3255,21 @@ impl Shared {
         )
     }
 
-    /// One piece of the answer already held, when it is the answer to the
-    /// question being asked.
-    fn held_join(&self, what: Joining, part: u32) -> Option<Message> {
+    /// What the answer already held says about the question being asked.
+    fn held_join(&self, what: Joining, part: u32) -> Held {
         let held = self.joined();
-        let tip = self.chain().tip()?;
-        let ready = held.get(what.slot())?.as_ref()?;
+        let Some(tip) = self.chain().tip() else {
+            return Held::Nothing;
+        };
+        let Some(Some(ready)) = held.get(what.slot()) else {
+            return Held::Nothing;
+        };
         if ready.at != tip {
-            return None;
+            return Held::Nothing;
         }
-        piece_of(ready, part)
+        // From here the answer is the one this question is about, so the only
+        // thing left that piece_of can object to is the part.
+        piece_of(ready, part).map_or(Held::NoSuchPart, Held::Piece)
     }
 
     /// Puts a freshly built answer in its slot, and takes one piece of it.
@@ -3295,14 +3392,14 @@ impl Shared {
         // an empty collection once a round for the rest of its life.
         let asking = self.wants_headers()?;
         let previous = *self.filling_from();
-        let keeps_turn = previous.is_some_and(|(peer, moved)| {
-            connected.contains(&peer) && now.saturating_sub(moved) < HEADER_PATIENCE
+        let keeps_turn = previous.is_some_and(|turn| {
+            connected.contains(&turn.peer) && now.saturating_sub(turn.moved) < HEADER_PATIENCE
         });
-        if let Some((peer, _)) = previous.filter(|_| keeps_turn) {
-            return Some((peer, asking));
+        if let Some(turn) = previous.filter(|_| keeps_turn) {
+            return Some((turn.peer, asking));
         }
         let next = previous
-            .map(|(peer, _)| peer)
+            .map(|turn| turn.peer)
             .and_then(|peer| {
                 connected
                     .iter()
@@ -3319,7 +3416,13 @@ impl Shared {
         // to be wrong. It costs an honest peer that goes quiet mid run the
         // part it had sent, once.
         self.clear_filling();
-        *self.filling_from() = Some((next, now));
+        // Nothing collected yet, and the run always starts at height zero, so
+        // how far it reaches is how much this turn has fetched.
+        *self.filling_from() = Some(Turn {
+            peer: next,
+            moved: now,
+            marked: 0,
+        });
         // Asked again after the clearing, because what is missing has just
         // become the whole of it.
         self.wants_headers().map(|fresh| (next, fresh))
@@ -3374,15 +3477,21 @@ impl Shared {
     /// sent a truthful run out of order, or with a gap, is caught by the log
     /// itself. Losing its turn is what it costs.
     fn take_headers(&self, peer: PeerId, from: u64, headers: &[BlockHeader], now: u64) {
-        if !self.filling_from().is_some_and(|(asked, _)| asked == peer) {
+        if !self.filling_from().is_some_and(|turn| turn.peer == peer) {
             return;
         }
         match self.fill_headers(from, headers) {
             Filled::Ignored => {}
-            // Progress, so this peer keeps its turn.
-            Filled::Grew => {
-                if let Some(entry) = self.filling_from().as_mut() {
-                    entry.1 = now;
+            // A run, so this peer keeps its turn. A header is not a run, and
+            // that is the whole of the difference: renewing on one meant a peer
+            // answering each question with a single header held the turn for
+            // ever, and the node never filled its headers in at all.
+            Filled::Grew(reached) => {
+                if let Some(turn) = self.filling_from().as_mut() {
+                    if reached.saturating_sub(turn.marked) >= HEADER_RUN {
+                        turn.marked = reached;
+                        turn.moved = now;
+                    }
                 }
             }
             // What was collected is gone, and whoever supplied it has just
@@ -3433,7 +3542,7 @@ impl Shared {
             }
             if store.filling.reaches() < oldest {
                 return if store.filling.reaches() > held {
-                    Filled::Grew
+                    Filled::Grew(store.filling.reaches())
                 } else {
                     Filled::Ignored
                 };
@@ -3482,7 +3591,7 @@ impl Shared {
         // As at the open: the next block applied runs this again and says what
         // it found, and this one is holding the log.
         let _ = grow_forest(&mut store.forest, &store.headers);
-        Filled::Grew
+        Filled::Grew(oldest)
     }
 
     /// One record of the run being collected, with the log taken for the read
@@ -4596,8 +4705,15 @@ fn dial_from_book(shared: &Arc<Shared>, now: u64) {
         .take(wanted)
         .collect();
 
+    let dialling_since = Instant::now();
     for address in candidates {
         if !shared.running.load(Ordering::SeqCst) {
+            return;
+        }
+        // Checked before the dial rather than after, so a round always opens at
+        // least one connection however slow the last one was. Otherwise a node
+        // whose every address hangs would stop dialling altogether.
+        if dialling_since.elapsed() >= DIAL_BUDGET {
             return;
         }
         let host = address.ip();

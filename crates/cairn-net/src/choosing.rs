@@ -135,6 +135,9 @@ struct Claim {
     /// Set when the peer was asked to show this claim and could not. Words
     /// that failed once are not waited on twice.
     unbacked: bool,
+    /// Set once this peer weighed its chain, so [`Chooser::best_standing`] can
+    /// tell a figure somebody showed from a figure somebody said.
+    proved: bool,
     /// When a claim inherited from its address stops being held back, if it
     /// was.
     ///
@@ -225,6 +228,14 @@ pub struct Chooser {
     /// The most work any peer has shown rather than said, and when the
     /// first showing landed, which is when the patience for unshown heavier
     /// claims starts running.
+    ///
+    /// The two halves are read in different places and it matters which. The
+    /// moment is the deadline, and it must never move, or a stranger turning up
+    /// pushes it back. The figure is the ceiling on words worth chasing in
+    /// [`Chooser::step`]: nothing heavier than anything ever shown is worth a
+    /// turn. What a commitment is measured against is neither of these but
+    /// [`Chooser::best_standing`], because a showing whose owner has since
+    /// failed is not a chain anybody can still be handed.
     proven: Option<(u128, u64)>,
     /// Set once the node has a chain. The choice was the whole job, so
     /// after it there is nothing here for the rest of the node's life.
@@ -271,6 +282,7 @@ impl Chooser {
                 shows_the_chain,
                 host,
                 unbacked: false,
+                proved: false,
                 held_off_until,
                 tried: None,
                 heard,
@@ -327,6 +339,7 @@ impl Chooser {
     pub fn shown(&mut self, peer: u64, work: u128, now: u64) -> bool {
         if let Some(claim) = self.claims.get_mut(&peer) {
             claim.work = work;
+            claim.proved = true;
         }
         self.proven = Some(match self.proven {
             None => (work, now),
@@ -355,14 +368,43 @@ impl Chooser {
                 .iter()
                 .any(|(other, claim)| outweighs(other, claim) && Self::owed_a_turn(claim, at, now))
         });
-        let patience_over = self
-            .proven
-            .is_some_and(|(best, at)| work >= best && now.saturating_sub(at) >= PROVEN_PATIENCE);
+        // Measured against the heaviest showing still standing rather than the
+        // heaviest ever made. See [`Self::best_standing`].
+        let standing = self.best_standing();
+        let patience_over = self.proven.is_some_and(|(_, at)| {
+            now.saturating_sub(at) >= PROVEN_PATIENCE && standing.is_none_or(|best| work >= best)
+        });
         if heavier && (!patience_over || owed) {
             self.asked = None;
             return false;
         }
         true
+    }
+
+    /// The heaviest chain anybody has shown that is still there to be taken.
+    ///
+    /// Not the heaviest ever shown, which is what a commitment used to be
+    /// measured against. [`Self::proven`] holds the moment of the first showing
+    /// so that a stranger cannot push the deadline back, and it held the figure
+    /// beside it; the figure never fell when the peer that set it failed.
+    ///
+    /// So a peer that weighed its chain and then went away before the ledger
+    /// landed left behind a number no chain still on offer could match. The
+    /// `work >= best` half of the patience was false from then on, the patience
+    /// that exists precisely so that words cannot hold a node off never opened,
+    /// and any claim heavier than what was left blocked the commitment. Claims
+    /// cost a stranger a reconnection: measured at four times
+    /// [`HELD_OFF_AT_MOST`] and still holding, from one address.
+    ///
+    /// That peer going away is an ordinary evening on a network, not a
+    /// capability anybody needs. And a showing whose owner has failed is not a
+    /// chain anybody can be handed, so it is not one worth holding out for.
+    fn best_standing(&self) -> Option<u128> {
+        self.claims
+            .values()
+            .filter(|claim| claim.proved && !claim.unbacked)
+            .map(|claim| claim.work)
+            .max()
     }
 
     /// The peer asked to show its claim could not: what came back does not

@@ -148,9 +148,18 @@ pub struct ConsensusParams {
     /// different depths do not merely disagree about one spend, they compute
     /// different roots for every block.
     ///
-    /// Never above [`Self::burial`], or a reward would be spendable while the
-    /// block that paid it can still be undone, which is the one thing the rule
-    /// exists to prevent. Every network here sets the two equal.
+    /// Never *below* [`Self::burial`], or a reward would be spendable while
+    /// the block that paid it can still be undone, which is the one thing the
+    /// rule exists to prevent. Every network here sets the two equal.
+    ///
+    /// The direction is worth stating carefully because it was written down
+    /// backwards once, and so was the check that was meant to hold it: a
+    /// maturity of nought under a burial of a thousand read as sound, which is
+    /// a reward spendable at once on a chain that undoes a thousand blocks.
+    /// The depth a node refuses to undo past is the smaller of its build's
+    /// window and this network's burial, so a maturity at or above the burial
+    /// is at or above that depth whichever of the two is smaller. Above is the
+    /// safe side; there is no ceiling here, only a floor.
     pub coinbase_maturity: u64,
     /// Seconds the retarget aims for between blocks.
     pub target_block_time: u64,

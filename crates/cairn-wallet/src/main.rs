@@ -233,7 +233,13 @@ fn show_balance(arguments: &[String]) -> Result<(), String> {
             println!("{line}");
         }
     }
-    if holdings.notes.is_empty() {
+    // Only when there is nothing at all. It used to be asked of the notes a
+    // spend can reach for, which are empty for a wallet whose money is a young
+    // reward, whose notes are promised to a payment waiting for a block, or
+    // whose notes have fallen out of reach: this line then told somebody who
+    // had just been shown their own balance that there was nothing here and
+    // that they should go and check their connection.
+    if holdings.empty_handed() {
         println!();
         println!("Nothing here yet. If this key should hold something, check that the");
         println!("wallet reached a peer and caught up to the height you expect.");

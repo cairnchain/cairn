@@ -413,15 +413,15 @@
       "body": {
         "plain": [
           "Every computer on the network keeps one drawer. In it are the notes that have moved recently, and there is a hard limit on how many fit: 131072.",
-          "That limit is not a suggestion or an average. It is a rule the whole network agrees on, so the drawer can never grow past it, no matter how popular Cairn becomes. Full, it comes to about 107 megabytes. That is a fraction of a phone.",
+          "That limit is not a suggestion or an average. It is a rule the whole network agrees on, so the drawer can never grow past it, no matter how popular Cairn becomes. Full, it comes to about 68 megabytes. That is a fraction of a phone.",
           "When the drawer is full and new notes need room, the oldest ones are taken out and moved to the cave."
         ],
         "curious": [
-          "A bounded set of 131072 notes, held in full by every node, in a sparse Merkle tree so the state commitment can be recomputed cheaply. About 107 MB at capacity, measured on the running implementation.",
+          "A bounded set of 131072 notes, held in full by every node, in a sparse Merkle tree so the state commitment can be recomputed cheaply. About 68 MB at capacity, measured on the running implementation.",
           "Eviction is by age, oldest first, in batches at block boundaries. Every node evicts the same notes at the same height, because the rule is consensus."
         ],
         "technical": [
-          "131072 notes, sparse Merkle tree, persistent through structural sharing so a reorganisation can restore the previous root without a rebuild. 813 bytes per note measured, giving about 107 MB at capacity.",
+          "131072 notes, sparse Merkle tree, persistent through structural sharing so a reorganisation can restore the previous root without a rebuild. 516 bytes per note measured, giving about 68 MB at capacity.",
           "The tree is the one part of the design with clear room left: a leaner representation is the most valuable remaining optimisation, and it changes no rule."
         ]
       }
@@ -523,17 +523,17 @@
       "body": {
         "plain": [
           "Two things worth saying out loud. First, Cairn is new and unproven. It has not been attacked, it has not been audited by outsiders, and the current network is a test network whose money is worth nothing and which will be wiped.",
-          "Second, joining for the first time still means downloading the whole history. Every block carries what is needed to make that unnecessary, and the part that uses it is not written yet. So today a newcomer downloads everything; the day that work is done, a newcomer downloads about a thousandth of it and checks it just as thoroughly.",
+          "Second, joining without reading the whole history now works, and the reasoning it rests on has been checked by nobody outside this project. A newcomer draws a sample of old blocks, weighs them, and is handed the current state. How large that sample has to be was settled by measuring rather than by proving, and the first answer was wrong by a wide margin. It is right as far as anyone here can tell, which is not the same as right.",
           "It is written here rather than left for you to find."
         ],
         "curious": [
-          "Initial sync still downloads and revalidates every block. Steady state cost is flat, first-start cost is not, and the fix is half done: every header now commits to the work behind the chain and to every header before it, so a newcomer can be given a sample rather than the lot. What is missing is the protocol that serves that sample.",
-          "Measured, at one block a minute: thirty years of a busy chain is about forty eight gigabytes to download and five hours to revalidate. Through the sample it is a few hundred kilobytes of headers plus the hundred megabytes of state, checked against the commitment in the tip. No checkpoint, no trusted snapshot, nobody to believe.",
-          "One cost also still grows: a node holds every block of the branch it follows in memory. That is the history, not the state it validates against, and the same commitment is what will let it stop. Smaller: an archivist rebuilds a proof in time proportional to the set it holds."
+          "A newcomer opens 4 096 old headers, drawn against the work behind them rather than against their height, checks that each sits where it claims to in the tip's own commitment, and is then handed the ledger in pieces. It validates the thousand blocks between that ledger and the tip for itself before it will answer as a node on a chain, and while it has not, it says so at the top of this page.",
+          "Measured, at one block a minute: thirty years of a busy chain is about a hundred and ninety-seven gigabytes to download and the better part of a day to revalidate. Through the sample it is about nine megabytes of headers, eleven of state, and the thousand blocks in between, every part of it checked against the commitment in the tip. No checkpoint, no trusted snapshot, nobody to believe.",
+          "One cost still grows, and it is small and named: the headers, and the tree they make, at 129 MB a year. Every node keeps them so that anybody can join through any of them. Keeping every block ever accepted, and keeping every note that ever fell out of the drawer, both grow without bound, and both are chosen work the network runs without."
         ],
         "technical": [
           "No external audit yet, and none of the cryptography is novel: BLAKE3 with per-domain derived keys, Ed25519 with small-order and non-canonical encodings rejected at construction. Novelty is in the state layout, which is where it should be if anywhere.",
-          "Deadlines, connection ceilings, per address shares, temporary refusal, bounded undo records and bounded send queues are all in place, so nothing an anonymous peer does decides how much a node spends. Headers commit to cumulative work and to a forest of every earlier header, which is what a sampled start needs and what could not have been added after a network had value on it. What is left: the sampling protocol itself, moving the history out of memory, and a leaner hot tree representation."
+          "Deadlines, connection ceilings, per address shares, temporary refusal, bounded undo records and bounded send queues are all in place, so nothing an anonymous peer does decides how much a node spends. Headers commit to cumulative work and to a forest of every earlier header, which is what a sampled start needs and what could not have been added after a network had value on it. What is left: an outside eye on the sampling bound, which is measured rather than proved, and a leaner representation of the hot tree, which is the clearest remaining optimisation and changes no rule."
         ]
       }
     },

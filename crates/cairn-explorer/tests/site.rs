@@ -281,3 +281,47 @@ fn every_download_has_a_name_in_both_languages() {
     }
     assert!(count >= 5, "every build was read: {count}");
 }
+
+/// The site does not tell a visitor that the sampled start is unwritten.
+///
+/// The lesson that exists to state the limits honestly said, in both
+/// languages, that joining still meant downloading the whole history, that
+/// what was missing was the protocol serving the sample, and that a node holds
+/// every block of the branch it follows in memory. All three had stopped being
+/// true: the wire carries the messages below, the node reports `Joined` and
+/// `Probation` while it uses them, and the same two files carry the sentences
+/// the site shows a visitor while that is happening. A page whose subject is
+/// candour was describing a Cairn from three test networks ago.
+///
+/// The messages are named rather than described, so this fails on the day one
+/// of them is removed rather than going quietly out of date the way the prose
+/// did.
+#[test]
+fn the_site_does_not_call_the_sampled_start_unwritten() {
+    let weigh = cairn_net::Message::GetJoin {
+        what: cairn_net::message::Joining::Weight,
+        part: 0,
+    };
+    let hand_over = cairn_net::Message::GetJoin {
+        what: cairn_net::message::Joining::Ledger,
+        part: 0,
+    };
+    assert_eq!(weigh.kind(), "get join");
+    assert_eq!(hand_over.kind(), "get join");
+
+    for (language, text) in [("English", EN), ("French", FR)] {
+        for stale in [
+            "the part that uses it is not written yet",
+            "What is missing is the protocol that serves that sample",
+            "a node holds every block of the branch it follows in memory",
+            "la partie qui s'en sert n'est pas écrite",
+            "Ce qui manque est le protocole qui sert cet échantillon",
+            "un nœud garde en mémoire tous les blocs de la branche qu'il suit",
+        ] {
+            assert!(
+                !text.contains(stale),
+                "the {language} site still says `{stale}`, which this build does"
+            );
+        }
+    }
+}

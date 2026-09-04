@@ -202,10 +202,19 @@ fn the_schedule_is_what_turns_a_bad_block_into_an_admission() {
     assert_eq!(outdated.required, BLOCK_VERSION + 1);
 
     // Nothing was written down, so an update finds the block still judgeable.
+    // A condemned block answers `KnownBad` and never reaches the rules again;
+    // this one is judged a second time and comes back with the same admission,
+    // which is the node going on saying it is out of date rather than falling
+    // silent after the first peer to tell it.
+    let again = store.add_block(after, NOW).unwrap_err();
+    assert!(
+        !matches!(again, ChainError::KnownBad { .. }),
+        "held rather than condemned: {again:?}"
+    );
     assert_eq!(
-        store.add_block(after, NOW),
-        Ok(Accepted::Duplicate),
-        "held rather than condemned"
+        again.outdated().map(|out| out.required),
+        Some(BLOCK_VERSION + 1),
+        "and it is still the admission and not a verdict on the block"
     );
 }
 
@@ -267,12 +276,16 @@ fn a_heavier_branch_that_crosses_the_change_leaves_the_node_where_it_was() {
         "and the ledger with it"
     );
 
-    // Nothing on either branch was condemned on the way through.
+    // Nothing on either branch was condemned on the way through. A condemned
+    // block answers `KnownBad` and no other answer does: the branch this node
+    // follows says it already holds these, and the rival says it has them
+    // recorded and lighter, which is the fork choice being asked again rather
+    // than a verdict being remembered.
     for block in mine_side.iter().chain(rival.iter()) {
-        assert_eq!(
-            store.add_block(block.clone(), NOW),
-            Ok(Accepted::Duplicate),
-            "a block the rewind touched was written off"
+        let answer = store.add_block(block.clone(), NOW);
+        assert!(
+            matches!(answer, Ok(Accepted::Duplicate | Accepted::SideBranch)),
+            "a block the rewind touched was written off: {answer:?}"
         );
     }
 }

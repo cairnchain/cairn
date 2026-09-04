@@ -88,7 +88,7 @@ across a set no node holds.
 Every header commits to two things beyond its own block: the work behind the
 whole chain, and every header that came before it, held as sixty four hashes
 like the cold set. What they buy is the only way to join this chain without
-downloading all of it. Someone starting from nothing draws 512 old headers
+downloading all of it. Someone starting from nothing draws 4 096 old headers
 against accumulated work rather than height, checks each is really where it
 claims to be in the tip's own commitment, and works out what stands behind the
 tip without reading the millions in between. Then they are handed the ledger.
@@ -109,7 +109,7 @@ stranger's word for where the story begins.
 A block holds 128 kilobytes, which is about 686 ordinary payments, or eleven a
 second. That number decides three things at once and is small because of the
 first two: a node holds the blocks it could still reorganise away, so it is
-134 MB of memory every node must have; it sets how fast the hot set turns over
+186 MB of memory every node must have; it sets how fast the hot set turns over
 and with it how long a fallen note stays spendable without a proof; and it is
 how many people can be paid in a minute.
 
@@ -143,12 +143,13 @@ rather than treating every updated peer as a liar and following whoever did not
 update either.
 
 A newcomer joins by opening 4 096 headers drawn against accumulated work, about
-eight megabytes against the forty-eight gigabytes of reading it replaces. That
-holds against a forger up to 40% of the world's work, and what it guarantees is
-a depth: such a forger cannot put a newcomer on a branch differing from the real
-one by more than about 1 240 blocks, twenty hours. Inside that it can, as can a
-slow peer — it is where any node sits for its first blocks after connecting, and
-it is shallower than the deepest reorganisation a node would accept anyway.
+nine megabytes against the hundred and ninety-seven gigabytes of reading it
+replaces. That holds against a forger up to 40% of the world's work, and what
+it guarantees is a depth: such a forger cannot put a newcomer on a branch
+differing from the real one by more than about 1 240 blocks, twenty hours.
+Inside that it can, as can a slow peer — it is where any node sits for its
+first blocks after connecting, and it is shallower than the deepest
+reorganisation a node would accept anyway.
 
 Those numbers are measured rather than proved, and the first version of them was
 wrong: 512 draws and 45.7% were derived assuming the draw is uniform over the

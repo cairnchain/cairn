@@ -307,13 +307,23 @@
       asked what this one measured.
     </p>
     <p>
-      One thing an audit found and the design had not faced: there is no
-      message in this protocol by which a wallet can ask an archivist for a
-      proof. A wallet whose own node kept the position can build one; a wallet
-      whose node did not has nowhere to turn, and the error it shows names an
-      archivist as though asking one were possible. Compensation was the open
-      question here and it was the second one. The first is that the role has
-      no protocol, and that is an omission rather than a trade-off.
+      An audit found that the role had no protocol at all: nothing in the
+      message set let a wallet ask an archivist for anything, and the error a
+      stuck wallet showed named an archivist as though asking one were
+      possible. That is closed. A wallet now asks for the paths it is missing,
+      by position and not by name, so what it hands over is a list of places in
+      a set the archivist already holds in full; and it folds every answer
+      against the root its own node worked out from blocks it checked itself,
+      so the answer can come from a stranger.
+    </p>
+    <p>
+      What is left of it is narrower and is still a real hole. A path is asked
+      for by where the note sits, and where a note sits is learned as it falls.
+      A wallet that was not running when its note fell, and kept no record of
+      it, has nothing to ask about: the set is a list of hashes with no name
+      attached to any of them. That wallet's money is on the chain and is its
+      own, and nothing here can reach it. Compensating archivists remains open
+      as well, and is the lesser of the two.
     </p>
   </div>
 </section>
@@ -455,9 +465,9 @@
     <h3><span class="sub">7.1</span>The measured cost of arrival</h3>
     <p>
       On this implementation, at one block per minute with blocks carrying 64
-      transfers, thirty years of chain is 48 GB to download and 5.3 hours to
-      revalidate on one core, to arrive at a validation state weighing 68 MB.
-      The wall is bandwidth, not computation.
+      ordinary payments, thirty years of chain is 197 GB to download and about
+      19 hours to revalidate on one core, to arrive at a validation state
+      weighing 68 MB. The wall is bandwidth, not computation.
     </p>
 
     <h3><span class="sub">7.2</span>What headers commit to</h3>
@@ -661,7 +671,7 @@
       <em>lie</em>. Measured against the shipped function, the placement that
       suits a forger best left that at 2<sup>-5.8</sup> rather than
       2<sup>-128</sup>. The count and the density above are the correction; the
-      claim went from 45.7% to 40% and the cost from one megabyte to eight.
+      claim went from 45.7% to 40% and the cost from one megabyte to nine.
       None of this is a proof in the other direction: it is a measurement over
       one family of placements, made in-house, and it is the part of this design
       that most wants an outside eye.
@@ -676,9 +686,10 @@
     </p>
     <p>
       Serving that sample takes the headers and the forest they make, which a
-      node keeps on disk at 182 bytes a header: 129 MB a year, against 50 GB a
-      year for Bitcoin and 200 for Ethereum. Every node keeps them, so joining
-      a chain does not depend on anyone volunteering to carry its history.
+      node keeps on disk at 182 bytes a header and 64 for its place in the
+      forest: 129 MB a year, against 50 GB a year for Bitcoin and 200 for
+      Ethereum. Every node keeps them, so joining a chain does not depend on
+      anyone volunteering to carry its history.
       Blocks a node has already applied are dropped once it has written down
       the ledger they add up to, which is what stops a node's disk from growing
       with the chain.
@@ -748,9 +759,10 @@
       chain carries the most work, which the network cannot do without, and
       rebuilding the proof of a note whose owner lost theirs, which it can. The
       first was separated out and made small enough that every node performs
-      it (182 bytes a header, 129 MB a year), so nothing in the protocol now
-      depends on a party being paid. What is left is recovery for a wallet that
-      kept no records, and a wallet that keeps its own needs no one.
+      it (182 bytes a header and 64 for its place in the forest, 129 MB a
+      year), so nothing in the protocol now depends on a party being paid. What
+      is left is recovery for a wallet that kept no records, and a wallet that
+      keeps its own needs no one.
     </p>
   </div>
 </section>
@@ -819,15 +831,16 @@
       <div><span class="k">Halving interval</span><span class="v">1 051 200 blocks</span></div>
       <div><span class="k">Tail reward</span><span class="v">0.01 CAIRN, perpetual</span></div>
       <div><span class="k">Header size</span><span class="v">182 bytes</span></div>
-      <div><span class="k">Empty block</span><span class="v">196 bytes</span></div>
-      <div><span class="k">Block with 64 transfers</span><span class="v">3 211 bytes</span></div>
-      <div><span class="k">Validation, empty block</span><span class="v">0.009 ms</span></div>
-      <div><span class="k">Validation, 64 transfers</span><span class="v">1.21 ms</span></div>
+      <div><span class="k">Ordinary payment</span><span class="v">191 bytes</span></div>
+      <div><span class="k">Empty block</span><span class="v">244 bytes</span></div>
+      <div><span class="k">Block with 64 ordinary payments</span><span class="v">12 468 bytes</span></div>
+      <div><span class="k">Validation, empty block</span><span class="v">0.016 ms</span></div>
+      <div><span class="k">Validation, 64 payments</span><span class="v">4.4 ms</span></div>
     </div>
 
     <div class="scroll">
       <table>
-        <caption>Thirty years of chain at one block per minute, blocks carrying 64 transfers</caption>
+        <caption>Thirty years of chain at one block per minute, blocks carrying 64 ordinary payments</caption>
         <thead>
           <tr>
             <th>Quantity</th>
@@ -838,17 +851,17 @@
         <tbody>
           <tr>
             <td>All blocks, to download</td>
-            <td class="n">48 GB</td>
+            <td class="n">197 GB</td>
             <td>No, grows with history</td>
           </tr>
           <tr>
             <td>All headers, to read</td>
-            <td class="n">2 GB</td>
+            <td class="n">2.9 GB</td>
             <td>No, grows with history</td>
           </tr>
           <tr>
             <td>Revalidating from genesis</td>
-            <td class="n">5.3 h</td>
+            <td class="n">19 h</td>
             <td>No, grows with history</td>
           </tr>
           <tr class="us">
@@ -887,8 +900,24 @@
       ledger and the tip, which a newcomer validates itself. Those blocks are
       at most 128 MB and in practice far less, since a block is only as large
       as the traffic that filled it. Call it 20 MB on a quiet chain and under
-      150 MB on a saturated one, against forty-eight gigabytes of reading, and
-      none of the three grows with the chain's age.
+      150 MB on a saturated one, against a hundred and ninety-seven gigabytes
+      of reading, and none of the three grows with the chain's age.
+    </p>
+    <p class="fig-note">
+      Seven of the figures above were wrong until this draft, and how is worth
+      more than the correction. A block carrying 64 payments was published at
+      3 211 bytes. The program that measured it asked for 64 transfers a block
+      and could fund only 16, because a coinbase carries at most 16 outputs and
+      the purse it spent from was refilled by the coinbase alone; so a figure
+      labelled 64 was the cost of 16, and the thirty-year download built on it
+      was short by four times over. Underneath that, the block sizes and the
+      timings were taken before headers carried the two commitments described
+      in 7.2. The header row was corrected for those 48 bytes and the block
+      rows were not, so the table disagreed with itself by exactly the number
+      it stated a page earlier. Both are the same failure as the memory
+      readings in 4.3: not arithmetic, but nobody asking what the instrument
+      was pointed at. The figures here are now checked against the running
+      build every time the tests are run.
     </p>
   </div>
 </section>

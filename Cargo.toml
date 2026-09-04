@@ -61,6 +61,30 @@ missing_panics_doc = "allow"
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
 
+# Tests mine, and mining is blake3. Forty two test files search for a real
+# nonce, some of them up to four million tries at a time, and an unoptimised
+# blake3 is not the same program: measured on this machine, 130 815 tries a
+# second against 1 723 081, a factor of thirteen. The chain's own suite took
+# fourteen and a half minutes of which almost all of it was that.
+#
+# So the dependencies are built optimised whatever the profile, and the test
+# targets with them. What is deliberately left alone is `debug-assertions`,
+# which stays on: several of this codebase's guards are `debug_assert!`, and a
+# handover that named one note twice was caught by one of them and by nothing
+# else. Speed here must not be bought by turning off the checks that only run
+# here.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.test]
+opt-level = 2
+
+[profile.test.package."*"]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

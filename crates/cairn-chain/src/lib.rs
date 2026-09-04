@@ -1442,22 +1442,47 @@ impl ChainStore {
     /// `now` is this node's clock, in seconds since the Unix epoch.
     pub fn add_block(&mut self, block: Block, now: u64) -> Result<Accepted, ChainError> {
         let id = block.id();
-        // Already held, and the same block: nothing to do. Already held and a
-        // *different* block is the case that matters, because an identifier is
-        // taken over a header and a header does not commit to the signatures
-        // in its body. Anyone can copy a block, break one signature, and send
-        // the twin first; it costs them nothing, since the twin inherits the
-        // work of the block it copies. Treating that as a duplicate would hand
-        // them the real block's place, and the node would never follow the
-        // chain past it.
+        // Already held and on the branch this node follows: it was applied, so
+        // it was valid, and whatever body arrives under that identifier this
+        // node is already following the one it checked. An identifier is taken
+        // over a header and a header does not commit to the signatures in its
+        // body, so anyone can copy a block, break one signature, and send the
+        // twin; it costs them nothing, since the twin inherits the work of the
+        // block it copies. Asking the branch first is what stops the copy
+        // taking the place of a block already on it: the twin used to fall
+        // through, pass the work and floor checks, and have `hold` write its
+        // body over the real one, after which `block_at` answered with the
+        // forgery for a height the node was still following. That accessor is
+        // what a node serves blocks from and writes its log from.
+        //
+        // Held and *off* the branch is the other case, and having seen a block
+        // is not having applied it. A switch that fails partway leaves the
+        // blocks it could not put back sitting here with no place on the
+        // branch, and answering "already held" for one of those told every
+        // peer offering the chain back that this node had it, while the node
+        // held nothing but the name. One record the disk would not give back
+        // took a node from height 104 to height 9, and offering all ninety
+        // five blocks back afterwards produced ninety five duplicates, nothing
+        // applied, and a node that stayed at 9 for the rest of its life.
         match self.blocks.get(&id) {
-            Some(held) if held.body.as_ref() == Some(&block) => {
+            Some(_) if self.branch.height_of(&id).is_some() => {
                 return Ok(Accepted::Duplicate);
             }
-            // Held with its body dropped, which a node does once it has been
-            // applied. It was applied, so it was valid, and this is that block
-            // or a twin of it; either way there is nothing to decide again.
-            Some(held) if held.body.is_none() => return Ok(Accepted::Duplicate),
+            Some(held) if held.body.as_ref() == Some(&block) => {
+                // The same block, off the branch. There is nothing to check
+                // again, but the fork choice is not settled by having seen it
+                // once: the branch can move out from under a block that is
+                // already in memory. Weighed rather than followed blindly, so
+                // a peer resending one costs a comparison and not a walk.
+                let total_work = held.total_work;
+                if total_work <= self.total_work() {
+                    return Ok(Accepted::SideBranch);
+                }
+                return self.follow(id, now);
+            }
+            // Held with no body, off the branch: an entry and nothing else.
+            // It falls through and is taken like any block arriving for the
+            // first time, which is what it is to this node now.
             _ => {}
         }
 
@@ -1853,7 +1878,16 @@ impl ChainStore {
                 bytes,
             },
         ) {
-            self.held_bytes = self.held_bytes.saturating_sub(replaced.bytes);
+            // Only what was actually being counted. An entry keeps its size
+            // after its body has gone, and `release_bodies` has already taken
+            // those bytes off, so subtracting them again here counts one block
+            // out twice and leaves the node holding more than it believes it
+            // is. That is the same rule `release` and `recount` keep, and this
+            // was the one path that did not: it only became reachable when a
+            // block held with no body stopped being waved off as a duplicate.
+            if replaced.body.is_some() {
+                self.held_bytes = self.held_bytes.saturating_sub(replaced.bytes);
+            }
         }
         self.held_bytes = self.held_bytes.saturating_add(bytes);
     }
@@ -2543,7 +2577,7 @@ mod tests {
         assert_eq!(store.held_bytes(), first_bytes + second_bytes);
         assert_eq!(store.bodies_held(), 2);
 
-        store.hold(first_id, first, 0);
+        store.hold(first_id, first.clone(), 0);
         assert_eq!(
             store.held_bytes(),
             first_bytes + second_bytes,
@@ -2556,6 +2590,22 @@ mod tests {
         store.recount();
         assert_eq!(store.held_bytes(), second_bytes);
         assert_eq!(store.bodies_held(), 1);
+
+        // And taken back into memory, which is what a peer offering back a
+        // block this node holds the name of and nothing else asks for. The
+        // entry keeps its size after its body has gone, so subtracting it here
+        // as well takes one block off the count twice and leaves a node
+        // holding more than it believes it is.
+        store.hold(first_id, first, 0);
+        assert_eq!(
+            store.held_bytes(),
+            first_bytes + second_bytes,
+            "bytes already taken off with the body must not come off again \
+             with the entry"
+        );
+        assert_eq!(store.bodies_held(), 2);
+        store.blocks.get_mut(&first_id).unwrap().body = None;
+        store.recount();
 
         store.release(&first_id);
         assert_eq!(

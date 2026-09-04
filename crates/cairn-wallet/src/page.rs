@@ -385,10 +385,17 @@ async function refresh() {
   }
   text("moves-line", said.join(" "));
 
+  // Three states, not two. A wallet with no note a spend can reach for is not
+  // the same as a wallet with nothing in it: a reward too young to move, a
+  // payment already holding every note, and a note whose proof is out of reach
+  // all leave this count at nought. Reading them as an empty wallet printed
+  // "Nothing here yet" directly above the line naming the amount.
   const held = state.held;
   const fallen = state.notes.filter((n) => n.cold).length;
-  text("held-line", held === 0
+  text("held-line", !state.anything
     ? "Nothing here yet. If this key should hold something, check the height above."
+    : held === 0
+    ? "Nothing here can be spent right now."
     : held + (held === 1 ? " note" : " notes") + ", " + fallen + " of them fallen to the cold set.");
   text("notes-line", state.notes.length < held
     ? "Showing the first " + state.notes.length + " of " + held + "."
