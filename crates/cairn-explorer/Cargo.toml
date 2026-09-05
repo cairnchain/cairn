@@ -20,3 +20,8 @@ cairn-http.workspace = true
 cairn-ledger.workspace = true
 cairn-net.workspace = true
 cairn-primitives.workspace = true
+
+[dev-dependencies]
+# For `tests/published_figures.rs`, which takes a sampled weighing apart to
+# work out what one costs on a chain no test can mine to.
+cairn-accumulator.workspace = true

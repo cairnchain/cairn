@@ -6,10 +6,10 @@ of checking it does not grow with the chain.
 That is one claim, not three, and the difference matters. What is capped is
 the state a validator must hold: about 68 MB, whatever the chain's age. What
 is not capped is the header chain a node keeps in order to take newcomers in,
-which grows at 182 bytes a header, 129 MB a year, nor the share of a user's
-money that needs an inclusion proof to spend, which rises as the chain gets
-busier. "Costs the same in thirty years" is a slogan the body of the paper
-already corrects, so it is not made here.
+which grows at 182 bytes a header and 64 for its place in the forest, 129 MB a
+year, nor the share of a user's money that needs an inclusion proof to spend,
+which rises as the chain gets busier. "Costs the same in thirty years" is a
+slogan the body of the paper already corrects, so it is not made here.
 
 Every existing chain grows its validation cost with its own usage, so the
 longer it succeeds the fewer people can afford to verify it, and validation
@@ -94,8 +94,8 @@ claims to be in the tip's own commitment, and works out what stands behind the
 tip without reading the millions in between. Then they are handed the ledger.
 Twelve megabytes for a thirty year chain, against 2 067 GB of reading.
 
-Any node can answer, because the headers and the forest they make are kept on
-disk by every node at 182 bytes each. Joining does not depend on anyone
+Any node can answer, because every node keeps the headers on disk at 182 bytes
+each, and the forest they make at 64 more. Joining does not depend on anyone
 volunteering to carry the history.
 
 Those fields had to be in the header from the first day: changing the shape of
@@ -143,7 +143,7 @@ rather than treating every updated peer as a liar and following whoever did not
 update either.
 
 A newcomer joins by opening 4 096 headers drawn against accumulated work, about
-nine megabytes against the hundred and ninety-seven gigabytes of reading it
+three megabytes against the hundred and ninety-seven gigabytes of reading it
 replaces. That holds against a forger up to 40% of the world's work, and what
 it guarantees is a depth: such a forger cannot put a newcomer on a branch
 differing from the real one by more than about 1 240 blocks, twenty hours.
@@ -326,10 +326,11 @@ What a node must hold to validate is capped by the rules: 68 MB of hot notes
 and, in the worst case the rules allow, 233 MB of blocks it could still have to
 undo. Neither grows with the chain.
 
-One cost does grow, and it is small and named: the headers, at 129 MB a year.
-A node keeps them so that anyone can join through it. Keeping every block, and
-archiving every note that ever fell out of the hot set, are the two costs that
-grow without bound, and both are chosen work the network does not depend on.
+One cost does grow, and it is small and named: the headers and the forest they
+make, at 129 MB a year. A node keeps them so that anyone can join through it.
+Keeping every block, and archiving every note that ever fell out of the hot set,
+are the two costs that grow without bound, and both are chosen work the network
+does not depend on.
 `cargo run --release -p cairn-chain --example archivist` prints all four.
 
 ## Licence

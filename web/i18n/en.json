@@ -133,13 +133,13 @@
           "It costs about {perNote} bytes for every note that has ever existed, and it never stops growing. Keeping the cave, which this computer also does, costs about {coldPerNote} bytes for each note that has fallen. An ordinary node keeps neither and pays for neither."
         ],
         "curious": [
-          "The index is the explorer's own growing cost, and it is the larger of its two by about seven times: {perNote} bytes for every note ever created, against {coldPerNote} bytes for every note that has fallen into the cold set. Both are unbounded, and both are carried by whoever chooses to offer this service.",
+          "The index is the explorer's own growing cost, and it is the larger of its two by about eight times: {perNote} bytes for every note ever created, against {coldPerNote} bytes for every note that has fallen into the cold set. Both are unbounded, and both are carried by whoever chooses to offer this service.",
           "A plain node carries neither. Its memory does not move with the cold set at all, which is the claim the whole design rests on, and this page is what an exception to it looks like."
         ],
         "technical": [
           "Owner to notes, note to record, transaction identifier to location, and one movement recorded per credit and per debit. Nothing is ever removed, so the size is a function of the chain's whole history rather than of its current state.",
           "Measured on the running implementation: {perNote} bytes per note ever created for the index, {coldPerNote} bytes per fallen note for an archiving node's cold set, and no slope at all for a node that keeps only the sixty four roots.",
-          "None of it is bounded by a rule. One block filled to the byte limit can be three thousand dust notes to three thousand fresh addresses, which is about 1.6 MB of index for that one block, and about 810 GB a year at a block a minute. Whoever mines that block pays nothing for it: the fee floor is a node's own policy about what it will carry, not a rule of the chain."
+          "None of it is bounded by a rule. One block filled to the byte limit can be three thousand dust notes to three thousand fresh addresses, which is about 1.7 MB of index for that one block, and about 910 GB a year at a block a minute. Whoever mines that block pays nothing for it: the fee floor is a node's own policy about what it will carry, not a rule of the chain."
         ]
       }
     },
@@ -528,7 +528,7 @@
         ],
         "curious": [
           "A newcomer opens 4 096 old headers, drawn against the work behind them rather than against their height, checks that each sits where it claims to in the tip's own commitment, and is then handed the ledger in pieces. It validates the thousand blocks between that ledger and the tip for itself before it will answer as a node on a chain, and while it has not, it says so at the top of this page.",
-          "Measured, at one block a minute: thirty years of a busy chain is about a hundred and ninety-seven gigabytes to download and the better part of a day to revalidate. Through the sample it is about nine megabytes of headers, eleven of state, and the thousand blocks in between, every part of it checked against the commitment in the tip. No checkpoint, no trusted snapshot, nobody to believe.",
+          "Measured, at one block a minute: thirty years of a busy chain is about a hundred and ninety-seven gigabytes to download and the better part of a day to revalidate. Through the sample it is about three megabytes of headers, eleven of state, and the thousand blocks in between, every part of it checked against the commitment in the tip. No checkpoint, no trusted snapshot, nobody to believe.",
           "One cost still grows, and it is small and named: the headers, and the tree they make, at 129 MB a year. Every node keeps them so that anybody can join through any of them. Keeping every block ever accepted, and keeping every note that ever fell out of the drawer, both grow without bound, and both are chosen work the network runs without."
         ],
         "technical": [
@@ -645,7 +645,7 @@
       "title": "Or build it yourself",
       "body": {
         "plain": ["You need Rust, which is a free programming toolchain. These three commands fetch the source and build it, and take a couple of minutes. What you end up with is the same three programs, built by you."],
-        "curious": ["Rust 1.89, which the repository pins so that everybody builds with the same one. Six direct dependencies and no asynchronous runtime."],
+        "curious": ["Rust 1.89, which the repository pins so that everybody builds with the same one. Five direct dependencies and no asynchronous runtime."],
         "technical": ["Rust 1.89. The workspace forbids unsafe code and denies arithmetic side effects, indexing, slicing, unwrap, expect and panic. The release profile keeps overflow checks on."]
       }
     }

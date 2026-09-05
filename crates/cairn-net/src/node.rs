@@ -975,6 +975,27 @@ struct Turn {
     /// How far the collection had reached then, so what renews the turn is a
     /// run and not a header. See [`HEADER_RUN`].
     marked: u64,
+    /// Set when this peer's collection was thrown away, so that the turn is
+    /// over at once instead of at [`HEADER_PATIENCE`].
+    ///
+    /// The turn used to be forgotten outright at that point, and forgetting it
+    /// is what handed it straight back: with nothing remembered,
+    /// [`Shared::asks_headers_of`] starts the round again at the lowest
+    /// connected identifier, which is the oldest connection. So a peer that
+    /// stayed connected longest could answer every question with two headers
+    /// that do not follow on, have the collection thrown away, and be asked
+    /// again on the next round, for ever. Measured: fifty one collections
+    /// spoiled in sixty seconds for eighteen kilobytes, from one connection,
+    /// with a peer that could have answered the whole run in one message never
+    /// asked once. The node then never fills its old headers in, so
+    /// `Store::can_show_the_chain` stays false for the rest of its life and it
+    /// can never take a newcomer in.
+    ///
+    /// Remembering who it was is what makes the next line of
+    /// [`Shared::asks_headers_of`] mean what it says: the turn goes to the next
+    /// peer along, and a node surrounded by peers that spoil the collection
+    /// works through them rather than asking the same one for ever.
+    spoiled: bool,
 }
 
 /// The undertaking a node took on with a handed ledger, as it stands.
@@ -2326,6 +2347,7 @@ impl Node {
                 peer,
                 moved: now,
                 marked: held.map_or(0, |turn| turn.marked),
+                spoiled: false,
             });
             peer
         };
@@ -3383,9 +3405,12 @@ impl Shared {
     /// peer only. Asking everybody was cheaper and looked harmless, since the
     /// answer is checked rather than trusted; what it missed is that the
     /// checking happens at the end, over a collection anybody could put the
-    /// first header into. A peer that stops adding to it loses its turn, and
-    /// the next one along is asked, so a node surrounded by peers that cannot
-    /// answer works through them rather than asking the same one for ever.
+    /// first header into. A peer that stops adding to it loses its turn, and so
+    /// does one whose run has to be thrown away, and in both cases the turn
+    /// goes to the next one along rather than back to the same peer: see
+    /// [`Turn::spoiled`], which is the half of that this used to get wrong. So
+    /// a node surrounded by peers that cannot answer works through them rather
+    /// than asking the same one for ever.
     fn asks_headers_of(&self, connected: &[PeerId], now: u64) -> Option<(PeerId, Message)> {
         // Nothing missing, nothing to do, and in particular no turn to pass
         // on: a node that has filled its headers in would otherwise throw away
@@ -3393,7 +3418,9 @@ impl Shared {
         let asking = self.wants_headers()?;
         let previous = *self.filling_from();
         let keeps_turn = previous.is_some_and(|turn| {
-            connected.contains(&turn.peer) && now.saturating_sub(turn.moved) < HEADER_PATIENCE
+            !turn.spoiled
+                && connected.contains(&turn.peer)
+                && now.saturating_sub(turn.moved) < HEADER_PATIENCE
         });
         if let Some(turn) = previous.filter(|_| keeps_turn) {
             return Some((turn.peer, asking));
@@ -3422,6 +3449,7 @@ impl Shared {
             peer: next,
             moved: now,
             marked: 0,
+            spoiled: false,
         });
         // Asked again after the clearing, because what is missing has just
         // become the whole of it.
@@ -3495,8 +3523,13 @@ impl Shared {
                 }
             }
             // What was collected is gone, and whoever supplied it has just
-            // shown it could not. The next peer is asked on the next round.
-            Filled::Discarded => *self.filling_from() = None,
+            // shown it could not. The next peer is asked on the next round,
+            // which takes remembering who this one was: see [`Turn::spoiled`].
+            Filled::Discarded => {
+                if let Some(turn) = self.filling_from().as_mut() {
+                    turn.spoiled = true;
+                }
+            }
         }
     }
 

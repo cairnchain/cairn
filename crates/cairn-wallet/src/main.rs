@@ -189,8 +189,14 @@ fn show_balance(arguments: &[String]) -> Result<(), String> {
             .height
             .map_or_else(|| "-".to_owned(), |h| h.to_string())
     );
+    // Both of these are about what a spend can reach for, and both say so.
+    // `Holdings::notes` holds only that, so an unqualified "notes 0" was a
+    // false count for a wallet whose money is a young reward, or is promised to
+    // a payment waiting for a block, or has fallen where this node cannot place
+    // it. The lines further down name that money; this one now leaves room for
+    // them rather than reading as the whole.
     println!(
-        "notes     {} ({fallen} of them fallen to the cold set)",
+        "notes     {} that can move now ({fallen} of them fallen to the cold set)",
         holdings.notes.len()
     );
     println!("balance   {}", holdings.spendable);

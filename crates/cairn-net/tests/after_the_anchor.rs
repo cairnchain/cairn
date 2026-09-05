@@ -732,6 +732,99 @@ fn a_peer_that_answers_one_header_at_a_time_does_not_hold_the_turn() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// **A peer whose run was thrown away was handed the turn straight back.**
+///
+/// A collection thrown away is meant to end that peer's turn: the code says
+/// "the next peer is asked on the next round" and the commitment check says
+/// "give somebody else the turn". Both forgot the turn outright, and forgetting
+/// it is what handed it back. With nothing remembered, the round starts again
+/// at the lowest connected identifier, which is the oldest connection, so
+/// whoever had stayed connected longest was picked again every time.
+///
+/// The whole of it costs two headers that do not follow on: the first lands,
+/// the second is out of order, and the collection goes. Measured on the code
+/// before this test: fifty one collections spoiled in sixty seconds for
+/// eighteen kilobytes from one connection, with a peer that could have answered
+/// the whole run in one message never asked once. That is the same end as the
+/// two defects above it, by a door neither closed: a node that never fills in
+/// the headers from before it arrived can never show the chain to a newcomer.
+#[test]
+fn a_peer_that_spoils_the_collection_does_not_get_the_turn_back() {
+    let (directory, source) = directory_holding_a_handover("spoiled");
+    let anchor_height = 120 - BURIAL - 1;
+    let oldest = anchor_height - 10;
+    {
+        let mut log = cairn_store::HeaderLog::open(&directory).unwrap();
+        for height in oldest..=anchor_height {
+            log.append(&source.headers[height as usize]).unwrap();
+        }
+    }
+    let (node, _restored) = Node::open(params(), loopback(), &directory).unwrap();
+
+    // The first connection, so the lowest identifier and the one a forgotten
+    // turn goes back to.
+    let mut spoiler = a_bare_peer(&node, 555_555);
+    until_it_sends(&mut spoiler, |message| {
+        matches!(message, Message::GetHeaders { from: 0, .. }).then_some(())
+    });
+    // Somebody who could answer the whole run in one message.
+    let mut waiting = a_bare_peer(&node, 666_666);
+
+    // Long enough that the half minute a turn runs for on its own would be
+    // reached and passed, so a turn that ends only by running out of patience
+    // is told apart from one that ends when the collection is thrown away.
+    let watched = Duration::from_secs(45);
+    let started = Instant::now();
+    let mut thrown_away = 0usize;
+    let mut passed_on: Option<Duration> = None;
+    while started.elapsed() < watched && passed_on.is_none() {
+        for from in headers_wanted(&mut spoiler) {
+            // Two headers that do not follow on: the first lands, the second
+            // is out of order, and the collection goes.
+            let run = vec![
+                source.headers[from as usize],
+                source.headers[(from + 2) as usize],
+            ];
+            write_message(
+                &mut spoiler,
+                params().network,
+                &Message::Headers { from, headers: run },
+            )
+            .unwrap();
+            spoiler.flush().unwrap();
+            thrown_away += 1;
+        }
+        if !headers_wanted(&mut waiting).is_empty() {
+            passed_on = Some(started.elapsed());
+        }
+    }
+
+    assert!(
+        thrown_away > 0,
+        "the spoiler was never asked, so this test never put its case to the node"
+    );
+    let Some(took) = passed_on else {
+        panic!(
+            "the spoiler had {thrown_away} collections thrown away over {:?} and was \
+             asked again every time, and nobody else was asked once",
+            started.elapsed()
+        );
+    };
+    // Well inside the half minute an idle turn runs for, because a collection
+    // thrown away ends the turn there and then. Anything near it would mean the
+    // turn was only expiring, which costs the node that half minute for every
+    // connection a stranger holds.
+    assert!(
+        took < Duration::from_secs(15),
+        "the turn passed on after {took:?}, which is a turn running out rather \
+         than a spoiled collection ending it"
+    );
+
+    node.shutdown();
+    drop(node);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 /// Every `GetHeaders` waiting on this connection, by the height it starts at.
 ///
 /// Drains rather than waits: the point is usually that nothing is there.

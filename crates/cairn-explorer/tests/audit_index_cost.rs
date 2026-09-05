@@ -37,6 +37,11 @@
     clippy::needless_pass_by_value
 )]
 
+/// The site's own pages, so what they publish about this cost can be held
+/// against what it is measured at.
+const EN: &str = include_str!("../../../web/i18n/en.json");
+const FR: &str = include_str!("../../../web/i18n/fr.json");
+
 #[path = "../src/index.rs"]
 mod index;
 
@@ -768,6 +773,36 @@ fn what_a_block_of_dust_costs_the_index() {
     );
     assert_eq!(size.notes, index.totals().notes_created);
     assert!(size.bytes > 0);
+
+    // The two figures the site publishes about this block, which are the ones
+    // an operator would size a machine from. They were written when a note cost
+    // the index five hundred bytes and were not taken again when the figure was
+    // corrected to five hundred and sixty five, so the sentence quoted the new
+    // per-note figure out of the running route and then multiplied it out with
+    // the old one, in both languages: 1.6 MB and 810 GB where this build gives
+    // 1.7 and 910.
+    let a_block = notes_per_block as u64 * index::BYTES_PER_NOTE;
+    let a_year = a_block * 525_600;
+    let megabytes = format!("{:.1}", a_block as f64 / 1e6);
+    let gigabytes = (a_year / 1_000_000_000 + 5) / 10 * 10;
+    println!("the site's figures for this block: {megabytes} MB, {gigabytes} GB a year");
+    for (language, text) in [("English", EN), ("French", FR)] {
+        assert!(
+            text.contains(&format!("{megabytes} MB of index for that one block"))
+                || text.contains(&format!(
+                    "{} Mo d'index pour ce seul bloc",
+                    megabytes.replace('.', ",")
+                )),
+            "the {language} lesson does not say what a packed block costs the index \
+             at the {} bytes a note this build charges",
+            index::BYTES_PER_NOTE
+        );
+        assert!(
+            text.contains(&format!("about {gigabytes} GB a year"))
+                || text.contains(&format!("environ {gigabytes} Go par an")),
+            "the {language} lesson does not say what a year of them comes to"
+        );
+    }
 }
 
 /// A block of transfers that each pay `fan_out` owners and spend the one

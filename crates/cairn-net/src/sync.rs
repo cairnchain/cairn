@@ -250,11 +250,25 @@ impl Allowance {
 /// closes.
 ///
 /// Set from what an honest peer needs rather than from what feels safe. The
-/// most a peer ever legitimately wants is a full sync, which asks for blocks
-/// as fast as it can take them; at this allowance that is eight hundred blocks
-/// a second, so thirty years of chain arrives in about five hours, which is
-/// what the bandwidth alone would take. Nothing else an honest peer does comes
-/// anywhere near it.
+/// most a peer ever legitimately wants is a full sync, which asks for blocks as
+/// fast as it can take them: at this allowance that is eight hundred blocks a
+/// second, and nothing else an honest peer does comes anywhere near it.
+///
+/// That is what the allowance permits and not what a sync does, and the two
+/// were written here as one number. This said that eight hundred a second put
+/// thirty years of chain on a disk in five hours, "which is what the bandwidth
+/// alone would take", and neither half follows: the allowance decides nothing
+/// about how fast a catch-up runs. Two nodes over a loopback socket, with empty
+/// blocks and no link in the way at all, were measured at a hundred blocks a
+/// second, steady, over two thousand nine hundred of them: an eighth of what
+/// this allows, and thirty years at that rate is forty-four hours rather than
+/// five. Whatever paces a catch-up, and the exchange asks a fresh locator and
+/// waits a round trip for every [`MAX_REQUESTED`] blocks, it is not this. So
+/// this stays a ceiling an honest sync does not come near, which is all it was
+/// ever for, and the duration it used to promise belongs to whoever measures
+/// the exchange rather than here. `tests/network.rs` prints that reading off
+/// the catch-up it already runs, so whoever doubts the figure can take it
+/// again.
 const ALLOWANCE: u32 = 8_192;
 
 /// What each kind of message costs to answer, in the same units.

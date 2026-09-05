@@ -71,6 +71,7 @@ dependencies = [
 name = "cairn-explorer"
 version = "0.5.0"
 dependencies = [
+ "cairn-accumulator",
  "cairn-chain",
  "cairn-crypto",
  "cairn-http",

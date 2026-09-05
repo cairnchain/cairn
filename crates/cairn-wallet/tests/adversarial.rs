@@ -1151,3 +1151,100 @@ fn a_wallet_whose_notes_are_all_promised_is_not_an_empty_wallet() {
     wallet.shutdown();
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// **A wallet showing a stranger's account of the money said the balance was
+/// right.**
+///
+/// [`Progress::warning`] shows one line, so its order is a ranking, and the
+/// doc comment above it said the lines meaning the numbers beside them are
+/// wrong come first. Probation was last of all: below the full disk, below the
+/// account file that would not write, and below the account that did not read
+/// back, three lines that say in as many words that the balance is right.
+///
+/// Probation is set for as long as a node that joined a chain has not validated
+/// its own way to the tip it was handed under, which is the first hour of every
+/// join. So an ordinary pairing, a node that joined and a disk with nothing left
+/// on it, put "The balance beside this is right for the chain as it stands"
+/// above a number this wallet had not checked, and the line that says so was
+/// hidden underneath it.
+///
+/// What stays above probation is the two that mean this wallet has stopped for
+/// good, because probation's own line ends "it carries on by itself" and those
+/// two are why it will not.
+#[test]
+fn a_wallet_that_has_not_checked_its_chain_says_so_before_anything_smaller() {
+    use cairn_net::joining::Joined;
+    use cairn_net::node::{Probation, Unwritten, Writing};
+    use cairn_wallet::Progress;
+
+    let probation = Probation {
+        anchor: 1_000,
+        settles_at: 2_024,
+        reached: 1_200,
+    };
+    let unchecked = "has not yet checked the chain it is showing you";
+    let progress = |fill: fn(&mut Progress)| -> String {
+        let mut progress = Progress {
+            height: Some(1_200),
+            peers: 3,
+            joining: Joined::Done,
+            total_work: 1,
+            probation: Some(probation),
+            outdated: None,
+            stranded: None,
+            unwritten: None,
+            unjudged: None,
+            keeping_its_account: true,
+            lost_its_account: None,
+        };
+        fill(&mut progress);
+        progress.warning().expect("something to say")
+    };
+
+    let alone = progress(|_| {});
+    assert!(alone.contains(unchecked), "{alone}");
+
+    let full_disk = progress(|progress| {
+        progress.unwritten = Some(Unwritten {
+            what: Writing::Blocks,
+            because: "no space left on device".to_owned(),
+            reached: 1_200,
+            written_through: Some(900),
+            blocks: 300,
+            within_reach: true,
+        });
+    });
+    assert!(
+        full_disk.contains(unchecked),
+        "a full disk hid the line saying the balance had not been checked: {full_disk}"
+    );
+
+    let no_account = progress(|progress| progress.keeping_its_account = false);
+    assert!(
+        no_account.contains(unchecked),
+        "an account file that would not write hid it: {no_account}"
+    );
+
+    let lost_account = progress(|progress| {
+        progress.lost_its_account = Some(cairn_wallet::history::Discarded::BeforeTheStamp);
+    });
+    assert!(
+        lost_account.contains(unchecked),
+        "an account that did not read back hid it: {lost_account}"
+    );
+
+    // And the two that mean this wallet has stopped stay above it, because
+    // probation's line promises it carries on by itself.
+    let stranded = progress(|progress| {
+        progress.stranded = Some(cairn_net::node::Stranded {
+            anchor: 1_000,
+            settles_at: 2_024,
+            waited: 3_600,
+            out_of_reach: 0,
+        });
+    });
+    assert!(
+        stranded.contains("Delete this wallet's data directory"),
+        "a stranded wallet was told to wait: {stranded}"
+    );
+}

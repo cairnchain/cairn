@@ -1072,9 +1072,9 @@ fn a_route_is_answered_while_the_index_is_being_built() {
     explorer.node().shutdown();
 }
 
-/// The lesson pages quote the same hot-set figure this program serves.
+/// Every page that quotes the hot set quotes the figure this program serves.
 ///
-/// The site says three times, in two languages, what a note costs a node and
+/// The site said three times, in two languages, what a note costs a node and
 /// what the drawer weighs full. Those were 813 bytes and 107 MB, from before a
 /// public key stopped carrying its decoded point. The papers were corrected to
 /// 516 and 68 six days later; the lessons were not, and `/api/status` had been
@@ -1082,12 +1082,21 @@ fn a_route_is_answered_while_the_index_is_being_built() {
 /// exists to explain the thesis was told the number the thesis turns on, and
 /// told it half as large again as it is.
 ///
+/// The lessons were the half that had gone stale, so the lessons were the half
+/// that got a test. The papers say it in five more places and the README in
+/// three, and none of those was covered by anything: the same six days would
+/// have passed unnoticed the other way round. They are all here now.
+///
 /// Read out of the running route rather than written down here, so the day the
 /// measurement moves this fails rather than drifts.
 #[test]
-fn the_lessons_quote_the_hot_set_this_program_serves() {
+fn the_pages_that_quote_the_hot_set_quote_what_this_program_serves() {
     const EN: &str = include_str!("../../../web/i18n/en.json");
     const FR: &str = include_str!("../../../web/i18n/fr.json");
+    const PAPER: &str = include_str!("../../../docs/cairn-whitepaper.html");
+    const DESIGN: &str = include_str!("../../../docs/cairn-design.html");
+    const README: &str = include_str!("../../../README.md");
+    const QUESTIONS: &str = include_str!("../../../docs/cairn-open-questions.html");
 
     let explorer = explorer(ConsensusParams::testnet());
     let status = body(&ask(&explorer, "status"));
@@ -1127,5 +1136,45 @@ fn the_lessons_quote_the_hot_set_this_program_serves() {
             "the {language} lesson still carries the figure from before the correction"
         );
     }
+
+    // The paper states both figures in its parameter list and both again in
+    // its thirty-year table, which is the row the whole design is about.
+    for stated in [
+        format!("<span class=\"k\">Bytes per hot note, measured</span><span class=\"v\">{per_note}</span>"),
+        format!("<span class=\"k\">Hot set at capacity</span><span class=\"v\">{megabytes} MB</span>"),
+        format!("measured at {per_note} bytes each, about {megabytes} MB"),
+        format!("{per_note} bytes per note, which is the note"),
+    ] {
+        assert!(
+            PAPER.contains(&stated),
+            "the paper does not say `{stated}`, which is what this program serves"
+        );
+    }
+    assert!(
+        DESIGN.contains(&format!("un billet chaud coûte {per_note} octets"))
+            && DESIGN.contains(&format!("soit environ {megabytes} Mo")),
+        "the design paper does not quote the hot set this program serves"
+    );
+    assert!(
+        README.contains(&format!("about {megabytes} MB, whatever the chain's age"))
+            && README.contains(&format!("{megabytes} MB of hot notes")),
+        "the README does not quote the hot set this program serves"
+    );
+
+    // The other measured per-note figure, and the same story two days later.
+    // The cold set's cost was written into the open questions by hand on the
+    // 31st as 64 bytes, the measured slope landed at 72 on the 2nd, and the
+    // whole of that paper's archivist table is that figure times the traffic
+    // it names down the side. The lessons never drifted because they take it
+    // from this route; the paper did because it did not.
+    let cold = status.split_once("\"cold\":{").expect("a cold object").1;
+    let per_fallen = digits(cold, "\"bytesPerNote\"");
+    println!("the route says {per_fallen} bytes a fallen note");
+    assert!(
+        QUESTIONS.contains(&format!(
+            "l'archive de la cave, {per_fallen} octets par billet tombé"
+        )),
+        "the open questions do not quote the {per_fallen} bytes a fallen note this build measures"
+    );
     explorer.node().shutdown();
 }

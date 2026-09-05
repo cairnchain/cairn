@@ -133,13 +133,13 @@
           "Cela coûte environ {perNote} octets par billet ayant jamais existé, et cela ne cesse jamais de grandir. Garder la cave, ce que cet ordinateur fait aussi, coûte environ {coldPerNote} octets par billet tombé. Un nœud ordinaire ne garde ni l'un ni l'autre, et ne paie ni l'un ni l'autre."
         ],
         "curious": [
-          "L'index est le coût croissant propre à l'explorateur, et c'est le plus lourd de ses deux coûts, d'un facteur sept environ : {perNote} octets pour chaque billet jamais créé, contre {coldPerNote} octets pour chaque billet tombé dans l'ensemble froid. Aucun des deux n'est borné, et les deux pèsent sur qui choisit de rendre ce service.",
+          "L'index est le coût croissant propre à l'explorateur, et c'est le plus lourd de ses deux coûts, d'un facteur huit environ : {perNote} octets pour chaque billet jamais créé, contre {coldPerNote} octets pour chaque billet tombé dans l'ensemble froid. Aucun des deux n'est borné, et les deux pèsent sur qui choisit de rendre ce service.",
           "Un nœud ordinaire ne porte ni l'un ni l'autre. Sa mémoire ne bouge pas du tout avec l'ensemble froid, et c'est là-dessus que repose toute la conception ; cette page montre à quoi ressemble une exception."
         ],
         "technical": [
           "Propriétaire vers billets, billet vers fiche, identifiant de transaction vers emplacement, et un mouvement enregistré à chaque crédit comme à chaque débit. Rien n'en sort jamais : la taille dépend donc de toute l'histoire de la chaîne et non de son état courant.",
           "Mesuré sur l'implémentation réelle : {perNote} octets par billet jamais créé pour l'index, {coldPerNote} octets par billet tombé pour l'ensemble froid d'un nœud archiviste, et aucune pente du tout pour un nœud qui ne garde que les soixante-quatre racines.",
-          "Rien de tout cela n'est borné par une règle. Un bloc rempli jusqu'à la limite d'octets peut contenir trois mille billets de poussière vers trois mille adresses neuves, soit environ 1,6 Mo d'index pour ce seul bloc, et environ 810 Go par an à raison d'un bloc par minute. Celui qui mine ce bloc ne paie rien pour cela : le plancher de frais est la politique de chaque nœud sur ce qu'il accepte de porter, pas une règle de la chaîne."
+          "Rien de tout cela n'est borné par une règle. Un bloc rempli jusqu'à la limite d'octets peut contenir trois mille billets de poussière vers trois mille adresses neuves, soit environ 1,7 Mo d'index pour ce seul bloc, et environ 910 Go par an à raison d'un bloc par minute. Celui qui mine ce bloc ne paie rien pour cela : le plancher de frais est la politique de chaque nœud sur ce qu'il accepte de porter, pas une règle de la chaîne."
         ]
       }
     },
@@ -528,7 +528,7 @@
         ],
         "curious": [
           "Un nouveau venu ouvre 4 096 vieux en-têtes, tirés contre le travail accumulé derrière eux plutôt que contre leur hauteur, vérifie que chacun se trouve bien là où il prétend être dans l'engagement inscrit au sommet, puis reçoit le grand livre en morceaux. Il valide lui-même les mille blocs qui séparent ce grand livre du sommet avant de répondre comme un nœud sur une chaîne, et tant qu'il ne l'a pas fait, il le dit en haut de cette page.",
-          "Mesuré, à raison d'un bloc par minute : trente ans de chaîne chargée représentent environ cent quatre-vingt-dix-sept gigaoctets à télécharger et près d'une journée à revalider. Par l'échantillon, c'est environ neuf mégaoctets d'en-têtes, onze d'état, et les mille blocs intermédiaires, chaque partie vérifiée contre l'engagement inscrit au sommet. Aucun point de contrôle, aucun instantané de confiance, personne à croire.",
+          "Mesuré, à raison d'un bloc par minute : trente ans de chaîne chargée représentent environ cent quatre-vingt-dix-sept gigaoctets à télécharger et près d'une journée à revalider. Par l'échantillon, c'est environ trois mégaoctets d'en-têtes, onze d'état, et les mille blocs intermédiaires, chaque partie vérifiée contre l'engagement inscrit au sommet. Aucun point de contrôle, aucun instantané de confiance, personne à croire.",
           "Un coût grandit encore, et il est petit et nommé : les en-têtes, et l'arbre qu'ils forment, à 129 Mo par an. Chaque nœud les garde pour que n'importe qui puisse rejoindre le réseau par n'importe lequel d'entre eux. Conserver tous les blocs depuis l'origine, et conserver tous les billets qui sont un jour tombés du tiroir, sont deux coûts qui grandissent sans borne ; ce sont aussi deux travaux facultatifs, dont le réseau se passe."
         ],
         "technical": [
@@ -645,7 +645,7 @@
       "title": "Ou le compiler vous-même",
       "body": {
         "plain": ["Il vous faut Rust, une chaîne d'outils de programmation gratuite. Ces trois commandes récupèrent le code source et le compilent, en deux ou trois minutes. Vous obtenez les trois mêmes programmes, compilés par vous."],
-        "curious": ["Rust 1.89, que le dépôt fixe pour que tout le monde compile avec la même version. Six dépendances directes et aucun moteur asynchrone."],
+        "curious": ["Rust 1.89, que le dépôt fixe pour que tout le monde compile avec la même version. Cinq dépendances directes et aucun moteur asynchrone."],
         "technical": ["Rust 1.89. Le workspace interdit le code non sûr et refuse les effets de bord arithmétiques, l'indexation, le découpage, unwrap, expect et panic. Le profil release garde les contrôles de débordement actifs."]
       }
     }

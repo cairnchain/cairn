@@ -138,16 +138,16 @@
       <h3>La situation exacte, chiffrée</h3>
       <p>Le tiroir tient 131 072 billets, et le plus ancien tombe quand il est plein. À blocs pleins, un billet qui ne bouge pas descend à la cave en 3,2 heures ; à un dixième du trafic, en 32 heures ; à un centième, en treize jours. La fenêtre qui suit la chute, pendant laquelle il se dépense encore sans preuve, dure douze minutes à pleine charge. La cave est donc l'état normal de toute épargne, pas un cas rare, et le document de conception le disait déjà.</p>
       <p>Trois situations, et elles n'appellent pas le même service. Un portefeuille allumé ne remarque rien : chaque bloc porte de quoi rafraîchir ses preuves, il ne demande rien à personne, et une preuve pèse 685 octets en moyenne à un million de billets tombés, de l'ordre du kilooctet à trente ans de chaîne pleine. Un portefeuille éteint quelques jours se rattrape en relisant les blocs manqués, que les nœuds gardent pour cela : un gigaoctet par défaut, environ cinq jours de chaîne pleine.</p>
-      <p>Au-delà, tout dépend de ce qui a survécu. Celui qui a gardé son carnet, quels billets, à quelle position de la forêt, n'a besoin que d'une preuve fraîche. La produire demande l'archive de la cave, 64 octets par billet tombé ; cela coûte quelques microsecondes et une réponse d'un kilooctet, et le portefeuille vérifie seul le résultat contre les racines que tout nœud tient. La confiance demandée est nulle : un archiviste ne peut pas mentir, il peut seulement se taire. Celui qui a tout perdu sauf sa clé doit d'abord retrouver ce qu'il possède, et cela, l'archive ne le sait pas, car elle tient des empreintes, pas des noms. Retrouver demande l'histoire des blocs, ou un index par propriétaire comme celui de l'explorateur.</p>
+      <p>Au-delà, tout dépend de ce qui a survécu. Celui qui a gardé son carnet, quels billets, à quelle position de la forêt, n'a besoin que d'une preuve fraîche. La produire demande l'archive de la cave, 72 octets par billet tombé ; cela coûte quelques microsecondes et une réponse d'un kilooctet, et le portefeuille vérifie seul le résultat contre les racines que tout nœud tient. La confiance demandée est nulle : un archiviste ne peut pas mentir, il peut seulement se taire. Celui qui a tout perdu sauf sa clé doit d'abord retrouver ce qu'il possède, et cela, l'archive ne le sait pas, car elle tient des empreintes, pas des noms. Retrouver demande l'histoire des blocs, ou un index par propriétaire comme celui de l'explorateur.</p>
       <p>Et personne n'est payé pour tenir l'un ou l'autre. Voilà l'omission, énoncée depuis le code : la deuxième garantie du document de conception, reconstituable pour toujours, repose sur un rôle que le protocole ne rémunère pas, dont le réseau ne dépend pas, et dont l'épargnant, lui, dépend entièrement.</p>
       <div class="tablewrap">
         <table>
           <caption>Ce que pèsent les deux services, mesuré à trente ans, un bloc par minute</caption>
           <thead><tr><th>La chaîne est</th><th>Paiements / s</th><th>L'archive, pour prouver</th><th>L'histoire, pour retrouver</th></tr></thead>
           <tbody>
-            <tr><td>pleine à 1 %</td><td class="num">0,1</td><td class="num">6,0 Go</td><td class="num">20,7 Go</td></tr>
-            <tr><td>pleine à 10 %</td><td class="num">1,1</td><td class="num">68,6 Go</td><td class="num">206,7 Go</td></tr>
-            <tr class="us"><td>pleine</td><td class="num">11,4</td><td class="num">692,3 Go</td><td class="num">2,1 To</td></tr>
+            <tr><td>pleine à 1 %</td><td class="num">0,1</td><td class="num">6,8 Go</td><td class="num">20,7 Go</td></tr>
+            <tr><td>pleine à 10 %</td><td class="num">1,1</td><td class="num">77,2 Go</td><td class="num">206,7 Go</td></tr>
+            <tr class="us"><td>pleine</td><td class="num">11,4</td><td class="num">778,8 Go</td><td class="num">2,1 To</td></tr>
           </tbody>
         </table>
       </div>

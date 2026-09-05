@@ -475,13 +475,58 @@ impl Progress {
     /// means the balance is a stranger's word rather than this wallet's own
     /// reading. None of them is worth hiding to keep a page tidy.
     ///
-    /// Only one line is shown, so the order is a ranking. The ones that mean
-    /// the numbers beside them are wrong or frozen come first; the account
-    /// this wallet lost comes last, because the balance is right and becomes
-    /// right again on its own, and what it costs is a record rather than
-    /// money.
+    /// Only one line is shown, so the order is a ranking, and the ranking is
+    /// what the numbers beside it are worth. First the two that mean this
+    /// wallet has stopped following the chain and will not start again. Then
+    /// the one that means the number is not this wallet's own reading at all.
+    /// Then the ones that mean the number is right and something else is at
+    /// risk, and last the account this wallet lost, because that balance is
+    /// right and becomes right again on its own, and what it costs is a record
+    /// rather than money.
+    ///
+    /// Probation used to be last of all, under three lines that say in as many
+    /// words that the balance is right. It is set whenever the node under this
+    /// wallet joined a chain rather than reading one, which is most of the
+    /// first hour of every join, so a wallet whose disk was full or whose
+    /// account file would not write was told "the balance beside this is right
+    /// for the chain as it stands" while it was showing a stranger's account of
+    /// somebody's money. The line above the money must never be the one that
+    /// vouches for it.
     #[must_use]
     pub fn warning(&self) -> Option<String> {
+        if let Some(outdated) = self.outdated {
+            return Some(format!(
+                "This wallet is too old for the chain it is on. The rules from block {} need \
+                 version {}, and this program knows only version {}. It stopped following the \
+                 chain there on purpose, so the height and the balance shown are from before \
+                 that moment and will not move again. Install a newer wallet and start it \
+                 again: nothing on disk is lost, and the key file is not touched.",
+                outdated.height, outdated.required, outdated.known
+            ));
+        }
+        if let Some(stranded) = self.stranded {
+            return Some(format!(
+                "This wallet was handed the ledger at block {}, and had to check its own way to \
+                 block {} before it could stand behind it. The blocks in between never arrived, \
+                 and it holds nothing below block {}, so there is no other way to reach them. \
+                 The balance shown is not one this wallet has checked. Delete this wallet's data \
+                 directory and start it again from a peer you trust; the key file is a separate \
+                 file and is not touched by that.",
+                stranded.anchor, stranded.settles_at, stranded.anchor
+            ));
+        }
+        if let Some(probation) = self.probation {
+            return Some(format!(
+                "This wallet has not yet checked the chain it is showing you. It was handed the \
+                 ledger at block {} and has checked {} of the {} blocks above it that it has to \
+                 check first. Until it has, the balance below is somebody else's account of your \
+                 money rather than this wallet's own. It carries on by itself; wait for this \
+                 line to go before believing the number.",
+                probation.anchor,
+                probation.checked(),
+                probation.owed()
+            ));
+        }
         if let Some(unwritten) = &self.unwritten {
             let kept = unwritten.written_through.map_or_else(
                 || "nothing at all".to_owned(),
@@ -524,41 +569,8 @@ impl Progress {
                     .to_owned(),
             );
         }
-        if let Some(outdated) = self.outdated {
-            return Some(format!(
-                "This wallet is too old for the chain it is on. The rules from block {} need \
-                 version {}, and this program knows only version {}. It stopped following the \
-                 chain there on purpose, so the height and the balance shown are from before \
-                 that moment and will not move again. Install a newer wallet and start it \
-                 again: nothing on disk is lost, and the key file is not touched.",
-                outdated.height, outdated.required, outdated.known
-            ));
-        }
-        if let Some(stranded) = self.stranded {
-            return Some(format!(
-                "This wallet was handed the ledger at block {}, and had to check its own way to \
-                 block {} before it could stand behind it. The blocks in between never arrived, \
-                 and it holds nothing below block {}, so there is no other way to reach them. \
-                 The balance shown is not one this wallet has checked. Delete this wallet's data \
-                 directory and start it again from a peer you trust; the key file is a separate \
-                 file and is not touched by that.",
-                stranded.anchor, stranded.settles_at, stranded.anchor
-            ));
-        }
         if let Some(why) = self.lost_its_account {
             return Some(lost_its_account(why));
-        }
-        if let Some(probation) = self.probation {
-            return Some(format!(
-                "This wallet has not yet checked the chain it is showing you. It was handed the \
-                 ledger at block {} and has checked {} of the {} blocks above it that it has to \
-                 check first. Until it has, the balance below is somebody else's account of your \
-                 money rather than this wallet's own. It carries on by itself; wait for this \
-                 line to go before believing the number.",
-                probation.anchor,
-                probation.checked(),
-                probation.owed()
-            ));
         }
         None
     }

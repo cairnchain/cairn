@@ -325,3 +325,84 @@ fn the_site_does_not_call_the_sampled_start_unwritten() {
         }
     }
 }
+
+/// The number of dependencies the site quotes is the number a build pulls in.
+///
+/// Two lines say it, and they said two different things. One counts them
+/// ("six direct dependencies", under "build it yourself"), and the other names
+/// them ("blake3, ed25519-dalek, getrandom, thiserror, zeroize"), which is
+/// five. The sixth is `hex`, which four crates take as a dev-dependency and no
+/// build of the programs anybody runs ever sees. Six was the length of the
+/// workspace's dependency table rather than of anything a reader would get.
+///
+/// Counted here rather than written down, because the whole point of the claim
+/// is that it is small, and a number that small is one somebody will check.
+#[test]
+fn the_site_counts_the_dependencies_a_build_actually_pulls() {
+    let mut named = BTreeSet::new();
+    for crate_name in [
+        "cairn-accumulator",
+        "cairn-chain",
+        "cairn-crypto",
+        "cairn-explorer",
+        "cairn-http",
+        "cairn-ledger",
+        "cairn-net",
+        "cairn-node",
+        "cairn-primitives",
+        "cairn-store",
+        "cairn-wallet",
+    ] {
+        let manifest = std::fs::read_to_string(format!("../../crates/{crate_name}/Cargo.toml"))
+            .expect("every crate in the workspace has a manifest");
+        // Only what a `cargo build` of this crate pulls in: the section ends at
+        // the next one, so `[dev-dependencies]` and `[lints]` are outside it.
+        let Some(section) = manifest.split_once("\n[dependencies]\n") else {
+            continue;
+        };
+        for line in section.1.lines().take_while(|line| !line.starts_with('[')) {
+            let Some((name, _)) = line.split_once('.') else {
+                continue;
+            };
+            if !name.starts_with("cairn-") && !name.is_empty() {
+                named.insert(name.to_owned());
+            }
+        }
+    }
+    let counted = named.len();
+    let listed = named.into_iter().collect::<Vec<_>>().join(", ");
+    println!("{counted} outside dependencies a build pulls: {listed}");
+
+    let spelled = match counted {
+        4 => "Four",
+        5 => "Five",
+        6 => "Six",
+        7 => "Seven",
+        other => panic!("{other} dependencies, and this test has no word for that"),
+    };
+    for (language, text, said) in [
+        ("English", EN, format!("{spelled} direct dependencies")),
+        (
+            "French",
+            FR,
+            format!(
+                "{} dépendances directes",
+                match counted {
+                    4 => "Quatre",
+                    5 => "Cinq",
+                    6 => "Six",
+                    _ => "Sept",
+                }
+            ),
+        ),
+    ] {
+        assert!(
+            text.contains(&said),
+            "the {language} page does not say `{said}`, which is what a build pulls"
+        );
+    }
+    assert!(
+        EN.contains(&listed) && FR.contains(&listed),
+        "the page names a dependency tree that is not `{listed}`"
+    );
+}

@@ -563,8 +563,8 @@
       rather than devising its own. It is implemented: a newcomer draws 4 096
       headers against accumulated work rather than height, with a Fiat-Shamir
       seed taken from the tip, and each opened header is checked against the
-      tip's own commitment. Weighing a thirty year chain costs about 9 MB,
-      of which the run described below is a fifth.
+      tip's own commitment. Weighing a thirty year chain costs about 3 MB, of
+      which the run described below is 200 kB.
     </p>
     <p>
       Four checks sit around the draw, and they are not decoration. An audit
@@ -671,7 +671,8 @@
       <em>lie</em>. Measured against the shipped function, the placement that
       suits a forger best left that at 2<sup>-5.8</sup> rather than
       2<sup>-128</sup>. The count and the density above are the correction; the
-      claim went from 45.7% to 40% and the cost from one megabyte to nine.
+      claim went from 45.7% to 40%, and the cost went up eightfold with the
+      draws.
       None of this is a proof in the other direction: it is a measurement over
       one family of placements, made in-house, and it is the part of this design
       that most wants an outside eye.
@@ -895,13 +896,14 @@
     <p class="fig-note">
       The first three rows are what arriving used to cost, and section 7 is how
       it stopped costing that. Arriving now has three parts, and it is worth
-      adding them up rather than quoting the smallest: about 9 MB to weigh the
+      adding them up rather than quoting the smallest: about 3 MB to weigh the
       chain, about 12 MB for the ledger, and the thousand blocks between that
       ledger and the tip, which a newcomer validates itself. Those blocks are
-      at most 128 MB and in practice far less, since a block is only as large
-      as the traffic that filled it. Call it 20 MB on a quiet chain and under
-      150 MB on a saturated one, against a hundred and ninety-seven gigabytes
-      of reading, and none of the three grows with the chain's age.
+      at most 134 MB, the block size limit a thousand and twenty four times
+      over, and in practice far less, since a block is only as large as the
+      traffic that filled it: call it 20 MB on a quiet chain. Against a hundred
+      and ninety-seven gigabytes of reading, and none of the three grows with
+      the chain's age.
     </p>
     <p class="fig-note">
       Seven of the figures above were wrong until this draft, and how is worth

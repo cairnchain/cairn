@@ -1,6 +1,7 @@
 //! Real nodes on real sockets.
 
 #![allow(
+    clippy::cast_precision_loss,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
@@ -628,9 +629,21 @@ fn a_node_partway_along_catches_up_with_one_far_ahead() {
     assert!(started < top, "and it is behind");
 
     behind.connect(ahead.address()).unwrap();
+    let clock = Instant::now();
     wait_for("the node behind to catch up", || {
         behind.height() == Some(top)
     });
+    // Printed and not asserted, because it is a reading off whatever machine
+    // this runs on. It is here because `sync::ALLOWANCE` used to state a figure
+    // for it: eight hundred blocks a second, and thirty years of chain in five
+    // hours. That is what the allowance permits and not what the exchange does,
+    // and this is where somebody can see the difference for themselves.
+    let read = top - started;
+    println!(
+        "{read} blocks over a loopback socket in {:.1}s, {:.0} a second",
+        clock.elapsed().as_secs_f64(),
+        read as f64 / clock.elapsed().as_secs_f64(),
+    );
 
     assert_eq!(
         behind.with_chain(|chain| chain.state().state_root()),

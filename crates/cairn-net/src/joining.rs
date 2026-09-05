@@ -20,9 +20,15 @@ use crate::message::{Joining, MAX_JOIN_PARTS};
 /// Bytes a collection may reach before it is abandoned.
 ///
 /// A ledger at the largest hot set the rules allow is eleven megabytes, and a
-/// sampled weight is one. This is several times either, and it is here so that
-/// a peer sending pieces that never complete anything cannot make a node hold
-/// more and more of them.
+/// sampled weight over thirty years of chain is three. This is several times
+/// either, and it is here so that a peer sending pieces that never complete
+/// anything cannot make a node hold more and more of them.
+///
+/// The weight was written here as one megabyte and next to
+/// [`crate::message::MAX_JOIN_PARTS`] as eight, which are the figure from
+/// before the draw count went from 512 to 4 096 and a figure nothing produced.
+/// `cairn-explorer/tests/published_figures.rs` measures what the encoder puts
+/// on the wire for one.
 pub const MAX_JOIN_BYTES: usize = 48 * 1024 * 1024;
 
 /// Pieces of one answer, as they arrive.

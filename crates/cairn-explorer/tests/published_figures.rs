@@ -27,9 +27,13 @@
     clippy::print_stdout
 )]
 
+use cairn_accumulator::forest::tree_of;
+use cairn_accumulator::Archive;
 use cairn_crypto::SecretKey;
-use cairn_ledger::block::Block;
+use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::note::{Note, NoteId};
+use cairn_ledger::sampling::{draw, open_start, seed_of, SAMPLES};
+use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
 use cairn_ledger::LedgerState;
@@ -310,5 +314,176 @@ fn the_papers_limitations_do_not_name_a_hole_the_protocol_has_closed() {
     assert!(
         PAPER.contains("A wallet now asks for the paths it is missing"),
         "and it has to say what closed it"
+    );
+}
+
+/// A chain long enough to take a real sampled weighing off, with the forest
+/// the headers make so that every draw can be proved.
+struct Weighed {
+    headers: Vec<BlockHeader>,
+    history: Archive,
+    state: LedgerState,
+}
+
+impl Weighed {
+    fn new(blocks: usize) -> Self {
+        let params = ConsensusParams::testnet();
+        let miner = SecretKey::from_bytes(&[3; 32]);
+        let mut built = Self {
+            headers: Vec::new(),
+            history: Archive::new(),
+            state: LedgerState::new(),
+        };
+        let mut clock = 1_000u64;
+        for _ in 0..blocks {
+            let height = built.state.next_height().unwrap();
+            clock += 60;
+            let coinbase = CoinbaseTransaction::new(
+                height,
+                vec![Note::new(params.initial_reward, miner.public_key())],
+            );
+            let block = assemble_block(
+                &built.state,
+                coinbase,
+                Vec::<Transfer>::new(),
+                &params,
+                clock,
+                0,
+            )
+            .unwrap();
+            connect_block(&mut built.state, &block, &params, u64::MAX / 2).unwrap();
+            built.history.add(header_leaf(&block.header.id())).unwrap();
+            built.headers.push(block.header);
+        }
+        built
+    }
+}
+
+/// What weighing a thirty year chain costs is what this build puts on the wire
+/// for one.
+///
+/// The paper said 9 MB in three places, the site in two more and in two
+/// languages, the README once, and one of the French papers said 8. The
+/// encoder puts 3.3 MB on the wire. The figure came from
+/// `cairn-ledger/examples/joining.rs`, which prices every one of the 4 096
+/// paths at sixty four levels and every header at its size in memory: sixty
+/// four is how many trees a forest can hold at 2^64 leaves, and the deepest
+/// tree over thirty years of blocks is twenty three levels. Beside it,
+/// `cairn-ledger/examples/history.rs` counts the same thing at the depth each
+/// draw actually lands at and says three, and so does the doc comment on
+/// `sampling::SAMPLES`. Two instruments for one published figure, differing by
+/// three times over, and the papers quoted the louder one.
+///
+/// Neither instrument is what goes on the wire, so neither is used here. A real
+/// weighing is taken off a chain this test mines and taken apart: what does not
+/// grow with the chain is measured, and what does is the one path per draw. The
+/// model is checked against the encoder to the byte before it is applied at a
+/// height nothing can mine to.
+#[test]
+fn the_papers_weighing_is_the_size_this_build_encodes() {
+    let built = Weighed::new(2_048);
+    let tip = *built.headers.last().unwrap();
+    let start = open_start(
+        &tip,
+        built.state.headers_before_tip(),
+        SAMPLES,
+        |height| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|at| built.headers.get(at))
+                .copied()
+        },
+        |height| built.history.prove_in(height, tip.height),
+    )
+    .expect("a weighing of a chain this node holds whole");
+
+    // A sample is a header and a path, and a path is a sibling per level of the
+    // tree its leaf sits in. Checked against the encoder rather than asserted
+    // of it: this equality is the whole licence for the arithmetic below.
+    let encoded = start.encode().len();
+    let samples = start.samples.encode().len();
+    let levels: usize = start.samples.iter().map(|s| s.proof.depth()).sum();
+    let per_sample = start.tip.encode().len() + 4;
+    assert_eq!(
+        samples,
+        4 + SAMPLES * per_sample + 32 * levels,
+        "a weighing is no longer a header and a path per draw, so what follows \
+         is no longer arithmetic about this encoder"
+    );
+
+    // Everything else in a weighing is the same at any height: the tip, the
+    // header below it, and the run from the deepest draw up to the tip, which
+    // is a fixed distance because the draw stops resolving there.
+    let fixed = encoded - samples;
+    let thirty = THIRTY_YEARS;
+    let leaves = thirty - 1;
+    let mut levels_then = 0u64;
+    for at in draw(seed_of(&tip), SAMPLES, u128::from(thirty), thirty) {
+        let position = u64::try_from(at).unwrap_or(0);
+        levels_then += tree_of(leaves, position).map_or(0, |(depth, _)| depth) as u64;
+    }
+    let roots = u64::from(leaves.count_ones()) - u64::from(tip.height.count_ones());
+    let whole =
+        fixed as u64 + 4 + SAMPLES as u64 * per_sample as u64 + 32 * levels_then + 32 * roots;
+    let megabytes = whole as f64 / 1e6;
+    println!(
+        "a weighing is {encoded} bytes over {} blocks and {whole} over thirty years, {megabytes:.2} MB",
+        built.headers.len(),
+    );
+
+    // No path can be longer than the deepest tree a forest of this many leaves
+    // holds, so this is the most a weighing can ever come to at that height.
+    let deepest = 63 - u64::from(leaves.leading_zeros());
+    let most = fixed as u64
+        + 4
+        + SAMPLES as u64 * per_sample as u64
+        + 32 * deepest * SAMPLES as u64
+        + 32 * roots;
+    assert!(
+        whole <= most,
+        "{whole} is past the {most} a forest {deepest} levels deep can cost"
+    );
+
+    let stated = format!("about {megabytes:.0} MB");
+    assert!(
+        PAPER.contains(&format!("Weighing a thirty year chain costs {stated}")),
+        "the paper does not say weighing costs {stated}"
+    );
+    assert!(
+        PAPER.contains(&format!("{stated} to weigh the\n      chain")),
+        "the paper's arrival note does not say weighing costs {stated}"
+    );
+    assert!(
+        README.contains("about\nthree megabytes against the hundred and ninety-seven gigabytes"),
+        "the README does not say what weighing costs in the same figure"
+    );
+}
+
+/// What a newcomer validates for itself is the block limit times the window,
+/// counted the way the rest of the paper counts.
+///
+/// The note under the table said "at most 128 MB" and then, of the same
+/// quantity in the next sentence, "under 150 MB on a saturated one", so the
+/// ceiling it named was smaller than the figure it gave for reaching it. 128 MB
+/// is the limit times the window in binary megabytes, and every other size in
+/// the paper is decimal: the same bytes are 134.
+#[test]
+fn the_burial_a_newcomer_validates_is_the_block_limit_times_the_window() {
+    let params = ConsensusParams::testnet();
+    let blocks = cairn_chain::MAX_REORG_DEPTH;
+    let bytes = blocks * params.max_block_bytes;
+    let megabytes = bytes as f64 / 1e6;
+    println!(
+        "{blocks} blocks at {} bytes each is {megabytes:.0} MB",
+        params.max_block_bytes
+    );
+
+    assert!(
+        PAPER.contains(&format!("at most {megabytes:.0} MB")),
+        "the paper does not say the burial is at most {megabytes:.0} MB"
+    );
+    assert!(
+        !PAPER.contains("under\n      150 MB on a saturated one"),
+        "the paper still names a saturated figure above the ceiling beside it"
     );
 }

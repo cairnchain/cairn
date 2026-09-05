@@ -419,10 +419,14 @@ pub const JOIN_PART_BYTES: usize = 512 * 1024;
 
 /// Pieces one answer may be cut into.
 ///
-/// A ledger is eleven megabytes at the largest hot set the rules allow, and a
-/// sampled weight is eight. This is several times either, and it is here so a
-/// reader can refuse an answer that claims to be enormous before it starts
+/// A ledger is eleven megabytes at the largest hot set the rules allow, which
+/// is twenty two pieces, and a sampled weight over thirty years of chain is
+/// three megabytes, which is six. This is several times either, and it is here
+/// so a reader can refuse an answer that claims to be enormous before it starts
 /// collecting one.
+///
+/// The weight was written here as eight megabytes and next to
+/// [`crate::joining::MAX_JOIN_BYTES`] as one. See the note there.
 pub const MAX_JOIN_PARTS: u32 = 64;
 
 impl Message {

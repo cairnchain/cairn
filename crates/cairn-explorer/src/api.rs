@@ -48,11 +48,24 @@ const ADDRESS_PAGE: usize = 100;
 /// the cost of asking stays the caller's own rather than everyone else's.
 const ADDRESS_SCAN: usize = 10_000;
 
-/// Bytes one hot note costs a node, measured on the running implementation:
-/// the note itself, its identifier, and its share of the sparse tree.
+/// Bytes one hot note costs a node: the note itself, its identifier, and its
+/// share of the sparse tree.
 ///
-/// Reported so a page can state what a node carries without inventing the
-/// figure, and so the number moves if the implementation ever changes.
+/// Written down here rather than worked out, and that has to be said plainly
+/// because the doc comment used to claim the opposite: "the number moves if the
+/// implementation ever changes", of a literal that moves when somebody edits it.
+/// It cannot be worked out here. The reading comes from
+/// `cairn-ledger/examples/footprint.rs`, which builds the three structures in a
+/// process of their own and reads the resident set back, because the answer is
+/// dominated by what an allocator does rather than by the size of a note; a
+/// resident reading is not something a test can assert on.
+///
+/// What is checked is the half that went wrong last time. This figure was 813
+/// until a public key stopped being kept in the form it is verified in, and
+/// every page that quoted it went on quoting 813 for five days after the papers
+/// were corrected. `tests/answers.rs` now reads this out of the running route
+/// and holds the papers, the README and both languages of the lessons against
+/// it, so the pages and the program can no longer drift apart.
 const HOT_BYTES_PER_NOTE: u64 = 516;
 
 /// Bytes one fallen note costs a node that keeps the whole cold set, measured
@@ -767,9 +780,12 @@ fn network_object(json: &mut Writer, params: &ConsensusParams) {
 
 /// The rules of the network, as one document a page can render.
 ///
-/// Every field here is consensus. Two nodes that disagree on any of them build
-/// different chains while believing they are on the same one, which is why the
-/// page shows them rather than describing them from memory.
+/// Every field here is consensus but one. Two nodes that disagree on any of
+/// them build different chains while believing they are on the same one, which
+/// is why the page shows them rather than describing them from memory. The one
+/// that is not is `bytesPerNote`, which is a measurement of this build and not
+/// a rule: it rides along because the capacity beside it means nothing to a
+/// reader without it.
 fn params(context: &Context<'_>) -> Response {
     let params = context.params();
     let mut json = Writer::new();
