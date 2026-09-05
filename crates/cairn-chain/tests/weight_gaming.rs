@@ -179,3 +179,249 @@ fn grace_respends_pay_the_same_rate_per_eviction() {
         "a grace re-spend evicts at {grace_per} pebbles/note against an ordinary payment's {ordinary_per}: the churn is underpriced by more than 2x, so the weight formula does not price eviction 'however the transfer is shaped'",
     );
 }
+
+/// The same door, one room along: the pool.
+///
+/// `accept_transfer` charges a transfer for the hot places it takes, counting
+/// only the inputs that were still in the tier. That is a fact about the state
+/// at the moment it arrived, and it was written down once and never asked
+/// again. So the shape the test above prices correctly on arrival went on
+/// being ranked at its arrival price for the whole grace window: pooled while
+/// its notes were hot, and still ranked as if they were hot once they had
+/// fallen and it was evicting one note per output.
+///
+/// A miner walks the pool from the best rate down, so the stale figure is not
+/// bookkeeping: it decides what goes in the next block.
+mod repricing {
+    use std::sync::LazyLock;
+
+    use cairn_chain::ChainStore;
+    use cairn_crypto::SecretKey;
+    use cairn_ledger::note::{Note, NoteId};
+    use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
+    use cairn_ledger::validation::{assemble_block, mine_block, ConsensusParams};
+    use cairn_primitives::codec::Encode;
+    use cairn_primitives::Amount;
+
+    use super::{fee_floor, transfer_weight, wallet, CAPACITY, NOW};
+
+    const ATTEMPTS: u64 = 1 << 20;
+
+    /// Maturity off, so a coinbase note can be spent as soon as it lands and
+    /// the tier can be churned in a handful of blocks.
+    fn params() -> ConsensusParams {
+        ConsensusParams::testnet()
+            .with_hot_capacity(CAPACITY)
+            .with_coinbase_maturity(0)
+    }
+
+    /// A chain with one note a block, so a fixed number of blocks pushes a
+    /// known number of notes out of the tier.
+    ///
+    /// Mining is the slow part and the notes are the same every run, so the
+    /// funded prefix is mined once for both tests.
+    struct Funded {
+        blocks: Vec<cairn_ledger::block::Block>,
+        notes: Vec<(NoteId, Note)>,
+    }
+
+    static FUNDED: LazyLock<Funded> = LazyLock::new(|| {
+        let params = params();
+        let mut store = ChainStore::archiving(params);
+        let mut blocks = Vec::new();
+        let mut notes = Vec::new();
+        let mut clock = 1_000_000u64;
+        for _ in 0..CAPACITY {
+            clock += 60;
+            let (block, note) = mine_one(&mut store, &wallet(1), clock);
+            notes.push(note);
+            blocks.push(block);
+        }
+        Funded { blocks, notes }
+    });
+
+    fn funded() -> (ChainStore, Vec<(NoteId, Note)>, u64) {
+        let mut store = ChainStore::archiving(params());
+        for block in &FUNDED.blocks {
+            store.add_block(block.clone(), NOW).unwrap();
+        }
+        (
+            store,
+            FUNDED.notes.clone(),
+            1_000_000 + 60 * CAPACITY as u64,
+        )
+    }
+
+    /// Mines one block paying `to` a single note.
+    fn mine_one(
+        store: &mut ChainStore,
+        to: &SecretKey,
+        clock: u64,
+    ) -> (cairn_ledger::block::Block, (NoteId, Note)) {
+        let params = *store.params();
+        let height = store.state().next_height().unwrap();
+        let note = Note::new(params.reward_at(height), to.public_key());
+        let coinbase = CoinbaseTransaction::new(height, vec![note]);
+        let block = assemble_block(
+            store.state(),
+            coinbase,
+            Vec::<Transfer>::new(),
+            &params,
+            clock,
+            0,
+        )
+        .unwrap();
+        let block = mine_block(block, ATTEMPTS).unwrap();
+        let id = NoteId::new(block.coinbase.id(), 0);
+        store.add_block(block.clone(), NOW).unwrap();
+        (block, (id, note))
+    }
+
+    /// Spends `notes` back to their owner, leaving `fee` behind altogether.
+    fn respend(
+        params: &ConsensusParams,
+        notes: &[(NoteId, Note)],
+        owner: &SecretKey,
+        fee: u64,
+    ) -> Transfer {
+        let each = fee / notes.len() as u64;
+        let first = fee - each * (notes.len() as u64 - 1);
+        let mut inputs = Vec::new();
+        let mut outputs = Vec::new();
+        for (index, (id, note)) in notes.iter().enumerate() {
+            let taken = if index == 0 { first } else { each };
+            inputs.push(Input::hot(*id));
+            outputs.push(Note::new(
+                Amount::from_pebbles(note.value.as_pebbles() - taken).unwrap(),
+                owner.public_key(),
+            ));
+        }
+        let mut transfer = Transfer::new(inputs, outputs);
+        for (index, (_, note)) in notes.iter().enumerate() {
+            transfer.sign_input(params.network, u32::try_from(index).unwrap(), note, owner);
+        }
+        transfer
+    }
+
+    /// What the same transfer weighs once its inputs have left the tier: the
+    /// shape's honest price, which is what `prune_pool` has to charge it.
+    fn weight_when_fallen(transfer: &Transfer) -> usize {
+        transfer_weight(transfer, transfer.encode().len(), 0)
+    }
+
+    /// Pushes `count` notes out of the tier by paying somebody else.
+    fn churn(store: &mut ChainStore, clock: &mut u64, count: usize) {
+        for _ in 0..count {
+            *clock += 60;
+            mine_one(store, &wallet(9), *clock);
+        }
+    }
+
+    /// A transfer paying exactly the floor for the places it took while its
+    /// notes were hot pays a fifth of the floor for the places it takes once
+    /// they have fallen. It used to go on waiting at the price it came in at.
+    #[test]
+    fn a_pooled_transfer_stops_paying_the_floor_when_its_notes_fall() {
+        let miner = wallet(1);
+        let (mut store, notes, mut clock) = funded();
+        let params = params();
+
+        let take = 4;
+        let hot = respend(&params, &notes[0..take], &miner, 1);
+        let hot_weight = transfer_weight(&hot, hot.encode().len(), take);
+        let fallen_weight = weight_when_fallen(&hot);
+        let fee = fee_floor(hot_weight).as_pebbles();
+
+        let transfer = respend(&params, &notes[0..take], &miner, fee);
+        let id = transfer.id();
+        assert!(
+            store.accept_transfer(transfer).unwrap(),
+            "it pays the floor"
+        );
+
+        // Enough blocks paying somebody else to push all four out of the tier.
+        churn(&mut store, &mut clock, take);
+
+        println!(
+            "weighed {hot_weight} hot and {fallen_weight} fallen; paid {fee} pebbles \
+             against a floor of {} once fallen",
+            fee_floor(fallen_weight).as_pebbles()
+        );
+        assert!(
+            fee < fee_floor(fallen_weight).as_pebbles(),
+            "the shape has to have become one the floor refuses"
+        );
+        assert!(
+            store.pooled(&id).is_none(),
+            "the pool went on holding, and offering to miners, a transfer that \
+             pays {fee} pebbles where its shape now costs {}",
+            fee_floor(fallen_weight).as_pebbles()
+        );
+    }
+
+    /// And what the stale figure actually bought: a place at the front of the
+    /// queue a miner walks.
+    ///
+    /// Two transfers, both valid, both paying the floor or better. The
+    /// re-spend pays exactly what its fallen shape costs; the ordinary payment
+    /// pays twice what its own shape costs. Priced honestly the payment is the
+    /// better of the two and is picked first. Priced at what the re-spend was
+    /// worth while its notes were hot, the re-spend wins by four to one.
+    #[test]
+    fn a_miner_picks_by_what_a_transfer_takes_now_rather_than_when_it_arrived() {
+        let miner = wallet(1);
+        let (mut store, notes, mut clock) = funded();
+        let params = params();
+
+        let take = 4;
+        let probe = respend(&params, &notes[0..take], &miner, 1);
+        let hot_weight = transfer_weight(&probe, probe.encode().len(), take);
+        let fallen_weight = weight_when_fallen(&probe);
+        let respend_fee = fee_floor(fallen_weight).as_pebbles();
+        let stale = respend_fee * 65_536 / hot_weight as u64;
+        let honest = respend_fee * 65_536 / fallen_weight as u64;
+
+        let sneak = respend(&params, &notes[0..take], &miner, respend_fee);
+        let sneak_id = sneak.id();
+        assert!(store.accept_transfer(sneak).unwrap());
+
+        // The four oldest fall; the newest four, including the one the
+        // ordinary payment spends, stay in the tier.
+        churn(&mut store, &mut clock, take);
+
+        let (last_id, last_note) = notes[CAPACITY - 1];
+        let probe = respend(&params, &[(last_id, last_note)], &miner, 1);
+        let payment_weight = transfer_weight(&probe, probe.encode().len(), 1);
+        let payment_fee = fee_floor(payment_weight).as_pebbles() * 2;
+        let payment_rate = payment_fee * 65_536 / payment_weight as u64;
+        let payment = respend(&params, &[(last_id, last_note)], &miner, payment_fee);
+        let payment_id = payment.id();
+        assert!(store.accept_transfer(payment).unwrap());
+
+        println!("re-spend: {stale} stale, {honest} honest; payment: {payment_rate}");
+        assert!(
+            honest < payment_rate && payment_rate < stale,
+            "the payment has to sit between the two prices for this to \
+             distinguish them: {honest} < {payment_rate} < {stale}"
+        );
+
+        // One more block, which is what makes the pool reconsider what it
+        // holds.
+        churn(&mut store, &mut clock, 1);
+
+        let (chosen, _) = store.selection(1);
+        let picked = chosen.first().map(Transfer::id);
+        assert_eq!(
+            picked,
+            Some(payment_id),
+            "the miner reached for the re-spend first, at the rate it was \
+             worth before its notes fell: {stale} against the payment's \
+             {payment_rate}, where its honest rate is {honest}"
+        );
+        assert!(
+            store.pooled(&sneak_id).is_some(),
+            "and the re-spend is still pooled, since it does pay its fallen \
+             floor: this is about the order, not about dropping it"
+        );
+    }
+}

@@ -29,6 +29,7 @@
 )]
 
 use cairn_chain::ChainStore;
+use cairn_ledger::block::BlockHeader;
 use cairn_ledger::validation::ConsensusParams;
 
 /// Thirty years of a block a minute.
@@ -40,9 +41,21 @@ const PAYMENT_BYTES: u64 = 191;
 const NOTES_PER_PAYMENT: u64 = 1;
 
 /// A leaf and the inner node above it, which is what a forest holds per item.
-const ARCHIVED_BYTES: u64 = 64;
+///
+/// Structural, and worth saying so: a forest of `n` leaves holds `n` of them
+/// and `n - 1` nodes above, at thirty two bytes each, so it costs two hashes
+/// an item on disk. It is not a reading of a process, and it must not be
+/// quoted as one. The whitepaper's "about 64 bytes for every note that has
+/// ever fallen" is a separate number that happens to land in the same place:
+/// that one is an archiving node's memory, measured with `footprint` over 3.2
+/// million notes. Two numbers, two provenances, and only this one is exact.
+const ARCHIVED_BYTES: u64 = 2 * 32;
 /// What a header takes on disk, which is what it takes on the wire.
-const HEADER_BYTES: u64 = 182;
+///
+/// Taken from the type rather than written out. `cairn-store` refuses to open
+/// a header log when this number moves, because its records are laid out for
+/// it; an example has nothing to refuse and would go on printing the old one.
+const HEADER_BYTES: u64 = BlockHeader::ENCODED_BYTES as u64;
 
 fn main() {
     let params = ConsensusParams::testnet();

@@ -30,6 +30,7 @@ use cairn_primitives::hash::{hash, Domain};
 use cairn_primitives::Hash32;
 
 use crate::block::{BlockHeader, HeaderSummary};
+use crate::note::NetworkId;
 use crate::pow::{
     median_time_past, meets_target, next_difficulty, work_of, DIFFICULTY_WINDOW,
     MAX_RETARGET_FACTOR, MIN_DIFFICULTY,
@@ -87,10 +88,20 @@ use crate::validation::ConsensusParams;
 /// **40%**, which leaves three points of margin for the difference between a
 /// staircase of halvings and the smooth density it stands for.
 ///
-/// What that costs is eight megabytes to join a chain rather than one, against
-/// the forty-eight gigabytes it replaces. What it buys back is [`SHALLOWEST`]:
-/// the draw stops resolving 1024 blocks from the tip, which cuts `levels` from
-/// twenty-four to fourteen and the count with it.
+/// What that costs is about three megabytes to weigh a thirty-year chain,
+/// against the three gigabytes of headers it replaces reading. What it buys
+/// back is [`SHALLOWEST`]: the draw stops resolving 1024 blocks from the tip,
+/// which cuts `levels` from twenty-four to fourteen and the count with it.
+///
+/// The three megabytes are derived rather than guessed, in
+/// `examples/history.rs`: a header per draw plus the path beside it, and a
+/// path is as long as the tree the draw lands in. The figure here used to be
+/// eight, from a count that predates this derivation multiplied by a path of
+/// sixty-four hashes. Sixty-four is the deepest a forest can ever hold; thirty
+/// years of blocks make a forest whose largest tree is twenty-three, and the
+/// draw spends most of its levels in trees smaller than that. So the old
+/// figure was an upper bound on a chain nobody will live to see, quoted as the
+/// cost of joining this one.
 ///
 /// **The guarantee is a depth, and it is worth stating as one.** A forger at
 /// 40% cannot put a newcomer on a branch differing from the real one by more
@@ -209,6 +220,18 @@ pub struct SampledStart {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum StartError {
+    #[error("the header at {height} belongs to network {found:?}, this node follows {expected:?}")]
+    WrongNetwork {
+        height: u64,
+        expected: NetworkId,
+        found: NetworkId,
+    },
+    #[error("the header at {height} is dated {found}, before this network opened at {opens_at}")]
+    BeforeTheNetworkOpened {
+        height: u64,
+        opens_at: u64,
+        found: u64,
+    },
     #[error("the tip carries no work")]
     TipWithoutWork,
     #[error("the tip claims no work at all")]
@@ -513,6 +536,59 @@ pub fn draw(seed: Hash32, count: usize, total_work: u128, blocks: u64) -> Vec<u1
     drawn
 }
 
+/// Whether a header is one this network could have produced.
+///
+/// Two fields [`crate::validation::check_header`] puts every block through,
+/// and that nothing on the joining path read at all. A node with no chain is
+/// the one reader that cannot fall back on comparing what it is offered
+/// against what it already has, so it is the reader these matter most to, and
+/// it was the only one not asking.
+///
+/// The network identifier is what the whole numbering scheme rests on: a
+/// network that has to change a rule starts over and takes the next number, so
+/// that a node still on the old one "is told plainly that it is on another
+/// network, rather than failing somewhere confusing". A newcomer could be
+/// weighed onto another network's chain, take its ledger, and then refuse
+/// every block that chain went on to produce, which is exactly the confusing
+/// failure the number exists to prevent. It costs one comparison.
+///
+/// The opening moment is the sharper of the two. `opens_at` is published ahead
+/// of a launch so that "whoever knew about the network first cannot have mined
+/// it quietly the week before, because every node refuses blocks dated
+/// earlier". Every node did not: a chain premined before the opening carries
+/// the extra work that head start bought, and a newcomer weighed it, took it,
+/// and sat on a chain every established node refuses. Re-dating those blocks
+/// forward is not a way out, because a header's difficulty is part of its
+/// identifier and the retarget would have demanded a different one for blocks
+/// spaced that way, so the head start has to be worn where it was earned.
+///
+/// Neither check can refuse an honest chain: every honest header went through
+/// `check_header` on the way in and carries both. What they cover is every
+/// header this exchange actually sees, which is the tip, its parent, the run
+/// up to the tip, and whatever the draw opened. A header nobody opened is
+/// still unexamined, and on a young chain, where a head start is worth a large
+/// share of the total, that is where the draw is looking.
+fn belongs_to_this_network(
+    header: &BlockHeader,
+    params: &ConsensusParams,
+) -> Result<(), StartError> {
+    if header.network != params.network {
+        return Err(StartError::WrongNetwork {
+            height: header.height,
+            expected: params.network,
+            found: header.network,
+        });
+    }
+    if header.timestamp < params.opens_at {
+        return Err(StartError::BeforeTheNetworkOpened {
+            height: header.height,
+            opens_at: params.opens_at,
+            found: header.timestamp,
+        });
+    }
+    Ok(())
+}
+
 /// Checks that a tip really has the work it claims, on the strength of the
 /// headers opened for it.
 ///
@@ -555,6 +631,7 @@ pub fn check_start(
     params: &ConsensusParams,
 ) -> Result<Weighed, StartError> {
     let tip = &start.tip;
+    belongs_to_this_network(tip, params)?;
     if !meets_target(&tip.id(), tip.difficulty) {
         return Err(StartError::TipWithoutWork);
     }
@@ -587,6 +664,7 @@ pub fn check_start(
 
     for (index, (sample, drawn)) in start.samples.iter().zip(wanted.iter()).enumerate() {
         let header = &sample.header;
+        belongs_to_this_network(header, params)?;
         if !meets_target(&header.id(), header.difficulty) {
             return Err(StartError::SampleWithoutWork { index });
         }
@@ -607,7 +685,7 @@ pub fn check_start(
         }
     }
 
-    check_the_parent(start)?;
+    check_the_parent(start, params)?;
     check_the_gaps(start)?;
     check_the_tail(start, now, params)?;
 
@@ -672,6 +750,7 @@ fn check_the_tail(
     let mut previous: Option<&BlockHeader> = None;
     let mut carried_the_pinned = false;
     for header in &start.tail {
+        belongs_to_this_network(header, params)?;
         if !meets_target(&header.id(), header.difficulty) {
             return Err(StartError::TailWithoutWork { at: header.height });
         }
@@ -735,7 +814,7 @@ fn check_the_tail(
 /// all three, and mining one that does means mining on the chain it claims,
 /// which is the honest thing this whole exchange is trying to tell apart from
 /// the rest.
-fn check_the_parent(start: &SampledStart) -> Result<(), StartError> {
+fn check_the_parent(start: &SampledStart, params: &ConsensusParams) -> Result<(), StartError> {
     let tip = &start.tip;
     let Some(below) = tip.height.checked_sub(1) else {
         // One block long, so there is nothing under it to open.
@@ -745,6 +824,7 @@ fn check_the_parent(start: &SampledStart) -> Result<(), StartError> {
         return Err(StartError::ParentNotOpened);
     };
     let header = &parent.header;
+    belongs_to_this_network(header, params)?;
     if header.height != below || header.id() != tip.previous {
         return Err(StartError::ParentNotTheTipsOwn);
     }
@@ -1034,8 +1114,11 @@ mod tests {
         // of a hundred thousand blocks the finest band is a hundred and
         // twenty-eight of them wide, so the last stretch is never drawn from
         // at all. That is deliberate: see SHALLOWEST. What it costs is stated
-        // as a depth rather than hidden, and what it buys is a count that is
-        // eight megabytes instead of a hundred.
+        // as a depth rather than hidden, and what it buys is the count: the
+        // draw is worth `1/levels` per question, so resolving to one block in
+        // thirty years would take twenty-four levels where this takes
+        // fourteen, and the same guarantee would cost seven thousand draws
+        // instead of four.
         let bands = levels_for(100_000);
         let unresolved = total >> bands;
         assert!(

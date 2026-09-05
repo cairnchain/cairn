@@ -93,24 +93,33 @@ mod tests {
         }
     }
 
+    /// Every pebble the halvings pay out, read off the shipped schedule.
+    ///
+    /// An era pays one reward for the whole interval, so an era is a
+    /// multiplication rather than a walk of a million heights.
+    /// `tests/audit_emission.rs` sums the same schedule height by height and
+    /// arrives at the same figure, which is what makes either of them worth
+    /// reading.
+    fn before_the_floor() -> u128 {
+        let mut total: u128 = 0;
+        let mut height = 0u64;
+        while reward(height) > tail() {
+            total = total.saturating_add(
+                u128::from(reward(height).as_pebbles())
+                    .saturating_mul(u128::from(HALVING_INTERVAL)),
+            );
+            height = height.saturating_add(HALVING_INTERVAL);
+        }
+        total
+    }
+
     #[test]
     fn what_the_halvings_add_up_to() {
         // A geometric series: the whole schedule before the floor is twice what
         // one interval pays at the starting rate.
-        let mut total: u128 = 0;
-        let mut height = 0u64;
-        while reward(height) > tail() {
-            total = total
-                .saturating_add(u128::from(reward(height).as_pebbles()))
-                .saturating_mul(1);
-            for _ in 0..HALVING_INTERVAL.saturating_sub(1) {
-                total = total.saturating_add(u128::from(reward(height).as_pebbles()));
-            }
-            height = height.saturating_add(HALVING_INTERVAL);
-        }
-        let in_cairn = total / u128::from(PEBBLES_PER_CAIRN);
-        assert!(
-            (104_000_000..=106_000_000).contains(&in_cairn),
+        let in_cairn = before_the_floor() / u128::from(PEBBLES_PER_CAIRN);
+        assert_eq!(
+            in_cairn, 105_107_167,
             "the schedule before the floor pays out {in_cairn} CAIRN"
         );
     }
@@ -122,12 +131,18 @@ mod tests {
         let yearly = blocks_per_year.saturating_mul(u128::from(tail().as_pebbles()))
             / u128::from(PEBBLES_PER_CAIRN);
         assert_eq!(yearly, 5_256);
-        // Against the twenty one million the halvings pay out, that is under a
-        // tenth of a percent a year, and the share only falls as the total
-        // grows.
+        // Under a tenth of a percent a year of what the halvings pay out, and
+        // the share only falls as the total grows.
+        //
+        // Measured against the schedule rather than against a number written
+        // here. The number written here was twenty one million: Bitcoin's, in
+        // the one file whose whole subject is that this schedule is not
+        // Bitcoin's. It went unnoticed because the claim held either way, and
+        // holds by five times the margin against the real figure.
+        let whole = before_the_floor() / u128::from(PEBBLES_PER_CAIRN);
         assert!(
-            yearly * 1_000 < 21_000_000,
-            "{yearly} CAIRN a year is not small enough"
+            yearly.saturating_mul(1_000) < whole,
+            "{yearly} CAIRN a year is not a tenth of a percent of {whole}"
         );
     }
 }

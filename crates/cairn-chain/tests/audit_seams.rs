@@ -597,20 +597,181 @@ fn the_disk_is_trimmed_to_the_burial_and_read_back_from_the_reorg_depth() {
     assert!(
         cut_at(tip, devnet.burial) > reads_back_from(tip),
         "and on devnet the log is cut {} blocks above the deepest height the \
-         chain still expects to read a body back from",
+         chain holds an undo record for",
         cut_at(tip, devnet.burial) - reads_back_from(tip)
     );
     assert_eq!(
         cut_at(tip, devnet.burial) - reads_back_from(tip),
         depth - devnet.burial,
-        "the gap is exactly the difference between the two numbers, and \
-         nothing anywhere compares them"
+        "the gap is exactly the difference between the two numbers"
     );
+
+    // What compares them is the switch itself, and it is measured against a
+    // third number that is at or below both: `undo_limit`, the smallest of
+    // `MAX_REORG_DEPTH` and the burial, which is what `follow` refuses on and
+    // therefore the deepest height a rewind ever reaches for.
+    //
+    // So the gap above is memory held for nothing, not a body in neither
+    // place that anything asks for. Held on purpose: see the note on
+    // `forget_what_cannot_change`, which is where following the burial here
+    // would cost more than it saves.
+    for name in ["testnet-6", "devnet"] {
+        let network = ConsensusParams::for_network(name).unwrap();
+        let reaches = tip
+            .saturating_sub(depth.min(network.burial))
+            .saturating_add(1);
+        assert!(
+            cut_at(tip, network.burial) <= reaches,
+            "{name}: the log is cut to {}, above the {reaches} the deepest \
+             switch this network allows still reads a body at",
+            cut_at(tip, network.burial)
+        );
+        assert!(
+            reads_back_from(tip) <= reaches,
+            "{name}: the undo records reach {}, above the {reaches} the \
+             deepest switch this network allows still removes one at",
+            reads_back_from(tip)
+        );
+    }
 }
 
-/// The consequence of that gap, on a chain, with no disk failure anywhere:
-/// the node cut its own log where its rules told it to, and then could not
-/// put a branch back.
+/// The deepest switch a node's own rules allow, on a log its own rules
+/// trimmed, reading back everything the switch has to put back.
+///
+/// This is the boundary the two floors meet at, and on every public network
+/// they meet with no margin at all. The burial here is eighty, which is above
+/// the sixty four bodies a chain keeps warm, so the bottom of the rewind is
+/// read off the disk rather than found in memory: `tip - burial + 1` is the
+/// first record the log still holds and the first body the switch asks for,
+/// and they are the same height.
+///
+/// Both halves are taken from one `ConsensusParams`, which is what
+/// `trim_history` does: it cuts to `chain_tip - params.burial`, the same
+/// `params` the chain refuses a switch with. Nothing here contrives a
+/// mismatch between the two.
+#[test]
+fn a_switch_as_deep_as_the_rules_allow_finds_every_body_it_needs() {
+    // Above the sixty four kept warm, so the deep end of the rewind is a read
+    // and not a lookup, and small enough to mine in a test.
+    let burial = 80u64;
+    let rules = params().with_burial(burial);
+
+    let miner = wallet(1);
+    let shelf = Arc::new(Shelf::default());
+    let mut store = ChainStore::new(rules);
+    store.reads_bodies_from(shelf.clone());
+
+    let mut source = Source::new();
+    let mut blocks = Vec::new();
+    source.run(&miner, 81, &mut blocks);
+    // A switch from here is exactly `burial` deep, which is the deepest the
+    // rules allow.
+    let at_the_limit = source.clone();
+    source.run(&miner, 80, &mut blocks);
+
+    for block in &blocks {
+        shelf.put(block);
+        store.add_block(block.clone(), NOW).unwrap();
+    }
+    let tip = store.height().unwrap();
+    let tip_id = store.tip().unwrap();
+    assert_eq!(tip, 160);
+    assert_eq!(store.undo_limit(), burial);
+
+    // What a node does after every write, and then what `trim_history` does
+    // once the log is over its budget: cut to the anchor, `tip - burial`, and
+    // keep everything above it.
+    store.release_bodies(0, tip + 1);
+    let cut = tip - burial + 1;
+    for height in 0..cut {
+        shelf.lose(height);
+    }
+
+    let held: Vec<u64> = (0..=tip)
+        .filter(|height| store.block_at(*height).is_some())
+        .collect();
+    let read: Vec<u64> = (0..=tip)
+        .filter(|height| store.block_at(*height).is_none() && shelf.body(*height).is_some())
+        .collect();
+    println!(
+        "log cut to {cut}; bodies in memory from {}; read off the disk {}..={}",
+        held[0],
+        read[0],
+        read[read.len() - 1]
+    );
+    assert_eq!(
+        read[0], cut,
+        "the deep end of the switch is a disk read, which is what makes this \
+         the boundary worth measuring"
+    );
+
+    // A rival forking one block deeper than the rules allow is turned away by
+    // the rule, before anything asks a disk for anything. Its first block sits
+    // at exactly the floor `add_block` refuses below, so it is held; what
+    // refuses it is the depth, and the two guards meet with nothing between
+    // them.
+    let mut too_deep = Source::new();
+    let mut ignored = Vec::new();
+    too_deep.run(&miner, 80, &mut ignored);
+    let mut past_the_limit = Vec::new();
+    too_deep.run(&wallet(4), 82, &mut past_the_limit);
+    let refused = past_the_limit
+        .into_iter()
+        .map(|block| store.add_block(block, NOW))
+        .find(Result::is_err);
+    assert!(
+        matches!(
+            refused,
+            Some(Err(ChainError::ForkTooDeep { depth, limit }))
+                if depth as u64 == burial + 1 && limit == burial
+        ),
+        "one deeper than the rules allow is refused by the rule: {refused:?}"
+    );
+    assert_eq!(store.height(), Some(tip), "and the branch did not move");
+
+    // And the deepest switch the rules do allow, ending in a block that will
+    // not apply, so the whole of what it undid has to go back.
+    let mut rival = at_the_limit;
+    let mut branch = Vec::new();
+    rival.run(&wallet(3), 81, &mut branch);
+    let last = branch.len() - 1;
+    branch[last].header.state_root = Hash32::from_bytes([0xcd; 32]);
+
+    let mut verdict = None;
+    for block in branch {
+        verdict = Some(store.add_block(block, NOW));
+    }
+    assert!(
+        matches!(
+            verdict,
+            Some(Err(ChainError::InvalidBlock {
+                source: cairn_ledger::validation::BlockError::StateRootMismatch { .. },
+                ..
+            }))
+        ),
+        "the last block is the only thing wrong here: {verdict:?}"
+    );
+    assert_eq!(
+        store.height(),
+        Some(tip),
+        "a switch of {burial} blocks read back every body it had let go of \
+         and put the branch it left back where it was"
+    );
+    assert_eq!(store.tip(), Some(tip_id), "and on the same tip");
+}
+
+/// The same shape with the two numbers pulled apart on purpose: a log cut
+/// deeper than the node's own rules would ever cut it.
+///
+/// `trim_history` cannot produce this, because it takes the burial it cuts to
+/// and the burial it refuses a switch with from one `ConsensusParams`. What
+/// produces it is a disk that came from somewhere else: a directory carried
+/// between builds, a log restored from a backup taken under other rules, an
+/// operator's hand. So this is not the gap between `MAX_REORG_DEPTH` and the
+/// burial; it is a log that disagrees with the chain above it.
+///
+/// What it establishes is the half that has to hold however the bodies went
+/// missing: the node loses height, and is not stranded there.
 ///
 /// The shelf here is cut to `tip - burial + 1` with a devnet-shaped burial,
 /// which is what `BlockLog::keep_from(cut)` does. Everything else is an

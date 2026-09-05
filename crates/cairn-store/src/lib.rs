@@ -269,6 +269,20 @@ pub struct BlockLog {
     /// over them, which is the moment nothing could reach them again anyway,
     /// and going then is what stops every later start from walking them.
     trailing: u64,
+    /// Whether the two handles above are still on the two files this log
+    /// names.
+    ///
+    /// True for the whole of an ordinary life. It goes false in one place: a
+    /// compaction that let go of both handles and could not get them back.
+    /// The log is then holding a scratch file that has been deleted, and a
+    /// write to it lands on an inode nothing can ever read again.
+    ///
+    /// This is not the same as holding nothing, and the difference is what a
+    /// node does next. A log that holds nothing is written from the start of
+    /// the branch; a log that is not a log has to refuse, so that the gap
+    /// between the chain and the disk opens where the node is watching for it
+    /// instead of being closed by writes that go nowhere.
+    usable: bool,
 }
 
 impl BlockLog {
@@ -309,6 +323,7 @@ impl BlockLog {
             first: 0,
             end: 0,
             trailing: 0,
+            usable: true,
         };
         let recovered = log.recover()?;
         Ok((log, recovered))
@@ -433,19 +448,50 @@ impl BlockLog {
         self.file = hold(&scratch)?;
         self.index = hold(&scratch)?;
 
-        std::fs::rename(&staged_log, &self.path)?;
-        std::fs::rename(&staged_index, &index_path)?;
-        // A rename changes the directory rather than either file, so syncing
-        // the files leaves it exactly as unrecorded as it was. Without this a
-        // machine that loses power here comes back to the directory it had
-        // before, holding a log that was moved out of it.
-        sync_directory(&self.directory)?;
-
-        self.file = OpenOptions::new().read(true).write(true).open(&self.path)?;
-        self.index = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&index_path)?;
+        // From here the handles are on a scratch file, so what this struct
+        // says about itself and what it can actually read have parted company
+        // until they are put back together. Nothing below may leave with `?`.
+        //
+        // It used to. A rename that failed, a directory that would not sync,
+        // or a reopen refused took the error straight out of here with the
+        // handles still on the scratch file and `count`, `first` and `end`
+        // still describing the log that is no longer there. Measured on a
+        // twenty record log whose reopen was refused: it went on reporting
+        // twenty records from height zero, gave an unexpected end of file for
+        // the block at height fifteen, replayed one record instead of twenty,
+        // and then took an append and reported it written. That block went
+        // into `blocks.log.hold`, which the next start deletes. The node saw
+        // no gap, because the append succeeded, so nothing anywhere said the
+        // chain was no longer being written down.
+        let put_back = || -> Result<(File, File), StoreError> {
+            std::fs::rename(&staged_log, &self.path)?;
+            std::fs::rename(&staged_index, &index_path)?;
+            sync_directory(&self.directory)?;
+            let file = OpenOptions::new().read(true).write(true).open(&self.path)?;
+            let index = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&index_path)?;
+            Ok((file, index))
+        };
+        let (file, index) = match put_back() {
+            Ok(handles) => handles,
+            Err(error) => {
+                // What is left cannot be read, so nothing here may go on
+                // saying it can. Saying nothing is what would let the appends
+                // carry on into the scratch file; saying nothing *and* that
+                // this is not a log is what puts the gap where the node is
+                // watching for it.
+                self.count = 0;
+                self.first = 0;
+                self.end = 0;
+                self.trailing = 0;
+                self.usable = false;
+                return Err(error);
+            }
+        };
+        self.file = file;
+        self.index = index;
         let _ = std::fs::remove_file(&scratch);
 
         self.count = ends.len();
@@ -485,6 +531,17 @@ impl BlockLog {
     /// for again, which is what a torn write has always cost here. The other
     /// order would leave an offset pointing at bytes that were never written.
     pub fn append(&mut self, block: &Block) -> Result<(), StoreError> {
+        // A compaction that could not put this back on its own files leaves
+        // the handles below on a deleted scratch file. Writing there returns
+        // success and reaches nobody, which is the one failure a node cannot
+        // see: it is the appends that tell it the disk is keeping up.
+        if !self.usable {
+            return Err(StoreError::Io(std::io::Error::other(
+                "this log is not on the files it names: a compaction could not \
+                 open them again",
+            )));
+        }
+
         // A log whose positions do not line up with heights would serve the
         // wrong block to everyone catching up, confidently. The first block
         // sets where the log starts; every one after it has to follow on.

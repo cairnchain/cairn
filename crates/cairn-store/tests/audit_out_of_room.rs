@@ -1016,3 +1016,82 @@ fn making_room_holds_everything_it_keeps_in_one_allocation() {
     }
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// The claim: a compaction that cannot finish leaves a log that can account
+/// for itself, rather than one describing files it no longer holds.
+///
+/// `keep_from` lets go of both handles before it renames anything, because
+/// Windows will not rename over an open file. Between letting go and getting
+/// them back there are four things that can fail, and every one of them used
+/// to leave with `?`: the handles stayed on the scratch file, and `count`,
+/// `first` and `end` went on describing the log that was no longer there.
+///
+/// What that cost is not a bad read. A node reads its log rarely and appends
+/// to it every block, and the appends went on succeeding: into a scratch file
+/// the next start deletes. The node saw no gap between its chain and its disk,
+/// because the writes returned success, so the one watch that would have
+/// stopped it never fired.
+///
+/// The failure is injected at the reopen, which is the last of the four and
+/// the only one that can be made to fail without a filesystem to break: the
+/// staged log is put there first with no read permission, `fs::write` keeps
+/// the mode of a file already present, and the rename carries it into place.
+#[cfg(unix)]
+#[test]
+fn a_compaction_that_cannot_finish_leaves_a_log_that_says_so() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = scratch("compaction-interrupted");
+    let blocks = chain(20);
+    let (mut log, _) = BlockLog::open(&directory).unwrap();
+    for block in &blocks {
+        log.append(block).unwrap();
+    }
+    assert_eq!(log.len(), blocks.len());
+
+    let staged = directory.join(format!("{BLOCK_LOG}.part"));
+    std::fs::write(&staged, b"").unwrap();
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o200)).unwrap();
+
+    let refused = log.keep_from(10);
+    assert!(refused.is_err(), "the reopen has to fail: {refused:?}");
+
+    // What it says about itself is now true of what it can reach.
+    assert_eq!(
+        log.len(),
+        0,
+        "it claimed {} records it cannot read",
+        log.len()
+    );
+    assert!(!log.holds(15));
+    assert!(matches!(log.read_at(15), Ok(None)));
+    assert_eq!(log.replay().count(), 0);
+
+    // And the one call a node makes every block is refused rather than
+    // answered by a write that reaches nobody.
+    let next = &blocks[19];
+    assert!(
+        log.append(next).is_err(),
+        "an append onto a log that lost its files was taken and reported \
+         written, and the block went into a scratch file the next start deletes"
+    );
+    assert_eq!(log.len(), 0, "and it did not count one either");
+
+    // The blocks themselves are on the disk, where the compaction put them, so
+    // a start that can open the file finds the compacted log waiting.
+    drop(log);
+    std::fs::set_permissions(
+        directory.join(BLOCK_LOG),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    let (log, _) = BlockLog::open(&directory).expect("and it opens again");
+    assert_eq!(log.len(), blocks.len() - 10);
+    assert_eq!(log.first_height(), 10);
+    let back: Vec<_> = log.replay().map(|block| block.unwrap().id()).collect();
+    for (position, id) in back.iter().enumerate() {
+        assert_eq!(*id, blocks[position + 10].id());
+    }
+    drop(log);
+    let _ = std::fs::remove_dir_all(&directory);
+}

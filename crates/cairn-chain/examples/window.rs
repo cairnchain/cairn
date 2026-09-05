@@ -35,10 +35,18 @@ use cairn_primitives::codec::Encode;
 use cairn_primitives::hash::{hash, Domain};
 use cairn_primitives::{Amount, Hash32};
 
-/// Bodies a node keeps warm behind its tip, from `cairn_chain`.
-const WARM_BODIES: u64 = 64;
+/// Bodies a node keeps warm behind its tip.
+///
+/// Read from the chain rather than copied, because a figure published here is
+/// a figure somebody quotes: a copy that stopped agreeing with the store would
+/// go on being printed with nothing to say so.
+const WARM_BODIES: u64 = cairn_chain::WARM_BODIES;
 /// What a header takes, which is what is left once a body is let go of.
-const HEADER_BYTES: u64 = 182;
+///
+/// Taken from the type for the same reason. `cairn-store` refuses to open a
+/// log when this number moves, because its records are laid out for it; an
+/// example has nothing to refuse and would simply print the old one.
+const HEADER_BYTES: u64 = BlockHeader::ENCODED_BYTES as u64;
 
 /// Copies held at once, enough for the measurement to rise above the noise.
 const COPIES: usize = 256;
@@ -171,8 +179,30 @@ fn empty_header() -> BlockHeader {
     }
 }
 
+/// What this process actually occupies, as the kernel charges it.
+///
+/// `ps -o rss=` counts resident pages and nothing else, and the pages a memory
+/// compressor has taken away are not resident. That is the instrument that
+/// published the cold set at 9 MB where the process was holding 204, a
+/// twenty-one-fold under-report in the direction that flatters, and the
+/// whitepaper names it rather than quietly correcting it. The blocks measured
+/// here are written and dropped in the same second, so nothing has been
+/// compressed and the two instruments agreed to within a tenth of a per cent
+/// when this was checked. Agreeing by luck is not a reason to keep the wrong
+/// one.
+///
+/// `footprint` is macOS only, so `ps` stays as the fallback: the number it
+/// gives here is the right one, and it is the only reading available where
+/// `footprint` is not. The same pair is in `cairn-ledger/examples/undo_total.rs`,
+/// copied because the two crates share nothing that could hold it.
 fn resident_bytes() -> Option<u64> {
     let pid = std::process::id().to_string();
+    if let Ok(output) = Command::new("footprint").arg("-p").arg(&pid).output() {
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        if let Some(bytes) = phys_footprint(&text) {
+            return Some(bytes);
+        }
+    }
     let output = Command::new("ps")
         .args(["-o", "rss=", "-p", &pid])
         .output()
@@ -180,6 +210,27 @@ fn resident_bytes() -> Option<u64> {
     let text = String::from_utf8(output.stdout).ok()?;
     let kilobytes: u64 = text.trim().parse().ok()?;
     Some(kilobytes.saturating_mul(1_024))
+}
+
+/// The physical footprint out of what `footprint` printed, in bytes.
+fn phys_footprint(report: &str) -> Option<u64> {
+    for line in report.lines() {
+        let Some(rest) = line.split("phys_footprint:").nth(1) else {
+            continue;
+        };
+        let mut parts = rest.split_whitespace();
+        let (Some(value), Some(unit)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let value: f64 = value.parse().ok()?;
+        return Some(match unit {
+            "GB" => (value * 1_073_741_824.0) as u64,
+            "MB" => (value * 1_048_576.0) as u64,
+            "KB" => (value * 1_024.0) as u64,
+            _ => value as u64,
+        });
+    }
+    None
 }
 
 fn format_bytes(bytes: u64) -> String {

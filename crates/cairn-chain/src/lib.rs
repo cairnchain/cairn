@@ -137,18 +137,29 @@ fn rate(fee: Amount, weight: usize) -> u128 {
 
 /// A transfer waiting for a block, with what it pays and what it takes.
 ///
-/// All three are worked out once, when it arrives. The fee against the weight
-/// decides what it displaces and what a miner reaches for first; the bytes
-/// decide whether there is room. Reading any of them again from the transfer
-/// itself would mean encoding it or revalidating it on every comparison.
+/// Only the bytes are settled by the transfer itself. The fee against the
+/// weight decides what it displaces and what a miner reaches for first, and
+/// both of those move with the state, so both are worked out again whenever
+/// the followed branch does: see `ChainStore::prune_pool`.
 #[derive(Clone, Debug)]
 struct Pooled {
     transfer: Transfer,
     fee: Amount,
     bytes: usize,
     /// Bytes plus the hot set places taken, which is what the fee is measured
-    /// against. Fixed by the transfer's shape, so unlike the fee it never has
-    /// to be worked out again.
+    /// against.
+    ///
+    /// This used to say it was fixed by the transfer's shape and never worked
+    /// out again, which is what [`transfer_weight`] says it is not: a note
+    /// that falls stops giving a hot place back when it is spent, so the same
+    /// transfer takes one more place than it did the block before. What the
+    /// stale figure bought was the discount [`NOTE_WEIGHT`] exists to close,
+    /// through the pool instead of through the rules. Measured on a tier of
+    /// eight, a four-note re-spend admitted while its notes were hot weighed
+    /// 574 and went on being ranked at 574 once they had fallen and it
+    /// weighed 2622: four and a half times its true rate, held for the whole
+    /// grace window, and picked ahead of payments that really did pay more
+    /// for what they took.
     weight: usize,
 }
 
@@ -224,7 +235,12 @@ const MAX_SIDE_BYTES: usize = 32 * 1024 * 1024;
 /// produces off the disk. Beyond this a switch costs some reading, which is
 /// the right trade for an event that deep: it is rare, and the alternative is
 /// holding hundreds of megabytes against it.
-const WARM_BODIES: u64 = 64;
+///
+/// Public because `examples/window.rs` publishes what a node holds in memory,
+/// and that figure is this number times the size of a block. It was copied
+/// there as a literal, which is a published number that would have gone on
+/// being published after this one moved.
+pub const WARM_BODIES: u64 = 64;
 
 /// Identifiers of blocks known to be invalid, held before the set is cleared.
 ///
@@ -1325,12 +1341,28 @@ impl ChainStore {
                 &BTreeMap::new(),
                 &params,
             ) {
-                // The fee is worked out again rather than carried over: what a
-                // transfer pays depends on the state, and the state is what
-                // moved. What it takes does not, so that is kept.
+                // Both halves of the rate are worked out again rather than
+                // carried over. What a transfer pays depends on the state, and
+                // the state is what moved; what it takes depends on the state
+                // for exactly the same reason, which the note on
+                // [`transfer_weight`] sets out and the note here used to deny.
+                // Only the bytes are settled by the transfer itself.
                 Ok(outcome) => {
+                    let weight =
+                        transfer_weight(&held.transfer, held.bytes, outcome.spent_hot.len());
+                    // And the floor is asked again, because the floor is asked
+                    // of a weight and the weight is not the one it was asked of
+                    // before. A transfer that arrived now would be refused;
+                    // one that came back through `repool` after a
+                    // reorganisation is refused, by `accept_transfer`, on these
+                    // same numbers. Merely having waited was the one way past
+                    // it, and waiting is what a note falling takes.
+                    if outcome.fee < fee_floor(weight) {
+                        return false;
+                    }
                     held.fee = outcome.fee;
-                    kept.insert((rate(outcome.fee, held.weight), *id));
+                    held.weight = weight;
+                    kept.insert((rate(outcome.fee, weight), *id));
                     bytes = bytes.saturating_add(held.bytes);
                     true
                 }
@@ -1797,9 +1829,32 @@ impl ChainStore {
 
     /// Lets go of blocks now deeper than [`MAX_REORG_DEPTH`].
     ///
-    /// Past that depth a block can no longer be undone, which is a rule this
-    /// store enforces rather than a hope. So what is held for it is held for
-    /// nothing: the record of how to undo it, and the block itself.
+    /// Sized by the constant and not by [`Self::undo_limit`], which is the
+    /// rule that actually refuses a switch. On every public network the two
+    /// are the same number. Below one that buries shallower, this holds undo
+    /// records and block entries no switch can reach, and that is deliberate.
+    ///
+    /// It is not held for the undo records. It is held for the headers. An
+    /// entry keeps its header whatever happens to its body, this is the only
+    /// thing that drops the entry, and [`Self::held_from`] is the height a
+    /// node's header log resumes at after a write it could not make.
+    /// `cairn-net` lets that gap reach `MAX_BEHIND` blocks before it stops the
+    /// node, under a build-time assertion that `MAX_BEHIND < MAX_REORG_DEPTH`.
+    /// A build-time assertion cannot see `params.burial`. Following the burial
+    /// here would leave that assertion compiling and its meaning gone: on a
+    /// network burying shallower than the gap it allows, the headers would be
+    /// let go of while the node still called the gap fillable, and a node
+    /// whose disk refused one write would quietly stop being able to show
+    /// anyone the chain.
+    ///
+    /// What the excess costs is memory for records nothing will read, bounded
+    /// by the constant like every other ceiling here. What it must not cost is
+    /// a body in neither memory nor the log that a switch still asks for, and
+    /// it does not: a switch reaches no deeper than `tip - undo_limit() + 1`,
+    /// and a log is cut no deeper than `tip - burial + 1`, which is at or
+    /// below it because `undo_limit` is the smaller of the two numbers.
+    /// `a_switch_as_deep_as_the_rules_allow_finds_every_body_it_needs`
+    /// measures that boundary on a chain rather than arguing it.
     ///
     /// Dropping the block is what keeps a node's memory from growing with the
     /// chain. A node that kept every block it ever applied would be carrying
@@ -1839,9 +1894,19 @@ impl ChainStore {
     /// a ledger anchored at a block this node went on to orphan, and would
     /// take back a reward the rules had already called spendable.
     ///
-    /// Only the rule uses this. What is held in memory stays sized by the
-    /// constant, because holding more of the chain than can be undone is
-    /// harmless and every ceiling written against the constant stays true.
+    /// Only the rule uses this. `forget_what_cannot_change` stays sized by
+    /// the constant on purpose, and says there what that buys and what it
+    /// costs.
+    ///
+    /// This is also the number every floor a switch stands on is measured
+    /// against, and it is the smallest of them by construction. A switch
+    /// undoes down to `tip - undo_limit() + 1`. The undo records reach
+    /// `tip + 1 - MAX_REORG_DEPTH`, at or below that because this never
+    /// exceeds the constant. A block log is cut no deeper than
+    /// `tip - burial + 1`, at or below it because this never exceeds the
+    /// burial. Neither has any margin where the two numbers are equal, so
+    /// both are measured on a chain rather than argued: see
+    /// `tests/audit_seams.rs`.
     ///
     /// On every public network the two are the same number. Devnet lowers
     /// both so a throwaway chain settles in minutes, and this is what carries
@@ -1959,8 +2024,32 @@ impl ChainStore {
             if over <= MAX_SIDE_BYTES {
                 break;
             }
-            self.blocks.remove(&id);
-            over = over.saturating_sub(bytes);
+            // Only what was actually being counted, which is the rule
+            // `release` and `recount` already keep: an entry whose body has
+            // gone costs nothing, so dropping it frees nothing. It used to be
+            // credited with the size its body had, and that credit is what
+            // stopped the sweep.
+            //
+            // Those entries are not hypothetical and they are not rare in the
+            // one case this ceiling exists for. A body is let go of once it is
+            // more than `WARM_BODIES` below the tip, and a reorganisation
+            // deeper than that moves every one of them off the branch at once,
+            // leaving up to a thousand entries with a full block's size
+            // recorded and no bytes behind it. Sorted oldest first, those are
+            // exactly what this walks before it reaches anything real: a
+            // hundred and twenty megabytes of credit against a ceiling of
+            // thirty two, so the sweep dropped the free entries, believed
+            // itself done, and left the rival branch it was called to bound
+            // sitting in memory at full size. Measured at forty eight
+            // megabytes held under a thirty two megabyte ceiling, with none of
+            // the twelve rival blocks touched.
+            if self
+                .blocks
+                .remove(&id)
+                .is_some_and(|stored| stored.body.is_some())
+            {
+                over = over.saturating_sub(bytes);
+            }
         }
         self.recount();
     }
@@ -2670,6 +2759,68 @@ mod tests {
         store.forget_oldest_side_blocks();
         assert_eq!(store.len(), held);
         assert_eq!(store.held_bytes(), CHUNK * 9);
+    }
+
+    /// The same ceiling, with the entries a deep reorganisation leaves behind.
+    ///
+    /// A body is let go of once it is more than `WARM_BODIES` below the tip,
+    /// and a reorganisation deeper than that moves every one of those blocks
+    /// off the branch at once. What is left is an entry with a full block's
+    /// size recorded against it and no bytes behind it, and being the oldest
+    /// blocks this node holds, they are the first thing a sweep by age walks.
+    ///
+    /// They cost nothing, so dropping them frees nothing. Crediting the sweep
+    /// with their recorded size is what let it stop before it reached a single
+    /// block it could actually free: forty eight megabytes of rival branch
+    /// held under a thirty two megabyte ceiling, with the sweep believing
+    /// itself finished.
+    #[test]
+    fn an_entry_whose_body_has_gone_does_not_pay_for_a_rival_branch() {
+        const CHUNK: usize = 4 * 1024 * 1024;
+        let mut store = ChainStore::new(params());
+
+        let anchor = shelve(&mut store, 0, 0, CHUNK);
+        store.branch.push(anchor);
+
+        // Bodies released while these were on the branch, and off it since.
+        let stale: Vec<Hash32> = (1..=6u64)
+            .map(|n| {
+                let id = shelve(&mut store, n, n, CHUNK);
+                store.blocks.get_mut(&id).unwrap().body = None;
+                id
+            })
+            .collect();
+        let rivals: Vec<Hash32> = (7..=18u64)
+            .map(|n| shelve(&mut store, n, n, CHUNK))
+            .collect();
+        store.recount();
+
+        assert_eq!(
+            store.side_bytes(),
+            CHUNK * rivals.len(),
+            "an entry without a body is not bytes held, which is the whole \
+             reason it must not buy any"
+        );
+        assert!(store.side_bytes() > MAX_SIDE_BYTES);
+
+        store.forget_oldest_side_blocks();
+
+        assert!(
+            store.side_bytes() <= MAX_SIDE_BYTES,
+            "holding {} bytes off the branch, the ceiling is {MAX_SIDE_BYTES}: \
+             the sweep spent its budget on {} entries that were free to drop",
+            store.side_bytes(),
+            stale.len()
+        );
+        assert!(
+            store.contains(&anchor),
+            "the branch a reorganisation has to undo was swept away with the rest"
+        );
+        assert_eq!(
+            rivals.iter().filter(|id| store.contains(id)).count(),
+            MAX_SIDE_BYTES / CHUNK,
+            "and what was dropped is rival blocks, which is what costs memory"
+        );
     }
 
     /// One block leaves the window each time one is added, so this is a step

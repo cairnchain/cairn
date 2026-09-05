@@ -331,3 +331,323 @@ fn a_proof_whose_owner_went_away_does_not_hold_the_node_off_for_ever() {
     );
     println!("a proof whose owner went away cost {waited}s, against {HELD_OFF_AT_MOST}s");
 }
+
+// ---------------------------------------------------------------------------
+// What an address that will not show a chain can spend of a node's attention.
+//
+// The turns above are rationed by a budget counted in seconds. This half is
+// rationed by the addresses a stranger has to spend to buy them, and the two
+// have to hold together: a stranger that cannot buy time by holding
+// connections must not be able to buy it by hanging up either.
+// ---------------------------------------------------------------------------
+
+/// One address holding `sockets_each` connections at each of `hosts`
+/// addresses. Every one of them goes quiet the moment it is asked, and dials
+/// back only once the node has written its claim off, which is the earliest a
+/// real one could notice.
+///
+/// One honest peer stands beside them the whole time with a real chain it can
+/// show. Returns how long until the node commits to it, and how many times it
+/// was asked at all.
+fn against_silent_addresses(hosts: u64, sockets_each: usize, watch: u64) -> (Option<u64>, u32) {
+    let mut chooser = Chooser::new();
+    let start = 100u64;
+    chooser.noted(1, Some(host(1)), 1_000, LONG, true, start);
+    let mut connected: Vec<u64> = vec![1];
+    let mut next_id = 50u64;
+    // Each live socket: its peer number, the address behind it, and when it was
+    // asked, if it is under a question.
+    let mut live: Vec<(u64, u64, Option<u64>)> = Vec::new();
+    for index in 0..hosts {
+        for _ in 0..sockets_each {
+            next_id += 1;
+            chooser.noted(
+                next_id,
+                Some(host(20 + index)),
+                u128::MAX / 2,
+                LONG,
+                true,
+                start,
+            );
+            connected.push(next_id);
+            live.push((next_id, 20 + index, None));
+        }
+    }
+
+    let mut now = start + 2;
+    let mut asked_honest = 0u32;
+    for _ in 0..watch {
+        now += 1;
+        match chooser.step(now, true, 0, JoinProgress::NothingYet, &connected) {
+            Step::Ask(1, _) => {
+                asked_honest += 1;
+                if chooser.shown(1, 1_000, now) {
+                    return (Some(now - (start + 2)), asked_honest);
+                }
+            }
+            Step::Ask(peer, _) => {
+                if let Some(entry) = live.iter_mut().find(|(id, _, _)| *id == peer) {
+                    entry.2 = Some(now);
+                }
+            }
+            Step::Nudge(_) => return (Some(now - (start + 2)), asked_honest),
+            Step::Quiet => {}
+        }
+        let spent: Vec<(u64, u64)> = live
+            .iter()
+            .filter(|(_, _, asked)| {
+                asked.is_some_and(|at| now.saturating_sub(at) >= FIRST_ANSWER_WINDOW)
+            })
+            .map(|(id, at, _)| (*id, *at))
+            .collect();
+        for (id, at) in spent {
+            connected.retain(|other| *other != id);
+            live.retain(|(other, _, _)| *other != id);
+            next_id += 1;
+            connected.push(next_id);
+            live.push((next_id, at, None));
+            chooser.noted(next_id, Some(host(at)), u128::MAX / 2, LONG, true, now);
+        }
+    }
+    (None, asked_honest)
+}
+
+/// **Two connections at one address took every turn a node had, for ever.**
+///
+/// The pause an address earns by failing to show a chain was stamped on to a
+/// claim when the claim was first heard. A claim already standing when its
+/// neighbour failed therefore carried no stamp, so the address's second
+/// connection was never paused by the first one's failure. Two of them, which
+/// is exactly `MAX_PER_HOST`, handed the turn back and forth: each was asked,
+/// went quiet for its answering window, and was written off at the moment the
+/// other came out of its pause, so the heaviest standing claim was always one
+/// of theirs.
+///
+/// Measured on the code this was written against: twenty times
+/// [`HELD_OFF_AT_MOST`], one honest peer with a real chain standing there the
+/// whole time, asked zero times. The price was two connections and one
+/// reconnection every half minute.
+#[test]
+fn two_connections_at_one_address_cannot_take_every_turn() {
+    let watch = HELD_OFF_AT_MOST * 20;
+    for sockets in [1usize, 2, 3] {
+        let (waited, asked) = against_silent_addresses(1, sockets, watch);
+        let Some(waited) = waited else {
+            panic!(
+                "{sockets} connections at one address kept a node from a chain it could \
+                 see for more than {watch}s, and the honest peer was asked {asked} times"
+            );
+        };
+        println!("{sockets} connection(s) at one address cost {waited}s, honest asked {asked}");
+        assert!(
+            waited <= HELD_OFF_AT_MOST,
+            "{sockets} connections at one address cost {waited}s, past {HELD_OFF_AT_MOST}s"
+        );
+    }
+}
+
+/// The same, for a stranger that spreads over addresses instead of sockets.
+///
+/// A flat pause let two of them do what two sockets did, because each came out
+/// of its pause exactly as the other went in. The pause now doubles with each
+/// further failure at an address, so reusing a handful of them costs more every
+/// time round, and a stranger that wants the node's whole attention has to keep
+/// finding addresses it has not already spent. That is the price this module
+/// has always said a turn has.
+///
+/// Not bounded by [`HELD_OFF_AT_MOST`], which is about a chain a node has
+/// already proved and this node has proved nothing. What is asserted is that
+/// the wait ends, and that it grows with what the stranger spends rather than
+/// with how long it is willing to wait.
+#[test]
+fn reusing_a_handful_of_addresses_does_not_buy_turns_for_ever() {
+    let watch = HELD_OFF_AT_MOST * 40;
+    let mut seen = Vec::new();
+    for hosts in [2u64, 4, FULL_TABLE / 2] {
+        let (waited, asked) = against_silent_addresses(hosts, 1, watch);
+        let Some(waited) = waited else {
+            panic!(
+                "{hosts} addresses, reused and never fresh, kept a node from a chain it \
+                 could see for more than {watch}s, and the honest peer was asked {asked} times"
+            );
+        };
+        println!("{hosts} silent addresses cost {waited}s, honest asked {asked}");
+        seen.push((hosts, waited));
+    }
+    let (fewest, cheapest) = seen[0];
+    let (most, dearest) = seen[seen.len() - 1];
+    assert!(
+        dearest > cheapest,
+        "{most} addresses bought no more time than {fewest} did: {seen:?}"
+    );
+}
+
+/// **The pause must never reach the peer whose chain the node proved.**
+///
+/// Reading the address's failures when a turn is handed out, rather than
+/// stamping them on to a claim, is what closes the two-socket turn above. It
+/// also puts every claim behind a shared address inside the pause, and the
+/// supplier of the one chain a node has proved may well be behind one: one
+/// carrier NAT, one office. A stranger holding the other connection there then
+/// paused that supplier every time it went quiet itself, the one claim under
+/// the ceiling was never picked, and the commitment never came.
+///
+/// Measured while writing this: twenty times [`HELD_OFF_AT_MOST`] and still
+/// holding, where the code before it cost ninety one seconds. So a claim that
+/// has been shown is exempt: the pause is against words, and a chain somebody
+/// weighed is not a word.
+#[test]
+fn a_stranger_beside_the_proved_supplier_cannot_hold_the_node_off() {
+    let mut chooser = Chooser::new();
+    let start = 100u64;
+    // The supplier the node ends up taking its chain from, and a stranger
+    // sharing its address, which is what one gateway looks like from here.
+    chooser.noted(1, Some(host(7)), 500, LONG, true, start);
+    let mut connected = vec![1u64];
+    let mut stranger = 50u64;
+    chooser.noted(stranger, Some(host(7)), u128::MAX / 2, LONG, true, start);
+    connected.push(stranger);
+    // And a second stranger that never reuses an address, so there is always a
+    // claim standing that no pause applies to. Without it the last rung of the
+    // choice hands the supplier its turn anyway and this measures nothing: what
+    // is being measured is whether the supplier is reachable while somebody
+    // else is always askable, which is what a stranger arranges for free.
+    let mut fresh = 60u64;
+    let mut fresh_host = 200u64;
+    chooser.noted(
+        fresh,
+        Some(host(fresh_host)),
+        u128::MAX / 4,
+        LONG,
+        true,
+        start,
+    );
+    connected.push(fresh);
+
+    let mut now = start + 2;
+    assert!(matches!(
+        chooser.step(now, true, 0, JoinProgress::NothingYet, &connected),
+        Step::Ask(_, _)
+    ));
+    let proven_at = now;
+    assert!(
+        !chooser.shown(1, 500, now),
+        "a heavier claim stands, so this may not commit yet"
+    );
+
+    let watch = HELD_OFF_AT_MOST * 20;
+    let mut next_id = 100u64;
+    let mut asked_at: Option<u64> = None;
+    let mut fresh_asked_at: Option<u64> = None;
+    for _ in 0..watch {
+        now += 1;
+        match chooser.step(now, true, 0, JoinProgress::NothingYet, &connected) {
+            Step::Ask(1, _) => {
+                if chooser.shown(1, 500, now) {
+                    let waited = now - proven_at;
+                    println!(
+                        "a stranger beside the proved supplier cost {waited}s, \
+                         against {HELD_OFF_AT_MOST}s"
+                    );
+                    assert!(
+                        waited <= HELD_OFF_AT_MOST,
+                        "a stranger sharing the supplier's address cost {waited}s, \
+                         past the {HELD_OFF_AT_MOST}s ceiling"
+                    );
+                    return;
+                }
+            }
+            Step::Ask(peer, _) if peer == stranger => asked_at = Some(now),
+            Step::Ask(peer, _) if peer == fresh => fresh_asked_at = Some(now),
+            Step::Ask(_, _) | Step::Quiet => {}
+            Step::Nudge(_) => return,
+        }
+        if asked_at.is_some_and(|at| now.saturating_sub(at) >= FIRST_ANSWER_WINDOW) {
+            connected.retain(|other| *other != stranger);
+            next_id += 1;
+            stranger = next_id;
+            connected.push(stranger);
+            chooser.noted(stranger, Some(host(7)), u128::MAX / 2, LONG, true, now);
+            asked_at = None;
+        }
+        if fresh_asked_at.is_some_and(|at| now.saturating_sub(at) >= FIRST_ANSWER_WINDOW) {
+            connected.retain(|other| *other != fresh);
+            next_id += 1;
+            fresh = next_id;
+            fresh_host += 1;
+            connected.push(fresh);
+            chooser.noted(
+                fresh,
+                Some(host(fresh_host)),
+                u128::MAX / 4,
+                LONG,
+                true,
+                now,
+            );
+            fresh_asked_at = None;
+        }
+    }
+    panic!(
+        "a stranger sharing the proved supplier's address held the node off a chain it \
+         had proved for more than {watch}s, against a ceiling of {HELD_OFF_AT_MOST}s"
+    );
+}
+
+/// **A pause is never the end of the road, which is what lets it grow.**
+///
+/// Letting the pause double with each failure only costs what an address that
+/// keeps failing is worth, provided it can never leave a node with nobody to
+/// ask. The last resort is what guarantees that: it ignores the pause entirely
+/// and reads from the heaviest claim there is, inside `RETRY_PAUSE`, however
+/// long the pause on that address has grown to.
+///
+/// Reading and not a handover, deliberately, and `tests/shared_address_claims.rs`
+/// owns the other half of that argument: a handover is taken on the strength of
+/// the claim behind it, so a claim inside its pause must not buy one. What the
+/// pause costs is the cheap way in, never the chain.
+#[test]
+fn a_paused_address_is_still_read_from_when_it_is_all_there_is() {
+    let mut chooser = Chooser::new();
+    let start = 100u64;
+    // A stranger and an honest peer behind one gateway, and nobody else at all.
+    let mut stranger = 50u64;
+    chooser.noted(stranger, Some(host(7)), u128::MAX / 2, LONG, true, start);
+    chooser.noted(1, Some(host(7)), 500, LONG, true, start);
+    let mut connected = vec![stranger, 1u64];
+
+    let mut now = start + 2;
+    let mut next_id = 100u64;
+    let mut asked_at: Option<u64> = None;
+    for _ in 0..HELD_OFF_AT_MOST {
+        now += 1;
+        match chooser.step(now, true, 0, JoinProgress::NothingYet, &connected) {
+            Step::Ask(1, approach) => {
+                let waited = now - (start + 2);
+                println!("the only peer left was asked after {waited}s as {approach:?}");
+                assert!(
+                    waited <= FIRST_ANSWER_WINDOW + 2,
+                    "the only peer this node could see waited {waited}s for a turn"
+                );
+                assert_eq!(
+                    approach,
+                    Approach::Read,
+                    "a claim inside its own address's pause was handed a whole ledger on \
+                     the strength of the claim"
+                );
+                return;
+            }
+            Step::Ask(peer, _) if peer == stranger => asked_at = Some(now),
+            Step::Ask(_, _) | Step::Quiet => {}
+            Step::Nudge(_) => panic!("there is no chain to finish on"),
+        }
+        if asked_at.is_some_and(|at| now.saturating_sub(at) >= FIRST_ANSWER_WINDOW) {
+            connected.retain(|other| *other != stranger);
+            next_id += 1;
+            stranger = next_id;
+            connected.push(stranger);
+            chooser.noted(stranger, Some(host(7)), u128::MAX / 2, LONG, true, now);
+            asked_at = None;
+        }
+    }
+    panic!("the only peer this node could see was never asked at all");
+}

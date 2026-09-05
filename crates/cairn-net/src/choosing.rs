@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
+use crate::refusal::can_be_refused;
 use crate::sync::JOIN_RATHER_THAN_READ;
 
 /// Seconds a node with nothing waits for peers to introduce themselves
@@ -91,6 +92,15 @@ const OWED_PATIENCE: u64 = PROVEN_PATIENCE.saturating_add(FIRST_ANSWER_PATIENCE)
 /// Stated here rather than left to be worked out because it is the property
 /// the whole patience exists for, and `tests/audit_owed_a_turn.rs` measures a
 /// running chooser against it.
+///
+/// What it does not cover, and must not be read as covering: the time before
+/// anything has been proved at all. The clock in both terms starts at the first
+/// showing, so a node that nobody has yet shown a chain to is outside this, and
+/// how long a stranger can keep it there is bounded by what turns cost rather
+/// than by any number here. That is [`held_off_for`]'s side of the argument,
+/// and the same test file measures it. Being held there is a node with no
+/// chain, which is loud; being held off one it has proved is a node that has
+/// the answer and will not use it, which is not.
 pub const HELD_OFF_AT_MOST: u64 = OWED_PATIENCE.saturating_add(ATTEMPT_PATIENCE);
 
 /// Seconds before a peer whose claim already failed is worth asking again,
@@ -100,12 +110,52 @@ pub const HELD_OFF_AT_MOST: u64 = OWED_PATIENCE.saturating_add(ATTEMPT_PATIENCE)
 /// broken peer every round would be a tight loop of nothing.
 const RETRY_PAUSE: u64 = 30;
 
+/// The longest an address is left alone between turns, however often its claims
+/// have failed.
+///
+/// A pause that grew without a ceiling would be the defect this pause replaced
+/// wearing a slower fuse: a per-address memory that shut out whoever shared an
+/// address for as long as the choice stayed open. Half an hour is the ceiling,
+/// it is the address book's `MAX_QUIET` reasoning applied to claims rather than
+/// to dials, and `tests/audit_owed_a_turn.rs` measures the worst case it buys
+/// against the worst case it costs.
+///
+/// What keeps the ceiling affordable is that a pause is never the end of the
+/// road. [`Chooser::last_resort`] ignores it and reads from the heaviest claim
+/// there is, inside [`RETRY_PAUSE`], so the only peer a node can see is asked
+/// whatever its address has done. What the pause costs is the handover, not the
+/// chain, and that is the trade it exists to make: a handover is taken on the
+/// strength of the claim behind it, and a read is checked block by block.
+const MAX_HELD_OFF: u64 = 1_800;
+
+/// How long an address is left alone after `failures` claims of its went
+/// unshown.
+///
+/// Flat, and it was flat, which is what let two addresses share a node's whole
+/// attention for ever: each was asked, went quiet for its answering window, and
+/// came back out of the pause exactly as the other went into it, so there was
+/// never a round in which neither was the heaviest standing claim and nobody
+/// else was asked once in six thousand six hundred seconds of watching.
+///
+/// Doubling twice per further failure is the shape [`crate::book`] already uses
+/// against addresses that will not answer a dial, and it says the same thing
+/// here: one failure is a bad minute, and a run of them is an address that is
+/// not going to show a chain. A turn now costs a stranger an address it has not
+/// already spent, which is the cost this module has always said a turn has.
+fn held_off_for(failures: u32) -> u64 {
+    let steps = failures.saturating_sub(1).saturating_mul(2);
+    RETRY_PAUSE
+        .checked_shl(steps)
+        .unwrap_or(MAX_HELD_OFF)
+        .min(MAX_HELD_OFF)
+}
+
 /// Addresses whose claims went unshown that are remembered at once.
 ///
 /// This exists so that a peer cannot wash a broken claim clean by
 /// reconnecting, so it deliberately outlives connections. What is kept against
 /// each address is when it failed, because what an address buys is a pause and
-/// not a verdict: see [`Claim::held_off_until`].
+/// not a verdict: see [`Chooser::held_off`].
 ///
 /// It used to grow without a ceiling, one address per host that claimed a
 /// chain and failed to show it, and the window in which it grows is exactly
@@ -120,6 +170,15 @@ const RETRY_PAUSE: u64 = 30;
 /// much memory this node spends. The whole lot is dropped the moment the
 /// choice is made, which is the only thing it was ever for.
 const MAX_UNBACKED_HOSTS: usize = 1_024;
+
+/// What one address has spent, in claims it was asked to show and could not.
+#[derive(Clone, Copy, Debug)]
+struct Unshown {
+    /// When the last of them failed, which is when the pause starts running.
+    at: u64,
+    /// How many have, so the pause grows with them.
+    failures: u32,
+}
 
 /// What one peer says stands behind its chain, and what has become of the
 /// claim since.
@@ -138,27 +197,6 @@ struct Claim {
     /// Set once this peer weighed its chain, so [`Chooser::best_standing`] can
     /// tell a figure somebody showed from a figure somebody said.
     proved: bool,
-    /// When a claim inherited from its address stops being held back, if it
-    /// was.
-    ///
-    /// A claim from an address that failed recently is held off rather than
-    /// discredited. That distinction is the whole of the repair here: the
-    /// address is the only thing that survives a reconnection, so a peer that
-    /// failed and dialled back is indistinguishable from a second peer behind
-    /// the same gateway, and the old rule answered that by shutting both out
-    /// for as long as the choice was open.
-    ///
-    /// What it cost was not the attacker. A node behind one carrier NAT, one
-    /// office, or one machine running a devnet had its claim thrown out of
-    /// [`Chooser::pick`] outright, so the node went on to follow a chain it
-    /// could see was lighter, on the strength of who else shared an address
-    /// with the peer offering the heavier one.
-    ///
-    /// A pause does what the exclusion was for: a peer cannot wash a broken
-    /// claim clean by reconnecting, because it has to wait out
-    /// [`RETRY_PAUSE`] like the claim it broke. What it no longer does is
-    /// outlive that.
-    held_off_until: Option<u64>,
     /// When this peer was last asked, so the last resort does not ask the
     /// same broken peer every round.
     tried: Option<u64>,
@@ -217,7 +255,11 @@ pub struct Chooser {
     claims: HashMap<u64, Claim>,
     /// Addresses whose claims went unshown, kept apart from the claims
     /// because a claim leaves with its connection and this must not.
-    unbacked_hosts: HashMap<IpAddr, u64>,
+    ///
+    /// When each last failed, and how many times, because what the pause after
+    /// one costs has to grow with how often an address has spent one: see
+    /// [`held_off_for`].
+    unbacked_hosts: HashMap<IpAddr, Unshown>,
     /// When the first claim long enough to be final arrived. Until one has,
     /// there is no choice to make: a short chain is never past the
     /// reorganisation limit, so following the wrong one is undone by the
@@ -262,15 +304,6 @@ impl Chooser {
         if self.done || work == 0 {
             return;
         }
-        // A claim from an address that already failed to show one starts
-        // failed. This is what stops a peer washing its claim clean by
-        // reconnecting under a fresh connection number.
-        // The claim itself is not discredited by the company it keeps; it
-        // waits out the same pause the broken claim at that address is
-        // waiting out.
-        let held_off_until = host
-            .and_then(|host| self.unbacked_hosts.get(&host).copied())
-            .map(|failed_at| failed_at.saturating_add(RETRY_PAUSE));
         // A peer that says something new keeps the moment it first spoke, so
         // revising a claim upward is not a way to jump the queue either.
         let heard = self.claims.get(&peer).map_or(now, |known| known.heard);
@@ -283,7 +316,6 @@ impl Chooser {
                 host,
                 unbacked: false,
                 proved: false,
-                held_off_until,
                 tried: None,
                 heard,
             },
@@ -414,8 +446,21 @@ impl Chooser {
             claim.unbacked = true;
             claim.tried = Some(now);
             if let Some(host) = claim.host {
-                if self.unbacked_hosts.len() < MAX_UNBACKED_HOSTS {
-                    self.unbacked_hosts.insert(host, now);
+                let room = self.unbacked_hosts.len() < MAX_UNBACKED_HOSTS;
+                // An address already on the list costs nothing further to hold,
+                // and counting against it is what makes its next pause longer
+                // than its last.
+                if let Some(spent) = self.unbacked_hosts.get_mut(&host) {
+                    spent.at = now;
+                    spent.failures = spent.failures.saturating_add(1);
+                } else if room {
+                    self.unbacked_hosts.insert(
+                        host,
+                        Unshown {
+                            at: now,
+                            failures: 1,
+                        },
+                    );
                 }
             }
         }
@@ -492,6 +537,12 @@ impl Chooser {
         let ceiling = self.proven.and_then(|(best, at)| {
             (now.saturating_sub(at) >= PROVEN_PATIENCE).then_some((best, at))
         });
+        // A paused claim is never the end of the road: [`Self::last_resort`]
+        // ignores the pause and reads from the heaviest claim there is, which
+        // is what makes it affordable for [`MAX_HELD_OFF`] to be half an hour.
+        // Reading rather than a handover, deliberately: a handover is taken on
+        // the strength of the claim behind it, and a read is checked block by
+        // block as it arrives.
         let pick = self
             .pick(ceiling, now)
             .or_else(|| self.pick(None, now))
@@ -548,12 +599,70 @@ impl Chooser {
         }
     }
 
+    /// Whether a claim is waiting out a failure at the address it came from.
+    ///
+    /// A claim from an address that failed recently is held off rather than
+    /// discredited. That distinction is the whole of the earlier repair here:
+    /// the address is the only thing that survives a reconnection, so a peer
+    /// that failed and dialled back is indistinguishable from a second peer
+    /// behind the same gateway, and the rule before it answered that by
+    /// shutting both out for as long as the choice was open. What that cost was
+    /// not the attacker: a node behind one carrier NAT, one office, or one
+    /// machine running a devnet had its claim thrown out of [`Self::pick`]
+    /// outright, so the node went on to follow a chain it could see was
+    /// lighter, on the strength of who else shared an address with the peer
+    /// offering the heavier one.
+    ///
+    /// **Asked here rather than written on to the claim when it was first
+    /// heard, which is the repair this round.** A stamp is made once, and a
+    /// claim standing before the failure carried no stamp: the address's second
+    /// connection was never paused by the first one's failure, so two sockets
+    /// from one address, which is exactly [`crate::node::MAX_PER_HOST`], handed
+    /// the turn back and forth for ever. Each was asked, went quiet for
+    /// [`FIRST_ANSWER_PATIENCE`], and was written off at the moment the other
+    /// came out of its pause, so the heaviest standing claim was always one of
+    /// theirs and nobody else was ever asked once. Measured on a chooser
+    /// against one honest peer that could show a real chain: twenty times
+    /// [`HELD_OFF_AT_MOST`] and still holding, the honest peer asked zero
+    /// times, for two connections and one reconnection every half minute.
+    ///
+    /// Read at the moment a turn is handed out, the pause covers every claim
+    /// from that address, which is what the address was ever being kept for.
+    ///
+    /// Two things it must never reach, both measured rather than reasoned about.
+    ///
+    /// A claim that has been shown is not a word, and this is against words. It
+    /// was not carved out at first, and a stranger holding the other connection
+    /// at the supplier's address then held the node off a chain it had already
+    /// proved: the supplier was paused every time its neighbour went quiet, so
+    /// the one claim under the ceiling was never picked and the commitment never
+    /// came. Measured at twenty times [`HELD_OFF_AT_MOST`] and still holding,
+    /// where the flat pause it replaced cost ninety one seconds. A pause that
+    /// can do that is not a pause, it is the ceiling being false again.
+    ///
+    /// And loopback is not an identity. On a devnet every node wears it, so one
+    /// claim failing there would pause the whole network this software is
+    /// developed and demonstrated on. It is the same address
+    /// [`crate::refusal::can_be_refused`] refuses to hold anything against, for
+    /// the same reason.
+    fn held_off(&self, claim: &Claim, now: u64) -> bool {
+        if claim.proved {
+            return false;
+        }
+        let Some(host) = claim.host.filter(|host| can_be_refused(*host)) else {
+            return false;
+        };
+        self.unbacked_hosts
+            .get(&host)
+            .is_some_and(|spent| now < spent.at.saturating_add(held_off_for(spent.failures)))
+    }
+
     fn pick(&self, ceiling: Option<(u128, u64)>, now: u64) -> Option<(u64, Approach)> {
         let (peer, claim) = self
             .claims
             .iter()
             .filter(|(_, claim)| !claim.unbacked)
-            .filter(|(_, claim)| claim.held_off_until.is_none_or(|until| now >= until))
+            .filter(|(_, claim)| !self.held_off(claim, now))
             .filter(|(_, claim)| {
                 ceiling.is_none_or(|(most, proven_at)| {
                     claim.work <= most || Self::owed_a_turn(claim, proven_at, now)
@@ -1094,6 +1203,80 @@ mod tests {
             chooser.step(223, true, 0, JoinProgress::NothingYet, connected),
             Step::Ask(1, Approach::Join),
             "no honest claim stands, so taking the proven chain is correct"
+        );
+    }
+
+    /// The pause grows with what an address has already spent, and stops.
+    #[test]
+    fn the_pause_an_address_earns_doubles_and_then_stops() {
+        assert_eq!(
+            held_off_for(0),
+            RETRY_PAUSE,
+            "nothing held is no pause at all"
+        );
+        assert_eq!(held_off_for(1), RETRY_PAUSE);
+        assert_eq!(held_off_for(2), RETRY_PAUSE * 4);
+        assert_eq!(held_off_for(3), RETRY_PAUSE * 16);
+        assert_eq!(held_off_for(4), MAX_HELD_OFF, "and it is capped there");
+        assert_eq!(
+            held_off_for(u32::MAX),
+            MAX_HELD_OFF,
+            "a count that would shift past the width of the number still caps"
+        );
+    }
+
+    /// **A devnet is every node wearing one address.**
+    ///
+    /// Reading the address's failures when a turn is handed out puts every
+    /// claim behind a shared address inside the pause, and on loopback that is
+    /// every node on the machine. One failing devnet node would pause the whole
+    /// devnet. It is the address [`can_be_refused`] already refuses to hold
+    /// anything against, for the same reason and with the same weight.
+    #[test]
+    fn a_failure_on_loopback_pauses_nobody() {
+        let mut chooser = Chooser::new();
+        let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        chooser.noted(1, Some(loopback), 900, LONG, true, 100);
+        chooser.noted(2, Some(loopback), 500, LONG, true, 100);
+        // Somebody out in the world with a lighter claim, so a pause on
+        // loopback would have somebody to defer to and the last rung of
+        // [`Chooser::step`] would not rescue the devnet.
+        chooser.noted(3, Some(host(4)), 10, LONG, true, 100);
+        let connected = &[1u64, 2, 3];
+
+        assert_eq!(
+            chooser.step(102, true, 0, JoinProgress::NothingYet, connected),
+            Step::Ask(1, Approach::Join)
+        );
+        chooser.failed(1, 103);
+        assert_eq!(
+            chooser.step(104, true, 0, JoinProgress::NothingYet, connected),
+            Step::Ask(2, Approach::Join),
+            "the other node on this machine was made to wait for its neighbour"
+        );
+    }
+
+    /// The same failure at a real address does pause the claim beside it, which
+    /// is the whole of what closes two connections taking every turn.
+    #[test]
+    fn a_failure_at_a_real_address_pauses_the_connection_beside_it() {
+        let mut chooser = Chooser::new();
+        let shared = host(9);
+        chooser.noted(1, Some(shared), 900, LONG, true, 100);
+        chooser.noted(2, Some(shared), 500, LONG, true, 100);
+        // Somebody else entirely, so the pause has an alternative to defer to.
+        chooser.noted(3, Some(host(4)), 10, LONG, true, 100);
+        let connected = &[1u64, 2, 3];
+
+        assert_eq!(
+            chooser.step(102, true, 0, JoinProgress::NothingYet, connected),
+            Step::Ask(1, Approach::Join)
+        );
+        chooser.failed(1, 103);
+        assert_eq!(
+            chooser.step(104, true, 0, JoinProgress::NothingYet, connected),
+            Step::Ask(3, Approach::Join),
+            "the second connection at the address that just failed took the turn"
         );
     }
 }

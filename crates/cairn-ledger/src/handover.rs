@@ -25,7 +25,7 @@ use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
 use cairn_primitives::{Amount, Hash32};
 
 use crate::block::{BlockHeader, HeaderSummary, BLOCK_VERSION};
-use crate::note::{Note, NoteId};
+use crate::note::{NetworkId, Note, NoteId};
 use crate::pow::{median_time_past, meets_target, next_difficulty, work_of, RECENT_HEADERS};
 use crate::state::{
     header_leaf, HotEntry, LedgerState, Maturing, Pieces, GRACE_BLOCKS, GRACE_NOTES,
@@ -156,6 +156,18 @@ pub struct Handover {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum HandoverError {
+    #[error("the header at {height} belongs to network {found:?}, this node follows {expected:?}")]
+    WrongNetwork {
+        height: u64,
+        expected: NetworkId,
+        found: NetworkId,
+    },
+    #[error("the header at {height} is dated {found}, before this network opened at {opens_at}")]
+    BeforeTheNetworkOpened {
+        height: u64,
+        opens_at: u64,
+        found: u64,
+    },
     #[error("the header this ledger claims to belong to carries no work")]
     HeaderWithoutWork,
     #[error("the hot set holds {held} notes, more than the {limit} allowed")]
@@ -285,6 +297,15 @@ pub fn accept(handover: &Handover, params: &ConsensusParams) -> Result<LedgerSta
     let burial = params.burial;
     let at = &handover.at;
     let tip = &handover.tip;
+    // Which network these belong to, and whether they predate its opening.
+    // Both are read off every block by `validation::check_header` and neither
+    // was read here: see `sampling::belongs_to_this_network`, which is the
+    // other half of the same gap and where the reasoning is written down. A
+    // node taking a ledger has no chain of its own to compare against, so
+    // these are the only two things it can ask that are about *which* chain
+    // this is rather than about how much work is behind it.
+    belongs_to_this_network(at, params)?;
+    belongs_to_this_network(tip, params)?;
     if !meets_target(&at.id(), at.difficulty) || !meets_target(&tip.id(), tip.difficulty) {
         return Err(HandoverError::HeaderWithoutWork);
     }
@@ -407,7 +428,7 @@ pub fn accept(handover: &Handover, params: &ConsensusParams) -> Result<LedgerSta
         return Err(HandoverError::HistoryMismatch);
     }
 
-    check_recent(handover)?;
+    check_recent(handover, params)?;
     check_buried(
         at,
         tip,
@@ -444,8 +465,31 @@ pub fn accept(handover: &Handover, params: &ConsensusParams) -> Result<LedgerSta
     Ok(state)
 }
 
+/// The same question `sampling::belongs_to_this_network` asks, in the errors
+/// this exchange reports.
+fn belongs_to_this_network(
+    header: &BlockHeader,
+    params: &ConsensusParams,
+) -> Result<(), HandoverError> {
+    if header.network != params.network {
+        return Err(HandoverError::WrongNetwork {
+            height: header.height,
+            expected: params.network,
+            found: header.network,
+        });
+    }
+    if header.timestamp < params.opens_at {
+        return Err(HandoverError::BeforeTheNetworkOpened {
+            height: header.height,
+            opens_at: params.opens_at,
+            found: header.timestamp,
+        });
+    }
+    Ok(())
+}
+
 /// Checks the run of recent headers hands over what it claims.
-fn check_recent(handover: &Handover) -> Result<(), HandoverError> {
+fn check_recent(handover: &Handover, params: &ConsensusParams) -> Result<(), HandoverError> {
     let at = &handover.at;
     let Some(last) = handover.recent.last() else {
         return Err(HandoverError::RecentNotEndingAtTip);
@@ -465,6 +509,7 @@ fn check_recent(handover: &Handover) -> Result<(), HandoverError> {
     }
 
     for (index, header) in handover.recent.iter().enumerate() {
+        belongs_to_this_network(header, params)?;
         if !meets_target(&header.id(), header.difficulty) {
             return Err(HandoverError::RecentWithoutWork);
         }
@@ -556,6 +601,7 @@ pub fn check_buried(
     let mut window = summaries(recent);
     let mut previous = *at;
     for header in buried {
+        belongs_to_this_network(header, params)?;
         if header.height != previous.height.saturating_add(1) || header.previous != previous.id() {
             return Err(HandoverError::BuriedRunNotConsecutive { at: header.height });
         }

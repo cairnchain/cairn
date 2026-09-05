@@ -43,6 +43,15 @@ fn main() {
     let params = ConsensusParams::testnet();
     let owner = SecretKey::from_bytes(&[1; 32]).public_key();
 
+    // An ordinary payment: one note spent, one to the payee, one back as
+    // change. Everything else in this file is a worst case; this is the case.
+    let ordinary = Transfer::new(
+        vec![Input::hot(NoteId::new(Hash32::ZERO, 0))],
+        vec![Note::new(Amount::ZERO, owner); 2],
+    );
+    let each = ordinary.encode().len().max(1);
+    let per_block = (params.max_block_bytes / each).min(params.max_transfers_per_block);
+
     let hot = Transfer::new(
         vec![Input::hot(NoteId::new(Hash32::ZERO, 0)); params.max_inputs_per_transfer],
         vec![Note::new(Amount::ZERO, owner); params.max_outputs_per_transfer],
@@ -88,15 +97,6 @@ fn main() {
         params.max_outputs_per_transfer,
     );
 
-    // An ordinary payment: one note spent, one to the payee, one back as
-    // change. Everything else in this file is a worst case; this is the case.
-    let ordinary = Transfer::new(
-        vec![Input::hot(NoteId::new(Hash32::ZERO, 0))],
-        vec![Note::new(Amount::ZERO, owner); 2],
-    );
-    let each = ordinary.encode().len().max(1);
-    let per_block = (params.max_block_bytes / each).min(params.max_transfers_per_block);
-
     println!(
         "\nAn ordinary payment, one note in and two out, takes {each} bytes, so\n\
          a block holds about {} of them: {:.0} a second, at a block a minute.",
@@ -107,12 +107,7 @@ fn main() {
     // The number the block size decides that nobody sees. A node holds the
     // blocks it could still reorganise away, so this is memory every node must
     // have, whatever else it is doing.
-    println!(
-        "\nA node holds the {} blocks it could still reorganise away, so a full\n\
-         one of those is {} of memory every node must have.",
-        with_commas(REORG_DEPTH),
-        format_bytes(REORG_DEPTH * params.max_block_bytes),
-    );
+    held_blocks(&params, &ordinary, per_block);
 
     // Which decides something the byte limit does not say out loud: how long a
     // note stays in the hot set. Every payment nets one more note than it
@@ -243,6 +238,59 @@ fn churn(params: &ConsensusParams, ordinary_bytes: usize, per_block: usize) {
         capped_minutes,
         params.hot_capacity as f64 / per_block as f64 * params.target_block_time as f64 / 60.0,
     );
+}
+
+/// What a node keeps for the blocks it could still take back out.
+///
+/// Two numbers about the same object, and this used to print one of them under
+/// the other's name.
+fn held_blocks(params: &ConsensusParams, ordinary: &Transfer, per_block: usize) {
+    // This used to print the multiplication alone and call it memory. It is
+    // not. The multiplication is the encoding: what crosses the wire and what
+    // a disk keeps. A block held in memory is a different and larger thing,
+    // because an input carries a decoded signature and a witness enum beside
+    // the identifier it was written as, and every vector it hangs off has its
+    // own header. Both are real numbers about the same object, so both are
+    // printed and each is called what it is.
+    let encoded = REORG_DEPTH * params.max_block_bytes;
+    let decoded = REORG_DEPTH * held_in_memory(ordinary, per_block);
+    println!(
+        "\nA node holds the {} blocks it could still reorganise away. Full ones\n\
+         are {} encoded, and {} once decoded, {:.2} times as much.",
+        with_commas(REORG_DEPTH),
+        format_bytes(encoded),
+        format_bytes(decoded),
+        decoded as f64 / encoded as f64,
+    );
+    println!(
+        "  The decoded figure is counted rather than read off a resident set:\n\
+         the vectors and their contents, at the sizes this build gives them.\n\
+         It leaves out what the allocator rounds each one up to, so it is a\n\
+         floor. A resident reading was tried and is not fit to publish here,\n\
+         because this program builds two worst-case blocks of two and a half\n\
+         gigabytes first: three runs of it read 128 MB, 144 MB and 62 MB for\n\
+         the same structures, which is the allocator's history and not the\n\
+         blocks."
+    );
+}
+
+/// What one full block of ordinary payments costs once it is decoded.
+///
+/// Counted from the types rather than read off a resident set, so it is the
+/// same number on every machine and in every run. What it counts is the shape
+/// a node holds: the vector of transfers, and per transfer its own inputs and
+/// outputs. An input is much larger decoded than written, because the
+/// signature and the witness are values there and thirty six bytes of
+/// identifier on the wire.
+///
+/// It is a floor, not a reading. Every one of those vectors is a separate
+/// allocation that a real allocator rounds up and puts a header on, and none
+/// of that is here.
+fn held_in_memory(ordinary: &Transfer, per_block: usize) -> usize {
+    let per_transfer = size_of::<Transfer>()
+        + ordinary.inputs.len() * size_of::<Input>()
+        + ordinary.outputs.len() * size_of::<Note>();
+    size_of::<Block>() + per_block * per_transfer
 }
 
 fn line(name: &str, bytes: usize) {
