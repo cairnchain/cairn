@@ -1861,19 +1861,74 @@ impl ChainStore {
     /// its whole history in memory to answer questions it can answer from
     /// disk, where the same blocks already sit in order of height.
     ///
-    /// One block leaves the window each time one is added, so this is a step
-    /// rather than a sweep: what it costs does not depend on how long the
-    /// chain has been running.
+    /// One block leaves the window each time one is added, so the ordinary
+    /// case is a step rather than a sweep: what it costs does not depend on
+    /// how long the chain has been running.
+    ///
+    /// A switch is the case where more than one leaves at once, and it is the
+    /// case that used to be lost. See [`Self::forget_past_the_window`].
     fn forget_what_cannot_change(&mut self) {
         let window = u64::try_from(MAX_REORG_DEPTH).unwrap_or(u64::MAX);
         while self.branch.len().saturating_sub(self.undo_from) > window {
             let Some(id) = self.branch.id_at(self.undo_from) else {
-                break;
+                self.forget_past_the_window(window);
+                return;
             };
             self.applied.remove(&id);
             self.release(&id);
             self.undo_from = self.undo_from.saturating_add(1);
         }
+    }
+
+    /// The same, for a cursor the branch can no longer name a block at.
+    ///
+    /// A switch does not add one block, it adds the whole of the branch it
+    /// moves onto, and that can be longer than the branch it replaced by more
+    /// than one: a rival carrying more work in more, easier blocks is exactly
+    /// what a partition produces. [`Branch::push`] lets go of its oldest
+    /// identifier once the window is full, so a switch that applied two more
+    /// blocks than it undid leaves this cursor one height below the oldest
+    /// the branch can still name, and the step above then has nothing to look
+    /// up.
+    ///
+    /// It used to stop there, and stopping was permanent: the cursor stayed
+    /// where it was for the life of the node, every later block found it
+    /// still unnameable, and from then on every block applied added an undo
+    /// record and a block entry that nothing would ever remove. Measured on a
+    /// chain sitting at the window, with three blocks undone against five
+    /// applied: the cursor froze at height 5, and twenty ordinary blocks
+    /// after it took what the node held from 1,029 blocks to 1,049, one per
+    /// block, on a node whose whole claim is that its memory does not grow
+    /// with the chain. `release_bodies` walks from the same cursor, so its
+    /// cost grew with it.
+    ///
+    /// Swept by identifier, because the height is the thing that has been
+    /// lost. What it walks is the undo records, which are the window and
+    /// nothing more, and it is reached only by a switch of that shape.
+    ///
+    /// The floor is held at or above where the branch begins. A failed switch
+    /// leaves the window shorter than it found it, since the identifiers
+    /// `push` let go of do not come back when `restore` pops the blocks off
+    /// again, and a cursor below that would be claiming records for heights
+    /// no rewind could reach anyway.
+    fn forget_past_the_window(&mut self, window: u64) {
+        let floor = self
+            .branch
+            .len()
+            .saturating_sub(window)
+            .max(self.branch.from);
+        let branch = &self.branch;
+        let stale: Vec<Hash32> = self
+            .applied
+            .keys()
+            .filter(|id| branch.height_of(id).is_none_or(|height| height < floor))
+            .copied()
+            .collect();
+        for id in &stale {
+            self.applied.remove(id);
+            self.release(id);
+        }
+        self.undo_from = self.undo_from.max(floor);
     }
 
     /// Wire bytes of every block this node is holding in memory.
@@ -2065,6 +2120,18 @@ impl ChainStore {
     /// node kept every block it had ever applied. It is not any more, and a
     /// ceiling that grew with the chain was one this never reached: side
     /// branches accumulated with nothing to clear them.
+    ///
+    /// The cutoff saturates rather than being given up on, and that is the
+    /// whole of what makes the ceiling bind on a young chain. A tip below the
+    /// window has no height that is out of reach, so there is nothing for the
+    /// walk below to drop, but the sweep by size after it is the only thing
+    /// that bounds what a peer can make this node hold, and taking the early
+    /// exit skipped it. Every network is younger than the window for its
+    /// first thousand blocks, and a devnet may never leave it. Measured on a
+    /// chain of thirty one blocks with a ceiling of 37.7 MB: twenty rival
+    /// blocks nothing sized left the node holding 42 MB, the sweep ran and
+    /// dropped none of it, and each further block a peer offered was another
+    /// two megabytes with nothing to take it back.
     fn forget_unreachable_branches(&mut self) {
         let limit = MAX_REORG_DEPTH.saturating_add(MAX_SIDE_BLOCKS);
         let by_count = self.blocks.len() > limit;
@@ -2074,7 +2141,7 @@ impl ChainStore {
         }
         let Some(cutoff) = self
             .height()
-            .and_then(|tip| tip.checked_sub(u64::try_from(MAX_REORG_DEPTH).unwrap_or(u64::MAX)))
+            .map(|tip| tip.saturating_sub(u64::try_from(MAX_REORG_DEPTH).unwrap_or(u64::MAX)))
         else {
             return;
         };
@@ -2866,6 +2933,207 @@ mod tests {
                 .map(|stored| stored.bytes)
                 .fold(0usize, usize::saturating_add),
             "and the bytes came off with the blocks"
+        );
+    }
+
+    /// An undo record for a block that was applied but whose contents this
+    /// test does not exercise. What is measured here is the bookkeeping around
+    /// the records, and building real ones would need a ledger and a chain.
+    fn a_record() -> ConnectedBlock {
+        ConnectedBlock {
+            transition: cairn_ledger::StateTransition::default(),
+            undo: cairn_ledger::BlockUndo::default(),
+            total_fees: Amount::ZERO,
+        }
+    }
+
+    /// A switch does not add one block, it adds the whole branch it moves
+    /// onto, and a branch that wins on more and easier blocks adds more than
+    /// it took away. That is what a partition produces: the far side retargets
+    /// down, mines faster and cheaper, and comes back carrying more work in
+    /// more blocks.
+    ///
+    /// The branch holds one identifier more than a rewind may undo, which is
+    /// one block of slack. A switch that applied two more than it undid spends
+    /// it: `Branch::push` lets go of its oldest identifier, and the cursor that
+    /// walks the window is then one height below the oldest the branch can
+    /// still name.
+    ///
+    /// The step that lets go of what can no longer change used to stop there,
+    /// and stopping was for good: every later block found the cursor still
+    /// unnameable, so from then on each block applied added an undo record and
+    /// a block entry that nothing would ever remove. Not a leak that settles.
+    /// Memory growing one block per block, on a node whose whole claim is that
+    /// it does not.
+    #[test]
+    fn a_switch_that_applied_more_than_it_undid_still_lets_the_window_slide() {
+        let mut store = ChainStore::new(params());
+        let past = 5u64;
+        let mut previous = Hash32::ZERO;
+        for height in 0..as_height(MAX_REORG_DEPTH) + past {
+            let block = block_at(height, previous, 1);
+            let id = block.id();
+            previous = id;
+            store.hold(id, block, 0);
+            store.branch.push(id);
+            store.applied.insert(id, a_record());
+            store.forget_what_cannot_change();
+        }
+        assert_eq!(store.undo_from, past);
+        assert_eq!(store.undo_records(), MAX_REORG_DEPTH);
+        assert_eq!(store.len(), MAX_REORG_DEPTH);
+
+        // What `rewind_to` does: three blocks off the tip, and the cursor
+        // brought down to whatever branch is left.
+        let undone = 3u64;
+        for _ in 0..undone {
+            let id = store.branch.pop().unwrap();
+            store.applied.remove(&id);
+        }
+        store.undo_from = store.undo_from.min(store.branch.len());
+
+        // And what `follow` does next: apply the winning branch, which here is
+        // two blocks longer than the one it replaced, and then step the cursor
+        // once.
+        let applied = undone + 2;
+        let mut tip = store.branch.tip().unwrap();
+        for n in 0..applied {
+            let block = block_at(store.branch.len(), tip, 100 + n);
+            let id = block.id();
+            tip = id;
+            store.hold(id, block, 0);
+            store.branch.push(id);
+            store.applied.insert(id, a_record());
+        }
+        store.forget_what_cannot_change();
+
+        assert_eq!(
+            store.undo_from,
+            store.branch.len() - as_height(MAX_REORG_DEPTH),
+            "the cursor stopped where the branch could no longer name a block \
+             for it, and never moved again"
+        );
+        assert_eq!(
+            store.undo_records(),
+            MAX_REORG_DEPTH,
+            "and the records it could not name piled up behind it"
+        );
+        assert!(
+            store.branch.id_at(store.undo_from).is_some(),
+            "the cursor has to name a block, or the next step stops too"
+        );
+
+        // Two hundred ordinary blocks after it. What a node holds must be the
+        // same at the end as at the start: this is the claim, and one block
+        // per block is how it was lost.
+        let held = store.len();
+        for n in 0..200u64 {
+            let block = block_at(store.branch.len(), tip, 900 + n);
+            let id = block.id();
+            tip = id;
+            store.hold(id, block, 0);
+            store.branch.push(id);
+            store.applied.insert(id, a_record());
+            store.forget_what_cannot_change();
+        }
+        assert_eq!(
+            store.undo_records(),
+            MAX_REORG_DEPTH,
+            "the undo records grew with the chain"
+        );
+        assert_eq!(
+            store.len(),
+            held,
+            "what the node holds grew with the chain: {} blocks after two \
+             hundred more, against {held} before them",
+            store.len()
+        );
+        assert_eq!(
+            store.undo_from,
+            store.branch.len() - as_height(MAX_REORG_DEPTH)
+        );
+    }
+
+    /// A switch that fails partway leaves the branch shorter than it found it,
+    /// and the cursor has to stop at the new start rather than below it.
+    ///
+    /// `Branch::push` lets go of its oldest identifier as the winning branch is
+    /// applied, and `restore` popping those blocks off again does not bring the
+    /// identifiers back: what the branch holds in full is that much shorter
+    /// until the chain grows into it again. A cursor placed at the height the
+    /// window arithmetic asks for would then sit below the oldest block the
+    /// branch can name, so the next step would find nothing to name again, and
+    /// the node would be claiming undo records for heights no rewind could
+    /// reach.
+    #[test]
+    fn the_cursor_stops_where_a_failed_switch_left_the_branch_beginning() {
+        let mut store = ChainStore::new(params());
+        let past = 5u64;
+        let mut previous = Hash32::ZERO;
+        for height in 0..as_height(MAX_REORG_DEPTH) + past {
+            let block = block_at(height, previous, 1);
+            let id = block.id();
+            previous = id;
+            store.hold(id, block, 0);
+            store.branch.push(id);
+            store.applied.insert(id, a_record());
+            store.forget_what_cannot_change();
+        }
+        let started_at = store.branch.from;
+
+        // A switch that undid three, applied six, and then met a block that
+        // would not apply. `follow` never calls the step on that path: what it
+        // calls is `restore`, which pops what it added and puts back what it
+        // took.
+        let undone = 3u64;
+        let mut rolled_back = Vec::new();
+        for _ in 0..undone {
+            let id = store.branch.pop().unwrap();
+            store.applied.remove(&id);
+            rolled_back.push(id);
+        }
+        store.undo_from = store.undo_from.min(store.branch.len());
+        let mut tip = store.branch.tip().unwrap();
+        for n in 0..6u64 {
+            let block = block_at(store.branch.len(), tip, 100 + n);
+            let id = block.id();
+            tip = id;
+            store.hold(id, block, 0);
+            store.branch.push(id);
+            store.applied.insert(id, a_record());
+        }
+        for _ in 0..6u64 {
+            let id = store.branch.pop().unwrap();
+            store.applied.remove(&id);
+        }
+        for id in rolled_back.iter().rev() {
+            store.branch.push(*id);
+            store.applied.insert(*id, a_record());
+        }
+        assert!(
+            store.branch.from > started_at,
+            "the failed switch has to have moved the branch's start, or there \
+             is nothing here to measure"
+        );
+        assert!(store.branch.id_at(store.undo_from).is_none());
+
+        // And then one ordinary block, which is where the step runs again.
+        let block = block_at(store.branch.len(), tip, 900);
+        let id = block.id();
+        store.hold(id, block, 0);
+        store.branch.push(id);
+        store.applied.insert(id, a_record());
+        store.forget_what_cannot_change();
+
+        assert!(
+            store.undo_from >= store.branch.from,
+            "the cursor sits at height {}, below the {} the branch begins at",
+            store.undo_from,
+            store.branch.from
+        );
+        assert!(
+            store.branch.id_at(store.undo_from).is_some(),
+            "and it names a block, so the next step has something to walk"
         );
     }
 }

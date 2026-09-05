@@ -141,9 +141,20 @@ fn is_canonically_encoded(bytes: &[u8; PUBLIC_KEY_LEN]) -> bool {
 /// reference type holds both, which is right for a key that verifies often and
 /// wrong for a key that sits in a note: a node holds one of these per hot note
 /// and touches it once, when the note is spent. Keeping the point would be 160
-/// bytes of precomputation per note against 32 bytes of key, and it is the
-/// difference between a hot set that costs a phone 106 MB and one that costs
-/// it 37. What it costs instead is decoding the point at every verification,
+/// bytes of precomputation per note against 32 bytes of key, and across the
+/// three structures a node keeps for a hot note it is the difference between a
+/// set that costs a phone 107 MB and one that costs it 68.
+///
+/// That second figure said 37, which is the tree half of the same measurement
+/// and not the set. `cairn-ledger/examples/footprint.rs` prints the whole and
+/// each half in its own process, and at the ceiling the rules impose it reads
+/// 68 MB, of which 31 MB is the map and the eviction order and 37 MB is the
+/// tree. The one thing a reader takes from this line is whether a phone can
+/// hold the set, so quoting a half as the whole halved the answer, and every
+/// other place that quotes it, the whitepaper and the README included, says
+/// 68.
+///
+/// What the change costs instead is decoding the point at every verification,
 /// measured in `examples/verify.rs`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PublicKey([u8; PUBLIC_KEY_LEN]);
@@ -379,6 +390,20 @@ mod tests {
             let public = key(seed).public_key();
             assert_eq!(PublicKey::from_bytes(&public.to_bytes()), Ok(public));
         }
+    }
+
+    /// A key held in a note is the thirty two bytes and nothing beside them.
+    ///
+    /// The footprint quoted on [`PublicKey`] rests on this and on nothing
+    /// else: putting the decoded point back would be 160 more bytes per hot
+    /// note, and at the ceiling the rules impose that is the difference
+    /// between the 68 MB `cairn-ledger/examples/footprint.rs` reads today and
+    /// the 107 MB it read before. The megabytes are a resident reading and
+    /// cannot be pinned from here; the shape they are a reading of can.
+    #[test]
+    fn a_key_in_a_note_is_the_thirty_two_bytes_and_nothing_beside() {
+        assert_eq!(PUBLIC_KEY_LEN, 32);
+        assert_eq!(std::mem::size_of::<PublicKey>(), PUBLIC_KEY_LEN);
     }
 
     #[test]

@@ -2,14 +2,25 @@
 //!
 //! Showing a newcomer which chain carries the most work means proving that a
 //! header sits where it claims, and proving that means holding a path through
-//! the forest the tip commits to. Held in memory that is a gigabyte at thirty
-//! years, which is the one thing a node's cost may not do; held here it is
-//! thirty two bytes a block of disk and a handful of reads per proof.
+//! the forest the tip commits to. That is a gigabyte at thirty years wherever
+//! it is kept, and what this file decides is where: on the disk, at a handful
+//! of reads per proof, rather than in the memory of a node that is meant to
+//! run on a phone.
 //!
 //! One file per height. Level zero holds the leaves, level `k` the nodes
 //! covering `2^k` leaves each, and every record is thirty two bytes, so a
 //! node's place in its file is its index. A node appears only once every leaf
 //! beneath it has, which is exactly the nodes a proof asks for.
+//!
+//! A leaf is thirty two bytes and the whole forest is sixty four a leaf, and
+//! the difference between those two numbers is the whole of the cost. A forest
+//! of `n` leaves holds `n` of them and `n - 1` nodes above, so every level
+//! above the leaves is a second copy of the file paid for one halving at a
+//! time. This used to say thirty two bytes a block, which is level zero and
+//! not the forest, and it said so beside the gigabyte that only comes out at
+//! sixty four. `a_forest_costs_two_nodes_a_leaf_on_disk` measures it rather
+//! than restating it, and `cairn-chain/examples/archivist.rs` charges the same
+//! sixty four when it prints what taking in newcomers costs.
 //!
 //! The layout and the hashing come from `cairn_accumulator`, not from here. A
 //! forest on disk that produced different hashes from one in memory would put

@@ -10,12 +10,13 @@
 
 use cairn_chain::{Accepted, ChainError, ChainStore, MAX_REORG_DEPTH};
 use cairn_crypto::SecretKey;
-use cairn_ledger::block::Block;
-use cairn_ledger::note::{Note, NoteId};
+use cairn_ledger::block::{Block, BlockHeader, BLOCK_VERSION};
+use cairn_ledger::note::{NetworkId, Note, NoteId};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
 use cairn_primitives::codec::Encode;
+use cairn_primitives::{Amount, Hash32};
 
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
@@ -647,6 +648,111 @@ fn the_most_a_node_will_hold_stays_something_a_phone_has() {
         "a node may be made to hold {ceiling} bytes of blocks, and half again \
          that in memory, which is past what the promise that it runs on a \
          phone can carry"
+    );
+}
+
+/// A block off the followed branch, filled to `bytes` and carrying the least
+/// work there is.
+///
+/// Nothing sizes a side block. What bounds a block is applied when it is
+/// connected, and a block on a losing branch is never connected, so what a
+/// peer may make a node hold is bounded by the sweeps in `cairn-chain` and by
+/// nothing else.
+fn fat_block(height: u64, previous: Hash32, bytes: usize, owner: &SecretKey) -> Block {
+    let value = Amount::from_pebbles(1).unwrap();
+    let per = Note::new(value, owner.public_key()).encode().len();
+    let mut seed = [0u8; 32];
+    seed[..8].copy_from_slice(&height.to_le_bytes());
+    let transfer = Transfer::new(
+        vec![Input::hot(NoteId::new(Hash32::from_bytes(seed), 0))],
+        (0..bytes / per.max(1))
+            .map(|_| Note::new(value, owner.public_key()))
+            .collect(),
+    );
+    Block {
+        header: BlockHeader {
+            version: BLOCK_VERSION,
+            network: NetworkId::TESTNET,
+            height,
+            previous,
+            transactions_root: Hash32::ZERO,
+            state_root: Hash32::ZERO,
+            history: Hash32::ZERO,
+            timestamp: NOW,
+            difficulty: 1,
+            total_work: 0,
+            nonce: height,
+        },
+        coinbase: CoinbaseTransaction::new(height, Vec::new()),
+        transfers: vec![transfer],
+    }
+}
+
+/// The same ceiling, measured against a node rather than against arithmetic.
+///
+/// The sweep that enforces it works out the height below which a block can no
+/// longer be switched to, and gave up when there was no such height: on a
+/// chain shorter than the window, every block is still reachable, so the walk
+/// had nothing to drop. But the walk is not what bounds memory. The sweep by
+/// size that follows it is, and taking the early exit skipped that too, so
+/// what a peer could make a node hold was bounded by nothing at all.
+///
+/// Every network is younger than the window for its first thousand blocks,
+/// which is its first week, and a throwaway network may never leave it. That
+/// is the week a new chain is most worth pushing over.
+///
+/// The block size here is lowered so the published ceiling is within reach of
+/// a test. Nothing else is contrived: the rivals fork at the first block, stay
+/// lighter than the branch throughout, and are held exactly as a peer's blocks
+/// are held.
+#[test]
+fn what_a_node_holds_is_bounded_on_a_chain_younger_than_the_window() {
+    let mut rules = params();
+    rules.max_block_bytes = 4096;
+    let ceiling = ChainStore::held_bytes_ceiling(&rules);
+
+    let miner = wallet(1);
+    let mut shared = Branch::new(rules);
+    let chain = shared.mine_empty(&miner, 31, 600);
+
+    let mut store = ChainStore::new(rules);
+    feed(&mut store, &chain[..30]);
+    assert_eq!(store.height(), Some(29));
+    assert!(
+        store.height().unwrap() < MAX_REORG_DEPTH as u64,
+        "the chain has to be younger than the window, or there is nothing here"
+    );
+
+    // A rival hanging off the first block, in blocks nothing sized. It stays
+    // lighter than the branch the whole way: twenty blocks of the least work
+    // there is against thirty of the same.
+    let mut previous = chain[0].id();
+    for n in 0..20u64 {
+        let block = fat_block(1 + n, previous, 2 * 1024 * 1024, &wallet(9));
+        previous = block.id();
+        assert_eq!(
+            store.add_block(block, NOW).unwrap(),
+            Accepted::SideBranch,
+            "rival block {n} was not held aside"
+        );
+    }
+    let offered = store.held_bytes();
+    assert!(
+        offered > ceiling,
+        "the rivals have to take the node past its ceiling of {ceiling} bytes,          and they took it to {offered}"
+    );
+
+    // One ordinary block on the branch, which is where the sweeps run.
+    store.add_block(chain[30].clone(), NOW).unwrap();
+    println!(
+        "a chain of 31 blocks, ceiling {ceiling} bytes: held {offered} before          the branch moved and {} after",
+        store.held_bytes()
+    );
+    assert!(
+        store.held_bytes() <= ceiling,
+        "the node holds {} bytes against a ceiling of {ceiling}, and the sweep          that binds it dropped {} of the {offered} it found",
+        store.held_bytes(),
+        offered.saturating_sub(store.held_bytes())
     );
 }
 

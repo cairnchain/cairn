@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use cairn_accumulator::{forest::forest_leaf, Archive};
-use cairn_store::HeaderTree;
+use cairn_store::{HeaderTree, HEADER_TREE};
 
 fn scratch(name: &str) -> PathBuf {
     let directory = std::env::temp_dir().join(format!("cairn-tree-{name}-{}", std::process::id()));
@@ -123,6 +123,49 @@ fn what_it_holds_survives_being_reopened() {
             memory.prove_in(position, 70).map(|p| p.siblings),
         );
     }
+
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// What a forest costs on disk, which is the number the whole "every node
+/// takes in newcomers" claim is priced from.
+///
+/// A forest of `n` leaves holds `n` of them and `n - 1` nodes above, so it is
+/// two nodes a leaf and not one. `header_tree.rs` used to say thirty two bytes
+/// a block, which is level zero alone, in the same sentence as the gigabyte at
+/// thirty years that only comes out at sixty four. Measured here rather than
+/// argued, because the figure is published: `cairn-chain/examples/archivist.rs`
+/// prints what taking in newcomers costs from it, and the whitepaper quotes
+/// "182 bytes a header and 64 for its place in the forest".
+#[test]
+fn a_forest_costs_two_nodes_a_leaf_on_disk() {
+    let directory = scratch("size");
+    let leaves = 4_096u64;
+    {
+        let mut tree = HeaderTree::open(&directory).unwrap();
+        for index in 0..leaves {
+            tree.append(leaf(index)).unwrap();
+        }
+    }
+
+    let mut held = 0u64;
+    for entry in std::fs::read_dir(&directory).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name().to_string_lossy().starts_with(HEADER_TREE) {
+            held += entry.metadata().unwrap().len();
+        }
+    }
+    let each = (held + leaves / 2) / leaves;
+    println!("{leaves} headers cost {held} bytes of forest, {each} bytes a header");
+
+    // A power of two is the worst case for the count and the exact one: every
+    // level above the leaves is full, so the forest is 2n - 1 nodes.
+    assert_eq!(held, (2 * leaves - 1) * 32);
+    assert_eq!(
+        each, 64,
+        "the forest costs {held} bytes for {leaves} headers, and 64 a header is \
+         what the paper, the archivist example and `header_tree.rs` all quote"
+    );
 
     let _ = std::fs::remove_dir_all(&directory);
 }

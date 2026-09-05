@@ -359,6 +359,28 @@ impl BlockLog {
     }
 
     /// Reads the block at `height`, rather than at a position.
+    ///
+    /// A height is a position plus where the log begins, and where it begins
+    /// is one record's word for it. Everything between the two is assumed to
+    /// follow on, which is true of a log this code wrote and is a claim like
+    /// any other once bytes have changed on a disk, so the block answers for
+    /// its own height before it is handed over.
+    ///
+    /// [`HeaderLog::read`] has kept this check since a header that had moved
+    /// came back as truth at every read for the life of a node. The block log
+    /// did not, and it is the one a node serves blocks out of: a record whose
+    /// height field changed still decoded, still matched the length its index
+    /// gave it, and still opened a log reporting nothing wrong, so `read_at`
+    /// answered a question about height five with the block from height nine.
+    /// `cairn-net` sends that answer to whoever asked for height five, which
+    /// refuses it and has every reason to think the sender is the problem.
+    /// The check costs one comparison on a block that is decoded already, and
+    /// what it buys is the failure being this node's, where it happened.
+    ///
+    /// Only here, and not in [`BlockLog::read`], which is asked about a
+    /// position and answers about one: it is what `height_of_first` uses to
+    /// learn where the log begins, so a height check there would be asking the
+    /// record to confirm the number taken from it.
     pub fn read_at(&self, height: u64) -> Result<Option<Block>, StoreError> {
         if !self.holds(height) {
             return Ok(None);
@@ -366,7 +388,17 @@ impl BlockLog {
         let Ok(index) = usize::try_from(height.saturating_sub(self.first)) else {
             return Ok(None);
         };
-        self.read(index)
+        let Some(block) = self.read(index)? else {
+            return Ok(None);
+        };
+        if block.header.height != height {
+            return Err(StoreError::Displaced {
+                position: index as u64,
+                found: block.header.height,
+                expected: height,
+            });
+        }
+        Ok(Some(block))
     }
 
     /// Cuts the log back so that it holds nothing at `height` or past it.
@@ -444,9 +476,20 @@ impl BlockLog {
         // both. They point at a scratch file for the two lines it takes, since
         // a `File` closes when it is dropped and there is no other way to say
         // so.
+        //
+        // Both are opened before either is assigned, so that the last thing
+        // that can fail with a `?` happens while this log is still on its own
+        // files. Assigning as they were opened put the danger zone the comment
+        // below describes one line above where the comment starts: a second
+        // open that failed left `self.file` on the scratch, `self.index` on
+        // the real index, and `usable` still true, which is the shape of a
+        // node taking appends into a file the next start deletes while the
+        // offsets naming them land in the index that survives.
         let scratch = self.directory.join(format!("{BLOCK_LOG}.hold"));
-        self.file = hold(&scratch)?;
-        self.index = hold(&scratch)?;
+        let held = hold(&scratch)?;
+        let held_index = hold(&scratch)?;
+        self.file = held;
+        self.index = held_index;
 
         // From here the handles are on a scratch file, so what this struct
         // says about itself and what it can actually read have parted company

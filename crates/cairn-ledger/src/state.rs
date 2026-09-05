@@ -800,12 +800,18 @@ pub struct BlockUndo {
     /// It does not when the block lands more notes than the window can hold,
     /// which runs the front out and then takes the landing with it.
     grace_landed_kept: bool,
-    /// Notes this block started and stopped following for a watched owner.
+    /// Notes this block stopped following for a watched owner.
     ///
     /// Written down rather than worked out again from the block, because the
     /// ceiling on how many are followed means the block's own notes are not
     /// the only thing that decides: taking one on can let another go.
-    watched_added: Vec<NoteId>,
+    ///
+    /// What the block *started* following is not written down, and must not
+    /// be. A wallet asking a running node to follow an address takes up the
+    /// notes already sitting in the grace window, and those belong to no
+    /// block, so a record of what each block took up misses exactly them.
+    /// What an undo has to let go of is every note the block made fall, and
+    /// the transition already says which those are.
     watched_removed: Vec<(NoteId, u64, Note)>,
     /// Coinbases that matured when this block landed, oldest first, and the
     /// entry this block's own coinbase added.
@@ -1061,14 +1067,14 @@ impl LedgerState {
         // it away, and the money it belonged to became unspendable in exactly
         // the case the repair was written for.
         //
-        // A note taken up here has no record of having fallen, so an undo
-        // cannot put it back where it was. That is right for the case this
-        // exists for, where the node was handed the window and can undo
-        // nothing below its anchor. Where an undo could reach it, the entry
-        // goes stale rather than wrong: the path stops folding to the
-        // commitment, and a wallet is told the proof cannot be produced, which
-        // is the safe direction and what it is already told about a note
-        // nobody kept a path for.
+        // A note taken up here belongs to no block, so no undo record names
+        // it. That was read as harmless on the grounds that the case this
+        // exists for is a node handed a window it can undo nothing below, and
+        // it was not: `watch_owner` is what a wallet asks a running node for,
+        // and a reorganisation that undoes the block one of these fell in
+        // reaches every one of them. So an undo lets go of the notes the
+        // block made fall rather than the notes it took up, which covers
+        // these without a record: see [`Self::revert`].
         let taken: Vec<Fallen> = self
             .grace
             .iter()
@@ -1077,9 +1083,7 @@ impl LedgerState {
             .copied()
             .collect();
         for (id, position, note) in taken {
-            if self.watched_notes.insert(id, (position, note)).is_none() {
-                self.watched_by_worth.insert((note.value, position, id));
-            }
+            self.follow_note(id, position, note);
         }
 
         // The grace window can hold as many notes as the ceiling allows, so a
@@ -1561,7 +1565,7 @@ impl LedgerState {
         for (id, position) in &recently_fallen {
             if let Some((_, note)) = transition.evicted.iter().find(|(other, _)| other == id) {
                 if self.watching.contains(&note.owner) {
-                    self.follow_note(*id, *position, *note, &mut undo);
+                    self.follow_note(*id, *position, *note);
                 }
             }
         }
@@ -1621,22 +1625,37 @@ impl LedgerState {
 
         // The notes followed for a watched owner, undone in the opposite order
         // to `commit`: what it took out goes back first, then what it put in
-        // comes out. Read off the record rather than worked out again from the
-        // block, because the ceiling means a note the block landed is not the
-        // only thing that can have moved. These are in no root and nothing
-        // about the chain disagrees when they are wrong, which is exactly why
-        // nothing would say so. What would be wrong is a wallet: after a
-        // reorganisation it would still be shown a note that was undone, and
-        // would have lost one that still exists, until something made it
-        // resynchronise.
+        // comes out. What it took out is read off the record, because the
+        // ceiling means a note the block landed is not the only thing that can
+        // have moved. These are in no root and nothing about the chain
+        // disagrees when they are wrong, which is exactly why nothing would
+        // say so. What would be wrong is a wallet: after a reorganisation it
+        // would still be shown a note that was undone, and would have lost one
+        // that still exists, until something made it resynchronise.
         for (id, position, note) in &undo.watched_removed {
             self.watched_notes.insert(*id, (*position, *note));
             self.watched_by_worth.insert((note.value, *position, *id));
         }
-        for id in &undo.watched_added {
-            if let Some((position, note)) = self.watched_notes.remove(id) {
-                self.watched_by_worth.remove(&(note.value, position, *id));
-            }
+        // What it put in is read off the block instead. Every note the block
+        // pushed out of the hot set goes back into it, so none of them is a
+        // fallen note any more and none may be followed as one.
+        //
+        // This used to be a record of the notes the block itself took up,
+        // which misses the ones a wallet asked about afterwards: `watch_owner`
+        // takes up whatever is already sitting in the grace window, and those
+        // belong to no block and are in no record. Undoing the block that
+        // landed one left it in the map at a place the forest no longer had,
+        // so the node answered "it fell at position seven" about a note that
+        // was back in the hot set and could produce no proof for it. Worse,
+        // when the branch that won landed the same note somewhere else, the
+        // order kept beside the map gained a second entry for it while the map
+        // gained none. That order is what decides which followed note is let
+        // go of when the ceiling bites, so the stray entry costs a note that
+        // is still followed. A debug build does not get that far: it stops on
+        // the length assertion the two structures carry, which is a node a
+        // wallet can halt by asking it to follow an address.
+        for (id, _) in &transition.evicted {
+            self.forget_followed(id);
         }
 
         // The leaves the block emptied, and the proofs it emptied them with.
@@ -1772,11 +1791,29 @@ impl LedgerState {
     }
 
     /// Starts following a fallen note on behalf of the owner it belongs to.
-    fn follow_note(&mut self, id: NoteId, position: u64, note: Note, undo: &mut BlockUndo) {
-        if self.watched_notes.insert(id, (position, note)).is_none() {
-            undo.watched_added.push(id);
+    ///
+    /// The map and the order beside it are written together, and a place the
+    /// map already held comes out of the order rather than being left in it.
+    /// Nothing reaches this with the note already followed, now that an undo
+    /// lets go of every fall the block made; it is written this way because
+    /// the alternative is two structures whose agreement is a fact proved
+    /// somewhere else.
+    fn follow_note(&mut self, id: NoteId, position: u64, note: Note) {
+        if let Some((held, previous)) = self.watched_notes.insert(id, (position, note)) {
+            self.watched_by_worth.remove(&(previous.value, held, id));
         }
         self.watched_by_worth.insert((note.value, position, id));
+    }
+
+    /// Stops following one, writing nothing down.
+    ///
+    /// For a note that stopped being a fallen note at all, which is what
+    /// undoing its fall makes it. Nothing has to be put back, because being
+    /// followed is a fact about this node and the note is in the hot set now.
+    fn forget_followed(&mut self, id: &NoteId) {
+        if let Some((position, note)) = self.watched_notes.remove(id) {
+            self.watched_by_worth.remove(&(note.value, position, *id));
+        }
     }
 
     /// Stops following one, which is what a spend does.

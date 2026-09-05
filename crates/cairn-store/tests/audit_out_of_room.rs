@@ -455,6 +455,71 @@ fn a_record_and_the_index_have_to_agree_about_its_length() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// The claim, from `read_at`: it "reads the block at `height`, rather than at
+/// a position".
+///
+/// A height is a position plus where the log begins, and everything between
+/// the two is assumed to follow on. A record whose height field changed
+/// decodes into a block like any other: the length is fixed width, so the
+/// index still describes it, the walk still reads it, and the open reports
+/// nothing wrong. The header log has refused this since a header that had
+/// moved came back as truth at every read; the block log did not, and it is
+/// the one a node serves blocks out of.
+///
+/// What that cost is not a bad read on this node. `cairn-net::blocks_at`
+/// answers a peer's request for a height with whatever `read_at` gives it, so
+/// the block from the wrong height goes out over the wire, is refused by the
+/// peer that asked, and looks to that peer like a node sending rubbish. The
+/// failure belongs here and had no way of being seen here.
+#[test]
+fn a_record_that_says_it_sits_at_another_height_is_refused() {
+    let blocks = chain(12);
+    let directory = scratch("displaced-block");
+    built(&directory, &blocks);
+
+    // The record at position five, rewritten as the same block claiming height
+    // nine. Every field of a header is fixed width, so it is the same number
+    // of bytes and the index still describes it exactly.
+    let mut start = 0u64;
+    for block in &blocks[..5] {
+        start += 4 + block.encode().len() as u64;
+    }
+    let mut moved = blocks[5].clone();
+    moved.header.height = 9;
+    let body = moved.encode();
+    assert_eq!(body.len(), blocks[5].encode().len());
+    put(&directory.join(BLOCK_LOG), start + 4, &body);
+
+    let (log, recovered) = BlockLog::open(&directory).unwrap();
+    assert_eq!(log.len(), blocks.len(), "the log still accounts for itself");
+    assert!(recovered.unreadable.is_none(), "and reports nothing wrong");
+
+    assert!(
+        matches!(
+            log.read_at(5),
+            Err(StoreError::Displaced {
+                position: 5,
+                found: 9,
+                expected: 5
+            })
+        ),
+        "a block from another height was served as the block at five: {:?}",
+        log.read_at(5).map(|block| block.map(|block| block.id()))
+    );
+
+    // Every other height still answers, so this refuses the record the damage
+    // covers and not the log.
+    assert_eq!(log.read_at(4).unwrap().unwrap().id(), blocks[4].id());
+    assert_eq!(log.read_at(6).unwrap().unwrap().id(), blocks[6].id());
+    assert_eq!(log.read_at(9).unwrap().unwrap().id(), blocks[9].id());
+    // And a position is still answered as a position: that is what
+    // `height_of_first` asks, and it must not be asked to confirm the number
+    // it is the source of.
+    assert_eq!(log.read(5).unwrap().unwrap().header.height, 9);
+
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 // ---------------------------------------------------------------------------
 // The header log.
 // ---------------------------------------------------------------------------

@@ -108,3 +108,40 @@ fn every_network_answers_to_the_name_it_reports() {
         );
     }
 }
+
+/// What each network's eviction cap actually buys, in blocks.
+///
+/// The cap is written as a hundred and twenty eighth of the default tier, and
+/// the sentence beside it says that emptying the tier therefore takes at least
+/// that many blocks however the blocks are stuffed. The sentence is about the
+/// two numbers together, and devnet moves one of them: it takes the tier down
+/// to sixty four and leaves the cap where it was, so the cap is sixteen times
+/// the tier and one block empties the whole thing.
+///
+/// That is the other direction of this file's subject. It is not a rule devnet
+/// lowered below a floor; it is a rule devnet left above a ceiling, so the one
+/// bound on how fast the hot set turns over is the one bound a throwaway
+/// network does not rehearse. There is no number that keeps the relation at
+/// that size, which is why the answer is written down rather than asserted
+/// equal: a hundred and twenty eighth of sixty four is nought, and a cap of
+/// one refuses an ordinary devnet payment.
+#[test]
+fn the_eviction_cap_buys_a_hundred_and_twenty_eight_blocks_and_on_devnet_one() {
+    let blocks_to_empty = |name: &str| {
+        let params = ConsensusParams::for_network(name).expect("a network that answers");
+        params
+            .hot_capacity
+            .div_ceil(params.max_evictions_per_block.max(1))
+    };
+    assert_eq!(
+        blocks_to_empty("testnet-6"),
+        128,
+        "the public tier stopped taking a hundred and twenty eight blocks to empty"
+    );
+    assert_eq!(
+        blocks_to_empty("devnet"),
+        1,
+        "devnet's cap started binding, which would be an improvement worth \
+         reading the comment beside it for"
+    );
+}

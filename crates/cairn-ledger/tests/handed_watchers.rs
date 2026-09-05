@@ -1,9 +1,14 @@
-//! AUDIT PROBE. Not part of the shipped suite; delete after reading.
+//! The notes a handed ledger was already holding a path for.
 //!
 //! The adjacent case to the `adopt` repair in 2e5ac9f. That repair carries the
 //! watched owners across when a handed ledger replaces the one a node had, so
 //! notes that fall AFTER the handover are followed. This asks about the notes
 //! that fell BEFORE it and are still in the window the handover carries.
+//!
+//! It shipped with a header calling it a probe to be deleted after reading,
+//! which it stopped being the moment it was committed: it is the regression
+//! guard for the back-fill in `watch_owner`, and a file that says nobody
+//! should keep it is a file the next person deletes.
 
 #![allow(
     clippy::unwrap_used,

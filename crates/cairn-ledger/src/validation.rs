@@ -134,6 +134,12 @@ pub struct ConsensusParams {
     /// tier takes at least a hundred and twenty eight blocks, about two hours,
     /// instead of forty three minutes. `cairn-ledger/examples/blocksize.rs`
     /// works both figures out from measured sizes.
+    ///
+    /// Those two sentences are about this number and [`Self::hot_capacity`]
+    /// together, and only the public networks hold both: devnet takes the tier
+    /// down and inherits this, so there the cap is larger than the tier and
+    /// one block empties it. Said where devnet is built, and pinned for every
+    /// network in `tests/network_rules.rs`.
     pub max_evictions_per_block: usize,
     /// Blocks a handed over ledger must sit below the tip it belongs to.
     ///
@@ -286,6 +292,22 @@ impl ConsensusParams {
             // reach the cold set in seconds rather than months, and its first
             // block is found in seconds. Everything else is the same, which is
             // the point of having it.
+            //
+            // Everything else but one, and it is the one the small hot set
+            // takes with it. `max_evictions_per_block` is written as a hundred
+            // and twenty eighth of the *default* tier, so a tier of sixty four
+            // inherits a cap sixteen times its own size and a single block
+            // empties the whole thing, where on a public network the same
+            // number buys a hundred and twenty eight blocks.
+            //
+            // Said rather than mended, because no number keeps the relation at
+            // this size: a hundred and twenty eighth of sixty four is nought,
+            // and a cap of one refuses an ordinary devnet payment, which
+            // evicts two. So the one rule bounding how fast the hot set turns
+            // over is the one rule a throwaway network does not rehearse.
+            // `tests/network_rules.rs` writes down what each network's cap
+            // actually buys, so that moving either number fails a test rather
+            // than a network.
             "devnet" => Some(Self {
                 network: NetworkId::DEVNET,
                 genesis: crate::genesis::pinned(NetworkId::DEVNET),

@@ -4,8 +4,17 @@
 //! add up to is a fixed size and the blocks are not. Headers are different:
 //! they are what a newcomer is shown to settle which chain carries the most
 //! work, and showing one means having it. At 182 bytes a header that is
-//! 129 MB a year, against 50 GB a year for the same promise in Bitcoin, so
-//! every node can carry it rather than the few that volunteer to.
+//! 95.7 MB a year, and the forest in [`crate::header_tree`] is 64 bytes a
+//! header more: 129 MB a year altogether, against 50 GB a year for the same
+//! promise in Bitcoin, so every node can carry it rather than the few that
+//! volunteer to.
+//!
+//! The two halves are named apart because this file used to charge the header
+//! alone with the whole 129 MB, which is the published figure for both. A
+//! header is 95.7 MB a year and nothing here holds the other third, so a
+//! reader adding this file's cost to the forest's got a third more than a node
+//! actually pays. `cairn-explorer/tests/published_figures.rs` holds the paper
+//! to the same split.
 //!
 //! Records are a fixed size, which is what a header encoding to a fixed size
 //! buys: the record for a height is a seek, with no index to keep beside it.
