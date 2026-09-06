@@ -632,6 +632,28 @@
       the honest chain out-mines it while it waits.
     </p>
     <p>
+      That run is capped, at 16 474 headers, about 3.0 MB, and the cap is a
+      real limit rather than a formality: past it a chain cannot be weighed at
+      all, and a newcomer reads it block by block instead. The run is a band of
+      work rather than a distance from the tip, so its length in blocks is that
+      band divided by the difficulty at the tip, and it grows as the tip's
+      difficulty falls below what the chain averaged over its life. Measured
+      over this implementation's own draw, on chains from three months to
+      thirty years old: a chain that loses twenty four to forty eight times its
+      hash rate, depending on its length, and does not recover cannot be
+      weighed from about eleven days after the loss until months or years after
+      it. While that lasts, every honest node answering is refused in the same
+      words a forger would be. The cap is kept rather than raised, because
+      raising it moves the cliff instead of removing it: the same measurement
+      puts the run a thirty year chain needs a year after a four thousand fold
+      loss at 526 499 headers and 96 MB, thirty two times the cap, and nothing
+      in the shape of the problem stops the next chain needing more: the run is
+      work divided by a difficulty whose only floor is one. Every metre of
+      whatever number were chosen instead would be memory a stranger decides a
+      newcomer will allocate before one check about the chain has been made.
+      What the cap costs is the shorter way in, not the chain.
+    </p>
+    <p>
       The count follows from the assumption the chain already makes. A forger
       cannot mine what it did not mine, so a chain heavier than the honest one,
       presented by a party holding a share <em>s</em> of the world's work, has
@@ -953,6 +975,25 @@
       taking from the episode is that the failure was not in the arithmetic
       everybody looks at. It was in an assumption the arithmetic never made and
       the surrounding code quietly relied on.
+    </p>
+    <p>
+      <strong>A chain that loses most of its miners cannot be weighed while it
+      recovers.</strong> The run of headers a weighing carries is capped at
+      16 474, and a chain whose difficulty at the tip has fallen far below its
+      lifetime average needs a longer one. Measured over this implementation's
+      own draw: a loss of twenty four to forty eight times the hash rate,
+      depending on the chain's length, puts a chain out of reach of the short
+      way in from about eleven days after the loss until months or years after
+      it. Nothing is lost and nobody is attacked. Newcomers read the chain
+      block by block, which checks more rather than less; what it costs is the
+      bandwidth and the hours the sampling exists to save, at the moment a
+      chain is least able to spare either. The cap is deliberate, because the
+      run needed has no bound of its own. What was wrong, and is mended, is
+      that a node meeting it told nobody: the two refusals were discarded where
+      they were made, so an operator saw a node asking peers, dropping them and
+      taking hours, with no reason anywhere. It now says, when several peers
+      fail in the same words, that the chain in front of it is what those
+      failures have in common.
     </p>
     <p>
       <strong>A rule changes at a height, and a node that has not updated by

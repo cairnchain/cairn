@@ -537,6 +537,72 @@ fn the_site_asks_the_node_how_it_is() {
     assert!(page.contains("\"bytesPerNote\":565"), "{page}");
     assert!(page.contains("\"bytesPerNote\":72"), "{page}");
     assert!(page.contains("\"movements\":"), "{page}");
+
+    // The disk half. The four above are about the chain, and a node can be
+    // following it perfectly while writing none of it down.
+    for field in ["unwritten", "unread", "unjudged", "unweighable", "filling"] {
+        assert!(
+            page.contains(&format!("\"{field}\":null")),
+            "a healthy node says nothing is wrong with its disk either, in as \
+             many words: {page}"
+        );
+    }
+    // Null on a node with no block log wired, which is what these tests give
+    // it; what matters here is that the field is served at all.
+    assert!(page.contains("\"writtenThrough\":"), "{page}");
+}
+
+/// **A node whose disk has stopped taking writes does not read as a healthy
+/// one.**
+///
+/// This page is the one program in the project that publishes the chain to
+/// strangers, and it read five of the nine things its node can say about
+/// itself. All five are about the chain. So a node whose disk had filled went
+/// on validating, went on climbing, wrote nothing, and once it was
+/// `MAX_BEHIND` past what it had written it switched itself off: measured, the
+/// `node` object was byte for byte identical before and after, and the banner
+/// fell through to the line about not being connected to anybody, whose last
+/// clause promises it will learn about a new block when somebody reaches it
+/// again. Nobody can. The listening socket is still bound, so a visitor's
+/// connection completes and is never attached to anything.
+///
+/// `cairnd` reads all of these and stops on the fatal one, and so does the
+/// wallet, which is what makes this an oversight rather than a decision.
+///
+/// The height on the disk is what makes this test worth more than the shape:
+/// it is the one of the five whose value a healthy node moves, so a page that
+/// stopped asking the node and answered from nothing would show it standing at
+/// nought while the tip climbed. Filling a disk is not something this file can
+/// do; `cairn-net/tests/audit_out_of_room.rs` does that against a real small
+/// filesystem, and what is pinned here is that the answer carries the fields
+/// at all and reads the moving one from the node rather than from a default.
+#[test]
+fn the_site_can_see_a_disk_that_has_stopped() {
+    let params = params();
+    let miner = wallet(1);
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(&miner, 6);
+
+    let held = Archiving::open(params, "disk-visible");
+    feed(&held.explorer, &blocks);
+    held.explorer.refresh();
+
+    let page = body(&ask(&held.explorer, "status"));
+    // `unweighable` among them: a node nobody can show the chain to joins by
+    // reading every block instead, which takes hours and from here is a site
+    // with no chain on it and no complaint.
+    for field in ["unwritten", "unread", "unjudged", "unweighable", "filling"] {
+        assert!(
+            page.contains(&format!("\"{field}\"")),
+            "the site cannot see {field}, so a node in that state looks healthy \
+             from here: {page}"
+        );
+    }
+    assert!(
+        page.contains("\"writtenThrough\":5"),
+        "the height on the disk is not the one this node reached, so the page \
+         is answering from something other than the node: {page}"
+    );
 }
 
 /// A rebuild of the index does not stop the node it runs on.

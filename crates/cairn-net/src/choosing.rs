@@ -440,12 +440,30 @@ impl Chooser {
     }
 
     /// The peer asked to show its claim could not: what came back does not
-    /// add up, or nothing came back at all. The claim stops counting.
+    /// add up, or nothing came back at all. The claim stops counting, and the
+    /// address it came from pays a pause.
     pub fn failed(&mut self, peer: u64, now: u64) {
+        self.stops_counting(peer, now, true);
+    }
+
+    /// The same, for a claim this node cannot take through nobody's fault: a
+    /// ledger from a height this build has no rules for.
+    ///
+    /// The claim stops counting, because this node cannot be handed that chain
+    /// whoever offers it and asking again would be a loop. The address pays
+    /// nothing, because every peer that has updated hands over the same ledger
+    /// and an update makes it readable, so the judgement is about this build.
+    /// It was the same call as the one above, which held an updated archivist
+    /// off for a growing pause and then did the same to the next one.
+    pub fn cannot_be_taken(&mut self, peer: u64, now: u64) {
+        self.stops_counting(peer, now, false);
+    }
+
+    fn stops_counting(&mut self, peer: u64, now: u64, blame: bool) {
         if let Some(claim) = self.claims.get_mut(&peer) {
             claim.unbacked = true;
             claim.tried = Some(now);
-            if let Some(host) = claim.host {
+            if let Some(host) = claim.host.filter(|_| blame) {
                 let room = self.unbacked_hosts.len() < MAX_UNBACKED_HOSTS;
                 // An address already on the list costs nothing further to hold,
                 // and counting against it is what makes its next pause longer
@@ -747,6 +765,60 @@ mod tests {
         chooser.noted(1, Some(host(1)), 900, LONG, true, 100);
         chooser.noted(2, Some(host(2)), 500, LONG, true, 100);
         chooser
+    }
+
+    /// A pair of claims from one address, which is what a machine holding two
+    /// connections looks like from here.
+    fn two_at_one_address() -> Chooser {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(1)), 900, LONG, true, 100);
+        chooser.noted(2, Some(host(1)), 500, LONG, true, 100);
+        chooser
+    }
+
+    /// **A ledger this build has no rules for is not the sender's doing, and
+    /// its address pays nothing for it.**
+    ///
+    /// AUDIT, repaired. `land_the_ledger` read that verdict out of an `.ok()`
+    /// and called [`Chooser::failed`], so an archivist that had updated paid a
+    /// pause for handing over exactly what it should have. Every peer worth
+    /// asking hands over the same ledger, and the pause doubles twice per
+    /// failure up to half an hour, so what an operator saw was a node with no
+    /// chain dropping every peer it spoke to and nothing anywhere saying why.
+    ///
+    /// The claim still stops counting either way. What changes is what the
+    /// address beside it is charged, which is the whole of the difference
+    /// between the two verdicts.
+    #[test]
+    fn a_claim_this_build_cannot_take_costs_its_address_nothing() {
+        let mut cannot = two_at_one_address();
+        assert_eq!(
+            cannot.step(100 + SETTLING, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Join),
+            "the heaviest claimant is asked first"
+        );
+        cannot.cannot_be_taken(1, 100 + SETTLING);
+        assert_eq!(
+            cannot.step(101 + SETTLING, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(2, Approach::Join),
+            "its neighbour at the same address is still offered the short way in"
+        );
+
+        // And the sender's own doing still costs what it always did: the
+        // address is paused, so the neighbour is read from block by block
+        // rather than handed a ledger.
+        let mut failed = two_at_one_address();
+        assert_eq!(
+            failed.step(100 + SETTLING, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Join)
+        );
+        failed.failed(1, 100 + SETTLING);
+        assert_eq!(
+            failed.step(101 + SETTLING, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(2, Approach::Read),
+            "a claim that failed pauses the address it came from, and the last \
+             resort reads rather than joins"
+        );
     }
 
     #[test]

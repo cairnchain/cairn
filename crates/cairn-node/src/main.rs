@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cairn_net::node::{Probation, Unjudged, Unread, Unwritten, MAX_BEHIND};
+use cairn_net::node::{Probation, Unjudged, Unread, Unweighable, Unwritten, MAX_BEHIND};
 use cairn_net::{Filling, Joined, Node, Restored};
 
 const TICK: Duration = Duration::from_millis(100);
@@ -274,6 +274,12 @@ fn say_what_the_numbers_do_not(node: &Node, directory: &str) {
     // has stopped moving.
     if let Some(unjudged) = node.unjudged() {
         say(&too_old(&unjudged));
+    }
+    // And a node with no chain that nobody can show one to. Every showing it
+    // is offered fails, it falls back to reading block by block, and what an
+    // operator saw was a node taking hours with peers it kept dropping.
+    if let Some(unweighable) = node.unweighable() {
+        say(&cannot_weigh(&unweighable));
     }
     // A node being handed a ledger has no height to show until the whole of it
     // has arrived, so without this it reads as stuck.
@@ -549,6 +555,23 @@ fn too_old(unjudged: &Unjudged) -> String {
     )
 }
 
+/// What an operator is told when nobody's showing of the chain will weigh.
+///
+/// Deliberately not a verdict either, and for the same reason as
+/// [`too_old`]: two addresses are two peers. What it does is offer the reading
+/// an operator cannot make from the outside, because from the outside a chain
+/// this build cannot weigh and a peer inventing one look identical: peers
+/// asked, peers dropped, and a height that takes hours to move.
+fn cannot_weigh(unweighable: &Unweighable) -> String {
+    format!(
+        "no peer has been able to show this node what work stands behind the chain. {} showings          from {} peers, over {} minutes, were all refused with the same words: {}. Nothing has          stopped. This node is reading the chain block by block instead, which is how nodes          worked before the shorter way existed, and it checks more rather than less; what it          costs is time and bandwidth. Peers making chains up is one reason for this line. The          other is a chain whose difficulty has fallen far below what it once ran at, which needs          a longer run of headers than this build will take: that one mends itself as the chain          catches up, and until it does every honest node answering is refused in exactly this          way.",
+        unweighable.showings,
+        unweighable.peers,
+        unweighable.over / 60,
+        unweighable.because,
+    )
+}
+
 /// Breaks a paragraph into lines that fit a terminal.
 ///
 /// Everything above is written for a person rather than for a log parser, and
@@ -594,8 +617,8 @@ fn short(text: &str) -> &str {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod said_out_loud {
-    use super::{falling_behind, lost_the_disk, still_filling, too_old, wrapped};
-    use cairn_net::node::{Unjudged, Unwritten, Writing};
+    use super::{cannot_weigh, falling_behind, lost_the_disk, still_filling, too_old, wrapped};
+    use cairn_net::node::{Unjudged, Unweighable, Unwritten, Writing};
     use cairn_net::Filling;
 
     fn behind(blocks: u64, within_reach: bool) -> Unwritten {
@@ -607,6 +630,39 @@ mod said_out_loud {
             blocks,
             within_reach,
         }
+    }
+
+    /// A node nobody can show the chain to prints the lines of a healthy one:
+    /// peers, a clock, and a height that is simply absent. What was missing is
+    /// what to do about it, and the two readings, because from the outside a
+    /// chain this build cannot weigh and a peer making one up are the same
+    /// sight.
+    #[test]
+    fn the_line_about_an_unweighable_chain_carries_both_readings() {
+        let text = cannot_weigh(&Unweighable {
+            because: "it could not be read as a weighing at all".to_owned(),
+            showings: 5,
+            peers: 3,
+            over: 600,
+        });
+        assert!(text.contains('5') && text.contains('3'), "{text}");
+        assert!(text.contains("10 minutes"), "{text}");
+        assert!(
+            text.contains("it could not be read as a weighing at all"),
+            "the words the refusal used are what tells the two apart: {text}"
+        );
+        assert!(
+            text.contains("reading the chain block by block"),
+            "and what the node is doing meanwhile: {text}"
+        );
+        assert!(
+            text.contains("difficulty has fallen"),
+            "the reading that is nobody's fault has to be in it: {text}"
+        );
+        assert!(
+            text.contains("making chains up"),
+            "and so does the one that is: {text}"
+        );
     }
 
     /// Every number a person needs in order to act, in every one of them.

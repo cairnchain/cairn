@@ -29,7 +29,7 @@ use cairn_crypto::{random_bytes, PublicKey, SecretKey};
 use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::transaction::{Input, Transfer};
 use cairn_ledger::validation::{ConsensusParams, TransferError};
-use cairn_net::node::{Probation, Refused, Stranded, Unjudged, Unread, Unwritten};
+use cairn_net::node::{Probation, Refused, Stranded, Unjudged, Unread, Unweighable, Unwritten};
 use cairn_net::{Joined, Node};
 use cairn_primitives::codec::Encode;
 use cairn_primitives::{Amount, Hash32};
@@ -77,6 +77,21 @@ pub enum WalletError {
         bytes: usize,
         limit: usize,
     },
+    #[error(
+        "this payment would have to gather {over} notes, and the network carries at most {limit} \
+         in one payment. The largest {limit} this wallet holds come to {reach}, and the fee has \
+         to come out of that too. Nothing was sent. Send {reach} or less: the change comes back \
+         as a single note, so each payment leaves the money in fewer pieces and a few of them \
+         will move the lot."
+    )]
+    TooManyNotes {
+        /// How many notes covering the amount would have taken.
+        over: usize,
+        /// How many the network carries in one payment.
+        limit: usize,
+        /// What the largest `limit` notes come to.
+        reach: Amount,
+    },
     #[error("{0}")]
     Refused(String),
     #[error(
@@ -107,6 +122,46 @@ pub enum WalletError {
          yours"
     )]
     NoRandomness,
+}
+
+/// What a person is told when this build has no rules for the chain it is on.
+///
+/// `following` is whether the wallet had a chain when it found out. It used to
+/// be assumed, and the sentence said the height and the balance shown were
+/// from before the moment it stopped. A wallet can now meet this verdict in
+/// the ledger it is handed on its very first start, where there is no height
+/// and no balance to be from before anything, and telling somebody to look at
+/// numbers that are not there is worse than saying nothing.
+fn too_old_for_this_chain(outdated: &Outdated, following: bool) -> String {
+    let standing = if following {
+        "It stopped following the chain there on purpose, so the height and the balance shown \
+         are from before that moment and will not move again."
+    } else {
+        "It never got as far as a chain: what it was offered is written under those rules, so \
+         there is no height and no balance here yet."
+    };
+    format!(
+        "This wallet is too old for the chain it is on. The rules from block {} need version \
+         {}, and this program knows only version {}. {standing} Install a newer wallet and \
+         start it again: nothing on disk is lost, and the key file is not touched.",
+        outdated.height, outdated.required, outdated.known
+    )
+}
+
+/// What a person is told when no peer can show this node the chain.
+///
+/// Its own function rather than another arm inline, because the arm it sits
+/// beside is already the longest thing in this file and a reader looking for
+/// one of these should not have to walk the others.
+fn nobody_could_show_it(unweighable: &Unweighable) -> String {
+    format!(
+        "No peer has been able to show this wallet's node what work stands behind the chain. {} \
+         showings from {} different peers over {} seconds were all refused with the same words: \
+         {}. Nothing has stopped and nothing is lost: the node is reading the chain block by \
+         block instead, which checks more rather than less and takes longer. The balance appears \
+         when it has finished. Leave it running.",
+        unweighable.showings, unweighable.peers, unweighable.over, unweighable.because
+    )
 }
 
 fn stranded_note(stranded: Amount) -> String {
@@ -427,6 +482,14 @@ pub struct Progress {
     /// Blocks the node met that this build has no rules to judge, if enough of
     /// them came from enough peers to mean anything.
     pub unjudged: Option<Unjudged>,
+    /// Whether nobody can show this node the work behind the chain, if enough
+    /// showings from enough peers failed the same way to mean anything.
+    ///
+    /// A wallet starting for the first time joins by being shown that, and
+    /// falls back to reading the chain block by block when it cannot be. From
+    /// the outside those are the same thing: a wallet with no balance yet,
+    /// taking a long time. This is the difference said out loud.
+    pub unweighable: Option<Unweighable>,
     /// Whether this wallet's own account of what it was paid is reaching the
     /// disk.
     ///
@@ -509,14 +572,7 @@ impl Progress {
     #[must_use]
     pub fn warning(&self) -> Option<String> {
         if let Some(outdated) = self.outdated {
-            return Some(format!(
-                "This wallet is too old for the chain it is on. The rules from block {} need \
-                 version {}, and this program knows only version {}. It stopped following the \
-                 chain there on purpose, so the height and the balance shown are from before \
-                 that moment and will not move again. Install a newer wallet and start it \
-                 again: nothing on disk is lost, and the key file is not touched.",
-                outdated.height, outdated.required, outdated.known
-            ));
+            return Some(too_old_for_this_chain(&outdated, self.height.is_some()));
         }
         if let Some(stranded) = self.stranded {
             return Some(format!(
@@ -586,6 +642,9 @@ impl Progress {
                  version. Nothing on disk is lost and the key file is not touched.",
                 unjudged.blocks, unjudged.peers, unjudged.over, unjudged.version, unjudged.known
             ));
+        }
+        if let Some(unweighable) = &self.unweighable {
+            return Some(nobody_could_show_it(unweighable));
         }
         if !self.keeping_its_account {
             return Some(
@@ -860,7 +919,7 @@ impl Wallet {
             // Not enough to cover the amount and this fee together. Sending is
             // where that is said, with the numbers; quoting a larger fee here
             // would only make it worse.
-            let Some(draft) = self.draft(&holdings, recipient, amount, needed) else {
+            let Ok(draft) = self.draft(&holdings, recipient, amount, needed) else {
                 return fee;
             };
             if draft.floor <= fee {
@@ -884,9 +943,10 @@ impl Wallet {
         recipient: PublicKey,
         amount: Amount,
         needed: Amount,
-    ) -> Option<Draft> {
-        let (spending, gathered) = select(&holdings.notes, needed)?;
-        let change = gathered.checked_sub(needed)?;
+    ) -> Result<Draft, NoDraft> {
+        let (spending, gathered) =
+            select(&holdings.notes, needed, self.params.max_inputs_per_transfer)?;
+        let change = gathered.checked_sub(needed).ok_or(NoDraft::Short)?;
         let mut outputs = vec![Note::new(amount, recipient)];
         if change > Amount::ZERO {
             outputs.push(Note::new(change, self.address()));
@@ -894,7 +954,7 @@ impl Wallet {
         let inputs = spending.iter().map(Held::as_input).collect();
         let transfer = Transfer::new(inputs, outputs);
         let bytes = transfer.encode().len();
-        Some(Draft {
+        Ok(Draft {
             floor: floor_of(&transfer, bytes, &spending),
             bytes,
             spending,
@@ -922,6 +982,7 @@ impl Wallet {
             unwritten: self.node.unwritten(),
             unread: self.node.unread(),
             unjudged: self.node.unjudged(),
+            unweighable: self.node.unweighable(),
             keeping_its_account: self.wrote_history.lock().map_or(true, |wrote| *wrote),
             lost_its_account: self.lost_its_account,
         }
@@ -1528,15 +1589,21 @@ impl Wallet {
         let needed = amount.checked_add(fee).ok_or(WalletError::TooLarge)?;
 
         let holdings = self.holdings();
-        let short = || WalletError::NotEnough {
-            needed,
-            have: holdings.spendable,
-            waiting: holdings.waiting,
-            stranded: holdings.stranded,
-        };
         let draft = self
             .draft(&holdings, recipient, amount, needed)
-            .ok_or_else(short)?;
+            .map_err(|why| match why {
+                NoDraft::SpreadTooThin { over, reach } => WalletError::TooManyNotes {
+                    over,
+                    limit: self.params.max_inputs_per_transfer,
+                    reach,
+                },
+                NoDraft::Short => WalletError::NotEnough {
+                    needed,
+                    have: holdings.spendable,
+                    waiting: holdings.waiting,
+                    stranded: holdings.stranded,
+                },
+            })?;
 
         // The network turns away a transfer that pays less than the floor, so
         // the refusal is better said here, with the number, than fetched back
@@ -1639,28 +1706,97 @@ impl Wallet {
     }
 }
 
-/// Picks notes to cover `needed`, largest first so a spend uses as few as it
-/// can and leaves as little dust behind.
+/// Why no transfer could be drafted for a spend.
+#[derive(Debug)]
+enum NoDraft {
+    /// The wallet holds the money, and holds it in more notes than one
+    /// payment carries.
+    SpreadTooThin {
+        /// How many notes covering the amount would have taken.
+        over: usize,
+        /// What the most notes one payment carries come to, which is what the
+        /// owner can actually send.
+        reach: Amount,
+    },
+    /// The wallet does not hold the money at all.
+    Short,
+}
+
+/// Picks at most `most` notes to cover `needed`, largest first so a spend uses
+/// as few as it can and leaves as little dust behind.
 ///
 /// Notes the nodes still hold come first whatever their size, because
 /// spending one of those costs no proof: a wallet that reached for a fallen
 /// note while a hot one would do would be paying bytes for nothing.
-fn select(held: &[Held], needed: Amount) -> Option<(Vec<Held>, Amount)> {
-    let mut sorted = held.to_vec();
-    sorted.sort_by(|left, right| {
+///
+/// `most` is the network's own limit on how many notes one payment gathers,
+/// and it had no counterpart here: this took notes until the amount was
+/// covered and stopped at nothing. The only size guard downstream was on
+/// bytes, and at a hundred and one bytes an input that one first fires at
+/// 1 297 notes against a rule that refuses at 257, so a miner with 257 rewards
+/// built, shuffled, signed and submitted a payment the network was always
+/// going to turn away.
+///
+/// The second pass is what the cap costs and what it must not cost. Preferring
+/// a hot note over a larger cold one saves bytes, and while there are notes to
+/// spare that is free; at the cap it would be the wallet refusing a payment it
+/// could make, because 256 hot pebbles may come to less than 256 cold ones. So
+/// once cheap proofs no longer fit, value alone decides.
+fn select(held: &[Held], needed: Amount, most: usize) -> Result<(Vec<Held>, Amount), NoDraft> {
+    let mut by_proof = held.to_vec();
+    by_proof.sort_by(|left, right| {
         left.is_cold()
             .cmp(&right.is_cold())
             .then_with(|| right.note.value.cmp(&left.note.value))
     });
+    if let Some(enough) = take_until(&by_proof, needed, most) {
+        return Ok(enough);
+    }
 
+    let mut by_value = held.to_vec();
+    by_value.sort_by(|left, right| right.note.value.cmp(&left.note.value));
+    if let Some(enough) = take_until(&by_value, needed, most) {
+        return Ok(enough);
+    }
+
+    // Nothing within the cap reaches it. Whether that is too little money or
+    // too many notes is the difference between the owner's mistake and the
+    // network's rule, and they need telling apart: the same refusal for both
+    // would have somebody with the money in hand reading that they do not have
+    // it.
+    let mut over = 0;
+    let mut whole = Amount::ZERO;
+    let mut reach = Amount::ZERO;
+    for note in &by_value {
+        let Some(more) = whole.checked_add(note.note.value) else {
+            break;
+        };
+        whole = more;
+        if over < most {
+            reach = whole;
+        }
+        over = over.saturating_add(1);
+        if whole >= needed {
+            return Err(NoDraft::SpreadTooThin { over, reach });
+        }
+    }
+    Err(NoDraft::Short)
+}
+
+/// Takes notes off an already ordered list until `needed` is covered, giving
+/// up rather than gathering more than `most` of them.
+fn take_until(sorted: &[Held], needed: Amount, most: usize) -> Option<(Vec<Held>, Amount)> {
     let mut chosen = Vec::new();
     let mut gathered = Amount::ZERO;
     for note in sorted {
         if gathered >= needed {
             break;
         }
+        if chosen.len() >= most {
+            return None;
+        }
         gathered = gathered.checked_add(note.note.value)?;
-        chosen.push(note);
+        chosen.push(note.clone());
     }
     (gathered >= needed).then_some((chosen, gathered))
 }
@@ -1742,6 +1878,19 @@ fn said_plainly(refusal: &Refused) -> String {
              Send a smaller amount, more than once: each one leaves fewer notes behind."
                 .to_owned()
         }
+        // The sibling of the case above, and it had no arm: the wallet's own
+        // guard now refuses this before a transfer is built, so reaching here
+        // means the node is holding the rule at a number this wallet was not
+        // told about. Same advice, since the way out is the same.
+        // The sibling of the case above, and it had no arm: the wallet's own
+        // guard now refuses this before a transfer is built, so reaching here
+        // means the node is holding the rule at a number this wallet was not
+        // told about. Same advice, since the way out is the same.
+        Refused::Transfer(TransferError::TooManyInputs { count, limit }) => format!(
+            "this payment gathers {count} notes, and the network carries at most {limit} in one. \
+             Nothing was sent. Send a smaller amount, more than once: the change comes back as a \
+             single note, so each payment leaves the money in fewer pieces."
+        ),
         other => format!("the network would not take this payment, and nothing was sent: {other}"),
     }
 }
@@ -1767,8 +1916,13 @@ fn wait_until(patience: Duration, ready: impl Fn() -> bool) -> bool {
     clippy::arithmetic_side_effects
 )]
 mod tests {
-    use super::{ceiling, said_plainly, shuffle, Progress};
-    use cairn_ledger::note::NoteId;
+    use super::{
+        ceiling, said_plainly, select, shuffle, too_old_for_this_chain, Held, NoDraft, Outdated,
+        Progress,
+    };
+    use cairn_accumulator::ForestProof;
+    use cairn_crypto::SecretKey;
+    use cairn_ledger::note::{Note, NoteId};
     use cairn_ledger::validation::TransferError;
     use cairn_net::node::{Probation, Reading, Refused, Unread};
     use cairn_net::Joined;
@@ -1776,6 +1930,74 @@ mod tests {
 
     fn cairn(text: &str) -> Amount {
         Amount::from_cairn(text).unwrap()
+    }
+
+    /// One note worth `value`, still held by the nodes or long since fallen.
+    fn note(seed: u32, value: Amount, fallen: bool) -> Held {
+        let owner = SecretKey::from_bytes(&[3; 32]).public_key();
+        Held {
+            id: NoteId::new(Hash32::ZERO, seed),
+            note: Note::new(value, owner),
+            fallen: fallen.then(|| {
+                (
+                    0,
+                    ForestProof {
+                        siblings: vec![Hash32::ZERO; 20],
+                    },
+                )
+            }),
+        }
+    }
+
+    /// Spending a note the nodes still hold costs no proof, so those come
+    /// first whatever their size. That preference is free while there are
+    /// notes to spare and is not free at the count the network carries: a
+    /// wallet that filled a payment with hot dust rather than reach for the
+    /// larger fallen notes beside it would be refusing a payment it could
+    /// make, and the money is right there.
+    #[test]
+    fn once_the_count_binds_it_is_value_that_decides_and_not_cheap_proofs() {
+        let mut held: Vec<Held> = (0..8).map(|i| note(i, cairn("1"), false)).collect();
+        held.extend((8..12).map(|i| note(i, cairn("10"), true)));
+
+        // Room to spare: the hot notes are enough on their own and cost no
+        // proof, so they are what a spend reaches for.
+        let (chosen, gathered) = select(&held, cairn("5"), 8).expect("eight hot notes cover five");
+        assert_eq!(gathered, cairn("5"));
+        assert!(
+            chosen.iter().all(|one| !one.is_cold()),
+            "five hot notes cover it without a single proof"
+        );
+
+        // Four notes only. Four hot ones come to four; four fallen ones come
+        // to forty, and forty is what was asked for.
+        let (chosen, gathered) = select(&held, cairn("40"), 4)
+            .expect("four fallen tens come to forty, and the wallet holds four of them");
+        assert_eq!(chosen.len(), 4);
+        assert_eq!(gathered, cairn("40"));
+        assert!(
+            chosen.iter().all(Held::is_cold),
+            "the largest four are the fallen ones"
+        );
+
+        // Past what any four notes reach, and the refusal has to say which
+        // wall was hit: the money is there, and it is in too many pieces.
+        let refused = select(&held, cairn("41"), 4);
+        assert!(
+            matches!(
+                refused,
+                Err(NoDraft::SpreadTooThin { over, reach })
+                    if over == 5 && reach == cairn("40")
+            ),
+            "forty one out of forty eight held in twelve notes is neither short nor coverable \
+             by four: {refused:?}"
+        );
+
+        // And too little money is still too little money.
+        assert!(
+            matches!(select(&held, cairn("49"), 12), Err(NoDraft::Short)),
+            "forty eight is all there is"
+        );
     }
 
     /// A fee larger than the payment is nearly always a decimal point in the
@@ -1815,6 +2037,46 @@ mod tests {
         assert!(!said.contains("already spent"), "{said}");
         assert!(said.contains("waiting for a block"), "{said}");
         assert!(said.contains("Nothing was sent"), "{said}");
+
+        // A payment too large for a block had a hand-written answer and its
+        // sibling, a payment gathering more notes than one carries, did not:
+        // it fell through to the protocol's own words, which name a field and
+        // say nothing about what to do next. The wallet now refuses this
+        // before it builds anything, so getting here means the node holds the
+        // rule at a number this wallet was not told, and the person on the
+        // other end still needs the way out.
+        let too_many = Refused::Transfer(TransferError::TooManyInputs {
+            count: 257,
+            limit: 256,
+        });
+        let said = said_plainly(&too_many);
+        assert!(!said.contains("TooManyInputs"), "{said}");
+        assert!(said.contains("257"), "{said}");
+        assert!(said.contains("256"), "{said}");
+        assert!(said.contains("Nothing was sent"), "{said}");
+        assert!(said.contains("Send a smaller amount"), "{said}");
+    }
+
+    /// A wallet too old for its chain used to be told to look at a height and
+    /// a balance "from before that moment". It can now meet the verdict in the
+    /// first ledger it is ever handed, where there is neither.
+    #[test]
+    fn a_wallet_that_never_had_a_chain_is_not_told_to_look_at_its_last_balance() {
+        let outdated = Outdated {
+            height: 900,
+            required: 3,
+            known: 2,
+        };
+        let following = too_old_for_this_chain(&outdated, true);
+        assert!(following.contains("from before that moment"), "{following}");
+
+        let never = too_old_for_this_chain(&outdated, false);
+        assert!(!never.contains("from before that moment"), "{never}");
+        assert!(never.contains("never got as far as a chain"), "{never}");
+        assert!(
+            never.contains("Install a newer wallet"),
+            "and the way out is the same either way: {never}"
+        );
     }
 
     /// The node reports three states in which a height and a balance say
@@ -1848,6 +2110,7 @@ mod tests {
             unwritten: None,
             unread: None,
             unjudged: None,
+            unweighable: None,
             height: Some(10),
             peers: 1,
             joining: Joined::Done,

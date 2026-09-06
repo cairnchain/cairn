@@ -371,3 +371,54 @@ fn the_history_is_written_down_and_read_back() {
     again.shutdown();
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// The network carries at most `max_inputs_per_transfer` notes in one payment,
+/// and the wallet's only size guard was on bytes. At a hundred and one bytes a
+/// note that one first fires at 1 297 notes, five times past the rule that
+/// refuses at 257, so a miner with 257 rewards gathered them, shuffled them,
+/// signed every one and handed the node a payment it was always going to turn
+/// away. Nothing was lost but the answer was the raw protocol string, and the
+/// wallet knew the number before it started.
+#[test]
+fn a_payment_gathering_more_notes_than_the_network_carries_is_refused_here() {
+    let limit = params().max_inputs_per_transfer;
+    let blocks = limit + 2;
+    let (wallet, _forge, directory) = funded("toomanynotes", 11, blocks);
+    let recipient = SecretKey::from_bytes(&[9; 32]).public_key();
+
+    let reward = params().initial_reward;
+    let holdings = wallet.holdings();
+    assert_eq!(holdings.notes.len(), blocks, "one note per block mined");
+
+    // More than the largest `limit` notes come to, so covering it needs one
+    // note past what one payment carries.
+    let reach = Amount::from_pebbles(reward.as_pebbles() * u64::try_from(limit).unwrap()).unwrap();
+    let asking = Amount::from_pebbles(reach.as_pebbles() + 1).unwrap();
+    assert!(asking <= holdings.spendable, "the money is all there");
+
+    match wallet.send(recipient, asking, cairn("1")) {
+        Err(WalletError::TooManyNotes {
+            over,
+            limit: told,
+            reach: told_reach,
+        }) => {
+            assert_eq!(over, limit + 1, "one note past what a payment carries");
+            assert_eq!(told, limit);
+            assert_eq!(told_reach, reach, "what the owner can actually send");
+        }
+        other => panic!("a payment of {asking} should be refused for its note count: {other:?}"),
+    }
+
+    // And the wallet still makes the largest payment it can: the guard must
+    // refuse what the network refuses and nothing else.
+    let most = Amount::from_pebbles(reach.as_pebbles() - cairn("5").as_pebbles()).unwrap();
+    let paying = floor(&wallet, recipient, most);
+    let sent = wallet.send(recipient, most, paying).unwrap();
+    assert_eq!(
+        sent.notes, limit,
+        "the largest payment there is gathers exactly what one carries"
+    );
+
+    wallet.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+}

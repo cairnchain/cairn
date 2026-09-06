@@ -62,6 +62,17 @@ const DEFAULT_HOT_CAPACITY: usize = 1 << 17;
 /// Seconds a block is meant to take. Provisional.
 const DEFAULT_TARGET_BLOCK_TIME: u64 = 60;
 
+/// The difficulty [`ConsensusParams::mineable_network`] opens at.
+///
+/// Four thousand and ninety six hashes for a block, which is about a
+/// millisecond on one core here, so a couple of hundred blocks is a fixture a
+/// test can afford. What matters is that it is not the floor: the retarget can
+/// fall six times from here before it reaches [`MIN_DIFFICULTY`], and it can
+/// rise as far as a test is willing to pay for. A published network opens at
+/// 2^23 or 2^27, where a test cannot afford a second block, and that is the
+/// whole reason this number exists rather than one of those.
+pub const MINEABLE_DIFFICULTY: u64 = 4_096;
+
 /// Blocks a coinbase's notes must wait before anyone can spend them.
 ///
 /// The reward is the one note in the chain that has no parent. Every other
@@ -430,6 +441,48 @@ impl ConsensusParams {
     pub const fn with_coinbase_maturity(mut self, blocks: u64) -> Self {
         self.coinbase_maturity = blocks;
         self
+    }
+
+    /// A public network's shape, opened at a difficulty a test can mine.
+    ///
+    /// [`Self::testnet`] opens at [`MIN_DIFFICULTY`], which is the floor, so a
+    /// retarget that wants to lower the difficulty has nowhere to lower it to,
+    /// and every fixture in this workspace spaced its blocks ten times the
+    /// target apart, which is the direction that wants lowering. Instrumenting
+    /// [`expected_difficulty`] over the whole suite produced five outcomes and
+    /// not one of them was a block asked to carry a difficulty different from
+    /// its parent's. Work was the height, everywhere, for the life of the
+    /// project.
+    ///
+    /// Three defects lived in that gap and none of them could be reached from
+    /// a fixture. A sweep in `cairn-chain` froze for the life of the node, but
+    /// only when a switch applied two or more blocks than it undid, and where
+    /// every block is worth one a rival wins by exactly one. The memory
+    /// ceiling went unenforced on a chain younger than the reorganisation
+    /// window. And the deepest switch the rules allow was refused on
+    /// testnet-6, because every deep-switch fixture set a burial far under the
+    /// constant.
+    ///
+    /// So this is not a fourth set of numbers nobody runs. It is
+    /// [`Self::testnet`] with the opening difficulty lifted off the floor and
+    /// the two depths set together, and `tests/network_rules.rs` compares it
+    /// field by field against `testnet-6`: a rule that moves on a public
+    /// network and not here fails a test rather than leaving the fixtures
+    /// rehearsing a shape no network has.
+    ///
+    /// The burial is the caller's and the maturity follows it rather than
+    /// being chosen beside it. That pairing is the half of the shape the
+    /// fixtures were missing even where they raised the difficulty:
+    /// `with_burial(8)` leaves the maturity at a thousand and twenty four,
+    /// which is a combination no network ships, and it is what every
+    /// deep-switch test in this workspace was built on.
+    #[must_use]
+    pub const fn mineable_network(burial: u64) -> Self {
+        let mut params = Self::testnet();
+        params.genesis_difficulty = MINEABLE_DIFFICULTY;
+        params.burial = burial;
+        params.coinbase_maturity = burial;
+        params
     }
 }
 

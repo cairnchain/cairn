@@ -25,7 +25,7 @@ use cairn_chain::{Accepted, Bodies, ChainError, ChainStore, Located, Outdated, M
 use cairn_crypto::PublicKey;
 use cairn_ledger::block::{Block, BlockHeader, BLOCK_VERSION};
 use cairn_ledger::genesis;
-use cairn_ledger::handover::{accept, Handover};
+use cairn_ledger::handover::{accept, Handover, HandoverError};
 use cairn_ledger::note::NetworkId;
 use cairn_ledger::pow::RECENT_HEADERS;
 use cairn_ledger::sampling::{check_start, open_start, SampledStart, SAMPLES};
@@ -290,6 +290,33 @@ const UNJUDGED_MEMORY: u64 = 3_600;
 /// other table here. What is being asked of it is whether more than one peer
 /// is involved, and this is far above the number that settles that.
 const UNJUDGED_SENDERS: usize = 64;
+
+/// Showings that failed to weigh, saying the same thing each time, before a
+/// person is told the chain itself may be the reason.
+///
+/// One of these is the sender's doing and is treated as such: the chooser
+/// stops counting the claim behind it and asks the next claimant. Three
+/// saying the same words is a different question, and it is the question this
+/// exists for: this build refuses a run of headers longer than
+/// `cairn_ledger::sampling::MOST_TAIL`, and a chain whose difficulty has
+/// fallen far below what it ran at needs a longer one. Measured over the
+/// project's own `draw`: a chain that loses twenty four to forty eight times
+/// its hash rate, depending on its length, and does not recover, cannot be
+/// weighed at all from about eleven days after the loss until months or years
+/// after it. Every archivist then fails identically, honestly, and the node
+/// falls back to reading the chain. What was missing is anybody being told.
+const UNWEIGHED_SHOWINGS: u64 = 3;
+
+/// Connections those showings have to have come from.
+///
+/// The same reasoning as [`UNJUDGED_PEERS`] and the same honest caveat:
+/// whoever holds two addresses holds two connections, so this is the cheapest
+/// condition that makes the claim cost more than one peer's malice, and not
+/// proof of anything. It is said and never acted on.
+const UNWEIGHED_PEERS: usize = 2;
+
+/// Connections counted towards [`UNWEIGHED_PEERS`] at once.
+const UNWEIGHED_SENDERS: usize = 64;
 
 /// A gap between two rounds of maintenance that means the machine was away.
 ///
@@ -794,6 +821,43 @@ pub struct Unjudged {
     pub over: u64,
 }
 
+/// What says this node cannot weigh the chain it is being offered.
+///
+/// A newcomer joins by being shown what work stands behind a chain rather than
+/// by reading every block of it, and a showing that does not check out is
+/// ordinarily the sender's doing: the chooser stops counting its claim and the
+/// next claimant is asked. That stays, whatever this says, because the peer
+/// did send something this node could not use and the hold-off is what stops
+/// a stranger occupying a newcomer's attention.
+///
+/// What did not exist is the other reading. When every showing fails with the
+/// same words, the peers are not the thing they have in common: the chain is.
+/// This build takes a run of headers up to a fixed length, and a chain whose
+/// difficulty has fallen far below what it ran at needs a longer one, so an
+/// honest archivist serving an honest chain is refused and looks exactly like
+/// a liar. The node still gets its chain, by reading it block by block, which
+/// is slower and no less safe. Before this, nothing about any of it reached
+/// the person running it: both errors were dropped where they were made, and
+/// the only trace was a join that took hours.
+///
+/// Evidence and not a verdict, for the same reason as [`Unjudged`]: two
+/// addresses are two peers, and a node that stopped on this would be handing a
+/// stranger a way to stop it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unweighable {
+    /// What the last of them said, in the words of whatever refused it. The
+    /// difference between a run of headers longer than this build takes, which
+    /// is this build meeting a chain it cannot weigh, and a sample in the
+    /// wrong place, which is somebody making one up.
+    pub because: String,
+    /// Showings that failed with these words.
+    pub showings: u64,
+    /// Connections they came from.
+    pub peers: usize,
+    /// Seconds between the first of them and the last.
+    pub over: u64,
+}
+
 type PeerId = u64;
 
 /// One live connection, as the rest of the node sees it.
@@ -1003,6 +1067,12 @@ struct Shared {
     /// Also a leaf, and for the same reason: it is written from the thread
     /// reading a peer, which has just let go of the chain.
     unjudged: Mutex<Unreadable>,
+    /// Showings of what work stands behind a chain that would not weigh, and
+    /// who sent them.
+    ///
+    /// A leaf as well. It is written after the weighing, which holds neither
+    /// the chain nor the collection, and it takes nothing.
+    unweighed: Mutex<Unweighed>,
     /// What this node is asking the network about where fallen notes sit.
     ///
     /// Empty on a node nobody has asked to recover anything, which is every
@@ -1109,6 +1179,52 @@ fn too_old_for_the_chain(met: &Unreadable) -> Option<Unjudged> {
         blocks: met.blocks,
         peers: met.peers.len(),
         over,
+    })
+}
+
+/// Showings that would not weigh, as they add up.
+///
+/// Counted rather than acted on, the same shape as [`Unreadable`]. What one of
+/// them means is settled by the chooser; what a run of them means is settled
+/// in [`no_showing_checks_out`], kept apart so the rule can be read on its own.
+#[derive(Debug, Default)]
+struct Unweighed {
+    /// What they said, which has to be the same words each time. A different
+    /// refusal is a different question and starts the count again: peers
+    /// failing in three different ways are three peers, and peers failing in
+    /// one way are a chain.
+    because: String,
+    showings: u64,
+    /// The connections they came from, up to [`UNWEIGHED_SENDERS`].
+    peers: HashSet<PeerId>,
+    /// When the first arrived, and when the last did.
+    first: u64,
+    last: u64,
+}
+
+/// Whether what this node has met adds up to a chain it cannot weigh.
+///
+/// No stretch of time is asked for, unlike [`too_old_for_the_chain`], and the
+/// difference is what renews the evidence. A chain whose rules moved on
+/// produces an unreadable block for as long as a node is up, so demanding that
+/// they be spread out costs nothing there. Showings stop: a node asks one
+/// claimant at a time and runs out of claimants, and three that arrive quickly
+/// may be all there ever are. A stretch here would mean the line comes after
+/// the hours of reading it exists to explain, or never comes at all.
+fn no_showing_checks_out(met: &Unweighed) -> Option<Unweighable> {
+    if met.showings < UNWEIGHED_SHOWINGS || met.peers.len() < UNWEIGHED_PEERS {
+        return None;
+    }
+    // A clock that went backwards says nothing about how long these have been
+    // arriving, so it says nothing at all rather than a negative stretch.
+    if met.last < met.first {
+        return None;
+    }
+    Some(Unweighable {
+        because: met.because.clone(),
+        showings: met.showings,
+        peers: met.peers.len(),
+        over: met.last.saturating_sub(met.first),
     })
 }
 
@@ -1607,6 +1723,37 @@ impl Shared {
         met.blocks = met.blocks.saturating_add(1);
         met.last = now;
         if met.peers.len() < UNJUDGED_SENDERS {
+            met.peers.insert(from);
+        }
+    }
+
+    /// Counts one showing of a chain's work that would not weigh, and who sent
+    /// it.
+    ///
+    /// Beside the chooser rather than instead of it. The peer still loses its
+    /// turn where it always did: this node was handed bytes it could not use,
+    /// and whether that is the sender's fault is exactly what it cannot tell
+    /// from one showing. What this adds is the reading it could never make
+    /// before, which needs more than one showing to make.
+    fn could_not_weigh(&self, from: PeerId, because: &str, now: u64) {
+        let mut met = self
+            .unweighed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // A different refusal is a different question. Three peers failing in
+        // three ways are three peers; three failing in one way are a chain,
+        // and only the second is worth a person's afternoon.
+        let lapsed = met.showings > 0 && (met.because != because || now < met.last);
+        if lapsed {
+            *met = Unweighed::default();
+        }
+        if met.showings == 0 {
+            met.first = now;
+            because.clone_into(&mut met.because);
+        }
+        met.showings = met.showings.saturating_add(1);
+        met.last = now;
+        if met.peers.len() < UNWEIGHED_SENDERS {
             met.peers.insert(from);
         }
     }
@@ -2381,6 +2528,7 @@ impl Node {
             unwritten: Mutex::new(None),
             unread: Mutex::new(unread),
             unjudged: Mutex::new(Unreadable::default()),
+            unweighed: Mutex::new(Unweighed::default()),
             asking: Mutex::new(Asking::default()),
         });
 
@@ -2706,6 +2854,32 @@ impl Node {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         too_old_for_the_chain(&met)
+    }
+
+    /// Whether the showings this node is being offered say the chain itself
+    /// cannot be weighed by this build.
+    ///
+    /// `None` until several showings have failed in the same words, from more
+    /// than one peer. A node with no chain still gets one either way: it reads
+    /// it block by block, which is slower and no less safe. What this answers
+    /// is the question an operator watching that had no way to ask, which is
+    /// why it is taking hours.
+    ///
+    /// And `None` again the moment a chain arrives, however it arrived.
+    /// Showings are only ever weighed while a node has nothing, so the count
+    /// is frozen from then on, and left ungated it would follow a node that
+    /// had long since read its chain for the rest of its life, telling its
+    /// owner to wait for something that had already happened.
+    pub fn unweighable(&self) -> Option<Unweighable> {
+        if !self.shared.chain().is_empty() {
+            return None;
+        }
+        let met = self
+            .shared
+            .unweighed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        no_showing_checks_out(&met)
     }
 
     /// What this node is still missing before it can show a newcomer the
@@ -3200,10 +3374,27 @@ fn weigh_what_was_shown(
     whole: &[u8],
     now: u64,
 ) -> Option<Message> {
-    let weighed = SampledStart::decode(whole).ok().and_then(|start| {
-        let weighed = check_start(&start, SAMPLES, now, &shared.params).ok()?;
-        Some((weighed, start.tip))
-    });
+    // Both refusals were dropped on the floor here. What the sender lost was
+    // its turn, which is right; what nobody got was the reason, and the two
+    // readings of it are not the same afternoon. A sample in the wrong place
+    // is somebody making a chain up. A run of headers longer than this build
+    // takes is this build meeting a chain whose difficulty has fallen far
+    // below what it ran at, where every archivist alive fails identically and
+    // honestly. See [`Unweighable`] for what that costs and how long it lasts.
+    let weighed = SampledStart::decode(whole)
+        // Said rather than passed on bare. The codec names the type it refused
+        // and nothing else, which as a line for a person reads as a program
+        // talking to itself; and this is the refusal the tail ceiling comes
+        // out of, so it is the one worth placing.
+        .map_err(|error| format!("it could not be read as a weighing at all ({error})"))
+        .and_then(|start| {
+            check_start(&start, SAMPLES, now, &shared.params)
+                .map(|weighed| (weighed, start.tip))
+                .map_err(|error| error.to_string())
+        });
+    if let Err(because) = &weighed {
+        shared.could_not_weigh(from, because, now);
+    }
     let mut joining = shared.joining();
     // The attempt may have been given up on while this was being weighed:
     // upkeep starts a fresh one when the chooser turns to somebody else, and
@@ -3211,7 +3402,7 @@ fn weigh_what_was_shown(
     if !matches!(*joining, Progress::Weighing(_)) {
         return None;
     }
-    let Some((shown, tip)) = weighed else {
+    let Ok((shown, tip)) = weighed else {
         return fail_attempt(&mut joining, shared, from, now);
     };
 
@@ -3279,37 +3470,33 @@ fn land_the_ledger(
         *shared.joining() = Progress::Idle;
         return None;
     }
-    let landed = Handover::decode(whole)
-        .ok()
-        .filter(|handover| handover.tip.id() == tip.id())
-        .and_then(|handover| {
-            let state = accept(&handover, &shared.params).ok()?;
-            shared.chain().adopt(state, &handover.recent).ok()?;
-            // What the anchor was taken on: the blocks between it and the tip
-            // it names, which `accept` asks nothing about. Written down before
-            // anything else, because from this moment the node is holding a
-            // ledger nobody has stood behind and everything it does with it
-            // has to know that.
-            let anchor = handover.at.height;
-            shared.undertake(
-                anchor,
-                settles_at(anchor, handover.tip.height, &shared.params),
-                now,
-            );
-            // Kept only once it has been taken, so what is on disk is a ledger
-            // this node checked and adopted rather than one it merely
-            // received.
-            shared.keep_ledger(whole);
-            // The run of headers the ledger came with, written down. Without
-            // them this node has no oldest header of its own, and so nothing
-            // to check a filled-in run against: it would never be able to take
-            // anyone in.
-            shared.seed_headers(&handover.recent);
-            Some(())
-        });
+    let landed = take_the_ledger(shared, whole, &tip, now);
     let mut joining = shared.joining();
-    if landed.is_none() {
-        return fail_attempt(&mut joining, shared, from, now);
+    match landed {
+        Landed::Refused => return fail_attempt(&mut joining, shared, from, now),
+        // Not the sender's doing, and it used to be charged to the sender: an
+        // archivist that had updated was held off for a growing pause, and so
+        // was the next one, and the one after that, because every peer worth
+        // asking hands over the same ledger. The verdict itself reached
+        // nobody, because both errors went into an `.ok()`. What the reading
+        // path has always done with this is name it, hold it against no peer,
+        // and let a person read it beside a height that is not moving.
+        //
+        // The claim still stops counting, because this node cannot be handed
+        // that chain whoever offers it, and going round again would be a loop.
+        // The node is not stopped, which is where this parts company with the
+        // reading path: there the height is the chain's own next block and not
+        // a stranger's to choose, and here a newcomer with nothing would be
+        // stopped for good on a height any claimant can name. The stop still
+        // comes, from the first block this node then reads, which is the one
+        // form of this verdict whose height nobody gets to pick.
+        Landed::TooOld(outdated) => {
+            shared.outdated().get_or_insert(outdated);
+            shared.choosing().cannot_be_taken(from, now);
+            *joining = Progress::Idle;
+            return None;
+        }
+        Landed::Took => {}
     }
     *joining = Progress::Landed;
     drop(joining);
@@ -3321,6 +3508,74 @@ fn land_the_ledger(
     Some(Message::GetChain {
         locator: shared.chain().locator(),
     })
+}
+
+/// What came of a ledger arriving.
+enum Landed {
+    /// It checked out, was adopted, and is written down.
+    Took,
+    /// It did not check out. Whichever of the many ways, it is the sender's
+    /// doing and costs the sender the exchange.
+    Refused,
+    /// This build has no rules for the chain the ledger belongs to.
+    ///
+    /// A judgement about the reader and not about the sender, the same as a
+    /// block from past an activation: an update makes the same ledger
+    /// readable, and every peer that has updated hands over the same one.
+    TooOld(Outdated),
+}
+
+/// Checks a ledger, adopts it, and writes down what adopting it means.
+///
+/// Split out from the deciding above so that the one question that matters
+/// there, whose doing a refusal was, is not buried inside a chain of `and_then`
+/// that had thrown the answer away before it was asked.
+fn take_the_ledger(shared: &Arc<Shared>, whole: &[u8], tip: &BlockHeader, now: u64) -> Landed {
+    let Ok(handover) = Handover::decode(whole) else {
+        return Landed::Refused;
+    };
+    if handover.tip.id() != tip.id() {
+        return Landed::Refused;
+    }
+    let state = match accept(&handover, &shared.params) {
+        Ok(state) => state,
+        Err(HandoverError::SoftwareTooOld {
+            height,
+            required,
+            known,
+        }) => {
+            return Landed::TooOld(Outdated {
+                height,
+                required,
+                known,
+            })
+        }
+        Err(_) => return Landed::Refused,
+    };
+    // Asked again on the way in, because the ledger is checked against the
+    // rules and adopting it is checked against this node's own chain, and the
+    // two refuse for different reasons.
+    if let Err(error) = shared.chain().adopt(state, &handover.recent) {
+        return error.outdated().map_or(Landed::Refused, Landed::TooOld);
+    }
+    // What the anchor was taken on: the blocks between it and the tip it
+    // names, which `accept` asks nothing about. Written down before anything
+    // else, because from this moment the node is holding a ledger nobody has
+    // stood behind and everything it does with it has to know that.
+    let anchor = handover.at.height;
+    shared.undertake(
+        anchor,
+        settles_at(anchor, handover.tip.height, &shared.params),
+        now,
+    );
+    // Kept only once it has been taken, so what is on disk is a ledger this
+    // node checked and adopted rather than one it merely received.
+    shared.keep_ledger(whole);
+    // The run of headers the ledger came with, written down. Without them this
+    // node has no oldest header of its own, and so nothing to check a filled-in
+    // run against: it would never be able to take anyone in.
+    shared.seed_headers(&handover.recent);
+    Landed::Took
 }
 
 /// Ends a join attempt whose answer does not add up, and says so.

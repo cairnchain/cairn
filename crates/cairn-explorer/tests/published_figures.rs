@@ -32,7 +32,7 @@ use cairn_accumulator::Archive;
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::note::{Note, NoteId};
-use cairn_ledger::sampling::{draw, open_start, seed_of, SAMPLES};
+use cairn_ledger::sampling::{draw, open_start, seed_of, MOST_TAIL, SAMPLES};
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
@@ -43,6 +43,13 @@ use cairn_primitives::Amount;
 const PAPER: &str = include_str!("../../../docs/cairn-whitepaper.html");
 const README: &str = include_str!("../../../README.md");
 const DESIGN: &str = include_str!("../../../docs/cairn-design.html");
+const SITE_EN: &str = include_str!("../../../web/i18n/en.json");
+const SITE_FR: &str = include_str!("../../../web/i18n/fr.json");
+/// The source that acts on the cap, which quotes the same two figures in the
+/// comment explaining why it reports what it reports. Included here because
+/// the last published figure to go stale had a guard already, in a file the
+/// guard did not reach.
+const NET_NODE: &str = include_str!("../../cairn-net/src/node.rs");
 
 /// Thirty years of a block a minute, which is what both tables are about.
 const THIRTY_YEARS: u64 = 30 * 365 * 24 * 60;
@@ -529,5 +536,288 @@ fn the_french_design_paper_quotes_the_arrival_the_english_one_is_held_to() {
             "the design paper does not say `{said}`, which is what the English one \
              is held to and what this build encodes"
         );
+    }
+}
+
+/// Blocks in a year at a block a minute, which is what the cliff below is
+/// measured in.
+const A_YEAR: u64 = 365 * 24 * 60;
+
+/// A chain that ran at one difficulty and then, after losing most of its hash
+/// rate, at a lower one.
+///
+/// Piecewise linear in work, so the block covering a drawn work value is
+/// arithmetic rather than a search: a chain of thirty years is fifteen million
+/// blocks, and materialising one per point of the sweep below is minutes.
+///
+/// The step is instant here and is not on a real chain: the retarget moves by
+/// at most a factor of four a block and lags by a window, so a fall of five
+/// hundred takes a handful of blocks to arrive. Against the tens of thousands
+/// of blocks the answer is measured in, that is nothing, and it errs towards
+/// the chain being weighable rather than away from it.
+struct Fallen {
+    before: u64,
+    high: u128,
+    low: u128,
+    blocks: u64,
+}
+
+impl Fallen {
+    fn new(age: u64, factor: u64, since: u64) -> Self {
+        const HIGH: u64 = 1_000_000;
+        Self {
+            before: age - since,
+            high: u128::from(HIGH),
+            low: u128::from((HIGH / factor).max(1)),
+            blocks: age,
+        }
+    }
+
+    fn total_at(&self, height: u64) -> u128 {
+        if height < self.before {
+            (u128::from(height) + 1) * self.high
+        } else {
+            u128::from(self.before) * self.high + (u128::from(height - self.before) + 1) * self.low
+        }
+    }
+
+    /// The lowest height whose own work spans `work`, which is where a draw
+    /// lands. The rule `sampling::covering` applies, in closed form.
+    fn covering(&self, work: u128) -> u64 {
+        let joint = u128::from(self.before) * self.high;
+        if work < joint {
+            u64::try_from(work / self.high).unwrap_or(0)
+        } else {
+            self.before + u64::try_from((work - joint) / self.low).unwrap_or(0)
+        }
+    }
+
+    /// The run of headers `check_the_tail` demands of this chain: a full
+    /// retarget window below the deepest header the draw pinned, up to the tip.
+    fn run_wanted(&self, seed: u8) -> u64 {
+        let window = u64::try_from(cairn_ledger::pow::DIFFICULTY_WINDOW).unwrap();
+        let tip = self.blocks - 1;
+        let difficulty = if tip < self.before {
+            self.high
+        } else {
+            self.low
+        };
+        let behind = self.total_at(tip) - difficulty;
+        let pinned = draw(
+            cairn_primitives::Hash32::from_bytes([seed; 32]),
+            SAMPLES,
+            behind,
+            tip,
+        )
+        .iter()
+        .map(|work| self.covering(*work))
+        .max()
+        .unwrap_or(0);
+        tip - pinned.saturating_sub(window) + 1
+    }
+}
+
+/// The soonest after the loss that this chain stops being weighable, in
+/// blocks. `None` if it is weighable throughout.
+fn cliff(age: u64, factor: u64) -> Option<u64> {
+    let mut first = None;
+    let mut since = 256u64;
+    while since < age {
+        if Fallen::new(age, factor, since).run_wanted(7) > MOST_TAIL {
+            first.get_or_insert(since);
+        }
+        // Geometric, because what is being located is an order of magnitude
+        // rather than a block: a linear walk over thirty years of them is an
+        // afternoon of hashing for two figures quoted to the day. A sixteenth
+        // a step, in whole numbers, so the same points are visited on every
+        // machine.
+        since = since + since / 16 + 1;
+    }
+    first
+}
+
+/// **What a chain that loses its miners costs a newcomer, as the paper states
+/// it.**
+///
+/// The run of headers a weighing carries is capped, and the cap is a real
+/// limit rather than a formality: past it a chain cannot be weighed at all and
+/// a newcomer has to read it. The paper's own instrument for the weighing,
+/// above, treats that run as a fixed distance from the tip, which it is only
+/// while the difficulty is near the chain's lifetime average. It is a band of
+/// work, so when the difficulty at the tip falls the same band covers more
+/// blocks.
+///
+/// Every figure the paper publishes about that is measured here, against this
+/// build's own `draw` and its own `MOST_TAIL`, because a figure about a limit
+/// nobody will meet for years is exactly the kind that goes stale unwatched.
+#[test]
+fn the_papers_cliff_on_a_chain_that_lost_its_miners_is_the_one_this_build_has() {
+    let paper = flowing();
+    let header = BlockHeader::ENCODED_BYTES as u64;
+    let ceiling = format!("{} headers", grouped(MOST_TAIL));
+    let ceiling_mb = format!("{:.1} MB", (MOST_TAIL * header) as f64 / 1e6);
+    println!("the cap on the run is {ceiling}, {ceiling_mb}");
+    assert!(
+        paper.contains(&ceiling),
+        "the paper does not say the run is capped at {ceiling}"
+    );
+    assert!(
+        paper.contains(&format!("about {ceiling_mb}")),
+        "the paper does not price the cap at {ceiling_mb}"
+    );
+    // And in both languages of the site, whose "honest limits" section is
+    // where a reader is sent for exactly this kind of sentence. A figure
+    // published in three places and measured in one is how the last fourteen
+    // went stale.
+    for (language, text) in [("English", SITE_EN), ("French", SITE_FR)] {
+        assert!(
+            text.contains(&grouped(MOST_TAIL)),
+            "the {language} site does not say the run is capped at {}",
+            grouped(MOST_TAIL)
+        );
+    }
+}
+
+/// **And the shape of chain that reaches it, which is where the paper's
+/// figures come from.**
+///
+/// Two figures: the loss that first puts a chain out of reach, which depends
+/// on its length, and how soon after the loss that begins. Both are quoted in
+/// the paper, in the site's honest limits, and in the comment beside the code
+/// that reports the state, so all three are held to the same measurement here.
+#[test]
+fn the_papers_account_of_which_chains_reach_the_cliff_is_the_measured_one() {
+    let paper = flowing();
+    // Where the cliff begins, per chain length: the smallest loss that reaches
+    // it at all. The paper quotes the range across these.
+    let ages = [
+        A_YEAR / 4,
+        A_YEAR / 2,
+        A_YEAR,
+        2 * A_YEAR,
+        3 * A_YEAR,
+        10 * A_YEAR,
+        30 * A_YEAR,
+    ];
+    let factors = [16u64, 24, 32, 48];
+    let mut thresholds = Vec::new();
+    let mut soonest = u64::MAX;
+    for age in ages {
+        let mut reached = None;
+        for factor in factors {
+            if let Some(first) = cliff(age, factor) {
+                soonest = soonest.min(first);
+                if reached.is_none() {
+                    reached = Some(factor);
+                }
+            }
+        }
+        println!(
+            "a chain of {:.2} years first cannot be weighed after losing {:?} times its work",
+            age as f64 / A_YEAR as f64,
+            reached
+        );
+        thresholds.push(reached.expect("every length here reaches it at some loss"));
+    }
+    let least = *thresholds.iter().min().unwrap();
+    let most = *thresholds.iter().max().unwrap();
+    let onset = soonest / (24 * 60);
+    println!("the cliff begins at a loss of {least} to {most}, {onset} days after it");
+
+    assert!(
+        !factors
+            .iter()
+            .take(1)
+            .any(|factor| ages.iter().any(|age| cliff(*age, *factor).is_some())),
+        "sixteen times reaches the cliff after all, and the paper says it does not"
+    );
+    assert!(
+        paper.contains(&format!(
+            "loses {} to {} times its hash rate",
+            spelled(least),
+            spelled(most)
+        )),
+        "the paper does not say the cliff begins at a loss of {least} to {most}"
+    );
+    assert!(
+        paper.contains(&format!("about {} days after the loss", spelled(onset))),
+        "the paper does not say the cliff begins {onset} days after the loss"
+    );
+    // And the comment beside the code that reports it, which quotes both. The
+    // comment markers come off first: a sentence that wraps in a doc comment
+    // has a `///` sitting in the middle of it.
+    let source = NET_NODE
+        .lines()
+        .map(|line| line.trim_start().trim_start_matches('/'))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        source.contains(&format!(
+            "loses {} to {} times its hash rate",
+            spelled(least),
+            spelled(most)
+        )),
+        "`cairn-net`'s own account of why it reports this no longer says a loss \
+         of {least} to {most}"
+    );
+    assert!(
+        source.contains(&format!("about {} days after the loss", spelled(onset))),
+        "`cairn-net`'s own account no longer says {onset} days after the loss"
+    );
+}
+
+/// **And what raising the cap would have to buy, which is the whole of the
+/// argument for keeping it: the run needed has no bound of its own.**
+#[test]
+fn the_papers_figure_for_a_chain_far_past_the_cliff_is_the_measured_one() {
+    let paper = flowing();
+    let header = BlockHeader::ENCODED_BYTES as u64;
+    //
+    // One named point rather than the worst of the sweep above. The worst of a
+    // sweep is partly a figure about the step size: this was published off the
+    // sweep first, and moved by half a percent the moment the grid was made to
+    // walk in whole numbers, which is a published figure resting on its own
+    // instrument's resolution.
+    let worst = Fallen::new(30 * A_YEAR, 4_096, A_YEAR).run_wanted(7);
+    let worst_mb = format!("{:.0} MB", (worst * header) as f64 / 1e6);
+    println!(
+        "a thirty year chain a year after a four thousand fold loss wants {worst} headers, \
+         {worst_mb}"
+    );
+    assert!(
+        worst > MOST_TAIL,
+        "a chain this far down is weighable after all, and the paper says it is not"
+    );
+    assert!(
+        paper.contains(&grouped(worst)),
+        "the paper does not say a four thousand fold loss wants {} headers",
+        grouped(worst)
+    );
+    assert!(
+        paper.contains(&worst_mb),
+        "the paper does not price that run at {worst_mb}"
+    );
+}
+
+/// The paper with its line breaks taken out, for phrases longer than a line.
+///
+/// A guard that matched the paper's own wrapping would be a guard against
+/// reflowing a paragraph, which is not what any of these are for.
+fn flowing() -> String {
+    PAPER.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The small numbers the paper writes in words rather than digits.
+fn spelled(value: u64) -> &'static str {
+    match value {
+        11 => "eleven",
+        16 => "sixteen",
+        24 => "twenty four",
+        32 => "thirty two",
+        48 => "forty eight",
+        other => panic!("the paper has no word for {other}, so the figure moved"),
     }
 }

@@ -17,7 +17,7 @@ use cairn_ledger::pow::work_of;
 use cairn_ledger::transaction::{Transfer, Witness};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_net::joining::Joined;
-use cairn_net::node::{Probation, Stranded};
+use cairn_net::node::{Filling, Probation, Stranded, Unjudged, Unread, Unweighable, Unwritten};
 use cairn_net::Node;
 use cairn_primitives::codec::Encode;
 use cairn_primitives::{hex, Amount, Hash32};
@@ -345,6 +345,21 @@ pub(crate) fn nothing_at(height: u64, from: Option<u64>, through: Option<u64>) -
 /// with no notice anywhere. Two of these mean the node has stopped and will
 /// not start again on its own, and from the outside all of them look exactly
 /// like a node that is working.
+///
+/// That paragraph was written about the chain and the same thing was true of
+/// the disk one layer down, for the same reason and for longer. A node whose
+/// disk has filled goes on validating and climbing and writes nothing, and
+/// once it is `MAX_BEHIND` past what it wrote it switches itself off: the
+/// accept loop, the upkeep and every peer thread run on that flag. Measured,
+/// the `node` object was byte for byte identical before and after, the banner
+/// fell through to "not connected to anybody", and the last clause of that
+/// sentence, that it will learn about a new block when somebody reaches it
+/// again, was false. The listening socket is still bound, so a visitor's
+/// connection completes and is never attached.
+///
+/// `cairnd` reads all of these and stops on the fatal one; so does the wallet.
+/// This is the one program of the three that publishes the chain to strangers,
+/// and it read five of the nine.
 #[derive(Debug)]
 struct Health {
     outdated: Option<Outdated>,
@@ -353,6 +368,30 @@ struct Health {
     joining: Joined,
     out_of_reach: u64,
     peers: usize,
+    /// What this node has taken on and not put on its disk, if anything.
+    ///
+    /// The one that can mean the node has stopped: `within_reach` false is
+    /// what `cairnd` watches for and what turns its own running flag off.
+    unwritten: Option<Unwritten>,
+    /// What it could not read back off its own disk, if anything.
+    unread: Option<Unread>,
+    /// Whether the blocks arriving say this build is too old for its chain.
+    unjudged: Option<Unjudged>,
+    /// Whether nobody can show this node what work stands behind the chain.
+    ///
+    /// A node in this state is joining by reading every block instead, which
+    /// takes hours and from the outside is a site with no chain on it and no
+    /// complaint. It is the state every other field here exists to make
+    /// visible, so it belongs beside them.
+    unweighable: Option<Unweighable>,
+    /// The headers from before this node arrived that it is still collecting.
+    ///
+    /// While this is set the node cannot show a newcomer the chain, and cannot
+    /// bound its own disk either, because trimming waits on a ledger it cannot
+    /// write until the forest is whole.
+    filling: Option<Filling>,
+    /// The height its disk actually holds, against the tip it is serving.
+    written_through: Option<u64>,
 }
 
 impl Health {
@@ -366,6 +405,12 @@ impl Health {
             joining: node.joining(),
             out_of_reach: node.out_of_reach(),
             peers: node.peer_count(),
+            unwritten: node.unwritten(),
+            unread: node.unread(),
+            unjudged: node.unjudged(),
+            unweighable: node.unweighable(),
+            filling: node.filling(),
+            written_through: node.written_through(),
         }
     }
 }
@@ -704,6 +749,28 @@ fn index_cost(json: &mut Writer, size: Size) {
     json.field_str("bytes", &size.bytes.to_string());
 }
 
+/// What the node says about nobody being able to show it the chain.
+///
+/// Its own function only because [`node_object`] is at the length where one
+/// more field stops being readable; there is nothing here that is not the
+/// shape of every other field beside it.
+fn unweighable_field(json: &mut Writer, unweighable: Option<&Unweighable>) {
+    let Some(unweighable) = unweighable else {
+        json.field_null("unweighable");
+        return;
+    };
+    json.key("unweighable");
+    json.begin_object();
+    json.field_u64("showings", unweighable.showings);
+    json.field_u64(
+        "peers",
+        u64::try_from(unweighable.peers).unwrap_or(u64::MAX),
+    );
+    json.field_u64("over", unweighable.over);
+    json.field_str("because", &unweighable.because);
+    json.end_object();
+}
+
 /// Whether the node under this website is still following the chain.
 ///
 /// Two of these mean it has stopped and will not start again, and from the
@@ -754,6 +821,78 @@ fn node_object(json: &mut Writer, context: &Context<'_>) {
 
     json.field_str("joining", &node.joining.to_string());
     json.field_u64("outOfReach", node.out_of_reach);
+
+    // The disk half. A page that showed only the four above went on serving a
+    // frozen tip under a banner about being lonely, on a node that had written
+    // nothing since block thirty two and had switched itself off.
+    match &node.unwritten {
+        Some(unwritten) => {
+            json.key("unwritten");
+            json.begin_object();
+            json.field_str("what", &unwritten.what.to_string());
+            json.field_str("because", &unwritten.because);
+            json.field_u64("reached", unwritten.reached);
+            match unwritten.written_through {
+                Some(height) => json.field_u64("writtenThrough", height),
+                None => json.field_null("writtenThrough"),
+            }
+            json.field_u64("blocks", unwritten.blocks);
+            // False means the gap can no longer be closed, so the node has
+            // stopped itself and will not come back on its own. It is the one
+            // field here a reader has to act on rather than watch.
+            json.field_bool("withinReach", unwritten.within_reach);
+            json.end_object();
+        }
+        None => json.field_null("unwritten"),
+    }
+
+    match &node.unread {
+        Some(unread) => {
+            json.key("unread");
+            json.begin_object();
+            json.field_str("what", &unread.what.to_string());
+            json.field_u64("height", unread.height);
+            json.field_str("because", &unread.because);
+            json.field_u64("refusals", unread.refusals);
+            json.end_object();
+        }
+        None => json.field_null("unread"),
+    }
+
+    match &node.unjudged {
+        Some(unjudged) => {
+            json.key("unjudged");
+            json.begin_object();
+            json.field_u64("blocks", unjudged.blocks);
+            json.field_u64("peers", u64::try_from(unjudged.peers).unwrap_or(u64::MAX));
+            json.field_u64("over", unjudged.over);
+            json.field_u64("version", u64::from(unjudged.version));
+            json.field_u64("known", u64::from(unjudged.known));
+            json.end_object();
+        }
+        None => json.field_null("unjudged"),
+    }
+
+    unweighable_field(json, node.unweighable.as_ref());
+
+    match &node.filling {
+        Some(filling) => {
+            json.key("filling");
+            json.begin_object();
+            json.field_u64("from", filling.from);
+            json.field_u64("through", filling.through);
+            json.field_u64("proved", filling.proved);
+            json.field_u64("reaches", filling.reaches);
+            json.field_u64("bytes", filling.bytes);
+            json.end_object();
+        }
+        None => json.field_null("filling"),
+    }
+
+    match node.written_through {
+        Some(height) => json.field_u64("writtenThrough", height),
+        None => json.field_null("writtenThrough"),
+    }
     json.end_object();
 }
 

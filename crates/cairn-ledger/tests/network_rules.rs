@@ -145,3 +145,60 @@ fn the_eviction_cap_buys_a_hundred_and_twenty_eight_blocks_and_on_devnet_one() {
          reading the comment beside it for"
     );
 }
+
+/// The rule set fixtures mine on is a public network's, field by field.
+///
+/// [`ConsensusParams::mineable_network`] exists because no test can mine
+/// testnet-6, which opens at 2^27. What a test can afford is a lower opening
+/// difficulty, and for a long time the way to get one was
+/// `ConsensusParams::testnet()`, which opens at the floor. A chain on the floor
+/// cannot retarget downwards, so every fixture in this workspace validated
+/// blocks carrying their parents' difficulty and nothing else, and three
+/// defects lived where that blindness reached.
+///
+/// The danger in answering that with a fourth rule set is that it drifts: a
+/// number changes on the public networks, nothing changes here, and the
+/// fixtures go on rehearsing a shape no network has. So the comparison is made
+/// against `testnet-6` on the whole struct rather than on the fields somebody
+/// remembered, with only the four this deliberately moves written out. A field
+/// added to `ConsensusParams` is covered the day it is added, without anybody
+/// having to come back here.
+#[test]
+fn the_rules_a_test_can_mine_are_a_public_networks_rules() {
+    let public = ConsensusParams::for_network("testnet-6").expect("a network that answers");
+    let mineable = ConsensusParams::mineable_network(public.burial);
+
+    // The four. A test mines its own first block, so nothing is pinned and
+    // there is no opening moment to sit after; and it opens at a difficulty a
+    // machine can solve in about a millisecond rather than in an afternoon.
+    let expected = ConsensusParams {
+        network: mineable.network,
+        genesis: mineable.genesis,
+        opens_at: mineable.opens_at,
+        genesis_difficulty: mineable.genesis_difficulty,
+        ..public
+    };
+    assert_eq!(
+        mineable, expected,
+        "the rules fixtures mine on differ from testnet-6 in something other \
+         than the network it is not and the difficulty it could not afford"
+    );
+    assert!(
+        mineable.genesis_difficulty > cairn_ledger::pow::MIN_DIFFICULTY,
+        "an opening on the floor is the blindness this exists to remove: the \
+         retarget can only ever want to lower it, and lowering is refused"
+    );
+
+    // And the pairing the fixtures were missing even where they raised the
+    // difficulty. `with_burial(8)` leaves the maturity at a thousand and
+    // twenty four, which no network ships.
+    for burial in [8u64, 32, 80, 1_024] {
+        let shaped = ConsensusParams::mineable_network(burial);
+        assert_eq!(
+            shaped.coinbase_maturity, shaped.burial,
+            "a network sets the two equal, and a fixture that does not is \
+             testing a network nobody runs"
+        );
+        assert!(settles_before_it_pays(&shaped));
+    }
+}
