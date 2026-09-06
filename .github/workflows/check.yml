@@ -11,6 +11,19 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # Called by release.yml, so that what has to hold before a merge is the same
+  # text as what has to hold before a download. Two copies of a gate are two
+  # gates that drift, and the one that drifts is the one nobody reads.
+  workflow_call:
+
+# Nothing here writes anything. This is the workflow that runs this
+# repository's own code, and the build scripts of everything it depends on,
+# on every push and every pull request. The repository's default token is
+# read-only today, but that is a setting in a web page rather than a line
+# anyone reviewing a change can see, and the other two workflows already say
+# it here.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,7 +39,7 @@ jobs:
       - name: Install the toolchain this repository pins
         run: rustup show
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets
+      - run: cargo clippy --workspace --all-targets --locked
 
   # Tests run on all three, because a node is meant to run on all three and
   # the differences that matter are the ones nobody thought to look for:
@@ -41,7 +54,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the toolchain this repository pins
         run: rustup show
-      - run: cargo test --workspace --release
+      - run: cargo test --workspace --release --locked
 
   # The same tests again, in a debug build, because the release job above
   # compiles every debug_assert out of existence. Some of those stand on
@@ -56,7 +69,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the toolchain this repository pins
         run: rustup show
-      - run: cargo test --workspace
+      - run: cargo test --workspace --locked
 
   # A node has to build for the machines people actually run servers on, and
   # those are not the machines this is developed on.
@@ -73,4 +86,4 @@ jobs:
       - name: Install the toolchain this repository pins
         run: rustup show
       - run: rustup target add ${{ matrix.target }}
-      - run: cargo check --workspace --target ${{ matrix.target }}
+      - run: cargo check --workspace --target ${{ matrix.target }} --locked

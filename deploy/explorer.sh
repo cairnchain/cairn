@@ -141,7 +141,11 @@ if [ -f "$HOME/.cargo/env" ]; then
 fi
 
 say "Build"
-( cd "$SRC" && cargo build --release --bin cairn-explorer )
+# --locked so a seed node is built from the dependency versions in Cargo.lock,
+# the same ones the checks ran against. release.yml already says this about the
+# binaries it publishes; the machines that build from source were resolving
+# whatever cargo decided at the time.
+( cd "$SRC" && cargo build --release --locked --bin cairn-explorer )
 install -m 0755 "$SRC/target/release/cairn-explorer" /usr/local/bin/cairn-explorer
 
 say "User and directory"

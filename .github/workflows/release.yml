@@ -66,7 +66,15 @@ jobs:
       - id: look
         shell: bash
         run: |
-          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          # Read from inside [workspace.package] rather than from the first
+          # line in the file that starts with the word: the release is named
+          # after this number, and a second `version` key added above it one
+          # day would rename the release without anyone editing this file.
+          version=$(awk '/^\[workspace\.package\]/{s=1;next} /^\[/{s=0} s && /^version[[:space:]]*=/{split($0,a,"\"");print a[2];exit}' Cargo.toml)
+          if [ -z "$version" ]; then
+            echo "no version under [workspace.package] in Cargo.toml" >&2
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "release=false" >> "$GITHUB_OUTPUT"
@@ -81,8 +89,27 @@ jobs:
           echo "release=true" >> "$GITHUB_OUTPUT"
           echo "v$version has no release yet, so this push is one"
 
-  build:
+  # The checks, before anything is built for people to download.
+  #
+  # Nothing enforced this. check.yml and this file both start from the same
+  # push and never look at each other, and the branch requires no status
+  # check, so a version bump published signed binaries whether or not the
+  # tests, the lints and the formatting had passed. The attestation says which
+  # commit and which workflow produced a file, and a reader hears "this is a
+  # good build" in it. It never said that. Now the release cannot happen
+  # unless it is true.
+  #
+  # Called rather than copied: the gate a release passes is the same text as
+  # the gate a merge passes.
+  verify:
     needs: decide
+    if: needs.decide.outputs.release == 'true' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/check.yml
+
+  build:
+    needs: [decide, verify]
     # An ordinary push builds nothing here. The checks that run on every commit
     # are a different file; this one exists to make what people download.
     if: needs.decide.outputs.release == 'true' || github.event_name == 'workflow_dispatch'
@@ -209,9 +236,20 @@ jobs:
 
       # The commit that changed the version, followed by the same closing note
       # every time: how to check these files without having to believe anyone.
+      # The commit that changed the version, found by the change rather than by
+      # position. This took the newest commit instead, which is the same one
+      # only when the version bump happens to be last in the push. A push that
+      # bumps the version and then fixes a typo released the typo's message as
+      # its notes and as its tag, and the version this repository stands at
+      # today was set fifteen commits before the current head.
       - name: Write the release notes
         run: |
-          git log -1 --format='%B' > notes.md
+          version="${{ needs.decide.outputs.version }}"
+          git log -S"version = \"$version\"" -1 --format='%B' -- Cargo.toml > notes.md
+          if [ ! -s notes.md ]; then
+            echo "could not find the commit that set version $version" >&2
+            exit 1
+          fi
           cat deploy/RELEASE_FOOTER.md >> notes.md
           cat notes.md
 

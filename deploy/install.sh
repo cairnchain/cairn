@@ -210,7 +210,11 @@ say "Build"
 #     fallocate -l 2G /swapfile && chmod 600 /swapfile
 #     mkswap /swapfile && swapon /swapfile
 #
-( cd "$SRC" && cargo build --release --bin cairnd )
+# --locked so a seed node is built from the dependency versions in Cargo.lock,
+# the same ones the checks ran against. release.yml already says this about the
+# binaries it publishes; the machines that build from source were resolving
+# whatever cargo decided at the time.
+( cd "$SRC" && cargo build --release --locked --bin cairnd )
 install -m 0755 "$SRC/target/release/cairnd" /usr/local/bin/cairnd
 
 say "User and directory"
