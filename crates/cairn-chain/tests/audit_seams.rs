@@ -553,13 +553,20 @@ fn a_branch_read_from_the_first_block_knows_its_first_block() {
 /// is ever cut to is `chain_tip - params.burial + 1`.
 ///
 /// What the chain reads back from is `undo_from`, which
-/// `forget_what_cannot_change` holds at `chain_tip + 1 - MAX_REORG_DEPTH` — a
+/// `forget_what_cannot_change` holds at `chain_tip - MAX_REORG_DEPTH` — a
 /// compile-time `usize` in this crate, not a rule of the network. So the
-/// invariant `cut <= undo_from` reduces to `params.burial >= MAX_REORG_DEPTH`.
+/// invariant `cut <= undo_from + 1` reduces to `params.burial >= MAX_REORG_DEPTH`.
 ///
 /// The build-time assertion checks the opposite direction, on a constant:
 /// `BURIAL <= MAX_REORG_DEPTH`. Together they force equality, which testnet-6
 /// has and devnet does not.
+///
+/// The one block between the two on testnet-6 is the block a switch of the
+/// full depth lands on. The chain holds its entry and its identifier and the
+/// log does not hold its body, and neither is wrong: a rewind stops above it,
+/// so nothing ever reads that body. What the chain wants from it is the
+/// height and the work behind it, so that the rival asking for the switch
+/// has a parent to be attached to.
 #[test]
 fn the_disk_is_trimmed_to_the_burial_and_read_back_from_the_reorg_depth() {
     let depth = MAX_REORG_DEPTH as u64;
@@ -568,8 +575,9 @@ fn the_disk_is_trimmed_to_the_burial_and_read_back_from_the_reorg_depth() {
     // the answer is the argument it was given plus one. That argument is the
     // anchor, and the anchor is `tip - burial`.
     let cut_at = |tip: u64, burial: u64| tip.saturating_sub(burial).saturating_add(1);
-    // What `forget_what_cannot_change` holds `undo_from` at.
-    let reads_back_from = |tip: u64| tip.saturating_add(1).saturating_sub(depth);
+    // What `forget_what_cannot_change` holds `undo_from` at: one below the
+    // deepest block a switch undoes, which is the block it lands on.
+    let reads_back_from = |tip: u64| tip.saturating_sub(depth);
 
     let tip = 100_000u64;
 
@@ -588,9 +596,10 @@ fn the_disk_is_trimmed_to_the_burial_and_read_back_from_the_reorg_depth() {
     let testnet = ConsensusParams::for_network("testnet-6").unwrap();
     assert_eq!(
         cut_at(tip, testnet.burial),
-        reads_back_from(tip),
-        "on testnet-6 the two floors are the same height, exactly, because \
-         the burial and the reorganisation depth are the same number"
+        reads_back_from(tip) + 1,
+        "on testnet-6 the log begins one height above the deepest the chain \
+         holds an entry for, and that one height is the block a switch lands \
+         on, whose body no rewind reads"
     );
 
     let devnet = ConsensusParams::for_network("devnet").unwrap();
@@ -602,8 +611,9 @@ fn the_disk_is_trimmed_to_the_burial_and_read_back_from_the_reorg_depth() {
     );
     assert_eq!(
         cut_at(tip, devnet.burial) - reads_back_from(tip),
-        depth - devnet.burial,
-        "the gap is exactly the difference between the two numbers"
+        depth + 1 - devnet.burial,
+        "the gap is exactly the window this build holds, less what this \
+         network calls buried"
     );
 
     // What compares them is the switch itself, and it is measured against a
@@ -872,4 +882,173 @@ fn a_node_that_trimmed_its_log_to_the_burial_cannot_put_a_branch_back() {
         "a node that cut its own log too deep climbs back when the chain is \
          offered to it again"
     );
+}
+
+/// **A fourth floor, which is the one a switch that fails can move: the
+/// identifiers the branch holds in full.**
+///
+/// The other three are fixed by the rules. The undo records reach
+/// `tip + 1 - MAX_REORG_DEPTH`; a block log is cut no deeper than
+/// `tip - burial + 1`; and `undo_limit`, the smaller of the depth and the
+/// burial, is what `follow` refuses on and so the deepest a rewind reaches.
+/// The two tests above measure those against each other.
+///
+/// This one is the window of identifiers `Branch` keeps, `MAX_REORG_DEPTH + 1`
+/// of them, so its floor sits at `tip - MAX_REORG_DEPTH`: one block below the
+/// deepest undo record, because the block a branch is rewound *onto* has to be
+/// nameable too. That single block is the whole of the margin, and letting go
+/// of identifiers as a winning branch was applied spent it. `restore` puts the
+/// blocks back and cannot put the identifiers back with them, so a switch that
+/// failed left the branch beginning one height higher, and the next switch as
+/// deep as the rules allow could no longer name its own fork point.
+///
+/// What it answered then is the point. Not `ForkTooDeep`, which would at least
+/// name this node's own limit, but `UnknownParent`, naming a block this node
+/// mined its way past and dropped itself, at a peer offering a branch the
+/// rules say it should take. A local shortfall reported as a fact about
+/// somebody else.
+///
+/// Everything here is the shape a live network makes without help: uniform
+/// difficulty, so the rival wins by exactly one block, undoing 1,024 and
+/// applying 1,024 before the 1,025th is refused. That last one is never
+/// pushed, so this switch spends no identifiers at all, and the branch's
+/// beginning is checked here to say so rather than to catch it moving. What
+/// moves it is a rival winning on more and easier blocks, which is what a
+/// partition produces and what no chain in this workspace can build while
+/// every one of them sits at the minimum difficulty:
+/// `a_failed_switch_leaves_the_branch_beginning_where_it_found_it` drives
+/// that shape by hand.
+///
+/// What this measures instead is the floor underneath: the block a switch of
+/// the full depth lands on, which the branch names and the block table used
+/// to have let go of.
+///
+/// With a disk behind it, and the log cut where this node's own rules cut it,
+/// because that is the other half of the same boundary and no test reached it.
+/// `a_switch_as_deep_as_the_rules_allow_finds_every_body_it_needs` measures
+/// the deepest switch against a trimmed log, on a chain of a hundred and sixty
+/// blocks under a burial of eighty: the window never bites there, so the
+/// entries and the records are all still held and the fork parent is simply
+/// present. The two only meet where the burial and `MAX_REORG_DEPTH` are the
+/// same number and the chain has run past the window, which is testnet-6 and
+/// mainnet on any ordinary day.
+#[test]
+fn a_failed_switch_leaves_the_branch_naming_the_deepest_fork_the_rules_allow() {
+    let depth = MAX_REORG_DEPTH as u64;
+    let burial = depth; // what testnet-6 and mainnet both set
+    let miner = wallet(1);
+    let shelf = Arc::new(Shelf::default());
+    let mut store = ChainStore::new(params());
+    store.reads_bodies_from(shelf.clone());
+
+    // Past the identifier window, so the branch is letting identifiers go by
+    // the time the fork arrives, and dated far enough back that a chain this
+    // long still ends before `NOW`.
+    let mut source = Source::new();
+    source.clock = NOW - 700_000;
+    let mut blocks = Vec::new();
+    source.run(&miner, 6, &mut blocks);
+    let fork = source.clone();
+    source.run(&miner, MAX_REORG_DEPTH, &mut blocks);
+    for block in &blocks {
+        shelf.put(block);
+        store.add_block(block.clone(), NOW).unwrap();
+    }
+    let tip = store.height().unwrap();
+    let head = store.tip().unwrap();
+    assert_eq!(tip, depth + 5);
+
+    // What a node does after every write, and what `trim_history` does once
+    // the log is over its budget: cut to the anchor, `tip - burial`, and keep
+    // everything above it.
+    store.release_bodies(0, tip + 1);
+    let cut = tip - burial + 1;
+    for height in 0..cut {
+        shelf.lose(height);
+    }
+
+    // The four floors, on this chain, as this node answers for them.
+    let reaches = tip - store.undo_limit();
+    let records = store.held_from();
+    let identifiers = store.branch_start().unwrap();
+    println!(
+        "tip {tip}: switch reaches {reaches}, undo records from {records}, \
+         identifiers from {identifiers}"
+    );
+    assert_eq!(
+        identifiers, reaches,
+        "the branch has to name the block a rewind of the full depth lands on"
+    );
+    assert_eq!(
+        records, reaches,
+        "and the block table has to hold it, because the rival that asks for \
+         that switch arrives as a block whose parent it is"
+    );
+
+    // A rival forking at that very height, longer by one, whose last block
+    // does not apply. One longer is what uniform difficulty produces: the
+    // fork choice moves the moment the rival carries more work, and with
+    // every block worth the same that is one block later.
+    let mut rival_source = fork;
+    let mut rival = Vec::new();
+    rival_source.run(&wallet(3), MAX_REORG_DEPTH + 1, &mut rival);
+    assert_eq!(
+        store.id_at(rival[0].header.height - 1),
+        Some(rival[0].header.previous),
+        "the fork is at the deepest height the rules allow"
+    );
+    assert!(
+        store.contains(&rival[0].header.previous),
+        "the branch names the block at height {}, and the block table has let \
+         it go: the deepest switch the rules allow arrives as a block whose \
+         parent this node applied and dropped itself, so `add_block` cannot \
+         work out the height or the work behind it and answers UnknownParent",
+        rival[0].header.height - 1
+    );
+    // Its entry is held; its body is in neither place, and nothing asks for
+    // one. A rewind of the full depth stops above this block, so it is never
+    // disconnected and never repooled: what is wanted from it is the height
+    // and the work behind it, which live in the entry.
+    assert!(
+        store.block_at(reaches).is_none() && shelf.body(reaches).is_none(),
+        "the block a switch of the full depth lands on still has its body \
+         somewhere, so this is not measuring the boundary it says it is"
+    );
+    for block in &rival[..MAX_REORG_DEPTH] {
+        assert_eq!(
+            store.add_block(block.clone(), NOW).unwrap(),
+            Accepted::SideBranch,
+            "equal work keeps the branch already followed"
+        );
+    }
+    let mut broken = rival[MAX_REORG_DEPTH].clone();
+    broken.header.state_root = Hash32::from_bytes([0xcd; 32]);
+    let refused = store.add_block(broken, NOW);
+    assert!(refused.is_err(), "the switch has to fail: {refused:?}");
+    assert_eq!(
+        (store.height(), store.tip()),
+        (Some(tip), Some(head)),
+        "and the node has to be back on the branch it was following"
+    );
+
+    assert_eq!(
+        store.branch_start(),
+        Some(identifiers),
+        "the failed switch cost the branch its beginning, so the next switch \
+         as deep as the rules allow cannot name its own fork point"
+    );
+
+    // The same branch again, with the block that failed replaced by the one
+    // that does not. Nothing here is deeper than the attempt that failed.
+    let accepted = store
+        .add_block(rival[MAX_REORG_DEPTH].clone(), NOW)
+        .expect("a switch the rules allow, offered again");
+    match accepted {
+        Accepted::Reorganised { removed, added } => {
+            assert_eq!(removed.len(), MAX_REORG_DEPTH);
+            assert_eq!(added.len(), MAX_REORG_DEPTH + 1);
+        }
+        other => panic!("the heavier branch was not taken: {other:?}"),
+    }
+    assert_eq!(store.height(), Some(tip + 1));
 }

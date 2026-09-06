@@ -18,7 +18,7 @@ use std::time::Instant;
 use cairn_accumulator::forest::tree_of;
 use cairn_crypto::SecretKey;
 use cairn_ledger::note::Note;
-use cairn_ledger::sampling::{draw, SAMPLES};
+use cairn_ledger::sampling::{draw, sample_bytes, SAMPLES};
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
 use cairn_ledger::LedgerState;
@@ -289,6 +289,11 @@ fn main() {
 /// height. That is what makes a drawn number a position; a real chain's
 /// difficulty moves, and moves the mapping with it, but not the shape of the
 /// forest or the count of the draw.
+///
+/// `header_bytes` is measured off a real header a few lines up rather than read
+/// from a constant, which is what makes this a second instrument for the same
+/// quantity as `sampling::sample_bytes` and worth keeping beside it. They are
+/// checked against each other below.
 fn sampled_bytes(blocks: u64, header_bytes: usize) -> u64 {
     let seed = Hash32::from_bytes([7; 32]);
     let mut total = 0u64;
@@ -299,5 +304,14 @@ fn sampled_bytes(blocks: u64, header_bytes: usize) -> u64 {
         // count the sequence is written with.
         total += header_bytes as u64 + depth as u64 * 32 + 4;
     }
+    // One quantity, two ways of arriving at it: this one from a header that was
+    // encoded, that one from the width the encoding is declared to have. A
+    // header that grew a field and did not say so moves one and not the other,
+    // and this figure is quoted in the papers.
+    assert_eq!(
+        total,
+        sample_bytes(seed, blocks),
+        "the two ways of pricing a sampled start disagree"
+    );
     total
 }

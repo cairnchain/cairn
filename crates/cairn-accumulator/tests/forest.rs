@@ -588,3 +588,36 @@ fn undoing_an_append_leaves_what_was_there_before() {
     assert!(!after.remove_last(), "and it stops at empty");
     assert_eq!(after.commitment(), Archive::new().commitment());
 }
+
+/// The size a proof reports is the size it takes, not one derived beside it.
+///
+/// `size_in_bytes` is what four published figures are quoted in, and it was
+/// written as arithmetic over the fields rather than read off the encoding.
+/// It is right. The same shape of arithmetic, one crate over, priced a header
+/// at its size in memory and a path at the deepest a forest could ever hold,
+/// and published 9.4 MB for something that costs 3.1. A figure derived beside
+/// a format has to be tied back to it, or the next field added moves one of
+/// the two and not the other.
+#[test]
+fn what_a_proof_says_it_costs_is_what_the_wire_writes() {
+    let mut archive = Archive::new();
+    for index in 0..300u64 {
+        archive.add(forest_leaf(&index.to_le_bytes()));
+    }
+    // Positions in trees of several different heights, since the length is
+    // what the two ways of counting could disagree about.
+    for position in [0u64, 1, 5, 63, 200, 255, 299] {
+        let proof = archive.prove(position).expect("an archivist can prove it");
+        assert_eq!(
+            proof.size_in_bytes(),
+            proof.encode().len(),
+            "a path of {} levels at place {position}",
+            proof.depth()
+        );
+    }
+    assert_eq!(
+        ForestProof::default().size_in_bytes(),
+        ForestProof::default().encode().len(),
+        "and the empty one, which is the length and nothing else"
+    );
+}

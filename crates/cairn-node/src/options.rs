@@ -304,7 +304,7 @@ fn parse_size(text: &str) -> Result<u64, String> {
 }
 
 /// A size as an operator would read it back.
-fn size(bytes: u64) -> String {
+pub(crate) fn size(bytes: u64) -> String {
     if bytes >= 1_000_000_000 {
         format!("{} GB", bytes / 1_000_000_000)
     } else if bytes >= 1_000_000 {

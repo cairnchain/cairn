@@ -29,6 +29,38 @@ const EN: &str = include_str!("../../../web/i18n/en.json");
 const FR: &str = include_str!("../../../web/i18n/fr.json");
 const SCRIPT: &str = include_str!("../../../web/cairn.js");
 const PAGE: &str = include_str!("../../../web/index.html");
+const PAPER: &str = include_str!("../../../docs/cairn-whitepaper.html");
+const ROAD: &str = include_str!("../../../docs/cairn-road-to-mainnet.html");
+
+/// The crates the workspace is made of, read from the workspace.
+fn members() -> Vec<String> {
+    let root = std::fs::read_to_string("../../Cargo.toml").expect("the workspace manifest");
+    let listed = root
+        .split_once("members = [")
+        .expect("a members list")
+        .1
+        .split_once(']')
+        .expect("a members list that ends")
+        .0;
+    let names: Vec<String> = listed
+        .split(',')
+        .filter_map(|entry| entry.trim().trim_matches('"').strip_prefix("crates/"))
+        .map(str::to_owned)
+        .collect();
+    assert!(names.len() > 5, "the workspace was read: {names:?}");
+    names
+}
+
+/// The English word a number this small is written out as on the page.
+fn spelled_lower(count: usize) -> &'static str {
+    match count {
+        4 => "four",
+        5 => "five",
+        6 => "six",
+        7 => "seven",
+        other => panic!("{other} dependencies, and this test has no word for that"),
+    }
+}
 
 /// A scanner over one translation file.
 struct Scan<'a> {
@@ -340,19 +372,12 @@ fn the_site_does_not_call_the_sampled_start_unwritten() {
 #[test]
 fn the_site_counts_the_dependencies_a_build_actually_pulls() {
     let mut named = BTreeSet::new();
-    for crate_name in [
-        "cairn-accumulator",
-        "cairn-chain",
-        "cairn-crypto",
-        "cairn-explorer",
-        "cairn-http",
-        "cairn-ledger",
-        "cairn-net",
-        "cairn-node",
-        "cairn-primitives",
-        "cairn-store",
-        "cairn-wallet",
-    ] {
+    // Read from the workspace rather than written out here. The list used to
+    // be a literal, and a literal is a second place the membership lives: a
+    // crate added to the workspace with a dependency of its own would not have
+    // been counted, the number would not have moved, and the page would have
+    // gone on saying a figure whose whole point is that a reader can check it.
+    for crate_name in members() {
         let manifest = std::fs::read_to_string(format!("../../crates/{crate_name}/Cargo.toml"))
             .expect("every crate in the workspace has a manifest");
         // Only what a `cargo build` of this crate pulls in: the section ends at
@@ -372,6 +397,13 @@ fn the_site_counts_the_dependencies_a_build_actually_pulls() {
     let counted = named.len();
     let listed = named.into_iter().collect::<Vec<_>>().join(", ");
     println!("{counted} outside dependencies a build pulls: {listed}");
+    assert!(
+        PAPER.contains(&format!("and {} dependencies.", spelled_lower(counted))),
+        "the paper does not say `and {} dependencies`, which is what a build pulls. \
+         It said six for as long as the site did, and six was the length of the \
+         workspace's dependency table rather than of anything a reader would get",
+        spelled_lower(counted)
+    );
 
     let spelled = match counted {
         4 => "Four",
@@ -405,4 +437,195 @@ fn the_site_counts_the_dependencies_a_build_actually_pulls() {
         EN.contains(&listed) && FR.contains(&listed),
         "the page names a dependency tree that is not `{listed}`"
     );
+}
+
+/// The site describes the window the ledger has, and no window it dropped.
+///
+/// A proof used to be accepted if it matched any of the last thirty two
+/// states, so that a transfer written while a block was being found was not
+/// invalid through nobody's fault. `ColdTier` explains why that went: taking a
+/// note out folds along the path the proof carries, an old path does not reach
+/// the root that is there now, so the removal did nothing and the note stayed
+/// to be spent again. The rule went and the window went with it.
+///
+/// The site went on describing it as live in three places and in both
+/// languages, while a fourth place on the same page said it had been removed.
+/// The worst of the three is `explain.holdings.technical`, which is the panel
+/// somebody writing a wallet reads: "the node accepts a proof up to 32 blocks
+/// stale". A wallet built to that sentence hands over a proof the network
+/// refuses, and the person holding it is told a payment failed with nothing
+/// they did wrong and nothing they can see.
+///
+/// So the window that is real is held against the two constants that decide
+/// it, and the window that is not is held against the phrases it was said in.
+/// A figure with no constant behind it can only be checked the second way.
+#[test]
+fn the_site_quotes_the_grace_window_and_no_window_the_ledger_has_dropped() {
+    let blocks = cairn_ledger::state::GRACE_BLOCKS;
+    let notes = cairn_ledger::state::GRACE_NOTES;
+    for (language, text, said) in [
+        (
+            "English",
+            EN,
+            format!("GRACE_BLOCKS is {blocks} and GRACE_NOTES is {notes}"),
+        ),
+        (
+            "French",
+            FR,
+            format!("GRACE_BLOCKS vaut {blocks} et GRACE_NOTES vaut {notes}"),
+        ),
+    ] {
+        assert!(
+            text.contains(&said),
+            "the {language} page does not say `{said}`, which is what this build compiles"
+        );
+        assert!(
+            text.contains(&format!("for {blocks} blocks"))
+                || text.contains(&format!("pendant {blocks} blocs")),
+            "the {language} page states the grace window in code and not in words"
+        );
+    }
+    for (language, text, dropped) in [
+        (
+            "English",
+            EN,
+            vec![
+                "32 blocks stale",
+                "may lag up to 32 blocks",
+                "up to 32 blocks stale",
+            ],
+        ),
+        (
+            "French",
+            FR,
+            vec!["32 blocs de retard", "trente-deux derniers états n'"],
+        ),
+    ] {
+        for phrase in dropped {
+            assert!(
+                !text.contains(phrase),
+                "the {language} page still tells a reader `{phrase}`, and the ledger \
+                 checks a proof against the forest as it stands and against nothing else"
+            );
+        }
+    }
+}
+
+/// Every Rust file in the workspace, told apart by whether it is the program
+/// or a test of it.
+///
+/// The two have to be counted separately, because the sentence on the page
+/// counts them separately: "the implementation is roughly N lines of Rust with
+/// M tests". The implementation is what is under `src`. Counting the whole
+/// tree instead gives 88 000 against 36 900, which is not a drifting figure,
+/// it is a different quantity, and publishing one for the other is how the
+/// last nine wrong figures happened.
+fn sources() -> (Vec<String>, Vec<String>) {
+    fn walk(at: &std::path::Path, program: &mut Vec<String>, rest: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(at) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, program, rest);
+            } else if path.extension().is_some_and(|kind| kind == "rs") {
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let under_src = path
+                    .components()
+                    .any(|part| part.as_os_str() == std::ffi::OsStr::new("src"));
+                if under_src {
+                    program.push(text);
+                } else {
+                    rest.push(text);
+                }
+            }
+        }
+    }
+    let mut program = Vec::new();
+    let mut rest = Vec::new();
+    walk(
+        std::path::Path::new("../../crates"),
+        &mut program,
+        &mut rest,
+    );
+    assert!(
+        program.len() > 20 && rest.len() > 20,
+        "the tree was read: {} under src, {} beside it",
+        program.len(),
+        rest.len()
+    );
+    (program, rest)
+}
+
+/// The papers say how large this is and how much of it is tests, and both
+/// numbers are the argument rather than decoration: "small enough to be read,
+/// which is the point".
+///
+/// Neither had an instrument. The paper said 419 tests and 33 100 lines and
+/// the road said 452, against a tree holding 980 and 36 969, so one of them
+/// was out by more than half and both had been out for long enough that the
+/// two documents no longer agreed with each other either. A figure whose whole
+/// job is to say "this is small enough to check" is the last one that should
+/// be taken on trust.
+///
+/// Held to a band and not to a digit, on purpose. These move every time a test
+/// is written, and a test that has to be edited by whoever adds a test is a
+/// test that gets edited without being read. The band is what a "roughly"
+/// claim promises: it catches the drift that happened here, which was more
+/// than half, and passes an ordinary week's work.
+#[test]
+fn the_papers_say_how_large_this_is_and_the_tree_agrees() {
+    let (program, rest) = sources();
+    // Tests wherever they are written, since a good many of them live in a
+    // `#[cfg(test)]` module beside the code they are about.
+    let tests: usize = program
+        .iter()
+        .chain(rest.iter())
+        .map(|text| text.matches("#[test]").count())
+        .sum();
+    let lines: usize = program.iter().map(|text| text.lines().count()).sum();
+    let beside: usize = rest.iter().map(|text| text.lines().count()).sum();
+    println!("{tests} tests; {lines} lines of program and {beside} beside it");
+
+    let near = |said: usize, counted: usize| -> bool {
+        let apart = said.abs_diff(counted);
+        apart.saturating_mul(10) <= counted
+    };
+    for (document, text, what) in [
+        ("the whitepaper", PAPER, "tests, no"),
+        ("the road to mainnet", ROAD, "tests</span>"),
+    ] {
+        let said = quoted_before(text, what);
+        assert!(
+            near(said, tests),
+            "{document} says {said} tests and the tree holds {tests}"
+        );
+    }
+    let said = quoted_before(PAPER, "lines of Rust");
+    assert!(
+        near(said, lines),
+        "the whitepaper says {said} lines of Rust and the tree holds {lines}"
+    );
+}
+
+/// The number written just before `what`, with the spaces this house style
+/// puts inside long numbers taken out.
+fn quoted_before(text: &str, what: &str) -> usize {
+    let before = text.split_once(what).expect("the phrase is on the page").0;
+    let digits: String = before
+        .chars()
+        .rev()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit() || *c == ' ' || *c == '\u{a0}')
+        .filter(char::is_ascii_digit)
+        .collect();
+    digits
+        .chars()
+        .rev()
+        .collect::<String>()
+        .parse()
+        .expect("a number")
 }

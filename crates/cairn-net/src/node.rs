@@ -36,7 +36,9 @@ use cairn_ledger::validation::TransferError;
 use cairn_ledger::LedgerState;
 use cairn_primitives::codec::{Decode, Encode};
 use cairn_primitives::Hash32;
-use cairn_store::{BlockLog, DirectoryLock, HeaderLog, HeaderTree, StoreError, HANDED_LEDGER};
+use cairn_store::{
+    BlockLog, DirectoryLock, HeaderLog, HeaderTree, StoreError, HANDED_LEDGER, HEADER_BYTES,
+};
 
 use crate::book::AddressBook;
 use crate::choosing::{self, Approach, Chooser, JoinProgress};
@@ -399,6 +401,61 @@ impl std::fmt::Display for Probation {
     }
 }
 
+/// What a node that cannot yet show a newcomer the chain is still missing.
+///
+/// The first stretch of every join, and it was the whole of one before the
+/// header exchange stopped handing the turn back to a peer that spoiled it. A
+/// node handed a ledger holds headers from where it was handed on and no path
+/// through what came before, so until it has collected the rest from the
+/// network there is a question it cannot answer.
+///
+/// The half nobody would guess is the disk. Showing a newcomer the chain and
+/// writing down this node's own ledger are proved against the same header
+/// forest, and dropping old blocks is what writing that ledger is for. So a
+/// node in this state does not drop anything: measured on a node handed a
+/// ledger at height 32 and asked to keep one byte, the chain reached 159 and
+/// the log still began at 32, thirty one kilobytes and climbing, with every
+/// other line an operator could read saying the node was well. `--keep` is a
+/// promise, and this is the one state where it is not being kept.
+///
+/// Three numbers and not one, because there are three ways to fall short of
+/// showing the chain and they call for different afternoons. Headers that
+/// start above the first block is the ordinary one, and it mends itself. But
+/// headers that stop below the tip, or a forest that does, is a write the disk
+/// would not take, and a line that only knew how to say the first would have
+/// told such a node it was collecting nothing from nobody.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Filling {
+    /// The lowest header this node holds. Everything below it is what it is
+    /// still asking the network for.
+    pub from: u64,
+    /// One past the highest header it holds.
+    pub through: u64,
+    /// Leaves in the forest built over those headers, which is what a place in
+    /// the chain is proved against.
+    pub proved: u64,
+    /// How far the chain has got, so each of the three above can be said
+    /// against something rather than as "some".
+    pub reaches: u64,
+    /// Bytes of blocks on the disk now.
+    pub bytes: u64,
+    /// Bytes of blocks the operator asked this node to hold.
+    ///
+    /// Kept beside the figure above rather than compared here, because the
+    /// pair is the news: a node over its budget and unable to do anything
+    /// about it has a disk that grows with the chain, and that is the one
+    /// thing this whole design exists to prevent.
+    pub keep: u64,
+}
+
+impl Filling {
+    /// Whether the disk has grown past what this node was asked to hold.
+    #[must_use]
+    pub const fn over_the_keep(&self) -> bool {
+        self.bytes > self.keep
+    }
+}
+
 /// A node that cannot get on from where it was handed its ledger.
 ///
 /// Told apart from every other way of being behind, for the same reason
@@ -511,6 +568,29 @@ pub struct Restored {
     /// bytes are still on the disk to be looked at, and a node that read them
     /// wrongly once can read them again.
     pub unreadable: Option<usize>,
+    /// Header records the store would not stand behind, left on the disk and
+    /// counted here.
+    ///
+    /// A header log's first record decides where the whole log claims to be,
+    /// so a head the record after it does not name is one the log cannot
+    /// build on. The store reports holding nothing rather than a geography it
+    /// made up, and deliberately leaves the bytes exactly where they are so
+    /// that somebody can look at them.
+    ///
+    /// What used to happen next is that the log was written again from the
+    /// blocks this node still had, and the first of those writes cut the file
+    /// to nothing. A node keeps a gigabyte of blocks and every header ever, so
+    /// what the blocks can replace is the recent end and what they cannot is
+    /// most of it. Measured: a node holding headers 0 to 59 with blocks 52 to
+    /// 59 came back holding headers 52 to 59, could no longer show a newcomer
+    /// the chain, could no longer write the ledger that lets it drop old
+    /// blocks, and reported a clean start with nothing set aside at all.
+    ///
+    /// Told apart from `unreadable`, which is the same kind of news about the
+    /// block log. Both are damage rather than an interrupted write, and this
+    /// one costs the node something the network can give back rather than
+    /// anything of its own.
+    pub headers_set_aside: u64,
     /// Whether the log was set aside because it does not start at the first
     /// block of the chain.
     ///
@@ -1945,6 +2025,12 @@ impl Node {
         Self::open_with(params, address, directory, true, &[])
     }
 
+    // Every step here is a decision about a file already on the disk, and each
+    // one is written where it is because of what the step before it left
+    // behind: the ledger before the replay, the replay before the cut, the cut
+    // before the headers. Splitting it would move those orderings into a call
+    // graph, where the next person to change one cannot see the others.
+    #[allow(clippy::too_many_lines)]
     fn open_with(
         params: ConsensusParams,
         address: SocketAddr,
@@ -2075,6 +2161,7 @@ impl Node {
         // than those is gone, which costs this node the ability to answer a
         // newcomer about that stretch and nothing else.
         let mut headers = HeaderLog::open(&directory)?;
+        let headers_set_aside = headers_the_store_will_not_stand_behind(&headers);
         catch_up_headers(&mut headers, &log)?;
         let mut forest = HeaderTree::open(&directory)?;
         // A refusal here is not lost by being dropped: nothing has been
@@ -2111,6 +2198,7 @@ impl Node {
             left_in_place: recovered.left_in_place,
             unreadable: recovered.unreadable,
             rejoining,
+            headers_set_aside,
             addresses: book.len(),
         };
 
@@ -2473,6 +2561,40 @@ impl Node {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         too_old_for_the_chain(&met)
+    }
+
+    /// What this node is still missing before it can show a newcomer the
+    /// chain, or `None` for one that can show it now.
+    ///
+    /// `None` also for a node started without a directory, which keeps no
+    /// headers to be missing any of and no disk to grow: there is a real
+    /// question about such a node and this is not the place it is asked.
+    ///
+    /// Takes the chain and then the log, which is the order everything here
+    /// takes them in, so it cannot be called from inside
+    /// [`Self::with_chain`].
+    pub fn filling(&self) -> Option<Filling> {
+        let reaches = {
+            let chain = self.shared.chain();
+            chain.height().map_or(0, |tip| tip.saturating_add(1))
+        };
+        let log = self
+            .shared
+            .log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let store = log.as_ref()?;
+        if store.can_show_the_chain(reaches) {
+            return None;
+        }
+        Some(Filling {
+            from: store.headers.first_height(),
+            through: store.headers.reaches(),
+            proved: store.forest.len(),
+            reaches,
+            bytes: store.blocks.bytes(),
+            keep: self.shared.keep_bytes.load(Ordering::Relaxed),
+        })
     }
 
     /// Blocks this node was offered and can never reach.
@@ -4342,6 +4464,22 @@ fn build_ledger(
     state
         .handover(*at, *tip, tip_history, anchor, buried, recent)
         .ok()
+}
+
+/// Records a header log holds and will not answer for.
+///
+/// Asked before the log is filled in from the blocks, because filling it in is
+/// what destroys the evidence: the first header appended to a log holding no
+/// records cuts the file. Until that moment, a log reporting nothing over a
+/// file with whole records in it is the store saying it will not stand behind
+/// its own head. See [`Restored::headers_set_aside`].
+fn headers_the_store_will_not_stand_behind(headers: &HeaderLog) -> u64 {
+    if !headers.is_empty() {
+        return 0;
+    }
+    std::fs::metadata(headers.path())
+        .map(|held| held.len().checked_div(HEADER_BYTES as u64).unwrap_or(0))
+        .unwrap_or(0)
 }
 
 /// Fills the header log in from the blocks, for the stretch it is missing.

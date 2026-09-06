@@ -121,7 +121,7 @@
         ],
         "technical": [
           "Hot set: {capacity} notes maximum, held in a sparse Merkle tree, about {megabytes} at capacity. Eviction is by age, oldest first, in batches at block boundaries.",
-          "Cold set: an append-only Merkle forest, sixty four roots. A spend from it carries an inclusion proof; proofs may lag up to 32 blocks, and a note that has just fallen stays spendable without one for 64 blocks."
+          "Cold set: an append-only Merkle forest, sixty four roots. A spend from it carries an inclusion proof, checked against the forest as it stands and against nothing else. A note that has just fallen stays spendable without a proof for 64 blocks."
         ]
       }
     },
@@ -322,7 +322,7 @@
     "holdings": {
       "plain": "The individual notes this address is holding. A balance is just what they add up to.",
       "curious": "State tells you which notes every node still holds and which have fallen. A wallet keeps proofs for the fallen ones, so it can still spend them.",
-      "technical": "Fallen notes need a proof at spend time. A wallet tracks the position and refreshes the proof as the forest grows; the node accepts a proof up to 32 blocks stale."
+      "technical": "Fallen notes need a proof at spend time. A wallet tracks the position and refreshes the proof as the forest grows; the node checks it against the forest as it stands and accepts nothing older."
     },
     "note": {
       "plain": "One note. It was written once, it belongs to one address, and it can be torn up once. That is the whole life of it.",
@@ -462,7 +462,7 @@
         ],
         "curious": [
           "The spender supplies an inclusion proof, verified against roots the node already holds. Your wallet tracks the position of each of your fallen notes and refreshes the proof as the forest grows.",
-          "Two windows make this survivable in practice. A proof may be up to 32 blocks stale, so a wallet that fell slightly behind is not refused. And a note that has only just fallen stays spendable with no proof at all for 64 blocks, because every node still has it."
+          "One window makes this survivable in practice: a note that has only just fallen stays spendable with no proof at all for 64 blocks, because every node still has it. Past that the proof has to match the forest as it stands now, and nothing older is accepted. A wallet that fell behind loses nothing by it: the payment is the same payment, offered again with a fresh proof."
         ],
         "technical": [
           "A proof is checked against the cold set as it stands, and against nothing else. Earlier versions accepted one matching any of the last thirty two states, so a transfer written while a block was being found was not invalid through no fault of its author. That was half a rule: removing a note folds along the path the proof carries, an old path does not reach the root that is there now, so the removal did nothing and the note stayed to be spent again. A transfer's identifier excludes its witness, so one that waited too long is the same transfer offered again with a fresh proof.",

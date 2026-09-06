@@ -39,7 +39,7 @@ use cairn_crypto::SecretKey;
 use cairn_ledger::block::BlockHeader;
 use cairn_ledger::note::Note;
 use cairn_ledger::sampling::{
-    check_start, covering, draw, seed_of, work_before, Sample, SampledStart,
+    check_start, covering, draw, sample_bytes, seed_of, work_before, Sample, SampledStart, SAMPLES,
 };
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
@@ -53,6 +53,9 @@ const HEIGHT: u64 = 600;
 /// Forgeries tried per setting, since a draw either catches one or does not
 /// and the question is how often.
 const TRIALS: usize = 200;
+/// Thirty years of a chain a minute, which is the size every published figure
+/// about this chain is quoted at.
+const FULL_SIZE: u64 = 30 * 365 * 24 * 60;
 
 fn main() {
     let honest = build(HEIGHT);
@@ -103,12 +106,20 @@ fn main() {
          would not need to forge."
     );
 
+    // What this used to print: a header at `size_of::<BlockHeader>()`, 192
+    // where the wire writes 182, a path at the sixty-four levels a forest
+    // could hold rather than the twenty-three a thirty-year chain makes, and a
+    // count of 128 from before `adversarial_placement` set it at SAMPLES.
+    // Three wrong numbers multiplied together came to 286 kB for something
+    // that costs 3.1 MB, and it read as the cost of the draw this build makes.
     println!(
-        "\nWhat it costs to ask. A header is {} bytes and a proof is at most 64\n\
-         hashes, so 128 draws is about {} kB, once, against the tens of\n\
-         gigabytes of reading it replaces.",
-        core::mem::size_of::<BlockHeader>(),
-        128 * (core::mem::size_of::<BlockHeader>() + 64 * 32) / 1000,
+        "\nWhat it costs to ask. A header is {} bytes on the wire and a path is\n\
+         as long as the tree the draw lands in, so the {} draws below come to\n\
+         {:.1} MB on a thirty-year chain, once, against the gigabytes of\n\
+         reading they replace.",
+        BlockHeader::ENCODED_BYTES,
+        SAMPLES,
+        sample_bytes(seed_of(&tip), FULL_SIZE) as f64 / 1e6,
     );
 
     at_full_size();
@@ -127,8 +138,8 @@ fn main() {
 /// No mining and no headers, so it says nothing about whether the checks hold.
 /// That is what the tests are for. This says how many draws to make.
 fn at_full_size() {
-    // Thirty years of a chain a minute, at a difficulty a real network reaches.
-    let blocks = 30u64 * 365 * 24 * 60;
+    // At a difficulty a real network reaches.
+    let blocks = FULL_SIZE;
     let per_block = 1u128 << 40;
     let honest = per_block * u128::from(blocks);
 

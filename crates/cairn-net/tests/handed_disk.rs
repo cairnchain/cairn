@@ -11,6 +11,11 @@
 //! chain while its own introduction said it could. The warning was how it
 //! showed, and it showed as the one thing it was not, a disk that had stopped
 //! taking writes.
+//!
+//! The other half of the same subject is here too: the disk such a node says
+//! nothing about is a disk that is not being held to what `--keep` asked for,
+//! because dropping old blocks needs the same header forest that showing a
+//! newcomer the chain needs.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -35,6 +40,7 @@ use cairn_ledger::transaction::CoinbaseTransaction;
 use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
 use cairn_ledger::LedgerState;
 use cairn_net::node::Node;
+use cairn_net::Filling;
 use cairn_primitives::codec::Encode;
 
 const NOW: u64 = 2_000_000_000;
@@ -226,4 +232,169 @@ fn a_node_that_joined_a_chain_writes_it_down_and_says_nothing_about_its_disk() {
         "the header log holds the chain, which is the whole of what a node \
          needs to show a newcomer where the work is"
     );
+}
+
+/// A node that joined a chain and has found nobody holding the part of it
+/// from before it arrived says both of the things that costs, and one of them
+/// is its disk.
+///
+/// The disk is the half that had no line anywhere. Writing down the summary
+/// that lets a node drop old blocks is proved against the header forest, and
+/// a node that joined a chain has no forest until it has collected the
+/// headers below its anchor. So `trim_history` asks for a summary, is given
+/// none, and returns; and nothing above it ever said so. Measured before this
+/// test existed: handed a ledger at height 32 and asked to keep one byte, the
+/// node followed the chain to 159 with its log still beginning at 32, thirty
+/// one kilobytes and climbing, `unwritten` empty, `probation` over, and every
+/// printed line the line a healthy node prints.
+///
+/// Its control is the test after this one: the same blocks and the same
+/// budget on a node that read the chain rather than being handed it. What
+/// separates the two is the forest and nothing else about either test.
+#[test]
+fn a_node_that_cannot_show_the_chain_says_so_and_says_what_its_disk_is_doing() {
+    let miner = wallet(7);
+    let mut source = Chain::new();
+    source.run(&miner, 40);
+    let handover = source.handover();
+    let anchor = handover.at.height;
+    source.run(&miner, 120);
+
+    let joined_directory = scratch("cannot-show");
+    std::fs::write(
+        joined_directory.join(cairn_store::HANDED_LEDGER),
+        handover.encode(),
+    )
+    .unwrap();
+
+    // The blocks above the anchor, which is what a node that joined has after
+    // it has validated its way off probation. Written straight to the log so
+    // that this test is about the disk and not about a second node.
+    {
+        let (mut log, _) = cairn_store::BlockLog::open(&joined_directory).unwrap();
+        for block in &source.blocks[(anchor as usize + 1)..40] {
+            log.append(block).unwrap();
+        }
+    }
+
+    // Handed a ledger and left with nobody to ask for what came before it.
+    let (joined, _) = Node::open(params(), loopback(), &joined_directory).unwrap();
+    assert_eq!(
+        joined.probation(),
+        None,
+        "the replay took it off probation, so what follows is an ordinary node"
+    );
+    joined.keep_blocks(1);
+    for block in &source.blocks[40..] {
+        joined.submit_block(block.clone()).unwrap();
+    }
+    wait_for("the joined node to follow the whole chain", || {
+        joined.height() == Some(159)
+    });
+    // Long enough for several rounds of upkeep, which is where a log is
+    // trimmed: this must not pass because nothing was given a chance to run.
+    std::thread::sleep(Duration::from_secs(3));
+
+    let filling = joined.filling();
+    let joined_from = joined.blocks_from();
+    let joined_bytes = joined.kept_bytes();
+    let wrote_a_ledger = joined.write_ledger();
+    let unwritten = joined.unwritten();
+    joined.shutdown();
+    drop(joined);
+    let _ = std::fs::remove_dir_all(&joined_directory);
+
+    println!(
+        "joined: filling {filling:?}; log begins at {joined_from:?} holding {joined_bytes} \
+         bytes against a budget of 1; wrote a ledger: {wrote_a_ledger}; unwritten {unwritten:?}"
+    );
+    let Some(filling) = filling else {
+        panic!(
+            "a node holding the chain only from block {} says it can show a newcomer \
+             the whole of it",
+            anchor + 1
+        );
+    };
+    assert_eq!(
+        filling.from,
+        anchor + 1,
+        "and it says where its own headers start, which is how many are missing"
+    );
+    assert_eq!(filling.reaches, 160, "against how far the chain has got");
+    assert!(
+        filling.over_the_keep(),
+        "the disk holds {} bytes against a budget of {}, and this is the one \
+         line that says so",
+        filling.bytes,
+        filling.keep
+    );
+    assert_eq!(
+        joined_from,
+        Some(anchor + 1),
+        "nothing was dropped: the log still begins where the node was handed on"
+    );
+    assert!(
+        !wrote_a_ledger,
+        "and the reason is that it cannot write the summary the dropping is \
+         measured against"
+    );
+    assert_eq!(
+        unwritten, None,
+        "nothing refused a write, which is why no other line can carry this"
+    );
+}
+
+/// The control for the test above: the same chain and the same budget on a
+/// node that read its way up rather than being handed a ledger.
+///
+/// Written as its own test rather than as a second half, so that the one that
+/// fails names which of the two did. This one can show the chain, so it has
+/// nothing to report and its log is held to what it was asked to hold.
+#[test]
+fn a_node_that_read_the_chain_shows_it_and_keeps_to_its_budget() {
+    let miner = wallet(7);
+    let mut source = Chain::new();
+    source.run(&miner, 160);
+
+    let read_directory = scratch("can-show");
+    let (read, _) = Node::open(params(), loopback(), &read_directory).unwrap();
+    read.keep_blocks(1);
+    for block in &source.blocks {
+        read.submit_block(block.clone()).unwrap();
+    }
+    wait_for(
+        "the log of the node that read the chain to be trimmed",
+        || read.blocks_from().unwrap_or(0) > 0,
+    );
+    let read_filling = read.filling();
+    let read_from = read.blocks_from();
+    read.shutdown();
+    drop(read);
+    let _ = std::fs::remove_dir_all(&read_directory);
+
+    println!("read: filling {read_filling:?}; log begins at {read_from:?}");
+    assert_eq!(
+        read_filling, None,
+        "a node that read the chain from the first block can show it"
+    );
+    assert!(
+        read_from.unwrap_or(0) > 0,
+        "and holds itself to its budget, which is the whole difference"
+    );
+}
+
+/// `Filling::over_the_keep` is the only thing that decides whether an operator
+/// is told about the disk, so the boundary is stated rather than assumed.
+#[test]
+fn a_disk_exactly_at_its_budget_is_not_over_it() {
+    let at = Filling {
+        from: 32,
+        through: 160,
+        proved: 0,
+        reaches: 160,
+        bytes: 1_000,
+        keep: 1_000,
+    };
+    assert!(!at.over_the_keep());
+    assert!(Filling { bytes: 1_001, ..at }.over_the_keep());
 }

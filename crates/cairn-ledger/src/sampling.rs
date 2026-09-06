@@ -24,7 +24,7 @@
 //! every header commits to it, so it arrives whole and is checked against the
 //! header this sampling just accepted.
 
-use cairn_accumulator::forest::{Forest, ForestProof};
+use cairn_accumulator::forest::{tree_of, Forest, ForestProof};
 use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
 use cairn_primitives::hash::{hash, Domain};
 use cairn_primitives::Hash32;
@@ -93,11 +93,11 @@ use crate::validation::ConsensusParams;
 /// back is [`SHALLOWEST`]: the draw stops resolving 1024 blocks from the tip,
 /// which cuts `levels` from twenty-four to fourteen and the count with it.
 ///
-/// The three megabytes are derived rather than guessed, in
-/// `examples/history.rs`: a header per draw plus the path beside it, and a
-/// path is as long as the tree the draw lands in. The figure here used to be
-/// eight, from a count that predates this derivation multiplied by a path of
-/// sixty-four hashes. Sixty-four is the deepest a forest can ever hold; thirty
+/// The three megabytes are derived rather than guessed, in [`sample_bytes`]:
+/// a header per draw plus the path beside it, and a path is as long as the
+/// tree the draw lands in. The figure here used to be eight, from a count that
+/// predates this derivation multiplied by a path of sixty-four hashes.
+/// Sixty-four is the deepest a forest can ever hold; thirty
 /// years of blocks make a forest whose largest tree is twenty-three, and the
 /// draw spends most of its levels in trees smaller than that. So the old
 /// figure was an upper bound on a chain nobody will live to see, quoted as the
@@ -534,6 +534,52 @@ pub fn draw(seed: Hash32, count: usize, total_work: u128, blocks: u64) -> Vec<u1
         drawn.push(value.min(total_work.saturating_sub(1)));
     }
     drawn
+}
+
+/// What one opened header and the path beside it take on the wire.
+///
+/// A header is fixed width, and a path is a length followed by its siblings.
+/// Written from [`Sample`]'s own encoding and checked against it in this
+/// module's tests, because a size derived beside a format rather than from it
+/// is exactly how the published figure went wrong.
+fn opened_header_bytes(depth: usize) -> u64 {
+    let header = u64::try_from(BlockHeader::ENCODED_BYTES).unwrap_or(0);
+    let siblings = u64::try_from(depth).unwrap_or(0).saturating_mul(32);
+    header.saturating_add(4).saturating_add(siblings)
+}
+
+/// Bytes the drawn answers take on the wire, for a chain of `blocks` blocks.
+///
+/// The count is the draw this build makes, and each path is as long as the
+/// tree the drawn position falls in, so nothing here is a bound standing in
+/// for a measurement.
+///
+/// It lives here rather than in an example because three examples quoted this
+/// figure and each derived it again, and two of the three were wrong in the
+/// same two ways. A header was priced at `size_of::<BlockHeader>()`, 192,
+/// because a `u128` field carries the alignment, where the wire writes
+/// [`BlockHeader::ENCODED_BYTES`], 182. And a path was priced at 64 levels,
+/// which is how many trees a forest can hold once it has `2^64` leaves rather
+/// than how deep one path is: thirty years of blocks a minute make a deepest
+/// tree of twenty-three, and most draws land in trees smaller than that.
+/// Together they published 9.4 MB for something that costs 3.1.
+///
+/// The chain is taken as one of even difficulty, so that a work value is a
+/// height. That is what makes a drawn number a position; a real chain's
+/// difficulty moves and moves the mapping with it, but not the shape of the
+/// forest and not the count of the draw.
+///
+/// `seed` is what [`seed_of`] gives for the tip being weighed. A different tip
+/// draws different positions and lands on a slightly different total.
+#[must_use]
+pub fn sample_bytes(seed: Hash32, blocks: u64) -> u64 {
+    let mut total = 0u64;
+    for work in draw(seed, SAMPLES, u128::from(blocks), blocks) {
+        let position = u64::try_from(work).unwrap_or(0);
+        let depth = tree_of(blocks, position).map_or(0, |(height, _)| height);
+        total = total.saturating_add(opened_header_bytes(depth));
+    }
+    total
 }
 
 /// Whether a header is one this network could have produced.
@@ -1020,6 +1066,75 @@ mod tests {
 
     fn seed(byte: u8) -> Hash32 {
         Hash32::from_bytes([byte; 32])
+    }
+
+    fn bare_header() -> BlockHeader {
+        BlockHeader {
+            version: 1,
+            network: NetworkId::MAINNET,
+            height: 0,
+            previous: Hash32::from_bytes([0; 32]),
+            transactions_root: Hash32::from_bytes([0; 32]),
+            state_root: Hash32::from_bytes([0; 32]),
+            history: Hash32::from_bytes([0; 32]),
+            timestamp: 0,
+            difficulty: 1,
+            total_work: 0,
+            nonce: 0,
+        }
+    }
+
+    /// The price of one answer is the wire's price, not the compiler's.
+    ///
+    /// `size_of::<BlockHeader>()` is 192 and the encoding writes 182: the
+    /// `u128` field takes the alignment with it and ten bytes of padding are
+    /// counted that never travel. Every figure built on the wrong one of those
+    /// was five per cent high before the path was even considered.
+    #[test]
+    fn one_opened_header_costs_what_the_wire_writes() {
+        for depth in [0usize, 1, 7, 23, 64] {
+            let sample = Sample {
+                header: bare_header(),
+                proof: ForestProof {
+                    siblings: vec![Hash32::from_bytes([9; 32]); depth],
+                },
+            };
+            assert_eq!(
+                u64::try_from(sample.encode().len()).unwrap(),
+                opened_header_bytes(depth),
+                "a path of {depth} levels"
+            );
+        }
+    }
+
+    /// The published cost of weighing a chain, re-derived.
+    ///
+    /// Both halves of the old formula are pinned here. A path of 64 levels
+    /// instead of the tree the draw lands in puts this over nine megabytes; a
+    /// header at `size_of` instead of its encoded width puts it over 3.2. The
+    /// bounds are tight enough that either alone fails.
+    #[test]
+    fn weighing_a_thirty_year_chain_costs_three_megabytes() {
+        let blocks = 30 * 365 * 24 * 60;
+        let bytes = sample_bytes(seed(7), blocks);
+        assert!(
+            (3_000_000..3_200_000).contains(&bytes),
+            "a sampled start opens {SAMPLES} headers for {bytes} bytes"
+        );
+
+        // And no path anywhere near the depth a forest could hold. Sixty-four
+        // is the count of trees at 2^64 leaves; this chain's deepest tree is
+        // twenty-three, which is what the figure above is made of.
+        let deepest = draw(seed(7), SAMPLES, u128::from(blocks), blocks)
+            .into_iter()
+            .filter_map(|work| tree_of(blocks, u64::try_from(work).ok()?))
+            .map(|(height, _)| height)
+            .max()
+            .expect("the draw opened something");
+        assert!(
+            deepest <= 23,
+            "the deepest path a thirty-year draw takes is {deepest} levels"
+        );
     }
 
     /// What the count is for, pinned so it cannot drift unnoticed.

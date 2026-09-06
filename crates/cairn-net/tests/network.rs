@@ -30,7 +30,27 @@ use cairn_primitives::Hash32;
 
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
-const PATIENCE: Duration = Duration::from_secs(15);
+/// How long a wait here may take before the test calls it a hang.
+///
+/// It was fifteen seconds, which is under what the longest test in this file
+/// takes on an idle machine: `a_node_that_joined_writes_and_serves_what_it_validates`
+/// mines a thousand and sixty four blocks and then joins over real sockets,
+/// and ran in fourteen to nineteen seconds alone. So it passed on its own and
+/// failed every time in `cargo test --workspace`, where the other crates run
+/// beside it and this suite goes from a hundred and nineteen seconds to two
+/// hundred and twenty.
+///
+/// That is not a flaky test, and it was not read as one: it fails in one
+/// context and passes in the other, every time, which is a bound set below
+/// what the work takes rather than a race. Raising it was verified the same
+/// way anything else here is, by running the whole workspace with the number
+/// changed and with it back.
+///
+/// The number only costs anything when something has genuinely hung, and then
+/// it costs the wait once. What the old one cost was every run on a busy
+/// machine, which is how a suite teaches the person reading it to ignore a
+/// red result.
+const PATIENCE: Duration = Duration::from_secs(60);
 
 /// Shallow, so a test does not have to mine a thousand blocks before a node
 /// has a ledger anyone would hand over. What the depth buys is argued in

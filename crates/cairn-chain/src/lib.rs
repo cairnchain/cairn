@@ -497,11 +497,24 @@ struct Branch {
     milestones: Vec<Hash32>,
 }
 
-/// Identifiers kept in full.
+/// Heights a node holds in full: the identifiers, the block entries and the
+/// undo records all reach exactly this far back.
 ///
-/// One more than a reorganisation may undo, so the block a branch is rewound
-/// to is always still here to be rewound onto.
-const WINDOW: usize = MAX_REORG_DEPTH + 1;
+/// One more than a reorganisation may undo, because the block a branch is
+/// rewound *onto* is not one of the blocks it undoes and is needed all the
+/// same. It has to be nameable, or the branch cannot say where the fork it
+/// just agreed to sits; and it has to be held, because the rival that asks
+/// for that switch arrives as a block whose parent it is, and `add_block`
+/// reads a parent out of the block table to learn its height and the work
+/// behind it.
+///
+/// The identifiers had this margin and the entries did not, which cost the
+/// deepest switch the rules allow on every network where the burial and
+/// [`MAX_REORG_DEPTH`] are the same number, which is every public one.
+///
+/// Public because `examples/window.rs` publishes what a node holds in memory,
+/// and that figure is this number times the size of a block.
+pub const HELD_WINDOW: usize = MAX_REORG_DEPTH + 1;
 
 impl Branch {
     /// Blocks on the branch, which is one more than the height of its tip.
@@ -566,6 +579,9 @@ impl Branch {
     }
 
     /// Adds a block to the end of the branch.
+    ///
+    /// Nothing is let go of here. See [`Self::settle`] for why the window is
+    /// trimmed once a switch is over rather than once per block.
     fn push(&mut self, id: Hash32) {
         let height = self.len();
         if height % MILESTONE == 0 {
@@ -582,8 +598,47 @@ impl Branch {
         }
         self.recent.push_back(id);
         self.at.insert(id, height);
+    }
 
-        while self.recent.len() > WINDOW {
+    /// Lets go of the identifiers past the window, once the branch is one the
+    /// node is actually following.
+    ///
+    /// This used to happen inside [`Self::push`], one identifier dropped per
+    /// block added. That is right for a branch that only ever grows and wrong
+    /// for a switch, which undoes some blocks and applies others: the blocks
+    /// that did apply can outnumber the ones undone by more than the one block
+    /// of slack the window carries. Dropping as those went on left the branch
+    /// beginning that many heights higher, and [`Self::pop`] cannot give back
+    /// an identifier `push` has already thrown away, so a switch that then
+    /// failed and was put back left the node holding a window shorter than the
+    /// one its own rules quote.
+    ///
+    /// That is the fourth floor a switch stands on, under the undo records,
+    /// the block log and [`ChainStore::undo_limit`], and it was the only one
+    /// that could move *down*, below what the fork choice allows. Measured on
+    /// a chain sitting at the window, with three blocks undone against nine
+    /// applied and the tenth refused: the branch began six heights higher than
+    /// it had, the deepest switch the node would go on to make fell from 1,024
+    /// blocks to 1,018 while `undo_limit` went on answering 1,024, and the
+    /// next ordinary block threw away four undo records the node was still
+    /// holding and could still have used. It healed as the chain grew back
+    /// into the window, which is why it went a round as a report rather than a
+    /// fix.
+    ///
+    /// What it takes to reach is worth stating, because it is not the shape
+    /// any test here makes. `ChainStore::apply` pushes nothing for the block
+    /// that fails, so the count that matters is the blocks that applied, and
+    /// with every block on the network worth the same work a rival wins by
+    /// exactly one: whatever fails, no more applied than were undone. The
+    /// shortfall needs a rival carrying more work in more, easier blocks,
+    /// which is what a partition produces on the side that retargeted down,
+    /// and no chain in this workspace leaves the minimum difficulty.
+    ///
+    /// What waiting costs is the identifiers of the branch being applied, held
+    /// until the switch is done with them: thirty two bytes each over a branch
+    /// bounded by what this node keeps off the one it follows.
+    fn settle(&mut self) {
+        while self.recent.len() > HELD_WINDOW {
             if let Some(gone) = self.recent.pop_front() {
                 self.at.remove(&gone);
                 self.from = self.from.saturating_add(1);
@@ -859,12 +914,15 @@ impl ChainStore {
     /// what this node holds has to start at.
     /// The lowest height this chain can still answer a header for.
     ///
-    /// Below [`Self::branch_start`] on a chain that has been running: the
-    /// branch remembers identifiers far further back than the blocks
-    /// themselves, by milestones, and what a block was is dropped entirely
-    /// once it is past undoing. So a walk that wants headers has to start
-    /// here, and starting at the branch's own beginning asks for blocks this
-    /// chain let go of on purpose.
+    /// The same height [`Self::branch_start`] answers, on a chain that has
+    /// been running: the identifiers, the entries and the undo records all
+    /// reach [`HELD_WINDOW`] back and no further. They used to differ by one,
+    /// the identifiers reaching a height whose entry had been dropped, and
+    /// what that cost is written down on `forget_what_cannot_change`.
+    ///
+    /// The branch also remembers heights far below this by [`MILESTONE`], and
+    /// those are identifiers and nothing else: a walk that wants headers has
+    /// to start here.
     ///
     /// On a node that joined a chain this is its anchor, which is the honest
     /// answer: the chain below it is one that node was never given.
@@ -1763,8 +1821,10 @@ impl ChainStore {
     /// nothing for `h` itself. The deepest that can be reached is therefore
     /// [`Self::undo_from`] minus one, not `undo_from`: the block whose own
     /// record has just been let go is still the block a rewind lands on.
-    /// A reorganisation of the full [`MAX_REORG_DEPTH`] already lands there,
-    /// so refusing it here was refusing something the store does elsewhere.
+    /// A reorganisation of the full [`MAX_REORG_DEPTH`] lands on `undo_from`
+    /// itself now that the records reach [`HELD_WINDOW`] back, and refusing
+    /// one block short of that was refusing something the store does
+    /// elsewhere.
     #[must_use]
     pub fn ledger_at(&self, height: u64) -> Option<LedgerState> {
         let tip = self.height()?;
@@ -1827,12 +1887,38 @@ impl ChainStore {
         Ok(removed)
     }
 
-    /// Lets go of blocks now deeper than [`MAX_REORG_DEPTH`].
+    /// Lets go of blocks now deeper than [`HELD_WINDOW`].
     ///
-    /// Sized by the constant and not by [`Self::undo_limit`], which is the
-    /// rule that actually refuses a switch. On every public network the two
-    /// are the same number. Below one that buries shallower, this holds undo
-    /// records and block entries no switch can reach, and that is deliberate.
+    /// [`HELD_WINDOW`] and not [`MAX_REORG_DEPTH`], which is one less, and
+    /// that one block is the whole of this paragraph. A switch of the full
+    /// depth lands on the block below the deepest undo record it reads, and
+    /// the rival asking for it arrives as a block whose parent is that one.
+    /// `add_block` reads
+    /// its parent out of the block table to learn the height and the work
+    /// behind it, so an entry dropped there refuses the deepest switch the
+    /// rules allow, and refuses it as `UnknownParent`, naming a block this
+    /// node applied and dropped itself, at the peer offering the chain.
+    ///
+    /// That block's *body* is never read: a rewind stops above it, so nothing
+    /// disconnects it and nothing repools it. Only its header and the work
+    /// behind it are wanted. It is kept whole because keeping the entry and
+    /// dropping the body is what `release_bodies` is for, and it starts at
+    /// the log's own beginning.
+    ///
+    /// So the identifiers, the entries and the undo records now all reach the
+    /// same height: [`Self::held_from`] and [`Self::branch_start`] answer the
+    /// same number on a chain past the window, and that number is one below
+    /// the deepest record a rewind actually reads. It read a height higher
+    /// before, and only at a depth of exactly [`MAX_REORG_DEPTH`], which is
+    /// why every test in this crate produced the working shape: they all set
+    /// a burial far under the constant, so `undo_limit` never reached the
+    /// height where the entry had gone.
+    ///
+    /// Sized by this build's own window and not by [`Self::undo_limit`], which
+    /// is the rule that actually refuses a switch. On every public network the
+    /// two differ by the one block above. On a network that buries shallower
+    /// they differ by far more, and this then holds undo records and block
+    /// entries no switch can reach, which is deliberate.
     ///
     /// It is not held for the undo records. It is held for the headers. An
     /// entry keeps its header whatever happens to its body, this is the only
@@ -1848,8 +1934,8 @@ impl ChainStore {
     /// anyone the chain.
     ///
     /// What the excess costs is memory for records nothing will read, bounded
-    /// by the constant like every other ceiling here. What it must not cost is
-    /// a body in neither memory nor the log that a switch still asks for, and
+    /// by [`HELD_WINDOW`] like every other ceiling here. What it must not
+    /// cost is a body in neither memory nor the log that a switch asks for, and
     /// it does not: a switch reaches no deeper than `tip - undo_limit() + 1`,
     /// and a log is cut no deeper than `tip - burial + 1`, which is at or
     /// below it because `undo_limit` is the smaller of the two numbers.
@@ -1863,54 +1949,63 @@ impl ChainStore {
     ///
     /// One block leaves the window each time one is added, so the ordinary
     /// case is a step rather than a sweep: what it costs does not depend on
-    /// how long the chain has been running.
-    ///
-    /// A switch is the case where more than one leaves at once, and it is the
-    /// case that used to be lost. See [`Self::forget_past_the_window`].
+    /// how long the chain has been running. A switch is the case where more
+    /// than one leaves at once, and the walk is the same walk.
     fn forget_what_cannot_change(&mut self) {
-        let window = u64::try_from(MAX_REORG_DEPTH).unwrap_or(u64::MAX);
+        let window = u64::try_from(HELD_WINDOW).unwrap_or(u64::MAX);
         while self.branch.len().saturating_sub(self.undo_from) > window {
             let Some(id) = self.branch.id_at(self.undo_from) else {
                 self.forget_past_the_window(window);
-                return;
+                break;
             };
             self.applied.remove(&id);
             self.release(&id);
             self.undo_from = self.undo_from.saturating_add(1);
         }
+
+        // The identifiers last, and this order is the whole of why the walk
+        // above can always name what it is letting go of. `settle` takes the
+        // branch's beginning up to exactly where this cursor now stands, so
+        // running it first would take away the names of the very heights the
+        // walk had still to reach.
+        //
+        // Reached only once a switch stands: `follow` returns through
+        // `restore` on the other path and never comes here, which is what
+        // keeps a switch that failed from spending the window. See
+        // [`Branch::settle`].
+        self.branch.settle();
     }
 
     /// The same, for a cursor the branch can no longer name a block at.
     ///
-    /// A switch does not add one block, it adds the whole of the branch it
-    /// moves onto, and that can be longer than the branch it replaced by more
-    /// than one: a rival carrying more work in more, easier blocks is exactly
-    /// what a partition produces. [`Branch::push`] lets go of its oldest
-    /// identifier once the window is full, so a switch that applied two more
-    /// blocks than it undid leaves this cursor one height below the oldest
-    /// the branch can still name, and the step above then has nothing to look
-    /// up.
+    /// No longer reached, and kept because of what the alternative was. The
+    /// step above used to stop when it could not name its own height, and
+    /// stopping was permanent: the cursor stayed where it was for the life of
+    /// the node, every later block found it still unnameable, and from then on
+    /// every block applied added an undo record and a block entry that nothing
+    /// would ever remove. Measured on a chain sitting at the window, with
+    /// three blocks undone against five applied: the cursor froze at height 5,
+    /// and twenty ordinary blocks after it took what the node held from 1,029
+    /// blocks to 1,049, one per block, on a node whose whole claim is that its
+    /// memory does not grow with the chain. `release_bodies` walks from the
+    /// same cursor, so its cost grew with it.
     ///
-    /// It used to stop there, and stopping was permanent: the cursor stayed
-    /// where it was for the life of the node, every later block found it
-    /// still unnameable, and from then on every block applied added an undo
-    /// record and a block entry that nothing would ever remove. Measured on a
-    /// chain sitting at the window, with three blocks undone against five
-    /// applied: the cursor froze at height 5, and twenty ordinary blocks
-    /// after it took what the node held from 1,029 blocks to 1,049, one per
-    /// block, on a node whose whole claim is that its memory does not grow
-    /// with the chain. `release_bodies` walks from the same cursor, so its
-    /// cost grew with it.
+    /// What made the cursor unnameable was letting identifiers go while the
+    /// step still had heights to reach: a switch applying more blocks than it
+    /// undid took the branch's beginning up past the cursor. Both halves of
+    /// that are gone. [`Branch::settle`] runs after the step rather than
+    /// during the applying, and the step runs before `settle` rather than
+    /// after it, so the branch begins at or below this cursor by construction
+    /// and always names it. Instrumented and measured unreached across
+    /// `cairn-chain`, `cairn-store` and `cairn-net`.
     ///
-    /// Swept by identifier, because the height is the thing that has been
-    /// lost. What it walks is the undo records, which are the window and
-    /// nothing more, and it is reached only by a switch of that shape.
+    /// So this is the guard and not the path. Swept by identifier, because the
+    /// height would be the thing that had been lost, and a sweep rather than a
+    /// stop because stopping is the defect above. The test named for this
+    /// function drives it directly, since nothing else does.
     ///
-    /// The floor is held at or above where the branch begins. A failed switch
-    /// leaves the window shorter than it found it, since the identifiers
-    /// `push` let go of do not come back when `restore` pops the blocks off
-    /// again, and a cursor below that would be claiming records for heights
-    /// no rewind could reach anyway.
+    /// The floor is held at or above where the branch begins, because the
+    /// whole job of this sweep is to leave the cursor naming a block.
     fn forget_past_the_window(&mut self, window: u64) {
         let floor = self
             .branch
@@ -1955,12 +2050,15 @@ impl ChainStore {
     ///
     /// This is also the number every floor a switch stands on is measured
     /// against, and it is the smallest of them by construction. A switch
-    /// undoes down to `tip - undo_limit() + 1`. The undo records reach
-    /// `tip + 1 - MAX_REORG_DEPTH`, at or below that because this never
-    /// exceeds the constant. A block log is cut no deeper than
-    /// `tip - burial + 1`, at or below it because this never exceeds the
-    /// burial. Neither has any margin where the two numbers are equal, so
-    /// both are measured on a chain rather than argued: see
+    /// undoes down to `tip - undo_limit() + 1` and lands on
+    /// `tip - undo_limit()`. What a node holds in full reaches
+    /// `tip + 1 - HELD_WINDOW`, which is `tip - MAX_REORG_DEPTH`, at or below
+    /// the block it lands on because this never exceeds the constant: the
+    /// identifiers, the block entries and the undo records all reach that far
+    /// and no further. A block log is cut no deeper than `tip - burial + 1`,
+    /// at or below the deepest body a switch reads because this never exceeds
+    /// the burial. Neither has any margin where the two numbers are equal, so
+    /// all of them are measured on a chain rather than argued: see
     /// `tests/audit_seams.rs`.
     ///
     /// On every public network the two are the same number. Devnet lowers
@@ -1975,12 +2073,17 @@ impl ChainStore {
 
     /// The most this node will ever hold in blocks.
     ///
-    /// The window it may have to undo, at the largest block the rules allow,
+    /// The heights it keeps in full, at the largest block the rules allow,
     /// plus what it keeps of branches it is not on. Anything that raises one
     /// of the three has to be read against this.
+    ///
+    /// [`HELD_WINDOW`] and not [`MAX_REORG_DEPTH`], which is what a switch
+    /// undoes rather than what a node holds: the two differ by the block a
+    /// switch lands on, and reading the smaller one here made the ceiling one
+    /// block short of what the store keeps by design.
     #[must_use]
     pub fn held_bytes_ceiling(params: &ConsensusParams) -> usize {
-        MAX_REORG_DEPTH
+        HELD_WINDOW
             .saturating_mul(params.max_block_bytes)
             .saturating_add(MAX_SIDE_BYTES)
     }
@@ -2359,6 +2462,7 @@ mod tests {
         let count = MILESTONE * 3 + 10;
         for n in 0..count {
             branch.push(id(n));
+            branch.settle();
         }
 
         assert_eq!(branch.len(), count);
@@ -2396,15 +2500,16 @@ mod tests {
     fn the_identifiers_a_branch_holds_in_full_are_a_window_and_not_a_history() {
         let mut branch = Branch::default();
         let past = 500u64;
-        let count = as_height(WINDOW) + past;
+        let count = as_height(HELD_WINDOW) + past;
         for n in 0..count {
             branch.push(id(n));
+            branch.settle();
         }
 
-        assert_eq!(branch.recent.len(), WINDOW);
+        assert_eq!(branch.recent.len(), HELD_WINDOW);
         assert_eq!(
             branch.at.len(),
-            WINDOW,
+            HELD_WINDOW,
             "the index holds what the window does"
         );
         assert_eq!(branch.from, past);
@@ -2429,12 +2534,13 @@ mod tests {
     /// unable to name the branch point it had just agreed to.
     #[test]
     fn the_window_outlasts_the_deepest_rewind_the_store_will_perform() {
-        assert_eq!(WINDOW, MAX_REORG_DEPTH + 1);
+        assert_eq!(HELD_WINDOW, MAX_REORG_DEPTH + 1);
 
         let mut branch = Branch::default();
-        let count = as_height(WINDOW) + 3;
+        let count = as_height(HELD_WINDOW) + 3;
         for n in 0..count {
             branch.push(id(n));
+            branch.settle();
         }
         let anchor = branch.from;
 
@@ -2915,16 +3021,18 @@ mod tests {
 
         assert_eq!(
             store.undo_from,
-            as_height(past),
+            as_height(past - 1),
             "the cursor moved one block per block, and not in a burst at the end"
         );
         assert_eq!(
             store.len(),
-            MAX_REORG_DEPTH,
-            "what is held is the window, whatever the chain has reached"
+            HELD_WINDOW,
+            "what is held is the window, whatever the chain has reached: one \
+             more than a switch undoes, because the block it lands on is the \
+             parent the rival that asked for it names"
         );
-        assert!(!store.contains(&ids[past - 1]));
-        assert!(store.contains(&ids[past]));
+        assert!(!store.contains(&ids[past - 2]));
+        assert!(store.contains(&ids[past - 1]));
         assert_eq!(
             store.held_bytes(),
             store
@@ -2953,18 +3061,18 @@ mod tests {
     /// down, mines faster and cheaper, and comes back carrying more work in
     /// more blocks.
     ///
-    /// The branch holds one identifier more than a rewind may undo, which is
-    /// one block of slack. A switch that applied two more than it undid spends
-    /// it: `Branch::push` lets go of its oldest identifier, and the cursor that
-    /// walks the window is then one height below the oldest the branch can
-    /// still name.
+    /// The step that lets go of what can no longer change moves its cursor one
+    /// height per block, and here it has several to cover at once. It used to
+    /// let go of the identifiers first, so the cursor met a height the branch
+    /// could no longer name, and then it stopped, and stopping was for good:
+    /// every later block found the cursor still unnameable, so from then on
+    /// each block applied added an undo record and a block entry that nothing
+    /// would ever remove. Not a leak that settles. Memory growing one block
+    /// per block, on a node whose whole claim is that it does not.
     ///
-    /// The step that lets go of what can no longer change used to stop there,
-    /// and stopping was for good: every later block found the cursor still
-    /// unnameable, so from then on each block applied added an undo record and
-    /// a block entry that nothing would ever remove. Not a leak that settles.
-    /// Memory growing one block per block, on a node whose whole claim is that
-    /// it does not.
+    /// What is measured is the outcome and not the path: the cursor lands
+    /// where the window says, the records and the entries are the window, and
+    /// two hundred ordinary blocks after it change none of that.
     #[test]
     fn a_switch_that_applied_more_than_it_undid_still_lets_the_window_slide() {
         let mut store = ChainStore::new(params());
@@ -2979,9 +3087,9 @@ mod tests {
             store.applied.insert(id, a_record());
             store.forget_what_cannot_change();
         }
-        assert_eq!(store.undo_from, past);
-        assert_eq!(store.undo_records(), MAX_REORG_DEPTH);
-        assert_eq!(store.len(), MAX_REORG_DEPTH);
+        assert_eq!(store.undo_from, past - 1);
+        assert_eq!(store.undo_records(), HELD_WINDOW);
+        assert_eq!(store.len(), HELD_WINDOW);
 
         // What `rewind_to` does: three blocks off the tip, and the cursor
         // brought down to whatever branch is left.
@@ -3009,13 +3117,13 @@ mod tests {
 
         assert_eq!(
             store.undo_from,
-            store.branch.len() - as_height(MAX_REORG_DEPTH),
+            store.branch.len() - as_height(HELD_WINDOW),
             "the cursor stopped where the branch could no longer name a block \
              for it, and never moved again"
         );
         assert_eq!(
             store.undo_records(),
-            MAX_REORG_DEPTH,
+            HELD_WINDOW,
             "and the records it could not name piled up behind it"
         );
         assert!(
@@ -3038,7 +3146,7 @@ mod tests {
         }
         assert_eq!(
             store.undo_records(),
-            MAX_REORG_DEPTH,
+            HELD_WINDOW,
             "the undo records grew with the chain"
         );
         assert_eq!(
@@ -3048,29 +3156,33 @@ mod tests {
              hundred more, against {held} before them",
             store.len()
         );
+        assert_eq!(store.undo_from, store.branch.len() - as_height(HELD_WINDOW));
         assert_eq!(
-            store.undo_from,
-            store.branch.len() - as_height(MAX_REORG_DEPTH)
+            store.branch.recent.len(),
+            HELD_WINDOW,
+            "the identifiers held grew with the chain, which is the same claim \
+             by the other half: they are a window and not a history"
         );
     }
 
-    /// A switch that fails partway leaves the branch shorter than it found it,
-    /// and the cursor has to stop at the new start rather than below it.
+    /// The guard under the step, driven by hand because nothing drives it.
     ///
-    /// `Branch::push` lets go of its oldest identifier as the winning branch is
-    /// applied, and `restore` popping those blocks off again does not bring the
-    /// identifiers back: what the branch holds in full is that much shorter
-    /// until the chain grows into it again. A cursor placed at the height the
-    /// window arithmetic asks for would then sit below the oldest block the
-    /// branch can name, so the next step would find nothing to name again, and
-    /// the node would be claiming undo records for heights no rewind could
-    /// reach.
+    /// `forget_past_the_window` is what the step falls back on when the branch
+    /// cannot name the height its cursor stands at. The ordering in
+    /// `forget_what_cannot_change` means that cannot happen, and instrumenting
+    /// it across this crate, `cairn-store` and `cairn-net` found it unreached.
+    /// It is kept because the alternative at that point is to stop, and
+    /// stopping is the defect the step above is written against, so what it
+    /// does has to be pinned by something.
+    ///
+    /// What it must do is leave the cursor naming a block and take the records
+    /// and the entries it could not name with it, however far the cursor is
+    /// behind.
     #[test]
-    fn the_cursor_stops_where_a_failed_switch_left_the_branch_beginning() {
+    fn the_sweep_a_cursor_that_cannot_name_its_height_falls_back_on() {
         let mut store = ChainStore::new(params());
-        let past = 5u64;
         let mut previous = Hash32::ZERO;
-        for height in 0..as_height(MAX_REORG_DEPTH) + past {
+        for height in 0..as_height(HELD_WINDOW) + 40 {
             let block = block_at(height, previous, 1);
             let id = block.id();
             previous = id;
@@ -3079,12 +3191,95 @@ mod tests {
             store.applied.insert(id, a_record());
             store.forget_what_cannot_change();
         }
-        let started_at = store.branch.from;
+        let held = store.len();
 
-        // A switch that undid three, applied six, and then met a block that
-        // would not apply. `follow` never calls the step on that path: what it
-        // calls is `restore`, which pops what it added and puts back what it
-        // took.
+        // The shape the step cannot produce: a cursor left well below where
+        // the branch begins, with records and entries stranded beneath it.
+        // Those are what a frozen cursor accumulated, so they are what has to
+        // go, and putting them back by hand is the only way to have any.
+        let mut stranded = Vec::new();
+        for height in store.branch.from.saturating_sub(20)..store.branch.from {
+            let block = block_at(height, id(height), 1);
+            let stray = block.id();
+            store.hold(stray, block, 0);
+            store.applied.insert(stray, a_record());
+            stranded.push(stray);
+        }
+        store.undo_from = store.branch.from.saturating_sub(20);
+        assert!(store.branch.id_at(store.undo_from).is_none());
+        assert_eq!(store.undo_records(), HELD_WINDOW + 20);
+
+        store.forget_past_the_window(as_height(HELD_WINDOW));
+
+        for stray in &stranded {
+            assert!(
+                !store.contains(stray),
+                "an entry the branch cannot name outlived the sweep"
+            );
+        }
+
+        assert_eq!(
+            store.undo_from, store.branch.from,
+            "the cursor has to come back to where the branch begins"
+        );
+        assert!(store.branch.id_at(store.undo_from).is_some());
+        assert_eq!(
+            store.undo_records(),
+            HELD_WINDOW,
+            "and the records it could not name go with it"
+        );
+        assert_eq!(store.len(), held, "and so do their blocks");
+    }
+
+    /// A switch that fails partway leaves the branch beginning exactly where
+    /// it found it, so the node goes on making the deepest switch its own
+    /// rules quote.
+    ///
+    /// This is the fourth floor a switch stands on, and the only one that
+    /// could ever move *down*. The other three are fixed by the rules: the
+    /// undo records reach `tip + 1 - MAX_REORG_DEPTH`, a block log is cut no
+    /// deeper than `tip - burial + 1`, and `undo_limit` is at or below both.
+    /// This one is the identifiers the branch holds in full, and letting go of
+    /// them as the winning branch was applied spent it: `restore` puts the
+    /// blocks back and cannot put the identifiers back with them.
+    ///
+    /// Driven by hand, because the shape needs a rival winning on more and
+    /// easier blocks and no chain in this workspace leaves the minimum
+    /// difficulty: see [`Branch::settle`]. Nine blocks applied against three
+    /// undone, and a tenth that will not apply.
+    ///
+    /// What that cost was measured before it was fixed. The branch began six
+    /// heights higher than it had; the
+    /// deepest fork `branch_to` could still find fell from 1,024 blocks below
+    /// the tip to 1,018, while `undo_limit` went on answering 1,024 and the
+    /// undo records for those heights were still held; and the next ordinary
+    /// block threw four of those records away. A branch forking where the
+    /// rules allow was refused as `UnknownParent`, which names a block this
+    /// node had applied itself and blames the peer that offered the chain
+    /// back for a shortfall on this side of the wire.
+    #[test]
+    fn a_failed_switch_leaves_the_branch_beginning_where_it_found_it() {
+        let mut store = ChainStore::new(params());
+        let past = 5u64;
+        let mut previous = Hash32::ZERO;
+        let mut main = Vec::new();
+        for height in 0..as_height(MAX_REORG_DEPTH) + past {
+            let block = block_at(height, previous, 1);
+            let id = block.id();
+            previous = id;
+            main.push(id);
+            store.hold(id, block, 0);
+            store.branch.push(id);
+            store.applied.insert(id, a_record());
+            store.forget_what_cannot_change();
+        }
+        let started_at = store.branch.from;
+        let records = store.undo_records();
+
+        // A switch that undid three, applied nine, and then met a block that
+        // would not apply. `follow` never settles the window on that path:
+        // what it calls is `restore`, which pops what it added and puts back
+        // what it took.
         let undone = 3u64;
         let mut rolled_back = Vec::new();
         for _ in 0..undone {
@@ -3094,7 +3289,7 @@ mod tests {
         }
         store.undo_from = store.undo_from.min(store.branch.len());
         let mut tip = store.branch.tip().unwrap();
-        for n in 0..6u64 {
+        for n in 0..9u64 {
             let block = block_at(store.branch.len(), tip, 100 + n);
             let id = block.id();
             tip = id;
@@ -3102,7 +3297,7 @@ mod tests {
             store.branch.push(id);
             store.applied.insert(id, a_record());
         }
-        for _ in 0..6u64 {
+        for _ in 0..9u64 {
             let id = store.branch.pop().unwrap();
             store.applied.remove(&id);
         }
@@ -3110,14 +3305,39 @@ mod tests {
             store.branch.push(*id);
             store.applied.insert(*id, a_record());
         }
-        assert!(
-            store.branch.from > started_at,
-            "the failed switch has to have moved the branch's start, or there \
-             is nothing here to measure"
-        );
-        assert!(store.branch.id_at(store.undo_from).is_none());
+        tip = store.branch.tip().unwrap();
 
-        // And then one ordinary block, which is where the step runs again.
+        assert_eq!(
+            store.branch.from, started_at,
+            "the failed switch moved the branch's start, so the window is \
+             shorter than the one the rules quote"
+        );
+
+        // What the rules quote, asked of the code that answers it: a rival
+        // hung on the branch at the deepest height a switch may reach has to
+        // be found there, and the depth `follow` works out from it has to be
+        // the limit itself and not less.
+        let fork_at = (store.branch.len() - 1) - store.undo_limit();
+        let parent = main[usize::try_from(fork_at).unwrap()];
+        let rival = block_at(fork_at + 1, parent, 7_777);
+        let rival_id = rival.id();
+        store.hold(rival_id, rival, 0);
+        let (position, walked) = store
+            .branch_to(rival_id)
+            .expect("a branch forking where the rules allow is one this node can assemble");
+        assert_eq!(position, Some(fork_at));
+        assert_eq!(walked, vec![rival_id]);
+        let keep = position.unwrap() + 1;
+        assert_eq!(
+            store.branch.len() - keep,
+            store.undo_limit(),
+            "the deepest switch this node will make is not the one it quotes"
+        );
+        store.release(&rival_id);
+
+        // And then one ordinary block, which is where the cursor steps again.
+        // Nothing may be thrown away early: the records held are the window,
+        // whatever the failed switch did.
         let block = block_at(store.branch.len(), tip, 900);
         let id = block.id();
         store.hold(id, block, 0);
@@ -3125,15 +3345,15 @@ mod tests {
         store.applied.insert(id, a_record());
         store.forget_what_cannot_change();
 
-        assert!(
-            store.undo_from >= store.branch.from,
-            "the cursor sits at height {}, below the {} the branch begins at",
-            store.undo_from,
-            store.branch.from
+        assert_eq!(
+            store.undo_records(),
+            records,
+            "the failed switch cost the node undo records it still held"
         );
+        assert_eq!(store.undo_from, store.branch.len() - as_height(HELD_WINDOW));
         assert!(
             store.branch.id_at(store.undo_from).is_some(),
-            "and it names a block, so the next step has something to walk"
+            "and the cursor names a block, so the next step has something to walk"
         );
     }
 }

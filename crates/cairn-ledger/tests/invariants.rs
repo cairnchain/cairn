@@ -25,6 +25,25 @@
 //! least covered part of the system. What was actually reached is asserted at
 //! the end of each test, because a generator that quietly stopped producing
 //! spends would leave both of these passing while checking nothing.
+//!
+//! Two holes in that net were found by asking what the generator could not
+//! reach, and both were reached by nothing else either.
+//!
+//! `watch_owner` was called once, on an empty state. The interesting half of
+//! it is the back-fill, which takes up whatever of its owner's notes are
+//! already sitting in the grace window, and an empty state has none: round
+//! nine's defect lived in undoing a block that landed one of those, and this
+//! file could not have produced the case. The ask is now made partway through
+//! a run.
+//!
+//! And every sequence ran on `LedgerState::archiving()` alone, which keeps the
+//! leaves and rebuilds any path it wants. `ColdSet::watch` does nothing to an
+//! archive, so the number of paths this file exercised was measured at zero
+//! while its grace window held eighty notes. Everything the last two rounds
+//! rewrote about keeping paths current, `PathsBefore` and `Forest::rewind_to`
+//! and the sibling arithmetic under them, is on the other arm, and it is the
+//! arm a node a person runs takes. Both kinds now run every sequence, and what
+//! each of them can still prove is compared block by block.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -35,9 +54,10 @@
     clippy::arithmetic_side_effects
 )]
 
-use cairn_crypto::SecretKey;
+use cairn_accumulator::ForestProof;
+use cairn_crypto::{PublicKey, SecretKey};
 use cairn_ledger::note::{Note, NoteId};
-use cairn_ledger::state::{HotEntry, GRACE_BLOCKS};
+use cairn_ledger::state::{cold_leaf, HotEntry, GRACE_BLOCKS};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{
     assemble_block, connect_block, disconnect_block, mine_block, ConnectedBlock, ConsensusParams,
@@ -102,13 +122,18 @@ struct Fingerprint {
     grace_len: usize,
     next_cold_position: u64,
     grace: Vec<Vec<(NoteId, u64, Note)>>,
-    /// The proofs kept current for watched owners.
+    /// The fallen notes this node follows for a watched owner, and where each
+    /// one sits.
     ///
-    /// In no root at all, and restored by a route nothing states: undoing a
-    /// block assigns a clone of the forest as it stood, and the proofs come
-    /// back only because `watched` is a field of what is cloned. A node that
-    /// lost them would still agree with everyone about every block, and would
-    /// quietly stop being able to prove notes it was proving a moment before.
+    /// This is what a wallet is told and it is in no root at all, so a node
+    /// that answered wrongly here would go on agreeing with the whole network
+    /// about every block. The paths themselves are not in this: an archivist
+    /// keeps none and builds them, so they are in [`PlainPrint::paths`], on the
+    /// kind of node that does keep them.
+    ///
+    /// The doc that stood here said an undo restored these by assigning a clone
+    /// of the forest as it stood. That route is gone, and had been for two
+    /// rounds: the clone was the nine gigabytes `PathsBefore` exists to remove.
     watched: Vec<(NoteId, u64, Note)>,
 }
 
@@ -143,6 +168,199 @@ fn wallet(seed: u8) -> SecretKey {
     SecretKey::from_bytes(&[seed; 32])
 }
 
+/// The owner a wallet asks about partway through, rather than before the first
+/// block.
+///
+/// A distinct owner from the one watched from the start, because what it
+/// answers about is compared differently: notes taken up by a late ask belong
+/// to no block and are in no undo record, so an undo below the moment of the
+/// ask legitimately holds fewer of them than the fingerprint from before it.
+/// Everything else has to match to the byte.
+const LATE: u8 = 4;
+
+/// The same fingerprint with one owner's followed notes left out.
+///
+/// For comparing across the moment a wallet asked. Only that owner's entries
+/// may differ there; that they are still coherent is what
+/// [`every_followed_note_can_be_proved`] says.
+fn without(print: &Fingerprint, owner: PublicKey) -> Fingerprint {
+    let mut copy = print.clone();
+    copy.watched.retain(|(_, _, note)| note.owner != owner);
+    copy
+}
+
+/// What following a note is supposed to establish, asked of every one of them.
+///
+/// `watched_notes` is read as three claims at once: this note has fallen, it
+/// sits at this place, and this node can prove it there. None of the three is
+/// in any root, so no other node ever disagrees when one is wrong; the only
+/// reader is a wallet, and what it is handed is a place and a path.
+///
+/// Round nine's defect was exactly a broken one of these. `watch_owner` takes
+/// up whatever of its owner's is sitting in the grace window, and those notes
+/// belong to no block, so undoing the block that landed one left the entry
+/// naming a place the forest no longer had. The state root agreed with the
+/// whole network throughout.
+fn every_followed_note_can_be_proved(state: &LedgerState, when: &str) {
+    for (id, position, note) in state.watched_notes() {
+        assert!(
+            position < state.next_cold_position(),
+            "{when}: {id:?} is followed at place {position}, and the forest has handed out {}",
+            state.next_cold_position()
+        );
+        assert!(
+            state.hot_note(&id).is_none(),
+            "{when}: {id:?} is followed as a fallen note and is in the hot set"
+        );
+        let Some(proof) = state.cold().proof_of(position) else {
+            panic!("{when}: no path is kept for followed note {id:?} at place {position}");
+        };
+        assert!(
+            state.cold().verify(position, cold_leaf(&id, &note), &proof),
+            "{when}: the path kept for followed note {id:?} at place {position} proves nothing"
+        );
+    }
+}
+
+/// The same for the grace window, which makes the same promise to everybody.
+///
+/// A note that fell moments ago is spendable without the spender bringing a
+/// proof, and that only works because every node holds one for it. The window
+/// is committed to; the paths under it are not, so an undo that mended one
+/// wrongly is invisible until somebody tries to spend.
+fn every_path_kept_proves_its_note(state: &LedgerState, when: &str) {
+    for (id, position, note) in state.grace_window().into_iter().flatten() {
+        let Some(proof) = state.cold().proof_of(position) else {
+            panic!("{when}: {id:?} sits in the grace window at place {position} with no path");
+        };
+        assert!(
+            state.cold().verify(position, cold_leaf(&id, &note), &proof),
+            "{when}: the path for {id:?} at place {position} in the window proves nothing"
+        );
+    }
+    every_followed_note_can_be_proved(state, when);
+}
+
+/// A plain node's fingerprint: the common part, and the paths it keeps.
+///
+/// Both kinds of node run every sequence here, because they do not run the
+/// same code. `LedgerState::archiving()` holds the leaves and rebuilds any
+/// path it wants, so `ColdSet::watch` does nothing to it and it keeps none:
+/// measured at zero, on runs whose grace window held eighty notes. That left
+/// the other arm of `ColdSet::rewind` unreached by this file, and with it
+/// `PathsBefore` and the sibling arithmetic in `Forest::rewind_to`, which is
+/// what the last two rounds rewrote and what a node a person runs uses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PlainPrint {
+    common: Fingerprint,
+    /// Every place this node can still produce a path for, and the path.
+    paths: Vec<(u64, ForestProof)>,
+}
+
+fn plain_print(state: &LedgerState) -> PlainPrint {
+    let mut paths = Vec::new();
+    for position in 0..state.next_cold_position() {
+        if let Some(proof) = state.cold().proof_of(position) {
+            paths.push((position, proof));
+        }
+    }
+    assert_eq!(
+        paths.len(),
+        state.watched_paths(),
+        "what the node says it keeps is what it can answer for"
+    );
+    PlainPrint {
+        common: fingerprint(state),
+        paths,
+    }
+}
+
+/// One block, and what applying it left on each of the two nodes.
+struct Step {
+    before: Fingerprint,
+    before_plain: PlainPrint,
+    block: Block,
+    connected: ConnectedBlock,
+    connected_plain: ConnectedBlock,
+}
+
+/// One party, running both kinds of node over the same blocks.
+struct Nodes {
+    /// The archivist. It holds the leaves, so the generator asks this one
+    /// where a note sits and for the proof of a cold spend.
+    archive: LedgerState,
+    /// The node a person runs.
+    plain: LedgerState,
+}
+
+impl Nodes {
+    fn new() -> Self {
+        Self {
+            archive: LedgerState::archiving(),
+            plain: LedgerState::new(),
+        }
+    }
+
+    fn watch_owner(&mut self, owner: PublicKey) {
+        self.archive.watch_owner(owner);
+        self.plain.watch_owner(owner);
+    }
+
+    /// Everything each of them holds, checked against the roots it holds.
+    fn coherent(&self, when: &str) {
+        every_followed_note_can_be_proved(&self.archive, when);
+        every_path_kept_proves_its_note(&self.plain, when);
+    }
+}
+
+/// Whether an undo landed on the state the block it undid went on top of.
+///
+/// `apart` names an owner whose followed notes may differ, which is the one a
+/// wallet asked about partway through. Nothing else may, in either node.
+fn landed_on(nodes: &Nodes, step: &Step, apart: Option<PublicKey>, why: &str) {
+    let now = fingerprint(&nodes.archive);
+    let now_plain = plain_print(&nodes.plain);
+    let Some(owner) = apart else {
+        assert_eq!(now, step.before, "{why}");
+        assert_eq!(now_plain, step.before_plain, "{why}, paths and all");
+        return;
+    };
+    assert_eq!(without(&now, owner), without(&step.before, owner), "{why}");
+    assert_eq!(
+        without(&now_plain.common, owner),
+        without(&step.before_plain.common, owner),
+        "{why}, on the node a person runs"
+    );
+    assert_eq!(
+        now_plain.paths, step.before_plain.paths,
+        "{why}, in the paths it keeps"
+    );
+}
+
+/// Feeds a run of blocks to a party that did not build them.
+fn replay(nodes: &mut Nodes, steps: &[Step], params: &ConsensusParams) {
+    for step in steps {
+        connect_block(&mut nodes.archive, &step.block, params, NOW)
+            .expect("a node that did not build these blocks still accepts them");
+        connect_block(&mut nodes.plain, &step.block, params, NOW)
+            .expect("and so does the plain one beside it");
+    }
+}
+
+/// Two parties that ought to be indistinguishable, compared as both kinds.
+fn level(left: &Nodes, right: &Nodes, why: &str) {
+    assert_eq!(
+        fingerprint(&left.archive),
+        fingerprint(&right.archive),
+        "{why}"
+    );
+    assert_eq!(
+        plain_print(&left.plain),
+        plain_print(&right.plain),
+        "{why}, once the paths are compared too"
+    );
+}
+
 /// A reward is spendable at once here.
 ///
 /// These tests all spend a coinbase shortly after mining it, and none of them
@@ -175,6 +393,13 @@ struct Reached {
     evictions: u64,
     undos: u64,
     watched_seen: u64,
+    /// Notes a late ask took up out of the grace window. Zero here means the
+    /// back-fill was never reached, which is what this file used to do.
+    back_filled: u64,
+    /// The most paths the plain node was keeping current at once. Zero here
+    /// means the path mending was never reached, which is what this file used
+    /// to do.
+    paths_kept: u64,
 }
 
 /// Builds the transfers for one block out of what the state actually holds.
@@ -270,11 +495,12 @@ fn draw_transfers(
 /// too large, a height that overflowed), and a sequence that hit one of those
 /// is not a failure, it is a sequence with one block fewer.
 fn advance(
-    state: &mut LedgerState,
+    nodes: &mut Nodes,
     params: &ConsensusParams,
     miner: &SecretKey,
     transfers: Vec<Transfer>,
-) -> Option<(Block, ConnectedBlock)> {
+) -> Option<(Block, ConnectedBlock, ConnectedBlock)> {
+    let state = &mut nodes.archive;
     let height = state.next_height()?;
     let coinbase = CoinbaseTransaction::new(
         height,
@@ -291,36 +517,50 @@ fn advance(
     .ok()?;
     let block = mine_block(candidate, MINING_ATTEMPTS)?;
     let connected = connect_block(state, &block, params, NOW).ok()?;
-    Some((block, connected))
+    // Not `ok()?`: the two kinds of node judge the same block by the same
+    // rules, and one taking what the other refused is itself the failure.
+    let connected_plain = connect_block(&mut nodes.plain, &block, params, NOW)
+        .expect("a node that keeps no leaves takes what an archivist took");
+    Some((block, connected, connected_plain))
 }
 
 /// Grows the chain by `count` blocks, returning what was mined and what it made.
 fn extend(
-    state: &mut LedgerState,
+    nodes: &mut Nodes,
     params: &ConsensusParams,
     rng: &mut Rng,
     miner: &SecretKey,
     held: &mut Vec<Held>,
     count: usize,
     reached: &mut Reached,
-) -> Vec<(Fingerprint, Block, ConnectedBlock)> {
+) -> Vec<Step> {
     let mut applied = Vec::new();
     for _ in 0..count {
-        let before = fingerprint(state);
-        let (transfers, created) = draw_transfers(state, params, rng, held, reached);
-        let Some((block, connected)) = advance(state, params, miner, transfers) else {
+        let before = fingerprint(&nodes.archive);
+        let before_plain = plain_print(&nodes.plain);
+        let (transfers, created) = draw_transfers(&nodes.archive, params, rng, held, reached);
+        let Some((block, connected, connected_plain)) = advance(nodes, params, miner, transfers)
+        else {
             continue;
         };
         reached.blocks += 1;
         reached.evictions += connected.transition.evicted.len() as u64;
-        reached.watched_seen += state.watched_notes().count() as u64;
+        reached.watched_seen += nodes.archive.watched_notes().count() as u64;
+        reached.paths_kept = reached.paths_kept.max(nodes.plain.watched_paths() as u64);
+        nodes.coherent("after a block");
         held.extend(created);
         held.push(Held {
             id: NoteId::new(block.coinbase.id(), 0),
             note: Note::new(params.initial_reward, miner.public_key()),
             owner: 1,
         });
-        applied.push((before, block, connected));
+        applied.push(Step {
+            before,
+            before_plain,
+            block,
+            connected,
+            connected_plain,
+        });
     }
     applied
 }
@@ -335,10 +575,10 @@ fn undoing_any_sequence_of_blocks_restores_the_state_exactly() {
 
     for seed in 0..SEQUENCES {
         let mut rng = Rng::new(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        let mut state = LedgerState::archiving();
+        let mut nodes = Nodes::new();
         // Without this, watched proofs are always empty and the field for them
         // in the fingerprint compares nothing to nothing.
-        state.watch_owner(wallet(2).public_key());
+        nodes.watch_owner(wallet(2).public_key());
         let mut held = Vec::new();
 
         // Past GRACE_BLOCKS, so that notes age out of the window and can only
@@ -346,8 +586,8 @@ fn undoing_any_sequence_of_blocks_restores_the_state_exactly() {
         // reach the tier boundary at all, which is where the design review
         // says the least covered interaction lives.
         let depth = GRACE_BLOCKS + 8 + rng.below(20);
-        let applied = extend(
-            &mut state,
+        let mut applied = extend(
+            &mut nodes,
             &params,
             &mut rng,
             &miner,
@@ -356,31 +596,76 @@ fn undoing_any_sequence_of_blocks_restores_the_state_exactly() {
             &mut reached,
         );
 
+        // Partway through, which is the whole point of it being here. Asking
+        // before the first block is what this file used to do, and a wallet
+        // that has never asked a running node about an address is not the case
+        // worth generating: `watch_owner` back-fills whatever of its owner's
+        // notes are already sitting in the grace window, and that back-fill,
+        // being in no block and in no undo record, is where round nine's
+        // defect was. An ask before block one back-fills an empty window and
+        // reaches none of it.
+        let late = wallet(LATE).public_key();
+        let watched_from = applied.len();
+        nodes.watch_owner(late);
+        reached.back_filled += nodes
+            .archive
+            .watched_notes()
+            .filter(|(_, _, note)| note.owner == late)
+            .count() as u64;
+        nodes.coherent("just after the ask");
+
+        let after = 8 + rng.below(20);
+        applied.extend(extend(
+            &mut nodes,
+            &params,
+            &mut rng,
+            &miner,
+            &mut held,
+            after,
+            &mut reached,
+        ));
+
         // Backwards, one at a time. Each step has to land on the fingerprint
         // taken before that very block went on, not merely on something that
         // hashes the same.
-        for (before, block, connected) in applied.iter().rev() {
-            disconnect_block(&mut state, connected);
+        for (index, step) in applied.iter().enumerate().rev() {
+            disconnect_block(&mut nodes.archive, &step.connected);
+            disconnect_block(&mut nodes.plain, &step.connected_plain);
             reached.undos += 1;
-            assert_eq!(
-                fingerprint(&state),
-                *before,
+            nodes.coherent("after an undo");
+            let why = format!(
                 "seed {seed}: undoing block {} left a different state",
-                block.header.height
+                step.block.header.height
             );
+            // Below the ask, only the asker's own notes may differ: the ones
+            // it took up out of the window belong to blocks down here, and
+            // undoing one of those lets go of the note it landed. Everything
+            // the chain decides still has to match, and so do the paths, since
+            // the ask keeps no path the window was not keeping already.
+            let apart = if index >= watched_from {
+                None
+            } else {
+                Some(late)
+            };
+            landed_on(&nodes, step, apart, &why);
         }
 
-        assert_eq!(
-            fingerprint(&state),
-            fingerprint(&LedgerState::archiving()),
-            "seed {seed}: the whole sequence undone is an empty state"
+        // Which includes the notes the late ask took up. They are in no undo
+        // record, and what lets go of them is the undo of the block that made
+        // each one fall, so a sequence undone to nothing has to have let go of
+        // every one.
+        level(
+            &nodes,
+            &Nodes::new(),
+            &format!("seed {seed}: the whole sequence undone is an empty state"),
         );
     }
 
-    // Measured at 963 blocks, 924 hot spends, 25 cold spends, 1684 evictions.
-    // The thresholds sit well under that: what they are guarding against is a
-    // generator that stopped reaching a case, not a run that reached three
-    // fewer than last time.
+    // Measured at 1182 blocks, 1053 hot spends, 121 cold spends, 2120
+    // evictions, 161 notes taken up by the ask partway through and 101 paths
+    // kept at once on the plain node. The thresholds sit well under all of
+    // that: what they are guarding against is a generator that stopped
+    // reaching a case, not a run that reached three fewer than last time.
     assert_eq!(
         reached.undos, reached.blocks,
         "every block applied was undone: {reached:?}"
@@ -397,6 +682,65 @@ fn undoing_any_sequence_of_blocks_restores_the_state_exactly() {
         reached.watched_seen > 100,
         "proofs were kept for a watched owner, so restoring them was tested: {reached:?}"
     );
+    assert!(
+        reached.back_filled > 50,
+        "a wallet asking partway through found notes already in the window: {reached:?}"
+    );
+    assert!(
+        reached.paths_kept > 50,
+        "the plain node was mending real paths rather than an empty map: {reached:?}"
+    );
+}
+
+/// Two parties taken to the same point by the same blocks, both asked about a
+/// second owner once they are there.
+///
+/// One of them will walk a losing branch and come back and the other will
+/// never have seen it, so what they hold has to be indistinguishable now. The
+/// ask is made here rather than on an empty state because that is what makes
+/// both of them carry followed notes belonging to no block and named in no
+/// undo record: what a branch then spends out of that set has to come back
+/// through the record the spend wrote, and what the ceiling displaces has to
+/// come back the same way.
+fn at_a_fork(
+    params: &ConsensusParams,
+    rng: &mut Rng,
+    miner: &SecretKey,
+    reached: &mut Reached,
+    seed: u64,
+) -> (Nodes, Nodes, Vec<Held>) {
+    let mut walker = Nodes::new();
+    let mut control = Nodes::new();
+    walker.watch_owner(wallet(2).public_key());
+    control.watch_owner(wallet(2).public_key());
+    let mut held = Vec::new();
+
+    // The fork point sits past the grace window, so both branches spend across
+    // the tier boundary rather than out of the hot set alone.
+    let depth = GRACE_BLOCKS + 8 + rng.below(10);
+    let shared = extend(&mut walker, params, rng, miner, &mut held, depth, reached);
+    replay(&mut control, &shared, params);
+    level(
+        &walker,
+        &control,
+        &format!("seed {seed}: the two nodes start level"),
+    );
+
+    let late = wallet(LATE).public_key();
+    walker.watch_owner(late);
+    control.watch_owner(late);
+    reached.back_filled += walker
+        .archive
+        .watched_notes()
+        .filter(|(_, _, note)| note.owner == late)
+        .count() as u64;
+    level(
+        &walker,
+        &control,
+        &format!("seed {seed}: the same ask on the same state takes up the same notes"),
+    );
+    walker.coherent("just after the ask");
+    (walker, control, held)
 }
 
 /// The second invariant: a reorganisation lands where the branch alone would.
@@ -411,41 +755,12 @@ fn a_reorganisation_lands_on_the_state_the_winning_branch_alone_would_build() {
     for seed in 0..SEQUENCES {
         let mut rng = Rng::new(seed.wrapping_mul(0xD1B5_4A32_D192_ED03) ^ 0x5DEE_CE66);
 
-        // Two nodes, taken to the same fork point by the same blocks: one will
-        // walk a losing branch and come back, the other will never have seen
-        // it. Whether they agree afterwards is the whole question.
-        let mut walker = LedgerState::archiving();
-        let mut control = LedgerState::archiving();
-        walker.watch_owner(wallet(2).public_key());
-        control.watch_owner(wallet(2).public_key());
-        let mut held = Vec::new();
+        let (mut walker, mut control, held) =
+            at_a_fork(&params, &mut rng, &miner, &mut reached, seed);
 
-        // The fork point sits past the grace window, so both branches spend
-        // across the tier boundary rather than out of the hot set alone.
-        let shared_depth = GRACE_BLOCKS + 8 + rng.below(10);
-        let shared = extend(
-            &mut walker,
-            &params,
-            &mut rng,
-            &miner,
-            &mut held,
-            shared_depth,
-            &mut reached,
-        );
-        for (_, block, _) in &shared {
-            connect_block(&mut control, block, &params, NOW)
-                .expect("the control node accepts the same blocks");
-        }
-        assert_eq!(
-            fingerprint(&walker),
-            fingerprint(&control),
-            "seed {seed}: the two nodes start level"
-        );
-
-        // What the losing branch is allowed to spend. Cloned, because the
-        // branch spends notes that have to be spendable again on the branch
-        // that wins.
-        let at_fork = held.clone();
+        // What the losing branch is allowed to spend. Kept, because the branch
+        // spends notes that have to be spendable again on the branch that wins.
+        let at_fork = held;
 
         let losing_depth = 1 + rng.below(6);
         let losing = extend(
@@ -453,21 +768,23 @@ fn a_reorganisation_lands_on_the_state_the_winning_branch_alone_would_build() {
             &params,
             &mut rng,
             &miner,
-            &mut held.clone(),
+            &mut at_fork.clone(),
             losing_depth,
             &mut reached,
         );
         if losing.is_empty() {
             continue;
         }
-        for (_, _, connected) in losing.iter().rev() {
-            disconnect_block(&mut walker, connected);
+        for step in losing.iter().rev() {
+            disconnect_block(&mut walker.archive, &step.connected);
+            disconnect_block(&mut walker.plain, &step.connected_plain);
             reached.undos += 1;
+            walker.coherent("walking a branch back");
         }
-        assert_eq!(
-            fingerprint(&walker),
-            fingerprint(&control),
-            "seed {seed}: the losing branch left nothing behind"
+        level(
+            &walker,
+            &control,
+            &format!("seed {seed}: the losing branch left nothing behind"),
         );
 
         // Now the branch that wins, built on the node that walked back, and
@@ -486,16 +803,18 @@ fn a_reorganisation_lands_on_the_state_the_winning_branch_alone_would_build() {
         if winning.is_empty() {
             continue;
         }
-        for (_, block, _) in &winning {
-            connect_block(&mut control, block, &params, NOW)
-                .expect("the branch that one node built, the other accepts");
-        }
+        replay(&mut control, &winning, &params);
         reorgs += 1;
 
-        assert_eq!(
-            fingerprint(&walker),
-            fingerprint(&control),
-            "seed {seed}: walking a branch and coming back changed where the chain lands"
+        // The second half of `level` is the sharper one. Two nodes that
+        // reached one tip by different routes have to be able to prove the
+        // same notes: the paths are in no root, so a node that mended one
+        // wrongly agrees with the network about every block and then refuses a
+        // spend everyone else takes.
+        level(
+            &walker,
+            &control,
+            &format!("seed {seed}: walking a branch and coming back changed where the chain lands"),
         );
     }
 
@@ -510,5 +829,13 @@ fn a_reorganisation_lands_on_the_state_the_winning_branch_alone_would_build() {
     assert!(
         reached.watched_seen > 100,
         "proofs were kept for a watched owner across the reorganisations: {reached:?}"
+    );
+    assert!(
+        reached.back_filled > 50,
+        "a wallet asking at the fork found notes already in the window: {reached:?}"
+    );
+    assert!(
+        reached.paths_kept > 50,
+        "the plain nodes were mending real paths rather than an empty map: {reached:?}"
     );
 }

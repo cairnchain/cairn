@@ -121,7 +121,7 @@
         ],
         "technical": [
           "Ensemble chaud : {capacity} billets au maximum, dans un arbre de Merkle creux, environ {megabytes} à pleine capacité. L'éviction se fait par ancienneté, les plus vieux d'abord, par lots aux frontières de bloc.",
-          "Ensemble froid : une forêt de Merkle en ajout seul, soixante-quatre racines. Une dépense qui en vient porte une preuve d'inclusion ; une preuve peut avoir jusqu'à 32 blocs de retard, et un billet qui vient de tomber reste dépensable sans preuve pendant 64 blocs."
+          "Ensemble froid : une forêt de Merkle en ajout seul, soixante-quatre racines. Une dépense qui en vient porte une preuve d'inclusion, vérifiée contre la forêt telle qu'elle est et contre rien d'autre. Un billet qui vient de tomber reste dépensable sans preuve pendant 64 blocs."
         ]
       }
     },
@@ -322,7 +322,7 @@
     "holdings": {
       "plain": "Les billets que cette adresse détient, un par un. Un solde n'est que leur somme.",
       "curious": "L'état indique quels billets chaque nœud détient encore et lesquels sont tombés. Un portefeuille conserve les preuves des billets tombés, ce qui lui permet de les dépenser quand même.",
-      "technical": "Les billets tombés demandent une preuve au moment de la dépense. Un portefeuille suit la position et rafraîchit la preuve à mesure que la forêt grandit ; le nœud accepte une preuve avec jusqu'à 32 blocs de retard."
+      "technical": "Les billets tombés demandent une preuve au moment de la dépense. Un portefeuille suit la position et rafraîchit la preuve à mesure que la forêt grandit ; le nœud la vérifie contre la forêt telle qu'elle est et n'en accepte pas de plus ancienne."
     },
     "note": {
       "plain": "Un billet. Il a été écrit une fois, il appartient à une adresse, et il pourra être déchiré une fois. Voilà toute sa vie.",
@@ -462,7 +462,7 @@
         ],
         "curious": [
           "Le dépensier fournit une preuve d'inclusion, vérifiée contre des racines que le nœud possède déjà. Votre portefeuille suit la position de chacun de vos billets tombés et rafraîchit la preuve à mesure que la forêt grandit.",
-          "Deux fenêtres rendent cela vivable en pratique. Une preuve peut avoir jusqu'à 32 blocs de retard, si bien qu'un portefeuille légèrement à la traîne n'est pas refusé. Et un billet qui vient juste de tomber reste dépensable sans aucune preuve pendant 64 blocs, parce que chaque nœud l'a encore."
+          "Une seule fenêtre rend cela vivable en pratique : un billet qui vient juste de tomber reste dépensable sans aucune preuve pendant 64 blocs, parce que chaque nœud l'a encore. Passé ce délai, la preuve doit correspondre à la forêt telle qu'elle est, et rien de plus ancien n'est accepté. Un portefeuille à la traîne n'y perd rien : c'est le même paiement, réoffert avec une preuve fraîche."
         ],
         "technical": [
           "Une preuve est vérifiée contre l'ensemble froid tel qu'il est, et contre rien d'autre. Les versions antérieures en acceptaient une qui correspondait à l'un des trente-deux derniers états, pour qu'un transfert écrit pendant qu'un bloc était trouvé ne soit pas invalide sans faute de son auteur. C'était une demi-règle : retirer un billet replie le long du chemin que porte la preuve, un vieux chemin n'atteint pas la racine actuelle, le retrait ne faisait donc rien et le billet restait, à dépenser une deuxième fois. L'identité d'un transfert exclut son témoin, si bien qu'un transfert qui a trop attendu est le même transfert réofferte avec une preuve fraîche.",

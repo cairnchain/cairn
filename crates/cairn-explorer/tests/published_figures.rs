@@ -42,6 +42,7 @@ use cairn_primitives::Amount;
 
 const PAPER: &str = include_str!("../../../docs/cairn-whitepaper.html");
 const README: &str = include_str!("../../../README.md");
+const DESIGN: &str = include_str!("../../../docs/cairn-design.html");
 
 /// Thirty years of a block a minute, which is what both tables are about.
 const THIRTY_YEARS: u64 = 30 * 365 * 24 * 60;
@@ -486,4 +487,47 @@ fn the_burial_a_newcomer_validates_is_the_block_limit_times_the_window() {
         !PAPER.contains("under\n      150 MB on a saturated one"),
         "the paper still names a saturated figure above the ceiling beside it"
     );
+}
+
+/// The French design paper says what arriving costs, and it has to be the
+/// same cost the English one is held to.
+///
+/// It was not. It said forty eight gigabytes to download thirty years of
+/// chain and a hundred megabytes of state at the end of it. The first is the
+/// figure from before the instrument was fixed: the bench asked for sixty
+/// four transfers a block and could fund sixteen, so every quantity built on
+/// it was short by four times over, and 197 GB is what the corrected one
+/// gives. The second is the hot set from before it was re-measured, 107 MB
+/// against 68.
+///
+/// Both had already been corrected everywhere a test could see them. The
+/// guard against the old hot-set figure runs over the two lesson files and
+/// the whitepaper and not over this document, and nothing at all looked at
+/// the download. A paper nothing reads is a paper that keeps whatever it was
+/// last told, and this one is the one a French reader is sent to first.
+#[test]
+fn the_french_design_paper_quotes_the_arrival_the_english_one_is_held_to() {
+    let mut bench = Bench::new(8);
+    let busy = bench.block(64).encode().len() as u64;
+    let header = bench.block(0).header.encode().len() as u64;
+    let blocks = (THIRTY_YEARS * busy) as f64 / 1e9;
+    let headers = (THIRTY_YEARS * header) as f64 / 1e9;
+    let state = table_row("Validation state a node holds");
+    let megabytes = state.strip_suffix(" MB").expect("a size in megabytes");
+    println!("arriving costs {blocks:.0} GB against {headers:.1} GB of headers, for {state}");
+
+    for said in [
+        format!("{blocks:.0} gigaoctets à télécharger"),
+        format!("un état qui en pèse {megabytes} Mo"),
+        format!(
+            "au lieu de {} gigaoctets",
+            format!("{headers:.1}").replace('.', ",")
+        ),
+    ] {
+        assert!(
+            DESIGN.contains(&said),
+            "the design paper does not say `{said}`, which is what the English one \
+             is held to and what this build encodes"
+        );
+    }
 }

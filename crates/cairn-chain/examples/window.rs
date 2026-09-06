@@ -1,6 +1,6 @@
 //! What a node holds in memory so that it can undo a reorganisation.
 //!
-//! A node keeps the last [`MAX_REORG_DEPTH`] blocks it applied, because a
+//! A node keeps the last [`HELD_WINDOW`] blocks it applied, because a
 //! branch that arrives with more work behind it has to be switched to, and
 //! switching means undoing what the current one did. That window is bounded,
 //! which is what makes the cost constant. What it costs is measured here,
@@ -25,7 +25,7 @@
 
 use std::process::Command;
 
-use cairn_chain::{ChainStore, MAX_REORG_DEPTH};
+use cairn_chain::{ChainStore, HELD_WINDOW, MAX_REORG_DEPTH};
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::note::{Note, NoteId};
@@ -77,18 +77,20 @@ fn main() {
     println!("{:>28}  {:>14}", "transfers in it", block.transfers.len());
 
     println!(
-        "\nThe window a node can still undo is {MAX_REORG_DEPTH} blocks, so on a chain\n\
-         running at the limit that window costs:\n"
+        "\nThe window a node can still undo is {MAX_REORG_DEPTH} blocks, and it holds\n\
+         {HELD_WINDOW} of them, one more, because the block a switch lands on is not\n\
+         one of the blocks it undoes. On a chain running at the limit that\n\
+         costs:\n"
     );
     println!(
         "{:>28}  {:>14}",
         "the window, if all held",
-        format_bytes(each.saturating_mul(MAX_REORG_DEPTH as u64))
+        format_bytes(each.saturating_mul(HELD_WINDOW as u64))
     );
     // What a node with a disk behind it actually holds: the bodies of the
     // recent blocks, and the headers of the rest.
     let warm = each.saturating_mul(WARM_BODIES);
-    let cold = HEADER_BYTES.saturating_mul(MAX_REORG_DEPTH as u64 - WARM_BODIES);
+    let cold = HEADER_BYTES.saturating_mul(HELD_WINDOW as u64 - WARM_BODIES);
     println!(
         "{:>28}  {:>14}",
         "what it holds",
@@ -102,7 +104,7 @@ fn main() {
     println!(
         "{:>28}  {:>14}",
         "rival branches on top",
-        format_bytes(in_memory.saturating_sub(each.saturating_mul(MAX_REORG_DEPTH as u64)))
+        format_bytes(in_memory.saturating_sub(each.saturating_mul(HELD_WINDOW as u64)))
     );
     println!("{:>28}  {:>14}", "the hot set, at its own", "68 MB");
 

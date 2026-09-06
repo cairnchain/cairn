@@ -315,3 +315,40 @@ fn a_copy_evolves_without_disturbing_the_original() {
         "the copy kept what the original dropped"
     );
 }
+
+/// The same for the tree's own proofs, membership and absence alike.
+///
+/// An absence proof carries the occupant as well, which is the part a count
+/// written by hand is most likely to forget.
+#[test]
+fn what_a_proof_says_it_costs_is_what_the_wire_writes() {
+    let mut tree = SparseMerkleTree::new();
+    for index in 0..512u64 {
+        tree.insert(key(index), value(index));
+    }
+
+    for index in [0u64, 1, 17, 511] {
+        let proof = tree.prove(key(index));
+        assert_eq!(
+            proof.size_in_bytes(),
+            proof.encode().len(),
+            "membership at {index}, {} levels",
+            proof.depth()
+        );
+    }
+
+    // A key the tree does not hold: the walk ends on somebody else's leaf, so
+    // the proof carries an occupant.
+    let missing = key(9_999);
+    let absence = tree.prove(missing);
+    assert!(absence.verify_absence(tree.root(), missing));
+    assert_eq!(
+        absence.size_in_bytes(),
+        absence.encode().len(),
+        "absence with an occupant, {} levels",
+        absence.depth()
+    );
+
+    let empty = SparseMerkleTree::new().prove(missing);
+    assert_eq!(empty.size_in_bytes(), empty.encode().len());
+}

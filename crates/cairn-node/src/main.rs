@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use cairn_net::node::{Probation, Unjudged, Unwritten, MAX_BEHIND};
-use cairn_net::{Joined, Node, Restored};
+use cairn_net::{Filling, Joined, Node, Restored};
 
 const TICK: Duration = Duration::from_millis(100);
 
@@ -257,6 +257,16 @@ fn watch(node: &Node, options: &options::Options, running: &AtomicBool) {
                     probation_line(&probation, node.out_of_reach())
                 );
             }
+            // And a node that has arrived and still cannot answer the question
+            // a newcomer asks. Every other state above has had a line here for
+            // longer than this one, which is the first stretch of every join
+            // and used to be the whole of one. It is also the only line that
+            // says the disk is not being held to what `--keep` asked for.
+            if let Some(filling) = node.filling() {
+                for line in wrapped(&still_filling(&filling, &directory)) {
+                    println!("           {line}");
+                }
+            }
         }
         thread::sleep(TICK);
     }
@@ -314,6 +324,22 @@ fn say_what_was_restored(restored: &Restored, directory: &str) {
     // cost one block. A whole record that will not read is damage, and it is
     // left exactly where it is: nothing here is confident enough about what
     // those bytes are to delete them.
+    // Before the block log's version of the same news, because this one costs
+    // more: a block set aside is asked for again in seconds, and headers the
+    // blocks cannot replace are only ever given back by a peer that kept them.
+    if restored.headers_set_aside > 0 {
+        for line in wrapped(&format!(
+            "{} stored headers were set aside because the first of them could not be \
+             checked against the one after it. Nothing was deleted and the bytes are \
+             still on the disk to look at. This node writes the headers again from the \
+             blocks it kept and asks the network for the rest, and until it has them it \
+             cannot show the chain to anybody arriving new. If this happens again after \
+             a clean restart, the disk under {directory} is the thing to check.",
+            restored.headers_set_aside
+        )) {
+            println!("             {line}");
+        }
+    }
     if let Some(record) = restored.unreadable {
         for line in wrapped(&format!(
             "stored block {record} will not read back. That is damage to the file rather \
@@ -387,6 +413,53 @@ fn lost_the_disk(unwritten: &Unwritten, directory: &str) -> String {
     )
 }
 
+/// What an operator is told while this node cannot yet show the chain to
+/// somebody arriving new.
+///
+/// The costly half is the disk, and it is the half nobody would guess:
+/// showing a newcomer the chain and writing down this node's own summary of it
+/// are proved against the same header forest, and writing that summary is
+/// what lets a node drop old blocks. So `--keep` is not being kept while this
+/// lasts, and it is said as a number here rather than left for somebody to
+/// notice a directory growing.
+///
+/// Not a fault, and written not to read like one. Nothing is wrong with the
+/// machine, nothing has been lost, and the cure happens on its own for as
+/// long as some peer holds the older part of the chain.
+fn still_filling(filling: &Filling, directory: &str) -> String {
+    let disk = if filling.over_the_keep() {
+        format!(
+            " It also cannot write down the summary that lets it drop old blocks, which is \
+             proved against the same thing, so the {} of blocks under {directory} will go on \
+             growing past the {} it was asked to hold. Both end together.",
+            options::size(filling.bytes),
+            options::size(filling.keep),
+        )
+    } else {
+        String::new()
+    };
+    // What it holds, rather than how it came to hold it. Three different things
+    // land here: a node that joined a chain and was given it from the anchor
+    // down, one whose stored headers were set aside and rewritten from the
+    // blocks it had left, and one whose disk refused a header write so the
+    // headers stop short of the tip. Naming any of them as the cause would be
+    // wrong two times in three. The numbers say which it is without guessing,
+    // and the two that are somebody's fault already have lines of their own.
+    format!(
+        "this node cannot yet show the chain to somebody arriving new. It holds the \
+         headers from block {} up to block {}, it can prove where {} of them sit, and the \
+         chain is at block {}. It collects what is missing from its peers as it runs, and \
+         nobody can join the network through this node until it has it all.{disk} If the \
+         height above keeps moving and these numbers do not, no peer this node has found \
+         holds the part it is missing, and connecting it to one that does is the only \
+         thing to do.",
+        filling.from,
+        filling.through.saturating_sub(1),
+        filling.proved,
+        filling.reaches.saturating_sub(1),
+    )
+}
+
 /// What an operator is told when the blocks arriving are written under rules
 /// this build does not have.
 ///
@@ -456,8 +529,9 @@ fn short(text: &str) -> &str {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod said_out_loud {
-    use super::{falling_behind, lost_the_disk, too_old, wrapped};
+    use super::{falling_behind, lost_the_disk, still_filling, too_old, wrapped};
     use cairn_net::node::{Unjudged, Unwritten, Writing};
+    use cairn_net::Filling;
 
     fn behind(blocks: u64, within_reach: bool) -> Unwritten {
         Unwritten {
@@ -502,6 +576,65 @@ mod said_out_loud {
         eprintln!("{}", wrapped(&text).join("\n"));
         assert!(text.contains("no blocks at all"));
         assert!(!text.contains("block None"));
+    }
+
+    /// The disk figure is the whole reason this line exists, so it has to be
+    /// there whenever the disk is over its budget and absent when it is not:
+    /// a node that has just joined is inside its budget, and telling it its
+    /// disk is running away would be a fault reported where there is none.
+    #[test]
+    fn the_line_about_filling_in_names_the_disk_only_when_the_disk_is_over() {
+        let over = Filling {
+            from: 32,
+            through: 160,
+            proved: 0,
+            reaches: 160,
+            bytes: 31_744,
+            keep: 1_000,
+        };
+        let text = still_filling(&over, "/var/lib/cairn");
+        eprintln!("{}", wrapped(&text).join("\n"));
+        eprintln!();
+        assert!(
+            text.contains("from block 32"),
+            "where its own headers start"
+        );
+        assert!(
+            text.contains("block 159"),
+            "where they stop, and the chain too"
+        );
+        assert!(text.contains("31744 bytes"), "what the disk holds");
+        assert!(text.contains("1000 bytes"), "against what was asked for");
+        assert!(text.contains("/var/lib/cairn"), "and which disk");
+
+        // The shape that used to come out as "collecting the 0 blocks below
+        // block 0 from its peers": headers level with the chain at the bottom
+        // and short at the top, which is a disk that refused a write and not a
+        // node waiting on anybody.
+        let short_at_the_top = Filling {
+            from: 0,
+            through: 140,
+            proved: 140,
+            ..over
+        };
+        let text = still_filling(&short_at_the_top, "/var/lib/cairn");
+        eprintln!("{}", wrapped(&text).join("\n"));
+        eprintln!();
+        assert!(text.contains("from block 0 up to block 139"), "{text}");
+        assert!(text.contains("prove where 140 of them sit"), "{text}");
+        assert!(text.contains("chain is at block 159"), "{text}");
+
+        let under = Filling { bytes: 500, ..over };
+        let text = still_filling(&under, "/var/lib/cairn");
+        eprintln!("{}", wrapped(&text).join("\n"));
+        assert!(
+            !text.contains("growing past"),
+            "a node inside its budget is not told its disk is running away: {text}"
+        );
+        assert!(
+            text.contains("cannot yet show the chain"),
+            "but it is still told the thing it cannot do"
+        );
     }
 
     /// The one line that is a suspicion rather than a fact has to read like

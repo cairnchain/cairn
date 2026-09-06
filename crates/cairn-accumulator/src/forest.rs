@@ -1079,25 +1079,36 @@ impl Archive {
         };
         self.truncate_inner(self.leaves.len());
 
-        // A holder watching a position has a proof that this may have changed,
-        // and what it takes to mend one is not here. Nobody watches a header
-        // archive; the slow way is kept for the case that arrives later rather
-        // than being a wrong answer waiting to be found.
-        if self.forest.watched_count() > 0 {
-            let mut rebuilt = Forest::new();
-            for leaf in &self.leaves {
-                rebuilt.add(*leaf);
-            }
-            self.forest = rebuilt;
-            return true;
-        }
-
         let live = if dropped == empty_leaf() {
             self.forest.live
         } else {
             self.forest.live.saturating_sub(1)
         };
-        self.forest = self.forest_of(u64::try_from(self.leaves.len()).unwrap_or(0), live);
+        let leaves = u64::try_from(self.leaves.len()).unwrap_or(0);
+        // A holder watching a position has a path this may have changed, and
+        // an archive can build one rather than mend one, since it holds the
+        // leaves. A place past the new count is gone and the watch goes with
+        // it.
+        //
+        // This used to build the whole forest again from every leaf whenever
+        // anything was watched, and defended that as the slow way rather than
+        // a wrong answer waiting to be found. It was the wrong answer twice
+        // over. `add` counts every leaf it is handed as live, so a forest
+        // rebuilt over an archive holding an emptied place came back with one
+        // live leaf too many, and the count is inside the commitment: two
+        // archives holding exactly the same leaves, one of them watched,
+        // committed to different roots. And the rebuilt forest watched
+        // nothing, so the holder the branch existed for was the one it
+        // silently stopped answering.
+        let watching: Vec<u64> = self.forest.watched.keys().copied().collect();
+        self.forest = self.forest_of(leaves, live);
+        let mended: Vec<(u64, ForestProof)> = watching
+            .into_iter()
+            .filter_map(|position| Some((position, self.prove_in(position, leaves)?)))
+            .collect();
+        for (position, proof) in mended {
+            self.forest.watch(position, proof);
+        }
         true
     }
 
@@ -1276,5 +1287,82 @@ impl Archive {
         let half = 1u64.checked_shl(shift).unwrap_or(0);
         let right_start = start.checked_add(half).unwrap_or(start);
         node_hash(self.subtree(start, lower), self.subtree(right_start, lower))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    /// In here rather than beside the other forest tests because it has to
+    /// watch a place on an archive, and an archive offers no way to: the whole
+    /// point of holding the leaves is being able to build any path on demand.
+    /// So the branch this covers was unreachable from outside the crate, and
+    /// unreached by anything, which is how it came to be wrong.
+    #[test]
+    fn undoing_an_append_leaves_a_watched_archive_where_an_unwatched_one_lands() {
+        let build = || {
+            let mut archive = Archive::new();
+            for index in 0..8u64 {
+                archive.add(forest_leaf(&index.to_le_bytes()));
+            }
+            // One place emptied, so the leaf count and the live count differ,
+            // which is what the rebuild used to lose.
+            assert!(archive.remove(3));
+            archive
+        };
+
+        let mut plain = build();
+        let mut watched = build();
+        let path = watched.prove(5).expect("a path an archive can build");
+        watched.forest.watch(5, path);
+        assert_eq!(plain.commitment(), watched.commitment(), "level to start");
+
+        assert!(plain.remove_last());
+        assert!(watched.remove_last());
+
+        assert_eq!(
+            plain.len(),
+            watched.len(),
+            "watching a place is a fact about a holder, not about the forest"
+        );
+        assert_eq!(
+            plain.commitment(),
+            watched.commitment(),
+            "and it cannot move the commitment the chain compares"
+        );
+
+        // And the holder the branch existed for still has its path, current.
+        let kept = watched
+            .forest
+            .proof_of(5)
+            .expect("the place is still there, so the watch is")
+            .clone();
+        assert!(
+            watched
+                .forest
+                .verify(5, forest_leaf(&5u64.to_le_bytes()), &kept),
+            "the path put back is the path the forest now has"
+        );
+        assert_eq!(
+            kept,
+            plain.prove(5).expect("and it is the one an archive builds"),
+        );
+    }
+
+    /// A watch on a place the undo took away goes with it.
+    #[test]
+    fn undoing_an_append_lets_go_of_a_watch_on_the_leaf_it_took() {
+        let mut archive = Archive::new();
+        for index in 0..8u64 {
+            archive.add(forest_leaf(&index.to_le_bytes()));
+        }
+        let path = archive.prove(7).expect("a path");
+        archive.forest.watch(7, path);
+
+        assert!(archive.remove_last());
+        assert_eq!(archive.forest.watched_count(), 0);
+        assert_eq!(archive.forest.leaves(), 7);
     }
 }

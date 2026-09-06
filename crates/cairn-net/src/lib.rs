@@ -17,7 +17,9 @@ pub mod wire;
 pub use book::AddressBook;
 pub use joining::Joined;
 pub use message::{Handshake, Keeps, Message, PeerAddress, Placed, MAX_PROVEN, PROTOCOL_VERSION};
-pub use node::{Node, NodeError, Recovered, Restored, KEEP_BLOCK_BYTES, NAME_LOOKUP_PERIOD};
+pub use node::{
+    Filling, Node, NodeError, Recovered, Restored, KEEP_BLOCK_BYTES, NAME_LOOKUP_PERIOD,
+};
 pub use seeds::start_from;
 pub use sync::{on_message, DropReason, Local, PeerState, Reaction};
 pub use wire::{read_message, write_message, WireError, MAX_FRAME_BYTES};

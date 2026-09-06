@@ -150,7 +150,7 @@ fn run(blocks: usize, archiving: bool) {
         let block =
             assemble_block(&state, coinbase, Vec::<Transfer>::new(), &params, clock, 0).unwrap();
         // The record is dropped here on purpose: this is the ledger's cost and
-        // not the undo window's, which `zz_probe_undo_total.rs` weighs.
+        // not the undo window's, which `examples/undo_total.rs` weighs.
         connect_block(&mut state, &block, &params, NOW).unwrap();
         drop(block);
         if (at + 1) % chunk == 0 {

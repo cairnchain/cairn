@@ -428,9 +428,13 @@ fn undo_records_do_not_pile_up_forever() {
     feed(&mut store, &blocks);
 
     assert_eq!(store.height(), Some((MAX_REORG_DEPTH + 199) as u64));
+    // One more than the deepest switch, because the block that switch lands
+    // on has to be held as well as reached: `forget_what_cannot_change` says
+    // what the extra one buys.
+    let limit = MAX_REORG_DEPTH + 1;
     assert!(
-        store.undo_records() <= MAX_REORG_DEPTH,
-        "kept {} undo records, the limit is {MAX_REORG_DEPTH}",
+        store.undo_records() <= limit,
+        "kept {} undo records, the limit is {limit}",
         store.undo_records()
     );
 }

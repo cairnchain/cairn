@@ -73,9 +73,12 @@ impl Miner {
 /// below the tip, and `ledger_at` has to be able to rebuild it, or no node can
 /// ever serve or re-check a buried ledger.
 ///
-/// A node holds `MAX_REORG_DEPTH` undo records, enough to reorganise that
+/// A node holds `MAX_REORG_DEPTH + 1` undo records, enough to reorganise that
 /// deep, and therefore enough to undo its way to a state `MAX_REORG_DEPTH`
 /// blocks back. `ledger_at`'s own guard refuses one block short of that.
+///
+/// One more than the depth, because the block a switch lands on has to be
+/// nameable and holdable as well as reachable: see `forget_what_cannot_change`.
 #[test]
 fn the_burial_anchor_can_be_rebuilt() {
     let miner = wallet(1);
@@ -96,7 +99,7 @@ fn the_burial_anchor_can_be_rebuilt() {
     // full MAX_REORG_DEPTH of them, and the height one deeper than the anchor
     // is reconstructable, so the record needed to undo the last block down to
     // the anchor is held too.
-    assert_eq!(store.undo_records(), MAX_REORG_DEPTH);
+    assert_eq!(store.undo_records(), MAX_REORG_DEPTH + 1);
     assert!(
         store.ledger_at(anchor + 1).is_some(),
         "one block shallower than the anchor rebuilds fine"

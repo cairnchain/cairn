@@ -2,8 +2,17 @@
 //!
 //! Two exchanges, both once. First a newcomer decides which chain is heaviest
 //! from a sample of its headers; then it is handed the ledger at that chain's
-//! tip. Neither grows with the chain's age, which is the whole claim, so the
-//! numbers below are what joining costs at any age at all.
+//! tip. The handover does not grow with the chain's age at all. The sampling
+//! grows by the depth of a Merkle path, which is a logarithm: the table below
+//! prints it at one, ten and thirty years so the reader can see it move by
+//! less than a per cent over the range.
+//!
+//! The sampling figure here used to be 9.4 MB and is 3.3. Both halves of it
+//! were wrong: a header priced at `size_of::<BlockHeader>()`, 192, where the
+//! wire writes 182, and a path priced at sixty-four levels, which is how many
+//! trees a forest holds once it has `2^64` leaves rather than how deep one
+//! path is. What is measured now is the encoding of a real [`SampledStart`],
+//! so no arithmetic here stands between the format and the number.
 //!
 //! Run with `cargo run --release -p cairn-ledger --example joining`.
 
@@ -16,40 +25,42 @@
     clippy::print_stdout
 )]
 
+use cairn_accumulator::forest::{tree_of, Forest, ForestProof};
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::BlockHeader;
 use cairn_ledger::handover::BURIAL;
-use cairn_ledger::note::Note;
+use cairn_ledger::note::{NetworkId, Note};
 use cairn_ledger::pow::RECENT_HEADERS;
-use cairn_ledger::sampling::{SAMPLES, SHALLOWEST};
+use cairn_ledger::sampling::{draw, sample_bytes, Sample, SampledStart, SAMPLES, SHALLOWEST};
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
 use cairn_ledger::LedgerState;
 use cairn_primitives::codec::Encode;
+use cairn_primitives::Hash32;
 
 const NOW: u64 = 2_000_000_000;
 /// Hot sets to measure at. The last is what the rules actually allow, and
 /// mining enough blocks to fill it takes a moment.
 const SIZES: [usize; 4] = [1_024, 4_096, 16_384, 131_072];
+/// Chain ages the sampling is measured at, in blocks at one a minute.
+const AGES: [(u64, u64); 3] = [(1, 525_600), (10, 5_256_000), (30, 15_768_000)];
 
 fn main() {
-    println!("What joining a chain costs, whatever its age\n");
+    println!("What joining a chain costs\n");
     println!(
         "{:>12}  {:>12}  {:>12}  {:>12}",
         "hot notes", "ledger", "per note", "sampling"
     );
     println!("{}", "-".repeat(56));
 
-    // A sampled start is a tip, sixty four hashes, one opened header per draw,
-    // and the run from the deepest of those up to the tip. It does not depend
-    // on the ledger, so it is the same on every row.
+    // A sampled start is a tip, its parent, sixty four hashes of history, one
+    // opened header per draw, and the run from the deepest of those up to the
+    // tip. It does not depend on the ledger, so it is the same on every row.
     //
     // The run is what ties the top of a chain to a difficulty anybody can
     // check, and it is about a thousand headers: the draw stops resolving that
     // far from the tip, so that is exactly the stretch nothing else looks at.
-    let run = usize::try_from(SHALLOWEST).unwrap_or(0) + RECENT_HEADERS;
-    let sampling = SAMPLES * (core::mem::size_of::<BlockHeader>() + 64 * 32 + 4)
-        + run * core::mem::size_of::<BlockHeader>();
+    let sampling = sampled_start_bytes(AGES[AGES.len() - 1].1);
 
     for capacity in SIZES {
         let bytes = handover_bytes(capacity);
@@ -63,11 +74,35 @@ fn main() {
     }
 
     println!(
-        "\nAgainst reading the chain instead: thirty years of blocks at 128 kB\n\
-         each is {}, and every byte of it has to be validated.\n\
-         Joining this way is two exchanges that do not grow, and the second of\n\
-         them is most of the cost.",
-        format_bytes(30 * 365 * 24 * 60 * 128 * 1024),
+        "\nThe sampling column is at thirty years. It is the only part of this\n\
+         that moves with the chain's age at all, and what moves is the depth of\n\
+         a Merkle path:"
+    );
+    for (years, blocks) in AGES {
+        println!(
+            "  {:<10} {:>12} blocks   {:>10}",
+            format!("{years} year{}", if years == 1 { "" } else { "s" }),
+            with_commas(usize::try_from(blocks).unwrap_or(0)),
+            format!("{} kB", sampled_start_bytes(blocks) / 1_000),
+        );
+    }
+
+    // The ceiling read off the rules rather than written here. A block that
+    // full is the worst case and not the ordinary one: `examples/history.rs`
+    // measures a block of sixty-four ordinary payments at twelve kilobytes,
+    // and thirty years of those is 197 GB rather than what this prints.
+    let full = ConsensusParams::testnet().max_block_bytes;
+    println!(
+        "\nAgainst reading the chain instead: thirty years of blocks at the {}\n\
+         bytes a block may take is {}, and every byte of it has to be\n\
+         validated. Joining this way is two exchanges that do not grow with it,\n\
+         and the handover is most of the cost at the hot set the rules allow.",
+        with_commas(full),
+        format_bytes(
+            usize::try_from(AGES[AGES.len() - 1].1)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(full)
+        ),
     );
 
     println!(
@@ -81,7 +116,7 @@ fn main() {
     // The run between the ledger and the tip. It is what says the ledger
     // belongs to the chain that was weighed, and it is checked block by block,
     // which is also what makes the burial cost work rather than block count.
-    let buried = usize::try_from(BURIAL).unwrap_or(0) * core::mem::size_of::<BlockHeader>();
+    let buried = usize::try_from(BURIAL).unwrap_or(0) * BlockHeader::ENCODED_BYTES;
     println!(
         "\nAnd the {} headers between the ledger and the tip, {}. A newcomer is\n\
          about to ask for those blocks in full anyway, so what this adds to the\n\
@@ -90,6 +125,77 @@ fn main() {
         with_commas(usize::try_from(BURIAL).unwrap_or(0)),
         format_bytes(buried),
     );
+}
+
+/// What a sampled start takes on the wire, for a chain of `blocks` headers.
+///
+/// Measured rather than summed: a start of the real shape is built and encoded,
+/// so the tip, the parent, the sixty four hashes of history, the framing around
+/// each vector and the run up to the tip are all counted by the format itself.
+/// Only the depths are worked out, and they are worked out from the forest a
+/// chain that long makes.
+///
+/// The headers are blank. Every field in one is fixed width, so what is in them
+/// changes nothing about the bytes, and mining fifteen million real ones to
+/// weigh them is not an option this program has.
+fn sampled_start_bytes(blocks: u64) -> usize {
+    let mut history = Forest::new();
+    for index in 0..blocks {
+        history.add(Hash32::from_bytes([(index % 251) as u8; 32]));
+    }
+
+    let seed = Hash32::from_bytes([7; 32]);
+    let path = |position: u64| ForestProof {
+        siblings: vec![Hash32::ZERO; tree_of(blocks, position).map_or(0, |(height, _)| height)],
+    };
+    let samples: Vec<Sample> = draw(seed, SAMPLES, u128::from(blocks), blocks)
+        .into_iter()
+        .map(|work| Sample {
+            header: blank_header(),
+            proof: path(u64::try_from(work).unwrap_or(0)),
+        })
+        .collect();
+
+    // Two instruments for the part they share. `sampling::sample_bytes` adds
+    // the drawn answers up from the encoding's field widths; this one hands
+    // them to the encoding. A disagreement means one of the two has drifted,
+    // which is the failure this whole example was repaired for.
+    let opened: usize = samples.iter().map(|s| s.encode().len()).sum();
+    assert_eq!(
+        u64::try_from(opened).unwrap_or(0),
+        sample_bytes(seed, blocks),
+        "the drawn answers cost what the library says they cost"
+    );
+
+    let run = usize::try_from(SHALLOWEST).unwrap_or(0) + RECENT_HEADERS;
+    SampledStart {
+        tip: blank_header(),
+        tail: vec![blank_header(); run],
+        parent: Some(Sample {
+            header: blank_header(),
+            proof: path(blocks.saturating_sub(1)),
+        }),
+        history,
+        samples,
+    }
+    .encode()
+    .len()
+}
+
+fn blank_header() -> BlockHeader {
+    BlockHeader {
+        version: 1,
+        network: NetworkId::MAINNET,
+        height: 0,
+        previous: Hash32::ZERO,
+        transactions_root: Hash32::ZERO,
+        state_root: Hash32::ZERO,
+        history: Hash32::ZERO,
+        timestamp: 0,
+        difficulty: 1,
+        total_work: 0,
+        nonce: 0,
+    }
 }
 
 /// A ledger filled to `capacity` notes, handed over, measured.

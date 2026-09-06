@@ -974,3 +974,109 @@ fn a_record_the_store_cannot_read_is_named_rather_than_counted_in_bytes() {
     );
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// The claim, from `HeaderLog::head`: a head the second record contradicts
+/// "reports holding nothing rather than a geography it made up, and leaves the
+/// file exactly as it found it, so a node comes back up and fills in what its
+/// blocks can still show rather than serving a header it cannot vouch for."
+///
+/// The store keeps that promise. What was undone one layer up is the reason
+/// for it: `catch_up_headers` writes the log again from the blocks, and the
+/// first append to a log holding no records cuts the file. A node keeps a
+/// gigabyte of blocks and every header there has ever been, so the blocks can
+/// replace the recent end and nothing else, and the rest went without a word
+/// anywhere. Measured before this test existed: headers 0 to 59 and blocks 52
+/// to 59 in, headers 52 to 59 out, `restored.unreadable` empty, `unwritten`
+/// empty, and a start that read as clean.
+///
+/// What it costs is two things and this checks both: the node can no longer
+/// show a newcomer the chain, and it can no longer write the summary that
+/// lets it drop old blocks, so its disk grows past what `--keep` asked for.
+#[test]
+fn a_header_log_whose_head_cannot_be_checked_says_how_many_it_set_aside() {
+    let mut source = Chain::new();
+    source.run(&wallet(4), 60);
+    let directory = scratch("bad-head");
+    {
+        let (node, _) = Node::open(params(), loopback(), &directory).unwrap();
+        // Small enough that the upkeep drops the blocks below the ledger, which
+        // is what every node running with the default does once it has a
+        // gigabyte. Without it the blocks replace every header and nothing is
+        // lost, which is the case that was already covered.
+        node.keep_blocks(1);
+        for block in &source.blocks {
+            node.submit_block(block.clone()).unwrap();
+        }
+        let mut pruned = false;
+        for _ in 0..80 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if node.blocks_from().unwrap_or(0) > 0 {
+                pruned = true;
+                break;
+            }
+        }
+        assert!(pruned, "the log was never trimmed, so this proves nothing");
+    }
+    let blocks_from = {
+        let (log, _) = BlockLog::open(&directory).unwrap();
+        log.first_height()
+    };
+    let headers_before = {
+        let log = HeaderLog::open(&directory).unwrap();
+        (log.first_height(), log.reaches())
+    };
+    assert_eq!(headers_before, (0, 60), "every header, as a node keeps");
+    assert!(blocks_from > 0, "and only the recent blocks");
+
+    // The head record's parent. Changing it changes that record's identifier,
+    // so the record after it no longer names it, which is the one thing
+    // `HeaderLog::head` refuses on. A header is a version, a network, a height
+    // and then the parent.
+    let previous_at = 2 + 4 + 8;
+    let path = directory.join(HEADER_LOG);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[previous_at] ^= 0xFF;
+    std::fs::write(&path, &bytes).unwrap();
+    {
+        let log = HeaderLog::open(&directory).unwrap();
+        assert!(
+            log.is_empty(),
+            "the store has to be reporting nothing, or this test proves nothing"
+        );
+    }
+
+    let (node, restored) = Node::open(params(), loopback(), &directory).unwrap();
+    node.keep_blocks(1);
+    let filling = node.filling();
+    drop(node);
+    let headers_after = {
+        let log = HeaderLog::open(&directory).unwrap();
+        (log.first_height(), log.reaches())
+    };
+    eprintln!(
+        "one byte changed in the head record: set aside {}, headers {headers_before:?} -> \
+         {headers_after:?}, filling {filling:?}",
+        restored.headers_set_aside
+    );
+
+    assert_eq!(
+        restored.headers_set_aside, 60,
+        "the operator is told how many records the store would not stand behind"
+    );
+    assert_eq!(
+        headers_after.0, blocks_from,
+        "which is worth saying because the log now starts at the oldest block \
+         this node kept, and everything under it is gone"
+    );
+    let filling = filling.expect(
+        "a node holding the chain only from the oldest block it kept cannot show \
+         a newcomer the chain, and has to say so",
+    );
+    assert_eq!(filling.from, blocks_from);
+    assert!(
+        filling.over_the_keep(),
+        "and its disk is past what it was asked to hold, with no way back"
+    );
+
+    let _ = std::fs::remove_dir_all(&directory);
+}
