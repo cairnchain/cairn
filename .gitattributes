@@ -1,0 +1,13 @@
+# Every checkout has the same bytes.
+#
+# Git hands a Windows working tree CRLF unless told otherwise, and this
+# repository puts text inside the programs it builds: the whitepaper, the
+# website and both locales go into cairn-explorer through include_str!. So the
+# same commit built on Windows served different bytes than the same commit
+# built on Linux, for a reason that has nothing to do with the code, and a test
+# comparing a published figure against the sentence stating it failed there and
+# only there, on a sentence that happened to wrap.
+#
+# Every file under version control here is text and is already stored with LF,
+# so this renormalises nothing. It changes what Windows is given.
+* text=auto eol=lf
