@@ -1196,6 +1196,7 @@ fn a_wallet_that_has_not_checked_its_chain_says_so_before_anything_smaller() {
             unjudged: None,
             keeping_its_account: true,
             lost_its_account: None,
+            unread: None,
         };
         fill(&mut progress);
         progress.warning().expect("something to say")

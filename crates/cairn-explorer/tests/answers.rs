@@ -1087,6 +1087,88 @@ fn a_route_is_answered_while_the_index_is_being_built() {
 /// three, and none of those was covered by anything: the same six days would
 /// have passed unnoticed the other way round. They are all here now.
 ///
+/// The one figure on the site that is neither of the two measurements but the
+/// distance between them.
+///
+/// Five sentences in four files say the index is the larger of the explorer's
+/// two growing costs by about eight, and the eight is not written down
+/// anywhere: it is 565 over 72, and it moves the day either of those moves.
+/// Both halves have instruments and the ratio between them had none, so a
+/// correction to one constant would have left every one of those sentences
+/// confidently wrong, in two languages, with nothing to catch it. That is the
+/// exact shape of the last thirteen wrong figures: the number was checked and
+/// the sentence built on it was not.
+///
+/// The ratio is what is held, not the wording, and it is held to the whole
+/// number the sentences round it to. The failure names where to go.
+#[test]
+fn the_ratio_the_site_calls_eight_is_the_one_this_program_serves() {
+    const EN: &str = include_str!("../../../web/i18n/en.json");
+    const FR: &str = include_str!("../../../web/i18n/fr.json");
+    const SCRIPT: &str = include_str!("../../../web/cairn.js");
+
+    let explorer = explorer(ConsensusParams::testnet());
+    let status = body(&ask(&explorer, "status"));
+    explorer.node().shutdown();
+    let digits = |text: &str, key: &str| -> u64 {
+        let rest = text.split_once(key).expect("the field").1;
+        rest.chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .expect("a number")
+    };
+    let index = digits(
+        status.split_once("\"index\":{").expect("an index object").1,
+        "\"bytesPerNote\"",
+    );
+    let cold = digits(
+        status.split_once("\"cold\":{").expect("a cold object").1,
+        "\"bytesPerNote\"",
+    );
+    let times = index
+        .saturating_add(cold / 2)
+        .checked_div(cold)
+        .expect("a fallen note costs something");
+    println!("the route says {index} bytes a note against {cold}, which is {times} times");
+
+    // Where the sentence is, so whoever moves a constant is told rather than
+    // left to search. The comment in the script and the two doc comments are
+    // as much a published figure as the prose: they are what the next person
+    // reads before deciding the pages are right.
+    for (where_it_is, text, phrase) in [
+        (
+            "web/i18n/en.json",
+            EN,
+            "the larger of its two by about eight times",
+        ),
+        (
+            "web/i18n/fr.json",
+            FR,
+            "le plus lourd de ses deux coûts, d'un facteur huit environ",
+        ),
+        (
+            "web/cairn.js",
+            SCRIPT,
+            "the smaller half of it by nearly eight times",
+        ),
+    ] {
+        assert!(
+            text.contains(phrase),
+            "{where_it_is} no longer says `{phrase}`, which is what this checks"
+        );
+    }
+    assert_eq!(
+        times, 8,
+        "the index costs {index} bytes a note and the cold set {cold}, which is {times} \
+         times and not eight. Every one of these says eight and all of them are now \
+         wrong: web/i18n/en.json, web/i18n/fr.json, web/cairn.js, and the doc comments \
+         on INDEX_BYTES_PER_NOTE in cairn-explorer/src/api.rs and on BYTES_PER_NOTE in \
+         cairn-explorer/src/index.rs"
+    );
+}
+
 /// Read out of the running route rather than written down here, so the day the
 /// measurement moves this fails rather than drifts.
 #[test]

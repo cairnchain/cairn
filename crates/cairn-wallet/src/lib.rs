@@ -29,7 +29,7 @@ use cairn_crypto::{random_bytes, PublicKey, SecretKey};
 use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::transaction::{Input, Transfer};
 use cairn_ledger::validation::{ConsensusParams, TransferError};
-use cairn_net::node::{Probation, Refused, Stranded, Unjudged, Unwritten};
+use cairn_net::node::{Probation, Refused, Stranded, Unjudged, Unread, Unwritten};
 use cairn_net::{Joined, Node};
 use cairn_primitives::codec::Encode;
 use cairn_primitives::{Amount, Hash32};
@@ -410,6 +410,20 @@ pub struct Progress {
     /// writes nothing. From the outside that is a wallet working normally,
     /// until the machine restarts and comes back where the disk left off.
     pub unwritten: Option<Unwritten>,
+    /// What the node under this wallet could not read back off its own disk,
+    /// if it failed to.
+    ///
+    /// This wallet's list of what it was paid is read block by block off that
+    /// disk, and a block it will not give back stops the reading there and
+    /// leaves it there: skipping over it is not on offer, because which notes
+    /// are this key's is built up as the blocks go past, and a history with a
+    /// hole in it would go on calling a stranger's transfer ours. The balance
+    /// beside it stays right, because it is counted from the chain and not
+    /// from this account.
+    ///
+    /// So what it looks like is a page saying "still reading" about blocks it
+    /// is not going to read, next to a height that keeps climbing, for ever.
+    pub unread: Option<Unread>,
     /// Blocks the node met that this build has no rules to judge, if enough of
     /// them came from enough peers to mean anything.
     pub unjudged: Option<Unjudged>,
@@ -545,6 +559,20 @@ impl Progress {
                  disk's number. {} The balance beside this is right for the chain as it \
                  stands; what is at risk is having to read it all again.",
                 unwritten.because, unwritten.reached, kept, unwritten.blocks, lost
+            ));
+        }
+        if let Some(unread) = &self.unread {
+            return Some(format!(
+                "The disk under the node this wallet runs will not give back the block at \
+                 {}. It said: {}. Nothing has been deleted, and the amount beside this is \
+                 still right: it is counted from the chain rather than from the list of \
+                 payments below. The list is what stops. It is read one block at a time and \
+                 it cannot step over one, so it will sit where it is however long the page \
+                 says it is still reading, and payments made after that block will not \
+                 appear in it. Close this wallet and start it again: that reads the disk \
+                 afresh, and if this comes back, the disk on this machine is what needs \
+                 looking at.",
+                unread.height, unread.because,
             ));
         }
         if let Some(unjudged) = &self.unjudged {
@@ -892,6 +920,7 @@ impl Wallet {
             outdated: self.node.outdated(),
             stranded: self.node.stranded(),
             unwritten: self.node.unwritten(),
+            unread: self.node.unread(),
             unjudged: self.node.unjudged(),
             keeping_its_account: self.wrote_history.lock().map_or(true, |wrote| *wrote),
             lost_its_account: self.lost_its_account,
@@ -1733,6 +1762,7 @@ fn wait_until(patience: Duration, ready: impl Fn() -> bool) -> bool {
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
+    clippy::expect_used,
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects
 )]
@@ -1740,7 +1770,7 @@ mod tests {
     use super::{ceiling, said_plainly, shuffle, Progress};
     use cairn_ledger::note::NoteId;
     use cairn_ledger::validation::TransferError;
-    use cairn_net::node::{Probation, Refused};
+    use cairn_net::node::{Probation, Reading, Refused, Unread};
     use cairn_net::Joined;
     use cairn_primitives::{Amount, Hash32};
 
@@ -1793,19 +1823,7 @@ mod tests {
     /// just started shows a balance out of a ledger it has not checked.
     #[test]
     fn a_ledger_this_wallet_has_not_checked_is_said_to_be_one() {
-        let healthy = Progress {
-            keeping_its_account: true,
-            lost_its_account: None,
-            unwritten: None,
-            unjudged: None,
-            height: Some(10),
-            peers: 1,
-            joining: Joined::Done,
-            total_work: 10,
-            probation: None,
-            outdated: None,
-            stranded: None,
-        };
+        let healthy = healthy();
         assert!(healthy.warning().is_none(), "nothing to say about this one");
 
         let on_probation = Progress {
@@ -1820,6 +1838,59 @@ mod tests {
         assert!(said.contains("900"), "{said}");
         assert!(said.contains("40 of the 100"), "{said}");
         assert!(said.contains("has not yet checked"), "{said}");
+    }
+
+    /// A node with nothing to report, for the states below to differ from.
+    fn healthy() -> Progress {
+        Progress {
+            keeping_its_account: true,
+            lost_its_account: None,
+            unwritten: None,
+            unread: None,
+            unjudged: None,
+            height: Some(10),
+            peers: 1,
+            joining: Joined::Done,
+            total_work: 10,
+            probation: None,
+            outdated: None,
+            stranded: None,
+        }
+    }
+
+    /// The fourth state a height and a balance say nothing about, and the one
+    /// the page positively contradicts.
+    ///
+    /// This wallet's list of payments is read one block at a time off the
+    /// node's disk and cannot step over a block, so a block the disk will not
+    /// give back stops the list there for good. The page goes on saying "still
+    /// reading" about it, and the height beside it goes on climbing, because
+    /// the chain is fine and only this one read is not. Nothing said so.
+    #[test]
+    fn a_disk_that_will_not_give_a_block_back_stops_the_list_and_now_says_so() {
+        let stuck = Progress {
+            unread: Some(Unread {
+                what: Reading::Blocks,
+                height: 4_312,
+                because: "record 5 says it holds 244 bytes, the index gives it 184".to_owned(),
+                refusals: 3,
+            }),
+            ..healthy()
+        };
+        let said = stuck.warning().expect("a person is told");
+        assert!(said.contains("4312"), "it names the block: {said}");
+        assert!(
+            said.contains("the index gives it 184"),
+            "in the words the store used, which is what tells damage from a full disk: {said}"
+        );
+        assert!(
+            said.contains("still right"),
+            "and says the amount is not what is wrong, because it is not: {said}"
+        );
+        assert!(
+            said.contains("still reading"),
+            "and answers the line on the page that says the opposite: {said}"
+        );
     }
 
     /// A change output that is always last is one an observer picks out with

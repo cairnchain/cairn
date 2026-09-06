@@ -6,10 +6,23 @@
 //! gets one without replaying the chain that produced it.
 //!
 //! What makes that possible here and not elsewhere is that the ledger is
-//! bounded. A chain that grows for thirty years still holds the same hundred
-//! and seven megabytes, because everything older lives in a commitment rather
-//! than in a table. So it can be sent whole, once, and checked against the
-//! header that commits to it.
+//! bounded. A chain that grows for thirty years still holds the same 68 MB of
+//! hot set and the same bounded window beside it, because everything older
+//! lives in a commitment rather than in a table. So it can be sent whole,
+//! once, and checked against the header that commits to it.
+//!
+//! Sent whole is about 11 MB and not 68: what travels is the notes, where a
+//! node holds them in a map, an eviction order and a tree. It reaches about
+//! 19 MB when the grace window is at its own bound and its paths are as deep
+//! as the forest gets, which `examples/joining.rs` measures alongside the
+//! rest. Two quantities, two instruments: `examples/footprint.rs` reads the
+//! 68 and `examples/joining.rs` the 11.
+//!
+//! This paragraph said a hundred and seven megabytes until round eleven. That
+//! is what a hot set cost before a public key stopped being held as a decoded
+//! curve point, and it had been corrected everywhere a test could see it: the
+//! whitepaper, the site, the lesson files, and a guard in the explorer that
+//! runs over the pages and not over this crate's own prose.
 //!
 //! Nothing here is taken on trust. Every piece is rebuilt and the result is
 //! compared against what the header already said: the two tiers, the grace

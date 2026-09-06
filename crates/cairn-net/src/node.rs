@@ -16,7 +16,7 @@ use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -700,6 +700,71 @@ pub struct Unwritten {
     pub within_reach: bool,
 }
 
+/// What this node was reading back off its own disk when the disk refused it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reading {
+    /// A block. What a peer catching up asks for, what the chain reads back
+    /// when it has to undo something, and what an explorer quotes.
+    Blocks,
+    /// A header, or the forest built over them. What a newcomer is shown to
+    /// settle which chain carries the most work.
+    Headers,
+}
+
+impl std::fmt::Display for Reading {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Blocks => "a block it had accepted",
+            Self::Headers => "a header it shows the chain with",
+        })
+    }
+}
+
+/// A record this node holds, was asked for, and could not read back.
+///
+/// The counterpart of [`Unwritten`], and the half that had no channel. A write
+/// the disk will not take is this node's own history not being kept, and it is
+/// said. A read the disk will not answer is somebody else's question going
+/// unanswered, and it was said nowhere at all.
+///
+/// It is not a record this node no longer keeps. A peer asking for a block
+/// below what this node holds is told nothing, and is right to be; a wallet
+/// asking a node that keeps no archive is told to ask an archivist. This is
+/// the third case, where the log says the record is there, the disk will not
+/// produce it, and whoever asked hears exactly the same silence as in the
+/// first two.
+///
+/// What that costs is quiet, and the quiet is the defect. The node goes on
+/// following the chain, goes on announcing what it applies, goes on
+/// introducing itself as a node that can answer, and every peer catching up
+/// over that stretch is handed a batch with a hole in it. A catch-up applies
+/// blocks in the order they arrive and drops any whose parent has not landed,
+/// so one refused record throws away the whole tail of every batch that spans
+/// it, from every peer that asks, for as long as the node runs. Measured in
+/// `tests/own_disk.rs` on a node whose block index had one flipped byte: it
+/// starts clean, its height, its peer count and its stored height all read
+/// like a healthy node's, and the peer reading from it stops one block below
+/// the damage and stays there.
+///
+/// The count does not go down and is not cleared by a read that worked. A
+/// refusal is about one record; a later read that succeeded was a different
+/// question and says nothing about this one, and clearing on it would hide
+/// steady damage behind ordinary traffic. A restart clears it, because a
+/// restart re-opens the log and finds out again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unread {
+    /// What was being read when the disk last refused.
+    pub what: Reading,
+    /// The height of that record.
+    pub height: u64,
+    /// What the store said, in its own words. The difference between an index
+    /// that disagrees with the log, which is a derived file that can be worked
+    /// out again, and a record that will not decode, which is not.
+    pub because: String,
+    /// How many reads have been refused since this node started.
+    pub refusals: u64,
+}
+
 /// What says this build is too old for the chain it is on.
 ///
 /// A block written under rules this software does not have is not a bad block
@@ -927,6 +992,12 @@ struct Shared {
     /// A leaf, like [`Shared::stranded`]: the chain and the log may both be
     /// held while this is taken, and neither may be taken while it is.
     unwritten: Mutex<Option<Unwritten>>,
+    /// What the disk would not read back when somebody asked for it.
+    ///
+    /// A leaf as well, and it has to be: this is written from inside the reads
+    /// that hold the log, so anything it took would be taken under the log and
+    /// there is no order that survives that. It takes nothing.
+    unread: Mutex<Option<Unread>>,
     /// Blocks this build turned out not to be able to read, and who sent them.
     ///
     /// Also a leaf, and for the same reason: it is written from the thread
@@ -1493,6 +1564,27 @@ impl Shared {
         );
     }
 
+    /// Writes down one read of this node's own disk that the disk refused.
+    ///
+    /// Called from inside the reads themselves, which hold the log. It takes
+    /// nothing but its own lock, so it can be.
+    ///
+    /// The record is not cut, not rewritten and not acted on. Every caller
+    /// goes on to answer around the record as it always did: a peer is sent
+    /// the blocks that did read, a newcomer is sent the headers that did, and
+    /// an explorer is told the height is missing. All this adds is that
+    /// somebody is told, which is the whole of what was absent.
+    fn could_not_read(&self, what: Reading, height: u64, because: &impl std::fmt::Display) {
+        let mut held = self.unread.lock().unwrap_or_else(PoisonError::into_inner);
+        let refusals = held.as_ref().map_or(0, |held| held.refusals);
+        *held = Some(Unread {
+            what,
+            height,
+            because: because.to_string(),
+            refusals: refusals.saturating_add(1),
+        });
+    }
+
     /// Counts one block this build could not read, and who sent it.
     ///
     /// Nothing is held against the peer here or anywhere: it is carrying what
@@ -1699,7 +1791,19 @@ impl Shared {
             let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
             let log = log.as_ref()?;
             locator.iter().find_map(|entry| {
-                let block = log.blocks.read_at(entry.height).ok().flatten()?;
+                // A refusal here is not an entry the peer and this node
+                // disagree about. It is this node failing to look, and the two
+                // used to be the same answer: the position was passed over,
+                // the walk ran out of entries, and the peer was told from zero,
+                // which is this node's disk reported as a fact about somebody
+                // else's chain.
+                let block = match log.blocks.read_at(entry.height) {
+                    Ok(found) => found?,
+                    Err(error) => {
+                        self.could_not_read(Reading::Blocks, entry.height, &error);
+                        return None;
+                    }
+                };
                 (block.id() == entry.id).then_some(entry.height)
             })
         });
@@ -1734,7 +1838,18 @@ impl Shared {
         if let Some(log) = log.as_ref() {
             for (slot, height) in found.iter_mut().zip(heights.iter()) {
                 if slot.is_none() {
-                    *slot = log.blocks.read_at(*height).ok().flatten();
+                    // A height this log does not hold and a height it holds
+                    // and will not produce leave the same gap in the answer,
+                    // and the peer cannot tell them apart either way. The
+                    // difference is whose fault it is, and this is where it
+                    // is known.
+                    *slot = match log.blocks.read_at(*height) {
+                        Ok(found) => found,
+                        Err(error) => {
+                            self.could_not_read(Reading::Blocks, *height, &error);
+                            None
+                        }
+                    };
                 }
             }
         }
@@ -1985,6 +2100,7 @@ impl Node {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -2162,7 +2278,7 @@ impl Node {
         // newcomer about that stretch and nothing else.
         let mut headers = HeaderLog::open(&directory)?;
         let headers_set_aside = headers_the_store_will_not_stand_behind(&headers);
-        catch_up_headers(&mut headers, &log)?;
+        let unread = catch_up_headers(&mut headers, &log);
         let mut forest = HeaderTree::open(&directory)?;
         // A refusal here is not lost by being dropped: nothing has been
         // started yet that could carry it, and the first block this node
@@ -2211,6 +2327,7 @@ impl Node {
             Some(directory),
             Some(lock),
             probation,
+            unread,
         )?;
         Ok((node, restored))
     }
@@ -2225,6 +2342,7 @@ impl Node {
         directory: Option<PathBuf>,
         lock: Option<DirectoryLock>,
         probation: Option<Undertaking>,
+        unread: Option<Unread>,
     ) -> Result<Self, NodeError> {
         let listener = TcpListener::bind(address)?;
         let address = listener.local_addr()?;
@@ -2261,6 +2379,7 @@ impl Node {
             winding_down: AtomicBool::new(false),
             outdated: Mutex::new(None),
             unwritten: Mutex::new(None),
+            unread: Mutex::new(unread),
             unjudged: Mutex::new(Unreadable::default()),
             asking: Mutex::new(Asking::default()),
         });
@@ -2281,7 +2400,7 @@ impl Node {
             // written; one without has nowhere to read them back from, so it
             // keeps every one it might still need.
             if has_log {
-                chain.reads_bodies_from(Arc::new(FromLog(Arc::clone(&shared.log))));
+                chain.reads_bodies_from(Arc::new(FromLog(Arc::downgrade(&shared))));
             }
         }
 
@@ -2380,7 +2499,13 @@ impl Node {
             .log
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        log.as_ref()?.blocks.read_at(height).ok().flatten()
+        match log.as_ref()?.blocks.read_at(height) {
+            Ok(found) => found,
+            Err(error) => {
+                self.shared.could_not_read(Reading::Blocks, height, &error);
+                None
+            }
+        }
     }
 
     pub fn height(&self) -> Option<u64> {
@@ -2541,6 +2666,26 @@ impl Node {
     pub fn unwritten(&self) -> Option<Unwritten> {
         self.shared
             .unwritten
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// What this node holds on its disk and could not read back for somebody.
+    ///
+    /// `None` on a node whose disk is answering, which is every healthy one.
+    /// The pair of [`Self::unwritten`], and the half that had nowhere to be
+    /// said: a write the disk refuses costs this node its own history, and a
+    /// read the disk refuses costs whoever asked their answer, quietly, on a
+    /// node that goes on looking exactly like one that can answer.
+    ///
+    /// The node does not stop on it and nothing is cut for it. A read refusal
+    /// is about one record; the chain is not wrong, the branch is not short,
+    /// and the record may still be there to look at. What it is worth is a
+    /// person going to look.
+    pub fn unread(&self) -> Option<Unread> {
+        self.shared
+            .unread
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
@@ -3222,13 +3367,29 @@ fn step(
 /// what it reads is what the node has. Everything that calls into this already
 /// holds the chain, and this takes the log: chain first and log second, as
 /// everywhere else.
+///
+/// Weakly, because the chain this is handed to lives inside the very thing it
+/// points back at. A strong reference would be a node that never drops.
 #[derive(Debug)]
-struct FromLog(Arc<Mutex<Option<Store>>>);
+struct FromLog(Weak<Shared>);
 
 impl Bodies for FromLog {
     fn body(&self, height: u64) -> Option<Block> {
-        let log = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        log.as_ref()?.blocks.read_at(height).ok()?
+        let shared = self.0.upgrade()?;
+        let log = shared.log.lock().unwrap_or_else(PoisonError::into_inner);
+        match log.as_ref()?.blocks.read_at(height) {
+            Ok(found) => found,
+            Err(error) => {
+                // A body the chain needs and cannot get is already answered:
+                // the switch fails, `ChainError::Corrupt` comes back, and the
+                // connection that asked for it is dropped without the peer
+                // being blamed. What was missing is that an operator watching
+                // saw a connection go and nothing else, so a disk eating one
+                // record looked like a network with a flaky peer on it.
+                shared.could_not_read(Reading::Blocks, height, &error);
+                None
+            }
+        }
     }
 }
 
@@ -3288,6 +3449,31 @@ impl Store {
     }
 }
 
+/// A step of the header merge that this node's own disk refused.
+///
+/// Kept apart from a run that did not add up, and the distance between the two
+/// is the whole of why it exists. A collection that was invented is a supplier
+/// that could not show what it claimed, and the answer is to give the turn to
+/// somebody else. A disk is not, and giving the turn away for one means the
+/// entire run again, from the next peer, and the next, each of them marked as
+/// having spoiled it, for as long as the node runs. On a chain of any age that
+/// run is the whole history before this node arrived, so the node pays for its
+/// own disk in somebody else's bandwidth, over and over, and the line its
+/// operator is shown at the end of it says to connect it to a peer that holds
+/// the missing part, which is the one thing that cannot help.
+#[derive(Debug)]
+enum OwnDisk {
+    /// A record this log holds and would not give back. Nothing was written,
+    /// so nothing is lost by stopping here.
+    Read {
+        what: Reading,
+        height: u64,
+        because: String,
+    },
+    /// A record this log would not take.
+    Write(Refusing),
+}
+
 /// What became of a run of headers offered to a node filling in what came
 /// before it arrived.
 enum Filled {
@@ -3298,6 +3484,9 @@ enum Filled {
     Grew(u64),
     /// What was collected was thrown away, and has to be gathered again.
     Discarded,
+    /// The run was whole and checked out, and this node's own disk stopped the
+    /// rest. Nobody is at fault out there and nobody's turn is spent on it.
+    OwnDisk(OwnDisk),
 }
 
 /// A join answer, built once and handed out in pieces.
@@ -3475,16 +3664,30 @@ impl Shared {
         // The header log first: a node keeps every header and only the most
         // recent blocks, so this is the one that answers about the far end of
         // the chain.
-        if let Ok(Some(header)) = store.headers.read_at(height) {
-            return Some(header);
+        match store.headers.read_at(height) {
+            Ok(Some(header)) => return Some(header),
+            Ok(None) => {}
+            Err(error) => self.could_not_read(Reading::Headers, height, &error),
         }
-        Some(store.blocks.read_at(height).ok()??.header)
+        match store.blocks.read_at(height) {
+            Ok(found) => Some(found?.header),
+            Err(error) => {
+                self.could_not_read(Reading::Blocks, height, &error);
+                None
+            }
+        }
     }
 
     /// Where a header sits in the forest a chain of `leaves` committed to.
     fn proof_off_disk(&self, height: u64, leaves: u64) -> Option<ForestProof> {
         let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-        log.as_ref()?.forest.prove_in(height, leaves).ok()?
+        match log.as_ref()?.forest.prove_in(height, leaves) {
+            Ok(proof) => proof,
+            Err(error) => {
+                self.could_not_read(Reading::Headers, height, &error);
+                None
+            }
+        }
     }
 
     /// Whether this node can show a newcomer which chain carries the most
@@ -3652,6 +3855,20 @@ impl Shared {
                     turn.spoiled = true;
                 }
             }
+            // This node's disk, said in this node's own channels and held
+            // against nobody. The turn stays where it is: the supplier has
+            // done nothing wrong, and the patience on the turn still moves it
+            // along if nothing else happens, so this cannot pin the node to
+            // one peer either.
+            //
+            // Reached with no lock held, which the write half needs: saying
+            // what a write cost takes the chain and then the log.
+            Filled::OwnDisk(OwnDisk::Read {
+                what,
+                height,
+                because,
+            }) => self.could_not_read(what, height, &because),
+            Filled::OwnDisk(OwnDisk::Write(refusing)) => self.note_refusal(refusing),
         }
     }
 
@@ -3690,9 +3907,33 @@ impl Shared {
                 if header.height >= oldest {
                     break;
                 }
-                if store.filling.append(header).is_err() {
+                // The collection goes either way, because half a run is no
+                // use to the walk that weighs it. Whose turn goes with it
+                // depends on which of the two refusals this is, and reading
+                // them as one cost the whole repair above.
+                //
+                // A run that does not follow on is the supplier's doing: it
+                // was asked for a height and answered with another, and the
+                // log is only the first thing to notice. That loses the turn,
+                // which is what `Turn::spoiled` exists for.
+                //
+                // Anything else is this node's disk, said in this node's own
+                // channels and held against nobody, and the turn stays where
+                // it is because the supplier has done nothing wrong.
+                //
+                // Both used to be the second. So a peer answering every
+                // question with a run starting at the wrong height kept its
+                // turn for the full patience, over and over, and the node
+                // charged its own disk for it: measured at twenty six
+                // collections thrown away with the turn handed straight back
+                // each time, and the turn only ever passing on when it ran
+                // out.
+                if let Err(error) = store.filling.append(header) {
                     store.discard_filling();
-                    return Filled::Discarded;
+                    if matches!(error, StoreError::OutOfOrder { .. }) {
+                        return Filled::Discarded;
+                    }
+                    return Filled::OwnDisk(OwnDisk::Write(Refusing::at(Writing::Headers, &error)));
                 }
             }
             if store.filling.reaches() < oldest {
@@ -3713,8 +3954,15 @@ impl Shared {
         };
         let mut forest = cairn_accumulator::Archive::new();
         for height in 0..oldest {
-            let Some(header) = self.filling_at(height, epoch) else {
-                return self.throw_the_run_away(epoch);
+            // Three answers, and only one of them is about the supplier. A
+            // record that is not there is a run that was thrown away or never
+            // finished, which costs its owner the turn. A record this node
+            // cannot read is this node, and used to cost the supplier the turn
+            // just the same.
+            let header = match self.filling_at(height, epoch) {
+                Ok(Some(header)) => header,
+                Ok(None) => return self.throw_the_run_away(epoch),
+                Err(own) => return Filled::OwnDisk(own),
             };
             forest.add(header_leaf(&header.id()));
         }
@@ -3739,8 +3987,8 @@ impl Shared {
         {
             return Filled::Ignored;
         }
-        if !join_logs(&mut store.headers, &store.filling) {
-            return Filled::Discarded;
+        if let Err(own) = join_logs(&mut store.headers, &store.filling) {
+            return Filled::OwnDisk(own);
         }
         store.discard_filling();
         // As at the open: the next block applied runs this again and says what
@@ -3754,13 +4002,22 @@ impl Shared {
     ///
     /// `None` once the collection it belongs to has been thrown away, which is
     /// what stops a reading of one run being weighed as a reading of another.
-    fn filling_at(&self, height: u64, epoch: u64) -> Option<BlockHeader> {
+    fn filling_at(&self, height: u64, epoch: u64) -> Result<Option<BlockHeader>, OwnDisk> {
         let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-        let store = log.as_ref()?;
+        let Some(store) = log.as_ref() else {
+            return Ok(None);
+        };
         if store.filling_epoch != epoch {
-            return None;
+            return Ok(None);
         }
-        store.filling.read_at(height).ok()?
+        match store.filling.read_at(height) {
+            Ok(header) => Ok(header),
+            Err(error) => Err(OwnDisk::Read {
+                what: Reading::Headers,
+                height,
+                because: error.to_string(),
+            }),
+        }
     }
 
     /// Throws away the run that was being collected, if it is still that run.
@@ -3789,10 +4046,19 @@ impl Shared {
             .min(store.headers.reaches());
         let mut headers = Vec::new();
         for height in from..stop {
-            let Ok(Some(header)) = store.headers.read_at(height) else {
-                break;
-            };
-            headers.push(header);
+            // The run stops either way: a newcomer applies headers in order
+            // and one with a gap in it is worth nothing. What changes is that
+            // a run cut short by this node's own disk is no longer told apart
+            // from one that simply ran out, which from the far end look the
+            // same and from here do not.
+            match store.headers.read_at(height) {
+                Ok(Some(header)) => headers.push(header),
+                Ok(None) => break,
+                Err(error) => {
+                    self.could_not_read(Reading::Headers, height, &error);
+                    break;
+                }
+            }
         }
         headers
     }
@@ -4487,9 +4753,28 @@ fn headers_the_store_will_not_stand_behind(headers: &HeaderLog) -> u64 {
 /// For a node updated from a version that kept no headers, and for one whose
 /// header log was lost. Both are the same case: what the blocks can still show
 /// is written, and what they cannot is gone.
-fn catch_up_headers(headers: &mut HeaderLog, blocks: &BlockLog) -> Result<(), StoreError> {
+///
+/// Best effort, and that is the repair. This used to hand its failure back out
+/// of [`Node::open`], and the failure is reachable without any damage to the
+/// chain at all: the index beside the block log is a derived file, the store
+/// checks its last offset against the length of the log and no other, and the
+/// replay that starts a node reads the log forward and never opens the index.
+/// So one flipped byte in the middle of it replays twelve blocks out of twelve,
+/// reports a clean start, and then refuses the very first read this makes.
+/// Measured: `record 5 says it holds 244 bytes, the index gives it 184`, out of
+/// `Node::open`, on every start, for ever, on a node whose blocks were all
+/// there and whose index the store rebuilds from those blocks when it is asked
+/// to. An unattended node stayed down over it.
+///
+/// So it stops where the disk stopped answering and keeps what it wrote. The
+/// stretch it could not write is not lost either: the first block this node
+/// accepts runs [`write_headers`], which fills the log from the chain's own
+/// headers rather than from the disk, and that walk needs no block bodies at
+/// all. What is returned is for the operator, because a disk that ate one
+/// record has not finished.
+fn catch_up_headers(headers: &mut HeaderLog, blocks: &BlockLog) -> Option<Unread> {
     if blocks.is_empty() {
-        return Ok(());
+        return None;
     }
     let from = if headers.is_empty() {
         blocks.first_height()
@@ -4499,49 +4784,102 @@ fn catch_up_headers(headers: &mut HeaderLog, blocks: &BlockLog) -> Result<(), St
     if from < blocks.first_height() {
         // A gap nothing can fill: the headers stop before the blocks start.
         // Starting again from the blocks is the most that can be said.
-        headers.keep_below(0)?;
+        if let Err(error) = headers.keep_below(0) {
+            return Some(stopped_at(Reading::Headers, 0, &error));
+        }
         return catch_up_from(headers, blocks, blocks.first_height());
     }
     catch_up_from(headers, blocks, from)
 }
 
-fn catch_up_from(headers: &mut HeaderLog, blocks: &BlockLog, from: u64) -> Result<(), StoreError> {
+/// The same, and it is where both halves can refuse.
+///
+/// A block that will not read is this node's own disk, and it is what the
+/// return value is for. A header that will not be written is the same disk
+/// from the other side, and it is carried the same way rather than being made
+/// fatal: the next block accepted tries the identical write and reports it
+/// through [`Unwritten`], which is the channel for a disk that will not take
+/// what this node puts on it and says so in the words the disk used.
+fn catch_up_from(headers: &mut HeaderLog, blocks: &BlockLog, from: u64) -> Option<Unread> {
     for height in from..blocks.reaches() {
-        let Some(block) = blocks.read_at(height)? else {
-            break;
+        let block = match blocks.read_at(height) {
+            Ok(Some(block)) => block,
+            Ok(None) => break,
+            Err(error) => return Some(stopped_at(Reading::Blocks, height, &error)),
         };
-        headers.append(&block.header)?;
+        if let Err(error) = headers.append(&block.header) {
+            return Some(stopped_at(Reading::Headers, height, &error));
+        }
     }
-    Ok(())
+    None
+}
+
+/// One refusal met before the node exists to be told about it.
+fn stopped_at(what: Reading, height: u64, because: &impl std::fmt::Display) -> Unread {
+    Unread {
+        what,
+        height,
+        because: because.to_string(),
+        refusals: 1,
+    }
 }
 
 /// Puts `front` in front of `log`, leaving one run from the older of the two.
 ///
 /// Every record is rewritten, which is a pass over the headers and happens
 /// once in the life of a node that joined a chain.
-fn join_logs(log: &mut HeaderLog, front: &HeaderLog) -> bool {
+///
+/// Every failure here is this node's own disk and none of them is the
+/// supplier's: the run being merged has already been weighed against the
+/// commitment the oldest header carries, so by this point it is known to be
+/// the truth. They used to be indistinguishable from a run that was invented,
+/// and the node blamed whoever had just handed it a correct one.
+///
+/// The reads all happen before the clear, so a log that will not answer costs
+/// nothing but the attempt. A write that fails after it does cost something,
+/// and this is where that is at its worst: the log is emptied and refilled in
+/// place, so an interrupted refill leaves a header log holding a prefix and
+/// nothing that knows it. It is at least said now. Making it survivable needs
+/// the merge to land in a second file and be moved into place, which is the
+/// store's business rather than this module's.
+fn join_logs(log: &mut HeaderLog, front: &HeaderLog) -> Result<(), OwnDisk> {
     let mut all = Vec::new();
     for height in front.first_height()..front.reaches() {
-        let Ok(Some(header)) = front.read_at(height) else {
-            return false;
-        };
-        all.push(header);
+        all.push(one_header(front, height)?);
     }
     for height in log.first_height()..log.reaches() {
-        let Ok(Some(header)) = log.read_at(height) else {
-            return false;
-        };
-        all.push(header);
+        all.push(one_header(log, height)?);
     }
-    if log.clear().is_err() {
-        return false;
+    if let Err(error) = log.clear() {
+        return Err(OwnDisk::Write(Refusing::at(Writing::Headers, &error)));
     }
     for header in &all {
-        if log.append(header).is_err() {
-            return false;
+        if let Err(error) = log.append(header) {
+            return Err(OwnDisk::Write(Refusing::at(Writing::Headers, &error)));
         }
     }
-    true
+    Ok(())
+}
+
+/// One header out of a log, where the log has already said it holds it.
+///
+/// So nothing here is an absence. A store that answers `None` inside the run
+/// it says it holds is disagreeing with itself, which is the same news as a
+/// refusal and belongs in the same channel.
+fn one_header(log: &HeaderLog, height: u64) -> Result<BlockHeader, OwnDisk> {
+    match log.read_at(height) {
+        Ok(Some(header)) => Ok(header),
+        Ok(None) => Err(OwnDisk::Read {
+            what: Reading::Headers,
+            height,
+            because: "the log says it holds this record and produced nothing".to_owned(),
+        }),
+        Err(error) => Err(OwnDisk::Read {
+            what: Reading::Headers,
+            height,
+            because: error.to_string(),
+        }),
+    }
 }
 
 /// Reads back the ledger a node was handed, if it kept one.
@@ -5543,9 +5881,11 @@ mod quiet_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use std::net::Ipv4Addr;
+
+    use cairn_store::HEADER_LOG;
 
     use cairn_ledger::note::Note;
     use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
@@ -5638,9 +5978,127 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// A header merge that this node's own disk stops is not the supplier's
+    /// doing, and used to be charged to it.
+    ///
+    /// A node that joined a chain fills in the headers from before it arrived
+    /// from one peer at a time. The run is weighed against the commitment the
+    /// oldest header it holds already carries, so by the time the two logs are
+    /// joined the run is known to be the truth. Every way the join could fail
+    /// from there is this node's own disk, and all of them came back as the
+    /// same bare `false`, which the caller read as a collection that did not
+    /// add up: the supplier lost its turn, the next peer was asked for the
+    /// whole run again, and it lost its turn the same way. On a chain of any
+    /// age that run is the entire history before the node arrived, so the node
+    /// paid for its own disk in somebody else's bandwidth, round the whole
+    /// book, for as long as it ran, while the line its operator was shown said
+    /// to find it a peer that held the missing part.
+    #[test]
+    fn a_merge_this_node_s_own_disk_stopped_costs_the_supplier_nothing() {
+        let params = ConsensusParams::testnet();
+        let blocks = chain_of(30, params);
+        let oldest = 20u64;
+        // Far enough above `oldest` that reading the anchor still works: a
+        // spoiled record breaks the link with the one after it, and nothing
+        // else.
+        let spoiled = 25u64;
+
+        let directory = std::env::temp_dir().join(format!("cairn-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let (blocks_log, _) = BlockLog::open(&directory).unwrap();
+        let mut headers = HeaderLog::open(&directory).unwrap();
+        let mut filling = HeaderLog::open_named(&directory, FILLING_LOG).unwrap();
+        // What a node that joined at `oldest` holds: its own headers from
+        // there up, and a run of everything before it that is one short.
+        for block in &blocks[usize::try_from(oldest).unwrap()..] {
+            headers.append(&block.header).unwrap();
+        }
+        for block in &blocks[..usize::try_from(oldest).unwrap() - 1] {
+            filling.append(&block.header).unwrap();
+        }
+        let store = Store {
+            blocks: blocks_log,
+            headers,
+            forest: HeaderTree::open(&directory).unwrap(),
+            filling,
+            filling_epoch: 0,
+        };
+
+        // One byte inside a record this node wrote itself. Every byte is part
+        // of the identifier the record after it names, so any of them breaks
+        // the link, which is what the store refuses on.
+        let path = directory.join(HEADER_LOG);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let at = usize::try_from(spoiled - oldest).unwrap() * HEADER_BYTES + 40;
+        bytes[at] ^= 0x20;
+        std::fs::write(&path, &bytes).unwrap();
+
+        let node = Node::start(
+            params,
+            address(1),
+            ChainStore::new(params),
+            Some(store),
+            AddressBook::new(),
+            Some(directory.clone()),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        // The turn a peer would be holding, put there rather than waited for:
+        // what is on trial is what the answer costs it, not how it got one.
+        *node.shared.filling_from() = Some(Turn {
+            peer: 7,
+            moved: 1_000,
+            marked: 0,
+            spoiled: false,
+        });
+
+        let last = blocks[usize::try_from(oldest).unwrap() - 1].header;
+        node.shared
+            .take_headers(7, oldest - 1, std::slice::from_ref(&last), 1_001);
+
+        let turn = (*node.shared.filling_from()).unwrap();
+        let unread = node.unread();
+        let held = {
+            let log = node
+                .shared
+                .log
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let store = log.as_ref().unwrap();
+            (store.headers.first_height(), store.headers.reaches())
+        };
+        node.shutdown();
+        drop(node);
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert!(
+            !turn.spoiled,
+            "the peer sent a run that checked out against the commitment and was \
+             charged for this node's disk"
+        );
+        let unread = unread.expect("and nothing anywhere said what had happened");
+        assert_eq!(unread.what, Reading::Headers);
+        // Either of the pair. A header answers for the link with the one
+        // beside it, so a record with a changed byte refuses at its own height
+        // and at the one below, and the walk meets the lower of the two first.
+        assert!(
+            unread.height == spoiled || unread.height == spoiled - 1,
+            "it named {}, and the spoiled record is at {spoiled}",
+            unread.height
+        );
+        assert_eq!(
+            held,
+            (oldest, 30),
+            "and nothing was written, because every read happens before the \
+             clear that empties the log"
+        );
+    }
+
     /// A laptop closed for a night is the case this exists for: the thread
     /// below stops with the machine, and the seconds it missed are the only
-    /// trace left of the time it was not on the network.
+    /// trace left of the time it was not on the network."""
     #[test]
     fn a_long_gap_between_rounds_means_the_machine_was_away() {
         assert!(!was_away(1_000, 1_000), "no time passed at all");

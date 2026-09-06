@@ -892,6 +892,21 @@ fn replay(
     if !cold.remove_batch(&removals) {
         return None;
     }
+    // Second, and for the same reason. A forest hands out positions in order
+    // and never reuses one, so the count is the one thing here that can run
+    // out, and `Forest::add` answers by giving no position back. The loop
+    // below read that answer as "this note has no place", dropped it from the
+    // fallen list and carried on, having already taken it out of the hot tree:
+    // the note's value would have left the ledger, with the projection and the
+    // commit agreeing on the state that no longer held it, so no root would
+    // disagree and nothing would be at fault. It is asked here rather than
+    // where it happens so that a refusal leaves the state exactly as it was,
+    // which is the promise the step above already makes.
+    //
+    // No chain reaches it. A forest runs out at 2^64 places, and this network
+    // hands out a few hundred a block.
+    let falling = u64::try_from(transition.evicted.len()).ok()?;
+    cold.next_position().checked_add(falling)?;
     for id in &transition.spent_hot {
         hot_tree.remove(note_key(id));
     }
@@ -903,14 +918,15 @@ fn replay(
     let mut fallen = Vec::with_capacity(transition.evicted.len());
     for (id, note) in &transition.evicted {
         hot_tree.remove(note_key(id));
-        if let Some((position, proof)) = cold.add(cold_leaf(id, note)) {
-            // Every note that falls is watched: for a while, so it stays
-            // spendable without a proof, and for good if someone asked about
-            // this owner. The addition hands over the proof, so this costs
-            // nothing to start.
-            cold.watch(position, proof);
-            fallen.push((*id, position));
-        }
+        // The check above makes this refusal unreachable. It is a refusal
+        // rather than a `continue` so that the day the check stops being exact
+        // the answer is a block nobody applies, and not a note nobody holds.
+        let (position, proof) = cold.add(cold_leaf(id, note))?;
+        // Every note that falls is watched: for a while, so it stays spendable
+        // without a proof, and for good if someone asked about this owner. The
+        // addition hands over the proof, so this costs nothing to start.
+        cold.watch(position, proof);
+        fallen.push((*id, position));
     }
     for spend in &transition.spent_cold {
         cold.unwatch_spent(spend.position, disturbed);
@@ -1937,11 +1953,76 @@ impl LedgerState {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use cairn_accumulator::forest::forest_leaf;
+    use cairn_primitives::codec::Decode;
 
     use super::*;
 
     fn leaf(index: u64) -> Hash32 {
         forest_leaf(&index.to_le_bytes())
+    }
+
+    /// A forest that has handed out every position there is.
+    ///
+    /// Built through the wire format, because nothing else can reach this
+    /// shape: the trees a forest holds are the set bits of its leaf count, so
+    /// a count of `u64::MAX` is all sixty four of them, and adding that many
+    /// leaves is not something a test can do.
+    fn forest_with_no_room_left() -> Forest {
+        let mut bytes = Vec::new();
+        u64::MAX.encode_to(&mut bytes);
+        u64::MAX.encode_to(&mut bytes);
+        64u32.encode_to(&mut bytes);
+        for height in 0..64u8 {
+            height.encode_to(&mut bytes);
+            Hash32::from_bytes([height; 32]).encode_to(&mut bytes);
+        }
+        Forest::decode(&bytes).expect("a forest holding every position")
+    }
+
+    /// A note that falls into a cold set with no room stops the block.
+    ///
+    /// It used to leave the ledger instead. The eviction takes the note out of
+    /// the hot tree first and then asks the forest for a place; the forest
+    /// answered that it had none, and the loop read that as "nothing to record
+    /// about this note" and went on. The projection and the commit run the
+    /// same code, so both would have committed to a state the note was not in,
+    /// every node would have agreed, and the money would simply be gone.
+    ///
+    /// No chain reaches it, and the shape is the thing: an answer that means
+    /// "this did not happen" read as an answer that means "there is nothing to
+    /// say about it" is what this crate has already had to repair on the
+    /// removal side.
+    #[test]
+    fn a_fall_the_cold_set_cannot_take_refuses_the_block() {
+        let mut cold = ColdSet::Roots(forest_with_no_room_left());
+        let mut hot = SparseMerkleTree::new();
+        let owner = cairn_crypto::SecretKey::from_bytes(&[3; 32]).public_key();
+        let id = NoteId::new(Hash32::from_bytes([1; 32]), 0);
+        let note = Note::new(Amount::from_pebbles(500).unwrap(), owner);
+        hot.insert(note_key(&id), hot_value(&note, 1));
+
+        let transition = StateTransition {
+            evicted: vec![(id, note)],
+            ..StateTransition::default()
+        };
+        let answer = replay(
+            &mut hot,
+            &mut cold,
+            &transition,
+            1,
+            &mut PathsBefore::default(),
+        );
+
+        assert!(
+            answer.is_none(),
+            "the note left the hot set, landed nowhere, and the block was still              called good"
+        );
+        assert_eq!(
+            hot.len(),
+            1,
+            "and the refusal comes before anything is touched, so the caller              can say no to the block and keep the state it had"
+        );
+        assert_eq!(cold.len(), u64::MAX, "the cold set did not move either");
     }
 
     #[test]

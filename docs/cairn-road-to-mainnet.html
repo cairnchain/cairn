@@ -912,7 +912,18 @@
 
   <footer>
     <span>Cairn · route jusqu'au mainnet · v16</span>
-    <span>187 commits · 980 tests</span>
+    <!--
+      Le nombre de commits a disparu d'ici le 6 septembre. Il était faux au
+      moment même où on l'écrivait : le commit qui corrige le chiffre est le
+      commit suivant, donc il manque toujours au moins un. Et aucun test ne
+      peut le rattraper — la CI clone l'historique sur un seul commit, donc
+      un instrument qui compterait les commits dirait « 1 » à chaque fois.
+      Un chiffre publié que rien ne tient est exactement ce qui a produit
+      les treize précédents. Le nombre de tests, lui, reste : il est mesuré
+      sur l'arbre par tests/site.rs, et il porte un argument, celui de dire
+      que ce code est assez petit pour être relu.
+    -->
+    <span>980 tests</span>
     <span>Rien de ce document n'est un conseil en investissement</span>
   </footer>
 

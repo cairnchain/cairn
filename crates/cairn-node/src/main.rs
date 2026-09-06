@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cairn_net::node::{Probation, Unjudged, Unwritten, MAX_BEHIND};
+use cairn_net::node::{Probation, Unjudged, Unread, Unwritten, MAX_BEHIND};
 use cairn_net::{Filling, Joined, Node, Restored};
 
 const TICK: Duration = Duration::from_millis(100);
@@ -53,6 +53,17 @@ fn run(arguments: &[String]) -> Result<(), String> {
 
     println!("listening    {}", node.address());
     say_what_was_restored(&restored, &options.data.display().to_string());
+    // Before the node has answered anybody, because filling the headers in
+    // from the blocks is the first thing that reads them back, and a refusal
+    // there used to come out of the open as a failure to start.
+    if let Some(unread) = node.unread() {
+        for line in wrapped(&will_not_read_back(
+            &unread,
+            &options.data.display().to_string(),
+        )) {
+            println!("             {line}");
+        }
+    }
     // A node that was handed a ledger owes the network its own check of the
     // blocks above it, and until it has done that it is not a node on a chain,
     // it is a node holding somebody's account of one. Said here rather than
@@ -227,48 +238,65 @@ fn watch(node: &Node, options: &options::Options, running: &AtomicBool) {
                 node.cold_len(),
                 node.total_work(),
             );
-            // A node whose disk has stopped taking writes shows nothing else:
-            // it validates, it climbs, and every other line here is the line a
-            // healthy node prints.
-            if let Some(unwritten) = node.unwritten() {
-                for line in wrapped(&falling_behind(&unwritten, &directory)) {
-                    println!("           {line}");
-                }
-            }
-            // And a node the network has left behind shows nothing but a
-            // height that has stopped moving.
-            if let Some(unjudged) = node.unjudged() {
-                for line in wrapped(&too_old(&unjudged)) {
-                    println!("           {line}");
-                }
-            }
-            // A node being handed a ledger has no height to show until the
-            // whole of it has arrived, so without this it reads as stuck.
-            match node.joining() {
-                Joined::No | Joined::Done => {}
-                joining => println!("           joining  {joining}"),
-            }
-            // And once it has arrived, the height it shows is the anchor's
-            // rather than this node's, which without this reads as a healthy
-            // node. It is not one until the line below stops appearing.
-            if let Some(probation) = node.probation() {
-                println!(
-                    "           {}",
-                    probation_line(&probation, node.out_of_reach())
-                );
-            }
-            // And a node that has arrived and still cannot answer the question
-            // a newcomer asks. Every other state above has had a line here for
-            // longer than this one, which is the first stretch of every join
-            // and used to be the whole of one. It is also the only line that
-            // says the disk is not being held to what `--keep` asked for.
-            if let Some(filling) = node.filling() {
-                for line in wrapped(&still_filling(&filling, &directory)) {
-                    println!("           {line}");
-                }
-            }
+            say_what_the_numbers_do_not(node, &directory);
         }
         thread::sleep(TICK);
+    }
+}
+
+/// The lines under a status line, for every state a healthy node's numbers
+/// look exactly like.
+///
+/// Each of these is a node that climbs in height, keeps its peers and prints
+/// the line a working node prints, while something it is failing at goes
+/// unmentioned. That is why they are lines and not a flag: an operator reads
+/// prose, and every one of these needs a sentence to be understood at all.
+fn say_what_the_numbers_do_not(node: &Node, directory: &str) {
+    let say = |text: &str| {
+        for line in wrapped(text) {
+            println!("           {line}");
+        }
+    };
+    // A node whose disk has stopped taking writes shows nothing else: it
+    // validates, it climbs, and every other line here is the line a healthy
+    // node prints.
+    if let Some(unwritten) = node.unwritten() {
+        say(&falling_behind(&unwritten, directory));
+    }
+    // A disk that will not give back a record it holds. Beside the line above
+    // rather than instead of it: a node can be keeping everything it writes
+    // and still be unable to read part of what it wrote earlier, and those are
+    // two different afternoons.
+    if let Some(unread) = node.unread() {
+        say(&will_not_read_back(&unread, directory));
+    }
+    // And a node the network has left behind shows nothing but a height that
+    // has stopped moving.
+    if let Some(unjudged) = node.unjudged() {
+        say(&too_old(&unjudged));
+    }
+    // A node being handed a ledger has no height to show until the whole of it
+    // has arrived, so without this it reads as stuck.
+    match node.joining() {
+        Joined::No | Joined::Done => {}
+        joining => println!("           joining  {joining}"),
+    }
+    // And once it has arrived, the height it shows is the anchor's rather than
+    // this node's, which without this reads as a healthy node. It is not one
+    // until the line below stops appearing.
+    if let Some(probation) = node.probation() {
+        println!(
+            "           {}",
+            probation_line(&probation, node.out_of_reach())
+        );
+    }
+    // And a node that has arrived and still cannot answer the question a
+    // newcomer asks. Every other state above has had a line here for longer
+    // than this one, which is the first stretch of every join and used to be
+    // the whole of one. It is also the only line that says the disk is not
+    // being held to what `--keep` asked for.
+    if let Some(filling) = node.filling() {
+        say(&still_filling(&filling, directory));
     }
 }
 
@@ -457,6 +485,43 @@ fn still_filling(filling: &Filling, directory: &str) -> String {
         filling.through.saturating_sub(1),
         filling.proved,
         filling.reaches.saturating_sub(1),
+    )
+}
+
+/// What an operator is told when this node's own disk will not give back
+/// something it holds.
+///
+/// Written for somebody who has never read the protocol, and the hard part is
+/// that nothing looks wrong. The height climbs, the peers connect, the disk
+/// takes every write. What is happening is that some of what this node
+/// already wrote will not come back out, so the peers asking it for that
+/// stretch are quietly served answers with holes in them and go elsewhere.
+///
+/// It says what to check rather than what to do. The index beside the blocks
+/// is worked out from the blocks and can be worked out again, so a node that
+/// says this and comes back clean was carrying a derived file that had rotted;
+/// one that says it again is being told something about the drive.
+fn will_not_read_back(unread: &Unread, directory: &str) -> String {
+    let again = if unread.refusals > 1 {
+        format!(
+            " It has happened {} times since this node started.",
+            unread.refusals
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "the disk under {directory} will not give back something this node put there. It \
+         was reading {} at block {}, and the store said: {}.{again} Nothing has been \
+         deleted and nothing has been cut: the record is still on the disk to look at, and \
+         the chain this node follows is not affected by it. What is affected is everybody \
+         else. A peer catching up over that block is sent the blocks around it and drops \
+         the rest, so it looks to them like a node that will not answer, and this node is \
+         quietly doing less for the network than the line above it suggests. A restart \
+         reads the disk again and will say this again if the damage is real, which is the \
+         cheapest way to find out. After that, the drive under {directory} is the thing to \
+         look at, along with anything else on this machine that has been unhappy.",
+        unread.what, unread.height, unread.because,
     )
 }
 
