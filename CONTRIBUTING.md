@@ -102,6 +102,23 @@ names the defect in plain words.
 Keep a pull request to one subject. If you found three unrelated things, that
 is three pull requests, and all three are welcome.
 
+`main` is the only long-lived branch, and it is never red: every change goes on
+a branch of its own, the checks run there, and `main` moves once they are
+green. Name the branch for what it does, with the same word the commit will
+carry:
+
+    feat/wallet-input-cap
+    fix/clock-skew-bans-the-messenger
+    docs/contributing
+    test/join-part-cost
+    chore/pin-cargo-audit
+
+The exception is an audit round, which is deliberately many subjects at once
+and is named `round-14` and nothing else. A round is not a fix or a feature,
+and a prefix claiming it is one would be a label that lies about what is under
+it. This project spends most of its time finding labels that lie, so it should
+not add one here.
+
 ## What is most wanted
 
 From [SECURITY.md](SECURITY.md): the sampling bound that lets a newcomer join
