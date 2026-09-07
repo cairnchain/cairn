@@ -42,6 +42,21 @@ fn loopback() -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
 }
 
+/// An address a client can actually dial.
+///
+/// A wallet's node listens on every interface, so what it reports is
+/// `0.0.0.0:port`. Connecting to that means loopback on Unix and is refused on
+/// Windows with `WSAEADDRNOTAVAIL`, which is a fact about the test rather than
+/// about the wallet: the node is listening, the caller is naming a place
+/// instead of a machine.
+fn reachable(address: SocketAddr) -> SocketAddr {
+    if address.ip().is_unspecified() {
+        SocketAddr::from((Ipv4Addr::LOCALHOST, address.port()))
+    } else {
+        address
+    }
+}
+
 fn cairn(text: &str) -> Amount {
     Amount::from_cairn(text).unwrap()
 }
@@ -134,7 +149,7 @@ fn a_socket_that_says_nothing_is_not_the_network() {
     let (wallet, _blocks, directory) = funded("silent-peer", 3);
     let recipient = SecretKey::from_bytes(&[9; 32]).public_key();
 
-    let quiet = TcpStream::connect(wallet.node().address()).unwrap();
+    let quiet = TcpStream::connect(reachable(wallet.node().address())).unwrap();
     assert!(
         until(Duration::from_secs(10), || wallet.node().peer_count() == 1),
         "the connection was accepted, which is all the old answer looked at"
@@ -177,7 +192,7 @@ fn a_peer_that_arrives_after_the_pool_took_it_is_still_offered_it() {
     }
 
     assert_eq!(wallet.node().peer_count(), 0, "nobody to broadcast to");
-    let listening = wallet.node().address();
+    let listening = reachable(wallet.node().address());
     let arriving = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(300));
         receiver.connect(listening).unwrap();
