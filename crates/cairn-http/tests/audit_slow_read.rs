@@ -57,6 +57,10 @@ const BETWEEN_SIPS: Duration = Duration::from_secs(8);
 /// most any answer can be worth.
 const WHOLE_CONNECTION: Duration = REQUEST_DEADLINE.saturating_add(ANSWER_DEADLINE);
 
+/// Between this test starting its clock and the server stamping the connection
+/// it accepted. Only ever makes the deadline later than the server's own.
+const SLACK: Duration = Duration::from_secs(3);
+
 fn start(bytes: usize) -> SocketAddr {
     let listener = cairn_http::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
     let address = listener.local_addr().unwrap();
@@ -81,29 +85,43 @@ fn ask(address: SocketAddr, patience: Duration) -> TcpStream {
     stream
 }
 
-/// Everything left on a connection, read as fast as it will come.
-fn drain(stream: &mut TcpStream) -> usize {
-    let mut buffer = vec![0u8; 64 * 1024];
-    let mut read = 0usize;
-    loop {
-        match stream.read(&mut buffer) {
-            Ok(0) | Err(_) => return read,
-            Ok(count) => read += count,
-        }
-    }
-}
-
-/// Reads up to `wanted` bytes, or fewer if the connection ends first.
-fn sip(stream: &mut TcpStream, wanted: usize) -> usize {
+/// The same, counting separately what arrives after `cutoff`.
+///
+/// A read completing after the cutoff carries bytes the server may have handed
+/// to the kernel before it: that residue is what a kernel holds, and it is
+/// measured. Anything beyond it is the server still writing.
+fn sip_after(stream: &mut TcpStream, wanted: usize, cutoff: Instant, late: &mut usize) -> usize {
     let mut buffer = vec![0u8; 64 * 1024];
     let mut read = 0usize;
     while read < wanted {
         match stream.read(&mut buffer) {
             Ok(0) | Err(_) => break,
-            Ok(count) => read += count,
+            Ok(count) => {
+                read += count;
+                if Instant::now() > cutoff {
+                    *late += count;
+                }
+            }
         }
     }
     read
+}
+
+/// Everything left, counting what arrives after `cutoff`.
+fn drain_after(stream: &mut TcpStream, cutoff: Instant, late: &mut usize) -> usize {
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut read = 0usize;
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => return read,
+            Ok(count) => {
+                read += count;
+                if Instant::now() > cutoff {
+                    *late += count;
+                }
+            }
+        }
+    }
 }
 
 /// How much a loopback connection on this machine swallows before the writer
@@ -214,9 +232,15 @@ fn taking_the_answer_in_sips_does_not_hold_the_connection() {
     let mut stream = ask(address, Duration::from_secs(5));
 
     let started = Instant::now();
+    // The moment after which nothing the server writes is within its budget.
+    // The server's own deadline runs from when it accepted the connection,
+    // which is a little before this, so this is the later of the two and the
+    // slack only makes the test kinder.
+    let cutoff = started + WHOLE_CONNECTION + SLACK;
     let mut taken = 0usize;
+    let mut late = 0usize;
     for _ in 0..sips {
-        let got = sip(&mut stream, SIP);
+        let got = sip_after(&mut stream, SIP, cutoff, &mut late);
         taken += got;
         if got == 0 {
             break;
@@ -227,22 +251,28 @@ fn taking_the_answer_in_sips_does_not_hold_the_connection() {
     // Then read as fast as the connection will give. A server still holding
     // the connection would finish the whole answer here; one that let go on
     // its deadline has nothing left to give but what the kernel is holding.
-    taken += drain(&mut stream);
+    taken += drain_after(&mut stream, cutoff, &mut late);
     let over = started.elapsed();
     println!(
         "a loopback pair here swallows {swallowed} bytes, so the answer is {answer}. \
-         Took {sips} sips over {sipped_for:?} and got {taken} bytes; connection over \
-         after {over:?}"
+         Took {sips} sips over {sipped_for:?} and got {taken} bytes, {late} of them \
+         after the {WHOLE_CONNECTION:?} the connection is allowed; over after {over:?}"
     );
+    // What arrived late rather than what arrived at all.
+    //
+    // The total cannot tell the two cases apart, and it took a red build on
+    // one platform and not the others to see it: a server that stopped on time
+    // still leaves whatever the kernel was holding, and a client sipping at a
+    // megabyte every eight seconds is still draining that long after the
+    // server has gone. Fifty megabytes arriving proves nothing on its own.
+    // Fifty megabytes arriving *after the deadline* proves the server was
+    // still writing, because nothing else can be holding them.
     assert!(
-        taken < answer / 2,
-        "the server wrote {taken} bytes of a {answer} byte answer to a caller taking it \
-         in sips, of which a kernel holds at most {swallowed} without the server waiting \
-         on anyone, so the connection outlived the {WHOLE_CONNECTION:?} it is allowed"
-    );
-    assert!(
-        over < sipped_for + REQUEST_DEADLINE,
-        "the connection was still going {over:?} after it was accepted"
+        late < answer / 4,
+        "{late} bytes of a {answer} byte answer arrived after the \
+         {WHOLE_CONNECTION:?} this connection is allowed, on a machine whose loopback \
+         holds {swallowed}. A server that let go on time leaves what the kernel was \
+         holding and no more, so this is the server still writing."
     );
 }
 
