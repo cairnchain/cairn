@@ -111,8 +111,18 @@ impl Forge {
     }
 }
 
+/// Waits for something to become true, or says what it was waiting for.
+///
+/// A minute rather than fifteen seconds. What is waited on here is a handshake
+/// between two nodes in the same process, which takes milliseconds when the
+/// machine is free, and the deadline exists for the case where it never
+/// happens at all. Fifteen seconds is close enough to the work that a runner
+/// building the rest of this suite at the same time crossed it, and a deadline
+/// that measures the machine rather than the code is worth nothing: it costs
+/// no time at all when the condition is met, and the whole point of it is the
+/// case where it is not.
 fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
         if ready() {
             return;

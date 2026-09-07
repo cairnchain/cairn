@@ -1040,9 +1040,15 @@ fn a_node_lets_go_of_the_peer_and_its_queue_together() {
     // Not one byte is read from the socket while this waits. A node that still
     // needed the peer to take its answers before it could let go would be
     // holding both threads and the whole queue at the end of it.
-    let released = wait_until(FRAME_PATIENCE + Duration::from_secs(10), || {
-        node.peer_count() == 0
-    });
+    // Twice the patience and then some. The stall clock does not start when
+    // this wait does: it starts when the buffer under the socket fills, which
+    // is somewhere inside the sending above and cannot be known from here, and
+    // on a machine with deep buffers it may be the last answer of the last
+    // window that does it.
+    let released = wait_until(
+        FRAME_PATIENCE.saturating_mul(2) + Duration::from_secs(20),
+        || node.peer_count() == 0,
+    );
 
     // What the operating system already took is still there to collect, and
     // then the stream ends. Anything past that would be the node writing to a
