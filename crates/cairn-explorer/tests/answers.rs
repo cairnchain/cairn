@@ -38,7 +38,7 @@ mod api;
 mod index;
 
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cairn_crypto::{PublicKey, SecretKey};
 use cairn_http::{Request, Response};
@@ -732,6 +732,14 @@ fn a_rebuild_does_not_stop_the_node() {
     /// room on both sides: five times under what the repaired walk leaves, and
     /// a hundred times over what a walk that stops the node does.
     const SHARE: u64 = 40;
+    /// How small a share of a rebuild the longest single wait has to be.
+    ///
+    /// A walk that takes the chain for one block and lets it go between makes
+    /// the worst wait one block's work out of twelve hundred. One that holds it
+    /// to the tip makes the worst wait the whole rebuild. Three sits between
+    /// the two with room on both sides and does not care how fast the machine
+    /// is, because both halves of it are measured on the same run.
+    const SHARE_OF_THE_WALK: u32 = 3;
 
     let params = params();
     let miner = wallet(1);
@@ -818,12 +826,28 @@ fn a_rebuild_does_not_stop_the_node() {
         // block and the count keeps pace with the chain. Held across the walk,
         // all it gets is the moment before the lock is taken and one turn when
         // it is given back.
+        // The longest one question waited, against how long the whole rebuild
+        // took. That is the difference between the two cases and nothing else
+        // is: a walk that holds the chain to the tip makes the thread beside it
+        // wait the whole rebuild for its next turn, and a walk that takes the
+        // chain a block at a time never makes it wait for more than a block.
+        //
+        // The count cannot say it. Comparing a thread that takes a lock 1200
+        // times against a thread spinning on nothing measures the lock, not the
+        // walk: measured here, 160 turns during the rebuild against 54 807 free
+        // running in the same 4.6 ms, which is 342 times and reads as a node
+        // stopped dead. It was not stopped. It was interleaved, once per block,
+        // and 1200 blocks is where 160 comes from. The free rate was never the
+        // right yardstick, and the doc above about a stopped node leaving "a
+        // couple of hundred" turns is the proof: at this size the two cases
+        // land on the same number.
+        let longest = Duration::from_micros(waited);
         assert!(
-            during.saturating_mul(SHARE) >= unhindered,
-            "the node got {during} questions in during a {rebuild:?} rebuild, against \
-             {unhindered} it would have answered in the same time with nobody \
-             rebuilding, and one of them waited {waited} us. That is a node stopped \
-             rather than a node interleaved."
+            longest.saturating_mul(SHARE_OF_THE_WALK) < rebuild,
+            "one question waited {longest:?} of a {rebuild:?} rebuild, so the walk held \
+             the chain across it rather than taking it a block at a time. The node got \
+             {during} questions in while it ran, against {unhindered} free running in \
+             the same time"
         );
     });
 }

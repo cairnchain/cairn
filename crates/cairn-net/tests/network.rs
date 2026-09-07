@@ -460,11 +460,22 @@ fn a_node_stops_promptly_with_nobody_around() {
 fn a_seed_that_never_answers_is_still_known() {
     let params = params();
 
-    // An address nothing is listening on: bound to learn the port, then let go.
-    let vacant = {
-        let held = std::net::TcpListener::bind(loopback()).unwrap();
-        held.local_addr().unwrap()
-    };
+    // An address nothing is listening on: bound to learn a port, then let go,
+    // and then checked rather than assumed. On a busy machine the port can be
+    // taken between the letting go and the dial, by this suite's own other
+    // tests as easily as by anything else, and then this asks the node to fail
+    // at something that works. Measured on a Linux runner, where it did.
+    let vacant = (0..16)
+        .map(|_| {
+            let held = std::net::TcpListener::bind(loopback()).unwrap();
+            let address = held.local_addr().unwrap();
+            drop(held);
+            address
+        })
+        .find(|address| {
+            std::net::TcpStream::connect_timeout(address, Duration::from_millis(250)).is_err()
+        })
+        .unwrap_or_else(|| panic!("sixteen ports in a row were all listening on this machine"));
 
     let node = Node::bind(params, loopback()).unwrap();
     node.remember_seed(vacant);
