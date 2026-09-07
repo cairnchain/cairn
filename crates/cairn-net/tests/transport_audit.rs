@@ -987,11 +987,6 @@ fn a_node_lets_go_of_the_peer_and_its_queue_together() {
     let released = wait_until(FRAME_PATIENCE + Duration::from_secs(10), || {
         node.peer_count() == 0
     });
-    assert!(
-        released,
-        "the node should give up on a peer that stops reading, without waiting on that \
-         peer to do anything",
-    );
 
     // What the operating system already took is still there to collect, and
     // then the stream ends. Anything past that would be the node writing to a
@@ -1009,7 +1004,25 @@ fn a_node_lets_go_of_the_peer_and_its_queue_together() {
         }
     }
     node.shutdown();
-    println!("{collected} answers were still on the wire after the node let go");
+    println!(
+        "released={released} after the wait; {collected} answers were still on the wire, \
+         and the stream {} end",
+        if ended { "did" } else { "did not" }
+    );
+
+    // Said after the collecting, so that a failure carries the one number that
+    // separates the two ways this can go. A node still holding the peer with
+    // very little on the wire never filled a buffer and was never blocked, so
+    // the fixture did not create the condition on this machine; one holding it
+    // with the whole queue on the wire is a node waiting on a peer that reads
+    // nothing, which is the defect.
+    assert!(
+        released,
+        "the node should give up on a peer that stops reading, without waiting on that \
+         peer to do anything. {collected} answers reached the wire: few of them means \
+         no buffer was ever filled here and the fixture never blocked the node, \
+         many of them means a node waiting on a peer that reads nothing",
+    );
 
     assert!(
         ended,

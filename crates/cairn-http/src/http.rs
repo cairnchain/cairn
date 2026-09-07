@@ -105,6 +105,13 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// long enough that a caller reading at a human pace is not a spin.
 const WRITE_POLL: Duration = Duration::from_millis(50);
 
+/// The most that goes to the socket in one call.
+///
+/// Sets how often a long answer's deadline is looked at: once per chunk. Large
+/// enough that it costs nothing on a fast link, small enough that a caller
+/// cannot buy a whole answer's worth of writing on one check.
+const WRITE_CHUNK: usize = 64 * 1024;
+
 /// What a caller asked for, once the head has been read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
@@ -455,6 +462,19 @@ impl io::Read for Timed<'_> {
 
 impl Write for Timed<'_> {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        // Never more than a chunk in one call, so the moment below is looked
+        // at once per chunk rather than once per answer.
+        //
+        // `write_all` hands the whole body down in one slice, and a `write`
+        // that takes all of it checks the deadline exactly once, at the start.
+        // Whether that is enough then rests on the kernel refusing the bytes,
+        // which is not a promise any of them make: one that accepts a large
+        // send into its own buffers turns the whole answer into a single call
+        // that was inside the budget when it began. Writing less than asked
+        // for is what `write` is allowed to do and what `write_all` expects,
+        // so this costs nothing and makes the budget hold without depending on
+        // how a particular kernel behaves.
+        let data = data.get(..data.len().min(WRITE_CHUNK)).unwrap_or(data);
         loop {
             let left = self.left()?;
             // Set as well as polled: a socket that could not be put into
