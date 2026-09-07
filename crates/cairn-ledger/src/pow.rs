@@ -9,10 +9,25 @@ pub const MIN_DIFFICULTY: u64 = 1;
 
 /// Blocks considered when retargeting.
 ///
-/// Short enough to answer a swing in hash rate within minutes. Bitcoin waits
-/// two weeks, which suits a chain nobody can meaningfully swing; on a young
-/// chain the same rule freezes the ledger for weeks after rented hash rate
-/// leaves.
+/// Ninety of them at a minute apiece, so the window spans an hour and a half
+/// and the loop closed around it answers in hours rather than in minutes.
+/// Measured in `tests/audit_how_fast_the_difficulty_answers.rs` from a chain
+/// warmed on schedule: a hash rate that halves has half of it after 22 blocks,
+/// which is 37 minutes of chain time, and ninety percent after 90 blocks,
+/// which is a little over two hours. A tenfold loss reaches the same ninety
+/// percent after 64 blocks and three and a half hours.
+///
+/// Slow by construction rather than by accident. The weights run 1 to 90 and
+/// sum to 4095, so the newest gap carries 2.2 percent of the measurement and
+/// one block arriving late moves the difficulty by about a tenth however late
+/// it is. That damping is what a miner writing its own timestamps cannot get
+/// past, and it is the same damping that makes an honest answer take hours.
+///
+/// Hours against weeks is the comparison the window is for, and it survives:
+/// Bitcoin waits two weeks, which suits a chain nobody can meaningfully swing;
+/// on a young chain the same rule freezes the ledger for weeks after rented
+/// hash rate leaves. What did not survive is the word this doc used to use,
+/// which was minutes, and which no arithmetic here supports.
 pub const DIFFICULTY_WINDOW: usize = 90;
 
 /// Blocks the median time past is taken over.
@@ -113,8 +128,10 @@ pub fn median_time_past(recent: &[HeaderSummary]) -> Option<u64> {
 /// The difficulty the next block must carry.
 ///
 /// A linearly weighted moving average: recent solve times count for more than
-/// older ones, so the chain answers a change in hash rate within a handful of
-/// blocks instead of a fixed epoch.
+/// older ones, so the chain answers a change in hash rate continuously rather
+/// than at the edges of a fixed epoch. How long that answer takes is a
+/// separate question from how often it is asked, and it is answered on
+/// [`DIFFICULTY_WINDOW`].
 ///
 /// The solve times are read along a timeline the retarget keeps for itself. It
 /// opens at the oldest header in the window and then moves by each claimed gap,

@@ -192,7 +192,10 @@ pub struct SampledStart {
     /// clock, that makes the cheap run cost the one thing a forger cannot
     /// manufacture. Blocks at the floor have to be spaced at the target or
     /// the retarget demands more of them, so a thousand of them span most of
-    /// a day, and a day ahead of the reader is refused.
+    /// a day, and a reader refuses a tip more than two hours ahead of its own
+    /// clock. Two hours is [`ConsensusParams::max_timestamp_drift`], and this
+    /// used to say a day: true, and twelve times looser than the rule it
+    /// stands in for, inside the one argument that rule is load-bearing for.
     pub tail: Vec<BlockHeader>,
     /// The header the tip was built on, opened in the tip's own history.
     ///
@@ -492,6 +495,34 @@ fn levels_for(blocks: u64) -> u32 {
 /// Whole numbers throughout, because both sides have to draw exactly the same
 /// list and floating point is not the same everywhere. The halving that makes
 /// the distribution is done on the work itself rather than on a fraction of it.
+///
+/// **The level is drawn from one byte, and one byte does not divide evenly.**
+/// On a thirty year chain `levels` is 14 and 256 is 14 * 18 + 4, so the first
+/// four levels come up 19 times in 256 and the other ten 18 times. Level zero
+/// is the oldest half of the work and level thirteen the band nearest the tip,
+/// so what is over-drawn is the deep end and what is under-drawn is the ten
+/// levels nearest the tip, by 1.5625 percent: 4096 draws do the work of 4032.
+/// `FlyClient` assumes the choice is uniform, so this is a real loss, and it
+/// is measured in `tests/audit_sampling_as_published.rs` rather than argued.
+///
+/// It is left alone, for three reasons that have to hold together.
+///
+/// A prover and a newcomer run this same function over the same tip, so the
+/// bias cannot make them disagree. It is not a split, it is a slightly weaker
+/// guarantee.
+///
+/// The guarantee it weakens was measured through this function and not through
+/// a model of it: `examples/adversarial_placement` runs the real draw, so the
+/// 43 percent it reports is this biased draw's own number, and the 40 percent
+/// [`SAMPLES`] publishes holds three points back from it. The loss is inside
+/// the published figure rather than outside it.
+///
+/// And removing it changes which positions a chain is asked about, which every
+/// prover and every newcomer would have to change on the same day: a new
+/// network number, by this project's own rule for a changed rule. That is not
+/// worth spending on 1.6 percent. Whenever the draw next changes for something
+/// that is worth it, the level should be taken from more than one byte, which
+/// puts the bias below anything measurable at no cost in code.
 #[must_use]
 pub fn draw(seed: Hash32, count: usize, total_work: u128, blocks: u64) -> Vec<u128> {
     if total_work == 0 || count == 0 {

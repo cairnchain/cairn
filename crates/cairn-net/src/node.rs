@@ -31,6 +31,7 @@ use cairn_ledger::pow::RECENT_HEADERS;
 use cairn_ledger::sampling::{check_start, open_start, SampledStart, SAMPLES};
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::Transfer;
+use cairn_ledger::validation::BlockError;
 use cairn_ledger::validation::ConsensusParams;
 use cairn_ledger::validation::TransferError;
 use cairn_ledger::LedgerState;
@@ -345,6 +346,34 @@ const UNWEIGHED_PEERS: usize = 2;
 
 /// Addresses counted towards [`UNWEIGHED_PEERS`] at once.
 const UNWEIGHED_SENDERS: usize = 64;
+
+/// Blocks refused for being dated ahead of this machine's clock before a
+/// person is told the clock is the likely reason.
+///
+/// One is a number a stranger wrote in a field, exactly as an unreadable
+/// version is, and this node cannot tell one apart from a miner whose own
+/// clock is fast. A run of them is different: every block on the chain is
+/// dated, so a machine running behind refuses whatever it is offered, from
+/// everybody, for as long as it is wrong.
+const BEHIND_BLOCKS: u64 = 8;
+
+/// Addresses those blocks have to have arrived from.
+///
+/// The same reasoning as [`UNJUDGED_PEERS`] and the same honest caveat:
+/// whoever holds two addresses meets it. What it rules out is the case that
+/// costs nothing, which is one machine with a fast clock.
+const BEHIND_PEERS: usize = 2;
+
+/// Addresses counted towards [`BEHIND_PEERS`] at once.
+const BEHIND_SENDERS: usize = 64;
+
+/// Seconds of refusing none of them before the count starts again.
+///
+/// A clock that is wrong renews its own evidence with every block the network
+/// produces, so nothing that matters is lost by forgetting. What is gained is
+/// that one block from a miner with a fast clock, met an hour ago, never adds
+/// up to a claim about this machine.
+const BEHIND_MEMORY: u64 = 3_600;
 
 /// A gap between two rounds of maintenance that means the machine was away.
 ///
@@ -901,6 +930,36 @@ pub struct Unweighable {
     pub over: u64,
 }
 
+/// What says this machine's clock is behind the network's.
+///
+/// A block dated more than the allowed drift ahead of the reading node's own
+/// clock is refused, and it is the one refusal in the rule set that two honest
+/// nodes can disagree about: the reader reverses it by waiting. So a machine
+/// whose clock is slow refuses honest blocks, and until this existed it said
+/// nothing at all about a clock to the person running it. Nowhere else in this
+/// node does either.
+///
+/// Evidence and not a verdict, for the same reason as [`Unjudged`]: a
+/// timestamp is a number a stranger writes in a field. The exception is
+/// [`Self::own_first_block`], which is the network's first block as compiled
+/// into this binary, refused by this machine. Nobody else wrote that one, so
+/// one of those settles it on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Behind {
+    /// Seconds the furthest refused block stood ahead of this clock. What the
+    /// clock is wrong by is this less the drift below.
+    pub seconds: u64,
+    /// Seconds of drift the rules allow before a block is refused at all.
+    pub drift: u64,
+    /// Blocks refused for it.
+    pub blocks: u64,
+    /// Connections they arrived on.
+    pub peers: usize,
+    /// Set when what was refused was this build's own first block, which no
+    /// peer sent and nobody but this machine can have got wrong.
+    pub own_first_block: bool,
+}
+
 type PeerId = u64;
 
 /// One live connection, as the rest of the node sees it.
@@ -1150,6 +1209,12 @@ struct Shared {
     /// A leaf as well. It is written after the weighing, which holds neither
     /// the chain nor the collection, and it takes nothing.
     unweighed: Mutex<Unweighed>,
+    /// Blocks refused for being dated ahead of this machine's clock, and who
+    /// sent them.
+    ///
+    /// A leaf as well, written from the thread reading a peer once the chain
+    /// has been let go of, and once at start for this build's own first block.
+    out_of_step: Mutex<OutOfStep>,
     /// What this node is asking the network about where fallen notes sit.
     ///
     /// Empty on a node nobody has asked to recover anything, which is every
@@ -1333,6 +1398,88 @@ fn no_showing_checks_out(met: &Unweighed) -> Option<Unweighable> {
         showings: met.showings,
         peers: met.peers.len(),
         over: met.last.saturating_sub(met.first),
+    })
+}
+
+/// Blocks refused for being dated ahead of this machine's clock, as they add
+/// up.
+///
+/// Counted rather than acted on, the same shape as [`Unreadable`]. What one of
+/// these means is nothing; what a run of them means is settled in
+/// [`clock_is_behind`], kept apart so the rule can be read on its own.
+#[derive(Debug, Default)]
+struct OutOfStep {
+    /// The furthest ahead of this clock any of them was dated. The furthest
+    /// rather than the last, because what a person needs is the largest gap
+    /// the machine has actually met.
+    ahead: u64,
+    blocks: u64,
+    /// The peers they arrived from, up to [`BEHIND_SENDERS`].
+    peers: HashSet<Sender>,
+    /// When the last of them arrived.
+    last: u64,
+    /// Set when this node refused the first block of its own network, which is
+    /// compiled into this binary and which no peer sent it.
+    own_first_block: bool,
+}
+
+/// Counts one block refused for standing ahead of this machine's clock.
+///
+/// Kept out of [`Shared`] so the counting can be read and tested on its own,
+/// and counted by address rather than by connection for the reason
+/// [`Sender`] gives.
+fn count_out_of_step(met: &mut OutOfStep, from: Option<Sender>, ahead: u64, now: u64) {
+    let lapsed = met.blocks > 0 && (now < met.last || now.saturating_sub(met.last) > BEHIND_MEMORY);
+    if lapsed {
+        let own_first_block = met.own_first_block;
+        *met = OutOfStep {
+            own_first_block,
+            ..OutOfStep::default()
+        };
+    }
+    met.ahead = met.ahead.max(ahead);
+    met.blocks = met.blocks.saturating_add(1);
+    met.last = now;
+    if let Some(from) = from {
+        if met.peers.len() < BEHIND_SENDERS {
+            met.peers.insert(from);
+        }
+    }
+}
+
+/// Whether what this node has refused adds up to a clock that is behind.
+///
+/// Two ways to meet it, and they are not the same evidence. A run of blocks
+/// from several peers is the ordinary one, and it is circumstantial in the way
+/// [`too_old_for_the_chain`] is: a timestamp is a number, and whoever holds
+/// two addresses can write two of them.
+///
+/// Refusing this build's own first block is not circumstantial at all. That
+/// block is in the binary, its date is older than every chain on the network,
+/// and the only way to be past it is for this machine's clock to be behind the
+/// day the network opened. One is enough, and it is worth saying on its own
+/// because the node cannot start at all: it has no chain, so every peer's tip
+/// fails the same check and there is nothing to show for it but a height that
+/// never appears.
+///
+/// That half is spent the moment the node has a chain, which is what
+/// `still_without_a_chain` carries. The first block is laid down once, at
+/// start, and a clock put right while the node runs lets it take the chain
+/// from a peer instead; left ungated the line would follow such a node for the
+/// rest of its life, telling its owner to fix something already fixed.
+fn clock_is_behind(met: &OutOfStep, drift: u64, still_without_a_chain: bool) -> Option<Behind> {
+    let own_first_block = met.own_first_block && still_without_a_chain;
+    let enough =
+        own_first_block || (met.blocks >= BEHIND_BLOCKS && met.peers.len() >= BEHIND_PEERS);
+    if !enough {
+        return None;
+    }
+    Some(Behind {
+        seconds: met.ahead,
+        drift,
+        blocks: met.blocks,
+        peers: met.peers.len(),
+        own_first_block,
     })
 }
 
@@ -1826,6 +1973,35 @@ impl Shared {
         count_unreadable(&mut met, from, version, now);
     }
 
+    /// Counts one block refused for standing further ahead than this node's
+    /// clock allows, and who sent it.
+    ///
+    /// Nothing is held against the peer here or anywhere. The block is valid
+    /// to every node whose clock is right, and this node reverses the refusal
+    /// by waiting; what a run of them says is about this machine.
+    fn clock_looks_behind(&self, from: Option<Sender>, ahead: u64, now: u64) {
+        let mut met = self
+            .out_of_step
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        count_out_of_step(&mut met, from, ahead, now);
+    }
+
+    /// Writes down that this node refused the first block of its own network.
+    ///
+    /// Nobody sent it: it is in the binary. The only way to be past its date
+    /// is for this machine's clock to be behind the day the network opened,
+    /// and the node then has no chain, fails every peer's tip the same way,
+    /// and cannot start. It used to do all of that without a word.
+    fn own_first_block_refused(&self, ahead: u64, now: u64) {
+        let mut met = self
+            .out_of_step
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        met.own_first_block = true;
+        count_out_of_step(&mut met, None, ahead, now);
+    }
+
     /// Counts one showing of a chain's work that would not weigh, and who sent
     /// it.
     ///
@@ -2299,28 +2475,44 @@ impl Shared {
 /// block it had and start over. A node mining a real network lost its chain
 /// every time it was restarted, and every test here ran on a network with no
 /// first block to pin, so nothing said so.
+/// Says how far ahead of `now` the first block stood, when that is why it was
+/// refused.
+///
+/// The refusal used to be dropped whole. It is the one that costs a node its
+/// whole start: with no chain it fails every peer's tip the same way, so it
+/// keeps no peer, reaches no height, and prints the line a node waiting for
+/// its first peer prints. Nothing anywhere said the word clock.
 fn open_the_chain(
     chain: &mut ChainStore,
     log: Option<&mut BlockLog>,
     params: ConsensusParams,
     now: u64,
-) {
+) -> Option<u64> {
     // Only for a network that pins its first block. An unnamed one, which is
     // what tests use, starts from whatever it is given.
     if params.genesis.is_none() || !chain.is_empty() {
-        return;
+        return None;
     }
-    let Some(block) = genesis::block(params.network) else {
-        return;
-    };
-    if chain.add_block(block.clone(), now).is_err() {
-        return;
+    let block = genesis::block(params.network)?;
+    if let Err(error) = chain.add_block(block.clone(), now) {
+        // Every other way of refusing the block in this binary is a defect in
+        // the binary and no clock would mend it. This one is a machine dated
+        // before the day the network opened, which the person running it can
+        // fix in a minute once somebody says so.
+        return match error {
+            ChainError::InvalidBlock {
+                source: BlockError::TimestampTooFarAhead { timestamp, .. },
+                ..
+            } => Some(timestamp.saturating_sub(now)),
+            _ => None,
+        };
     }
     if let Some(log) = log {
         if log.is_empty() {
             let _ = log.append(&block);
         }
     }
+    None
 }
 
 /// A number this node calls itself by, for one run.
@@ -2501,7 +2693,30 @@ impl Node {
                 if block.header.height < start {
                     continue;
                 }
-                if !matches!(chain.add_block(block, now), Ok(Accepted::Extended)) {
+                // Judged against its own timestamp, not against the clock.
+                //
+                // These are blocks this node validated and wrote down itself.
+                // Every rule is checked again, and one of them, the drift
+                // ceiling, is a fact about the reader rather than about the
+                // block: a header cannot sit more than the drift ahead of its
+                // own timestamp, so asking it this way asks a question the
+                // block already answered.
+                //
+                // On the wall clock it was the one rule whose answer could
+                // change while the block did not. A machine whose clock steps
+                // back, which is an NTP correction or a dead battery, refused
+                // its own blocks from here, `break` cut the replay, and
+                // everything past that point was counted refused and dropped
+                // from the log. `Restored::refused` says what was cut is asked
+                // for again; the peers offer it back and this node refuses it
+                // again for the same reason, so a machine with a wrong clock
+                // was stuck at that height for as long as the clock stayed
+                // wrong. The same shape as `ChainStore::reapply`, one crate up.
+                let its_own_clock = block.header.timestamp;
+                if !matches!(
+                    chain.add_block(block, its_own_clock),
+                    Ok(Accepted::Extended)
+                ) {
                     break;
                 }
                 applied = applied.saturating_add(1);
@@ -2533,7 +2748,10 @@ impl Node {
         // block turns the first record replayed into a duplicate, which is not
         // an extension, which ends the replay and sets aside everything this
         // node had.
-        open_the_chain(&mut chain, Some(&mut log), params, now);
+        // Nothing to record it on yet: this runs before the node exists. The
+        // same refusal is met again inside `Node::start`, which has somewhere
+        // to write it down.
+        let _ = open_the_chain(&mut chain, Some(&mut log), params, now);
 
         // Headers are kept whatever happens to the blocks. A node updated from
         // a version that had no header log has an empty one and a chain, so it
@@ -2647,6 +2865,7 @@ impl Node {
             unsaved_book: Mutex::new(None),
             unjudged: Mutex::new(Unreadable::default()),
             unweighed: Mutex::new(Unweighed::default()),
+            out_of_step: Mutex::new(OutOfStep::default()),
             asking: Mutex::new(Asking::default()),
         });
 
@@ -2655,13 +2874,16 @@ impl Node {
             // with no directory has no log to write the first block to, which
             // is what `Node::bind` does and what tests use.
             let mut chain = shared.chain();
-            let has_log = {
+            let now = unix_now();
+            let (has_log, ahead) = {
                 let mut log = shared.log.lock().unwrap_or_else(PoisonError::into_inner);
                 let blocks = log.as_mut().map(|store| &mut store.blocks);
                 let present = blocks.is_some();
-                open_the_chain(&mut chain, blocks, params, unix_now());
-                present
+                (present, open_the_chain(&mut chain, blocks, params, now))
             };
+            if let Some(ahead) = ahead {
+                shared.own_first_block_refused(ahead, now);
+            }
             // A chain with a log behind it may let go of the bodies it has
             // written; one without has nowhere to read them back from, so it
             // keeps every one it might still need.
@@ -3048,6 +3270,33 @@ impl Node {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         no_showing_checks_out(&met)
+    }
+
+    /// Whether the blocks this node is refusing say its own clock is behind.
+    ///
+    /// `None` until a run of them has arrived from more than one peer, or
+    /// until this node has refused the first block of its own network, which
+    /// is in the binary and settles it on its own.
+    ///
+    /// Not a verdict and never acted on: a timestamp is a number a stranger
+    /// writes in a field, and a node that stopped on one would be handing a
+    /// stranger a way to stop it. What it is worth is somebody looking at the
+    /// machine's clock, and it is the only place in this node that mentions
+    /// one.
+    pub fn clock_behind(&self) -> Option<Behind> {
+        // The chain first and let go of before the count is taken, which is
+        // the order everything here takes them in.
+        let still_without_a_chain = self.shared.chain().is_empty();
+        let met = self
+            .shared
+            .out_of_step
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        clock_is_behind(
+            &met,
+            self.shared.params.max_timestamp_drift,
+            still_without_a_chain,
+        )
     }
 
     /// What this node is still missing before it can show a newcomer the
@@ -5479,6 +5728,21 @@ fn decide(
     (reaction, passing)
 }
 
+/// Whether the flood window that began at `started` is over by `now`.
+///
+/// A clock that went backwards says nothing about how long the window has been
+/// open, so the window starts again rather than counting a negative. The same
+/// reading [`was_away`] takes of the same event, and here it is not only
+/// liveness: without it a step back of an hour held one window open for that
+/// hour, and the first peer to send [`MAX_MESSAGES_PER_WINDOW`] messages
+/// inside it was dropped as a flood and its host refused for
+/// [`crate::refusal::REFUSAL_SECONDS`]. Two thousand messages is a few seconds
+/// of any peer serving a catch-up, so what the step bought was a node banning
+/// whoever was feeding it.
+fn window_is_over(started: u64, now: u64) -> bool {
+    now < started || now.saturating_sub(started) >= FLOOD_WINDOW
+}
+
 /// Whether the gap between two rounds of maintenance means the machine was not
 /// running, or not on the network, while it passed.
 ///
@@ -5868,15 +6132,67 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
     true
 }
 
+/// Writes down the three blocks a node refuses without blaming anybody.
+///
+/// All three are here rather than among the reasons to drop a peer because
+/// none of them is the peer's doing, and all three used to pass in silence: an
+/// operator saw a height that had stopped moving and nothing else. Counted, so
+/// a run of them from several peers can be read for what it is.
+fn note_what_was_not_taken(
+    shared: &Arc<Shared>,
+    reaction: &Reaction,
+    from: Option<Sender>,
+    now: u64,
+) {
+    // A block on a branch this node can never cross to. A node whose height
+    // never moves while these arrive has been handed a chain nobody else is
+    // on, and until this there was nowhere that showed.
+    if reaction.unreachable.is_some() {
+        shared.out_of_reach.fetch_add(1, Ordering::Relaxed);
+    }
+    // A block written under rules this build does not have. It is carrying
+    // what its own chain carries, and this node is the one that cannot read
+    // it; a run of these from several peers is a node the network has left
+    // behind.
+    if let Some(version) = reaction.unjudged {
+        shared.cannot_judge(from, version, now);
+    }
+    // A block dated further ahead than this node's clock allows. This one used
+    // to close the connection and refuse the host for ten minutes, so a node
+    // two minutes slow banned every peer that offered it a block a slightly
+    // fast miner had published, which is every peer it had. A run of these
+    // from several peers is this machine's clock, and nothing else in the node
+    // ever mentions one.
+    if let Some(ahead) = reaction.ahead_of_the_clock {
+        shared.clock_looks_behind(from, ahead, now);
+    }
+}
+
 /// Whether a framing failure is the peer's fault rather than the network's.
 ///
 /// A closed socket or a peer from another network has done nothing wrong. A
-/// peer that opens a frame and stops, announces a size past the limit, or
-/// sends something that does not decode is either broken or probing.
+/// peer that announces a size past the limit, or sends something that does not
+/// decode, wrote those bytes itself: nothing between the two ends produces
+/// them, so it is broken or probing either way.
+///
+/// A frame that stalls is the other kind, and it used to be counted here. It
+/// is a fact about a link and not about whoever is at the end of it. The floor
+/// a frame has to clear is `PROGRESS_BYTES` in `FRAME_PATIENCE`, about three
+/// and a quarter kilobytes a second, and the argument for lowering it to that
+/// applies word for word to what is done about falling under it: a phone on a
+/// weak signal, or a rural line, delivers under it steadily. Refusing the host
+/// for [`crate::refusal::REFUSAL_SECONDS`] over that is a node deciding, for
+/// ten minutes at a time, that a design whose whole point is that anyone can
+/// run a full node does not mean anyone.
+///
+/// The connection still ends, which is the whole of what a stalled frame
+/// costs anybody: the thread, the slot and the buffer are let go of at once,
+/// and a link that cannot carry a frame cannot carry a chain either. What it
+/// no longer costs is the address, so a link that comes back is talked to.
 fn is_peer_fault(error: &WireError) -> bool {
     matches!(
         error,
-        WireError::Stalled { .. } | WireError::FrameTooLarge { .. } | WireError::Malformed(_)
+        WireError::FrameTooLarge { .. } | WireError::Malformed(_)
     )
 }
 
@@ -5941,7 +6257,7 @@ fn read_loop(
         let message = match read_message(&mut stream, network) {
             Ok(Incoming::Message(message)) => {
                 last_heard = unix_now();
-                if last_heard.saturating_sub(window_start) >= FLOOD_WINDOW {
+                if window_is_over(window_start, last_heard) {
                     window_start = last_heard;
                     in_window = 0;
                 }
@@ -6029,24 +6345,12 @@ fn read_loop(
         if let Some((from, headers)) = reaction.offered_headers.take() {
             shared.take_headers(id, from, &headers, last_heard);
         }
-        // A block on a branch this node can never cross to. Nothing is done
-        // about it and nothing is held against the peer; it is counted,
-        // because a node whose height never moves while these arrive is a
-        // node that has been handed a chain nobody else is on, and until now
-        // there was nowhere that showed.
-        if reaction.unreachable.is_some() {
-            shared.out_of_reach.fetch_add(1, Ordering::Relaxed);
-        }
-        // A block written under rules this build does not have. Nothing is
-        // held against the peer, which is why it is here rather than among the
-        // reasons to drop one: it is carrying what its own chain carries, and
-        // this node is the one that cannot read it. Counted, because a node
-        // that has met a run of these from several peers has almost certainly
-        // been left behind by the network, and that used to show up as nothing
-        // but a height that had stopped moving.
-        if let Some(version) = reaction.unjudged {
-            shared.cannot_judge(sender_of(peer.advertised, remote), version, last_heard);
-        }
+        note_what_was_not_taken(
+            shared,
+            &reaction,
+            sender_of(peer.advertised, remote),
+            last_heard,
+        );
         if !reaction.broadcast.is_empty() {
             shared.broadcast(Some(id), &Message::Announce(reaction.broadcast));
         }
@@ -6231,6 +6535,193 @@ mod unjudged_tests {
         count_unreadable(&mut met, Some(address(8)), 7, 1_000 + UNJUDGED_STRETCH * 2);
         let said = too_old_for_the_chain(&met).expect("two addresses over the stretch");
         assert_eq!(said.peers, UNJUDGED_PEERS);
+    }
+}
+
+/// What a node says and does about a clock, its own or a block's.
+///
+/// AUDIT: nothing anywhere in this crate or the one above it ever mentioned a
+/// clock to the person running the node, and the one refusal that turns on a
+/// clock was answered by refusing the host that carried it.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+mod clock_tests {
+    use std::io;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use cairn_ledger::genesis;
+    use cairn_ledger::validation::ConsensusParams;
+
+    use super::{
+        clock_is_behind, count_out_of_step, is_peer_fault, open_the_chain, window_is_over,
+        ChainStore, OutOfStep, WireError, BEHIND_BLOCKS, BEHIND_PEERS, FLOOD_WINDOW,
+    };
+    use crate::wire::MAX_FRAME_BYTES;
+
+    const DRIFT: u64 = 7_200;
+
+    fn address(last: u8) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, last)), 8_333)
+    }
+
+    /// **A frame that stalls is a fact about a link, not a fault of whoever is
+    /// at the end of it.**
+    ///
+    /// AUDIT, repaired. `Stalled` was counted a peer fault, so a link falling
+    /// under the frame floor cost its host [`crate::refusal::REFUSAL_SECONDS`]
+    /// rather than the connection alone. The floor is `PROGRESS_BYTES` in
+    /// `FRAME_PATIENCE`, about three and a quarter kilobytes a second, and the
+    /// argument written above that constant for lowering it that far says a
+    /// phone on a weak signal or a rural line delivers under it steadily. That
+    /// argument is about what a slow link is, so it applies to the ban as much
+    /// as to the floor.
+    #[test]
+    fn a_slow_link_loses_its_connection_and_not_its_address() {
+        assert!(
+            !is_peer_fault(&WireError::Stalled {
+                had: 1_024,
+                wanted: MAX_FRAME_BYTES,
+            }),
+            "a link that could not keep up is refused for ten minutes, on a \
+             design whose whole claim is that anyone can run a full node"
+        );
+
+        // What a peer wrote itself, which nothing between the two ends
+        // produces. These must stay faults or a node stops defending itself.
+        assert!(is_peer_fault(&WireError::FrameTooLarge {
+            declared: MAX_FRAME_BYTES + 1,
+        }));
+        assert!(is_peer_fault(&WireError::Malformed(
+            cairn_primitives::codec::CodecError::UnexpectedEnd
+        )));
+        assert!(
+            !is_peer_fault(&WireError::Io(io::Error::from(
+                io::ErrorKind::ConnectionReset
+            ))),
+            "and a closed socket never was one"
+        );
+    }
+
+    /// **A clock stepping back must not turn an ordinary peer into a flood.**
+    ///
+    /// AUDIT, repaired. The window rolled on `now - started >= FLOOD_WINDOW`
+    /// with nothing said about `now` going behind `started`, so a step back of
+    /// an hour held one ten second window open for that hour. Every message
+    /// counted into it, and the first peer past `MAX_MESSAGES_PER_WINDOW`,
+    /// which is a few seconds of any peer serving a catch-up, was dropped as a
+    /// flood and its host refused.
+    #[test]
+    fn a_clock_stepping_back_does_not_make_a_peer_look_like_a_flood() {
+        let opened = 100_000;
+        assert!(!window_is_over(opened, opened));
+        assert!(!window_is_over(opened, opened + FLOOD_WINDOW - 1));
+        assert!(window_is_over(opened, opened + FLOOD_WINDOW));
+        assert!(
+            window_is_over(opened, opened - 3_600),
+            "an hour back is not an hour of one peer's messages in one window"
+        );
+    }
+
+    /// A record of `blocks` refusals from `peers` addresses.
+    fn met(blocks: u64, peers: u64) -> OutOfStep {
+        let mut record = OutOfStep::default();
+        for block in 0..blocks {
+            let from = address((block % peers.max(1)) as u8);
+            count_out_of_step(&mut record, Some(from), 900, 1_000 + block);
+        }
+        record
+    }
+
+    /// The claim: this is evidence and not a verdict, so each half on its own
+    /// is something one machine with a fast clock can produce.
+    #[test]
+    fn both_conditions_are_needed_before_a_clock_is_blamed() {
+        let enough = met(BEHIND_BLOCKS, BEHIND_PEERS as u64);
+        let said = clock_is_behind(&enough, DRIFT, false).expect("both met");
+        assert_eq!(said.blocks, BEHIND_BLOCKS);
+        assert_eq!(said.peers, BEHIND_PEERS);
+        assert_eq!(said.seconds, 900, "and it names the gap it actually saw");
+        assert_eq!(said.drift, DRIFT);
+        assert!(!said.own_first_block);
+
+        assert!(
+            clock_is_behind(&met(BEHIND_BLOCKS - 1, BEHIND_PEERS as u64), DRIFT, false).is_none(),
+            "a handful is a miner with a fast clock"
+        );
+        assert!(
+            clock_is_behind(&met(BEHIND_BLOCKS, 1), DRIFT, false).is_none(),
+            "and one address is one machine, which is what a stranger has"
+        );
+    }
+
+    /// **The one clock refusal that is nobody else's word.**
+    ///
+    /// The first block of the network is compiled into this binary. No peer
+    /// sends it and nobody but this machine can be wrong about it, so one is
+    /// enough where a run from several peers is otherwise needed.
+    #[test]
+    fn refusing_this_builds_own_first_block_says_it_on_its_own() {
+        let mut record = OutOfStep {
+            own_first_block: true,
+            ..OutOfStep::default()
+        };
+        count_out_of_step(&mut record, None, 4_000, 1_000);
+        let said = clock_is_behind(&record, DRIFT, true).expect("its own first block settles it");
+        assert!(said.own_first_block);
+        assert_eq!(said.peers, 0, "nobody sent it");
+
+        assert!(
+            clock_is_behind(&record, DRIFT, false).is_none(),
+            "and it is spent once the node has a chain: the first block is laid \
+             down once at start, so a clock put right while the node runs lets \
+             it take the chain from a peer, and a line that stayed would be \
+             telling its owner to fix something already fixed"
+        );
+    }
+
+    /// **A machine dated before the day the network opened cannot start, and
+    /// used to do it in silence.**
+    ///
+    /// AUDIT, repaired. `open_the_chain` read the refusal out of an
+    /// `is_err()` and returned. The node then had no chain, so every peer's
+    /// tip failed the same check, it kept nobody and showed no height, and
+    /// what an operator had to work from was a node that looked like one
+    /// waiting for its first peer.
+    #[test]
+    fn a_clock_behind_the_first_block_is_named_rather_than_dropped() {
+        let params = ConsensusParams::for_network("testnet-6").expect("testnet-6 exists");
+        let opened = genesis::opens_at(params.network);
+        assert!(opened > 0, "testnet-6 pins a first block");
+
+        let mut chain = ChainStore::new(params);
+        let ahead = open_the_chain(&mut chain, None, params, opened - DRIFT - 60)
+            .expect("a machine this far behind refuses its own first block");
+        assert_eq!(ahead, DRIFT + 60, "and how far behind it is, is the answer");
+        assert!(chain.is_empty(), "the block is still not taken");
+
+        // And a machine whose clock is right lays the block down and says
+        // nothing, which is every ordinary start.
+        let mut chain = ChainStore::new(params);
+        assert!(open_the_chain(&mut chain, None, params, opened + 60).is_none());
+        assert!(!chain.is_empty());
+    }
+
+    /// A network with no first block pinned, which is what the tests
+    /// everywhere else in this crate run on, is left alone whatever the clock
+    /// says.
+    #[test]
+    fn a_network_without_a_pinned_first_block_is_left_alone() {
+        let params = ConsensusParams::testnet();
+        assert!(params.genesis.is_none());
+        let mut chain = ChainStore::new(params);
+        assert!(open_the_chain(&mut chain, None, params, 0).is_none());
+        assert!(chain.is_empty());
     }
 }
 

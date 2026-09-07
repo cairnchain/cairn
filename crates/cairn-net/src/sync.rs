@@ -536,6 +536,21 @@ pub struct Reaction {
     /// would catch a lie about the work behind the block sits below the check
     /// that reads the version.
     pub unjudged: Option<u16>,
+    /// Seconds by which a refused block's timestamp stood ahead of this node's
+    /// own clock, when one did.
+    ///
+    /// The one refusal in the whole rule set that two honest nodes can
+    /// disagree about, and that the same node reverses simply by waiting. It
+    /// is measured against a clock this machine keeps, so what it says is
+    /// about the reader as much as about the block, and the reading worth
+    /// having is not about either: a run of these is a machine whose clock is
+    /// wrong, and nothing else in this node ever mentions a clock to the
+    /// person running it.
+    ///
+    /// Named rather than acted on, and counted where peers are counted, for
+    /// the same reason [`Self::unjudged`] is: one of these is a number a
+    /// stranger writes in a field.
+    pub ahead_of_the_clock: Option<u64>,
 }
 
 impl Reaction {
@@ -917,6 +932,37 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
         // again, and they are applied to what it has. Banning the messenger
         // was the one response that made that slower.
         Err(ChainError::Corrupt) => Reaction::close(DropReason::OwnStore),
+        // A block dated further ahead than this node's clock allows. The only
+        // refusal here that the same node reverses by waiting, and the only
+        // one two honest nodes can disagree about: a miner an hour and fifty
+        // eight minutes fast publishes a block valid to everybody whose clock
+        // is right, and a node two minutes slow refuses it.
+        //
+        // It used to fall through to the arm below, so that node closed the
+        // connection and refused the host for `REFUSAL_SECONDS`, which is ten
+        // minutes to buy itself where it needed two to wait. Every peer that
+        // offered the block got the same, so within seconds it had refused its
+        // whole book and `dial_from_book` would not dial any of them back. It
+        // eclipsed itself and charged it to peers that had done nothing.
+        //
+        // Nothing taken and nothing closed, rather than a drop reason that
+        // does not count as misbehaviour. Closing would make this node dial
+        // back, be offered the same block, and refuse it again, which is a
+        // loop that costs both ends a connection each time round; and there is
+        // nothing to end the connection for, since the peer is right and this
+        // node is the one that has to wait. The block is offered again by
+        // whoever announces the next one, and by then the wait is usually
+        // over.
+        //
+        // Said, though, because this is the only place in the node that can
+        // see a clock is wrong. See [`Reaction::ahead_of_the_clock`].
+        Err(ChainError::InvalidBlock {
+            source: BlockError::TimestampTooFarAhead { timestamp, .. },
+            ..
+        }) => Reaction {
+            ahead_of_the_clock: Some(timestamp.saturating_sub(now)),
+            ..Reaction::idle()
+        },
         Err(_) => Reaction::close(DropReason::BadBlock { id }),
     }
 }

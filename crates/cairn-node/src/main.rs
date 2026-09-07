@@ -9,7 +9,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use cairn_chain::Outdated;
-use cairn_net::node::{Probation, Stranded, Unjudged, Unread, Unweighable, Unwritten, MAX_BEHIND};
+use cairn_net::node::{
+    Behind, Probation, Stranded, Unjudged, Unread, Unweighable, Unwritten, MAX_BEHIND,
+};
 use cairn_net::{Filling, Joined, Node, NodeError, Restored};
 
 const TICK: Duration = Duration::from_millis(100);
@@ -274,6 +276,14 @@ fn say_what_the_numbers_do_not(node: &Node, directory: &str) {
     // two different afternoons.
     if let Some(unread) = node.unread() {
         say(&will_not_read_back(&unread, directory));
+    }
+    // And a machine whose clock is behind the network's, which refuses honest
+    // blocks and, before this line existed, was the one state in here that
+    // nothing in the whole node so much as named. It comes before the two
+    // below because it produces both of their symptoms and is the cheapest of
+    // the three to put right.
+    if let Some(behind) = node.clock_behind() {
+        say(&clock_is_slow(&behind));
     }
     // And a node the network has left behind shows nothing but a height that
     // has stopped moving.
@@ -646,6 +656,54 @@ fn too_old(unjudged: &Unjudged) -> String {
     )
 }
 
+/// What an operator is told when this machine's clock is behind the network's.
+///
+/// The one line here that names something outside the program. Every other
+/// state in this file is the node reporting on itself; this one is the node
+/// reporting that the machine under it is wrong, and it is the only reading a
+/// person cannot make from the outside: a node with a slow clock keeps no
+/// peers and climbs no height, which is what a node with no network looks
+/// like, and the two are mended in completely different places.
+///
+/// It says how far out the clock is rather than what the block said. The gap
+/// is what the reader has to act on, and the timestamp on its own is the raw
+/// material for that reading rather than the reading.
+fn clock_is_slow(behind: &Behind) -> String {
+    let out_by = behind.seconds.saturating_sub(behind.drift);
+    let evidence = if behind.own_first_block {
+        "this node refused the first block of its own network, which is written into this \
+         build and which no peer sent it"
+            .to_owned()
+    } else {
+        format!(
+            "{} blocks from {} peers were refused for being dated ahead of it",
+            behind.blocks, behind.peers,
+        )
+    };
+    let cost = if behind.own_first_block {
+        "So this node has no chain and cannot get one: with nothing to start from it refuses \
+         every peer's chain in the same way, keeps nobody, and shows no height at all."
+    } else {
+        "Those blocks are not being followed, and the peers offering them are offering what \
+         the rest of the network has already taken, so a node in this state falls behind the \
+         chain while looking like one that simply has quiet peers."
+    };
+    format!(
+        "the clock on this machine looks at least {out_by} seconds behind the network's. A \
+         block dated more than {} seconds ahead of the reading node's own clock is refused, \
+         and {evidence}, the furthest by {} seconds. {cost} Nothing is wrong with the chain, \
+         nothing has been written down against those peers, and nothing on this disk needs \
+         touching: this node takes the same blocks the moment its clock is right. What to \
+         look at is the time on this machine, and whatever is meant to be keeping it \
+         (`timedatectl` on most Linux systems, `sntp` or the date pane in settings on \
+         macOS). A machine that has been off, or that has never reached a time server, is \
+         the usual reason. Where to start looking rather than a verdict: a timestamp is \
+         written by whoever mined the block, so a run of fast miners would read the same \
+         from here, and the clock on this machine settles which it is in a second.",
+        behind.drift, behind.seconds,
+    )
+}
+
 /// What an operator is told when nobody's showing of the chain will weigh.
 ///
 /// Deliberately not a verdict either, and for the same reason as
@@ -708,8 +766,10 @@ fn short(text: &str) -> &str {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod said_out_loud {
-    use super::{cannot_weigh, falling_behind, lost_the_disk, still_filling, too_old, wrapped};
-    use cairn_net::node::{Unjudged, Unweighable, Unwritten, Writing};
+    use super::{
+        cannot_weigh, clock_is_slow, falling_behind, lost_the_disk, still_filling, too_old, wrapped,
+    };
+    use cairn_net::node::{Behind, Unjudged, Unweighable, Unwritten, Writing};
     use cairn_net::Filling;
 
     fn behind(blocks: u64, within_reach: bool) -> Unwritten {
@@ -721,6 +781,70 @@ mod said_out_loud {
             blocks,
             within_reach,
         }
+    }
+
+    /// **The one line in this file that names something outside the program.**
+    ///
+    /// AUDIT: no message anywhere in the node or the network layer mentioned a
+    /// clock. A machine running behind refuses honest blocks, and given what
+    /// the layer below used to do about that it lost its whole peer set for
+    /// it; what its operator saw was a node with no peers, which is what a
+    /// node with no network looks like, and the two are mended in completely
+    /// different places.
+    #[test]
+    fn the_line_about_a_slow_clock_says_how_far_out_and_what_to_look_at() {
+        let text = clock_is_slow(&Behind {
+            seconds: 7_500,
+            drift: 7_200,
+            blocks: 12,
+            peers: 3,
+            own_first_block: false,
+        });
+        assert!(
+            text.contains("300 seconds behind"),
+            "the gap is the block's timestamp less the drift, which is what \
+             the clock is actually out by: {text}"
+        );
+        assert!(text.contains("12") && text.contains('3'), "{text}");
+        assert!(
+            text.contains("clock"),
+            "the word this whole node never said: {text}"
+        );
+        assert!(
+            text.contains("time on this machine"),
+            "and what to go and look at: {text}"
+        );
+        assert!(
+            text.contains("nothing has been written down against those peers"),
+            "the peers did nothing, which the reader has to be told or the \
+             first thing they change is the peer list: {text}"
+        );
+        assert!(
+            text.contains("rather than a verdict"),
+            "a timestamp is written by whoever mined the block, so this is \
+             evidence like every other line in this file: {text}"
+        );
+
+        // The other half, which no peer sent and which settles it alone.
+        let own = clock_is_slow(&Behind {
+            seconds: 20_000,
+            drift: 7_200,
+            blocks: 1,
+            peers: 0,
+            own_first_block: true,
+        });
+        assert!(
+            own.contains("first block of its own network"),
+            "a node that cannot start needs the reason it cannot start: {own}"
+        );
+        assert!(
+            own.contains("no chain and cannot get one"),
+            "and what that costs, which is everything: {own}"
+        );
+        assert!(
+            !own.contains("0 peers"),
+            "nobody sent it, so nobody is counted for it: {own}"
+        );
     }
 
     /// A node nobody can show the chain to prints the lines of a healthy one:

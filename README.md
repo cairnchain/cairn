@@ -49,9 +49,9 @@ There is no mainnet. A network exists once its first block does, and that one
 will be mined in the open on the day it is announced.
 
 The protocol is complete and runs end to end: notes and transactions, the
-accumulator that replaces the state database, the two tiers, proof of work with
-a difficulty that retargets in a handful of blocks, the fork choice, atomic
-reorganisation, and syncing between nodes over TCP.
+accumulator that replaces the state database, the two tiers, proof of work
+with a difficulty that answers a halving of hash rate in about two hours,
+the fork choice, atomic reorganisation, and syncing between nodes over TCP.
 
 A node keeps its chain on disk and replays it on start, and finds its peers by
 asking the ones it already has, so it needs one address to join a network and

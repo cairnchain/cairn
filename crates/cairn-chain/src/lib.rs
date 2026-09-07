@@ -1729,7 +1729,7 @@ impl ChainStore {
                     if error.outdated().is_none() && self.blocks.remove(id).is_some() {
                         self.recount();
                     }
-                    self.restore(&added, &rolled_back, now)?;
+                    self.restore(&added, &rolled_back)?;
                     return Err(error);
                 }
             }
@@ -2262,7 +2262,36 @@ impl ChainStore {
 
     fn apply(&mut self, id: Hash32, now: u64) -> Result<(), ChainError> {
         let block = self.body_of(&id).ok_or(ChainError::Corrupt)?;
-        let connected = connect_block(&mut self.state, &block, &self.params, now)
+        self.connect(id, &block, now)
+    }
+
+    /// Puts a block this node has already applied once back on the branch.
+    ///
+    /// Every rule [`Self::apply`] runs, with one difference: the block is
+    /// judged against its own timestamp rather than against the clock. Only
+    /// one rule in `connect_block` reads the clock, the drift ceiling, and a
+    /// header cannot sit more than the drift ahead of its own timestamp, so
+    /// asking that question this way is asking it of a block that already
+    /// answered it. Nothing else here is given a different answer: the median,
+    /// the difficulty, the commitments and the body are all facts about the
+    /// chain and are checked again in full.
+    ///
+    /// It is the one rule whose answer can change while the block does not,
+    /// because it is a fact about the reader. Time normally only moves
+    /// forward, so re-asking it looked safe, and a clock that steps backwards
+    /// is ordinary: an NTP correction, a restored snapshot, a dead battery, a
+    /// machine that dual boots. A node that rewound for a heavier branch, then
+    /// found that branch bad, then refused to put its own blocks back because
+    /// they were now dated in the future, was left standing at the fork point
+    /// with nothing to re-apply them until a peer offered one of them again.
+    fn reapply(&mut self, id: Hash32) -> Result<(), ChainError> {
+        let block = self.body_of(&id).ok_or(ChainError::Corrupt)?;
+        let its_own_clock = block.header.timestamp;
+        self.connect(id, &block, its_own_clock)
+    }
+
+    fn connect(&mut self, id: Hash32, block: &Block, now: u64) -> Result<(), ChainError> {
+        let connected = connect_block(&mut self.state, block, &self.params, now)
             .map_err(|source| ChainError::InvalidBlock { id, source })?;
         self.branch.push(id);
         self.applied.insert(id, connected);
@@ -2287,21 +2316,18 @@ impl ChainStore {
     /// Puts the node back on the branch it was following before a failed
     /// switch, so a bad block on a heavier branch costs nothing but the
     /// attempt.
-    fn restore(
-        &mut self,
-        partial: &[Hash32],
-        rolled_back: &[Hash32],
-        now: u64,
-    ) -> Result<(), ChainError> {
+    fn restore(&mut self, partial: &[Hash32], rolled_back: &[Hash32]) -> Result<(), ChainError> {
         for _ in partial {
             let id = self.branch.pop().ok_or(ChainError::Corrupt)?;
             let connected = self.applied.remove(&id).ok_or(ChainError::Corrupt)?;
             disconnect_block(&mut self.state, &connected);
         }
         // `rolled_back` came off the tip newest first, so it goes back on in
-        // the opposite order.
+        // the opposite order. Through `reapply` rather than `apply`, because
+        // these are blocks this node applied already and a clock that stepped
+        // backwards must not be able to take them away from it.
         for id in rolled_back.iter().rev() {
-            self.apply(*id, now)?;
+            self.reapply(*id)?;
         }
         Ok(())
     }

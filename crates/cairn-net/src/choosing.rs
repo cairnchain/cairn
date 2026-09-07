@@ -101,6 +101,13 @@ const OWED_PATIENCE: u64 = PROVEN_PATIENCE.saturating_add(FIRST_ANSWER_PATIENCE)
 /// and the same test file measures it. Being held there is a node with no
 /// chain, which is loud; being held off one it has proved is a node that has
 /// the answer and will not use it, which is not.
+///
+/// Measured from the first showing, or from the last time this machine's clock
+/// went backwards, whichever is later. Every term here is arithmetic on
+/// `SystemTime::now` rather than on elapsed time, so a step back used to be
+/// added to the whole of it: an hour back made this three thousand nine
+/// hundred and thirty seconds, and the sentence above false. See
+/// [`Chooser::clock_went_back`].
 pub const HELD_OFF_AT_MOST: u64 = OWED_PATIENCE.saturating_add(ATTEMPT_PATIENCE);
 
 /// Seconds before a peer whose claim already failed is worth asking again,
@@ -502,6 +509,7 @@ impl Chooser {
         if !chain_is_empty {
             return self.finish(chain_work, connected);
         }
+        self.clock_went_back(now);
         let Some(first) = self.first_claim_at else {
             return Step::Quiet;
         };
@@ -573,6 +581,58 @@ impl Chooser {
         }
         self.asked = Some((peer, approach, now));
         Step::Ask(peer, approach)
+    }
+
+    /// Pulls every moment written down here back to `now` when the clock has
+    /// gone behind it.
+    ///
+    /// Every deadline in this module is wall-clock arithmetic on
+    /// `SystemTime::now`, and `saturating_sub` on a clock that has stepped
+    /// back reads as no time having passed. So a step back of an hour adds an
+    /// hour to each of them, and [`HELD_OFF_AT_MOST`] says in plain words that
+    /// there is no such hour: three hundred and thirty seconds, whatever it is
+    /// told and by however many strangers. A machine correcting its clock is
+    /// not a stranger, but the sentence was still false.
+    ///
+    /// Pulled back rather than dropped: what a step back costs is knowing how
+    /// long anything has been waiting, and the honest answer to that is that
+    /// the waiting starts again, which is the reading `owed_this_round` and
+    /// `has_gone_quiet` take of the same event one layer up. The bound is then
+    /// what it says it is, measured from the step.
+    ///
+    /// Read here rather than at every deadline because this runs once a round
+    /// and is the only place a turn is handed out.
+    fn clock_went_back(&mut self, now: u64) {
+        let behind = |at: &u64| *at > now;
+        let stale = self.first_claim_at.as_ref().is_some_and(behind)
+            || self.asked.as_ref().is_some_and(|(_, _, at)| *at > now)
+            || self.proven.as_ref().is_some_and(|(_, at)| *at > now)
+            || self
+                .claims
+                .values()
+                .any(|claim| claim.heard > now || claim.tried.as_ref().is_some_and(behind))
+            || self.unbacked_hosts.values().any(|spent| spent.at > now);
+        if !stale {
+            return;
+        }
+        if let Some(first) = self.first_claim_at.as_mut() {
+            *first = (*first).min(now);
+        }
+        if let Some((_, _, at)) = self.asked.as_mut() {
+            *at = (*at).min(now);
+        }
+        if let Some((_, at)) = self.proven.as_mut() {
+            *at = (*at).min(now);
+        }
+        for claim in self.claims.values_mut() {
+            claim.heard = claim.heard.min(now);
+            if let Some(tried) = claim.tried.as_mut() {
+                *tried = (*tried).min(now);
+            }
+        }
+        for spent in self.unbacked_hosts.values_mut() {
+            spent.at = spent.at.min(now);
+        }
     }
 
     /// Whether a claim is still owed the turn the patience is about to close.
@@ -1111,6 +1171,51 @@ mod tests {
             ),
             Step::Ask(1, Approach::Read),
             "reading checks every block, so it cannot be captured"
+        );
+    }
+
+    /// AUDIT: [`HELD_OFF_AT_MOST`] says in plain words that three hundred and
+    /// thirty seconds is the longest a node can be held off a chain it has
+    /// already proved. Every term in it is arithmetic on `SystemTime::now`,
+    /// and `saturating_sub` on a clock that has stepped back reads as no time
+    /// having passed, so a step back of an hour added an hour to the bound and
+    /// the sentence was false.
+    ///
+    /// Nothing a stranger can do moves a clock, so this is not an attack. It
+    /// is a stated bound that did not hold, on the one number this module
+    /// exists to promise.
+    #[test]
+    fn a_clock_stepping_back_does_not_extend_the_hold() {
+        // A bluffing claim that is asked first and shows a lighter chain, and
+        // a claim heavier than what was shown that never answers.
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(1)), 6_000, LONG, true, 10_000);
+        chooser.noted(2, Some(host(2)), 5_000, LONG, true, 10_000);
+        let connected = &[1u64, 2];
+
+        assert_eq!(
+            chooser.step(10_002, true, 0, JoinProgress::NothingYet, connected),
+            Step::Ask(1, Approach::Join),
+            "the heaviest claim is asked first"
+        );
+        assert!(
+            !chooser.shown(1, 900, 10_002),
+            "peer 2 still claims more than peer 1 showed, so nothing is adopted yet"
+        );
+
+        // The machine's clock is corrected backwards by an hour, which is one
+        // ordinary NTP step on a node that has been up a while.
+        let stepped_at = 10_002 - 3_600;
+        assert_eq!(
+            chooser.step(stepped_at, true, 0, JoinProgress::NothingYet, connected),
+            Step::Quiet
+        );
+
+        assert!(
+            chooser.allows(1, 900, stepped_at + HELD_OFF_AT_MOST),
+            "the bound is what it says it is, measured from the step: without \
+             this the hold ran for the hour as well, and the node sat on a \
+             chain it had proved and would not use"
         );
     }
 
