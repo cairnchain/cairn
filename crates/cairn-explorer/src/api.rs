@@ -367,6 +367,10 @@ struct Health {
     probation: Option<Probation>,
     joining: Joined,
     out_of_reach: u64,
+    /// Peers that have introduced themselves.
+    ///
+    /// Not sockets held. A stranger that connects and says nothing cannot be
+    /// asked anything, and this page's `peers` counted it.
     peers: usize,
     /// What this node has taken on and not put on its disk, if anything.
     ///
@@ -404,7 +408,7 @@ impl Health {
             probation: node.probation(),
             joining: node.joining(),
             out_of_reach: node.out_of_reach(),
-            peers: node.peer_count(),
+            peers: node.peers_introduced(),
             unwritten: node.unwritten(),
             unread: node.unread(),
             unjudged: node.unjudged(),
@@ -884,6 +888,13 @@ fn node_object(json: &mut Writer, context: &Context<'_>) {
             json.field_u64("proved", filling.proved);
             json.field_u64("reaches", filling.reaches);
             json.field_u64("bytes", filling.bytes);
+            // Beside the bytes, because the pair is the news and half of it is
+            // not. A node in this state cannot write the summary that lets it
+            // drop old blocks, so its disk grows with the chain, which is the
+            // one thing this design exists to prevent. The page served the
+            // bytes on their own and there was nothing to read them against.
+            json.field_u64("keep", filling.keep);
+            json.field_bool("overTheKeep", filling.over_the_keep());
             json.end_object();
         }
         None => json.field_null("filling"),

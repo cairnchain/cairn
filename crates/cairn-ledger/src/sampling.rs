@@ -792,7 +792,11 @@ fn check_the_tail(
         return Err(StartError::TailWrongLength { given, wanted });
     }
 
-    let mut summaries: Vec<HeaderSummary> = Vec::with_capacity(start.tail.len());
+    // A window and one more, which is all this ever holds: it is trimmed to
+    // that at the end of every step. Reserving the run's own length instead
+    // sized a reader's allocation from a number the sender chose, for room
+    // nothing ever puts anything in.
+    let mut summaries: Vec<HeaderSummary> = Vec::with_capacity(DIFFICULTY_WINDOW.saturating_add(1));
     let mut previous: Option<&BlockHeader> = None;
     let mut carried_the_pinned = false;
     for header in &start.tail {
@@ -970,7 +974,8 @@ fn check_the_gaps(start: &SampledStart) -> Result<(), StartError> {
 /// from the sixty four hashes everybody else keeps.
 ///
 /// `None` when this node cannot answer, which is the honest reply from a node
-/// that validates and nothing more.
+/// that validates and nothing more, and also from a node whose chain has left
+/// the band a sampling can reach. See the run up to the tip below.
 pub fn open_start(
     tip: &BlockHeader,
     history: Forest,
@@ -996,8 +1001,36 @@ pub fn open_start(
         .max()
         .unwrap_or(tip.height);
     let window = u64::try_from(DIFFICULTY_WINDOW).unwrap_or(u64::MAX);
-    let mut tail = Vec::new();
-    for height in deepest.saturating_sub(window)..=tip.height {
+    let from = deepest.saturating_sub(window);
+
+    // How long the run would be, worked out before a header is read for it.
+    //
+    // The draw stops resolving a band of work below the tip, and the run is
+    // that band measured in blocks. On a chain whose difficulty is near its
+    // own lifetime average that is about [`SHALLOWEST`] blocks; on one whose
+    // difficulty has fallen far below it the same work covers proportionally
+    // more, and there is no bound on the ratio but the chain's own length. A
+    // chain that has lost a hundredfold over a suffix of half a million blocks
+    // makes a run of half a million headers, which is what the loop below used
+    // to read off the disk and encode: a hundred megabytes, and growing with
+    // the chain, off a node whose whole claim is that nothing here does.
+    //
+    // Not one byte of which could ever be used. `check_the_tail` wants exactly
+    // this many headers and refuses past [`MOST_TAIL`], and `SampledStart`'s
+    // decoder refuses the same length before it reserves anything, so the far
+    // end throws the answer away without reading it. Refusing here reaches the
+    // same conclusion for the price of the subtraction.
+    //
+    // This belongs on the serving side because it is the same constant on both
+    // sides of the same exchange, and it lives in this crate rather than in
+    // whatever ships a server so that the two cannot drift apart: a build that
+    // moved MOST_TAIL would move what it serves with it.
+    let held = tip.height.checked_sub(from)?.checked_add(1)?;
+    if held > MOST_TAIL {
+        return None;
+    }
+    let mut tail = Vec::with_capacity(usize::try_from(held).unwrap_or(0));
+    for height in from..=tip.height {
         tail.push(header_at(height)?);
     }
 

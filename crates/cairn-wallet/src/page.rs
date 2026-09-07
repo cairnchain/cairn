@@ -464,12 +464,17 @@ async function spend(anyway) {
   try {
     const result = await post("/api/send", body);
     if (result.sent) {
-      said.className = "said good";
-      said.innerHTML = "Handed over: <b>" + result.amount + "</b> to be paid, " +
-        "<b>" + result.fee + "</b> to carry it." +
-        (result.handed_on
-          ? " <b>Waiting for a block</b>, which takes a few minutes. Nobody has been paid yet."
-          : " <b>No peer took it</b>, so it is not sent and nobody has been paid.") +
+      // A transfer nobody took is not good news wearing a green box. It was
+      // drafted, it was signed, and it went nowhere, and the headline said
+      // "Handed over" above the sentence saying it had not been.
+      said.className = result.handed_on ? "said good" : "said bad";
+      said.innerHTML = (result.handed_on
+        ? "Handed over: <b>" + result.amount + "</b> to be paid, <b>" + result.fee +
+          "</b> to carry it. <b>Waiting for a block</b>, which takes a few minutes. " +
+          "Nobody has been paid yet."
+        : "<b>No peer took it.</b> This wallet reached nobody to give it to, so it " +
+          "is not sent, nobody has been paid, and the <b>" + result.amount + "</b> is " +
+          "still here.") +
         "<br><code>" + result.id + "</code>";
       $("to").value = ""; $("amount").value = ""; $("fee").value = "";
       quote();

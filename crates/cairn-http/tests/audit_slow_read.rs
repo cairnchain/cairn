@@ -28,8 +28,8 @@
 )]
 
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpStream};
-use std::sync::atomic::AtomicBool;
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -37,19 +37,16 @@ use std::time::{Duration, Instant};
 use cairn_http::http::{ANSWER_DEADLINE, REQUEST_DEADLINE};
 use cairn_http::Response;
 
-/// An answer far bigger than any socket buffer pair, so the server is really
-/// left blocked on the caller rather than handing the whole thing to the
-/// kernel and walking away.
-///
-/// A loopback socket here swallows most of a megabyte before it blocks, which
-/// is why this has to be so much larger than anything the server really sends.
-/// What is being tested is the ceiling, and on a link with buffers this deep
-/// an answer of a realistic size never touches it: it is written and gone
-/// before the caller has read a byte.
-const TOO_BIG_TO_BUFFER: usize = 32 * 1024 * 1024;
+/// The smallest answer worth trying, whatever a kernel says it will hold.
+const AT_LEAST: usize = 48 * 1024 * 1024;
 
-/// What the caller takes at a time, which has to be more than half the receive
-/// buffer or the window never reopens and there is no attack to test.
+/// And the largest, so that a kernel with very deep buffers costs this test
+/// some memory rather than the machine all of it.
+const AT_MOST: usize = 256 * 1024 * 1024;
+
+/// What the caller takes at a time. Enough that the receive window reopens and
+/// the server gets to write again, which is what makes this an attack rather
+/// than a caller that has simply stopped reading.
 const SIP: usize = 1024 * 1024;
 
 /// And how long it waits between sips: under the write timeout, so that every
@@ -109,43 +106,143 @@ fn sip(stream: &mut TcpStream, wanted: usize) -> usize {
     read
 }
 
+/// How much a loopback connection on this machine swallows before the writer
+/// is really blocked on the reader.
+///
+/// The whole of the test below rests on the server being unable to write its
+/// answer and walk away, and how much a kernel takes before it says no is the
+/// kernel's decision. It is not a number this file can hold: a loopback socket
+/// pair here swallows a couple of megabytes, and Windows CI swallowed twenty
+/// seven. A thirty two megabyte answer went into the buffers whole there, the
+/// server was never blocked on the caller for a moment, it closed on its
+/// deadline exactly as it should, and the test read the bytes still sitting in
+/// the caller's own receive buffer as a server that had held the connection.
+/// So the answer is sized from this rather than pinned above it.
+///
+/// Read flat out first and then not at all. The reading is what makes a
+/// receive window that grows with what the reader takes grow here too, and
+/// reading faster than the caller below can only make this number larger,
+/// which is the safe direction: what it decides is how much room there is
+/// between what a kernel holds and what a server writes.
+fn swallowed_by_a_loopback_pair() -> usize {
+    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+    let address = listener.local_addr().unwrap();
+    let consumed = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let taking = {
+        let (consumed, stop) = (Arc::clone(&consumed), Arc::clone(&stop));
+        thread::spawn(move || {
+            let (mut side, _) = listener.accept().unwrap();
+            side.set_read_timeout(Some(Duration::from_millis(50)))
+                .unwrap();
+            let mut buffer = vec![0u8; 256 * 1024];
+            let until = Instant::now() + Duration::from_millis(200);
+            while Instant::now() < until {
+                match side.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        consumed.fetch_add(count, Ordering::Relaxed);
+                    }
+                    Err(_) => {}
+                }
+            }
+            // Then hold the socket open and take nothing, which is what leaves
+            // the writer to fill everything there is to fill.
+            while !stop.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(20));
+            }
+        })
+    };
+
+    let mut writing = TcpStream::connect(address).unwrap();
+    writing.set_nonblocking(true).unwrap();
+    let block = vec![b'c'; 256 * 1024];
+    let mut written = 0usize;
+    let mut refused: Option<Instant> = None;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        match writing.write(&block) {
+            Ok(0) => break,
+            Ok(count) => {
+                written += count;
+                refused = None;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                let since = *refused.get_or_insert_with(Instant::now);
+                if since.elapsed() > Duration::from_secs(1) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => break,
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    let _ = taking.join();
+    written.saturating_sub(consumed.load(Ordering::Relaxed))
+}
+
 /// The finding, as a regression: a caller that asks properly and then takes
 /// the answer in sips, each one timed to arrive just before the write it is
 /// blocking would have been given up on, is let go of at the deadline instead
 /// of holding its slot for as long as the answer lasts.
+///
+/// The sips are counted rather than clocked. The loop used to run for a fixed
+/// wall-clock window and take however many sips fitted inside it, which is not
+/// the same number of sips on a platform whose timer moves in fifteen
+/// millisecond steps as it is here, and how far past the deadline the sipping
+/// reaches is the whole of what the loop is for. A count of sips at a fixed
+/// pace says that plainly on every machine.
 #[test]
 fn taking_the_answer_in_sips_does_not_hold_the_connection() {
-    let address = start(TOO_BIG_TO_BUFFER);
+    let swallowed = swallowed_by_a_loopback_pair();
+    let answer = swallowed.saturating_mul(6).clamp(AT_LEAST, AT_MOST);
+    // Sips enough to carry the sipping a whole pause past the deadline, so
+    // that a server which lets go on time has stopped writing well before the
+    // last one and a server which does not is still writing at it.
+    let sips = usize::try_from(WHOLE_CONNECTION.as_secs() / BETWEEN_SIPS.as_secs() + 2).unwrap();
+    let sipped_for = BETWEEN_SIPS.saturating_mul(u32::try_from(sips).unwrap());
+    assert!(
+        answer >= swallowed.saturating_mul(3),
+        "this machine's loopback swallows {swallowed} bytes and the largest answer this \
+         test will build is {answer}, so there is no room between what a kernel holds \
+         and what a server writes for a deadline to show in"
+    );
+
+    let address = start(answer);
     let mut stream = ask(address, Duration::from_secs(5));
 
     let started = Instant::now();
-    let sipping = WHOLE_CONNECTION + Duration::from_secs(2);
     let mut taken = 0usize;
-    while started.elapsed() < sipping {
+    for _ in 0..sips {
         let got = sip(&mut stream, SIP);
         taken += got;
         if got == 0 {
             break;
         }
-        thread::sleep(BETWEEN_SIPS.min(sipping.saturating_sub(started.elapsed())));
+        thread::sleep(BETWEEN_SIPS);
     }
 
     // Then read as fast as the connection will give. A server still holding
-    // the connection would finish the whole answer here.
+    // the connection would finish the whole answer here; one that let go on
+    // its deadline has nothing left to give but what the kernel is holding.
     taken += drain(&mut stream);
-    let held = started.elapsed();
+    let over = started.elapsed();
     println!(
-        "sipped for {sipping:?} and took {taken} bytes of a {TOO_BIG_TO_BUFFER} byte answer, \
-         connection over after {held:?}"
+        "a loopback pair here swallows {swallowed} bytes, so the answer is {answer}. \
+         Took {sips} sips over {sipped_for:?} and got {taken} bytes; connection over \
+         after {over:?}"
     );
     assert!(
-        taken < TOO_BIG_TO_BUFFER / 2,
-        "the server wrote {taken} bytes to a caller taking it in sips, \
-         so the connection outlived the {WHOLE_CONNECTION:?} it is allowed"
+        taken < answer / 2,
+        "the server wrote {taken} bytes of a {answer} byte answer to a caller taking it \
+         in sips, of which a kernel holds at most {swallowed} without the server waiting \
+         on anyone, so the connection outlived the {WHOLE_CONNECTION:?} it is allowed"
     );
     assert!(
-        held < sipping + REQUEST_DEADLINE,
-        "the connection was still going {held:?} after it was accepted"
+        over < sipped_for + REQUEST_DEADLINE,
+        "the connection was still going {over:?} after it was accepted"
     );
 }
 

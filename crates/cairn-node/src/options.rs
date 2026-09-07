@@ -66,7 +66,12 @@ cairnd, a Cairn node
                          ledger they add up to, and the headers apart from
                          them. They are kept for other people, so a peer a
                          little behind can read them rather than being handed
-                         a whole ledger. Accepts suffixes: 512MB, 8GB
+                         a whole ledger. Accepts suffixes: 512MB, 8GB.
+                         There is a floor under it that this setting cannot
+                         lower: the blocks a reorganisation may still have to
+                         read back are never dropped, however small a size is
+                         asked for. `--check` prints what that floor comes to
+                         on the chosen network
   --status <seconds>     how often to print a status line (default: 10)
   --run-for <seconds>    stop after this long, for tests and demonstrations
   --help                 print this and stop
@@ -96,6 +101,16 @@ pub(crate) struct Options {
     pub(crate) archive: bool,
     /// Bytes of blocks to keep on disk. `u64::MAX` keeps everything.
     pub(crate) keep: u64,
+    /// Print what this node would do and start nothing.
+    ///
+    /// A setting like every other one here, and read off the settings. It used
+    /// to be found by looking through the words the operator typed for one
+    /// that read `--check`, which finds it in the one place it is not: standing
+    /// where another option's value belongs. `--data --check` then started a
+    /// node in a directory called `--check`, or rather printed the settings,
+    /// stopped, and exited nought without ever starting one. The explorer was
+    /// mended for this and the node was not.
+    pub(crate) check: bool,
 }
 
 /// Named values, each of which may have been given more than once.
@@ -146,6 +161,14 @@ fn parse_arguments(arguments: &[String]) -> Result<Given, String> {
         let Some(value) = arguments.get(index) else {
             return Err(format!("`--{name}` needs a value"));
         };
+        // A value that begins with two dashes is a value the operator left
+        // out. Taking it as one gave `--data --check` a chain directory called
+        // `--check`, and swallowed the flag on the way past.
+        if value.starts_with("--") {
+            return Err(format!(
+                "`--{name}` needs a value, and `{value}` is another option"
+            ));
+        }
         index = index.saturating_add(1);
         given.push(name, value.clone());
     }
@@ -274,6 +297,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         run_for,
         archive,
         keep,
+        check: command_line.has("check"),
     }))
 }
 
@@ -301,6 +325,19 @@ fn parse_size(text: &str) -> Result<u64, String> {
         .parse()
         .map_err(|_| format!("`{text}` is not a size; try 1GB, 512MB, or all"))?;
     Ok(count.saturating_mul(scale))
+}
+
+/// The most the blocks `--keep` cannot drop can come to on this network.
+///
+/// The trim keeps the burial window whatever budget it is given, because the
+/// chain releases block bodies from memory on the promise that the log still
+/// has them. At the network's largest block that window is this many bytes,
+/// which is the number an operator sizing a disk needs and the number a flat
+/// `--keep` figure was quietly wrong about.
+fn floor_under_keep(params: &ConsensusParams) -> u64 {
+    params
+        .burial
+        .saturating_mul(u64::try_from(params.max_block_bytes).unwrap_or(u64::MAX))
 }
 
 /// A size as an operator would read it back.
@@ -380,6 +417,22 @@ pub(crate) fn describe(options: &Options) -> String {
             format!("{} on disk, older ones dropped", size(options.keep))
         }
     );
+    // The floor under that figure, said wherever the figure is said. The
+    // budget is a preference and this is not: the chain lets go of block
+    // bodies from memory in the belief the log still holds them, so the last
+    // `burial` blocks are not the operator's to drop, and the trim never cuts
+    // into them however small a size was asked for. Nothing stated it and
+    // nothing reported it, so `--keep 1MB` printed "1 MB on disk, older ones
+    // dropped" and held a hundred and twenty eight times that.
+    if options.keep != u64::MAX {
+        let _ = writeln!(
+            text,
+            "             never below the last {} blocks, whatever they weigh: \
+             up to {} on this network",
+            options.params.burial,
+            size(floor_under_keep(&options.params)),
+        );
+    }
     match options.mine_to {
         Some(key) => {
             let _ = writeln!(text, "mining       rewards to {key}");

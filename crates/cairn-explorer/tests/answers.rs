@@ -605,6 +605,98 @@ fn the_site_can_see_a_disk_that_has_stopped() {
     );
 }
 
+/// **A node whose disk grows with the chain says so, in both numbers.**
+///
+/// While a node cannot show a newcomer the chain it cannot write its own
+/// summary of it either, because the two are proved against the same header
+/// forest, and writing that summary is what lets it drop old blocks. So
+/// `--keep` is not being kept, and the disk grows with the chain, which is the
+/// one thing this design exists to prevent.
+///
+/// The page served the bytes on the disk and not the budget beside them, so
+/// there was nothing to read them against. The pair is the news; half of it is
+/// a number.
+///
+/// The head record of the header log is damaged on purpose, which is what puts
+/// a node in this state: the store will not stand behind a record whose
+/// successor no longer names it, sets the headers aside, and rewrites them
+/// from the blocks it still has, which start above the first block.
+#[test]
+fn a_node_that_cannot_hold_its_disk_budget_serves_both_numbers() {
+    // A burial a test can reach, so upkeep writes a ledger and drops the
+    // blocks under it, which is what every node with the default does once it
+    // has a gigabyte.
+    let params = params().with_burial(8);
+    let miner = wallet(1);
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(&miner, 60);
+
+    let directory = std::env::temp_dir().join(format!(
+        "cairn-answers-{}-over-the-keep",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    {
+        let (node, _) = Node::open_archiving(params, address, &directory).unwrap();
+        node.keep_blocks(1);
+        for block in &blocks {
+            node.submit_block(block.clone()).unwrap();
+        }
+        let mut trimmed = false;
+        for _ in 0..80 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if node.blocks_from().unwrap_or(0) > 0 {
+                trimmed = true;
+                break;
+            }
+        }
+        assert!(trimmed, "the log was never trimmed, so this proves nothing");
+        node.shutdown();
+    }
+
+    // A header is a version, a network, a height and then the parent. Changing
+    // the head record's parent changes its identifier, so the record after it
+    // no longer names it, which is the one thing the store refuses on. The
+    // headers are then rewritten from the blocks that are left, which start
+    // above the first block, so the node holds a chain it cannot show.
+    let path = directory.join(cairn_store::HEADER_LOG);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[2 + 4 + 8] ^= 0xFF;
+    std::fs::write(&path, &bytes).unwrap();
+
+    let (node, _) = Node::open_archiving(params, address, &directory).unwrap();
+    node.keep_blocks(1);
+    let filling = node
+        .filling()
+        .expect("a node that cannot show the chain to a newcomer");
+    assert!(
+        filling.over_the_keep(),
+        "the disk is over the budget, which is what this is about: {filling:?}"
+    );
+    let explorer = Explorer::new(node);
+    explorer.refresh();
+    let page = body(&ask(&explorer, "status"));
+
+    assert!(
+        page.contains(&format!("\"bytes\":{}", filling.bytes)),
+        "the bytes on the disk, read from the node rather than a default: {page}"
+    );
+    assert!(
+        page.contains("\"keep\":1"),
+        "and the budget they are over, or the bytes say nothing: {page}"
+    );
+    assert!(
+        page.contains("\"overTheKeep\":true"),
+        "said plainly as well, because the comparison is the news: {page}"
+    );
+
+    explorer.node().shutdown();
+    drop(explorer);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 /// A rebuild of the index does not stop the node it runs on.
 ///
 /// `Explorer::refresh` took the index lock, then the node's single global
@@ -616,10 +708,30 @@ fn the_site_can_see_a_disk_that_has_stopped() {
 /// the chain rather than with the depth of the reorganisation that caused it.
 ///
 /// What is counted here is how often the node can ask its own chain a question
-/// while the rebuild runs. It used to be able to ask once.
+/// while the rebuild runs, against how often it manages the same question with
+/// nobody rebuilding. The second half is the repair to this test. It used to
+/// require a thousand questions and nothing else, which is a number about a
+/// machine rather than about this code: the same spinning thread gets through
+/// a few hundred turns on a busy CI runner and ten thousand on an idle laptop,
+/// over the same rebuild. CI read a rebuild of 1.73 ms, in which no thread of
+/// its was ever going to reach a thousand turns, and the test failed there
+/// because the code was fast. The rate is now measured on the machine that is
+/// running it, moments before, and what the rebuild has to leave standing is a
+/// share of that rate rather than a count.
 #[test]
 fn a_rebuild_does_not_stop_the_node() {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    /// Long enough for the free-running count to be a rate rather than a
+    /// sample, and short beside anything the rest of this test does.
+    const UNHINDERED: std::time::Duration = std::time::Duration::from_millis(50);
+    /// What the rebuild may cost the thread beside it. A walk that takes the
+    /// chain for one block and lets it go between leaves that thread a seventh
+    /// of what it had here; a walk that holds the chain to the tip leaves it
+    /// one turn, whatever the machine. A fortieth sits between the two with
+    /// room on both sides: five times under what the repaired walk leaves, and
+    /// a hundred times over what a walk that stops the node does.
+    const SHARE: u64 = 40;
 
     let params = params();
     let miner = wallet(1);
@@ -652,6 +764,17 @@ fn a_rebuild_does_not_stop_the_node() {
         while asked.load(Ordering::Relaxed) < 10 {
             std::hint::spin_loop();
         }
+
+        // What that thread manages with nobody holding the chain, on this
+        // machine, in this run. Sleeping rather than spinning here, so the
+        // measurement is of the node and not of two threads fighting over one
+        // processor.
+        asked.store(0, Ordering::Relaxed);
+        let began = Instant::now();
+        std::thread::sleep(UNHINDERED);
+        let free = asked.load(Ordering::Relaxed);
+        let freely = began.elapsed();
+
         asked.store(0, Ordering::Relaxed);
         longest.store(0, Ordering::Relaxed);
         let started = Instant::now();
@@ -661,9 +784,21 @@ fn a_rebuild_does_not_stop_the_node() {
         let waited = longest.load(Ordering::Relaxed);
         running.store(false, Ordering::Relaxed);
 
+        // What the same thread would have got through over the length of the
+        // rebuild had nothing been in its way.
+        // Scaled in microseconds with integers. It is a count against a ratio
+        // of two durations, and a float here buys nothing but a cast the
+        // workspace lints refuse.
+        let unhindered = Some(u128::from(free))
+            .and_then(|count| count.checked_mul(rebuild.as_micros()))
+            .and_then(|scaled| scaled.checked_div(freely.as_micros().max(1)))
+            .and_then(|count| u64::try_from(count).ok())
+            .unwrap_or(u64::MAX);
         println!(
             "rebuilding 1,200 blocks took {rebuild:?}; the node asked its own chain \
-             {during} questions while it ran, waiting at most {waited} us for one"
+             {during} questions while it ran, against {unhindered} it would have \
+             answered in that time with nobody rebuilding ({free} in {freely:?}), \
+             waiting at most {waited} us for one"
         );
         // The walk reached the tip. It does not reach the first block: a
         // node holding no blocks on disk keeps only the window a
@@ -672,15 +807,23 @@ fn a_rebuild_does_not_stop_the_node() {
         // of the first repair in this file.
         let status = ask(&explorer, "status");
         assert!(says(&status, "behind", "0"), "{}", body(&status));
+        assert!(
+            unhindered >= 100,
+            "with nobody rebuilding, this thread would have asked {unhindered} \
+             questions over a rebuild of {rebuild:?}, which is too few for the \
+             count during the rebuild to say anything"
+        );
         // The walk takes the chain for one block at a time and lets it go
         // between, so a thread spinning on it gets a turn or several per
-        // block and the count grows with the chain. Held across the walk, all
-        // it gets is the moment before the lock is taken: a couple of hundred
-        // however long the rebuild is, and then nothing until it is over.
+        // block and the count keeps pace with the chain. Held across the walk,
+        // all it gets is the moment before the lock is taken and one turn when
+        // it is given back.
         assert!(
-            during > 1_000,
-            "the node got {during} questions in during a {rebuild:?} rebuild, \
-             which is a node stopped rather than a node interleaved"
+            during.saturating_mul(SHARE) >= unhindered,
+            "the node got {during} questions in during a {rebuild:?} rebuild, against \
+             {unhindered} it would have answered in the same time with nobody \
+             rebuilding, and one of them waited {waited} us. That is a node stopped \
+             rather than a node interleaved."
         );
     });
 }

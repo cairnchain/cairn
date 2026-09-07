@@ -25,3 +25,6 @@ cairn-primitives.workspace = true
 # For `tests/published_figures.rs`, which takes a sampled weighing apart to
 # work out what one costs on a chain no test can mine to.
 cairn-accumulator.workspace = true
+# For `tests/answers.rs`, which damages a header log on purpose to put a node
+# in the one state where its disk grows with the chain.
+cairn-store.workspace = true

@@ -473,10 +473,20 @@ fn a_join_request_does_not_hold_the_chain_shut() {
 /// over a piece that existed, and nothing went back to the asker either way.
 /// The cost grows with the chain.
 ///
-/// Asserted against what a real piece costs on the same machine rather than
+/// Asserted against what the build costs on the same machine rather than
 /// against a number, because what is wrong is the ordering: a question this
-/// node can answer out of what it is already holding must not cost more than
-/// one it answers by sending half a megabyte.
+/// node can answer out of what it is already holding must not cost a build.
+///
+/// The build is measured rather than assumed, and the first ask is where it is
+/// measured: a node that has not been asked yet holds no answer, so that one
+/// ask pays for the whole build and nothing else here does. It used to be
+/// thrown away, and what stood in its place was a comparison between two small
+/// durations: the absent ask against the real one, both of them a few
+/// milliseconds of socket work on a good day. The difference between two such
+/// numbers is the load between them, and CI read forty milliseconds against
+/// two on a machine where a build costs far more than either. What separates a
+/// hand-over from a rebuild is not which of the two is larger, it is that a
+/// rebuild costs a build.
 #[test]
 fn a_part_that_is_not_in_the_answer_does_not_rebuild_it() {
     let directory = scratch("joinpart");
@@ -491,10 +501,11 @@ fn a_part_that_is_not_in_the_answer_does_not_rebuild_it() {
         .unwrap();
     write_message(&mut peer, params().network, &hello(987_654)).unwrap();
 
-    // The first ask builds the answer whatever happens, and is not measured.
-    // Nothing mines here, so the tip does not move and the answer stays the
-    // one every later question is about.
-    what_it_cost(&mut peer, Joining::Weight, 0, 1);
+    // The first ask builds the answer whatever happens. Nothing mines here, so
+    // the tip does not move and the answer stays the one every later question
+    // is about: this is the only build in the test, and what it cost is what
+    // an absent part is held against.
+    let build = what_it_cost(&mut peer, Joining::Weight, 0, 1);
 
     // A join answer is charged an eighth of an allowance window, so the asking
     // is paced to stay inside one rather than being answered with silence.
@@ -512,17 +523,28 @@ fn a_part_that_is_not_in_the_answer_does_not_rebuild_it() {
             200 + round,
         ));
     }
-    let real = middle(real);
-    let absent = middle(absent);
+    // The cheapest of each rather than the middle one. What is being measured
+    // is a cost, and every sample of a cost is that cost plus whatever the
+    // machine was doing at the time: the smallest is the one with the least of
+    // the machine in it, and a spike in a sample of the absent ask is the one
+    // thing that could make this read as a rebuild.
+    let real = cheapest(real);
+    let absent = cheapest(absent);
 
     node.shutdown();
     let _ = std::fs::remove_dir_all(&directory);
 
+    println!(
+        "chain of 400: building the answer cost {build:?}, handing over a part of it \
+         {real:?}, asking for a part that is not in it {absent:?}"
+    );
     assert!(
-        absent < real,
-        "a part that is not in the answer cost {absent:?}, where handing over a \
-         part that is cost {real:?}. Asking for nothing must not cost more than \
-         asking for something: the answer is built again on every one of them."
+        absent * 4 < build,
+        "a part that is not in the answer cost {absent:?}, where building the answer \
+         from nothing cost {build:?} and handing over a part that is in it cost \
+         {real:?}. An absent part is answered with silence out of what this node is \
+         already holding, so anything near the price of a build is the build being \
+         run again."
     );
 }
 
@@ -549,9 +571,8 @@ fn what_it_cost(peer: &mut TcpStream, what: Joining, part: u32, nonce: u64) -> D
     panic!("the node never answered the ping behind the question");
 }
 
-fn middle(mut of: Vec<Duration>) -> Duration {
-    of.sort_unstable();
-    of[of.len() / 2]
+fn cheapest(of: Vec<Duration>) -> Duration {
+    of.into_iter().min().unwrap_or(Duration::ZERO)
 }
 
 /// **A stranger naming addresses that do not answer stopped the round of upkeep
@@ -572,50 +593,96 @@ fn middle(mut of: Vec<Duration>) -> Duration {
 ///
 /// A round now spends a bounded amount of time dialling and goes back to the
 /// rest of its work.
+///
+/// Two nodes rather than one, watched over the same window from two threads.
+/// The baseline used to be taken first and the measurement after it, ten
+/// seconds apart from forty, so what stood between them was whatever else the
+/// machine had picked up in the meantime: in the full suite this read three
+/// rounds in forty seconds against nine in ten, and the repair was in place
+/// the whole time. Both nodes now run at once and are counted at once, so a
+/// machine that slows one slows the other, and what is left is the difference
+/// the book makes.
 #[test]
 fn a_book_of_addresses_that_do_not_answer_does_not_stop_upkeep() {
-    let directory = scratch("dialstall");
-    let (node, _) = Node::open(params(), loopback(), &directory).unwrap();
+    let empty_directory = scratch("dialstall-empty");
+    let full_directory = scratch("dialstall-full");
+    let (empty, _) = Node::open(params(), loopback(), &empty_directory).unwrap();
+    let (full, _) = Node::open(params(), loopback(), &full_directory).unwrap();
 
-    let mut peer = TcpStream::connect(node.address()).unwrap();
-    peer.set_read_timeout(Some(Duration::from_millis(250)))
+    let mut watching_empty = TcpStream::connect(empty.address()).unwrap();
+    watching_empty
+        .set_read_timeout(Some(Duration::from_millis(250)))
         .unwrap();
-    write_message(&mut peer, params().network, &hello(777_777)).unwrap();
+    write_message(&mut watching_empty, params().network, &hello(777_777)).unwrap();
 
-    // What an idle node's round costs, as the baseline this is measured
-    // against. One `GetPeers` goes out per round, so counting them counts
-    // rounds.
-    let idle = rounds_seen(&mut peer, Duration::from_secs(10));
+    let mut watching_full = TcpStream::connect(full.address()).unwrap();
+    watching_full
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .unwrap();
+    write_message(&mut watching_full, params().network, &hello(888_888)).unwrap();
 
     // Everything a peer is allowed to name in one answer, twice over, all of it
     // in ranges reserved for documentation so that a dial hangs rather than
     // being refused.
     for _ in 0..2 {
-        write_message(&mut peer, params().network, &Message::Peers(nowhere(64))).unwrap();
+        write_message(
+            &mut watching_full,
+            params().network,
+            &Message::Peers(nowhere(64)),
+        )
+        .unwrap();
     }
+    wait_for(
+        "the named addresses to reach the book",
+        Duration::from_secs(10),
+        || full.known_addresses().len() >= 32,
+    );
+    let known = full.known_addresses().len();
 
+    // What each node broadcast while its book was being loaded is queued on
+    // these sockets, so it is read off and thrown away: a round counted below
+    // is a round that happened inside the window.
+    let settling = Duration::from_millis(500);
+    let _ = rounds_seen(&mut watching_empty, settling);
+    let _ = rounds_seen(&mut watching_full, settling);
+
+    // One `GetPeers` goes out per round, so counting them counts rounds, and
+    // counting both at once is what makes the two counts comparable.
     let watched = Duration::from_secs(40);
-    let fed = rounds_seen(&mut peer, watched);
-    let known = node.known_addresses().len();
+    let counting = thread::spawn(move || rounds_seen(&mut watching_empty, watched));
+    let fed = rounds_seen(&mut watching_full, watched);
+    let idle = counting.join().unwrap_or(0);
 
-    node.shutdown();
-    let _ = std::fs::remove_dir_all(&directory);
+    empty.shutdown();
+    full.shutdown();
+    let _ = std::fs::remove_dir_all(&empty_directory);
+    let _ = std::fs::remove_dir_all(&full_directory);
 
+    println!(
+        "over the same {watched:?}: {idle} rounds of upkeep with an empty book, \
+         {fed} with {known} addresses that do not answer in it"
+    );
     assert!(
         known >= 32,
         "only {known} of the named addresses went into the book, so this test \
          never put a full book of the dead to the node"
     );
     assert!(
-        idle >= 4,
-        "an idle node only completed {idle} rounds in ten seconds, so the \
-         baseline this compares against is not a baseline"
+        idle >= 8,
+        "a node with an empty book only completed {idle} rounds in {watched:?}, so \
+         the baseline this is measured against is not a baseline"
     );
+    // A round may spend DIAL_BUDGET dialling and MAINTENANCE_PERIOD waiting, so
+    // a full book of the dead costs a node about four times its idle round and
+    // nothing beyond that. Ten times leaves room for a machine that schedules
+    // one of these two loops worse than the other, and is still nowhere near
+    // the twenty five seconds a round cost when every dial was waited out: that
+    // is one round in the window against forty.
     assert!(
-        fed >= 4,
-        "with {known} addresses that do not answer in its book, the node \
-         completed {fed} rounds of upkeep in {watched:?}, against {idle} in ten \
-         seconds when its book was empty. Dialling blocks the one loop that \
+        fed.saturating_mul(10) >= idle,
+        "with {known} addresses that do not answer in its book, the node completed \
+         {fed} rounds of upkeep in {watched:?}, against {idle} on a node with an \
+         empty book watched over the same window. Dialling blocks the one loop that \
          also drives the chooser, the header turn and the undertaking."
     );
 }
@@ -915,18 +982,35 @@ fn a_dribbling_peer_does_not_outlive_a_node_that_stopped_itself() {
     node.wait_for_the_burial(0);
     drop(handover);
 
+    // Somebody to ask, which the dribbler is not and never was. A node that
+    // has been handed a ledger and has nobody to ask for the blocks above it
+    // waits rather than stranding, because nobody to ask is a different fault
+    // with a different cure: the cure for stranding is deleting the directory,
+    // and no stranger's silent socket may be the evidence for that. This test
+    // used to reach the stranding through the dribbler alone, on a node that
+    // counted every socket in its table as a peer it had asked.
+    let witness = Node::bind(params(), loopback()).unwrap();
+    node.connect(witness.address()).unwrap();
+    wait_for(
+        "the node to hold a peer that has introduced itself",
+        Duration::from_secs(10),
+        || node.peers_introduced() == 1,
+    );
+
     let stop = Arc::new(AtomicBool::new(false));
     let hand = dribbler(node.address(), &stop);
     wait_for(
         "the node to take the dribbling connection",
         Duration::from_secs(10),
-        || node.peer_count() == 1,
+        || node.peer_count() == 2,
     );
     wait_for(
         "the node to say it is stranded",
         Duration::from_secs(20),
         || node.stranded().is_some(),
     );
+    witness.shutdown();
+    drop(witness);
 
     node.shutdown();
     drop(node);
@@ -946,6 +1030,72 @@ fn a_dribbling_peer_does_not_outlive_a_node_that_stopped_itself() {
         "eleven seconds after the node stopped itself and was dropped, its directory \
          was still locked by a read thread a stranger was keeping alive"
     );
+}
+
+/// **A stranger's silent socket is not somebody this node has asked.**
+///
+/// A node handed a ledger has to validate its way up from the anchor before it
+/// stands behind it, and when the blocks never come it stops and tells its
+/// operator to delete the data directory and start again. That is the most
+/// destructive sentence this program prints, and the one condition holding it
+/// back is having had somebody to ask: `owed_this_round` says so in as many
+/// words, "an operator whose node has no peers has a network to mend, not a
+/// directory to wipe".
+///
+/// The set it counted was every socket in the peer table. A socket that has
+/// not introduced itself cannot be asked anything, and after the broadcast
+/// that skips it, was never asked anything. So one stranger holding one open
+/// connection to a joining node was enough to turn the hour of waiting into
+/// that sentence, an exit code, and a person deleting their chain.
+#[test]
+fn a_node_with_nobody_to_ask_does_not_tell_its_operator_to_wipe_the_disk() {
+    let (directory, handover) = directory_holding_a_handover("nobody-to-ask");
+    let (node, _) = Node::open(params(), loopback(), &directory).unwrap();
+    // No patience at all, so the only thing between this node and the sentence
+    // is whether it had anybody to ask.
+    node.wait_for_the_burial(0);
+    drop(handover);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let hand = dribbler(node.address(), &stop);
+    wait_for(
+        "the node to take the dribbling connection",
+        Duration::from_secs(10),
+        || node.peer_count() == 1,
+    );
+    assert_eq!(
+        node.peers_introduced(),
+        0,
+        "the dribbler has said nothing, so there is nobody here to ask"
+    );
+
+    // Five rounds of upkeep with the patience at nought. Every one of them
+    // used to be enough.
+    thread::sleep(Duration::from_secs(5));
+    assert!(
+        node.stranded().is_none(),
+        "a node with nobody to ask was told to delete its own chain on the \
+         strength of a stranger's open socket: {:?}",
+        node.stranded()
+    );
+
+    // And with one peer that has actually spoken, it says so at once, so this
+    // is the condition being read rather than the reading being switched off.
+    let witness = Node::bind(params(), loopback()).unwrap();
+    node.connect(witness.address()).unwrap();
+    wait_for(
+        "the node to say it is stranded once it has somebody to ask",
+        Duration::from_secs(20),
+        || node.stranded().is_some(),
+    );
+
+    witness.shutdown();
+    drop(witness);
+    node.shutdown();
+    drop(node);
+    stop.store(true, Ordering::SeqCst);
+    let _ = hand.join();
+    let _ = std::fs::remove_dir_all(&directory);
 }
 
 /// The disk a node has the instant a handover lands.

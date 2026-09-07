@@ -423,15 +423,23 @@ fn spend(arguments: &[String]) -> Result<(), String> {
     wallet.shutdown();
 
     println!();
-    if sent.handed_on {
-        println!("Handed to the network, and waiting for a block. Nobody has been paid yet:");
-        println!("that happens when a block carries it, which takes a few minutes, and it is");
-        println!("settled once enough work is piled on top of that block. Until then this");
-        println!("wallet's balance does not move and the notes it used cannot be spent again.");
-    } else {
-        println!("No peer took it: this wallet reached nobody. It is not sent and nobody has");
-        println!("been paid.");
+    // A spend that reached nobody leaves by the failing door. It used to print
+    // its own refusal and then exit nought, so a script that ran this and read
+    // the code was told the payment had gone.
+    if !sent.handed_on {
+        return Err(format!(
+            "no peer took it. This wallet offered the transfer to every peer it had \
+             for five seconds and reached nobody, so it is not sent, nobody has been \
+             paid, and the money is still here. Check the network and the --seed \
+             addresses, then run this command again. The transfer that was drafted is \
+             {}, and nothing on the chain carries it.",
+            sent.id
+        ));
     }
+    println!("Handed to the network, and waiting for a block. Nobody has been paid yet:");
+    println!("that happens when a block carries it, which takes a few minutes, and it is");
+    println!("settled once enough work is piled on top of that block. Until then this");
+    println!("wallet's balance does not move and the notes it used cannot be spent again.");
     Ok(())
 }
 

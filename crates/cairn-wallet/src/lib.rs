@@ -707,7 +707,14 @@ pub struct Sent {
     /// Notes gathered to cover it, and how many needed a proof.
     pub notes: usize,
     pub from_cold: usize,
-    /// Whether a peer took it. False means it is not spent: nobody has it.
+    /// Whether this wallet got it as far as a peer: at least one connected
+    /// peer's outbound queue accepted it, and the wallet then waited for that
+    /// queue to be written to the socket.
+    ///
+    /// False means nobody was offered it. It is not spent, nobody has it, and
+    /// the money is still where it was. It used to be read off the peer count,
+    /// which answers the question "was anybody connected five seconds after
+    /// the one broadcast" and not the question its own name asks.
     pub handed_on: bool,
 }
 
@@ -973,7 +980,7 @@ impl Wallet {
     pub fn progress(&self) -> Progress {
         Progress {
             height: self.node.height(),
-            peers: self.node.peer_count(),
+            peers: self.node.peers_introduced(),
             joining: self.node.joining(),
             total_work: self.node.total_work(),
             probation: self.node.probation(),
@@ -1684,10 +1691,16 @@ impl Wallet {
             });
         }
 
-        // Held open long enough for the transfer to leave. Reporting a spend
-        // that reached nobody as done would be telling someone their money
-        // moved when it did not.
-        let handed_on = wait_until(Duration::from_secs(5), || self.node.peer_count() > 0);
+        // Offered until somebody takes it, rather than waited on until a peer
+        // exists. The submission above broadcasts once, at the instant the pool
+        // takes the transfer, and a wallet sends seconds after it opened: on
+        // that broadcast the peer table is regularly still empty. Nothing
+        // gossips a pool, so the peer that finished its handshake a second
+        // later was never told, and this read the peer count, said the money
+        // had been handed to the network, and shut the node down with the
+        // transfer in it and nowhere else.
+        let handed_on = wait_until(Duration::from_secs(5), || self.node.offer_again(&id) > 0);
+        // Long enough for the queue that took it to be written to the socket.
         std::thread::sleep(Duration::from_millis(500));
 
         Ok(Sent {

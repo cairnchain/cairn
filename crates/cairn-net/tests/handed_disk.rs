@@ -191,6 +191,17 @@ fn a_node_that_joined_a_chain_writes_it_down_and_says_nothing_about_its_disk() {
     wait_for("the node to follow the whole chain", || {
         node.height() == Some(last)
     });
+    // Following the chain and holding the whole of it on disk finish at two
+    // different moments. A node handed a ledger starts its header log just
+    // above the anchor, here at height 112, and fills downwards while it goes
+    // on reading. Waiting on the height and then opening the log measured how
+    // far down the fill had got by then, which is a fact about the machine:
+    // on a slower one the log still began at 112 and the assertion below read
+    // a node that was working correctly as one that had lost the chain. This
+    // waits for the fill, which is what that assertion is about.
+    wait_for("the header log to reach the bottom of the chain", || {
+        node.filling().is_none()
+    });
 
     let unwritten = node.unwritten();
     let written_through = node.written_through();

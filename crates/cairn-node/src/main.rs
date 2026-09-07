@@ -8,25 +8,49 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cairn_net::node::{Probation, Unjudged, Unread, Unweighable, Unwritten, MAX_BEHIND};
-use cairn_net::{Filling, Joined, Node, Restored};
+use cairn_chain::Outdated;
+use cairn_net::node::{Probation, Stranded, Unjudged, Unread, Unweighable, Unwritten, MAX_BEHIND};
+use cairn_net::{Filling, Joined, Node, NodeError, Restored};
 
 const TICK: Duration = Duration::from_millis(100);
 
+/// Why the node is no longer running, which is what the exit code is made of.
+///
+/// A node that stops because its disk filled, because the chain moved to rules
+/// this build has no reader for, or because nobody would deliver the blocks
+/// under a ledger it was handed, has not done what it was started to do. All
+/// three printed a paragraph saying exactly that and then exited nought, so a
+/// unit file with `Restart=on-failure` did not restart, a `cairnd && ...` went
+/// on to the next command, and every watch that reads an exit code was told
+/// the node had been asked to stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ending {
+    /// It ran until it was asked to stop, or until `--run-for` was up.
+    AsAsked,
+    /// It stopped itself, and the reason is already printed above.
+    Fault,
+}
+
 fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    if let Err(message) = run(&arguments) {
-        eprintln!("cairnd: {message}");
-        eprintln!();
-        eprintln!("{}", options::HELP);
-        std::process::exit(2);
+    match run(&arguments) {
+        Ok(Ending::AsAsked) => {}
+        // No usage text: nothing on the command line was wrong, and the
+        // paragraph the node printed before stopping is the thing to read.
+        Ok(Ending::Fault) => std::process::exit(1),
+        Err(message) => {
+            eprintln!("cairnd: {message}");
+            eprintln!();
+            eprintln!("{}", options::HELP);
+            std::process::exit(2);
+        }
     }
 }
 
-fn run(arguments: &[String]) -> Result<(), String> {
+fn run(arguments: &[String]) -> Result<Ending, String> {
     let Some(options) = options::resolve_options(arguments)? else {
         println!("{}", options::HELP);
-        return Ok(());
+        return Ok(Ending::AsAsked);
     };
 
     println!("cairnd {}", env!("CARGO_PKG_VERSION"));
@@ -37,8 +61,12 @@ fn run(arguments: &[String]) -> Result<(), String> {
     // second: a test network that has been retired leaves its name written in
     // a unit file, and a node that will not start is a worse answer than a
     // script that saw the refusal and asked for the current name instead.
-    if arguments.iter().any(|argument| argument == "--check") {
-        return Ok(());
+    //
+    // Read off the settings rather than by looking through the words the
+    // operator typed. Looking through them finds `--check` wherever it stands,
+    // including where it stands as another option's missing value.
+    if options.check {
+        return Ok(Ending::AsAsked);
     }
 
     let started = if options.archive {
@@ -87,8 +115,15 @@ fn run(arguments: &[String]) -> Result<(), String> {
         // Written down before it is dialled, so a seed that is down right now
         // is tried again later rather than never known at all.
         node.remember_seed(*seed);
+        // Three lines and not two. A dial that completes and a peer this node
+        // holds are different things, and `connect` used to answer `Ok(())`
+        // for both: a seed turned away for want of room was printed as
+        // `reached`, and the operator counted it.
         match node.connect(*seed) {
             Ok(()) => println!("reached      {seed}"),
+            Err(NodeError::NotKept { because, .. }) => {
+                println!("not kept     {seed} ({because}), will keep trying");
+            }
             Err(error) => println!("unreachable  {seed} ({error}), will keep trying"),
         }
     }
@@ -132,22 +167,28 @@ fn run(arguments: &[String]) -> Result<(), String> {
         })
     });
 
-    watch(&node, &options, &running);
+    let ending = watch(&node, &options, &running);
 
     running.store(false, Ordering::SeqCst);
     node.shutdown();
     if let Some(miner) = miner {
         let _ = miner.join();
     }
-    println!("stopped");
-    Ok(())
+    match ending {
+        Ending::AsAsked => println!("stopped"),
+        Ending::Fault => println!("stopped on the fault above"),
+    }
+    Ok(ending)
 }
 
-/// Prints where the node stands, until it is asked to stop.
+/// Prints where the node stands, until it is asked to stop or stops itself.
 ///
 /// Everything worth keeping is written as it happens, so a node killed at any
 /// moment loses nothing but the blocks it was in the middle of receiving.
-fn watch(node: &Node, options: &options::Options, running: &AtomicBool) {
+///
+/// The three ways out that print a paragraph and stop answer [`Ending::Fault`],
+/// which is what the exit code is made of.
+fn watch(node: &Node, options: &options::Options, running: &AtomicBool) -> Ending {
     let started = Instant::now();
     // Named once. Every line below that has anything to say about the disk
     // has to say which disk, because a machine running three of these has
@@ -158,64 +199,23 @@ fn watch(node: &Node, options: &options::Options, running: &AtomicBool) {
     let mut next = Duration::ZERO;
 
     while running.load(Ordering::SeqCst) {
-        // A rule took effect at a height this build has no rules for. Going on
-        // would mean refusing every peer that had updated and following
-        // whoever had not, so the node says which version it needs and stops.
-        if let Some(outdated) = node.outdated() {
-            println!(
-                "[{:>8}] stopping: the rules at height {} are block version {}, and this \
-                 build knows only version {}. Update and start again; the chain on disk \
-                 is kept and nothing is lost.",
-                stamp(started),
-                outdated.height,
-                outdated.required,
-                outdated.known,
-            );
-            return;
-        }
-        // A ledger this node was handed, and blocks above it that nobody will
-        // deliver. It cannot get back below where it was handed on, so there
-        // is nothing to wait for and nothing it can do about it; the cure is
-        // the operator's.
-        if let Some(stranded) = node.stranded() {
-            println!(
-                "[{:>8}] stopping: this node was handed a ledger at height {}, and had to check its \
-                 way to height {} before it could stand behind it. It waited {} seconds with \
-                 peers to ask and not one of the blocks in between arrived{}. It holds \
-                 nothing below the ledger, so no chain forking under it can be followed from \
-                 here. Delete the data directory and start again, from a seed you trust.",
-                stamp(started),
-                stranded.anchor,
-                stranded.settles_at,
-                stranded.waited,
-                if stranded.out_of_reach > 0 {
-                    format!(
-                        ", while {} blocks arrived from a chain it cannot reach",
-                        stranded.out_of_reach
-                    )
-                } else {
-                    String::new()
-                },
-            );
-            return;
-        }
-        // The disk stopped taking what this node writes, and it has now
-        // accepted more blocks than it could ever write down. Nothing an
-        // operator does from here puts those blocks on the disk, so what is
-        // left to protect is the directory itself: every block accepted past
-        // this point is one more the disk does not have, and one more the next
-        // start has to fetch again.
-        if let Some(unwritten) = node.unwritten().filter(|held| !held.within_reach) {
-            println!(
-                "[{:>8}] stopping: {}",
-                stamp(started),
-                lost_the_disk(&unwritten, &directory),
-            );
-            return;
+        // The three states this node stops itself in, decided in one place
+        // with the paragraph that explains them. One place because the two
+        // must not come apart: a node that printed one of these and then
+        // exited nought told every watch reading its exit code that it had
+        // been asked to stop.
+        if let Some(fault) = stopped_itself(
+            node.outdated(),
+            node.stranded(),
+            node.unwritten(),
+            &directory,
+        ) {
+            println!("[{:>8}] stopping: {fault}", stamp(started));
+            return Ending::Fault;
         }
         if let Some(limit) = limit {
             if started.elapsed() >= limit {
-                return;
+                return Ending::AsAsked;
             }
         }
         if started.elapsed() >= next {
@@ -233,7 +233,11 @@ fn watch(node: &Node, options: &options::Options, running: &AtomicBool) {
                 "[{:>8}] height {height:<6} stored {stored:<6} peers {:<4} known {:<5} \
                  cold {:<8} work {}",
                 stamp(started),
-                node.peer_count(),
+                // Peers that have introduced themselves, not sockets held. A
+                // stranger that connects and says nothing cannot be asked
+                // anything, and counting it here put a number in front of an
+                // operator that no part of this node could act on.
+                node.peers_introduced(),
                 node.known_addresses().len(),
                 node.cold_len(),
                 node.total_work(),
@@ -242,6 +246,7 @@ fn watch(node: &Node, options: &options::Options, running: &AtomicBool) {
         }
         thread::sleep(TICK);
     }
+    Ending::AsAsked
 }
 
 /// The lines under a status line, for every state a healthy node's numbers
@@ -304,6 +309,92 @@ fn say_what_the_numbers_do_not(node: &Node, directory: &str) {
     if let Some(filling) = node.filling() {
         say(&still_filling(&filling, directory));
     }
+    // And the one write here that costs nothing today and the whole of
+    // tomorrow's start. It is last because it is the cheapest of these to
+    // lose, and it is here because it was nowhere.
+    if let Some(because) = node.unsaved_addresses() {
+        say(&addresses_not_written(&because, directory));
+    }
+}
+
+/// What an operator is told when the list of peers will not write.
+///
+/// Nothing on the chain rests on this file, so nothing above this line changes
+/// while it is failing: the height climbs, the peers connect, the blocks are
+/// written. What it costs arrives at the next start, on a node that has
+/// forgotten every address it learned.
+fn addresses_not_written(because: &str, directory: &str) -> String {
+    format!(
+        "the list of peers under {directory} is not being written: {because}. Nothing on \
+         the chain depends on it and nothing has been lost yet. What it costs is the \
+         next start: this node has learned addresses while it ran, and without that \
+         file it comes back knowing only the seeds it is given on the command line. \
+         Free some room under that directory, or check what else on this machine \
+         cannot write there."
+    )
+}
+
+/// Why this node stopped itself, in the words an operator reads, or nothing
+/// if it has not.
+///
+/// A function of what the node says about itself rather than of the node, so
+/// that the mapping can be read and held to without a disk that has filled or
+/// a chain whose rules moved on. Every state that answers here is a state the
+/// node cannot get out of on its own, which is what makes it a fault and not
+/// a stop.
+///
+/// The disk is the one with a condition on it. A node behind on its writes and
+/// still able to catch up is not stopping: it says so on its status lines and
+/// carries on, and the difference between the two is `within_reach`.
+fn stopped_itself(
+    outdated: Option<Outdated>,
+    stranded: Option<Stranded>,
+    unwritten: Option<Unwritten>,
+    directory: &str,
+) -> Option<String> {
+    // A rule took effect at a height this build has no rules for. Going on
+    // would mean refusing every peer that had updated and following whoever
+    // had not, so the node says which version it needs and stops.
+    if let Some(outdated) = outdated {
+        return Some(format!(
+            "the rules at height {} are block version {}, and this build knows only \
+             version {}. Update and start again; the chain on disk is kept and nothing \
+             is lost.",
+            outdated.height, outdated.required, outdated.known,
+        ));
+    }
+    // A ledger this node was handed, and blocks above it that nobody will
+    // deliver. It cannot get back below where it was handed on, so there is
+    // nothing to wait for and nothing it can do about it; the cure is the
+    // operator's.
+    if let Some(stranded) = stranded {
+        return Some(format!(
+            "this node was handed a ledger at height {}, and had to check its way to \
+             height {} before it could stand behind it. It waited {} seconds with peers \
+             to ask and not one of the blocks in between arrived{}. It holds nothing \
+             below the ledger, so no chain forking under it can be followed from here. \
+             Delete the data directory and start again, from a seed you trust.",
+            stranded.anchor,
+            stranded.settles_at,
+            stranded.waited,
+            if stranded.out_of_reach > 0 {
+                format!(
+                    ", while {} blocks arrived from a chain it cannot reach",
+                    stranded.out_of_reach
+                )
+            } else {
+                String::new()
+            },
+        ));
+    }
+    // The disk stopped taking what this node writes, and it has now accepted
+    // more blocks than it could ever write down. Nothing an operator does from
+    // here puts those blocks on the disk, so what is left to protect is the
+    // directory itself: every block accepted past this point is one more the
+    // disk does not have, and one more the next start has to fetch again.
+    unwritten
+        .filter(|held| !held.within_reach)
+        .map(|unwritten| lost_the_disk(&unwritten, directory))
 }
 
 /// The status line for a node that has not yet stood behind the ledger it was
@@ -777,6 +868,81 @@ mod said_out_loud {
         assert!(
             text.contains("has not stopped"),
             "and that the node has not acted on it"
+        );
+    }
+}
+
+/// What the operator's supervisor is told, which is the exit code.
+///
+/// A node that stops itself has not done what it was started to do, and all
+/// three ways of doing that printed their paragraph and then exited nought.
+/// A unit file with `Restart=on-failure` did not restart, `cairnd && ...`
+/// carried on to the next command, and every watch reading `$?` was told the
+/// node had been asked to stop.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod what_the_exit_code_says {
+    use super::stopped_itself;
+    use cairn_chain::Outdated;
+    use cairn_net::node::{Stranded, Unwritten, Writing};
+
+    fn lost_the_disk(within_reach: bool) -> Unwritten {
+        Unwritten {
+            what: Writing::Blocks,
+            because: "No space left on device (os error 28)".to_owned(),
+            reached: 4_096,
+            written_through: Some(32),
+            blocks: 4_064,
+            within_reach,
+        }
+    }
+
+    /// Each of the three, and the state that looks like the third and is not.
+    ///
+    /// The pair at the end is the whole of the disk rule: a node behind on its
+    /// writes and still able to catch up says so and carries on, and the same
+    /// node past saving stops. Reading the first as a stop would take down
+    /// every node that ever met a slow disk.
+    #[test]
+    fn every_state_that_prints_stopping_is_one_the_node_cannot_leave() {
+        let outdated = stopped_itself(
+            Some(Outdated {
+                height: 900,
+                required: 3,
+                known: 1,
+            }),
+            None,
+            None,
+            "/var/lib/cairn",
+        )
+        .expect("a build with no rules for the chain stops");
+        assert!(outdated.contains("height 900"), "{outdated}");
+
+        let stranded = stopped_itself(
+            None,
+            Some(Stranded {
+                anchor: 1_000,
+                settles_at: 2_024,
+                waited: 600,
+                out_of_reach: 4,
+            }),
+            None,
+            "/var/lib/cairn",
+        )
+        .expect("a ledger nobody will deliver the blocks under stops");
+        assert!(stranded.contains("block"), "{stranded}");
+
+        let gone = stopped_itself(None, None, Some(lost_the_disk(false)), "/var/lib/cairn")
+            .expect("a disk past saving stops");
+        assert!(gone.contains("/var/lib/cairn"), "{gone}");
+
+        assert!(
+            stopped_itself(None, None, Some(lost_the_disk(true)), "/var/lib/cairn").is_none(),
+            "a disk that can still be caught up with is not a reason to stop"
+        );
+        assert!(
+            stopped_itself(None, None, None, "/var/lib/cairn").is_none(),
+            "and a node with nothing wrong with it is not either"
         );
     }
 }

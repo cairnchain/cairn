@@ -78,6 +78,7 @@ dependencies = [
  "cairn-ledger",
  "cairn-net",
  "cairn-primitives",
+ "cairn-store",
 ]
 
 [[package]]

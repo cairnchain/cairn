@@ -261,13 +261,41 @@ const _: () = assert!(MAX_BEHIND < MAX_REORG_DEPTH as u64);
 /// reason.
 const UNJUDGED_BLOCKS: u64 = 8;
 
-/// Connections those blocks have to have arrived on.
+/// Addresses those blocks have to have arrived from.
 ///
 /// Two rather than one, because one peer is one machine and one machine is
-/// what a stranger has. It is not proof either: whoever holds several
-/// addresses holds several connections. It is the cheapest condition that
-/// makes the claim cost more than a single message.
+/// what a stranger has. It is not proof: whoever holds two addresses meets it.
+/// It is the cheapest condition that makes the claim cost more than one
+/// machine, and it only started meaning that once these were counted by
+/// address; counted by connection, one machine met it by hanging up.
 const UNJUDGED_PEERS: usize = 2;
+
+/// A peer, for the two surfaces above that count peers.
+///
+/// Where the peer says it can be reached, which is its own port on the address
+/// the connection came from: the unit this codebase means by a peer everywhere
+/// else, and the one the address book keeps.
+///
+/// Both of these used to count [`PeerId`]s, which are handed out one per socket
+/// and never reused. A single machine at a single address therefore met the
+/// "two peers" condition by hanging up and dialling back, which costs it a TCP
+/// handshake and is not misbehaviour, and the word the operator read was
+/// "peers": a line telling somebody their build is too old for the chain was a
+/// line one stranger could write.
+///
+/// Still not proof, and the failure that is left is worth naming. A machine
+/// willing to say it listens on two different ports can present two of these,
+/// bounded by the connections one host may hold at once. What has gone is the
+/// case that costs nothing and is not even a lie.
+///
+/// A peer that has named no port counts as its address with no port, so every
+/// connection from it is the one peer rather than as many as it opens.
+type Sender = SocketAddr;
+
+/// How one connection counts towards those two.
+fn sender_of(advertised: Option<SocketAddr>, host: Option<IpAddr>) -> Option<Sender> {
+    advertised.or_else(|| host.map(|host| SocketAddr::new(host, 0)))
+}
 
 /// Seconds the first and the last of them have to be apart.
 ///
@@ -284,7 +312,7 @@ const UNJUDGED_STRETCH: u64 = 300;
 /// adds up to a claim about this build.
 const UNJUDGED_MEMORY: u64 = 3_600;
 
-/// Connections counted towards [`UNJUDGED_PEERS`] at once.
+/// Addresses counted towards [`UNJUDGED_PEERS`] at once.
 ///
 /// The table is fed by whoever connects, so it needs a ceiling like every
 /// other table here. What is being asked of it is whether more than one peer
@@ -307,15 +335,15 @@ const UNJUDGED_SENDERS: usize = 64;
 /// falls back to reading the chain. What was missing is anybody being told.
 const UNWEIGHED_SHOWINGS: u64 = 3;
 
-/// Connections those showings have to have come from.
+/// Addresses those showings have to have come from.
 ///
 /// The same reasoning as [`UNJUDGED_PEERS`] and the same honest caveat:
-/// whoever holds two addresses holds two connections, so this is the cheapest
-/// condition that makes the claim cost more than one peer's malice, and not
-/// proof of anything. It is said and never acted on.
+/// whoever holds two addresses meets it, so this is the cheapest condition
+/// that makes the claim cost more than one machine, and not proof of anything.
+/// It is said and never acted on.
 const UNWEIGHED_PEERS: usize = 2;
 
-/// Connections counted towards [`UNWEIGHED_PEERS`] at once.
+/// Addresses counted towards [`UNWEIGHED_PEERS`] at once.
 const UNWEIGHED_SENDERS: usize = 64;
 
 /// A gap between two rounds of maintenance that means the machine was away.
@@ -363,6 +391,21 @@ pub enum NodeError {
          changed: put the file back, or start this node in an empty directory"
     )]
     UnusableLedger { because: String },
+    /// The socket opened and was closed again without becoming a peer.
+    ///
+    /// A connection that completes is not a peer. This node lets one go when
+    /// it already holds as many as it takes, when it holds as many from that
+    /// host as it takes, when it is stopping, and when the socket could not be
+    /// set up. Every one of those answered `Ok(())`, and what the operator
+    /// read on the line under it was `reached`.
+    #[error(
+        "the connection to {address} was opened and closed again without being kept: \
+         {because}. The address is in the book, so upkeep dials it again"
+    )]
+    NotKept {
+        address: SocketAddr,
+        because: &'static str,
+    },
 }
 
 /// What a node handed a ledger has still to check before it stands behind it.
@@ -888,6 +931,19 @@ struct Peer {
     /// and counting it as one of this node's own is how a stranger decides who
     /// it talks to.
     dialled: bool,
+    /// Whether this peer has introduced itself.
+    ///
+    /// Read by [`Shared::broadcast`], and it has to be. A peer goes into this
+    /// table the moment its socket is accepted, and the welcome is only queued
+    /// once its hello has arrived, so anything broadcast in between reaches a
+    /// node this one has not been introduced to. That is `Unannounced`, which
+    /// closes the connection and refuses the host: a node's own eagerness,
+    /// spent on the peer that had just arrived.
+    ///
+    /// Only the accepting side has the gap. A node that dialled queued its
+    /// hello inside `attach_peer`, and one channel is one order, so everything
+    /// after it lands after it.
+    greeted: bool,
     /// Whether this peer said it keeps the cold set, and so can rebuild a path
     /// for a note that fell long ago.
     ///
@@ -897,6 +953,19 @@ struct Peer {
     /// claim saves is asking every peer in turn and waiting on the ones that
     /// were never going to answer.
     archives: bool,
+}
+
+impl Peer {
+    /// Whether this node may send this peer anything but its own
+    /// introduction.
+    ///
+    /// See [`Peer::greeted`]. A connection this node accepted and has not yet
+    /// answered a hello on is one where every other message costs the
+    /// connection: the peer refuses it as unannounced, closes, and turns this
+    /// host away for a while.
+    const fn worth_speaking_to(&self) -> bool {
+        self.dialled || self.greeted
+    }
 }
 
 struct Shared {
@@ -1062,6 +1131,14 @@ struct Shared {
     /// that hold the log, so anything it took would be taken under the log and
     /// there is no order that survives that. It takes nothing.
     unread: Mutex<Option<Unread>>,
+    /// Why the address book could not be written down, if it could not.
+    ///
+    /// A leaf as well, and it is written from upkeep and from the shutdown.
+    /// The write itself used to be `let _ = book.save(directory)`, on a file a
+    /// node reads on every start: a directory that will not take it costs the
+    /// node every address it has learned, so it comes back knowing only the
+    /// seeds it was started with, and nothing anywhere said a word.
+    unsaved_book: Mutex<Option<String>>,
     /// Blocks this build turned out not to be able to read, and who sent them.
     ///
     /// Also a leaf, and for the same reason: it is written from the thread
@@ -1146,11 +1223,42 @@ struct Unreadable {
     /// about several is being told the chain moved past the furthest of them.
     version: u16,
     blocks: u64,
-    /// The connections they arrived on, up to [`UNJUDGED_SENDERS`].
-    peers: HashSet<PeerId>,
+    /// The peers they arrived from, up to [`UNJUDGED_SENDERS`].
+    peers: HashSet<Sender>,
     /// When the first arrived, and when the last did.
     first: u64,
     last: u64,
+}
+
+/// Counts one block this build could not read, against the address it came
+/// from.
+///
+/// Kept out of [`Shared`] so the counting can be read and tested on its own.
+/// What it has to get right is that the same machine arriving twice is one
+/// peer: these used to be counted by connection, and a connection is handed
+/// out one per socket and never reused, so one address met the condition by
+/// hanging up and dialling back. See [`Sender`].
+fn count_unreadable(met: &mut Unreadable, from: Option<Sender>, version: u16, now: u64) {
+    // A stretch with none of these in it ends the count. A chain whose rules
+    // moved on renews its own evidence every block, so nothing that matters is
+    // lost by forgetting; what is gained is that a stray one a year ago never
+    // adds up to a claim about this build.
+    let lapsed =
+        met.blocks > 0 && (now < met.last || now.saturating_sub(met.last) > UNJUDGED_MEMORY);
+    if lapsed {
+        *met = Unreadable::default();
+    }
+    if met.blocks == 0 {
+        met.first = now;
+    }
+    met.version = met.version.max(version);
+    met.blocks = met.blocks.saturating_add(1);
+    met.last = now;
+    if let Some(from) = from {
+        if met.peers.len() < UNJUDGED_SENDERS {
+            met.peers.insert(from);
+        }
+    }
 }
 
 /// Whether what this node has met adds up to a build too old for its chain.
@@ -1195,8 +1303,8 @@ struct Unweighed {
     /// one way are a chain.
     because: String,
     showings: u64,
-    /// The connections they came from, up to [`UNWEIGHED_SENDERS`].
-    peers: HashSet<PeerId>,
+    /// The peers they came from, up to [`UNWEIGHED_SENDERS`].
+    peers: HashSet<Sender>,
     /// When the first arrived, and when the last did.
     first: u64,
     last: u64,
@@ -1569,6 +1677,14 @@ impl Shared {
         Some(owed)
     }
 
+    /// How a connection counts towards the two surfaces that count peers
+    /// rather than connections.
+    fn sender_for(&self, id: PeerId) -> Option<Sender> {
+        let peers = self.peers();
+        let peer = peers.get(&id)?;
+        sender_of(peer.advertised, peer.host)
+    }
+
     /// Hands `message` to one peer, if it is still there.
     ///
     /// Queued and never waited on, for the same reason a broadcast is.
@@ -1705,26 +1821,9 @@ impl Shared {
     ///
     /// Nothing is held against the peer here or anywhere: it is carrying what
     /// its own chain carries, and this node is the one that cannot read it.
-    fn cannot_judge(&self, from: PeerId, version: u16, now: u64) {
+    fn cannot_judge(&self, from: Option<Sender>, version: u16, now: u64) {
         let mut met = self.unjudged.lock().unwrap_or_else(PoisonError::into_inner);
-        // A stretch with none of these in it ends the count. A chain whose
-        // rules moved on renews its own evidence every block, so nothing that
-        // matters is lost by forgetting; what is gained is that a stray one a
-        // year ago never adds up to a claim about this build.
-        let lapsed =
-            met.blocks > 0 && (now < met.last || now.saturating_sub(met.last) > UNJUDGED_MEMORY);
-        if lapsed {
-            *met = Unreadable::default();
-        }
-        if met.blocks == 0 {
-            met.first = now;
-        }
-        met.version = met.version.max(version);
-        met.blocks = met.blocks.saturating_add(1);
-        met.last = now;
-        if met.peers.len() < UNJUDGED_SENDERS {
-            met.peers.insert(from);
-        }
+        count_unreadable(&mut met, from, version, now);
     }
 
     /// Counts one showing of a chain's work that would not weigh, and who sent
@@ -1735,7 +1834,7 @@ impl Shared {
     /// and whether that is the sender's fault is exactly what it cannot tell
     /// from one showing. What this adds is the reading it could never make
     /// before, which needs more than one showing to make.
-    fn could_not_weigh(&self, from: PeerId, because: &str, now: u64) {
+    fn could_not_weigh(&self, from: Option<Sender>, because: &str, now: u64) {
         let mut met = self
             .unweighed
             .lock()
@@ -1753,8 +1852,10 @@ impl Shared {
         }
         met.showings = met.showings.saturating_add(1);
         met.last = now;
-        if met.peers.len() < UNWEIGHED_SENDERS {
-            met.peers.insert(from);
+        if let Some(from) = from {
+            if met.peers.len() < UNWEIGHED_SENDERS {
+                met.peers.insert(from);
+            }
         }
     }
 
@@ -2046,6 +2147,9 @@ impl Shared {
     fn note_what_it_keeps(&self, id: PeerId, advertised: Option<SocketAddr>, archives: bool) {
         if let Some(peer) = self.peers().get_mut(&id) {
             peer.archives = archives;
+            // Called once the introduction has been read, which is the moment
+            // this connection is safe to send anything else down.
+            peer.greeted = true;
         }
         if let Some(address) = advertised {
             self.book().keeps_the_cold_set(&address, archives);
@@ -2156,16 +2260,29 @@ impl Shared {
     /// bounded and this never waits on it: a peer too far behind to take the
     /// message loses it and asks for what it missed later, which is a better
     /// outcome than letting it decide how much memory this node spends.
-    fn broadcast(&self, except: Option<PeerId>, message: &Message) {
+    /// Hands `message` to every peer but one, and says how many took it.
+    ///
+    /// The count is peers whose outbound queue accepted it, which is as far as
+    /// this node can say synchronously and is a great deal further than
+    /// "somebody was connected". Callers that only broadcast ignore it; the
+    /// one that has to tell a person whether their money left does not.
+    fn broadcast(&self, except: Option<PeerId>, message: &Message) -> usize {
+        let mut taken = 0usize;
         for (id, peer) in self.peers().iter() {
             if Some(*id) == except {
+                continue;
+            }
+            if !peer.worth_speaking_to() {
                 continue;
             }
             // A full queue and a gone peer are both left alone: the first
             // catches up by asking, and the second is already being cleared up
             // by the thread that was reading from it.
-            let _ = peer.outbound.try_send(message.clone());
+            if peer.outbound.try_send(message.clone()).is_ok() {
+                taken = taken.saturating_add(1);
+            }
         }
+        taken
     }
 }
 
@@ -2527,6 +2644,7 @@ impl Node {
             outdated: Mutex::new(None),
             unwritten: Mutex::new(None),
             unread: Mutex::new(unread),
+            unsaved_book: Mutex::new(None),
             unjudged: Mutex::new(Unreadable::default()),
             unweighed: Mutex::new(Unweighed::default()),
             asking: Mutex::new(Asking::default()),
@@ -2597,8 +2715,6 @@ impl Node {
         *self.shared.seed_names() = names;
     }
 
-    /// Opens a connection to a peer, introduces this node, and remembers the
-    /// address for next time.
     /// Dials one address and keeps the connection, if there is room for it.
     ///
     /// The address is remembered either way: it answered, which is more than
@@ -2607,6 +2723,12 @@ impl Node {
     /// ceiling or onto a node that has stopped: this is the third way into the
     /// peer table, after the accept loop and upkeep dialling, and it was the
     /// one that consulted neither.
+    ///
+    /// `Ok(())` means this node holds the connection. It used to mean the
+    /// three-way handshake completed, which is a different sentence: a socket
+    /// this node shut in the next statement for want of room answered `Ok(())`
+    /// and was printed as `reached`, and the wallet counted it as a seed it had
+    /// got to. Everything that turns the connection away now says so.
     pub fn connect(&self, address: SocketAddr) -> Result<(), NodeError> {
         let stream = TcpStream::connect_timeout(&address, DIAL_TIMEOUT)?;
         self.shared.book().insert(address);
@@ -2615,14 +2737,45 @@ impl Node {
             .has_room_for(stream.peer_addr().ok().map(|at| at.ip()))
         {
             let _ = stream.shutdown(Shutdown::Both);
-            return Ok(());
+            return Err(NodeError::NotKept {
+                address,
+                because: "this node already holds as many connections as it takes",
+            });
         }
-        attach_peer(&self.shared, stream, Some(address));
+        if !attach_peer(&self.shared, stream, Some(address)) {
+            return Err(NodeError::NotKept {
+                address,
+                because: "this node is stopping, or the socket could not be set up",
+            });
+        }
         Ok(())
     }
 
+    /// Connections this node is holding, introduced or not.
+    ///
+    /// What it costs in threads and buffers, which is what the ceiling on
+    /// connections is about. It is not what an operator means by "peers": see
+    /// [`Self::peers_introduced`].
     pub fn peer_count(&self) -> usize {
         self.shared.peers().len()
+    }
+
+    /// Peers that have introduced themselves, which is the number worth
+    /// showing a person.
+    ///
+    /// A socket that connects and says nothing is not somebody to ask
+    /// anything: a message down it is refused as unannounced and closes the
+    /// connection. Every surface that reports "peers" reported the sockets, so
+    /// a wallet with one silent stranger attached told its owner it had
+    /// reached the network and the trouble must be elsewhere, and a node handed
+    /// a ledger counted the same stranger as somebody it had asked for the
+    /// blocks it was waiting on.
+    pub fn peers_introduced(&self) -> usize {
+        self.shared
+            .peers()
+            .values()
+            .filter(|peer| peer.worth_speaking_to())
+            .count()
     }
 
     /// Addresses this node knows about, whether or not it is connected to them.
@@ -2783,6 +2936,21 @@ impl Node {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         log.as_ref()?.blocks.reaches().checked_sub(1)
+    }
+
+    /// Why the address book could not be written down, if it could not.
+    ///
+    /// Nothing on the chain depends on this file, which is why it was the one
+    /// write here whose failure was thrown away. What depends on it is the
+    /// next start: without it a node comes back knowing only the seeds it was
+    /// given, and on a machine whose seeds have moved on that is a node that
+    /// finds nobody.
+    pub fn unsaved_addresses(&self) -> Option<String> {
+        self.shared
+            .unsaved_book
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// The lowest block on the disk.
@@ -2991,6 +3159,30 @@ impl Node {
             self.shared.broadcast(None, &message);
         }
         Ok(fresh)
+    }
+
+    /// Offers a transfer this node already holds to every peer again, and says
+    /// how many took it into their queue.
+    ///
+    /// [`Self::submit_transaction`] broadcasts once, at the instant the pool
+    /// takes the transfer, to whoever is connected then. For a node that has
+    /// just started that is regularly nobody: a wallet's `send` runs seconds
+    /// after `open`, the handshake has not finished, the broadcast reaches an
+    /// empty peer table, and nothing here ever offers it again. The pool is
+    /// not gossiped and a peer that arrives afterwards is never told. So the
+    /// money sat in one process's memory until that process stopped, while the
+    /// person who sent it read that it had been handed to the network.
+    ///
+    /// Nought means nobody was offered it. A transfer no longer in the pool,
+    /// because a block carried it or because it was evicted, answers nought
+    /// too: there is nothing to offer, and this says what happened rather than
+    /// what it hoped.
+    pub fn offer_again(&self, id: &Hash32) -> usize {
+        let Some(transfer) = self.with_chain(|chain| chain.pooled(id).cloned()) else {
+            return 0;
+        };
+        self.shared
+            .broadcast(None, &Message::Transaction(Box::new(transfer)))
     }
 
     /// Notes in the cold set, which this node commits to in thirty two bytes
@@ -3393,7 +3585,9 @@ fn weigh_what_was_shown(
                 .map_err(|error| error.to_string())
         });
     if let Err(because) = &weighed {
-        shared.could_not_weigh(from, because, now);
+        // The address is read and let go of before the count is taken, so the
+        // table of these stays the leaf its own comment says it is.
+        shared.could_not_weigh(shared.sender_for(from), because, now);
     }
     let mut joining = shared.joining();
     // The attempt may have been given up on while this was being weighed:
@@ -4742,12 +4936,22 @@ fn answer_deferred(
     true
 }
 
+/// Writes the address book down, and says so when the disk will not take it.
+///
+/// The book is not the chain and losing it costs nothing that cannot be
+/// learned again. What it costs is the next start: a node that comes back with
+/// an empty book knows only the seeds on its command line, and an operator who
+/// has never seen this file fail has no reason to look for it.
 fn save_book(shared: &Arc<Shared>) {
     let Some(directory) = shared.directory.as_ref() else {
         return;
     };
     let book = shared.book().clone();
-    let _ = book.save(directory);
+    let refusal = book.save(directory).err().map(|error| error.to_string());
+    *shared
+        .unsaved_book
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = refusal;
 }
 
 /// Takes connections, and turns away the ones this node has no room for.
@@ -4825,7 +5029,18 @@ fn maintenance_loop(shared: &Arc<Shared>) {
         save_book(shared);
         collect_finished(shared);
         shared.trim_history();
-        let connected: Vec<PeerId> = shared.peers().keys().copied().collect();
+        // Peers this node can actually put a question to, which is not every
+        // socket in the table. A connection that has not introduced itself
+        // cannot be asked anything, and counting one as somebody to ask is
+        // what told a node handed a ledger that it had waited an hour "with
+        // peers to ask" while nobody had been asked at all, and sent its
+        // operator to delete the directory over it.
+        let connected: Vec<PeerId> = shared
+            .peers()
+            .iter()
+            .filter(|(_, peer)| peer.worth_speaking_to())
+            .map(|(id, _)| *id)
+            .collect();
         // Headers from before this node arrived, if it joined a chain rather
         // than reading one. Any node that read the chain can answer and the
         // answer is checked rather than trusted, so there is nobody in
@@ -5485,7 +5700,9 @@ fn dial_from_book(shared: &Arc<Shared>, now: u64) {
             continue;
         }
         match TcpStream::connect_timeout(&address, DIAL_TIMEOUT) {
-            Ok(stream) => attach_peer(shared, stream, Some(address)),
+            Ok(stream) => {
+                attach_peer(shared, stream, Some(address));
+            }
             // An address that never answers would otherwise be dialled every
             // second forever, and handed to every peer that asks.
             Err(_) => {
@@ -5540,23 +5757,28 @@ fn loses_the_tie(ours: SocketAddr, theirs: SocketAddr, initiator: bool) -> bool 
 /// connection somebody else opened. It is not the same thing as the address
 /// the peer will introduce itself at, and the difference is what a silent
 /// address used to live in.
-fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAddr>) {
+///
+/// False means the connection was let go of and this node holds no peer for
+/// it. Nobody read that before, because there was nothing to read: the three
+/// ways out below all looked like the way through, and [`Node::connect`]
+/// reported every one of them to the operator as a peer reached.
+fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAddr>) -> bool {
     let initiator = dialled.is_some();
     // Nothing is attached to a node that has stopped. Checked here and again
     // under the thread table below, because between the two a shutdown can
     // take that table and this thread would then never be joined.
     if !shared.running.load(Ordering::SeqCst) {
         let _ = stream.shutdown(Shutdown::Both);
-        return;
+        return false;
     }
     let Ok(writing_end) = stream.try_clone() else {
-        return;
+        return false;
     };
     let Ok(shutdown_end) = stream.try_clone() else {
-        return;
+        return false;
     };
     let Ok(closing_end) = stream.try_clone() else {
-        return;
+        return false;
     };
     let remote = stream.peer_addr().ok().map(|address| address.ip());
     // Small messages benefit from going out immediately rather than waiting for
@@ -5576,6 +5798,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
         Peer {
             outbound: outbound.clone(),
             dialled: initiator,
+            greeted: false,
             stream: shutdown_end,
             host: remote,
             advertised: None,
@@ -5642,6 +5865,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
         let _ = closing_end.shutdown(Shutdown::Both);
     }
     threads.push(handle);
+    true
 }
 
 /// Whether a framing failure is the peer's fault rather than the network's.
@@ -5821,7 +6045,7 @@ fn read_loop(
         // been left behind by the network, and that used to show up as nothing
         // but a height that had stopped moving.
         if let Some(version) = reaction.unjudged {
-            shared.cannot_judge(id, version, last_heard);
+            shared.cannot_judge(sender_of(peer.advertised, remote), version, last_heard);
         }
         if !reaction.broadcast.is_empty() {
             shared.broadcast(Some(id), &Message::Announce(reaction.broadcast));
@@ -5894,15 +6118,33 @@ fn note_the_ending(
 )]
 mod unjudged_tests {
     use super::{
-        too_old_for_the_chain, Unreadable, UNJUDGED_BLOCKS, UNJUDGED_PEERS, UNJUDGED_STRETCH,
+        count_unreadable, too_old_for_the_chain, Unreadable, UNJUDGED_BLOCKS, UNJUDGED_PEERS,
+        UNJUDGED_STRETCH,
     };
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    /// A record of `blocks` of them from `peers` peers, spread over `over`.
+    /// One peer, as it says it can be reached.
+    fn address(last: u8) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, last)), 9_944)
+    }
+
+    /// The same machine, on a different connection: a fresh source port, the
+    /// same peer. This is the arrival that used to count twice.
+    fn again(last: u8) -> SocketAddr {
+        address(last)
+    }
+
+    /// A record of `blocks` of them from `peers` addresses, spread over `over`.
+    ///
+    /// Addresses and not connections, which is the repair this counting
+    /// needed: a connection is handed out one per socket and never reused, so
+    /// one machine at one address met the "two peers" condition by hanging up
+    /// and dialling back.
     fn met(blocks: u64, peers: u64, over: u64) -> Unreadable {
         Unreadable {
             version: 7,
             blocks,
-            peers: (0..peers).collect(),
+            peers: (0..peers).map(|n| address(n as u8)).collect(),
             first: 1_000,
             last: 1_000 + over,
         }
@@ -5956,6 +6198,39 @@ mod unjudged_tests {
     #[test]
     fn a_node_that_has_met_none_of_them_says_nothing() {
         assert!(too_old_for_the_chain(&Unreadable::default()).is_none());
+    }
+
+    /// The claim under `UNJUDGED_PEERS`: "one peer is one machine, and one
+    /// machine is what a stranger has".
+    ///
+    /// These were counted by connection, and a connection is handed out one
+    /// per socket and never reused. So one machine at one address met the
+    /// condition by hanging up and dialling back, which costs it a TCP
+    /// handshake and is not misbehaviour, and the line the operator then read
+    /// said "8 blocks from 2 peers" and told them to install a newer build.
+    #[test]
+    fn one_machine_arriving_again_is_still_one_peer() {
+        let mut met = Unreadable::default();
+        for round in 0..UNJUDGED_BLOCKS {
+            count_unreadable(&mut met, Some(again(7)), 7, 1_000 + round * 60);
+        }
+        assert_eq!(met.blocks, UNJUDGED_BLOCKS);
+        assert_eq!(
+            met.peers.len(),
+            1,
+            "however many sockets they arrived on, that is one machine"
+        );
+        assert!(
+            too_old_for_the_chain(&met).is_none(),
+            "and one machine does not get to tell somebody their build is out of \
+             date: {met:?}"
+        );
+
+        // A second address does, which is the whole of what the condition is
+        // worth and all it was ever meant to claim.
+        count_unreadable(&mut met, Some(address(8)), 7, 1_000 + UNJUDGED_STRETCH * 2);
+        let said = too_old_for_the_chain(&met).expect("two addresses over the stretch");
+        assert_eq!(said.peers, UNJUDGED_PEERS);
     }
 }
 
@@ -6153,6 +6428,18 @@ mod tests {
         SocketAddr::from((Ipv4Addr::new(127, 0, 0, last), 9_000))
     }
 
+    /// A port the operating system picks, which is what every other test that
+    /// starts a node asks for.
+    ///
+    /// The one test here that really binds used to name port 9000, and two
+    /// tests wanting one port is one of them failing: under the parallel suite
+    /// it panicked with `AddrInUse`, from a bind that has nothing to do with
+    /// what it is about. The addresses above are still fixed, because nothing
+    /// binds them: they are two peers being compared with each other.
+    fn loopback() -> SocketAddr {
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
+    }
+
     /// A short valid chain, built off to the side.
     fn chain_of(count: usize, params: ConsensusParams) -> Vec<Block> {
         let miner = cairn_crypto::SecretKey::from_bytes(&[7; 32]);
@@ -6290,7 +6577,7 @@ mod tests {
 
         let node = Node::start(
             params,
-            address(1),
+            loopback(),
             ChainStore::new(params),
             Some(store),
             AddressBook::new(),

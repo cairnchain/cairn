@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use cairn_net::Node;
+use cairn_net::{Node, NodeError};
 
 use crate::api::Explorer;
 
@@ -90,8 +90,15 @@ fn run(arguments: &[String]) -> Result<(), String> {
 
     for seed in &options.seeds {
         node.remember_seed(*seed);
+        // Three lines and not two. A dial that completes and a peer this node
+        // holds are different things, and `connect` used to answer `Ok(())`
+        // for both: a seed turned away for want of room was printed as
+        // `reached`, and the operator counted it.
         match node.connect(*seed) {
             Ok(()) => println!("reached      {seed}"),
+            Err(NodeError::NotKept { because, .. }) => {
+                println!("not kept     {seed} ({because}), will keep trying");
+            }
             Err(error) => println!("unreachable  {seed} ({error}), will keep trying"),
         }
     }

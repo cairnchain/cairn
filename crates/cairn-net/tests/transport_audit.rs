@@ -49,6 +49,7 @@ use cairn_net::message::{
     Handshake, Joining, Message, PeerAddress, JOIN_PART_BYTES, MAX_SHARED_ADDRESSES,
     PROTOCOL_VERSION,
 };
+use cairn_net::node::TARGET_PEERS;
 use cairn_net::wire::{read_message, write_message, Incoming, FRAME_PATIENCE, MAX_FRAME_BYTES};
 use cairn_net::Keeps;
 use cairn_net::Node;
@@ -646,25 +647,76 @@ fn ping_burst(address: SocketAddr, nonce: u64, count: usize) -> Duration {
     took
 }
 
+/// Outbound peers for a node, so that it stops looking for more.
+///
+/// A node dials from its book until it holds [`TARGET_PEERS`] connections it
+/// opened itself, and a book of four thousand addresses that answer nothing
+/// keeps the maintenance thread dialling through the whole of every round.
+/// That is a real cost and it is asserted where it was found, in
+/// `concurrency_audit.rs`. Here it is somebody else's finding sitting on top
+/// of this one, and it is the larger of the two: measured, it held the stuffed
+/// node at fifty milliseconds a burst against three for the node beside it,
+/// with nothing on the message path reading the book at all. Both nodes are
+/// given the same connections for the same reason: a node answering nine peers
+/// is not doing the same work as one answering one, and that asymmetry alone
+/// was worth a quarter on the comparison.
+///
+/// Bare listeners rather than nodes. What stops the dialling is the count of
+/// connections this node opened, which is settled by the dial and not by
+/// anything the other end says, so these never have to answer.
+fn outbound_peers_for(node: &Node) -> Vec<TcpListener> {
+    (0..TARGET_PEERS)
+        .map(|_| {
+            let listener = TcpListener::bind(loopback()).unwrap();
+            node.connect(listener.local_addr().unwrap()).unwrap();
+            listener
+        })
+        .collect()
+}
+
+/// The mean of the five cheapest bursts.
+///
+/// A cost is what the work takes plus whatever else the machine was doing at
+/// the time, so the cheap end of a run of samples is where the cost is and the
+/// expensive end is where the machine is. Five of them rather than the single
+/// cheapest, because one sample is one sample: measured over forty rounds,
+/// the cheapest alone moved by a third between runs of identical code and
+/// these five moved by a tenth.
+fn cheaply(mut bursts: Vec<Duration>) -> Duration {
+    bursts.sort_unstable();
+    bursts.truncate(CHEAPEST);
+    bursts.iter().sum::<Duration>() / u32::try_from(CHEAPEST).unwrap()
+}
+
+/// How many of the cheapest bursts [`cheaply`] reads.
+const CHEAPEST: usize = 5;
+
+/// **A ping costs the same whatever the address book holds.**
+///
+/// Both nodes stand at once and their bursts alternate, because what separates
+/// them is a constant factor on a path that is mostly socket work, and the only
+/// way to read a constant factor off two measurements is to take them under the
+/// same conditions. Taken one node after the other, the whole of the first
+/// node's bursts happened in one stretch of the machine's life and the whole of
+/// the second's in another: in the full workspace suite that read fifty
+/// milliseconds against two and a half, twenty times over, on a build where
+/// nothing on the message path reads the book at all. This loopback answers the
+/// same burst in three milliseconds when the machine is quiet and in fifty when
+/// it is not, either way round and on either node, which is why the two are
+/// alternated, spread out, and read at their cheap end.
 #[test]
 fn a_ping_costs_the_same_whatever_the_address_book_holds() {
     // A burst that fits inside OUTBOUND_QUEUE, so a writing thread that does
     // not get scheduled on a busy machine cannot make the node drop this peer
-    // for not keeping up, which is not what is being measured. Ten of them
-    // against each node, and a ping costs one unit against an allowance of
-    // 8192 that the address keeps across connections.
+    // for not keeping up, which is not what is being measured. A ping costs one
+    // unit against an allowance of 8192 that the address keeps across
+    // connections, and the rounds are paced so that forty of them against each
+    // node stay well inside it.
     const PINGS: usize = 200;
-    const ROUNDS: u64 = 10;
+    const ROUNDS: u64 = 40;
+    const BETWEEN_ROUNDS: Duration = Duration::from_millis(300);
 
-    // Best of eight each way: this is a constant factor on a path that also
-    // does socket work, and one run of it is mostly scheduler noise.
     let empty = Node::bind(params(), loopback()).unwrap();
-    let quick = (0..ROUNDS)
-        .map(|round| ping_burst(empty.address(), 100 + round, PINGS))
-        .min()
-        .unwrap();
-    empty.shutdown();
-
     let stuffed = Node::bind(params(), loopback()).unwrap();
     let addresses = filler(MAX_ADDRESSES);
     // Four connections, because one peer may only send so many messages in a
@@ -674,20 +726,34 @@ fn a_ping_costs_the_same_whatever_the_address_book_holds() {
         stuff_the_book(stuffed.address(), 200 + round as u64, chunk);
     }
     let held = stuffed.known_addresses().len();
-    let slow = (0..ROUNDS)
-        .map(|round| ping_burst(stuffed.address(), 300 + round, PINGS))
-        .min()
-        .unwrap();
+    let _standing = (outbound_peers_for(&empty), outbound_peers_for(&stuffed));
+
+    let (here, there) = (empty.address(), stuffed.address());
+    let mut with_none = Vec::new();
+    let mut with_a_full_book = Vec::new();
+    for round in 0..ROUNDS {
+        with_none.push(ping_burst(here, 100 + round, PINGS));
+        with_a_full_book.push(ping_burst(there, 300 + round, PINGS));
+        std::thread::sleep(BETWEEN_ROUNDS);
+    }
+    empty.shutdown();
     stuffed.shutdown();
 
-    println!("{PINGS} pings: {quick:?} with an empty book, {slow:?} with {held} addresses in it",);
+    let quick = cheaply(with_none);
+    let slow = cheaply(with_a_full_book);
+    let times = slow.as_secs_f64() / quick.as_secs_f64().max(f64::EPSILON);
+    println!(
+        "{PINGS} pings, the mean of the {CHEAPEST} cheapest of {ROUNDS} bursts: {quick:?} \
+         with an empty book, {slow:?} with {held} addresses in it, {times:.2} times"
+    );
     assert!(
-        slow.as_secs_f64() < quick.as_secs_f64() * 1.4,
-        "answering {PINGS} pings took {slow:?} with {held} addresses in the book and {quick:?} \
-         with none: {:.1} times longer. decide() used to clone the whole book for every \
-         message, holding the chain, and a stranger set how big it was with Peers messages \
-         that cost one unit each.",
-        slow.as_secs_f64() / quick.as_secs_f64().max(f64::EPSILON),
+        times < 2.0,
+        "answering {PINGS} pings took {slow:?} with {held} addresses in the book and \
+         {quick:?} with none: {times:.1} times longer. decide() used to clone the whole \
+         book for every message, holding the chain, and a stranger set how big it was with \
+         Peers messages that cost one unit each. That copy was measured at three times the \
+         whole cost of answering here and twice it on the machine it was found on, and \
+         this comparison sits at one on a build that does not make it."
     );
 }
 

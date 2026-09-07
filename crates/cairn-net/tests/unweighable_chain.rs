@@ -115,12 +115,31 @@ struct CannotShowIt {
 
 impl CannotShowIt {
     fn start(tag: u8, work: u128) -> io::Result<Self> {
+        Self::start_with(tag, work, true)
+    }
+
+    /// The same, saying nothing about where it can be reached.
+    ///
+    /// Which is what one machine opening several connections looks like, and
+    /// what nothing can tell from three peers behind one address that all
+    /// decline to name a port.
+    fn anonymous(tag: u8, work: u128) -> io::Result<Self> {
+        Self::start_with(tag, work, false)
+    }
+
+    fn start_with(tag: u8, work: u128, name_the_port: bool) -> io::Result<Self> {
         let nonce = u64::from(tag);
         let listener = TcpListener::bind(loopback())?;
         let address = listener.local_addr()?;
         let running = Arc::new(AtomicBool::new(true));
         let asked = Arc::new(AtomicU64::new(0));
         let mine = (Arc::clone(&running), Arc::clone(&asked));
+        // Named, because a peer that names no port is a peer nothing can tell
+        // from the next connection off the same address, and the surface this
+        // file is about counts peers. Three real ones on one loopback address
+        // are three peers; three anonymous connections are one machine, and
+        // that is what a fixture with `listen: 0` was modelling.
+        let listen = if name_the_port { address.port() } else { 0 };
         thread::spawn(move || {
             let (running, asked) = mine;
             for stream in listener.incoming() {
@@ -146,7 +165,7 @@ impl CannotShowIt {
                             tip: Hash32::from_bytes([tag; 32]),
                             height: JOIN_RATHER_THAN_READ + 4_096,
                             total_work: work,
-                            listen: 0,
+                            listen,
                             nonce,
                             keeps: Keeps {
                                 headers: true,
@@ -258,6 +277,49 @@ fn showings_that_all_fail_the_same_way_are_said_to_be_about_the_chain() {
             .iter()
             .all(|peer| peer.asked.load(Ordering::SeqCst) > 0),
         "every one of them was asked, which is what makes this a claim about the chain"
+    );
+}
+
+/// **One machine's showings are not several peers' showings.**
+///
+/// The line this file is about tells a person that the trouble is the chain
+/// rather than a peer, and the whole of what carries that is having met it from
+/// more than one peer. These were counted by connection, and a connection is
+/// handed out one per socket and never reused, so one machine opening three of
+/// them cleared the condition outright, for the price of three TCP handshakes
+/// and no lie.
+///
+/// Three connections that name no port stand in for it, because that is exactly
+/// what nothing can tell apart: a peer that says nothing about where it can be
+/// reached is, from the outside, the same address opening another socket.
+#[test]
+fn showings_down_several_sockets_from_one_machine_are_one_peer() {
+    let newcomer = Node::bind(params(), loopback()).unwrap();
+    let peers: Vec<CannotShowIt> = (0..3u8)
+        .map(|index| CannotShowIt::anonymous(90 + index, 4_000_000 - u128::from(index)).unwrap())
+        .collect();
+    for peer in &peers {
+        newcomer.connect(peer.address).unwrap();
+    }
+    // Long enough that the showings have happened: the same wait the test
+    // above passes in a few seconds.
+    wait_for("every one of them to be asked", || {
+        peers
+            .iter()
+            .all(|peer| peer.asked.load(Ordering::SeqCst) > 0)
+    });
+    thread::sleep(Duration::from_secs(2));
+
+    let said = newcomer.unweighable();
+    for peer in &peers {
+        peer.stop();
+    }
+    newcomer.shutdown();
+
+    assert!(
+        said.is_none(),
+        "one machine on three sockets was reported to a person as several peers \
+         failing the same way, which is the whole of what the line claims: {said:?}"
     );
 }
 
