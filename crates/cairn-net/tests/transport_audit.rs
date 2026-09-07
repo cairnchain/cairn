@@ -717,6 +717,15 @@ fn a_ping_costs_the_same_whatever_the_address_book_holds() {
     const BETWEEN_ROUNDS: Duration = Duration::from_millis(300);
 
     let empty = Node::bind(params(), loopback()).unwrap();
+    // A second node with nothing in its book either, measured in the same
+    // rounds. Two nodes that differ only in their book should answer a ping
+    // for the same price, so whatever this pair costs against each other is
+    // what this instrument cannot see past, on this machine, in this run. The
+    // comparison below is held against it rather than against 1.0: the defect
+    // this test exists for was measured at two to three times the whole cost
+    // of answering, so a bound of two was sitting on top of the effect it had
+    // to resolve, and a busy machine put it the wrong side.
+    let control = Node::bind(params(), loopback()).unwrap();
     let stuffed = Node::bind(params(), loopback()).unwrap();
     let addresses = filler(MAX_ADDRESSES);
     // Four connections, because one peer may only send so many messages in a
@@ -728,32 +737,57 @@ fn a_ping_costs_the_same_whatever_the_address_book_holds() {
     let held = stuffed.known_addresses().len();
     let _standing = (outbound_peers_for(&empty), outbound_peers_for(&stuffed));
 
-    let (here, there) = (empty.address(), stuffed.address());
+    let (here, elsewhere, there) = (empty.address(), control.address(), stuffed.address());
     let mut with_none = Vec::new();
+    let mut with_none_again = Vec::new();
     let mut with_a_full_book = Vec::new();
+    // Each node takes each position in the round equally often.
+    //
+    // Measured, on an idle machine, pinging them in a fixed order: 4.68 ms for
+    // the one asked first, 21.64 ms for a node identical to it asked second,
+    // 26.96 ms for the stuffed one asked third. Whatever it is that the first
+    // burst of a round pays for and the later ones do not, it is four to five
+    // times the whole cost being measured, and the book is nowhere in it. A
+    // fixed order meant this test read its own arrangement, and passed only
+    // because that artefact came to less than its bound on the machine it was
+    // written on.
     for round in 0..ROUNDS {
-        with_none.push(ping_burst(here, 100 + round, PINGS));
-        with_a_full_book.push(ping_burst(there, 300 + round, PINGS));
+        for step in 0..3u64 {
+            match (round + step) % 3 {
+                0 => with_none.push(ping_burst(here, 100 + round, PINGS)),
+                1 => with_none_again.push(ping_burst(elsewhere, 500 + round, PINGS)),
+                _ => with_a_full_book.push(ping_burst(there, 300 + round, PINGS)),
+            }
+        }
         std::thread::sleep(BETWEEN_ROUNDS);
     }
     empty.shutdown();
+    control.shutdown();
     stuffed.shutdown();
 
     let quick = cheaply(with_none);
+    let same_again = cheaply(with_none_again);
     let slow = cheaply(with_a_full_book);
     let times = slow.as_secs_f64() / quick.as_secs_f64().max(f64::EPSILON);
+    // What two nodes that should cost the same actually cost against each
+    // other here, taken the same way round so it is never below one.
+    let floor = (same_again.as_secs_f64() / quick.as_secs_f64().max(f64::EPSILON))
+        .max(quick.as_secs_f64() / same_again.as_secs_f64().max(f64::EPSILON));
     println!(
         "{PINGS} pings, the mean of the {CHEAPEST} cheapest of {ROUNDS} bursts: {quick:?} \
-         with an empty book, {slow:?} with {held} addresses in it, {times:.2} times"
+         with an empty book, {same_again:?} with another empty one, {slow:?} with {held} \
+         addresses in it. {times:.2} times against {floor:.2} between the two empty ones"
     );
     assert!(
-        times < 2.0,
+        times < 2.0 * floor.max(1.0),
         "answering {PINGS} pings took {slow:?} with {held} addresses in the book and \
-         {quick:?} with none: {times:.1} times longer. decide() used to clone the whole \
-         book for every message, holding the chain, and a stranger set how big it was with \
-         Peers messages that cost one unit each. That copy was measured at three times the \
-         whole cost of answering here and twice it on the machine it was found on, and \
-         this comparison sits at one on a build that does not make it."
+         {quick:?} with none: {times:.1} times longer, where two nodes with nothing in \
+         either book differ by {floor:.1} on this machine right now. decide() used to \
+         clone the whole book for every message, holding the chain, and a stranger set \
+         how big it was with Peers messages that cost one unit each. That copy was \
+         measured at three times the whole cost of answering here and twice it on the \
+         machine it was found on, and this comparison sits at one on a build that does \
+         not make it."
     );
 }
 
