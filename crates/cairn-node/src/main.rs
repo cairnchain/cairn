@@ -475,6 +475,23 @@ fn say_what_was_restored(restored: &Restored, directory: &str) {
             println!("             {line}");
         }
     }
+    // Said whether or not the line above was, because they are two different
+    // pieces of news about the same file: one is bytes left where they are,
+    // this one is bytes that have gone.
+    if restored.headers_dropped > 0 {
+        for line in wrapped(&format!(
+            "{} stored headers were deleted because they stopped below the oldest block \
+             this node kept, so nothing joined them to it. The header log has been \
+             written again from the blocks. Until a peer hands the older run back, this \
+             node cannot show the chain to anybody arriving new. Nothing this build does \
+             leaves a header log in that state, so what is left is a file an older one \
+             left or a disk that changed underneath it: {directory} is the thing to \
+             check.",
+            restored.headers_dropped
+        )) {
+            println!("             {line}");
+        }
+    }
     if let Some(record) = restored.unreadable {
         for line in wrapped(&format!(
             "stored block {record} will not read back. That is damage to the file rather \

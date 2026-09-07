@@ -36,7 +36,7 @@
 //! and not merely that it has not rotted.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use cairn_ledger::block::BlockHeader;
@@ -95,6 +95,14 @@ pub struct HeaderLog {
     /// Zero for a node that read its chain. A node handed a ledger starts
     /// wherever it was handed, exactly as its block log does.
     first: u64,
+    /// Whether the handle above is still on the file this log names.
+    ///
+    /// True for the whole of an ordinary life. It goes false in one place: a
+    /// merge that let go of the handle and could not get it back. Writes then
+    /// have to refuse, because the alternative is appends that land on a
+    /// deleted scratch file and report success, and it is the appends that
+    /// tell a node its disk is keeping up.
+    usable: bool,
 }
 
 impl HeaderLog {
@@ -134,6 +142,7 @@ impl HeaderLog {
             path,
             count: 0,
             first: 0,
+            usable: true,
         };
         let held = log.file.metadata()?.len();
         let record = HEADER_BYTES as u64;
@@ -180,12 +189,189 @@ impl HeaderLog {
         self.count > 0 && height >= self.first && height < self.reaches()
     }
 
+    /// Puts the records of `front` before this log's own, leaving one run.
+    ///
+    /// For a node that joined a chain and has collected the headers from
+    /// before it arrived. It happens once in such a node's life.
+    ///
+    /// Written to a file beside this one and moved into place. It used to be
+    /// done here, in place: the log was emptied and refilled, so a machine
+    /// that stopped in the middle left a header log holding a prefix of the
+    /// run being merged and nothing that knew it. The next start found headers
+    /// stopping below the oldest block held, deleted every one of them, and
+    /// said nothing at all.
+    ///
+    /// Streamed rather than gathered, for the same reason a replay reads one
+    /// block at a time. The merge is every header a node holds, which is
+    /// 95.7 MB a year and around 290 MB after thirty; holding them all to
+    /// write them straight back out made the largest allocation the process
+    /// ever performs out of the one cost this whole design exists to keep
+    /// flat.
+    ///
+    /// The two runs have to meet exactly: `front` ends where this log begins.
+    /// Anything else is refused before a byte is written, where it used to be
+    /// found halfway through the refill.
+    ///
+    /// Nothing left behind of a merge that fails, and nothing changed: the
+    /// staged file goes, both logs stand where they were, and the caller is
+    /// told which half refused.
+    pub fn join(&mut self, front: &HeaderLog) -> Result<(), JoinFailed> {
+        self.still_on_its_file()?;
+        front.still_on_its_file()?;
+        if front.is_empty() {
+            return Ok(());
+        }
+        if self.count > 0 && front.reaches() != self.first {
+            return Err(StoreError::OutOfOrder {
+                expected: self.first,
+                found: front.reaches(),
+            }
+            .into());
+        }
+        let joined_first = front.first;
+        let joined_count = front.count.saturating_add(self.count);
+
+        let staged = crate::staged_beside(&self.path);
+        if let Err(error) = self.stage_join(front, &staged) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(error);
+        }
+
+        // The handle is let go of before the move, because Windows will not
+        // rename over an open file. It points at a scratch file meanwhile,
+        // since a `File` closes when it is dropped and there is no other way
+        // to say so.
+        let scratch = crate::beside(&self.path, ".hold");
+        let parked = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&scratch);
+        let parked = match parked {
+            Ok(file) => file,
+            Err(error) => {
+                let _ = std::fs::remove_file(&staged);
+                return Err(StoreError::from(error).into());
+            }
+        };
+        self.file = parked;
+
+        // From here the handle is on a scratch file, so nothing below may
+        // leave with `?`: what this struct says about itself and what it can
+        // read have parted company until they are put back together.
+        // The rename on its own, told apart from the wait for it. A rename
+        // that happened and was not waited for has still happened, and what
+        // this struct says about itself has to describe the file that is now
+        // there or every read is at the wrong offset.
+        let moved = std::fs::rename(&staged, &self.path);
+        let reopened = OpenOptions::new().read(true).write(true).open(&self.path);
+        let _ = std::fs::remove_file(&staged);
+        let _ = std::fs::remove_file(&scratch);
+        match (moved, reopened) {
+            (Ok(()), Ok(file)) => {
+                self.file = file;
+                self.first = joined_first;
+                self.count = joined_count;
+                crate::sync_the_directory_of(&self.path).map_err(StoreError::from)?;
+                Ok(())
+            }
+            // The move is what changes the file, so a move that did not happen
+            // leaves the log this handle was on, exactly as it was. Nothing
+            // here is lost but the merge, which is asked for again.
+            (Err(error), Ok(file)) => {
+                self.file = file;
+                Err(StoreError::from(error).into())
+            }
+            // Whatever is on the disk now, this handle is not on it and there
+            // is no saying which of the two files it would have been. Appends
+            // must not go on succeeding into a scratch file the next start
+            // deletes, which is a node writing no headers down and being told
+            // nothing about it.
+            (_, Err(error)) => {
+                self.count = 0;
+                self.first = 0;
+                self.usable = false;
+                Err(StoreError::from(error).into())
+            }
+        }
+    }
+
+    /// Writes the two runs into `staged`, oldest record first.
+    ///
+    /// One header in hand at a time. This used to be a vector of every header
+    /// the node holds, which is 95.7 MB a year and around 290 MB after thirty,
+    /// built to be written straight back out again.
+    ///
+    /// Every record goes through the checked read on its way, so a byte that
+    /// has changed anywhere in either log stops the merge here, with the
+    /// staged file thrown away and both logs exactly as they were. That check
+    /// is the reason this is not a copy of bytes: the header log is the one
+    /// file a node serves without anything having verified it, and a merge
+    /// that carried rot across would be writing it back down as truth.
+    fn stage_join(&self, front: &HeaderLog, staged: &Path) -> Result<(), JoinFailed> {
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(staged)
+            .map_err(StoreError::from)?;
+        let mut out = BufWriter::new(file);
+        for source in [front, self] {
+            for height in source.first_height()..source.reaches() {
+                let body = source.one(height)?.encode();
+                if body.len() != HEADER_BYTES {
+                    return Err(StoreError::BlockTooLarge.into());
+                }
+                out.write_all(&body).map_err(StoreError::from)?;
+            }
+        }
+        let file = out
+            .into_inner()
+            .map_err(|error| StoreError::Io(error.into_error()))?;
+        // Waited for before the move, or the name can reach the disk ahead of
+        // what it names, and the log comes back at its full length holding
+        // whatever those blocks held before.
+        file.sync_all().map_err(StoreError::from)?;
+        Ok(())
+    }
+
+    /// One record this log has already said it holds.
+    ///
+    /// So nothing here is an absence. A store that answers `None` inside the
+    /// run it says it holds is disagreeing with itself, which is the same news
+    /// as a refusal and belongs in the same channel.
+    fn one(&self, height: u64) -> Result<BlockHeader, JoinFailed> {
+        match self.read_at(height) {
+            Ok(Some(header)) => Ok(header),
+            Ok(None) => Err(JoinFailed::Read {
+                height,
+                source: StoreError::Io(std::io::Error::other(
+                    "the log says it holds this record and produced nothing",
+                )),
+            }),
+            Err(source) => Err(JoinFailed::Read { height, source }),
+        }
+    }
+
+    /// Refuses where this log is no longer on the file it names.
+    fn still_on_its_file(&self) -> Result<(), StoreError> {
+        if self.usable {
+            return Ok(());
+        }
+        Err(StoreError::Io(std::io::Error::other(
+            "this header log is not on the file it names: a merge could not open \
+             it again",
+        )))
+    }
+
     /// Adds one header to the end.
     ///
     /// A header that does not follow on from the last is refused. Positions
     /// here are heights, and a log where the two drifted apart would answer
     /// about the wrong header without any way to notice.
     pub fn append(&mut self, header: &BlockHeader) -> Result<(), StoreError> {
+        self.still_on_its_file()?;
         if self.count == 0 {
             self.first = header.height;
             // A log that holds no records and is not empty is one whose head
@@ -223,6 +409,7 @@ impl HeaderLog {
 
     /// Empties it, leaving a log that starts wherever the next header does.
     pub fn clear(&mut self) -> Result<(), StoreError> {
+        self.still_on_its_file()?;
         self.file.set_len(0)?;
         // A cut is waited for and an append is not, and the difference is
         // which way losing it goes. A header that never landed is written
@@ -242,6 +429,7 @@ impl HeaderLog {
         if height >= self.reaches() {
             return Ok(());
         }
+        self.still_on_its_file()?;
         let keep = height.saturating_sub(self.first).min(self.count);
         self.file
             .set_len(keep.saturating_mul(HEADER_BYTES as u64))?;
@@ -357,4 +545,26 @@ impl HeaderLog {
         let index = usize::try_from(index).unwrap_or(usize::MAX);
         BlockHeader::decode(bytes).map_err(|source| StoreError::Malformed { index, source })
     }
+}
+
+/// What stopped a merge of two header logs.
+///
+/// The two halves are told apart because a node says them in different words
+/// and to different ends. A record it holds and cannot read back is its own
+/// disk giving an answer it will not stand behind, and it is named by height
+/// so somebody can go and look at it. A write it could not make is the disk
+/// refusing to take something, which is the channel that says a node has
+/// stopped keeping up with itself.
+#[derive(Debug, thiserror::Error)]
+pub enum JoinFailed {
+    /// A record one of the two logs said it held and would not give back.
+    #[error("the header at height {height} would not read back: {source}")]
+    Read {
+        height: u64,
+        #[source]
+        source: StoreError,
+    },
+    /// The merged log could not be put on the disk.
+    #[error(transparent)]
+    Write(#[from] StoreError),
 }

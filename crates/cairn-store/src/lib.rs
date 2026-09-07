@@ -32,6 +32,16 @@
 //! nothing, and what it buys is that an accepted block is a kept block —
 //! which matters least for a node that can ask for it again, and most for an
 //! archivist, which is the one role that cannot.
+//!
+//! The same rule covers the files that are replaced whole rather than appended
+//! to: the ledger a node starts from, its address book, the header log after a
+//! merge, the compacted block log. Those go through
+//! [`write_beside_and_move`], which waits for the bytes and then for the name,
+//! so what a machine that stops leaves behind is the file that was there or
+//! the file that was written. Without the first wait a rename can reach the
+//! disk ahead of what it names, and the file comes back at its full length
+//! holding whatever those blocks held before: present, the right size, and
+//! nobody's.
 
 pub mod header_tree;
 pub mod headers;
@@ -76,7 +86,7 @@ pub const LOCK_FILE: &str = "lock";
 pub const HANDED_LEDGER: &str = "ledger.dat";
 
 pub use header_tree::{HeaderTree, HEADER_TREE};
-pub use headers::{HeaderLog, HEADER_BYTES, HEADER_LOG};
+pub use headers::{HeaderLog, JoinFailed, HEADER_BYTES, HEADER_LOG};
 
 /// Largest record the log will read or write.
 ///
@@ -127,6 +137,15 @@ pub enum StoreError {
     },
     #[error("the log reaches height {expected} and was handed height {found}")]
     OutOfOrder { expected: u64, found: u64 },
+    #[error(
+        "the index beside the log had to be worked out again and would not go down: \
+         {source}. Every block is still in the log itself and none of this is damage to \
+         it; make room beside it and start again"
+    )]
+    IndexNotWritten {
+        #[source]
+        source: std::io::Error,
+    },
     #[error("the header forest has no node of height {height} at {start}")]
     MissingNode { height: usize, start: u64 },
     #[error("the index puts record {index} between {start} and {end}, in {held} bytes of log")]
@@ -201,6 +220,19 @@ pub struct Recovered {
     pub unreadable: Option<usize>,
 }
 
+/// Says which file a recovery could not write, where the answer is the index.
+///
+/// The log and the index are both reached through the same error, and only one
+/// of them is ever the news: an operator told the block log could not be
+/// reached goes looking for damage to the chain, and what is actually there is
+/// a derived file that needs eight bytes a record of room.
+fn index_not_written(error: StoreError) -> StoreError {
+    match error {
+        StoreError::Io(source) => StoreError::IndexNotWritten { source },
+        other => other,
+    }
+}
+
 /// Opens a scratch file, for holding a handle somewhere harmless.
 fn hold(path: &Path) -> Result<File, StoreError> {
     Ok(OpenOptions::new()
@@ -220,9 +252,8 @@ fn hold(path: &Path) -> Result<File, StoreError> {
 /// next start treats that as an index reaching past its log and rebuilds, so
 /// nothing is served wrongly; what is lost is the compaction, not the chain.
 #[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<(), StoreError> {
-    File::open(path)?.sync_all()?;
-    Ok(())
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    File::open(path)?.sync_all()
 }
 
 // The signature has to match the Unix one, which can fail. Clippy sees a
@@ -230,7 +261,105 @@ fn sync_directory(path: &Path) -> Result<(), StoreError> {
 // move the difference between the platforms into every caller.
 #[cfg(not(unix))]
 #[allow(clippy::unnecessary_wraps)]
-fn sync_directory(_path: &Path) -> Result<(), StoreError> {
+fn sync_directory(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// The name a file is written under while it is being written.
+///
+/// Beside the real one and inside the same directory, so the move onto it is a
+/// rename within one filesystem, which is the only kind that cannot half
+/// happen.
+#[must_use]
+pub fn staged_beside(target: &Path) -> PathBuf {
+    beside(target, ".part")
+}
+
+/// The same, under any suffix.
+///
+/// Added to the whole name rather than put in place of the extension: two
+/// files a directory apart are `headers.log` and `headers.idx`, and a scratch
+/// name made by replacing the extension would be the same name for both.
+pub(crate) fn beside(target: &Path, suffix: &str) -> PathBuf {
+    let mut name = target.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Writes `bytes` to `path` and does not return until the disk holds them.
+///
+/// For a file written beside the one it is going to replace. Two things
+/// separate it from `std::fs::write`, and a node has been bitten by both.
+///
+/// The sync is the first. A write returns when the bytes are in the page
+/// cache, so a machine that stops afterwards can bring the file back at its
+/// full length holding whatever was on those blocks before. A file moved into
+/// place on the strength of a write that never reached the platter is the
+/// worst shape of all: present, the right size, and not the file anybody
+/// wrote.
+///
+/// Nothing left behind is the second. What an interrupted write leaves is
+/// bytes nobody can use, under a name the next attempt will write over
+/// anyway, on the disk that was probably the reason it failed. Taking it away
+/// is what stops a node that could not free space from having spent some.
+pub fn write_and_sync(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let written = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .and_then(|mut file| {
+            file.write_all(bytes)?;
+            file.sync_all()
+        });
+    if written.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    written
+}
+
+/// Moves `staged` onto `target`, and waits for the new name where the platform
+/// has a way to.
+///
+/// The rename itself is what makes the replacement all or nothing: whoever
+/// reads `target` next sees the file that was there or the file this wrote,
+/// and never half of either.
+pub fn move_into_place(staged: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::rename(staged, target)?;
+    sync_the_directory_of(target)
+}
+
+/// Waits for the directory `path` sits in, so a name that has just changed in
+/// it is on the disk.
+///
+/// Separate from [`move_into_place`] for the caller that has to know which of
+/// the two happened: a rename that did not happen leaves the file that was
+/// there, and a rename that happened and was not waited for has still
+/// happened. Reading the two as one failure means describing the file on the
+/// disk wrongly, which for a log whose positions are heights is the worst
+/// answer available.
+pub(crate) fn sync_the_directory_of(path: &Path) -> std::io::Result<()> {
+    match path.parent() {
+        Some(directory) if !directory.as_os_str().is_empty() => sync_directory(directory),
+        _ => Ok(()),
+    }
+}
+
+/// Replaces `target` with `bytes`, so that a machine which stops partway
+/// leaves the file that was there rather than half of a new one.
+///
+/// The order is the whole of it: the bytes reach the disk, then the name does.
+/// Reversed, or with either step left to the page cache, an interrupted write
+/// leaves the new name over contents that were never written, which for a file
+/// a node cannot start without is the difference between an interrupted write
+/// and a node that never comes back.
+pub fn write_beside_and_move(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let staged = staged_beside(target);
+    write_and_sync(&staged, bytes)?;
+    if let Err(error) = move_into_place(&staged, target) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -465,11 +594,31 @@ impl BlockLog {
         // The log moves first. Stopping between the two moves leaves an index
         // reaching past the log, which the next start already treats as an
         // index to be rebuilt.
+        //
+        // Both staged files are on the disk before either is moved, which is
+        // what makes the paragraph above a statement about the disk rather
+        // than about this program's buffers. Written with `std::fs::write`,
+        // the rename below could reach the platter first, and then a machine
+        // that stopped came back with the log's name over bytes nothing had
+        // written yet.
+        //
+        // A staging that fails takes its own files with it. What it leaves
+        // otherwise is a copy of everything this node keeps, which is up to a
+        // gigabyte, sitting on the disk this compaction was trying to free,
+        // until some later start opens the log and clears it.
         let staged_log = self.directory.join(format!("{BLOCK_LOG}.part"));
         let staged_index = self.directory.join(format!("{BLOCK_INDEX}.part"));
         let index_path = self.directory.join(BLOCK_INDEX);
-        std::fs::write(&staged_log, &kept)?;
-        std::fs::write(&staged_index, &written)?;
+        let drop_staged = || {
+            let _ = std::fs::remove_file(&staged_log);
+            let _ = std::fs::remove_file(&staged_index);
+        };
+        if let Err(error) = write_and_sync(&staged_log, &kept)
+            .and_then(|()| write_and_sync(&staged_index, &written))
+        {
+            drop_staged();
+            return Err(error.into());
+        }
 
         // Both handles are let go of before the move. Unix renames over an
         // open file happily; Windows refuses, and a node is meant to run on
@@ -486,8 +635,14 @@ impl BlockLog {
         // node taking appends into a file the next start deletes while the
         // offsets naming them land in the index that survives.
         let scratch = self.directory.join(format!("{BLOCK_LOG}.hold"));
-        let held = hold(&scratch)?;
-        let held_index = hold(&scratch)?;
+        let parked = hold(&scratch).and_then(|one| hold(&scratch).map(|two| (one, two)));
+        let (held, held_index) = match parked {
+            Ok(handles) => handles,
+            Err(error) => {
+                drop_staged();
+                return Err(error);
+            }
+        };
         self.file = held;
         self.index = held_index;
 
@@ -507,9 +662,13 @@ impl BlockLog {
         // no gap, because the append succeeded, so nothing anywhere said the
         // chain was no longer being written down.
         let put_back = || -> Result<(File, File), StoreError> {
-            std::fs::rename(&staged_log, &self.path)?;
-            std::fs::rename(&staged_index, &index_path)?;
-            sync_directory(&self.directory)?;
+            // Each move is waited for before the next is made. One sync at the
+            // end says both names are on the disk once it returns and nothing
+            // at all about which arrived first, and which arrived first is the
+            // whole of the paragraph above: the index may reach past the log,
+            // never the other way about.
+            move_into_place(&staged_log, &self.path)?;
+            move_into_place(&staged_index, &index_path)?;
             let file = OpenOptions::new().read(true).write(true).open(&self.path)?;
             let index = OpenOptions::new()
                 .read(true)
@@ -530,6 +689,9 @@ impl BlockLog {
                 self.end = 0;
                 self.trailing = 0;
                 self.usable = false;
+                // Whichever of the two never moved is a file nothing will ever
+                // read, on a disk this was called to make room on.
+                drop_staged();
                 return Err(error);
             }
         };
@@ -923,7 +1085,12 @@ impl BlockLog {
         let walk = self.walk(0, 0, total)?;
         self.count = walk.ends.len();
         self.end = walk.offset;
-        self.write_offsets(&walk.ends, 0)?;
+        // Recovery is the one part of a start that writes, and this is the
+        // write. A node whose index was lost cannot open on a disk with
+        // nothing left, and what it used to say about that was "could not
+        // reach the block log", which is the one file that is fine.
+        self.write_offsets(&walk.ends, 0)
+            .map_err(index_not_written)?;
         self.settle(walk.unreadable, total)
     }
 
@@ -940,7 +1107,8 @@ impl BlockLog {
         let walk = self.walk(self.end, from, total)?;
         self.count = from.saturating_add(walk.ends.len());
         self.end = walk.offset;
-        self.write_offsets(&walk.ends, from)?;
+        self.write_offsets(&walk.ends, from)
+            .map_err(index_not_written)?;
         self.settle(walk.unreadable, total)
     }
 

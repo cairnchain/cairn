@@ -30,6 +30,15 @@
 //! issued, and the headers behind it. A handover that does not reproduce the
 //! header is refused, and the header itself was accepted by the sampling that
 //! came before.
+//!
+//! All of that ends at the header, and it is worth being exact about what
+//! that buys. It says a lie had to be mined for the whole burial, not that a
+//! lie is impossible: whoever did mine it chose the state root and everything
+//! under it. So one check here does not go by that road. The issued total at a
+//! height cannot exceed what the schedule has paid by then, because a coinbase
+//! claims at most the schedule plus its own block's fees and an unclaimed fee
+//! is destroyed. That is a subtraction against the rules rather than against
+//! anybody's commitment, and no amount of work gets past it.
 
 use std::collections::{BTreeSet, VecDeque};
 
@@ -135,6 +144,10 @@ pub struct Handover {
     /// Committed to like everything else here, which is what makes it worth
     /// having: a newcomer learns the supply from the header rather than by
     /// adding up a history it was not there for.
+    ///
+    /// And it is the one field weighed against the rules as well as against
+    /// the commitment. The schedule says the most a chain can hold at a
+    /// height, and no state root a miner writes can put a ledger above it.
     pub supply: Amount,
     /// The header forest as it stood before `at`, which `at` commits to.
     pub headers: Forest,
@@ -189,6 +202,15 @@ pub enum HandoverError {
     DuplicateHotNote(NoteId),
     #[error("the maturity window holds {held} coinbases, more than the {limit} allowed")]
     MaturityWindowTooLarge { held: usize, limit: u64 },
+    #[error(
+        "this ledger holds {supply} at height {height}, and the schedule has paid at most \
+         {ceiling} by then"
+    )]
+    SupplyAboveTheSchedule {
+        height: u64,
+        supply: Amount,
+        ceiling: Amount,
+    },
     #[error("the ledger rebuilt from this does not produce the header's state root")]
     StateRootMismatch,
     #[error("the headers handed over are not the ones the header commits to")]
@@ -435,6 +457,34 @@ pub fn accept(handover: &Handover, params: &ConsensusParams) -> Result<LedgerSta
         return Err(HandoverError::MaturityWindowTooLarge {
             held: handover.maturing.len(),
             limit: params.coinbase_maturity,
+        });
+    }
+    // The one thing in a handover that follows from the rules rather than from
+    // a commitment whoever sent it wrote.
+    //
+    // Everything else here is checked against the header, and the header is
+    // checked against the work behind it. That is a strong argument and it has
+    // a shape: it says a lie had to be mined, not that a lie is impossible. A
+    // sender that did out-mine the network for the burial got to choose the
+    // state root, and with it the hot set, the window and this number, and no
+    // check that ends at the header can tell.
+    //
+    // This one does not end at the header. A coinbase claims at most what the
+    // schedule pays plus the fees the block's own transfers gave up, and a fee
+    // the coinbase declines is destroyed, so a chain at a height holds at most
+    // what the schedule has paid by then and never more. A ledger that holds
+    // more was not produced by these rules, whatever work stands behind the
+    // header that commits to it. It is a subtraction, and it is the only place
+    // in this exchange where a newcomer is not taking somebody's word.
+    //
+    // Asked before the ledger is rebuilt, because it needs nothing but the
+    // height and a number that arrived on the wire.
+    let ceiling = params.emitted_by(at.height);
+    if handover.supply > ceiling {
+        return Err(HandoverError::SupplyAboveTheSchedule {
+            height: at.height,
+            supply: handover.supply,
+            ceiling,
         });
     }
     if handover.headers.commitment() != at.history {

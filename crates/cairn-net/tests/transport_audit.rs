@@ -616,6 +616,14 @@ fn stuff_the_book(address: SocketAddr, nonce: u64, addresses: &[SocketAddr]) {
 }
 
 /// Pings a node as fast as it will take them, returning how long they took.
+///
+/// The clock starts once the node has answered the handshake, which is the
+/// only way to have it start after the handshake at all. It used to start
+/// after this side had *written* one, and a connection is not up when the
+/// bytes leave: the listener polls every `ACCEPT_POLL`, so what fell inside
+/// the measurement was up to fifty milliseconds of a node not yet knowing the
+/// connection existed, plus whatever the handshake itself costs. Measured on
+/// an idle machine, that was three quarters of what this reads.
 fn ping_burst(address: SocketAddr, nonce: u64, count: usize) -> Duration {
     let mut writing = TcpStream::connect(address).unwrap();
     let mut reading = writing.try_clone().unwrap();
@@ -623,6 +631,13 @@ fn ping_burst(address: SocketAddr, nonce: u64, count: usize) -> Duration {
         .set_read_timeout(Some(Duration::from_secs(20)))
         .unwrap();
     write_message(&mut writing, params().network, &hello(nonce, 4_242)).unwrap();
+    // The welcome, which is the node saying the connection is up and this
+    // peer is known to it.
+    let greeted = read_message(&mut reading, params().network);
+    assert!(
+        matches!(greeted, Ok(Incoming::Message(Message::Welcome(_)))),
+        "the node did not answer the handshake: {greeted:?}"
+    );
 
     let counting = std::thread::spawn(move || {
         let mut seen = 0usize;
@@ -705,26 +720,35 @@ const CHEAPEST: usize = 5;
 /// it is not, either way round and on either node, which is why the two are
 /// alternated, spread out, and read at their cheap end.
 ///
-/// PARKED, and not because it is flaky. It found something.
+/// It was parked for a round, and what it had found turned out to be two
+/// things, neither of them a ping.
 ///
-/// With the order artefact above removed, a Windows runner measured 2.23 ms
-/// against an empty book, 2.67 ms against a second empty one, and 39.10 ms
-/// against a book holding 4096 addresses: 17.5 times, where two nodes that
-/// differ in nothing at all differ by 1.2. The control is what makes that
-/// number mean something, and it means a node whose book is full answers far
-/// more slowly, on a book size a stranger sets with Peers messages.
+/// The first was the instrument. `ping_burst` started its clock after this
+/// side had written a handshake, which is not the same as the connection being
+/// up: the listener polls every `ACCEPT_POLL`, so up to fifty milliseconds of
+/// a node not yet knowing the connection existed fell inside the measurement,
+/// along with the handshake itself. Measured after the clock was moved to
+/// where the doc had always said it was: 6.34 ms became 1.36 ms on the same
+/// machine and the same build. Three quarters of what this test used to read
+/// was one connection being set up.
 ///
-/// It is not the defect named below. `decide` no longer touches the book, and
-/// the connection and its handshake are outside the measurement: the clock in
-/// `ping_burst` starts after them. What is left is upkeep, which builds vectors
-/// of every address it holds on every round and takes the same locks the
-/// answering path takes.
+/// The second was real and it was upkeep, which is the finding the parking was
+/// for. Once a second, for the life of the node, the round copied the whole
+/// book, turned every address in it into text and handed ninety kilobytes to
+/// the disk whether or not one address had moved, and asked whether it held a
+/// seed by building a list of all of them. Neither is proportional to anything
+/// a ping does, and both were proportional to a number a stranger sets with
+/// `Peers` messages. `a_round_that_changes_no_address_does_not_write_the_book
+/// _again` counts that one rather than timing it.
 ///
-/// Running it would fail the build on one platform for a defect that is real,
-/// named, and outside what this test was written to guard. It is the first item
-/// of the next round, and this comes off when that lands.
+/// Measured here with both repaired, three runs: 1.02, 1.06 and 0.95 times,
+/// against control floors of 1.15, 1.05 and 1.00. The bound is three times the
+/// floor rather than two, because the defect this exists to catch was 17.5
+/// times on the runner that found it and 2 to 3 times on the machine that
+/// found the one before it: a bound of three is an order of magnitude below
+/// anything worth catching and far enough from a measurement that reads one to
+/// leave a loaded runner alone.
 #[test]
-#[ignore = "found a real book-proportional cost on Windows; see the note above"]
 fn a_ping_costs_the_same_whatever_the_address_book_holds() {
     // A burst that fits inside OUTBOUND_QUEUE, so a writing thread that does
     // not get scheduled on a busy machine cannot make the node drop this peer
@@ -799,7 +823,7 @@ fn a_ping_costs_the_same_whatever_the_address_book_holds() {
          addresses in it. {times:.2} times against {floor:.2} between the two empty ones"
     );
     assert!(
-        times < 2.0 * floor.max(1.0),
+        times < 3.0 * floor.max(1.0),
         "answering {PINGS} pings took {slow:?} with {held} addresses in the book and \
          {quick:?} with none: {times:.1} times longer, where two nodes with nothing in \
          either book differ by {floor:.1} on this machine right now. decide() used to \
@@ -809,6 +833,114 @@ fn a_ping_costs_the_same_whatever_the_address_book_holds() {
          machine it was found on, and this comparison sits at one on a build that does \
          not make it."
     );
+}
+
+/// **A round that changes no address writes no file.**
+///
+/// The other half of the finding above, and the one that can be counted rather
+/// than timed. Upkeep runs once a second for the life of a node. It used to
+/// copy the whole address book, turn every address in it into text and hand
+/// the result to the disk on every round, whether or not one address had
+/// moved: a stuffed book is four thousand addresses and ninety kilobytes of
+/// it, once a second, for ever, on the thread that also dials, prunes and
+/// trims, taking the same lock the answering path takes.
+///
+/// What is counted here is rounds and writes, and no duration is compared with
+/// anything. A sentinel goes into the file; the node is watched until three
+/// more rounds have gone by, which its own `GetPeers` says; and the sentinel
+/// has to still be there. Then one address is added, which is the case that
+/// must still be written, because a book kept only in memory is a node that
+/// comes back knowing nothing but its seeds.
+///
+/// The seeds are loopback ports nobody listens on, so the dialling in each
+/// round is a handful of refusals rather than a wait, and none of them can
+/// change the book: a seed that does not answer is kept, and it is the set of
+/// addresses that decides what the file says.
+#[test]
+fn a_round_that_changes_no_address_does_not_write_the_book_again() {
+    let directory = std::env::temp_dir().join(format!("cairn-book-idle-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("peers.txt");
+
+    let (node, _) = Node::open(params(), loopback(), &directory).unwrap();
+    for port in 1..=40u16 {
+        node.remember_seed(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+    }
+    // A peer that names no port of its own, so nothing it does puts an address
+    // in the book. What it is here for is the round: upkeep asks every peer
+    // for addresses once a round, and that question arriving is this node
+    // saying it has been round again.
+    let mut peer = TcpStream::connect(node.address()).unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    write_message(&mut peer, params().network, &hello(777_777, 0)).unwrap();
+    let mut rounds = || loop {
+        match read_message(&mut peer, params().network) {
+            Ok(Incoming::Message(Message::GetPeers)) => return true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    };
+
+    let written = until(Duration::from_secs(20), || {
+        std::fs::read(&path).is_ok_and(|held| !held.is_empty())
+    });
+    assert!(written, "the book was never written down at all");
+
+    // From a round boundary, so what follows is whole rounds.
+    assert!(rounds(), "the node stopped asking for addresses");
+    let sentinel = "# left by the test\n";
+    std::fs::write(&path, sentinel).unwrap();
+    for round in 0..3 {
+        assert!(rounds(), "the node stopped asking for addresses at {round}");
+    }
+    let left = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        left.lines().count(),
+        1,
+        "three rounds of a book that had not changed wrote it again anyway: \
+         the file now holds {} lines",
+        left.lines().count()
+    );
+    assert_eq!(left, sentinel);
+
+    // And the case that must still reach the disk.
+    let fresh = SocketAddr::from((Ipv4Addr::new(240, 200, 200, 1), 8_333));
+    node.remember_seed(fresh);
+    let caught_up = until(Duration::from_secs(20), || {
+        std::fs::read_to_string(&path).is_ok_and(|held| held.contains(&fresh.to_string()))
+    });
+    node.shutdown();
+    drop(node);
+    assert!(
+        caught_up,
+        "an address the node was given never reached the file"
+    );
+    let back = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        back.lines().count(),
+        41,
+        "and the whole book is in it: {back}"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Whether `ready` becomes true inside `patience`, looking often.
+///
+/// A deadline rather than a sleep, so a slow machine waits longer and a quick
+/// one does not wait at all. It is only ever asked about something that has to
+/// happen: what must not happen is held by counting rounds, because a deadline
+/// that passes is not evidence that anything ran.
+fn until(patience: Duration, mut ready: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + patience;
+    while Instant::now() < deadline {
+        if ready() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------

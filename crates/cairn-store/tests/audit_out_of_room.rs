@@ -980,6 +980,57 @@ fn a_store_cannot_be_opened_at_all_on_a_full_disk() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// The claim under test: recovery reads, and what it writes it can be refused.
+///
+/// A start walks sixteen bytes. It walks the whole log and writes the index
+/// again in one case: when those sixteen bytes do not account for the log,
+/// which is what a crash between an append's two writes leaves. So the start
+/// after a crash is the one start that has to write, and a disk with no room
+/// left is exactly the state a crash is likely to have happened in.
+///
+/// The blocks are all there and none of this is damage to them. What an
+/// operator used to be told was "could not reach the block log", which sends
+/// them looking at the one file that is fine; they are now told which file
+/// would not go down and that the log is whole.
+///
+/// A warm store with a torn tail rather than a cold one, which is the case
+/// `a_store_cannot_be_opened_at_all_on_a_full_disk` does not cover.
+#[test]
+fn a_start_that_has_to_work_the_index_out_again_needs_room_for_it() {
+    let Ok(root) = std::env::var("CAIRN_AUDIT_FULL_DIR") else {
+        eprintln!("skipped: set CAIRN_AUDIT_FULL_DIR to a directory on a small filesystem");
+        return;
+    };
+    let root = PathBuf::from(root);
+    let directory = root.join("warm-start");
+    let _ = std::fs::remove_dir_all(&directory);
+    let blocks = chain(20);
+    built(&directory, &blocks);
+
+    // The index emptied rather than removed, which is the state that makes the
+    // next start work it out again from the log without also needing a name in
+    // a directory that has no room for one. Removing it tests the open; this
+    // tests the write that recovery itself makes.
+    cut_to(&directory.join(BLOCK_INDEX), 0);
+    let ballast = eat_the_room(&root);
+    let opened = BlockLog::open(&directory);
+    let said = match &opened {
+        Ok((log, recovered)) => format!("opened with {} records, {recovered:?}", log.len()),
+        Err(error) => error.to_string(),
+    };
+    drop(opened);
+    std::fs::remove_dir_all(&ballast).unwrap();
+    eprintln!("a warm store whose index was lost, opened with no room: {said}");
+
+    // Whatever it did with no room, the blocks were never in danger, and the
+    // start after the room comes back finds all of them.
+    let (log, recovered) = BlockLog::open(&directory).expect("and it opens once there is room");
+    assert_eq!(log.len(), blocks.len(), "{recovered:?}");
+    assert_eq!(recovered.discarded_bytes, 0);
+    drop(log);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 // ---------------------------------------------------------------------------
 // Making room.
 // ---------------------------------------------------------------------------
@@ -1157,6 +1208,47 @@ fn a_compaction_that_cannot_finish_leaves_a_log_that_says_so() {
     for (position, id) in back.iter().enumerate() {
         assert_eq!(*id, blocks[position + 10].id());
     }
+    drop(log);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// The claim, from `write_and_sync`: a staging that fails takes its own files
+/// with it.
+///
+/// This is the compaction, so the copy left behind is everything the node
+/// keeps, which by default is a gigabyte, and it is left on the disk this call
+/// exists to make room on. It used to sit there until some later start opened
+/// the log and swept it, and the reason the compaction failed is usually the
+/// reason there will not be a later start with room to spare.
+///
+/// A directory where the second staged file goes is what stops it: the log's
+/// copy is written, the index's copy is refused, and what happens to the first
+/// is the finding.
+#[test]
+fn a_compaction_that_stops_partway_takes_its_staged_copy_with_it() {
+    let directory = scratch("compaction-staged");
+    let blocks = chain(20);
+    let (mut log, _) = BlockLog::open(&directory).unwrap();
+    for block in &blocks {
+        log.append(block).unwrap();
+    }
+    let before: Vec<_> = log.replay().map(|block| block.unwrap().id()).collect();
+
+    std::fs::create_dir_all(directory.join(format!("{BLOCK_INDEX}.part"))).unwrap();
+    let refused = log.keep_from(10);
+    assert!(refused.is_err(), "the second staged write has to fail");
+
+    let staged = directory.join(format!("{BLOCK_LOG}.part"));
+    assert!(
+        !staged.exists(),
+        "{} is a second copy of the log, left on the disk this call was \
+         making room on",
+        staged.display()
+    );
+    assert_eq!(log.len(), blocks.len(), "and the log itself is untouched");
+    assert_eq!(log.first_height(), 0);
+    let after: Vec<_> = log.replay().map(|block| block.unwrap().id()).collect();
+    assert_eq!(before, after);
     drop(log);
     let _ = std::fs::remove_dir_all(&directory);
 }

@@ -15,6 +15,8 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 
+use cairn_store::write_beside_and_move;
+
 use crate::message::PeerAddress;
 
 /// The name the address book takes inside a node's directory.
@@ -133,6 +135,19 @@ pub struct AddressBook {
     /// so a peer naming five hundred addresses in one message costs five
     /// hundred lookups and not five hundred passes over the book.
     groups: BTreeMap<Group, usize>,
+    /// How many times the addresses held have changed.
+    ///
+    /// What the file is written from is the list of addresses and nothing
+    /// else, so this counts the two things that change it: one going in and
+    /// one going out. Misses, seed marks and the rest move what is known
+    /// about an address and leave the file identical.
+    ///
+    /// It is here so that upkeep can tell a book that has changed from one
+    /// that has not. Every round used to copy the whole book, turn four
+    /// thousand addresses into ninety kilobytes of text and put it on the
+    /// disk, once a second, for the life of the node, whether or not a single
+    /// address had moved.
+    changes: u64,
 }
 
 /// The part of an address that is expensive for one party to vary.
@@ -191,6 +206,7 @@ impl AddressBook {
         }
         self.known.insert(address, Known::default());
         self.groups.insert(group, held.saturating_add(1));
+        self.changes = self.changes.saturating_add(1);
         true
     }
 
@@ -213,6 +229,7 @@ impl AddressBook {
             let group = group_of(&address);
             let held = self.groups.get(&group).copied().unwrap_or(0);
             self.groups.insert(group, held.saturating_add(1));
+            self.changes = self.changes.saturating_add(1);
         }
         !was_seed
     }
@@ -235,6 +252,7 @@ impl AddressBook {
         if self.known.remove(address).is_none() {
             return false;
         }
+        self.changes = self.changes.saturating_add(1);
         let group = group_of(address);
         match self.groups.get(&group).copied().unwrap_or(0) {
             0 | 1 => {
@@ -412,10 +430,34 @@ impl AddressBook {
         book
     }
 
+    /// How many times the addresses held have changed.
+    ///
+    /// Two books with the same count and the same history write the same file.
+    /// For a caller deciding whether writing it again would say anything new.
+    pub fn changes(&self) -> u64 {
+        self.changes
+    }
+
+    /// Whether the operator named any of these addresses.
+    ///
+    /// Answered without building the list, because the answer is wanted once a
+    /// round and the list is not.
+    pub fn has_seeds(&self) -> bool {
+        self.known.values().any(|known| known.seed)
+    }
+
     /// Writes the book to `directory`, one address per line.
     ///
     /// Plain text on purpose: an operator should be able to read and edit the
     /// list of machines their node will talk to.
+    ///
+    /// Written beside the file and moved onto it. It used to be written
+    /// straight over it, which truncates first: a disk with nothing left, or a
+    /// machine that stopped, left a book holding the addresses that fitted and
+    /// half a line. The seeds are in this file too, so an operator who named
+    /// them once and has not kept the command line could come back to a node
+    /// with nothing to dial and no way onto the network. Losing the book is
+    /// meant to cost a head start; losing it this way costs the way back.
     pub fn save(&self, directory: impl AsRef<Path>) -> std::io::Result<()> {
         let directory = directory.as_ref();
         std::fs::create_dir_all(directory)?;
@@ -424,7 +466,7 @@ impl AddressBook {
             contents.push_str(&address.to_string());
             contents.push('\n');
         }
-        std::fs::write(directory.join(PEER_FILE), contents)
+        write_beside_and_move(&directory.join(PEER_FILE), contents.as_bytes())
     }
 }
 

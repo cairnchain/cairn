@@ -38,7 +38,8 @@ use cairn_ledger::LedgerState;
 use cairn_primitives::codec::{Decode, Encode};
 use cairn_primitives::Hash32;
 use cairn_store::{
-    BlockLog, DirectoryLock, HeaderLog, HeaderTree, StoreError, HANDED_LEDGER, HEADER_BYTES,
+    staged_beside, write_beside_and_move, BlockLog, DirectoryLock, HeaderLog, HeaderTree,
+    JoinFailed, StoreError, HANDED_LEDGER, HEADER_BYTES, HEADER_LOG,
 };
 
 use crate::book::AddressBook;
@@ -417,7 +418,9 @@ pub enum NodeError {
     /// never had a chain and clear the disk to match.
     #[error(
         "{because}. The blocks on this disk build on that ledger, so nothing has been \
-         changed: put the file back, or start this node in an empty directory"
+         changed: put the file back if there is a copy of it, or delete it, which \
+         costs the stored blocks and has this node join the chain again. It keeps its \
+         headers and its address book either way"
     )]
     UnusableLedger { because: String },
     /// The socket opened and was closed again without becoming a peer.
@@ -690,6 +693,29 @@ pub struct Restored {
     /// one costs the node something the network can give back rather than
     /// anything of its own.
     pub headers_set_aside: u64,
+    /// Header records deleted because the blocks left them stranded.
+    ///
+    /// The header log holds one run, and this is the shape it cannot hold: a
+    /// run that stops below the height the blocks begin at. Nothing joins the
+    /// two, and the log cannot take the blocks' headers while it holds a run
+    /// that does not lead up to them, so it is emptied and written again from
+    /// the blocks.
+    ///
+    /// The way in was a merge of the collected headers that was interrupted:
+    /// [`join_logs`] emptied the log and refilled it in place, so a machine
+    /// that stopped in the middle of one left exactly this, and the start after
+    /// it deleted every header the node held, could no longer show a newcomer
+    /// the chain, and reported what a healthy start reports. The merge is
+    /// written beside the log and moved into place now, so what is left to
+    /// arrive here is a log an older build left in that state, or bytes that
+    /// changed on a disk.
+    ///
+    /// Told apart from `headers_set_aside`, which is the store declining to
+    /// stand behind a head and leaving the bytes where they are. These bytes
+    /// are gone. What they cost is the same and it is given back the same way:
+    /// the node collects the run from before it arrived again, from a peer
+    /// that kept it.
+    pub headers_dropped: u64,
     /// Whether the log was set aside because it does not start at the first
     /// block of the chain.
     ///
@@ -1060,6 +1086,11 @@ struct Shared {
     /// When those names were last looked up, so a machine with no name server
     /// asks every so often rather than every round.
     names_looked_up_at: AtomicU64,
+    /// The book's change count as of the last write of it that got through.
+    ///
+    /// `u64::MAX` until one has, which no real count reaches: it would take
+    /// the addresses to have moved eighteen quintillion times.
+    book_written_at: AtomicU64,
     directory: Option<PathBuf>,
     /// Bytes of blocks this node keeps on disk. `u64::MAX` keeps everything,
     /// which is what a node that offers the history to others does.
@@ -2064,10 +2095,16 @@ impl Shared {
     /// Writes this node's ledger down and drops the blocks below it, when the
     /// log has grown past what this node keeps.
     ///
-    /// The ledger goes down first. A process that stops between the two leaves
-    /// a log longer than it needed to be, which costs a slower start; the
-    /// other order would leave a node with neither the blocks nor the ledger
-    /// that replaces them.
+    /// The ledger goes down first, and is on the disk before the blocks go. A
+    /// machine that stops between the two leaves a log longer than it needed
+    /// to be, which costs a slower start; the other order would leave a node
+    /// with neither the blocks nor the ledger that replaces them.
+    ///
+    /// First in the order the disk sees, which is what [`Shared::keep_ledger`]
+    /// is careful about and did not used to be: the ledger's bytes sat in the
+    /// page cache while the compaction below synced the directory the two
+    /// files share, so the deletion was made durable and the file that
+    /// replaces what it deleted was not.
     fn trim_history(&self) {
         let keep = self.keep_bytes.load(Ordering::Relaxed);
         let over = {
@@ -2172,19 +2209,26 @@ impl Shared {
     /// than half of a new one, which for a file a node cannot start without is
     /// the difference between an interrupted write and a node that never comes
     /// back.
+    ///
+    /// This says nothing until the disk has said it, which is what
+    /// [`write_beside_and_move`] adds and what a rename on its own never
+    /// bought. The rename covers a process that stops; it does not cover a
+    /// machine that stops. `std::fs::write` returned with the bytes in the
+    /// page cache, and the rename could reach the platter ahead of them, so a
+    /// power cut left `ledger.dat` at its full length holding whatever those
+    /// blocks held before. That file does not decode, `Node::open` refuses to
+    /// start over it, and by then [`Shared::trim_history`] has already deleted
+    /// the blocks below it: the node does not start, and no later start does
+    /// either, because there is nothing left to start from. The ordering in
+    /// `trim_history` is a statement about the disk only if this is.
+    ///
     /// Called with no lock held, because saying what the disk refused takes
     /// the chain and then the log.
     fn keep_ledger(&self, bytes: &[u8]) -> bool {
         let Some(directory) = self.directory.as_ref() else {
             return false;
         };
-        let target = directory.join(HANDED_LEDGER);
-        let partial = directory.join(format!("{HANDED_LEDGER}.part"));
-        if let Err(error) = std::fs::write(&partial, bytes) {
-            self.note_refusal(Refusing::at(Writing::Ledger, &error));
-            return false;
-        }
-        if let Err(error) = std::fs::rename(&partial, &target) {
+        if let Err(error) = write_beside_and_move(&directory.join(HANDED_LEDGER), bytes) {
             self.note_refusal(Refusing::at(Writing::Ledger, &error));
             return false;
         }
@@ -2650,11 +2694,29 @@ impl Node {
         // between them is read as a log that leads nowhere and cut to nothing.
         //
         // So this stops instead, with the disk untouched and the reason said.
-        // An operator can put the file back or start somewhere else; neither
-        // is possible once the blocks are gone. Every node writes this file as
-        // it runs, so what used to be at stake was not only a node that joined
-        // a chain: a rules update that refused a node's own stored ledger
-        // would have emptied it.
+        // A copy of the file can be put back; without one, deleting it has the
+        // node join the chain again, which costs the stored blocks and keeps
+        // the headers and the book. Neither is possible once the blocks have
+        // been deleted, which is why `keep_ledger` waits for the disk before
+        // `trim_history` deletes any. Every node writes this file as it runs,
+        // so what used to be at stake was not only a node that joined a chain:
+        // a rules update that refused a node's own stored ledger would have
+        // emptied it.
+        //
+        // Staged files left by a machine that stopped mid write go now: the
+        // ledger, and the two header logs a merge writes beside. They are
+        // bytes under names nothing reads, and this is the one moment they are
+        // certainly nobody's, because the directory lock above is held and no
+        // thread of this node has started. Swept here rather than in the store
+        // for exactly that reason: anything else that opens a header log is a
+        // reader, and a reader that deleted these would be deleting a merge
+        // this node is in the middle of.
+        for name in [HANDED_LEDGER, HEADER_LOG, FILLING_LOG] {
+            let _ = std::fs::remove_file(staged_beside(&directory.join(name)));
+        }
+        for name in [HEADER_LOG, FILLING_LOG] {
+            let _ = std::fs::remove_file(directory.join(format!("{name}.hold")));
+        }
         let handed = match read_handed_ledger(&directory, &params) {
             Ok(handed) => handed,
             Err(because) => return Err(NodeError::UnusableLedger { because }),
@@ -2760,7 +2822,10 @@ impl Node {
         // newcomer about that stretch and nothing else.
         let mut headers = HeaderLog::open(&directory)?;
         let headers_set_aside = headers_the_store_will_not_stand_behind(&headers);
-        let unread = catch_up_headers(&mut headers, &log);
+        let CaughtUp {
+            dropped: headers_dropped,
+            unread,
+        } = catch_up_headers(&mut headers, &log);
         let mut forest = HeaderTree::open(&directory)?;
         // A refusal here is not lost by being dropped: nothing has been
         // started yet that could carry it, and the first block this node
@@ -2797,6 +2862,7 @@ impl Node {
             unreadable: recovered.unreadable,
             rejoining,
             headers_set_aside,
+            headers_dropped,
             addresses: book.len(),
         };
 
@@ -2839,6 +2905,7 @@ impl Node {
             choosing: Mutex::new(Chooser::new()),
             seed_names: Mutex::new(Vec::new()),
             names_looked_up_at: AtomicU64::new(0),
+            book_written_at: AtomicU64::new(u64::MAX),
             directory,
             keep_bytes: AtomicU64::new(KEEP_BLOCK_BYTES),
             _lock: lock,
@@ -5195,8 +5262,27 @@ fn save_book(shared: &Arc<Shared>) {
     let Some(directory) = shared.directory.as_ref() else {
         return;
     };
-    let book = shared.book().clone();
+    // Nothing is copied or written while the addresses stand where the last
+    // write left them. The file is a list of addresses, so a round in which
+    // none went in or out would write the same bytes over the same bytes, and
+    // that is most rounds of most nodes: upkeep runs once a second for the
+    // life of the node, and it was copying the whole book, turning up to four
+    // thousand addresses into ninety kilobytes of text and handing it to the
+    // disk every time.
+    let (book, changes) = {
+        let book = shared.book();
+        let changes = book.changes();
+        if shared.book_written_at.load(Ordering::Relaxed) == changes {
+            return;
+        }
+        (book.clone(), changes)
+    };
     let refusal = book.save(directory).err().map(|error| error.to_string());
+    if refusal.is_none() {
+        // Only a write that got through. Otherwise the next round tries again,
+        // which is the whole of what a node can do about a disk that refused.
+        shared.book_written_at.store(changes, Ordering::Relaxed);
+    }
     *shared
         .unsaved_book
         .lock()
@@ -5491,9 +5577,9 @@ fn headers_the_store_will_not_stand_behind(headers: &HeaderLog) -> u64 {
 /// headers rather than from the disk, and that walk needs no block bodies at
 /// all. What is returned is for the operator, because a disk that ate one
 /// record has not finished.
-fn catch_up_headers(headers: &mut HeaderLog, blocks: &BlockLog) -> Option<Unread> {
+fn catch_up_headers(headers: &mut HeaderLog, blocks: &BlockLog) -> CaughtUp {
     if blocks.is_empty() {
-        return None;
+        return CaughtUp::default();
     }
     let from = if headers.is_empty() {
         blocks.first_height()
@@ -5503,12 +5589,40 @@ fn catch_up_headers(headers: &mut HeaderLog, blocks: &BlockLog) -> Option<Unread
     if from < blocks.first_height() {
         // A gap nothing can fill: the headers stop before the blocks start.
         // Starting again from the blocks is the most that can be said.
+        //
+        // Counted before the cut, and reported. This deletes every header the
+        // node had, which is the one loss here that the network has to give
+        // back rather than the blocks: until a peer does, the node cannot show
+        // a newcomer which chain carries the most work. It used to say nothing
+        // whatever, and a start that emptied the header log printed what a
+        // healthy start prints.
+        let dropped = headers.len();
         if let Err(error) = headers.keep_below(0) {
-            return Some(stopped_at(Reading::Headers, 0, &error));
+            return CaughtUp {
+                dropped: 0,
+                unread: Some(stopped_at(Reading::Headers, 0, &error)),
+            };
         }
-        return catch_up_from(headers, blocks, blocks.first_height());
+        return CaughtUp {
+            dropped,
+            unread: catch_up_from(headers, blocks, blocks.first_height()),
+        };
     }
-    catch_up_from(headers, blocks, from)
+    CaughtUp {
+        dropped: 0,
+        unread: catch_up_from(headers, blocks, from),
+    }
+}
+
+/// What filling the header log in from the blocks did.
+#[derive(Debug, Default)]
+struct CaughtUp {
+    /// Headers deleted because the blocks left them stranded.
+    ///
+    /// See [`Restored::headers_dropped`]. Zero on every ordinary start.
+    dropped: u64,
+    /// A read or a write that the disk refused partway through the fill.
+    unread: Option<Unread>,
 }
 
 /// The same, and it is where both halves can refuse.
@@ -5554,51 +5668,24 @@ fn stopped_at(what: Reading, height: u64, because: &impl std::fmt::Display) -> U
 /// the truth. They used to be indistinguishable from a run that was invented,
 /// and the node blamed whoever had just handed it a correct one.
 ///
-/// The reads all happen before the clear, so a log that will not answer costs
-/// nothing but the attempt. A write that fails after it does cost something,
-/// and this is where that is at its worst: the log is emptied and refilled in
-/// place, so an interrupted refill leaves a header log holding a prefix and
-/// nothing that knows it. It is at least said now. Making it survivable needs
-/// the merge to land in a second file and be moved into place, which is the
-/// store's business rather than this module's.
+/// The merge itself is [`HeaderLog::join`], which writes the two runs into a
+/// file beside the log and moves it into place. This used to read every header
+/// into one vector, empty the log and write them back: 290 MB in hand at
+/// thirty years of chain, on the one cost this design exists to keep flat, and
+/// a machine that stopped in the middle left a header log holding a prefix
+/// with nothing that knew it. What the next start did with that prefix was
+/// delete every header the node had, in silence. Both halves of that are gone:
+/// the merge holds one header at a time, and an interrupted one leaves the log
+/// that was there.
 fn join_logs(log: &mut HeaderLog, front: &HeaderLog) -> Result<(), OwnDisk> {
-    let mut all = Vec::new();
-    for height in front.first_height()..front.reaches() {
-        all.push(one_header(front, height)?);
-    }
-    for height in log.first_height()..log.reaches() {
-        all.push(one_header(log, height)?);
-    }
-    if let Err(error) = log.clear() {
-        return Err(OwnDisk::Write(Refusing::at(Writing::Headers, &error)));
-    }
-    for header in &all {
-        if let Err(error) = log.append(header) {
-            return Err(OwnDisk::Write(Refusing::at(Writing::Headers, &error)));
-        }
-    }
-    Ok(())
-}
-
-/// One header out of a log, where the log has already said it holds it.
-///
-/// So nothing here is an absence. A store that answers `None` inside the run
-/// it says it holds is disagreeing with itself, which is the same news as a
-/// refusal and belongs in the same channel.
-fn one_header(log: &HeaderLog, height: u64) -> Result<BlockHeader, OwnDisk> {
-    match log.read_at(height) {
-        Ok(Some(header)) => Ok(header),
-        Ok(None) => Err(OwnDisk::Read {
+    log.join(front).map_err(|failed| match failed {
+        JoinFailed::Read { height, source } => OwnDisk::Read {
             what: Reading::Headers,
             height,
-            because: "the log says it holds this record and produced nothing".to_owned(),
-        }),
-        Err(error) => Err(OwnDisk::Read {
-            what: Reading::Headers,
-            height,
-            because: error.to_string(),
-        }),
-    }
+            because: source.to_string(),
+        },
+        JoinFailed::Write(error) => OwnDisk::Write(Refusing::at(Writing::Headers, &error)),
+    })
 }
 
 /// Reads back the ledger a node was handed, if it kept one.
@@ -5883,7 +5970,7 @@ fn collect_finished(shared: &Arc<Shared>) {
 ///
 /// A lookup can block, so it is spaced out rather than tried every round.
 fn look_up_seed_names(shared: &Arc<Shared>, now: u64) {
-    if !shared.book().seeds().is_empty() {
+    if shared.book().has_seeds() {
         return;
     }
     let last = shared.names_looked_up_at.load(Ordering::Relaxed);

@@ -41,6 +41,54 @@ pub fn reward_at(height: u64, interval: u64, initial: Amount, tail: Amount) -> A
     Amount::from_pebbles(pebbles).unwrap_or(tail)
 }
 
+/// Every pebble the schedule has paid out by `height`, counting that height.
+///
+/// The most a chain can hold there. A block issues whatever its coinbase
+/// claims and no more than the schedule allows, and a fee the coinbase
+/// declines to claim is destroyed, so what a chain has at a height is at most
+/// this and never more. It is the one thing about a handed over ledger that
+/// can be checked against the rules rather than against a commitment whoever
+/// sent it wrote.
+///
+/// Summed by era rather than by height, because the caller is a rule on a
+/// received message and a walk of thirteen million heights is not.
+///
+/// The answer is clamped at the monetary ceiling. Nothing that can be weighed
+/// against this sits above the ceiling, so a figure above it would bound
+/// nothing the type does not already bound, and no chain reaches one: the
+/// floor takes about a hundred and seventy thousand years to add the
+/// difference.
+pub fn emitted_by(height: u64, interval: u64, initial: Amount, tail: Amount) -> Amount {
+    let blocks = u128::from(height).saturating_add(1);
+    let mut paid: u128 = 0;
+    let mut left = blocks;
+    if interval > 0 {
+        let era = u128::from(interval);
+        let mut halvings: u32 = 0;
+        // Ends after at most as many turns as an amount has bits, because the
+        // rate reaches the floor by then whatever the floor is.
+        while left > 0 {
+            let rate = initial.as_pebbles().checked_shr(halvings).unwrap_or(0);
+            if rate <= tail.as_pebbles() {
+                break;
+            }
+            let here = left.min(era);
+            paid = paid.saturating_add(u128::from(rate).saturating_mul(here));
+            left = left.saturating_sub(here);
+            halvings = halvings.saturating_add(1);
+        }
+    }
+    // What is left pays the floor, which is what `reward_at` answers once
+    // halving would take it lower. A schedule with no interval never halves,
+    // so its floor is the opening rate.
+    let floor = if interval == 0 { initial } else { tail };
+    paid = paid.saturating_add(u128::from(floor.as_pebbles()).saturating_mul(left));
+    u64::try_from(paid)
+        .ok()
+        .and_then(Amount::from_pebbles)
+        .unwrap_or(Amount::MAX_MONEY)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -121,6 +169,100 @@ mod tests {
         assert_eq!(
             in_cairn, 105_107_167,
             "the schedule before the floor pays out {in_cairn} CAIRN"
+        );
+    }
+
+    /// The running total against the schedule it is a total of.
+    ///
+    /// Two computations that share nothing but the answer: one walks every
+    /// height and adds up what [`reward_at`] pays there, the other jumps era
+    /// by era. A closed form that drifts from the schedule it describes is the
+    /// exact shape of defect this project has shipped before, and this one is
+    /// about to be a rule a node refuses a ledger on.
+    #[test]
+    fn the_running_total_is_the_schedule_added_up_height_by_height() {
+        // A schedule small enough to walk whole, with a halving every four
+        // blocks and a floor reached inside it.
+        let interval = 4u64;
+        let opening = Amount::from_pebbles(64).unwrap();
+        let floor = Amount::from_pebbles(3).unwrap();
+        let mut walked: u64 = 0;
+        for height in 0..64u64 {
+            walked = walked
+                .checked_add(reward_at(height, interval, opening, floor).as_pebbles())
+                .unwrap();
+            assert_eq!(
+                emitted_by(height, interval, opening, floor).as_pebbles(),
+                walked,
+                "the two disagree at height {height}"
+            );
+        }
+
+        // And on the schedule that ships, at every boundary that matters.
+        for height in [
+            0,
+            1,
+            HALVING_INTERVAL - 1,
+            HALVING_INTERVAL,
+            13 * HALVING_INTERVAL - 1,
+            13 * HALVING_INTERVAL,
+            13 * HALVING_INTERVAL + 1,
+        ] {
+            let stated = emitted_by(height, HALVING_INTERVAL, initial(), tail());
+            let below = emitted_by(
+                height.saturating_sub(1),
+                HALVING_INTERVAL,
+                initial(),
+                tail(),
+            );
+            let step = if height == 0 {
+                stated
+            } else {
+                stated.checked_sub(below).unwrap()
+            };
+            assert_eq!(step, reward(height), "the step at height {height}");
+        }
+    }
+
+    /// The whole schedule before the floor, stated once by the running total.
+    ///
+    /// The figure the project publishes, reached by the function a node uses
+    /// to bound a ledger rather than by a sum written for the occasion.
+    #[test]
+    fn the_running_total_reaches_the_published_figure() {
+        let last_paying = 13 * HALVING_INTERVAL - 1;
+        let total = emitted_by(last_paying, HALVING_INTERVAL, initial(), tail());
+        assert_eq!(total.as_pebbles(), 10_510_716_795_955_200);
+        assert_eq!(
+            u128::from(total.as_pebbles()) / u128::from(PEBBLES_PER_CAIRN),
+            105_107_167
+        );
+        assert_eq!(
+            u128::from(total.as_pebbles()),
+            before_the_floor(),
+            "the era walk and the running total are the same number"
+        );
+    }
+
+    /// A schedule that never halves, and one asked about a height no chain
+    /// reaches.
+    #[test]
+    fn the_running_total_holds_at_both_extremes() {
+        // No interval means the opening rate for ever, which is the largest
+        // number the schedule can be asked for.
+        assert_eq!(
+            emitted_by(9, 0, initial(), tail()).as_pebbles(),
+            initial().as_pebbles().checked_mul(10).unwrap()
+        );
+        // Past what an amount can hold, the answer is the ceiling rather than
+        // a wrap: no supply sits above it, so nothing is loosened.
+        assert_eq!(
+            emitted_by(u64::MAX, HALVING_INTERVAL, initial(), tail()),
+            Amount::MAX_MONEY
+        );
+        assert_eq!(
+            emitted_by(0, HALVING_INTERVAL, initial(), tail()),
+            initial()
         );
     }
 

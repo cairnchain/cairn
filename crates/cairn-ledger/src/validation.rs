@@ -411,6 +411,20 @@ impl ConsensusParams {
         )
     }
 
+    /// The most money this network's schedule can have paid out by `height`.
+    ///
+    /// A ceiling on what any ledger at that height may hold, and the only
+    /// thing about a ledger that follows from the rules rather than from a
+    /// commitment its sender wrote. See [`emission::emitted_by`].
+    pub fn emitted_by(&self, height: u64) -> Amount {
+        emission::emitted_by(
+            height,
+            self.halving_interval,
+            self.initial_reward,
+            self.tail_reward,
+        )
+    }
+
     /// The same rules with a hot set small enough to exercise eviction.
     #[must_use]
     pub const fn with_hot_capacity(mut self, capacity: usize) -> Self {

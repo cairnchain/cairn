@@ -206,3 +206,134 @@ fn a_log_written_over_by_a_reorganisation_is_still_read_back_whole() {
         "PROBE: an honest reorganised log is refused at {refused:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Merging the run collected from before a node arrived.
+// ---------------------------------------------------------------------------
+
+/// Two logs a node that joined a chain holds: the headers from where it was
+/// handed on, and the run of everything before that, collected from a peer.
+fn two_logs(name: &str, blocks: &[Block], at: usize) -> (PathBuf, HeaderLog, HeaderLog) {
+    let directory = scratch(name);
+    let mut headers = HeaderLog::open(&directory).unwrap();
+    for block in &blocks[at..] {
+        headers.append(&block.header).unwrap();
+    }
+    let mut front = HeaderLog::open_named(&directory, "headers.filling").unwrap();
+    for block in &blocks[..at] {
+        front.append(&block.header).unwrap();
+    }
+    (directory, headers, front)
+}
+
+/// **A merge that cannot finish leaves the log that was there.**
+///
+/// The merge used to empty the log and write it again in place, so a machine
+/// that stopped partway left a header log holding a prefix of the collected
+/// run and nothing at all that knew it. What the next start did with that
+/// prefix was delete every header the node held, in silence, because the run
+/// stopped below the oldest block it kept.
+///
+/// A directory sitting where the staged file goes stands in for the disk that
+/// would not take it: it refuses that one write and disturbs nothing else.
+#[test]
+fn a_merge_that_cannot_be_written_changes_nothing() {
+    let blocks = chain(60);
+    let (directory, mut headers, front) = two_logs("merge-refused", &blocks, 40);
+    let path = directory.join(HEADER_LOG);
+    let held = std::fs::read(&path).unwrap();
+
+    std::fs::create_dir(directory.join(format!("{HEADER_LOG}.part"))).unwrap();
+    let refused = headers.join(&front);
+    assert!(
+        refused.is_err(),
+        "a merge that could not be written said it worked"
+    );
+    assert_eq!(
+        (headers.first_height(), headers.reaches()),
+        (40, 60),
+        "the log is what it was before the merge was tried"
+    );
+    assert_eq!(
+        headers.read_at(40).unwrap().unwrap().id(),
+        blocks[40].header.id(),
+        "and it still answers out of it"
+    );
+    drop(headers);
+    drop(front);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        held,
+        "the file itself is byte for byte what it was"
+    );
+
+    // And the next start, which is where the old cost was paid: a log holding
+    // 40 to 60 is a log that leads up to the blocks, so nothing is deleted.
+    let again = HeaderLog::open(&directory).unwrap();
+    assert_eq!((again.first_height(), again.reaches()), (40, 60));
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// **A merge that finishes leaves one run and nothing beside it.**
+///
+/// The staged file and the scratch file both go. They are a copy of every
+/// header the node holds, which is 95.7 MB a year, sitting on the disk of a
+/// node that has just been told to keep less.
+#[test]
+fn a_merge_that_finishes_leaves_one_run_and_no_staged_file() {
+    let blocks = chain(60);
+    let (directory, mut headers, front) = two_logs("merge-done", &blocks, 40);
+
+    headers.join(&front).expect("the disk is working");
+    assert_eq!(
+        (headers.first_height(), headers.reaches()),
+        (0, 60),
+        "one run, from the older of the two"
+    );
+    for (height, block) in blocks.iter().enumerate() {
+        let found = headers.read_at(height as u64).unwrap().unwrap();
+        assert_eq!(found.id(), block.header.id(), "header {height}");
+    }
+    drop(headers);
+    drop(front);
+
+    let left: Vec<String> = std::fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(HEADER_LOG) && name != HEADER_LOG)
+        .collect();
+    assert!(
+        left.is_empty(),
+        "the merge left files beside the log: {left:?}"
+    );
+    let again = HeaderLog::open(&directory).unwrap();
+    assert_eq!((again.first_height(), again.reaches()), (0, 60));
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// **Two runs that do not meet are refused before anything is written.**
+///
+/// The merge used to be appends: the first record of the second run that did
+/// not follow on was refused, and by then the log had been emptied and half
+/// refilled. There is nowhere in this code that can happen to, and this holds
+/// the door shut.
+#[test]
+fn two_runs_that_do_not_meet_are_refused_with_the_log_untouched() {
+    let blocks = chain(60);
+    let (directory, mut headers, _front) = two_logs("merge-gap", &blocks, 40);
+    // A run that stops short of where the log begins, which is what an
+    // interrupted collection holds.
+    let mut short = HeaderLog::open_named(&directory, "headers.short").unwrap();
+    for block in &blocks[..30] {
+        short.append(&block.header).unwrap();
+    }
+
+    let refused = headers.join(&short);
+    assert!(refused.is_err(), "a run with a hole in it was merged");
+    assert_eq!(
+        (headers.first_height(), headers.reaches()),
+        (40, 60),
+        "and the log is untouched"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}

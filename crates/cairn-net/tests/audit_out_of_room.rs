@@ -173,16 +173,22 @@ fn eat_the_room(directory: &Path) -> PathBuf {
 /// node cannot start without is the difference between an interrupted write
 /// and a node that never comes back."
 ///
-/// The rename covers a process that stops between the two writes. It does not
-/// cover a machine that stops: `std::fs::write` returns when the bytes are in
-/// the page cache, and nothing syncs the staged file before the rename or the
-/// directory after it, so a power cut can leave the new name pointing at
-/// nothing. This test does not simulate the power cut — it puts the file into
-/// the state one would leave and asks what the next start does with it.
+/// The rename covers a process that stops between the two writes. It did not
+/// cover a machine that stops: `std::fs::write` returned with the bytes in the
+/// page cache, and nothing synced the staged file before the rename or the
+/// directory after it, so a power cut could leave the new name over bytes that
+/// were never written. `keep_ledger` now waits for the disk before it moves
+/// the file and waits again for the name, which is what makes the ordering in
+/// `trim_history` a fact about the platter.
 ///
-/// What it does is delete the node's entire block log.
+/// This test does not simulate the power cut. It puts the file into the state
+/// one would leave and asks what the next start does with it, which is the
+/// half that stays true whatever the write does: the node stops, says why, and
+/// touches nothing. What it must never do is read a file it will not take as a
+/// node that never had one, because then it deletes the blocks that are the
+/// only other copy of the same history.
 #[test]
-fn a_torn_handed_ledger_deletes_the_whole_block_log() {
+fn a_torn_handed_ledger_stops_the_node_and_keeps_the_block_log() {
     let mut source = Chain::new();
     source.run(&wallet(9), 120);
     let handover = source.handover();
@@ -537,23 +543,35 @@ fn a_node_whose_disk_stops_taking_writes_says_so_and_then_stops() {
         "beside the height the status line shows, which is the other one"
     );
 
-    // Stopped, in the way `outdated` and `stranded` stop a node: the flag that
-    // every loop inside it reads is cleared, so nothing is attached to it any
-    // more. Shown against a control, because a witness nobody can dial would
-    // prove this by accident.
+    it_takes_no_connection(&node);
+    drop(node);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// That a node has stopped in the way `outdated` and `stranded` stop one: the
+/// flag every loop inside it reads is cleared, so nothing is attached to it any
+/// more.
+///
+/// Shown against a control, because a witness nobody can dial would prove this
+/// by accident. The dial is refused and says so; it used to be unwrapped, from
+/// before a dial that opens a socket and keeps no peer had any way to say what
+/// happened, when every one of those answered `Ok(())` and the operator was
+/// told the address had been reached.
+fn it_takes_no_connection(node: &Node) {
     let witness = Node::bind(params(), loopback()).unwrap();
     let control = Node::bind(params(), loopback()).unwrap();
     control.connect(witness.address()).unwrap();
     assert_eq!(control.peer_count(), 1, "the witness takes connections");
-    node.connect(witness.address()).unwrap();
+    let refused = node.connect(witness.address());
+    assert!(
+        matches!(refused, Err(NodeError::NotKept { .. })),
+        "a node that has stopped said it had reached somebody: {refused:?}"
+    );
     assert_eq!(
         node.peer_count(),
         0,
         "a node that has stopped does not take one"
     );
-
-    drop(node);
-    let _ = std::fs::remove_dir_all(&directory);
 }
 
 // ---------------------------------------------------------------------------
@@ -648,6 +666,14 @@ fn an_address_book_that_cannot_be_written_says_so() {
         "the save said it worked and the book came back short"
     );
     assert!(whole > 0 && left > 0);
+    // The file is written beside itself and moved onto it now, so the one
+    // outcome that cannot happen is the file getting shorter: either the new
+    // book arrived whole or the old one is still there.
+    assert!(
+        left >= whole as u64,
+        "the book went from {whole} bytes to {left}, which is a write that \
+         truncated the file it could not replace"
+    );
     let _ = std::fs::remove_dir_all(&directory);
 }
 
@@ -1078,5 +1104,183 @@ fn a_header_log_whose_head_cannot_be_checked_says_how_many_it_set_aside() {
         "and its disk is past what it was asked to hold, with no way back"
     );
 
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// **A ledger write that cannot finish leaves nothing behind.**
+///
+/// The claim under test, from `write_and_sync`: what an interrupted write
+/// leaves is bytes nobody can use, on the disk that was probably the reason it
+/// failed, so it goes.
+///
+/// This is the write a node makes to get under its disk budget. It runs
+/// because the disk is filling up, and it stages several megabytes to do it,
+/// so a staged file left behind is a node that has just made its own problem
+/// worse. `keep_ledger` used to leave one: `std::fs::write` to `ledger.dat`
+/// then a rename, with nothing removing the first if the second refused.
+///
+/// A directory sitting where the file goes is what makes the rename refuse.
+/// It disturbs nothing else, which is what keeps this about the ledger.
+#[test]
+fn a_ledger_write_that_cannot_finish_leaves_nothing_behind() {
+    let mut source = Chain::new();
+    source.run(&wallet(4), 50);
+    let directory = scratch("ledger-part");
+
+    let (node, _) = Node::open(params(), loopback(), &directory).unwrap();
+    node.keep_blocks(u64::MAX);
+    for block in &source.blocks[..30] {
+        node.submit_block(block.clone()).unwrap();
+    }
+    let written_through = node.written_through();
+
+    // Where the file goes, so the move onto it cannot happen. The staged write
+    // beside it succeeds, which is the point: this is the failure that leaves
+    // something behind.
+    std::fs::create_dir(directory.join(HANDED_LEDGER)).unwrap();
+    assert!(!node.write_ledger(), "it cannot write onto a directory");
+
+    let said = node
+        .unwritten()
+        .expect("a ledger that would not write is worth a word");
+    assert_eq!(said.what, Writing::Ledger);
+    eprintln!("what the node said: {} / {}", said.what, said.because);
+    let staged = directory.join(format!("{HANDED_LEDGER}.part"));
+    assert!(
+        !staged.exists(),
+        "{} was left on a disk this write exists to make room on",
+        staged.display()
+    );
+    assert_eq!(
+        node.written_through(),
+        written_through,
+        "and no block was touched by it"
+    );
+
+    drop(node);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// **A book that cannot be written keeps the addresses it had.**
+///
+/// The claim under test, from `AddressBook::save`: written beside the file and
+/// moved onto it.
+///
+/// It used to be `std::fs::write` straight over the file, which truncates
+/// before it writes: a disk with nothing left, or a machine that stopped, left
+/// a book holding the addresses that fitted and half a line. The seeds are in
+/// this file too, so an operator who named them once and no longer has the
+/// command line could come back to a node with nothing to dial. A lost book is
+/// meant to cost a head start; lost this way it costs the way back.
+///
+/// A directory where the staged file goes stands in for the disk that would
+/// not take it.
+#[test]
+fn a_book_write_that_cannot_finish_keeps_the_book_it_had() {
+    let directory = scratch("book-part");
+    let mut book = AddressBook::new();
+    for n in 1..30u8 {
+        book.insert(SocketAddr::from(([10, n, 0, 1], 9000 + u16::from(n))));
+    }
+    book.save(&directory).unwrap();
+    let path = directory.join("peers.txt");
+    let held = std::fs::read(&path).unwrap();
+    assert!(!held.is_empty());
+
+    std::fs::create_dir(directory.join("peers.txt.part")).unwrap();
+    let mut bigger = book.clone();
+    for n in 1..30u8 {
+        bigger.insert(SocketAddr::from(([11, n, 0, 1], 9000 + u16::from(n))));
+    }
+    let refused = bigger.save(&directory);
+    assert!(
+        refused.is_err(),
+        "a save that could not be made said it worked"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        held,
+        "the book on the disk is not the book that was there"
+    );
+    assert_eq!(
+        AddressBook::load(&directory).len(),
+        book.len(),
+        "and it reads back whole"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// **Headers the blocks leave stranded are deleted, and the operator is told.**
+///
+/// The claim under test, from `catch_up_headers`: "A gap nothing can fill: the
+/// headers stop before the blocks start. Starting again from the blocks is the
+/// most that can be said."
+///
+/// True, and it used to be said to nobody. `keep_below(0)` on a log holding
+/// records is a `set_len(0)` and a sync: every header the node had, deleted
+/// durably, on a start that then reported exactly what a healthy start
+/// reports. Afterwards the node cannot show a newcomer which chain carries the
+/// most work, which is the loss `headers_set_aside` exists to report, and that
+/// field is worked out before this runs and reads zero here.
+///
+/// The state is the one an interrupted merge of the collected run leaves: the
+/// header log holding a prefix that starts at zero and stops far below the
+/// oldest block kept.
+#[test]
+fn headers_the_blocks_leave_stranded_are_counted_rather_than_deleted_in_silence() {
+    let mut source = Chain::new();
+    source.run(&wallet(9), 120);
+    let handover = source.handover();
+    let anchor = handover.at.height;
+    let directory = scratch("stranded-headers");
+    std::fs::write(directory.join(HANDED_LEDGER), handover.encode()).unwrap();
+    {
+        let (mut log, _) = BlockLog::open(&directory).unwrap();
+        for block in &source.blocks[(anchor as usize + 1)..] {
+            log.append(block).unwrap();
+        }
+    }
+    // What a merge that was interrupted leaves: the front of the collected run
+    // and nothing that knows the rest never landed.
+    let prefix = 10u64;
+    {
+        let mut headers = HeaderLog::open(&directory).unwrap();
+        for header in &source.headers[..prefix as usize] {
+            headers.append(header).unwrap();
+        }
+    }
+
+    let (node, restored) = Node::open(params(), loopback(), &directory).unwrap();
+    let filling = node.filling();
+    node.shutdown();
+    drop(node);
+    let after = {
+        let log = HeaderLog::open(&directory).unwrap();
+        (log.first_height(), log.reaches())
+    };
+    eprintln!(
+        "headers 0..{prefix} under blocks from {}: dropped {}, set aside {}, log now {after:?}",
+        anchor + 1,
+        restored.headers_dropped,
+        restored.headers_set_aside
+    );
+
+    assert_eq!(
+        restored.headers_dropped, prefix,
+        "the operator is told how many headers went"
+    );
+    assert_eq!(
+        restored.headers_set_aside, 0,
+        "and not through the field for bytes that are still on the disk"
+    );
+    assert_eq!(
+        after,
+        (anchor + 1, 120),
+        "the log was written again from the blocks, which is the repair"
+    );
+    assert!(
+        filling.is_some(),
+        "a node that cannot show the chain says so and starts collecting again"
+    );
     let _ = std::fs::remove_dir_all(&directory);
 }
