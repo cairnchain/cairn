@@ -183,6 +183,44 @@ fn key_for(domain: Domain) -> &'static [u8; HASH_LEN] {
     }
 }
 
+/// Bytes hashed on this thread, for the audits that measure what one message
+/// makes a node do.
+///
+/// The claim those tests hold the code to is that the work a peer can ask for
+/// is bounded by the length of what it sent. That is a statement about a
+/// count, and a test that timed it instead would be measuring whatever else
+/// the machine was doing. Every digest in this workspace passes through
+/// [`Hasher::update`], so counting there counts all of it.
+///
+/// Per thread, because tests run beside each other in one process and a
+/// counter they shared would be a counter none of them could read.
+///
+/// Compiled only when the `count-hashing` feature is on, which the test builds
+/// of the crates that audit this turn on and a node that ships does not.
+#[cfg(feature = "count-hashing")]
+pub mod counting {
+    use std::cell::Cell;
+
+    thread_local! {
+        static HASHED: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(super) fn took(bytes: usize) {
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        HASHED.with(|held| held.set(held.get().saturating_add(bytes)));
+    }
+
+    /// Bytes this thread has fed to a hasher since it last called [`reset`].
+    pub fn hashed() -> u64 {
+        HASHED.with(Cell::get)
+    }
+
+    /// Starts the count over, and answers with what it had reached.
+    pub fn reset() -> u64 {
+        HASHED.with(|held| held.replace(0))
+    }
+}
+
 /// An incremental hasher bound to a single domain.
 #[derive(Clone, Debug)]
 pub struct Hasher {
@@ -197,6 +235,8 @@ impl Hasher {
     }
 
     pub fn update(&mut self, bytes: &[u8]) -> &mut Self {
+        #[cfg(feature = "count-hashing")]
+        counting::took(bytes.len());
         self.inner.update(bytes);
         self
     }

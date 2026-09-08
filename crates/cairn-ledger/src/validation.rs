@@ -276,6 +276,38 @@ const _: () = assert!(
     "a schedule has to start at height zero and rise"
 );
 
+/// The decoder refuses what no network would accept, and this is what says so.
+///
+/// [`MOST_INPUTS`] and the ceilings beside it let a frame be turned away for
+/// the price of reading its declared length, instead of after every note in it
+/// has been built and every public key in it decompressed. That is only sound
+/// while they sit at or above what the rules allow. Every shipped network is
+/// [`ConsensusParams::testnet`] with a few fields replaced, and none of the
+/// replacements is one of these, so checking it covers all of them.
+///
+/// Raising a limit here without raising the ceiling would leave a transfer
+/// that consensus accepts and the wire cannot carry: valid, unrelayable, and
+/// silent. So it stops the build instead.
+const _: () = {
+    let rules = ConsensusParams::testnet();
+    assert!(
+        rules.max_inputs_per_transfer <= crate::transaction::MOST_INPUTS,
+        "the decoder would refuse a transfer the rules allow"
+    );
+    assert!(
+        rules.max_outputs_per_transfer <= crate::transaction::MOST_OUTPUTS,
+        "the decoder would refuse a transfer the rules allow"
+    );
+    assert!(
+        rules.max_coinbase_outputs <= crate::transaction::MOST_COINBASE_OUTPUTS,
+        "the decoder would refuse a coinbase the rules allow"
+    );
+    assert!(
+        rules.max_transfers_per_block <= crate::block::MOST_TRANSFERS,
+        "the decoder would refuse a block the rules allow"
+    );
+};
+
 impl ConsensusParams {
     /// The rules of a named network.
     ///
@@ -922,6 +954,14 @@ fn resolve_transfer(
 ) -> Result<TransferOutcome, TransferError> {
     check_transfer_shape(transfer, params)?;
 
+    // Once, ahead of the loop, because it is the same value at every input and
+    // it costs an encoding of the whole body and a hash of it. Asked for
+    // inside the loop it made a transfer cost the square of its own size: a
+    // full one was five megabytes hashed for thirty six kilobytes received,
+    // and every byte of that was spent before the first signature was looked
+    // at, so a transfer whose first signature is nonsense cost all of it.
+    let signing = transfer.signing(params.network);
+
     let mut available = Amount::ZERO;
     let mut from_hot = Vec::new();
     let mut from_cold = Vec::new();
@@ -932,7 +972,7 @@ fn resolve_transfer(
         let position = u32::try_from(index).unwrap_or(u32::MAX);
         pending.push(Pending {
             owner: spent.owner,
-            message: transfer.signature_message(params.network, position, &spent),
+            message: signing.message(position, &spent),
             signature: input.signature,
             transfer: position_in_block,
             input: index,

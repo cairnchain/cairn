@@ -18,4 +18,7 @@ thiserror.workspace = true
 [dev-dependencies]
 cairn-accumulator.workspace = true
 cairn-crypto.workspace = true
+# For `tests/audit_what_one_transfer_costs.rs`, which counts bytes hashed
+# rather than timing anything. Only the test build asks for it.
+cairn-primitives = { workspace = true, features = ["count-hashing"] }
 hex.workspace = true

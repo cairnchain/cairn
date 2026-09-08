@@ -748,17 +748,24 @@ pub fn check_start(
         if header.total_work > tip.total_work {
             return Err(StartError::PastTheTip { index });
         }
+        // Whether this header answers the question that was asked, which is
+        // two comparisons on numbers already in hand. Ahead of the proof,
+        // which folds up to sixty four hashes: the loop stops at the first
+        // sample it refuses, so a forger who opens a real header at the wrong
+        // place now buys one comparison rather than a path.
+        //
+        // `before` is the work standing behind this header, not counting its
+        // own.
+        let before = work_before(header);
+        if before > *drawn || header.total_work <= *drawn {
+            return Err(StartError::WrongPlace { index });
+        }
+
         if !start
             .history
             .verify(header.height, header_leaf(&header.id()), &sample.proof)
         {
             return Err(StartError::NotInHistory { index });
-        }
-
-        // The work standing behind this header, before its own.
-        let before = work_before(header);
-        if before > *drawn || header.total_work <= *drawn {
-            return Err(StartError::WrongPlace { index });
         }
     }
 

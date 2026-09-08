@@ -231,6 +231,15 @@ fn one_more_block(stuck: &mut Stuck) {
 /// archivist's welcome never arrives or `archives` is never set from it. Sixty
 /// seconds was already four times the original deadline and it did not help,
 /// which is the finding rather than the flake.
+///
+/// A hypothesis for whoever picks this up, not a conclusion. `archives` is set
+/// in one place, when the reader thread handles the introduction and the peer
+/// is greeted (`cairn-net/src/node.rs`, `note_what_it_keeps`). `reach` returns
+/// true once the socket is attached, not once anybody has answered on it, and
+/// on Linux a loopback `connect` returns as soon as the SYN is queued rather
+/// than when the far end accepts. So a true from `reach` may mean less there
+/// than it means elsewhere. That is the same shape round 13 found in
+/// `Node::connect`, which returned Ok for a socket it had just shut.
 #[test]
 #[ignore = "the archivist's handshake never completes on Linux; needs a Linux machine to settle"]
 fn a_wallet_that_lost_its_record_gets_its_money_back() {

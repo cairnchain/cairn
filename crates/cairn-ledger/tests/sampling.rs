@@ -20,6 +20,7 @@ use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
+use cairn_primitives::hash::counting;
 
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
@@ -42,8 +43,19 @@ struct Keeper {
 impl Keeper {
     /// Mines `count` blocks and keeps every header.
     fn build(count: u64) -> Self {
+        Self::mined_by(count, 1)
+    }
+
+    /// The same, paying a named miner.
+    ///
+    /// Everything here is deterministic, so two chains built the same way are
+    /// the same chain down to the nonces. Naming the miner is what makes a
+    /// second chain a second chain: a different coinbase gives every block a
+    /// different identifier while the schedule, the timestamps and therefore
+    /// the difficulty and the work at each height stay exactly what they were.
+    fn mined_by(count: u64, seed: u8) -> Self {
         let params = params();
-        let miner = SecretKey::from_bytes(&[1; 32]);
+        let miner = SecretKey::from_bytes(&[seed; 32]);
         let mut state = LedgerState::new();
         let mut headers = Vec::with_capacity(usize::try_from(count).unwrap());
         let mut clock = 1_000u64;
@@ -217,14 +229,40 @@ fn a_history_the_tip_does_not_commit_to_is_refused() {
 }
 
 /// A header that was never in this chain, however real it is elsewhere.
+///
+/// The substitute is taken from the same height as the honest answer, and the
+/// other chain runs to the same schedule, so it carries the same difficulty
+/// and the same work behind it: it answers the question the draw asked, and
+/// the only thing wrong with it is that this chain never committed to it.
+///
+/// That is worth stating because the substitute used to come from height ten
+/// whatever the draw asked, and was refused for being at the wrong place as
+/// readily as for being foreign. The two chains were also built the same way
+/// down to the miner, and everything here is deterministic, so it was not
+/// another chain at all: it was this one, opened with the wrong path.
 #[test]
 fn a_header_from_another_chain_is_refused() {
     let keeper = Keeper::build(HEIGHT);
-    let other = Keeper::build(HEIGHT);
+    let other = Keeper::mined_by(HEIGHT, 2);
 
     let mut start = keeper.open(16);
+    let answered = start.samples[0].header.height;
+    let elsewhere = other.headers[usize::try_from(answered).unwrap()];
+    assert_ne!(
+        elsewhere.id(),
+        start.samples[0].header.id(),
+        "the substitute has to be a different block"
+    );
+    assert_eq!(
+        (elsewhere.height, elsewhere.total_work),
+        (
+            start.samples[0].header.height,
+            start.samples[0].header.total_work
+        ),
+        "and it has to stand where the honest answer stood"
+    );
     // A real header, mined for real, from a chain that is not this one.
-    start.samples[0].header = other.headers[10];
+    start.samples[0].header = elsewhere;
 
     assert!(
         matches!(
@@ -281,11 +319,37 @@ fn a_header_that_does_not_span_the_work_drawn_is_refused() {
     start.samples[0].header = elsewhere;
     start.samples[0].proof = keeper.before_tip.prove(elsewhere.height).unwrap();
 
+    // Counted rather than timed, and compared against the other refusal in
+    // this loop rather than against a number. A sample that is merely foreign
+    // cannot be recognised without folding its path, which is up to sixty four
+    // hashes; a sample at the wrong place is recognised by two comparisons on
+    // numbers already in hand. So the free one must come first, and it does
+    // exactly when refusing this costs less than refusing that. With the two
+    // the other way round both refusals fold a path and the saving is nought.
+    counting::reset();
+    let refused = check_start(&start, 16, NOW, &params());
+    let at_the_wrong_place = counting::hashed();
+
+    let elsewhere = Keeper::mined_by(HEIGHT, 2);
+    let mut foreign = keeper.open(16);
+    let answered = foreign.samples[0].header.height;
+    foreign.samples[0].header = elsewhere.headers[usize::try_from(answered).unwrap()];
+    counting::reset();
+    assert!(matches!(
+        check_start(&foreign, 16, NOW, &params()),
+        Err(StartError::NotInHistory { .. })
+    ));
+    let merely_foreign = counting::hashed();
+
     assert!(
-        matches!(
-            check_start(&start, 16, NOW, &params()),
-            Err(StartError::WrongPlace { .. })
-        ),
+        at_the_wrong_place < merely_foreign,
+        "refusing a sample at the wrong place hashed {at_the_wrong_place} bytes \
+         and refusing a foreign one hashed {merely_foreign}, so the free check \
+         is not running first"
+    );
+
+    assert!(
+        matches!(refused, Err(StartError::WrongPlace { .. })),
         "the answer has to be to the question that was asked"
     );
 }

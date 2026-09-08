@@ -211,6 +211,31 @@ impl<T: Decode> Decode for Vec<T> {
     }
 }
 
+/// Reads a sequence whose length a sender chose, refusing one past `most`
+/// before building any of it.
+///
+/// [`MAX_SEQUENCE_LEN`] keeps a declared length from driving an allocation.
+/// This is the other half: a length inside that ceiling can still be far past
+/// anything the caller's own rules will accept, and every element of it costs
+/// something to build. Where a rule already says how many there can be, the
+/// decoder is the cheapest place to read it, and `type_name` is what the
+/// refusal names.
+pub fn take_at_most<T: Decode>(
+    reader: &mut Reader<'_>,
+    most: usize,
+    type_name: &'static str,
+) -> Result<Vec<T>, CodecError> {
+    let declared = usize::try_from(u32::decode_from(reader)?).unwrap_or(usize::MAX);
+    if declared > most {
+        return Err(CodecError::InvalidValue { type_name });
+    }
+    let mut items = Vec::with_capacity(declared.min(INITIAL_SEQUENCE_CAPACITY));
+    for _ in 0..declared {
+        items.push(T::decode_from(reader)?);
+    }
+    Ok(items)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {

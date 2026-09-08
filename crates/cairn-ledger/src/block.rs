@@ -1,12 +1,20 @@
 //! Block headers and blocks.
 
-use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
+use cairn_primitives::codec::{take_at_most, CodecError, Decode, Encode, Reader};
 use cairn_primitives::hash::Domain;
 use cairn_primitives::merkle::{merkle_leaf, merkle_root};
 use cairn_primitives::Hash32;
 
 use crate::note::NetworkId;
 use crate::transaction::{CoinbaseTransaction, Transfer};
+
+/// The most transfers a block's decoder will build.
+///
+/// The same argument as [`crate::transaction::MOST_INPUTS`]: a rule already
+/// says how many a block may hold, and the decoder is the cheapest place to
+/// read it. The assertion beside [`crate::validation::ConsensusParams`] stops
+/// a build where this and `max_transfers_per_block` part company.
+pub const MOST_TRANSFERS: usize = 4096;
 
 /// The highest block version this software knows how to judge.
 ///
@@ -204,7 +212,7 @@ impl Decode for Block {
         Ok(Self {
             header: BlockHeader::decode_from(reader)?,
             coinbase: CoinbaseTransaction::decode_from(reader)?,
-            transfers: Vec::decode_from(reader)?,
+            transfers: take_at_most(reader, MOST_TRANSFERS, "block transfers")?,
         })
     }
 }

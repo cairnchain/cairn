@@ -19,8 +19,8 @@ use cairn_ledger::note::NoteId;
 use cairn_ledger::pow::{meets_target, work_of};
 use cairn_ledger::transaction::Transfer;
 use cairn_ledger::validation::{
-    check_transfer, connect_block, disconnect_block, BlockError, ConnectedBlock, ConsensusParams,
-    TransferError,
+    check_transfer, check_transfer_shape, connect_block, disconnect_block, BlockError,
+    ConnectedBlock, ConsensusParams, TransferError,
 };
 use cairn_ledger::ColdSpend;
 use cairn_ledger::LedgerState;
@@ -1120,6 +1120,16 @@ impl ChainStore {
     /// transfer offered again with a fresher proof is the same transfer and
     /// none of this applies to it: it is already here.
     pub fn accept_transfer(&mut self, transfer: Transfer) -> Result<bool, TransferError> {
+        // Asked before the identifier, which is an encoding of the whole body
+        // and a hash of it, where this is a handful of comparisons and a walk
+        // over the inputs. Everything already in the pool passed this, so
+        // nothing that would have been recognised as known is turned away by
+        // it, and a transfer that cannot be valid is refused for about the
+        // price of reading its length. It is asked again inside
+        // `check_transfer` below, which is where it belongs: this is the relay
+        // path being careful, not a rule.
+        check_transfer_shape(&transfer, &self.params)?;
+
         let id = transfer.id();
         if self.pool.contains_key(&id) {
             return Ok(false);

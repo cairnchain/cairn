@@ -335,6 +335,16 @@ fn dripping_peers_cannot_take_every_connection_slot() {
 const CHAIN_PER_WINDOW: usize = 1024;
 
 fn ask_chain_until_quiet(address: SocketAddr, nonce: u64, asks: usize) -> usize {
+    asks_until_quiet(address, nonce, asks, &[])
+}
+
+/// The same, with a locator on every ask.
+fn asks_until_quiet(
+    address: SocketAddr,
+    nonce: u64,
+    asks: usize,
+    locator: &[cairn_chain::Located],
+) -> usize {
     let mut writing = TcpStream::connect(address).unwrap();
     let mut reading = writing.try_clone().unwrap();
     reading
@@ -367,7 +377,7 @@ fn ask_chain_until_quiet(address: SocketAddr, nonce: u64, asks: usize) -> usize 
             &mut writing,
             params().network,
             &Message::GetChain {
-                locator: Vec::new(),
+                locator: locator.to_vec(),
             },
         )
         .is_err()

@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use cairn_chain::{Accepted, ChainError, ChainStore, Located, Outdated};
+use cairn_chain::{Accepted, ChainError, ChainStore, Located, Outdated, MAX_LOCATOR};
 use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::note::NetworkId;
 use cairn_ledger::validation::BlockError;
@@ -976,7 +976,21 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
 /// this node work.
 fn cost_of(message: &Message, peer: &PeerState) -> u32 {
     match message {
-        Message::GetChain { .. } => COST_CHAIN,
+        // Priced by the locator, because the locator is what the work is.
+        //
+        // Every entry this node does not hold in memory is answered off the
+        // disk: an index seek, a record read, a whole `Block::decode` and a
+        // header hash, and the walk only stops when one of them matches, so a
+        // locator of entries that match nothing costs one read each. A flat
+        // price meant sixty four of those for the same eight units that buy
+        // eight disk reads through `GetBlocks`, and the answer is twenty five
+        // bytes, so nothing downstream ever noticed. Charged in the same
+        // currency as those reads, so the two asks cost the same for the same
+        // work.
+        Message::GetChain { locator } => {
+            let entries = u32::try_from(locator.len().min(MAX_LOCATOR)).unwrap_or(u32::MAX);
+            COST_CHAIN.saturating_add(entries.saturating_mul(COST_PER_BLOCK_SERVED))
+        }
         // The largest thing a peer can ask for, and the only one that is worth
         // more to it than it costs this node, so it is charged accordingly: a
         // peer joining gets through in a handful of windows and one asking
@@ -1155,5 +1169,71 @@ pub fn on_message(
                 ..Reaction::idle()
             }
         }
+    }
+}
+
+/// What an ask costs, which has to be what the ask makes this node do.
+///
+/// A `GetChain` is answered out of memory when it can be, and off the disk
+/// when it cannot: an index seek, a record read, a whole `Block::decode` and a
+/// header hash for every locator entry that matches nothing, and the walk
+/// stops only when one matches. The price was flat, so sixty four of those
+/// reads cost the same eight units that buy eight through `GetBlocks`, and the
+/// answer is twenty five bytes either way, so nothing downstream could notice.
+///
+/// Measured here rather than over a socket. What the price does is decide how
+/// many asks a window pays for, and that is arithmetic; counting answers on a
+/// connection measures what the socket carried in the time the test waited,
+/// which is a fact about the machine. A first attempt at this test did exactly
+/// that and read 180 against 65 on one run and 52 against 79 on the next.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod what_an_ask_costs {
+    use super::{cost_of, PeerState, ALLOWANCE, COST_CHAIN, COST_PER_BLOCK_SERVED};
+    use crate::message::Message;
+    use cairn_chain::{Located, MAX_LOCATOR};
+    use cairn_primitives::Hash32;
+
+    fn asks_a_window_pays_for(message: &Message) -> u32 {
+        let mut peer = PeerState::new(None);
+        let cost = cost_of(message, &peer);
+        let mut asks = 0u32;
+        while peer.afford(cost, 0) {
+            asks = asks.saturating_add(1);
+        }
+        asks
+    }
+
+    #[test]
+    fn a_locator_costs_what_its_entries_cost() {
+        let empty = Message::GetChain {
+            locator: Vec::new(),
+        };
+        let full = Message::GetChain {
+            locator: (0..MAX_LOCATOR)
+                .map(|entry| {
+                    Located::new(
+                        u64::try_from(entry).unwrap_or(0),
+                        Hash32::from_bytes([u8::try_from(entry % 256).unwrap_or(0); 32]),
+                    )
+                })
+                .collect(),
+        };
+
+        let carrying_nothing = asks_a_window_pays_for(&empty);
+        let carrying_a_full_one = asks_a_window_pays_for(&full);
+
+        assert_eq!(
+            carrying_nothing,
+            ALLOWANCE / COST_CHAIN,
+            "an ask that reaches no disk costs the ask and nothing else"
+        );
+        let each = COST_CHAIN + u32::try_from(MAX_LOCATOR).unwrap_or(0) * COST_PER_BLOCK_SERVED;
+        assert_eq!(
+            carrying_a_full_one,
+            ALLOWANCE / each,
+            "and one carrying {MAX_LOCATOR} entries costs {each}, which is the ask plus one \
+             block read for each of them, in the same currency `GetBlocks` pays in"
+        );
     }
 }

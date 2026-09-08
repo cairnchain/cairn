@@ -17,3 +17,6 @@ thiserror.workspace = true
 
 [dev-dependencies]
 cairn-crypto.workspace = true
+# For the relay-cost test in `tests/pool.rs`, which counts bytes hashed rather
+# than timing anything. Only the test build asks for it.
+cairn-primitives = { workspace = true, features = ["count-hashing"] }

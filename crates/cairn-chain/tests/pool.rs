@@ -20,6 +20,7 @@ use cairn_ledger::validation::{
 };
 use cairn_ledger::LedgerState;
 use cairn_primitives::codec::Encode;
+use cairn_primitives::hash::counting;
 use cairn_primitives::Amount;
 
 const NOW: u64 = 2_000_000_000;
@@ -793,4 +794,47 @@ fn a_selection_leaves_out_what_would_push_out_too_many_notes() {
         ),
         Err(BlockError::TooManyEvictions { .. })
     ));
+}
+
+/// AUDIT: a transfer that cannot be valid is refused before anything is hashed.
+///
+/// The identifier is an encoding of the whole body and a hash of it, and the
+/// pool used to take it first, to see whether it already held the transfer.
+/// The shape check ahead of it is a handful of comparisons and one walk over
+/// the inputs, and everything already in the pool has passed it, so nothing
+/// that would have been recognised is turned away by moving it up.
+///
+/// Counted rather than timed, and the count is nought rather than a threshold:
+/// hashing anything at all before a transfer has been found capable of being
+/// valid is the thing that was wrong.
+#[test]
+fn a_transfer_that_cannot_be_valid_is_refused_before_a_byte_is_hashed() {
+    let miner = wallet(1);
+    let (mut store, notes) = funded(1, &miner);
+
+    // Two hundred and fifty six inputs, which is the most the rules allow, and
+    // the same note in every one of them. Nothing about it can be valid, and
+    // it is the largest thing a peer can say that of.
+    let repeated = vec![Input::hot(notes[0].0); 256];
+    let doomed = Transfer::new(
+        repeated,
+        vec![Note::new(pebbles(1), wallet(2).public_key())],
+    );
+    assert!(
+        doomed.encode().len() > 25_000,
+        "the point is that it is large"
+    );
+
+    counting::reset();
+    let refused = store.accept_transfer(doomed);
+    let hashed = counting::hashed();
+
+    assert!(
+        matches!(refused, Err(TransferError::DuplicateInput(_))),
+        "the same note twice is not a transfer, however it is signed"
+    );
+    assert_eq!(
+        hashed, 0,
+        "refusing it hashed {hashed} bytes, and it should have hashed none"
+    );
 }

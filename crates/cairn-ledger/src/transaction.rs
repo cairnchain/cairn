@@ -7,7 +7,7 @@
 
 use cairn_accumulator::ForestProof;
 use cairn_crypto::{SecretKey, Signature};
-use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
+use cairn_primitives::codec::{take_at_most, CodecError, Decode, Encode, Reader};
 use cairn_primitives::hash::{Domain, Hasher};
 use cairn_primitives::{Amount, Hash32};
 
@@ -23,6 +23,31 @@ pub const COINBASE_VERSION: u16 = 1;
 /// piece of public news nobody could have known in advance is what shows the
 /// chain was not quietly started weeks earlier.
 pub const MAX_COINBASE_EXTRA: usize = 64;
+
+/// The most inputs a transfer's decoder will build.
+///
+/// Not a second consensus rule. It is the same rule read earlier: a transfer
+/// past `max_inputs_per_transfer` is refused by every network this build
+/// knows, and the assertion beside [`crate::validation::ConsensusParams`]
+/// stops a build where that stops being true.
+///
+/// It is here because decoding is not free and happens before any rule has
+/// looked at the frame. Every note carries a public key, and reading one is an
+/// Edwards decompression: 7.7 microseconds on the machine
+/// `cairn-crypto/examples/verify.rs` was last run on, for forty bytes on the
+/// wire. Without a ceiling the only bound was the frame, so a megabyte of
+/// repeated notes bought a fifth of a second of curve arithmetic and was then
+/// refused for its shape, having been built in full first.
+pub const MOST_INPUTS: usize = 256;
+
+/// The most outputs a transfer's decoder will build. See [`MOST_INPUTS`].
+pub const MOST_OUTPUTS: usize = 256;
+
+/// The most outputs a coinbase's decoder will build. See [`MOST_INPUTS`].
+///
+/// A coinbase already refuses an oversized `extra` where it is read rather
+/// than where it is judged, for the same reason and by the same argument.
+pub const MOST_COINBASE_OUTPUTS: usize = 16;
 
 /// The note and the proof a spender supplies for a note in the cold set.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -180,21 +205,30 @@ impl Transfer {
         cairn_primitives::hash::hash(Domain::TransferId, &body)
     }
 
+    /// Everything a transfer's signatures commit to that is the same for all
+    /// of them, worked out once.
+    ///
+    /// See [`Signing`] for why this exists rather than being asked for again
+    /// at each input.
+    pub fn signing(&self, network: NetworkId) -> Signing {
+        Signing {
+            network,
+            version: self.version,
+            id: self.id(),
+        }
+    }
+
     /// The message the holder of `spent` signs to authorise input `input_index`.
     ///
     /// The value and owner of the spent note are committed to alongside the
     /// transaction body. Without that, a wallet shown a false input value would
     /// sign a transaction whose real fee is the difference, and the signature
     /// would be perfectly valid.
+    ///
+    /// One input's worth. Anything asking for several should take a [`Signing`]
+    /// once and derive them from it.
     pub fn signature_message(&self, network: NetworkId, input_index: u32, spent: &Note) -> Hash32 {
-        let mut hasher = Hasher::new(Domain::SignatureMessage);
-        hasher.update(&network.encode());
-        hasher.update(&self.version.encode());
-        hasher.update(self.id().as_bytes());
-        hasher.update(&input_index.encode());
-        hasher.update(&spent.value.encode());
-        hasher.update(spent.owner.as_bytes());
-        hasher.finalize()
+        self.signing(network).message(input_index, spent)
     }
 
     /// Signs input `input_index` with `secret`, which must own `spent`.
@@ -234,6 +268,45 @@ impl Transfer {
     }
 }
 
+/// What every signature on one transfer commits to, held rather than redone.
+///
+/// The identifier is the expensive half of a signature message: it encodes the
+/// whole body and hashes it. It does not depend on which input is being
+/// signed, so asking for it once per input made a transfer cost the square of
+/// its own size. At the two hundred and fifty six inputs the rules allow, a
+/// thirty six kilobyte transfer was five megabytes encoded and five megabytes
+/// hashed, all of it before the first signature was looked at, and the first
+/// bad one then refused the lot for the price of one comparison. A peer could
+/// send that as fast as it could upload.
+///
+/// Nothing about what is signed changed. The identifier deliberately excludes
+/// the signatures, so that it is known before signing, which is exactly what
+/// makes it one value for the whole transfer rather than one per input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Signing {
+    network: NetworkId,
+    version: u16,
+    id: Hash32,
+}
+
+impl Signing {
+    pub const fn id(&self) -> Hash32 {
+        self.id
+    }
+
+    /// The message the holder of `spent` signs to authorise `input_index`.
+    pub fn message(&self, input_index: u32, spent: &Note) -> Hash32 {
+        let mut hasher = Hasher::new(Domain::SignatureMessage);
+        hasher.update(&self.network.encode());
+        hasher.update(&self.version.encode());
+        hasher.update(self.id.as_bytes());
+        hasher.update(&input_index.encode());
+        hasher.update(&spent.value.encode());
+        hasher.update(spent.owner.as_bytes());
+        hasher.finalize()
+    }
+}
+
 impl Encode for Transfer {
     fn encode_to(&self, out: &mut Vec<u8>) {
         self.version.encode_to(out);
@@ -246,8 +319,8 @@ impl Decode for Transfer {
     fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
         Ok(Self {
             version: u16::decode_from(reader)?,
-            inputs: Vec::decode_from(reader)?,
-            outputs: Vec::decode_from(reader)?,
+            inputs: take_at_most(reader, MOST_INPUTS, "transfer inputs")?,
+            outputs: take_at_most(reader, MOST_OUTPUTS, "transfer outputs")?,
         })
     }
 }
@@ -326,7 +399,7 @@ impl Decode for CoinbaseTransaction {
         Ok(Self {
             version: u16::decode_from(reader)?,
             height: u64::decode_from(reader)?,
-            outputs: Vec::decode_from(reader)?,
+            outputs: take_at_most(reader, MOST_COINBASE_OUTPUTS, "coinbase outputs")?,
             extra: {
                 let extra = Vec::<u8>::decode_from(reader)?;
                 if extra.len() > MAX_COINBASE_EXTRA {

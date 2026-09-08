@@ -9,6 +9,12 @@ repository.workspace = true
 [lints]
 workspace = true
 
+# Off here, so nothing a node ships carries it. A crate that audits what one
+# message costs turns it on through its dev-dependencies, which puts it in the
+# graph for `cargo test` and leaves it out of `cargo build`.
+[features]
+count-hashing = []
+
 [dependencies]
 blake3.workspace = true
 thiserror.workspace = true
