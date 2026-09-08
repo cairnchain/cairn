@@ -38,7 +38,7 @@ mod api;
 mod index;
 
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use cairn_crypto::{PublicKey, SecretKey};
 use cairn_http::{Request, Response};
@@ -697,181 +697,53 @@ fn a_node_that_cannot_hold_its_disk_budget_serves_both_numbers() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
-/// A rebuild of the index does not stop the node it runs on.
+/// A rebuild of the index reaches the tip and leaves the node answering.
 ///
-/// `Explorer::refresh` took the index lock, then the node's single global
-/// chain lock, and called `archived_at` once per block inside it.
-/// `Explorer::answer`'s own doc comment two lines below says why that must not
-/// happen: seeking a disk with the chain held is one anonymous caller deciding
-/// how long every peer waits. Everything on the peer side queued behind it,
-/// incoming block validation included, and the cost moved with the length of
-/// the chain rather than with the depth of the reorganisation that caused it.
+/// `Explorer::refresh` took the index lock, then the node's single global chain
+/// lock, and called `archived_at` once per block inside it. `Explorer::answer`'s
+/// own doc says why that must not happen: seeking a disk with the chain held is
+/// one anonymous caller deciding how long every peer waits. The repair reads
+/// everything the chain has to say in one turn of its lock and touches the disk
+/// once that lock is gone.
 ///
-/// What is counted here is how often the node can ask its own chain a question
-/// while the rebuild runs, against how often it manages the same question with
-/// nobody rebuilding. The second half is the repair to this test. It used to
-/// require a thousand questions and nothing else, which is a number about a
-/// machine rather than about this code: the same spinning thread gets through
-/// a few hundred turns on a busy CI runner and ten thousand on an idle laptop,
-/// over the same rebuild. CI read a rebuild of 1.73 ms, in which no thread of
-/// its was ever going to reach a thousand turns, and the test failed there
-/// because the code was fast. The rate is now measured on the machine that is
-/// running it, moments before, and what the rebuild has to leave standing is a
-/// share of that rate rather than a count.
+/// What this asserts is that the walk reaches the tip. It used to assert how
+/// much of the rebuild one competing question could be made to wait for, and
+/// that assertion is gone, because it could neither fail when it should nor
+/// pass when it should.
+///
+/// It could not fail on demand: holding the chain across the walk is the defect
+/// it described, and it cannot be written, because `held_at` takes the chain
+/// itself and a walk holding it would be a thread waiting on itself. The
+/// per-block release is enforced by the shape of the code.
+///
+/// And it failed without the defect, five times, at 1, 17, 28, 41 and 55
+/// percent of the rebuild across idle and loaded machines, against a rebuild
+/// of two to five milliseconds where one ordinary scheduling delay is most of
+/// the window. The defective case is 100 percent, so no threshold below it
+/// separates two distributions that overlap it. Raising the block count ten
+/// times moved the rebuild from two milliseconds to three and did not close
+/// the gap.
+///
+/// `a_route_is_answered_while_the_index_is_being_built`, below, is the one that
+/// discriminates: emptying `stand_aside` leaves it answering `/api/status`
+/// once over a whole rebuild, and it fails on demand every time.
 #[test]
-fn a_rebuild_does_not_stop_the_node() {
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
-    /// Long enough for the free-running count to be a rate rather than a
-    /// sample, and short beside anything the rest of this test does.
-    const UNHINDERED: std::time::Duration = std::time::Duration::from_millis(50);
-    /// What the rebuild may cost the thread beside it. A walk that takes the
-    /// chain for one block and lets it go between leaves that thread a seventh
-    /// of what it had here; a walk that holds the chain to the tip leaves it
-    /// one turn, whatever the machine. A fortieth sits between the two with
-    /// room on both sides: five times under what the repaired walk leaves, and
-    /// a hundred times over what a walk that stops the node does.
-    const SHARE: u64 = 40;
-    /// How small a share of a rebuild the longest single wait has to be.
-    ///
-    /// The two cases are two orders of magnitude apart, which is what makes
-    /// this readable at all. A walk that takes the chain for one block and lets
-    /// it go between makes the worst wait one block's work: measured over five
-    /// idle runs, 26 to 49 microseconds of a 3.3 millisecond rebuild, about one
-    /// percent. A walk that holds the chain to the tip makes the thread beside
-    /// it wait the whole rebuild for its next turn, which is a hundred percent.
-    ///
-    /// Half sits between them, and it is set from the loaded case rather than
-    /// the idle one. Inside a full workspace run this machine was seen at 936
-    /// microseconds of a 3.3 millisecond rebuild, twenty eight percent, with
-    /// the walk working correctly. A third would have refused that, and did.
-    ///
-    /// What this cannot do is fail on demand. Holding the chain across the walk
-    /// is the defect it describes, and it cannot be written: `held_at` takes
-    /// the chain itself, so a walk holding it would be a thread waiting on
-    /// itself. The per-block release is enforced by the shape of the code
-    /// rather than by a choice somebody could quietly reverse, and this stands
-    /// as the measurement that says so. The neighbouring test
-    /// `a_route_is_answered_while_the_index_is_being_built` is the one that
-    /// does fail on demand: emptying `stand_aside` leaves it answering
-    /// `/api/status` once over a whole rebuild.
-    const SHARE_OF_THE_WALK: u32 = 2;
-
+fn a_rebuild_reaches_the_tip() {
     let params = params();
     let miner = wallet(1);
     let mut forge = Forge::new(params);
-    // Long enough that a scheduling hiccup is a small share of it.
-    //
-    let blocks = forge.mine_many(&miner, 12_000);
+    let blocks = forge.mine_many(&miner, 1_200);
 
     let explorer = explorer(params);
     feed(&explorer, &blocks);
+    explorer.refresh();
 
-    let running = AtomicBool::new(true);
-    let asked = AtomicU64::new(0);
-    let longest = AtomicU64::new(0);
-
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            let mut last = Instant::now();
-            while running.load(Ordering::Relaxed) {
-                // The cheapest question the node asks its own chain, and the
-                // first thing to queue behind anything holding it.
-                let _ = explorer.node().height();
-                longest.fetch_max(last.elapsed().as_micros() as u64, Ordering::Relaxed);
-                asked.fetch_add(1, Ordering::Relaxed);
-                last = Instant::now();
-            }
-        });
-
-        // Let the other thread get going, so what is counted is the rebuild.
-        while asked.load(Ordering::Relaxed) < 10 {
-            std::hint::spin_loop();
-        }
-
-        // What that thread manages with nobody holding the chain, on this
-        // machine, in this run. Sleeping rather than spinning here, so the
-        // measurement is of the node and not of two threads fighting over one
-        // processor.
-        asked.store(0, Ordering::Relaxed);
-        let began = Instant::now();
-        std::thread::sleep(UNHINDERED);
-        let free = asked.load(Ordering::Relaxed);
-        let freely = began.elapsed();
-
-        asked.store(0, Ordering::Relaxed);
-        longest.store(0, Ordering::Relaxed);
-        let started = Instant::now();
-        explorer.refresh();
-        let rebuild = started.elapsed();
-        let during = asked.load(Ordering::Relaxed);
-        let waited = longest.load(Ordering::Relaxed);
-        running.store(false, Ordering::Relaxed);
-
-        // What the same thread would have got through over the length of the
-        // rebuild had nothing been in its way.
-        // Scaled in microseconds with integers. It is a count against a ratio
-        // of two durations, and a float here buys nothing but a cast the
-        // workspace lints refuse.
-        let unhindered = Some(u128::from(free))
-            .and_then(|count| count.checked_mul(rebuild.as_micros()))
-            .and_then(|scaled| scaled.checked_div(freely.as_micros().max(1)))
-            .and_then(|count| u64::try_from(count).ok())
-            .unwrap_or(u64::MAX);
-        println!(
-            "rebuilding 12,000 blocks took {rebuild:?}; the node asked its own chain \
-             {during} questions while it ran, against {unhindered} it would have \
-             answered in that time with nobody rebuilding ({free} in {freely:?}), \
-             waiting at most {waited} us for one"
-        );
-        // The walk reached the tip. It does not reach the first block: a
-        // node holding no blocks on disk keeps only the window a
-        // reorganisation could touch, so the bottom of this chain is gone and
-        // the index starts where the node's blocks start, which is the whole
-        // of the first repair in this file.
-        let status = ask(&explorer, "status");
-        assert!(says(&status, "behind", "0"), "{}", body(&status));
-        assert!(
-            unhindered >= 100,
-            "with nobody rebuilding, this thread would have asked {unhindered} \
-             questions over a rebuild of {rebuild:?}, which is too few for the \
-             count during the rebuild to say anything"
-        );
-        // The walk takes the chain for one block at a time and lets it go
-        // between, so a thread spinning on it gets a turn or several per
-        // block and the count keeps pace with the chain. Held across the walk,
-        // all it gets is the moment before the lock is taken and one turn when
-        // it is given back.
-        // The longest one question waited, against how long the whole rebuild
-        // took. That is the difference between the two cases and nothing else
-        // is: a walk that holds the chain to the tip makes the thread beside it
-        // wait the whole rebuild for its next turn, and a walk that takes the
-        // chain a block at a time never makes it wait for more than a block.
-        //
-        // The count cannot say it. Comparing a thread that takes a lock once
-        // per block against a thread spinning on nothing measures the lock, not
-        // the walk: at 1 200 blocks that read 160 turns against 54 807 free
-        // running in the same 4.6 ms, which is 342 times and looks like a node
-        // stopped dead. It was not stopped. It was interleaved, once per block,
-        // and 1 200 blocks is where 160 comes from.
-        //
-        // The size is the other half, and it took three attempts to see it. At
-        // 1 200 blocks the rebuild is about two milliseconds, so one ordinary
-        // scheduling hiccup is a third of the whole measurement: the same
-        // build read 47 microseconds waited on one run and 936 on the next,
-        // against a rebuild that barely moved. Neither statistic can separate
-        // two cases inside its own noise. Ten times the blocks makes the
-        // rebuild long enough that a hiccup is a few percent of it, which is
-        // what lets a ratio mean anything at all.
-        let longest = Duration::from_micros(waited);
-        assert!(
-            longest.saturating_mul(SHARE_OF_THE_WALK) < rebuild,
-            "one question waited {longest:?} of a {rebuild:?} rebuild, so the walk held \
-             the chain across it rather than taking it a block at a time. The node got \
-             {during} questions in while it ran, against {unhindered} free running in \
-             the same time"
-        );
-    });
+    // The walk reached the tip. It does not reach the first block: a node
+    // holding no blocks on disk keeps only the window a reorganisation could
+    // touch, so the bottom of this chain is gone and the index starts where the
+    // node's blocks start.
+    let status = ask(&explorer, "status");
+    assert!(says(&status, "behind", "0"), "{}", body(&status));
 }
 
 /// One anonymous GET buys one route, not two.
