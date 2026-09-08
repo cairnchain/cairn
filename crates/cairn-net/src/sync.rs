@@ -281,6 +281,14 @@ const COST_TRIVIAL: u32 = 1;
 const COST_CHAIN: u32 = 8;
 const COST_TRANSFER: u32 = 4;
 const COST_BLOCK: u32 = 8;
+/// What reaching the disk for one block costs.
+///
+/// The seek and nothing else. This used to be the whole price of a block, on
+/// the reasoning that a header and a block are both "a seek and a read", which
+/// is true of the disk and false of the wire: the same unit bought a hundred
+/// and twenty eight kilobytes here and a hundred and eighty two bytes there.
+/// What the block puts on the wire is charged separately, by
+/// [`what_the_wire_costs`], because it is the one thing the ask cannot say.
 const COST_PER_BLOCK_SERVED: u32 = 1;
 /// What one header served costs, which is one read off the header log.
 ///
@@ -289,6 +297,9 @@ const COST_PER_BLOCK_SERVED: u32 = 1;
 /// serves is what let one seventeen byte request buy five hundred and twelve
 /// reads, which is the whole of the difference between a limit that counts
 /// what answering costs and one that counts messages.
+///
+/// Flat, unlike the block charge, because a header is a fixed size and the ask
+/// therefore states what the answer weighs.
 const COST_PER_HEADER_SERVED: u32 = 1;
 /// What one address handed to a peer that asked costs.
 ///
@@ -304,7 +315,29 @@ const COST_PER_HEADER_SERVED: u32 = 1;
 /// and not on the reply: a price that moves with the book is a price whoever
 /// fills the book gets to set. At this cost a window answers a hundred and
 /// twenty eight, and an honest peer asks about once a second.
+///
+/// The price stopped moving with the book and the work went on moving with
+/// it: each of those hundred and twenty eight answers copied the whole book
+/// and sorted it, under the book's lock. That is the same sentence about the
+/// same message and it is repaired in [`crate::book::AddressBook::sample`],
+/// which now reads what it hands over and nothing else.
 const COST_PER_ADDRESS_SERVED: u32 = 1;
+/// What one address a peer hands this node costs to take in.
+///
+/// The same price as handing one out, for the same reason: taking one in is
+/// weighing it, looking up its neighbourhood, and putting it in the book in
+/// the order the book keeps. A `Peers` message carrying
+/// [`MAX_SHARED_ADDRESSES`] of them was one unit for all sixty four, so a
+/// window bought half a million of those insertions for a peer that spent it
+/// on nothing else, all of them under the one lock that dialling, saving and
+/// every other peer's addresses wait on.
+///
+/// It is a message this node asked for, and it is still charged, because
+/// nothing on the wire says a peer was asked: a stranger sends the same
+/// message unbidden and it costs the same to take. A node asks each peer for
+/// addresses about once a second, so an honest peer pays sixty four units ten
+/// times in a window against eight thousand.
+const COST_PER_ADDRESS_LEARNED: u32 = 1;
 /// What one place proved costs to answer for.
 ///
 /// A path is about a kilobyte on a chain with a million fallen notes, which is
@@ -329,6 +362,45 @@ const COST_PER_PLACE_PROVED: u32 = 8;
 /// has on it.
 const COST_JOIN: u32 = ALLOWANCE / 8;
 
+/// Bytes of an answer a peer draws for one unit of its allowance.
+///
+/// Everything above prices a seek, and a seek is what a header costs and not
+/// what a block does. `GetBlocks` for [`MAX_REQUESTED`] heights is a kilobyte
+/// of request and up to sixteen megabytes of reply, and at one unit a block a
+/// window bought eight thousand of them: a gigabyte per ten seconds per
+/// address, sold for six and a half kilobytes a second of asking. Per unit
+/// that is a hundred and twenty eight kilobytes where a header buys a hundred
+/// and eighty two bytes, and nothing drops a repeat, so the same heights are
+/// answered for as long as the peer cares to ask.
+///
+/// The number is not a new judgement. A join answer is the largest thing this
+/// node ever builds for anybody, and it already fixed this rate: a part is
+/// [`crate::message::JOIN_PART_BYTES`] and costs [`COST_JOIN`], which is five
+/// hundred and twelve bytes to the unit. Blocks are charged the same, so the
+/// two largest answers a stranger can draw cost the same per byte and a window
+/// buys four megabytes of either. `the_two_largest_answers_cost_the_same_per_byte`
+/// holds the two numbers together.
+const BYTES_PER_UNIT: usize = 512;
+
+/// What putting `bytes` of answer on the wire costs, on top of whatever the
+/// ask already paid for reaching the disk.
+///
+/// Rounded up, so the smallest block still costs a unit and a chain of empty
+/// blocks is priced by its seeks, which is what it costs.
+///
+/// Charged on what is served rather than on what is asked for, which is the
+/// opposite of the rule the header and the path charges follow, and the reason
+/// is that this is the one price the ask cannot state. A header is a fixed
+/// hundred and eighty two bytes and a path is about a kilobyte, so the ask
+/// bounds them; a block is anything up to what the consensus rules allow, and
+/// only whoever read it off the disk knows which. Charging the ceiling would
+/// mean a full batch of empty blocks costing sixteen megabytes' worth of
+/// allowance, which no honest sync could afford.
+#[must_use]
+pub fn what_the_wire_costs(bytes: usize) -> u32 {
+    u32::try_from(bytes.div_ceil(BYTES_PER_UNIT)).unwrap_or(u32::MAX)
+}
+
 impl PeerState {
     /// A peer just connected, reached at `remote`.
     pub fn new(remote: Option<IpAddr>) -> Self {
@@ -348,6 +420,18 @@ impl PeerState {
         }
         self.spent = self.spent.saturating_add(cost);
         true
+    }
+
+    /// Takes what putting `bytes` on the wire costs, saying whether it was
+    /// there.
+    ///
+    /// Called as a batch is served rather than after it, so a peer that has
+    /// spent its window is handed what it could afford and the rest is not
+    /// read, not encoded and not queued. A peer that gets a short batch asks
+    /// for the rest of it, which is what it already does about the heights
+    /// this node no longer holds.
+    pub fn afford_serving(&mut self, bytes: usize, now: u64) -> bool {
+        self.afford(what_the_wire_costs(bytes), now)
     }
 }
 
@@ -1020,6 +1104,14 @@ fn cost_of(message: &Message, peer: &PeerState) -> u32 {
             let carried = u32::try_from(MAX_SHARED_ADDRESSES).unwrap_or(u32::MAX);
             carried.saturating_mul(COST_PER_ADDRESS_SERVED)
         }
+        // Priced by what it carries, because what it carries is what this node
+        // does with it: every address is weighed, looked up and written into
+        // the order the book keeps, under the book's lock.
+        Message::Peers(addresses) => {
+            let carried =
+                u32::try_from(addresses.len().min(MAX_SHARED_ADDRESSES)).unwrap_or(u32::MAX);
+            carried.saturating_mul(COST_PER_ADDRESS_LEARNED)
+        }
         // A run of headers offered rather than asked for. Charged as one
         // message and not as five hundred writes, because a run from anybody
         // but the peer this node is filling from is refused before a byte of
@@ -1189,10 +1281,16 @@ pub fn on_message(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod what_an_ask_costs {
-    use super::{cost_of, PeerState, ALLOWANCE, COST_CHAIN, COST_PER_BLOCK_SERVED};
-    use crate::message::Message;
+    use super::{
+        cost_of, what_the_wire_costs, PeerState, ALLOWANCE, BYTES_PER_UNIT, COST_CHAIN, COST_JOIN,
+        COST_PER_BLOCK_SERVED, COST_PER_HEADER_SERVED,
+    };
+    use crate::message::{
+        Message, PeerAddress, JOIN_PART_BYTES, MAX_HEADERS, MAX_REQUESTED, MAX_SHARED_ADDRESSES,
+    };
     use cairn_chain::{Located, MAX_LOCATOR};
     use cairn_primitives::Hash32;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn asks_a_window_pays_for(message: &Message) -> u32 {
         let mut peer = PeerState::new(None);
@@ -1234,6 +1332,141 @@ mod what_an_ask_costs {
             ALLOWANCE / each,
             "and one carrying {MAX_LOCATOR} entries costs {each}, which is the ask plus one \
              block read for each of them, in the same currency `GetBlocks` pays in"
+        );
+    }
+
+    /// How much of this node a peer can draw off it in one window.
+    ///
+    /// Bytes rather than seeks, because the seek is what a header costs and
+    /// the megabyte is what a block costs, and one price was covering both.
+    fn bytes_a_window_serves(block_bytes: usize) -> usize {
+        let mut peer = PeerState::new(None);
+        let ask = Message::GetBlocks((0..MAX_REQUESTED as u64).collect());
+        let mut served = 0usize;
+        // The ask is charged first, then each block as it goes out, which is
+        // the order the node serves in.
+        while peer.afford(cost_of(&ask, &peer), 0) {
+            for _ in 0..MAX_REQUESTED {
+                if !peer.afford_serving(block_bytes, 0) {
+                    return served;
+                }
+                served = served.saturating_add(block_bytes);
+            }
+        }
+        served
+    }
+
+    /// The largest answer a stranger can draw off this node, and the second
+    /// largest, cost the same per byte.
+    #[test]
+    fn the_two_largest_answers_cost_the_same_per_byte() {
+        let per_unit_of_a_join = JOIN_PART_BYTES / usize::try_from(COST_JOIN).unwrap_or(1);
+        assert_eq!(
+            per_unit_of_a_join, BYTES_PER_UNIT,
+            "a join part is {JOIN_PART_BYTES} bytes for {COST_JOIN} units, which is the \
+             rate blocks are charged at"
+        );
+        assert_eq!(what_the_wire_costs(0), 0, "nothing served costs nothing");
+        assert_eq!(
+            what_the_wire_costs(1),
+            1,
+            "and anything at all costs a unit, so a chain of empty blocks is \
+             priced by its seeks"
+        );
+        assert_eq!(what_the_wire_costs(BYTES_PER_UNIT), 1);
+        assert_eq!(what_the_wire_costs(BYTES_PER_UNIT + 1), 2);
+    }
+
+    /// A window buys about four megabytes of blocks whatever the blocks weigh,
+    /// where it used to buy four megabytes of small ones and a gigabyte of
+    /// large ones.
+    #[test]
+    fn a_window_buys_the_same_megabytes_whatever_a_block_weighs() {
+        // `ConsensusParams::mainnet` and `testnet` both cap a block here.
+        let at_the_consensus_limit = 128 * 1024;
+        let drawn = bytes_a_window_serves(at_the_consensus_limit);
+        let ceiling = usize::try_from(ALLOWANCE).unwrap_or(0) * BYTES_PER_UNIT;
+        assert!(
+            drawn <= ceiling,
+            "one address drew {drawn} bytes of blocks out of one window, where the \
+             allowance is worth {ceiling}. At {COST_PER_BLOCK_SERVED} a block and \
+             nothing for the wire this was {} bytes, which is a gigabyte per ten \
+             seconds bought with about sixty six kilobytes of asking",
+            usize::try_from(ALLOWANCE).unwrap_or(0) * at_the_consensus_limit,
+        );
+        assert!(
+            drawn * 2 > ceiling,
+            "and it is not so tight that a peer syncing a full chain cannot use it: \
+             {drawn} bytes against a window worth {ceiling}"
+        );
+
+        // An honest sync on the chain this software actually runs is nowhere
+        // near it: an empty block is a few hundred bytes, so the seek is still
+        // what a block costs and the window buys thousands of them.
+        let empty = 200;
+        let blocks = bytes_a_window_serves(empty) / empty;
+        assert!(
+            blocks >= 4_000,
+            "an empty-block sync gets {blocks} blocks a window, and two nodes over a \
+             loopback socket were measured at a hundred a second, which is a thousand \
+             a window"
+        );
+    }
+
+    /// Handing this node addresses costs what being handed them costs.
+    ///
+    /// A `Peers` message makes this node weigh, look up and write down every
+    /// address in it, under the book's lock, and it was one unit for all sixty
+    /// four of them: a window bought half a million insertions.
+    #[test]
+    fn addresses_cost_the_same_to_take_in_as_to_hand_out() {
+        let full: Vec<PeerAddress> = (0..MAX_SHARED_ADDRESSES)
+            .map(|step| {
+                PeerAddress(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(
+                        203,
+                        0,
+                        113,
+                        u8::try_from(step % 256).unwrap_or(0),
+                    )),
+                    9_000,
+                ))
+            })
+            .collect();
+        let handed_over = asks_a_window_pays_for(&Message::Peers(full));
+        let asked_for = asks_a_window_pays_for(&Message::GetPeers);
+        assert_eq!(
+            handed_over,
+            asked_for,
+            "a window takes in {handed_over} full address lists and hands out \
+             {asked_for}. At one unit a message it took in {ALLOWANCE} of them, which \
+             is {} addresses written into the book",
+            ALLOWANCE.saturating_mul(u32::try_from(MAX_SHARED_ADDRESSES).unwrap_or(0)),
+        );
+
+        // And a shorter list costs less, so a peer answering with what it has
+        // is not charged for what it has not.
+        let one = asks_a_window_pays_for(&Message::Peers(vec![PeerAddress(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
+            9_000,
+        ))]));
+        assert_eq!(one, ALLOWANCE);
+    }
+
+    /// Per unit, a block used to buy seven hundred times what a header buys.
+    #[test]
+    fn a_unit_buys_about_as_much_wire_through_either_ask() {
+        let header_bytes = 182;
+        let a_unit_of_headers = header_bytes / usize::try_from(COST_PER_HEADER_SERVED).unwrap_or(1);
+        let a_unit_of_blocks = BYTES_PER_UNIT;
+        let ratio = a_unit_of_blocks / a_unit_of_headers.max(1);
+        assert!(
+            ratio <= 4,
+            "a unit buys {a_unit_of_blocks} bytes through `GetBlocks` and \
+             {a_unit_of_headers} through `GetHeaders`, a factor of {ratio}. It was \
+             {} before the wire was priced, and a window of {MAX_HEADERS}-header asks \
+             is the honest comparison",
+            (128 * 1024) / header_bytes,
         );
     }
 }

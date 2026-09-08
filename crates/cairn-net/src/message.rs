@@ -454,6 +454,54 @@ impl Message {
         }
     }
 
+    /// About what this weighs on the wire, for whoever is counting what a peer
+    /// has waiting for it.
+    ///
+    /// An upper bound, not an exact count, except for the three variants
+    /// carrying something whose size nothing in this file bounds: a block is
+    /// whatever the consensus rules allow, a transfer is whatever its inputs
+    /// make it, and a path is whatever the cold set has grown to. Those are
+    /// measured, and everything else is counted off the caps stated above,
+    /// where being a little high costs a peer a slightly shorter queue and
+    /// nothing else.
+    ///
+    /// Measuring means encoding, which the writer does again a moment later.
+    /// That is one pass over a block on the serving path, against a limit
+    /// whose whole purpose is that a stranger does not get to decide how many
+    /// of them this node is holding.
+    pub fn weight(&self) -> usize {
+        /// Enough for the tag, the lengths and the fixed fields of any of
+        /// these.
+        const OVERHEAD: usize = 128;
+        /// Height and identifier.
+        const LOCATED_BYTES: usize = 40;
+        /// A tag, sixteen bytes of address and a port.
+        const ADDRESS_BYTES: usize = 19;
+        /// Stated by [`MAX_HEADERS`], which sizes its answer from it.
+        const HEADER_BYTES: usize = 182;
+
+        let carried = match self {
+            Self::Block(_) | Self::Transaction(_) | Self::Proofs(_) => self.encode().len(),
+            Self::JoinPart { bytes, .. } => bytes.len(),
+            Self::Headers { headers, .. } => headers.len().saturating_mul(HEADER_BYTES),
+            Self::Announce(ids) => ids.len().saturating_mul(LOCATED_BYTES),
+            Self::GetChain { locator } => locator.len().saturating_mul(LOCATED_BYTES),
+            Self::Peers(addresses) => addresses.len().saturating_mul(ADDRESS_BYTES),
+            Self::GetBlocks(heights) | Self::GetProofs(heights) => {
+                heights.len().saturating_mul(size_of::<u64>())
+            }
+            Self::Hello(_)
+            | Self::Welcome(_)
+            | Self::Ping(_)
+            | Self::Pong(_)
+            | Self::Chain { .. }
+            | Self::GetPeers
+            | Self::GetJoin { .. }
+            | Self::GetHeaders { .. } => 0,
+        };
+        carried.saturating_add(OVERHEAD)
+    }
+
     const fn tag(&self) -> u8 {
         match self {
             Self::Hello(_) => 0,

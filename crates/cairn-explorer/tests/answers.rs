@@ -734,19 +734,35 @@ fn a_rebuild_does_not_stop_the_node() {
     const SHARE: u64 = 40;
     /// How small a share of a rebuild the longest single wait has to be.
     ///
-    /// A walk that takes the chain for one block and lets it go between makes
-    /// the worst wait one block's work out of twelve hundred. One that holds it
-    /// to the tip makes the worst wait the whole rebuild. Three sits between
-    /// the two with room on both sides and does not care how fast the machine
-    /// is, because both halves of it are measured on the same run.
-    const SHARE_OF_THE_WALK: u32 = 3;
+    /// The two cases are two orders of magnitude apart, which is what makes
+    /// this readable at all. A walk that takes the chain for one block and lets
+    /// it go between makes the worst wait one block's work: measured over five
+    /// idle runs, 26 to 49 microseconds of a 3.3 millisecond rebuild, about one
+    /// percent. A walk that holds the chain to the tip makes the thread beside
+    /// it wait the whole rebuild for its next turn, which is a hundred percent.
+    ///
+    /// Half sits between them, and it is set from the loaded case rather than
+    /// the idle one. Inside a full workspace run this machine was seen at 936
+    /// microseconds of a 3.3 millisecond rebuild, twenty eight percent, with
+    /// the walk working correctly. A third would have refused that, and did.
+    ///
+    /// What this cannot do is fail on demand. Holding the chain across the walk
+    /// is the defect it describes, and it cannot be written: `held_at` takes
+    /// the chain itself, so a walk holding it would be a thread waiting on
+    /// itself. The per-block release is enforced by the shape of the code
+    /// rather than by a choice somebody could quietly reverse, and this stands
+    /// as the measurement that says so. The neighbouring test
+    /// `a_route_is_answered_while_the_index_is_being_built` is the one that
+    /// does fail on demand: emptying `stand_aside` leaves it answering
+    /// `/api/status` once over a whole rebuild.
+    const SHARE_OF_THE_WALK: u32 = 2;
 
     let params = params();
     let miner = wallet(1);
     let mut forge = Forge::new(params);
-    // Long enough that the rebuild is not over before the other thread has
-    // had a chance to be shut out of anything.
-    let blocks = forge.mine_many(&miner, 1_200);
+    // Long enough that a scheduling hiccup is a small share of it.
+    //
+    let blocks = forge.mine_many(&miner, 12_000);
 
     let explorer = explorer(params);
     feed(&explorer, &blocks);
@@ -803,7 +819,7 @@ fn a_rebuild_does_not_stop_the_node() {
             .and_then(|count| u64::try_from(count).ok())
             .unwrap_or(u64::MAX);
         println!(
-            "rebuilding 1,200 blocks took {rebuild:?}; the node asked its own chain \
+            "rebuilding 12,000 blocks took {rebuild:?}; the node asked its own chain \
              {during} questions while it ran, against {unhindered} it would have \
              answered in that time with nobody rebuilding ({free} in {freely:?}), \
              waiting at most {waited} us for one"
@@ -832,15 +848,21 @@ fn a_rebuild_does_not_stop_the_node() {
         // wait the whole rebuild for its next turn, and a walk that takes the
         // chain a block at a time never makes it wait for more than a block.
         //
-        // The count cannot say it. Comparing a thread that takes a lock 1200
-        // times against a thread spinning on nothing measures the lock, not the
-        // walk: measured here, 160 turns during the rebuild against 54 807 free
-        // running in the same 4.6 ms, which is 342 times and reads as a node
+        // The count cannot say it. Comparing a thread that takes a lock once
+        // per block against a thread spinning on nothing measures the lock, not
+        // the walk: at 1 200 blocks that read 160 turns against 54 807 free
+        // running in the same 4.6 ms, which is 342 times and looks like a node
         // stopped dead. It was not stopped. It was interleaved, once per block,
-        // and 1200 blocks is where 160 comes from. The free rate was never the
-        // right yardstick, and the doc above about a stopped node leaving "a
-        // couple of hundred" turns is the proof: at this size the two cases
-        // land on the same number.
+        // and 1 200 blocks is where 160 comes from.
+        //
+        // The size is the other half, and it took three attempts to see it. At
+        // 1 200 blocks the rebuild is about two milliseconds, so one ordinary
+        // scheduling hiccup is a third of the whole measurement: the same
+        // build read 47 microseconds waited on one run and 936 on the next,
+        // against a rebuild that barely moved. Neither statistic can separate
+        // two cases inside its own noise. Ten times the blocks makes the
+        // rebuild long enough that a hiccup is a few percent of it, which is
+        // what lets a ratio mean anything at all.
         let longest = Duration::from_micros(waited);
         assert!(
             longest.saturating_mul(SHARE_OF_THE_WALK) < rebuild,

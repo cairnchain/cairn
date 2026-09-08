@@ -50,6 +50,7 @@ use cairn_net::message::{
     PROTOCOL_VERSION,
 };
 use cairn_net::node::TARGET_PEERS;
+use cairn_net::sync::a_window_has_turned;
 use cairn_net::wire::{read_message, write_message, Incoming, FRAME_PATIENCE, MAX_FRAME_BYTES};
 use cairn_net::Keeps;
 use cairn_net::Node;
@@ -79,6 +80,15 @@ fn hello(nonce: u64, listen: u16) -> Message {
             cold_set: false,
         },
     })
+}
+
+/// The clock the allowance is counted against, which is the wall clock in
+/// seconds and not this test's own stopwatch.
+fn seconds_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or_default()
 }
 
 fn wait_until(patience: Duration, mut ready: impl FnMut() -> bool) -> bool {
@@ -1152,22 +1162,42 @@ fn a_peer_that_sips_at_one_byte_a_period_is_given_up_on() {
 /// it says so; the deadline that bounds the writer is asserted above, on a
 /// writer that cannot escape it.
 ///
-/// PARKED, and not for flakiness. It fires its defect branch on Linux.
+/// It was parked for firing its defect branch on a Linux runner: 384 of 512
+/// answers on the wire, read as a node blocked on a peer that reads nothing
+/// and then holding it. Two of the three things that were open about it are
+/// settled here, and neither needed a Linux machine.
 ///
-/// Two runs on a Linux runner: 384 of 512 answers on the wire, so the node was
-/// genuinely blocked on a peer reading nothing, and it was still holding that
-/// peer after twice the frame patience plus twenty seconds. Other runs on the
-/// same platform swallow the whole fixture into kernel buffers, never block the
-/// node, and pass, which is why this comes and goes. macOS and Windows block
-/// and release, so the release path works where it is exercised.
+/// The number is the first. 512 less 384 is 128, which is `PEERS_PER_WINDOW`
+/// exactly, and an ask a peer cannot afford is answered with silence: the node
+/// does not write, does not close, and says nothing anybody outside can tell
+/// apart from an answer it could not get out. An ask is charged in the window
+/// the node reads it in and not the one the peer wrote it in, and this fixture
+/// wrote a whole window's worth in a burst; a node that fell behind on its
+/// reading, which is exactly what a node blocked on its writing does, carried
+/// part of one burst into the window the next one wanted. Whichever part
+/// landed in a window already spent was refused, and four bursts came to three
+/// windows. So `collected` counted the answers the allowance permitted, and
+/// the branch read it as the answers the node managed. The premise did not
+/// follow from the number. The bursts below are half a window each and wait
+/// for the window to turn, so two of them share a window at worst and even
+/// then both fit, and no ask is refused however late the node reads it.
 ///
-/// What has to be settled is which of the two is true when it does not release:
-/// whether the node never lets go of a blocked peer, or lets go of it as a peer
-/// while `peer_count` goes on counting a socket the reader has not yet noticed.
-/// The second needs `peers_introduced` beside the count, and neither can be
-/// observed from a machine whose kernel does not reproduce the blocking.
+/// The second hypothesis is the other, and it is false by construction rather
+/// than by measurement. There is one place a connection leaves
+/// `shared.peers()`, and it runs after the reading loop is out, after the
+/// queue's sender has been swapped for one nobody reads, and after the writing
+/// thread has been joined. `peer_count` cannot be counting a socket the node
+/// has finished with, and `peers_introduced` reads the same table, so putting
+/// it beside the count would have said nothing.
+///
+/// What is still not settled from any machine is the strong half: that a node
+/// genuinely blocked on a peer lets go of it. Whether it blocks at all depends
+/// on how much the loopback receive buffer swallows, which no test can set
+/// through the standard library. The experiment that would settle it is to
+/// call `setsockopt(SO_RCVBUF)` on the socket below before connecting, small
+/// enough that `OUTBOUND_QUEUE` answers cannot fit under it, which needs
+/// `libc` and would then run identically everywhere.
 #[test]
-#[ignore = "fires its defect branch on Linux only; needs a Linux machine to settle"]
 fn a_node_lets_go_of_the_peer_and_its_queue_together() {
     let node = Node::bind(params(), loopback()).unwrap();
     // Something worth queueing: an address list is the largest answer a peer
@@ -1180,19 +1210,27 @@ fn a_node_lets_go_of_the_peer_and_its_queue_together() {
         .unwrap();
     write_message(&mut socket, params().network, &hello(700, 4_242)).unwrap();
     // Enough to overrun OUTBOUND_QUEUE and every socket buffer under it, and
-    // not one byte of the answers is read. Spread over four windows because
-    // of the repair to FINDING E: address lists are no longer free, so making
-    // a node write half a megabyte now takes a peer four windows of its whole
+    // not one byte of the answers is read. Spread over windows because of the
+    // repair to FINDING E: address lists are no longer free, so making a node
+    // write half a megabyte takes a peer several windows of its whole
     // allowance rather than one burst of nine byte requests.
+    //
+    // Half a window a burst, and one burst per turn of the window. Two bursts
+    // landing in the same window still fit inside one allowance, so no ask
+    // here is ever refused for want of one and `asked` is what the node was
+    // asked and could afford, both.
     let mut asked = 0usize;
-    for _ in 0..4 {
-        for _ in 0..PEERS_PER_WINDOW {
+    for _ in 0..8 {
+        let began = seconds_now();
+        for _ in 0..(PEERS_PER_WINDOW / 2) {
             if write_message(&mut socket, params().network, &Message::GetPeers).is_err() {
                 break;
             }
             asked += 1;
         }
-        std::thread::sleep(Duration::from_secs(10));
+        while !a_window_has_turned(began, seconds_now()) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     // Not one byte is read from the socket while this waits. A node that still
@@ -1230,29 +1268,24 @@ fn a_node_lets_go_of_the_peer_and_its_queue_together() {
         if ended { "did" } else { "did not" }
     );
 
-    // Three outcomes, and the count is what tells them apart.
+    // Two outcomes, and every ask above was one the node could afford, so what
+    // is missing from the count is what the node could not get out and
+    // nothing else.
     //
-    // The allowance is what caps the fixture: a Peers answer carries
-    // MAX_SHARED_ADDRESSES addresses at COST_PER_ADDRESS_SERVED each, so a
-    // window buys 128 of them and four windows buy about six hundred
-    // kilobytes. On a machine whose loopback holds less than that, the peer
-    // that reads nothing really does block the node and the node has to let
-    // go. On one that holds more, measured on a Linux runner where 511 of the
-    // 512 answers reached the wire, nothing was ever blocked and there was
-    // nothing to let go of: the node is right to keep a peer that has asked
-    // properly and gone quiet, and `PEER_SILENCE` is what ends that.
-    //
-    // Making the fixture big enough for both would take fifty three windows,
-    // which is nine minutes of allowance, so the honest thing is to say which
-    // experiment ran rather than to assert the strong half where it cannot.
+    // On a machine whose loopback holds less than the fixture, the peer that
+    // reads nothing really does block the node and the node has to let go. On
+    // one that holds more, nothing was ever blocked and there is nothing to
+    // let go of: the node is right to keep a peer that has asked properly and
+    // gone quiet, and `PEER_SILENCE` is what ends that.
     if released {
         println!("the node let go of a peer that reads nothing, which is the finding");
     } else {
         assert!(
             collected + 8 >= asked,
             "the node neither let go of the peer nor got its answers out: only \
-             {collected} of {asked} answers reached the wire, so it was blocked on a \
-             peer that reads nothing and went on holding it. That is the defect this \
+             {collected} of {asked} answers reached the wire, and every one of those \
+             asks was inside an allowance window it had not spent. So it was blocked on \
+             a peer that reads nothing and went on holding it, which is the defect this \
              test exists for: both threads and the whole queue are held at the end of a \
              connection nobody is reading",
         );
@@ -1269,6 +1302,85 @@ fn a_node_lets_go_of_the_peer_and_its_queue_together() {
          {collected} answers and counting, out of a queue that holds OUTBOUND_QUEUE of \
          them and two threads that nobody had joined.",
     );
+}
+
+// ---------------------------------------------------------------------------
+// FINDING H, repaired: two connections between the same pair of nodes could
+// both survive, because only one of the two ever heard that there was a pair
+// and all it could do about it was leave.
+//
+// A connection asks `register` once, at its first message, and then sets
+// `announced`. So the first of a pair to get there is told it is the only
+// one, and the second is the only one that ever learns of the other. The
+// second then applied `loses_the_tie`, which names the connection that
+// survives, and left if that was not itself. When the rule named the second
+// as the survivor, the second stayed and the first was never asked again:
+// both were held, both greeted, both counted, for as long as they stayed
+// open.
+//
+// It is half the outcomes rather than a rare one, and it costs the node a
+// connection slot, a share of `MAX_PER_HOST`, two threads and two queues per
+// pair. Anything counting peers counts one peer twice, which is how it turned
+// up: a wallet waiting for `archiving_peers` to reach one waited out its
+// deadline while the count sat at two.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn two_connections_to_one_peer_come_down_to_one() {
+    let node = Node::bind(params(), loopback()).unwrap();
+    // The port this peer claims to listen on, chosen below the node's own so
+    // that the rule names the second connection as the survivor. That is the
+    // half of the outcomes where neither connection used to go.
+    let claimed = 1u16;
+    assert!(
+        SocketAddr::from((Ipv4Addr::LOCALHOST, claimed)) < node.address(),
+        "the fixture needs the peer to sort below the node"
+    );
+
+    let mut first = TcpStream::connect(node.address()).unwrap();
+    write_message(&mut first, params().network, &hello(1_001, claimed)).unwrap();
+    assert!(
+        wait_until(Duration::from_secs(10), || node.peers_introduced() == 1),
+        "the first connection introduced itself"
+    );
+
+    let mut second = TcpStream::connect(node.address()).unwrap();
+    write_message(&mut second, params().network, &hello(1_002, claimed)).unwrap();
+
+    // Read the first connection until the node ends it. Waiting on a count
+    // would be met by the moment before the second connection was attached at
+    // all, which is the state this test exists to leave.
+    first
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut ended = false;
+    while Instant::now() < deadline {
+        match read_message(&mut first, params().network) {
+            Ok(Incoming::Message(_) | Incoming::Quiet) => {}
+            Err(_) => {
+                ended = true;
+                break;
+            }
+        }
+    }
+    // The slot is the last thing given up, after both of that connection's
+    // threads are finished with it, so it lags the socket closing.
+    let settled = wait_until(Duration::from_secs(10), || node.peer_count() == 1);
+    let held = node.peer_count();
+    let introduced = node.peers_introduced();
+    node.shutdown();
+    drop(first);
+    drop(second);
+
+    assert!(
+        ended && settled,
+        "one peer, reached twice, left the node holding {held} connections and \
+         counting {introduced} peers. Only the second of a pair is ever told there \
+         is one, and all it could do was take itself out; the rule said it was the \
+         half to keep, so nothing took the other half out and both were held",
+    );
+    assert_eq!(held, 1, "and one connection remains");
 }
 
 // ---------------------------------------------------------------------------

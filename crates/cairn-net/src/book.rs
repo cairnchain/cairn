@@ -11,8 +11,9 @@
 //! nobody to be told about. The first is what the misses below are for. The
 //! second is what seeds are for.
 
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 
 use cairn_store::write_beside_and_move;
@@ -91,6 +92,13 @@ struct Known {
     quiet_until: u64,
     /// Given at the start rather than learned along the way.
     seed: bool,
+    /// Which change to the book put this address in it.
+    ///
+    /// Only ever read to decide which address a full neighbourhood gives up,
+    /// and there it decides that the newest goes. A peer naming address after
+    /// address in one range then displaces the ones it named a moment ago and
+    /// nothing anybody else told this node about.
+    written_at: u64,
     /// Whether this address said, last time it introduced itself, that it
     /// keeps the cold set.
     ///
@@ -126,9 +134,20 @@ impl Known {
 /// everything else, but they are never dropped. An address the operator gave
 /// is the one thing in the book that was not learned from the network, so it
 /// is the one thing the network cannot take away.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct AddressBook {
     known: BTreeMap<SocketAddr, Known>,
+    /// Every address, in the order it is dialled and handed on.
+    ///
+    /// Kept in order as addresses go in and out, rather than built by copying
+    /// the whole book and sorting it whenever somebody asks. `GetPeers` is
+    /// nine bytes, an allowance window pays for a hundred and twenty eight of
+    /// them, and answering one used to copy four thousand entries into a
+    /// fresh list, about three hundred and sixty kilobytes, and sort it:
+    /// forty nine thousand comparisons, under the one lock that `dial_from_book`,
+    /// `save_book`, `remember` and `forget` all wait on. The price of the ask
+    /// was already right, and it is the work that moved with the book.
+    order: Vec<Seat>,
     /// How many addresses each neighbourhood holds.
     ///
     /// Counted as they go in and out rather than walked for on each insert,
@@ -148,21 +167,141 @@ pub struct AddressBook {
     /// disk, once a second, for the life of the node, whether or not a single
     /// address had moved.
     changes: u64,
+    /// A number this node draws when it starts and never says.
+    ///
+    /// It decides where each address sits among the ones nothing is known
+    /// about, and that is a decision somebody was making for this node. When
+    /// an address was last heard from is not written to the file, on purpose,
+    /// so every address in a book read back from a disk carries the same
+    /// nothing; ordering those by the address itself put whoever holds the
+    /// lowest numbers at the front of the book on every restart, first to be
+    /// dialled and first to be passed on, for the price of renting the right
+    /// range. Drawn rather than derived, so it is not a thing to aim at.
+    salt: u64,
+}
+
+/// Where one address sits in the order it is dialled and handed on.
+///
+/// Heard from most recently first, then by the place this book draws for it,
+/// then by the address, which only ever settles a collision in the draw.
+type Seat = (Reverse<u64>, u64, SocketAddr);
+
+/// A number to draw the order from, for one run of one node.
+///
+/// A book that cannot get randomness orders its unheard addresses the way it
+/// always did, which is worse than a draw and no worse than before.
+fn fresh_salt() -> u64 {
+    let mut bytes = [0u8; 8];
+    if getrandom::fill(&mut bytes).is_ok() {
+        return u64::from_le_bytes(bytes);
+    }
+    0
+}
+
+/// Spreads one number across all sixty four bits of another.
+///
+/// So that two addresses next to each other in one range land nowhere near
+/// each other in the order.
+const fn mixed(value: u64) -> u64 {
+    let mut carried = value ^ (value >> 33);
+    carried = carried.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    carried ^= carried >> 33;
+    carried = carried.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    carried ^ (carried >> 33)
+}
+
+impl Default for AddressBook {
+    fn default() -> Self {
+        Self {
+            known: BTreeMap::new(),
+            order: Vec::new(),
+            groups: BTreeMap::new(),
+            changes: 0,
+            salt: fresh_salt(),
+        }
+    }
 }
 
 /// The part of an address that is expensive for one party to vary.
-type Group = [u8; 4];
+///
+/// The family leads, so that a v6 address whose first four octets happen to
+/// read like a v4 range is not counted against that range. The two are
+/// different stretches of the book, and what makes room in a full
+/// neighbourhood reads one stretch.
+type Group = [u8; 5];
+
+/// One number standing for a whole address, before the book's own draw is
+/// mixed into it.
+///
+/// A v4 address is read as the v6 address it maps to, so the two spellings of
+/// one machine land in the same place.
+fn place_of(address: &SocketAddr) -> u64 {
+    let octets = match address.ip() {
+        IpAddr::V4(ip) => ip.to_ipv6_mapped().octets(),
+        IpAddr::V6(ip) => ip.octets(),
+    };
+    let carried = octets
+        .iter()
+        .fold(0u64, |carried, byte| mixed(carried ^ u64::from(*byte)));
+    carried ^ u64::from(address.port())
+}
+
+/// The stretch of the book one neighbourhood occupies.
+///
+/// Addresses sort by family and then by their bytes, so a neighbourhood is a
+/// run of the book rather than a scattering through it, and what it holds can
+/// be read without walking the rest.
+fn neighbourhood_of(address: &SocketAddr) -> (SocketAddr, SocketAddr) {
+    match address.ip() {
+        IpAddr::V4(ip) => {
+            let mut low = ip.octets();
+            let mut high = ip.octets();
+            for (at, byte) in low.iter_mut().enumerate() {
+                if at >= 2 {
+                    *byte = 0;
+                }
+            }
+            for (at, byte) in high.iter_mut().enumerate() {
+                if at >= 2 {
+                    *byte = u8::MAX;
+                }
+            }
+            (
+                SocketAddr::from((Ipv4Addr::from(low), 0)),
+                SocketAddr::from((Ipv4Addr::from(high), u16::MAX)),
+            )
+        }
+        IpAddr::V6(ip) => {
+            let mut low = ip.octets();
+            let mut high = ip.octets();
+            for (at, byte) in low.iter_mut().enumerate() {
+                if at >= 4 {
+                    *byte = 0;
+                }
+            }
+            for (at, byte) in high.iter_mut().enumerate() {
+                if at >= 4 {
+                    *byte = u8::MAX;
+                }
+            }
+            (
+                SocketAddr::from((Ipv6Addr::from(low), 0)),
+                SocketAddr::from((Ipv6Addr::from(high), u16::MAX)),
+            )
+        }
+    }
+}
 
 /// Which neighbourhood an address belongs to.
 fn group_of(address: &SocketAddr) -> Group {
     match address.ip() {
         IpAddr::V4(ip) => {
             let octets = ip.octets();
-            [octets[0], octets[1], 0, 0]
+            [4, octets[0], octets[1], 0, 0]
         }
         IpAddr::V6(ip) => {
             let octets = ip.octets();
-            [octets[0], octets[1], octets[2], octets[3]]
+            [6, octets[0], octets[1], octets[2], octets[3]]
         }
     }
 }
@@ -192,22 +331,111 @@ impl AddressBook {
     ///
     /// An address already known keeps what is known about it: being mentioned
     /// again by a peer is not evidence that it answers.
+    ///
+    /// A full neighbourhood or a full book makes room rather than refusing,
+    /// and the difference is the whole of what a refusal was worth to whoever
+    /// caused it. Both ceilings are reached with addresses nobody has ever
+    /// heard from, and one `Peers` message naming [`MAX_PER_GROUP`] dead
+    /// addresses in the range an honest node lives in shut that node out of
+    /// this book for good: nothing put those addresses in, because nothing
+    /// dials while a node holds the peers it wants, so nothing ever took them
+    /// out again. Six hundred bytes and one unit of allowance.
+    ///
+    /// What makes room is [`Self::make_room`], and what it will give up is
+    /// only ever an address this node has never heard a word from. A book
+    /// full of peers that answered is a book a stranger cannot move.
     pub fn insert(&mut self, address: SocketAddr) -> bool {
-        if !is_dialable(&address) || self.known.len() >= MAX_ADDRESSES {
-            return false;
-        }
-        if self.known.contains_key(&address) {
+        if !is_dialable(&address) || self.known.contains_key(&address) {
             return false;
         }
         let group = group_of(&address);
-        let held = self.groups.get(&group).copied().unwrap_or(0);
-        if held >= MAX_PER_GROUP {
+        if self.groups.get(&group).copied().unwrap_or(0) >= MAX_PER_GROUP
+            && !self.make_room(Some(&address))
+        {
             return false;
         }
-        self.known.insert(address, Known::default());
-        self.groups.insert(group, held.saturating_add(1));
+        if self.known.len() >= MAX_ADDRESSES && !self.make_room(None) {
+            return false;
+        }
+        let held = self.groups.get(&group).copied().unwrap_or(0);
         self.changes = self.changes.saturating_add(1);
+        self.known.insert(
+            address,
+            Known {
+                written_at: self.changes,
+                ..Known::default()
+            },
+        );
+        self.seat(address, 0);
+        self.groups.insert(group, held.saturating_add(1));
         true
+    }
+
+    /// Drops the address this node would miss least, saying whether it found
+    /// one.
+    ///
+    /// `crowding` is the address that could not get in, when what is full is
+    /// its neighbourhood rather than the whole book.
+    ///
+    /// Only ever an address never heard from, and never a seed. Anything else
+    /// and a stranger naming addresses would be choosing which of the peers
+    /// that answer this node keeps, which is the attack the ceilings are
+    /// there against, arriving by the door marked exit.
+    fn make_room(&mut self, crowding: Option<&SocketAddr>) -> bool {
+        let giving_way = match crowding {
+            // One neighbourhood, which is where the ceiling usually bites.
+            // Read off the stretch of the book that neighbourhood occupies,
+            // which holds [`MAX_PER_GROUP`] addresses and never more, so
+            // making room does not cost a pass over the book: that would put
+            // back, at the door marked exit, exactly the work the sampling
+            // above was repaired to stop doing.
+            Some(address) => {
+                let (low, high) = neighbourhood_of(address);
+                self.known
+                    .range(low..=high)
+                    .filter(|(_, known)| known.heard == 0 && !known.seed)
+                    .max_by_key(|(_, known)| known.written_at)
+                    .map(|(address, _)| *address)
+            }
+            // The whole book, which only a node that has heard from nobody at
+            // all can fill. Never-heard addresses are the tail of the order,
+            // so the last of them is one step away, and where it sits was
+            // this node's own draw rather than anybody's choice.
+            None => self
+                .order
+                .iter()
+                .rev()
+                .find(|seat| {
+                    let (Reverse(heard), _, address) = seat;
+                    *heard == 0 && !self.known.get(address).is_some_and(|known| known.seed)
+                })
+                .map(|seat| seat.2),
+        };
+        giving_way.is_some_and(|address| self.remove(&address))
+    }
+
+    /// Puts an address in the order, or moves it to where it now belongs.
+    fn seat(&mut self, address: SocketAddr, heard: u64) {
+        let seat = (
+            Reverse(heard),
+            mixed(self.salt ^ mixed(place_of(&address))),
+            address,
+        );
+        if let Err(at) = self.order.binary_search(&seat) {
+            self.order.insert(at, seat);
+        }
+    }
+
+    /// Takes an address out of the order.
+    fn unseat(&mut self, address: &SocketAddr, heard: u64) {
+        let seat = (
+            Reverse(heard),
+            mixed(self.salt ^ mixed(place_of(address))),
+            *address,
+        );
+        if let Ok(at) = self.order.binary_search(&seat) {
+            self.order.remove(at);
+        }
     }
 
     /// Records an address the operator gave, which is never dropped.
@@ -230,6 +458,7 @@ impl AddressBook {
             let held = self.groups.get(&group).copied().unwrap_or(0);
             self.groups.insert(group, held.saturating_add(1));
             self.changes = self.changes.saturating_add(1);
+            self.seat(address, 0);
         }
         !was_seed
     }
@@ -249,9 +478,10 @@ impl AddressBook {
     }
 
     pub fn remove(&mut self, address: &SocketAddr) -> bool {
-        if self.known.remove(address).is_none() {
+        let Some(gone) = self.known.remove(address) else {
             return false;
-        }
+        };
+        self.unseat(address, gone.heard);
         self.changes = self.changes.saturating_add(1);
         let group = group_of(address);
         match self.groups.get(&group).copied().unwrap_or(0) {
@@ -270,10 +500,16 @@ impl AddressBook {
     /// Clears whatever was held against it: a peer that speaks now is a peer
     /// that exists now, whatever it did earlier.
     pub fn answered(&mut self, address: &SocketAddr, now: u64) {
-        if let Some(known) = self.known.get_mut(address) {
-            known.misses = 0;
-            known.heard = now;
-            known.quiet_until = 0;
+        let Some(known) = self.known.get_mut(address) else {
+            return;
+        };
+        known.misses = 0;
+        known.quiet_until = 0;
+        let before = known.heard;
+        known.heard = now;
+        if before != now {
+            self.unseat(address, before);
+            self.seat(*address, now);
         }
     }
 
@@ -361,17 +597,16 @@ impl AddressBook {
     }
 
     /// Every address, most recently heard from first.
+    ///
+    /// Read off the order this book keeps rather than sorted here. Both
+    /// callers want the whole book, once a second, for dialling; the one that
+    /// answers strangers is [`Self::sample`], and it does not come through
+    /// here any more.
     fn ordered(&self) -> Vec<(SocketAddr, Known)> {
-        let mut ordered: Vec<(SocketAddr, Known)> =
-            self.known.iter().map(|(a, k)| (*a, *k)).collect();
-        ordered.sort_by(|left, right| {
-            right
-                .1
-                .heard
-                .cmp(&left.1.heard)
-                .then_with(|| left.0.cmp(&right.0))
-        });
-        ordered
+        self.order
+            .iter()
+            .filter_map(|seat| self.known.get(&seat.2).map(|known| (seat.2, *known)))
+            .collect()
     }
 
     /// Addresses to hand to a peer that asked.
@@ -387,30 +622,59 @@ impl AddressBook {
     /// the book and the number given, which is what makes it testable. The
     /// caller passes the clock, so what circulates changes by the second.
     pub fn sample(&self, max: usize, turn: u64) -> Vec<PeerAddress> {
-        let ordered = self.candidates();
-        if ordered.len() <= max {
-            return ordered.into_iter().map(PeerAddress).collect();
+        self.sample_reading(max, turn).0
+    }
+
+    /// The same, and how many entries of the book it read to build it.
+    ///
+    /// The count is the point of the shape. This used to copy the whole book
+    /// into a fresh list and sort it, so a nine byte question cost a pass and
+    /// a sort over however many addresses this node happened to hold, under
+    /// the lock everything else in the node waits on. The price of the ask was
+    /// already refused the right to move with the book, and the work was left
+    /// moving with it. `answering_a_stranger_does_not_read_the_whole_book`
+    /// reads this count rather than a clock.
+    fn sample_reading(&self, max: usize, turn: u64) -> (Vec<PeerAddress>, usize) {
+        let mut read = 0usize;
+        if self.order.len() <= max {
+            let all: Vec<PeerAddress> = self
+                .order
+                .iter()
+                .inspect(|_| read = read.saturating_add(1))
+                .map(|seat| PeerAddress(seat.2))
+                .collect();
+            return (all, read);
         }
 
+        // The freshest half, which is the front of the order already.
         let fresh = max / 2;
-        let mut chosen: Vec<SocketAddr> = ordered.get(..fresh).unwrap_or_default().to_vec();
-        let rest = ordered.get(fresh..).unwrap_or_default();
-        if rest.is_empty() {
-            return chosen.into_iter().map(PeerAddress).collect();
-        }
+        let mut chosen: Vec<SocketAddr> = self
+            .order
+            .iter()
+            .take(fresh)
+            .inspect(|_| read = read.saturating_add(1))
+            .map(|seat| seat.2)
+            .collect();
 
-        let span = u64::try_from(rest.len()).unwrap_or(1).max(1);
+        // And the other half rotating through everything behind it, reached by
+        // where it sits rather than by walking there.
+        let rest = self.order.len().saturating_sub(fresh);
+        if rest == 0 {
+            return (chosen.into_iter().map(PeerAddress).collect(), read);
+        }
+        let span = u64::try_from(rest).unwrap_or(1).max(1);
         let start = usize::try_from(turn.checked_rem(span).unwrap_or(0)).unwrap_or(0);
         for step in 0..max.saturating_sub(fresh) {
-            let Some(at) = start.saturating_add(step).checked_rem(rest.len()) else {
+            let Some(at) = start.saturating_add(step).checked_rem(rest) else {
                 break;
             };
-            let Some(address) = rest.get(at) else {
+            let Some(seat) = self.order.get(fresh.saturating_add(at)) else {
                 break;
             };
-            chosen.push(*address);
+            read = read.saturating_add(1);
+            chosen.push(seat.2);
         }
-        chosen.into_iter().map(PeerAddress).collect()
+        (chosen.into_iter().map(PeerAddress).collect(), read)
     }
 
     /// Reads the book from `directory`, treating an unreadable or missing file
@@ -767,6 +1031,8 @@ mod tests {
         assert_eq!(book.seeds().len(), 2);
     }
 
+    /// The ceiling is on how much this book holds, and never on whether it
+    /// will hear about anybody new.
     #[test]
     fn the_book_stops_growing_at_its_ceiling() {
         let mut book = AddressBook::new();
@@ -774,8 +1040,105 @@ mod tests {
             book.insert(spread(index));
         }
         assert_eq!(book.len(), MAX_ADDRESSES, "the ceiling is reachable");
-        assert!(!book.insert(spread(MAX_ADDRESSES)), "and it holds");
+
+        // A full book used to answer this with no, which is what made a full
+        // book worth buying: nothing dials while a node holds the peers it
+        // wants, so nothing came out again and the no was for ever.
+        assert!(book.insert(spread(MAX_ADDRESSES)), "and it still learns");
+        assert!(book.contains(&spread(MAX_ADDRESSES)));
+        assert_eq!(book.len(), MAX_ADDRESSES, "without growing by one address");
+    }
+
+    /// What a full book gives up is only ever an address that has never said
+    /// anything.
+    #[test]
+    fn a_book_full_of_peers_that_answer_is_a_book_a_stranger_cannot_move() {
+        let mut book = AddressBook::new();
+        for index in 0..MAX_ADDRESSES {
+            book.insert(spread(index));
+            book.answered(&spread(index), 1_000);
+        }
         assert_eq!(book.len(), MAX_ADDRESSES);
+
+        assert!(
+            !book.insert(spread(MAX_ADDRESSES)),
+            "there is nothing here this node would rather have"
+        );
+        for index in 0..MAX_ADDRESSES {
+            assert!(book.contains(&spread(index)), "and nothing was given up");
+        }
+    }
+
+    /// One `Peers` message, six hundred bytes, one unit of allowance, and an
+    /// honest node was shut out of this book for the life of it.
+    ///
+    /// A stranger names [`MAX_PER_GROUP`] addresses in the range a real peer
+    /// lives in. None of them answers, and nothing ever finds that out:
+    /// `dial_from_book` returns without dialling while the node holds the
+    /// peers it wants, so the misses that would drop them are never counted.
+    #[test]
+    fn a_stranger_cannot_shut_a_neighbourhood_against_the_peer_that_lives_there() {
+        let mut book = AddressBook::new();
+        let honest = address(9, 9_000);
+        for step in 0..MAX_PER_GROUP {
+            let port = u16::try_from(step).unwrap_or(0).saturating_add(1_024);
+            assert!(book.insert(address(1, port)), "the range fills up");
+        }
+        assert_eq!(book.len(), MAX_PER_GROUP, "and it is full");
+        assert_eq!(group_of(&honest), group_of(&address(1, 1_024)));
+
+        assert!(
+            book.insert(honest),
+            "the peer that lives in this range was told there was no room, by              {MAX_PER_GROUP} addresses nobody has ever heard a word from"
+        );
+        assert!(book.contains(&honest));
+        assert_eq!(book.len(), MAX_PER_GROUP, "and the ceiling held");
+    }
+
+    /// Which is not a way of pushing out the ones that answered.
+    #[test]
+    fn a_neighbourhood_that_answers_is_not_pushed_out_by_one_that_does_not() {
+        let mut book = AddressBook::new();
+        for step in 0..MAX_PER_GROUP {
+            let port = u16::try_from(step).unwrap_or(0).saturating_add(1_024);
+            book.insert(address(1, port));
+            book.answered(&address(1, port), 1_000);
+        }
+        assert!(!book.insert(address(9, 9_000)), "nothing to give up");
+        assert_eq!(book.len(), MAX_PER_GROUP);
+    }
+
+    /// A book read back from a file remembers the addresses and nothing about
+    /// them, so its whole order is decided by the tie-break. That used to be
+    /// the address itself.
+    #[test]
+    fn a_book_read_back_from_a_file_is_not_ordered_by_whoever_holds_the_lowest_numbers() {
+        let lowest: Vec<SocketAddr> = (0..16)
+            .map(|last| SocketAddr::from((Ipv4Addr::new(1, 0, 0, last), 9_000)))
+            .collect();
+        let others: Vec<SocketAddr> = (0..16)
+            .map(|last| SocketAddr::from((Ipv4Addr::new(198, 51, 100, last), 9_000)))
+            .collect();
+
+        // Both books hold exactly the same addresses and know nothing about
+        // any of them, which is what a restart leaves.
+        let mut first = AddressBook::new();
+        let mut second = AddressBook::new();
+        for address in others.iter().chain(lowest.iter()) {
+            first.insert(*address);
+            second.insert(*address);
+        }
+
+        let ahead = |book: &AddressBook| -> usize {
+            book.candidates()
+                .into_iter()
+                .take_while(|address| lowest.contains(address))
+                .count()
+        };
+        assert!(
+            ahead(&first) < lowest.len() || ahead(&second) < lowest.len(),
+            "every address this book holds is unheard from, and the sixteen lowest              numbers came first in both of two independently started books. That is              the front of the dial list and the front of what is passed on, for the              price of renting the right range"
+        );
     }
 
     /// Whoever fills the book decides who a node can reach.
@@ -821,6 +1184,9 @@ mod tests {
         for step in 0..MAX_PER_GROUP {
             let port = u16::try_from(step).unwrap_or(0).saturating_add(1_024);
             book.insert(address(1, port));
+            // Heard from, so the neighbourhood is genuinely full rather than
+            // full of names a stranger wrote down.
+            book.answered(&address(1, port), 1_000);
         }
         assert!(!book.insert(address(1, 9_999)), "full for strangers");
         assert!(
@@ -836,12 +1202,96 @@ mod tests {
         let mut book = AddressBook::new();
         for index in 0..MAX_ADDRESSES {
             book.insert(spread(index));
+            book.answered(&spread(index), 1_000);
         }
         let full = book.len();
         assert!(!book.insert(address(255, 65_535)), "full for strangers");
         assert!(book.insert_seed(address(255, 65_535)));
         assert!(book.is_seed(&address(255, 65_535)));
         assert_eq!(book.len(), full.saturating_add(1));
+    }
+
+    /// Nine bytes in, and a pass and a sort over the whole book out.
+    ///
+    /// The price of `GetPeers` was already refused the right to move with the
+    /// book, because "a price that moves with the book is a price whoever
+    /// fills the book gets to set". The work was left moving with it: an
+    /// allowance window pays for a hundred and twenty eight of these, and each
+    /// one copied every entry into a fresh list and sorted it, under the lock
+    /// that dialling, saving and learning addresses all wait on.
+    ///
+    /// Counted rather than timed. What the shape decides is how many entries
+    /// an answer reads, and that is arithmetic; timing it would measure the
+    /// machine, which is how the same defect was reported as 39.10 ms against
+    /// 2.23 on one runner and meant nothing on another.
+    #[test]
+    fn answering_a_stranger_does_not_read_the_whole_book() {
+        let asked_for = crate::message::MAX_SHARED_ADDRESSES;
+
+        let mut small = AddressBook::new();
+        for index in 0..(asked_for * 4) {
+            small.insert(spread(index));
+        }
+        let mut full = AddressBook::new();
+        for index in 0..MAX_ADDRESSES {
+            full.insert(spread(index));
+        }
+        assert_eq!(full.len(), MAX_ADDRESSES);
+
+        let (from_a_small_book, read_small) = small.sample_reading(asked_for, 7);
+        let (from_a_full_book, read_full) = full.sample_reading(asked_for, 7);
+
+        assert_eq!(from_a_small_book.len(), asked_for);
+        assert_eq!(from_a_full_book.len(), asked_for);
+        assert_eq!(
+            read_full, read_small,
+            "answering one stranger read {read_full} of {MAX_ADDRESSES} entries out of \
+             a full book and {read_small} out of a book a sixty fourth the size. What \
+             an answer costs this node has to be what the answer is, not what the book is"
+        );
+        assert!(
+            read_full <= asked_for,
+            "{read_full} entries read to hand over {asked_for}"
+        );
+    }
+
+    /// The order is kept as addresses go in and out, so it has to stay in step
+    /// with them.
+    #[test]
+    fn the_order_holds_exactly_what_the_book_holds() {
+        let mut book = AddressBook::new();
+        for index in 0..200 {
+            book.insert(spread(index));
+        }
+        for index in 0..200 {
+            if index % 3 == 0 {
+                book.answered(&spread(index), 1_000 + index as u64);
+            }
+            if index % 7 == 0 {
+                book.answered(&spread(index), 2_000);
+            }
+            if index % 11 == 0 {
+                book.remove(&spread(index));
+            }
+        }
+        book.insert_seed(spread(1_000));
+        book.answered(&spread(1_000), 3_000);
+
+        assert_eq!(book.order.len(), book.known.len(), "one seat per address");
+        let seated: std::collections::BTreeSet<SocketAddr> =
+            book.order.iter().map(|seat| seat.2).collect();
+        let held: std::collections::BTreeSet<SocketAddr> = book.iter().collect();
+        assert_eq!(seated, held, "and the same addresses in both");
+
+        // And the order it keeps is the order it promises.
+        let heard: Vec<u64> = book
+            .ordered()
+            .into_iter()
+            .map(|(_, known)| known.heard)
+            .collect();
+        let mut falling = heard.clone();
+        falling.sort_by(|left, right| right.cmp(left));
+        assert_eq!(heard, falling, "most recently heard from first");
     }
 
     #[test]

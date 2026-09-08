@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::{self, JoinHandle};
@@ -129,6 +129,24 @@ const FLOOD_WINDOW: u64 = 10;
 /// let it decide how much memory this node spends. Dropped announcements cost
 /// it nothing lasting: it asks for what it is missing on the next exchange.
 const OUTBOUND_QUEUE: usize = 256;
+/// Bytes queued for one peer before further messages are dropped.
+///
+/// The count above is in messages, and a message on this wire is nine bytes or
+/// half a megabyte. Two `GetBlocks` for `MAX_REQUESTED` heights each filled
+/// that queue with two hundred and fifty six blocks, up to thirty two
+/// megabytes on one connection and about a gigabyte and a half across
+/// [`MAX_PEERS`], and it is not something a peer has to work at: the writer
+/// gives a frame [`crate::wire::FRAME_PATIENCE`] and renews it on
+/// progress, so a peer reading at the floor a frame has to clear, about three
+/// and a quarter kilobytes a second, is never judged late and holds all of it.
+/// Forty eight connections held that way cost the far end a hundred and fifty
+/// four kilobytes a second.
+///
+/// Four megabytes is what a window of allowance buys, since a peer pays five
+/// hundred and twelve bytes to the unit for anything large. So a peer cannot
+/// have more waiting for it than it has paid for, and paying again means
+/// waiting out a window.
+const OUTBOUND_QUEUE_BYTES: usize = 4 * 1024 * 1024;
 /// How long the accept loop waits between looks when nothing is arriving.
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
 /// How often the node looks for peers and saves its address book.
@@ -988,9 +1006,72 @@ pub struct Behind {
 
 type PeerId = u64;
 
+/// One peer's queue of things to say, bounded in messages and in bytes.
+///
+/// The channel bounds the first at [`OUTBOUND_QUEUE`] and says nothing about
+/// the second, which is the whole of [`OUTBOUND_QUEUE_BYTES`]. What is counted
+/// is what has been handed to the writer and not yet written, so the bound is
+/// on memory this node is holding rather than on anything it has said.
+#[derive(Clone, Debug)]
+struct Outbound {
+    sender: SyncSender<(Message, usize)>,
+    /// Bytes queued and not yet written.
+    waiting: Arc<AtomicUsize>,
+}
+
+impl Outbound {
+    fn new(sender: SyncSender<(Message, usize)>) -> Self {
+        Self {
+            sender,
+            waiting: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// A queue nobody reads, for a connection this node has finished with.
+    fn nowhere() -> Self {
+        let (sender, _) = mpsc::sync_channel(1);
+        Self::new(sender)
+    }
+
+    /// Queues `message`, saying whether there was room for it.
+    fn try_send(&self, message: Message) -> Result<(), ()> {
+        let weight = message.weight();
+        self.hand_over(message, weight)
+    }
+
+    /// The same, for a caller that has already weighed what it is sending.
+    ///
+    /// Weighing a block means encoding it, and the one caller that serves
+    /// blocks has to weigh them anyway to charge for them.
+    fn hand_over(&self, message: Message, weight: usize) -> Result<(), ()> {
+        // Claimed before the message is handed over, so two threads queueing
+        // at once cannot both be told there is room for the last of it.
+        let room = self
+            .waiting
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |held| {
+                let after = held.saturating_add(weight);
+                (after <= OUTBOUND_QUEUE_BYTES).then_some(after)
+            });
+        if room.is_err() {
+            return Err(());
+        }
+        if self.sender.try_send((message, weight)).is_err() {
+            self.waiting.fetch_sub(weight, Ordering::SeqCst);
+            return Err(());
+        }
+        Ok(())
+    }
+
+    /// Bytes queued and not yet written.
+    #[cfg(test)]
+    fn queued(&self) -> usize {
+        self.waiting.load(Ordering::SeqCst)
+    }
+}
+
 /// One live connection, as the rest of the node sees it.
 struct Peer {
-    outbound: SyncSender<Message>,
+    outbound: Outbound,
     /// Kept so a shutdown can unblock the thread reading from it.
     stream: TcpStream,
     /// Where the connection came from, which is the only address about this
@@ -1768,6 +1849,18 @@ impl Shared {
             .filter(|peer| peer.host == Some(host))
             .count();
         from_host < MAX_PER_HOST
+    }
+
+    /// Ends one connection, leaving its own threads to clear it up.
+    ///
+    /// The socket is shut rather than the entry taken out of the table, so
+    /// what happens next is what happens to any peer that goes away: the
+    /// reading loop fails, the writer is freed, and the slot is given up once
+    /// both are finished with it.
+    fn hang_up(&self, id: PeerId) {
+        if let Some(peer) = self.peers().get(&id) {
+            let _ = peer.stream.shutdown(Shutdown::Both);
+        }
     }
 
     fn book(&self) -> MutexGuard<'_, AddressBook> {
@@ -3699,12 +3792,7 @@ enum Taken {
 }
 
 /// Hands a message to the join collector if that is what it is.
-fn join_piece(
-    shared: &Arc<Shared>,
-    from: PeerId,
-    message: Message,
-    outbound: &SyncSender<Message>,
-) -> Taken {
+fn join_piece(shared: &Arc<Shared>, from: PeerId, message: Message, outbound: &Outbound) -> Taken {
     let Message::JoinPart {
         what,
         at,
@@ -3739,12 +3827,7 @@ fn join_piece(
 /// rather than to any decision about the peer that sent them, and an answer
 /// nobody asked for is dropped before it costs anything. That last part is
 /// what makes it safe to take these before the chain has been near them.
-fn collected(
-    shared: &Arc<Shared>,
-    from: PeerId,
-    message: Message,
-    outbound: &SyncSender<Message>,
-) -> Taken {
+fn collected(shared: &Arc<Shared>, from: PeerId, message: Message, outbound: &Outbound) -> Taken {
     match join_piece(shared, from, message, outbound) {
         Taken::Other(Message::Proofs(placed)) => {
             shared.take_placed(from, &placed);
@@ -5189,8 +5272,10 @@ fn write_blocks(log: &mut BlockLog, accepted: &Accepted, chain: &ChainStore) -> 
 /// is still worth writing to.
 fn answer_deferred(
     shared: &Arc<Shared>,
+    peer: &mut PeerState,
     reaction: &Reaction,
-    outbound: &SyncSender<Message>,
+    outbound: &Outbound,
+    now: u64,
 ) -> bool {
     if let Some(locator) = reaction.locate.as_ref() {
         let (from, count) = shared.chain_after(locator, MAX_CHAIN);
@@ -5201,9 +5286,27 @@ fn answer_deferred(
     // Gathered in one place so they go out in the order they were asked for: a
     // peer applies them as they arrive, and one whose parent has not landed is
     // dropped.
+    //
+    // Weighed here and nowhere earlier. The ask says how many blocks, and a
+    // block is anything up to what the consensus rules allow, so what this
+    // costs to put on the wire is known once the block is in hand and not
+    // before. `GetBlocks` was priced at a seek a block and nothing for the
+    // megabyte that follows it, which sold a gigabyte per ten seconds for
+    // about six and a half kilobytes a second of asking.
     for block in shared.blocks_at(&reaction.fetch) {
-        if outbound.try_send(Message::Block(Box::new(block))).is_err() {
-            return false;
+        let answer = Message::Block(Box::new(block));
+        let weight = answer.weight();
+        // What it could not afford is not sent, and the peer asks again
+        // against a fresh window. A short batch is what it already gets for
+        // heights this node no longer holds, so nothing downstream is new.
+        if !peer.afford_serving(weight, now) {
+            break;
+        }
+        // And a queue this full is a peer that has stopped reading rather than
+        // one that is behind, so the rest of the batch is not built for it
+        // either. The connection is left to the writer's own deadline.
+        if outbound.hand_over(answer, weight).is_err() {
+            break;
         }
     }
     // A piece of a join answer, built now that nothing is held. A node that
@@ -6066,25 +6169,32 @@ fn dial_from_book(shared: &Arc<Shared>, now: u64) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Registration {
     Recorded,
-    /// Another connection to the same peer already exists.
-    Redundant,
+    /// Another connection to the same peer already exists, and this is it.
+    Redundant(PeerId),
 }
 
-/// Notes where a peer says it listens, and reports whether this is the second
-/// connection to it.
+/// Notes where a peer says it listens, and names the other connection to it
+/// when there is one.
+///
+/// Which connection that is has to come back with the answer. Only one of a
+/// pair ever reaches this, because a connection asks once and then sets
+/// `announced`: the first of the two to get here is told it is the only one,
+/// and the second is the only one that ever hears about the pair. So the
+/// second is the only one that can end it, and it has to be able to end
+/// either half. It used to be handed nothing but a yes, so all it could do was
+/// leave, and when the rule said the other one should leave instead, neither
+/// did: two connections between the same pair of nodes, both greeted, both
+/// counted and both held for as long as they stayed open.
 fn register(shared: &Arc<Shared>, id: PeerId, address: SocketAddr) -> Registration {
     let mut peers = shared.peers();
     let existing = peers
         .iter()
-        .any(|(other, entry)| *other != id && entry.advertised == Some(address));
+        .find(|(other, entry)| **other != id && entry.advertised == Some(address))
+        .map(|(other, _)| *other);
     if let Some(entry) = peers.get_mut(&id) {
         entry.advertised = Some(address);
     }
-    if existing {
-        Registration::Redundant
-    } else {
-        Registration::Recorded
-    }
+    existing.map_or(Registration::Recorded, Registration::Redundant)
 }
 
 /// Which of two connections between the same pair of nodes is dropped.
@@ -6143,7 +6253,8 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
     let _ = writing_end.set_write_timeout(Some(WRITE_TIMEOUT));
 
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
-    let (outbound, inbox) = mpsc::sync_channel::<Message>(OUTBOUND_QUEUE);
+    let (sender, inbox) = mpsc::sync_channel::<(Message, usize)>(OUTBOUND_QUEUE);
+    let outbound = Outbound::new(sender);
     shared.peers().insert(
         id,
         Peer {
@@ -6159,10 +6270,16 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
     );
 
     let network = shared.network();
+    let written = Arc::clone(&outbound.waiting);
     let writer = thread::spawn(move || {
         let mut writing_end = writing_end;
-        while let Ok(message) = inbox.recv() {
-            if write_message(&mut writing_end, network, &message).is_err() {
+        while let Ok((message, weight)) = inbox.recv() {
+            let outcome = write_message(&mut writing_end, network, &message);
+            // Off the count whether or not it reached the far end. What is
+            // being counted is what this node is holding, and once the write
+            // has returned it is holding nothing.
+            written.fetch_sub(weight, Ordering::SeqCst);
+            if outcome.is_err() {
                 break;
             }
         }
@@ -6201,8 +6318,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
         // same host could take another, and up to a queue's worth of answers
         // and two threads went on living for a peer already given up on.
         if let Some(peer) = reading.peers().get_mut(&id) {
-            let (nowhere, _) = mpsc::sync_channel(1);
-            peer.outbound = nowhere;
+            peer.outbound = Outbound::nowhere();
         }
         let _ = writer.join();
         reading.peers().remove(&id);
@@ -6313,7 +6429,7 @@ fn read_loop(
     shared: &Arc<Shared>,
     mut stream: TcpStream,
     id: PeerId,
-    outbound: &SyncSender<Message>,
+    outbound: &Outbound,
     remote: Option<IpAddr>,
     dialled: Option<SocketAddr>,
 ) {
@@ -6405,10 +6521,15 @@ fn read_loop(
                 announced = true;
                 // It spoke, so whatever was held against it no longer holds.
                 shared.book().answered(&address, last_heard);
-                if register(shared, id, address) == Registration::Redundant
-                    && loses_the_tie(shared.address, address, initiator)
-                {
-                    break;
+                if let Registration::Redundant(other) = register(shared, id, address) {
+                    if loses_the_tie(shared.address, address, initiator) {
+                        break;
+                    }
+                    // This is the half to keep, so the other half goes. Both
+                    // ends work the rule out the same way, so they end the
+                    // same connection; what neither end could do before was
+                    // end it from this side of the pair.
+                    shared.hang_up(other);
                 }
             }
         }
@@ -6422,7 +6543,7 @@ fn read_loop(
         }
         // What the sync layer named rather than answered, because answering
         // either reaches a disk and it runs with the chain held.
-        if !answer_deferred(shared, &reaction, outbound) {
+        if !answer_deferred(shared, &mut peer, &reaction, outbound, last_heard) {
             break 'reading;
         }
         // Headers from before this node arrived, taken now that the chain has
@@ -7294,5 +7415,83 @@ mod trimming {
     #[test]
     fn nothing_held_is_not_a_division_by_nothing() {
         assert_eq!(cut_for(0, 0, 0, 1_000), 0);
+    }
+}
+
+/// What one peer can have waiting for it.
+///
+/// Counted rather than timed, because what the ceiling does is decide how many
+/// messages of a given size go into a queue, and that is arithmetic. Timing it
+/// would measure a socket buffer, which is a fact about the machine.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod what_a_queue_holds {
+    use super::{mpsc, Message, Outbound, OUTBOUND_QUEUE, OUTBOUND_QUEUE_BYTES};
+    use crate::message::Joining;
+    use cairn_primitives::Hash32;
+
+    /// A join part, which is the largest thing this node builds for a peer
+    /// and behaves on this queue exactly as a block does.
+    fn weighing(bytes: usize) -> Message {
+        Message::JoinPart {
+            what: Joining::Ledger,
+            at: Hash32::ZERO,
+            part: 0,
+            parts: 1,
+            bytes: vec![0u8; bytes],
+        }
+    }
+
+    /// Messages accepted before the queue refuses, and the bytes they came to.
+    fn accepted(each: usize) -> (usize, usize) {
+        let (sender, inbox) = mpsc::sync_channel(OUTBOUND_QUEUE);
+        let outbound = Outbound::new(sender);
+        let mut taken = 0usize;
+        while outbound.try_send(weighing(each)).is_ok() {
+            taken = taken.saturating_add(1);
+        }
+        let held = outbound.queued();
+        drop(inbox);
+        (taken, held)
+    }
+
+    /// The bound that was there counts messages, and a message on this wire is
+    /// nine bytes or half a megabyte.
+    #[test]
+    fn a_queue_is_bounded_in_bytes_and_not_only_in_messages() {
+        let block = 128 * 1024;
+        let (blocks, held) = accepted(block);
+        assert!(
+            held <= OUTBOUND_QUEUE_BYTES,
+            "{held} bytes queued against a ceiling of {OUTBOUND_QUEUE_BYTES}"
+        );
+        assert!(
+            blocks < OUTBOUND_QUEUE,
+            "{blocks} messages of {block} bytes went into one peer's queue, and the \
+             only bound was {OUTBOUND_QUEUE} messages: two `GetBlocks` for \
+             MAX_REQUESTED heights each put {OUTBOUND_QUEUE} blocks in it, which is \
+             {} bytes on one connection",
+            OUTBOUND_QUEUE.saturating_mul(block),
+        );
+
+        // And the message bound still does the work it was there for, since
+        // ten thousand nine-byte answers are not a memory problem.
+        let (small, _) = accepted(0);
+        assert_eq!(
+            small, OUTBOUND_QUEUE,
+            "small messages are still bounded by the count and nothing else"
+        );
+    }
+
+    /// A message larger than the whole ceiling would never go out at all, so
+    /// the ceiling has to be above the largest thing this node sends. Held at
+    /// the point the numbers are written rather than at the point a test runs.
+    const _: () = assert!(crate::message::JOIN_PART_BYTES < OUTBOUND_QUEUE_BYTES);
+    const _: () = assert!(crate::wire::MAX_FRAME_BYTES < OUTBOUND_QUEUE_BYTES);
+
+    #[test]
+    fn the_largest_message_still_fits() {
+        let (parts, _) = accepted(crate::message::JOIN_PART_BYTES);
+        assert!(parts >= 1, "one join part goes into an empty queue");
     }
 }
