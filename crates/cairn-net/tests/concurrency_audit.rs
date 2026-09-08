@@ -508,43 +508,63 @@ fn a_part_that_is_not_in_the_answer_does_not_rebuild_it() {
     let build = what_it_cost(&mut peer, Joining::Weight, 0, 1);
 
     // A join answer is charged an eighth of an allowance window, so the asking
-    // is paced to stay inside one rather than being answered with silence.
+    // is paced to stay inside one.
     let mut real = Vec::new();
-    let mut absent = Vec::new();
     for round in 0..4u64 {
         thread::sleep(Duration::from_millis(1_600));
         real.push(what_it_cost(&mut peer, Joining::Weight, 0, 100 + round));
-        thread::sleep(Duration::from_millis(1_600));
-        // Inside what the wire allows and far past the end of any answer.
-        absent.push(what_it_cost(
-            &mut peer,
-            Joining::Weight,
-            50_000,
-            200 + round,
-        ));
     }
-    // The cheapest of each rather than the middle one. What is being measured
-    // is a cost, and every sample of a cost is that cost plus whatever the
-    // machine was doing at the time: the smallest is the one with the least of
-    // the machine in it, and a spike in a sample of the absent ask is the one
-    // thing that could make this read as a rebuild.
+    // The cheapest rather than the middle one. Every sample of a cost is that
+    // cost plus whatever the machine was doing at the time, and the smallest is
+    // the one with the least of the machine in it.
     let real = cheapest(real);
-    let absent = cheapest(absent);
+
+    // Four asks for a part that is not in the answer, sent without waiting for
+    // anything, and then one that is. What is timed is the last of them.
+    //
+    // The absent asks cannot be timed themselves, and that is the whole repair.
+    // `what_it_cost` marks the end of an answer with a Ping, and for a part
+    // that is not there the node writes nothing but the Pong: a lone small
+    // packet, which TCP holds back for its own reasons. Measured on three
+    // Linux runners across four commits, that came to 40.16, 40.20, 40.21 and
+    // 40.38 milliseconds, four readings inside half a percent of each other,
+    // which is a protocol timer and not a cost. This test read that as the
+    // price of a rebuild.
+    //
+    // A real ask carries a large answer, so nothing holds it back, and it
+    // queues behind whatever the four before it made the node do. If each
+    // absent ask rebuilt the answer, this one waits out four builds. If they
+    // are answered out of what the node is already holding, it costs what a
+    // hand-over costs.
+    thread::sleep(Duration::from_millis(1_600));
+    for round in 0..4u64 {
+        write_message(
+            &mut peer,
+            params().network,
+            &Message::GetJoin {
+                what: Joining::Weight,
+                part: 50_000 + u32::try_from(round).unwrap_or(0),
+            },
+        )
+        .unwrap();
+    }
+    let behind_them = what_it_cost(&mut peer, Joining::Weight, 0, 300);
 
     node.shutdown();
     let _ = std::fs::remove_dir_all(&directory);
 
     println!(
         "chain of 400: building the answer cost {build:?}, handing over a part of it \
-         {real:?}, asking for a part that is not in it {absent:?}"
+         {real:?}, and handing one over behind four asks for parts that are not in it \
+         {behind_them:?}"
     );
     assert!(
-        absent * 4 < build,
-        "a part that is not in the answer cost {absent:?}, where building the answer \
-         from nothing cost {build:?} and handing over a part that is in it cost \
-         {real:?}. An absent part is answered with silence out of what this node is \
-         already holding, so anything near the price of a build is the build being \
-         run again."
+        behind_them * 4 < build,
+        "a hand-over placed behind four asks for parts that are not in the answer cost \
+         {behind_them:?}, where building the answer from nothing costs {build:?} and a \
+         hand-over on its own costs {real:?}. Four builds would be behind this one, so \
+         an absent part is being answered by running the build again rather than out of \
+         what the node is already holding."
     );
 }
 
