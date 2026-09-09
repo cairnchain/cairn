@@ -353,6 +353,14 @@ const UNJUDGED_SENDERS: usize = 64;
 /// weighed at all from about eleven days after the loss until months or years
 /// after it. Every archivist then fails identically, honestly, and the node
 /// falls back to reading the chain. What was missing is anybody being told.
+///
+/// Falls back to reading it from whoever kept the bodies, which is not
+/// everybody. A node keeps every header and [`KEEP_BLOCK_BYTES`] of blocks,
+/// and drops what is below the ledger it wrote; a header does not rebuild a
+/// deleted body. So the two ways in do not fail together and do not recover
+/// together, and on the day this fires a newcomer gets on the chain only if
+/// some reachable peer chose to keep more than it had to. See
+/// `tests/audit_reading_the_chain_needs_bodies.rs`.
 const UNWEIGHED_SHOWINGS: u64 = 3;
 
 /// Addresses those showings have to have come from.
@@ -2369,7 +2377,29 @@ impl Shared {
             })
         });
 
-        let from = agreed.map_or(0, |height| height.saturating_add(1));
+        // Where this node can start, for a peer it agrees with about nothing.
+        // That is a newcomer, whose locator is empty, and it is the one asker
+        // that has to be told the truth here: it has no chain of its own to
+        // fall back on and no other way to learn what this node can supply.
+        //
+        // Zero was the answer, worked out from the height the branch reaches
+        // and never from the heights this node can still produce a body for. A
+        // node that has written its ledger down holds no body below it, which
+        // is every node past its disk budget and the whole reason a node's
+        // disk does not grow with the chain. So it pointed a newcomer at the
+        // first block, was asked for it, and answered with nothing, which from
+        // the far end is indistinguishable from a peer that stopped talking:
+        // the newcomer waited out its patience, asked again, was pointed at
+        // the first block again, and did that for the rest of its life.
+        //
+        // The same mistake as the one the walk above was fixed for, one step
+        // further on: this node's disk stated as a fact about somebody else's
+        // chain. What it can hand over starts where its log does.
+        let floor = {
+            let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+            log.as_ref().map_or(0, |store| store.blocks.first_height())
+        };
+        let from = agreed.map_or(floor, |height| height.saturating_add(1));
         (from, reaches.saturating_sub(from).min(max))
     }
 
@@ -3410,10 +3440,19 @@ impl Node {
     /// cannot be weighed by this build.
     ///
     /// `None` until several showings have failed in the same words, from more
-    /// than one peer. A node with no chain still gets one either way: it reads
-    /// it block by block, which is slower and no less safe. What this answers
-    /// is the question an operator watching that had no way to ask, which is
-    /// why it is taking hours.
+    /// than one peer. What this answers is the question an operator watching
+    /// that had no way to ask, which is why it is taking hours.
+    ///
+    /// It used to say here that a node with no chain still gets one either
+    /// way, by reading it block by block, which is slower and no less safe.
+    /// Slower and no less safe is true; either way is not. Reading needs
+    /// bodies, and a node keeps [`KEEP_BLOCK_BYTES`] of them and drops what is
+    /// below the ledger it wrote, so the beginning of the chain is held only
+    /// by whoever chose to keep it. A newcomer that cannot weigh the chain
+    /// and cannot reach such a peer does not get on it at all. Nothing here
+    /// says that yet, which is the next thing this report needs: see
+    /// `tests/audit_reading_the_chain_needs_bodies.rs` for what a peer at its
+    /// default budget can and cannot serve.
     ///
     /// And `None` again the moment a chain arrives, however it arrived.
     /// Showings are only ever weighed while a node has nothing, so the count

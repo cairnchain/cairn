@@ -821,3 +821,40 @@ fn spelled(value: u64) -> &'static str {
         other => panic!("the paper has no word for {other}, so the figure moved"),
     }
 }
+
+/// The depth a newcomer can be put at, against the depth this node will undo.
+///
+/// The paper says a forger at 40% cannot place a newcomer further than about
+/// 1 240 blocks from the real chain, and `MAX_REORG_DEPTH` is 1 024. The
+/// paragraph used to conclude that the first was shallower than the second,
+/// which its own two figures refute, and nothing held them against each other.
+///
+/// So this holds them. It asserts the gap as it stands rather than the property
+/// anyone would want, because the property does not hold: a newcomer at the far
+/// end of the guarantee needs a switch deeper than the deepest this node makes.
+/// If somebody closes the gap, by resolving the draw finer or by raising the
+/// limit, this fails and the paragraph has to be rewritten with it. That is the
+/// point: the two numbers cannot drift apart again in silence, in either
+/// direction.
+#[test]
+fn the_depth_a_newcomer_can_be_put_at_is_read_against_the_depth_this_node_undoes() {
+    let stated: u64 = 1_240;
+    assert!(
+        PAPER.contains("1 240 blocks"),
+        "the paper no longer says 1 240 blocks; whatever it says now has to be \
+         read against MAX_REORG_DEPTH here"
+    );
+    let undone = u64::try_from(cairn_chain::MAX_REORG_DEPTH).unwrap_or(u64::MAX);
+    assert_eq!(undone, 1_024, "MAX_REORG_DEPTH moved");
+    assert!(
+        stated > undone,
+        "the guarantee is now inside what this node will undo, which is the \
+         property everyone wants and which the paper's paragraph says does not \
+         hold. Rewrite that paragraph."
+    );
+    assert!(
+        PAPER.contains("deeper than the node's own reorganisation limit"),
+        "the paper has to say that the depth a newcomer can be put at is deeper \
+         than what this node will undo, because it is"
+    );
+}

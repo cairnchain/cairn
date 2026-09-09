@@ -212,8 +212,9 @@ fn at_full_size() {
 /// What is printed below is therefore the number that model gives and not the
 /// bound. It is kept because seeing the two side by side is the point: the
 /// wrong model is the optimistic one, which is how it survived. The real
-/// figure comes from `--example adversarial_placement`, which builds forgeries
-/// and measures them.
+/// figure comes from `--example adversarial_placement`, which works it out
+/// from the real draw and then holds that model to the shipped check against
+/// forgeries it builds and presents.
 fn from_the_threat() {
     println!("\n\nWhat a forger has to lie about, given what it holds:\n");
     println!(
@@ -248,8 +249,9 @@ fn from_the_threat() {
          obituary: the draw is one over the distance from the tip, not uniform,\n\
          and the factor that costs is what once hid a real 2^-5.8 behind a\n\
          claimed 2^-128. The bound is 43% measured, 40% claimed in the papers,\n\
-         and it comes from `--example adversarial_placement`, which builds the\n\
-         forgeries rather than reasoning about them.",
+         and it comes from `--example adversarial_placement`, which measures the\n\
+         real draw and then checks that model against forgeries it builds and\n\
+         puts through the shipped `check_start`.",
         cairn_ledger::sampling::SAMPLES,
         share * 100.0,
     );

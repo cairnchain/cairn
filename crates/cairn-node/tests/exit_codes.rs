@@ -151,3 +151,50 @@ fn the_floor_under_what_a_node_keeps_is_printed_beside_the_figure() {
     assert!(said.contains("every one ever accepted"), "{said}");
     assert!(!said.contains("never below"), "{said}");
 }
+
+/// **What a dropped block costs somebody else is printed where the budget is
+/// chosen.**
+///
+/// There are two ways onto this chain and they need different things. Being
+/// handed a ledger needs headers, which every node keeps for ever. Reading the
+/// chain block by block needs every body, and no node is obliged to keep one:
+/// past the budget they go, and a header does not rebuild a deleted body.
+///
+/// A node at any budget serves newcomers perfectly well while the first way
+/// works, and the first way is refused on a chain whose difficulty has fallen
+/// far enough below what it once ran at. On that day the second way is the
+/// only way in, and whether anybody can take it depends on choices made here,
+/// by people who had no way to know they were making one.
+#[test]
+fn what_dropping_a_block_costs_a_newcomer_is_printed_beside_the_budget() {
+    let directory = scratch("keep-costs");
+    let output = cairnd(&[
+        "--data",
+        &directory.to_string_lossy(),
+        "--keep",
+        "1GB",
+        "--check",
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        said.contains("what is dropped cannot be served"),
+        "the budget says what it costs: {said}"
+    );
+    assert!(
+        said.contains("block by block"),
+        "and who pays it, which is whoever has to read the chain: {said}"
+    );
+
+    // Nothing to say to an operator who keeps everything: they are the ones
+    // the sentence is about.
+    let output = cairnd(&[
+        "--data",
+        &directory.to_string_lossy(),
+        "--keep",
+        "all",
+        "--check",
+    ]);
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert!(!said.contains("what is dropped"), "{said}");
+}

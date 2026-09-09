@@ -684,8 +684,28 @@
       the fork choice does not separate either. So a forger at 40% cannot put a
       newcomer on a branch differing from the real one by more than about
       1 240 blocks (twenty hours). Inside that it can, and so can a slow peer:
-      it is where any node sits for its first blocks after connecting, and it is
-      shallower than the deepest reorganisation this node would accept anyway.
+      it is where any node sits for its first blocks after connecting.
+    </p>
+    <p>
+      That depth is deeper than the node's own reorganisation limit, and the
+      two numbers have to be read together. The draw stops resolving 1 024
+      blocks from the tip and the measured guarantee is about 1 240, while
+      <code>MAX_REORG_DEPTH</code> is 1 024 and the effective undo limit is the
+      lesser of that and the network's burial. So a newcomer put on a branch at
+      the far end of the guarantee cannot be carried back onto the real chain by
+      the ordinary reorganisation rule: the switch it would need is deeper than
+      the deepest one the node will make. An earlier version of this paragraph
+      said the opposite, that the depth was shallower than the deepest
+      reorganisation, which its own two figures refute.
+    </p>
+    <p>
+      This is a gap between a probabilistic bound and a retention policy, not a
+      break in either. Closing it means one of three things: resolving the draw
+      finer so the guarantee falls under the limit, raising the limit above the
+      guarantee and paying for the undo data that costs, or accepting that a
+      newcomer this unlucky has to be started again and saying so where an
+      operator reads it. It is stated here rather than answered because the
+      answer changes a rule, and a rule should not change in a paragraph.
     </p>
     <p>
       The first version of this paper claimed 512 draws and 45.7%, on the

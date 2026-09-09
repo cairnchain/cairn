@@ -17,6 +17,7 @@ pub mod page;
 pub mod serve;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -372,16 +373,9 @@ impl Recovery {
                 self.asked
             ));
         }
-        if self.rebuilt > 0 {
-            return Some(format!(
-                "Spending a note that has been put away needs a small piece of \
-                 evidence that goes stale, and this wallet's own copy had gone \
-                 stale for {notes}. It asked around and got fresh evidence for {} \
-                 of them, checked against the chain it has verified itself. The \
-                 rest is still stuck, and asking again later may find it.",
-                self.rebuilt
-            ));
-        }
+        // Every note in this state, and no way to ask about any of them. Said
+        // before the rest because the rest all end in something to try, and
+        // there is nothing to try here.
         if self.unplaceable >= self.stranded {
             return Some(format!(
                 "This wallet holds {notes} it cannot spend and cannot ask about. \
@@ -392,18 +386,26 @@ impl Recovery {
                  it."
             ));
         }
-        if self.asked == 0 {
-            return Some(format!(
+        let mut said = if self.rebuilt > 0 {
+            format!(
+                "Spending a note that has been put away needs a small piece of \
+                 evidence that goes stale, and this wallet's own copy had gone \
+                 stale for {notes}. It asked around and got fresh evidence for {} \
+                 of them, checked against the chain it has verified itself. The \
+                 rest is still stuck, and asking again later may find it.",
+                self.rebuilt
+            )
+        } else if self.asked == 0 {
+            format!(
                 "This wallet holds {notes} it cannot spend yet. Spending a note \
                  that has been put away needs a small piece of evidence that goes \
                  stale, and this wallet's copy has. Rebuilding one takes a machine \
                  that kept the whole record, and this wallet is not connected to \
                  anything at all. Connect to a peer that was started with \
                  --archive, or start one yourself."
-            ));
-        }
-        if self.archivists == 0 {
-            return Some(format!(
+            )
+        } else if self.archivists == 0 {
+            format!(
                 "This wallet holds {notes} it cannot spend yet. Spending a note \
                  that has been put away needs a small piece of evidence that goes \
                  stale, and this wallet's copy has. Rebuilding one takes a machine \
@@ -411,14 +413,33 @@ impl Recovery {
                  connected to says it did. Connect to a peer started with \
                  --archive, or start one yourself.",
                 self.asked
-            ));
+            )
+        } else {
+            format!(
+                "This wallet holds {notes} it cannot spend yet. It asked {} machines \
+                 that keep the whole record, and none of them could say where these \
+                 notes sit. Asking again later may do better; so may a different peer.",
+                self.archivists
+            )
+        };
+
+        // And the part of it that none of those sentences is true about. Every
+        // one of them ends in something worth doing: wait, connect to an
+        // archivist, try another peer. A note whose place this wallet never
+        // saw is not waiting on any of that, and telling somebody to keep
+        // trying for money nothing here can reach is the one answer that is
+        // worse than saying so.
+        if self.unplaceable > 0 {
+            let _ = write!(
+                said,
+                " {} of them this wallet cannot ask about at all: it was not \
+                 running when they were put away, so it has no way to say which \
+                 note to ask after. Those are yours and on the chain, and nothing \
+                 here reaches them.",
+                self.unplaceable
+            );
         }
-        Some(format!(
-            "This wallet holds {notes} it cannot spend yet. It asked {} machines \
-             that keep the whole record, and none of them could say where these \
-             notes sit. Asking again later may do better; so may a different peer.",
-            self.archivists
-        ))
+        Some(said)
     }
 }
 
@@ -1108,14 +1129,25 @@ impl Wallet {
     /// watching: what the node knows is a map, and comparing it against this
     /// account is a pass over the wallet's own notes. Nothing is written
     /// unless something was learned.
+    ///
+    /// A pass over the node's notes rather than over this account's, which is
+    /// the direction that matters. The node knows notes this account does not:
+    /// a wallet reading a chain from a ledger it was handed starts at the
+    /// anchor, and its node comes out of that handover holding the notes that
+    /// fell in the window below it. Those are taken up here, value and all.
     fn note_where_they_landed(&self) {
         let mine = self.address();
-        let landed: Vec<(NoteId, u64)> = self.node.with_chain(|chain| {
+        // The value travels with the place. A note this account never read the
+        // block for is one the account cannot name without it, and those are
+        // exactly the notes worth writing down: a wallet handed a ledger comes
+        // out of the handover with a window of them that its node knows and
+        // its own reading never saw.
+        let landed: Vec<(NoteId, u64, Amount)> = self.node.with_chain(|chain| {
             chain
                 .state()
                 .watched_notes()
                 .filter(|(_, _, note)| note.owner == mine)
-                .map(|(id, position, _)| (id, position))
+                .map(|(id, position, note)| (id, position, note.value))
                 .collect()
         });
         if landed.is_empty() {
@@ -1126,8 +1158,8 @@ impl Wallet {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut learned = false;
-        for (id, position) in landed {
-            learned |= history.fell_at(id, position);
+        for (id, position, value) in landed {
+            learned |= history.fell_at(id, value, position);
         }
         if learned {
             self.write_history(&history);

@@ -105,17 +105,40 @@ use crate::validation::ConsensusParams;
 ///
 /// **The guarantee is a depth, and it is worth stating as one.** A forger at
 /// 40% cannot put a newcomer on a branch differing from the real one by more
-/// than about 1240 blocks (twenty hours). Inside that, it can, and so can a
-/// slow peer: it is where any node sits for its first blocks after connecting,
-/// and it is shallower than the reorganisation this node would accept anyway.
+/// than about 1240 blocks. Inside that, it can, and so can a slow peer: it is
+/// where any node sits for its first blocks after connecting, and it is
+/// shallower than the reorganisation this node would accept anyway.
+///
+/// Twenty hours at a block a minute, and the depth is the part that is
+/// guaranteed. A branch sitting at the difficulty floor may state the same
+/// depth in half that time, since the retarget stops asking for more once the
+/// gaps pass half the target, so any argument that wants a duration has to say
+/// which of the two chains it is timing.
 ///
 /// Past 50% nothing here helps, and nothing anywhere else does either: a
 /// forger at half the work has nothing left to invent and can mine the chain.
 ///
+/// **The bound is per tip, and a forger may buy more than one.** The seed is
+/// the tip's own identifier, so a forger that dislikes the questions it drew
+/// finds another tip and asks again, and a forger with `g` tips faces `g`
+/// times the chance of getting one through. That is a cost rather than a bar:
+/// a tip costs the tip's own work, so reaching even 2^80 tips is out of the
+/// question on a chain of any real difficulty, and 2^80 against 2^-128 is
+/// still 2^-48. The margin absorbs it, but the figure is a per-tip figure and
+/// saying so is the difference between a bound and a hope. Grinding is
+/// measured against forgeries that were built, in `adversarial_placement`.
+///
 /// `cargo run --release -p cairn-ledger --example sampled_start` prints the
 /// derivation and forges chains against it;
-/// `--example adversarial_placement` is where the numbers above come from, and
-/// it checks its own model against forgeries that were actually built.
+/// `--example adversarial_placement` is where the numbers above come from. It
+/// works the depth out from the real draw, and then holds that model to the
+/// shipped check: it mines chains, builds forgeries on them that a forger
+/// could really present, and for every tip compares what the draw alone says
+/// with what [`check_start`] did, attributing every refusal to the check that
+/// made it. The two have never differed. Until this round that half of it was
+/// worthless, because it left every `previous` link naming a header it had
+/// just replaced and then counted the refusal for the broken link as a
+/// forgery the draw had caught.
 pub const SAMPLES: usize = 4_096;
 
 /// Fewest halvings the draw ever spreads its samples over.
@@ -190,12 +213,23 @@ pub struct SampledStart {
     ///
     /// Held together with the tip's timestamp being near the reader's own
     /// clock, that makes the cheap run cost the one thing a forger cannot
-    /// manufacture. Blocks at the floor have to be spaced at the target or
-    /// the retarget demands more of them, so a thousand of them span most of
-    /// a day, and a reader refuses a tip more than two hours ahead of its own
+    /// manufacture. Blocks at the floor have to be spaced past half the
+    /// target or the retarget demands more of them, so a thousand of them
+    /// span eight hours and a half, and a reader
+    /// refuses a tip more than two hours ahead of its own
     /// clock. Two hours is [`ConsensusParams::max_timestamp_drift`], and this
     /// used to say a day: true, and twelve times looser than the rule it
     /// stands in for, inside the one argument that rule is load-bearing for.
+    ///
+    /// Half the target rather than the target, and the difference is a factor
+    /// of two on the waiting. At the floor the retarget answers
+    /// `floor(target / gap)`, which is already one at 31 seconds a block, so a
+    /// thousand cheap blocks span 8 h 49 m and not the 17 h 04 m this used to
+    /// claim. The argument survives halved: the run still has to state more
+    /// time than the drift lets a reader take in advance, so the forger still
+    /// sits through the difference in real time. The boundary is pinned at
+    /// exactly 30 and 31 seconds in
+    /// `tests/retarget_timewarp.rs::the_floor_holds_from_thirty_one_seconds_and_not_from_thirty`.
     pub tail: Vec<BlockHeader>,
     /// The header the tip was built on, opened in the tip's own history.
     ///

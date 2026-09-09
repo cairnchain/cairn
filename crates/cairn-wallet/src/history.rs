@@ -397,18 +397,33 @@ impl History {
 
     /// Writes down where a note landed, saying whether that was news.
     ///
-    /// Only for a note this account knows about: a place on its own says
-    /// nothing, and one written down for a note that was never this key's
-    /// would be a claim about somebody else's money kept in this key's file.
+    /// A note this account had not read the block for is taken up rather than
+    /// refused, which it used to be. The reasoning for refusing was that a
+    /// place written down for a note that was never this key's would be a
+    /// claim about somebody else's money kept in this key's file, and the
+    /// claim is not this file's to make either way: what calls this is the
+    /// wallet reading its own node's ledger, filtered to notes naming this
+    /// key, and that ledger is the same validated state the balance is read
+    /// out of.
+    ///
+    /// What refusing cost was money. A wallet handed a ledger starts reading
+    /// at the anchor, so the notes that fell in the sixty four blocks before
+    /// it were never in any block this account saw. Its node knows them, from
+    /// the window the handover carried, and stops knowing them the moment it
+    /// starts again from a ledger of its own. With nothing written down here,
+    /// the node was the only record, and on that restart the money left the
+    /// balance without a word: not stranded, which is a thing a wallet can say
+    /// and ask about, but gone.
     ///
     /// The first answer stands. A place is fixed when the note falls and never
     /// moves, so anything later saying different is a second opinion about a
     /// settled fact, and taking it would mean a wallet could be talked out of
     /// where its own money sits.
-    pub fn fell_at(&mut self, id: NoteId, position: u64) -> bool {
-        if !self.held.contains_key(&id) || self.fell.contains_key(&id) {
+    pub fn fell_at(&mut self, id: NoteId, value: Amount, position: u64) -> bool {
+        if self.fell.contains_key(&id) {
             return false;
         }
+        self.held.entry(id).or_insert(value);
         self.fell.insert(id, position);
         true
     }
@@ -925,10 +940,10 @@ mod tests {
         let (id, _) = history.held().next().unwrap();
 
         assert_eq!(history.where_it_fell(&id), None, "it has not fallen yet");
-        assert!(history.fell_at(id, 41));
+        assert!(history.fell_at(id, amount("50"), 41));
         assert_eq!(history.where_it_fell(&id), Some(41));
         assert!(
-            !history.fell_at(id, 9),
+            !history.fell_at(id, amount("50"), 9),
             "a place is fixed when a note falls and never moves, so nothing \
              later gets to say otherwise"
         );
@@ -939,19 +954,33 @@ mod tests {
         assert_eq!(read.encode(), history.encode());
     }
 
+    /// A note the account never read the block for is taken up, place and all.
+    ///
+    /// The account is not the only thing that knows what this key owns. A
+    /// wallet handed a ledger begins reading at the anchor, and its node comes
+    /// out of that handover holding the notes that fell in the window below
+    /// it. Written down here they survive the node starting again from a
+    /// ledger of its own; refused, as they used to be, they were held in one
+    /// place only and the money left the balance on that restart.
     #[test]
-    fn a_place_is_kept_only_for_a_note_this_account_holds() {
+    fn a_note_the_account_never_read_a_block_for_is_taken_up_with_its_place() {
         let mine = key(1);
         let mut history = History::new();
-        let stranger = NoteId::new(Hash32::from_bytes([9; 32]), 0);
-        assert!(!history.fell_at(stranger, 3));
-        assert_eq!(history.where_it_fell(&stranger), None);
+        let unseen = NoteId::new(Hash32::from_bytes([9; 32]), 0);
+        assert!(history.fell_at(unseen, amount("7"), 3));
+        assert_eq!(history.where_it_fell(&unseen), Some(3));
+        assert_eq!(
+            history.held().find(|(id, _)| *id == unseen).map(|(_, v)| v),
+            Some(amount("7")),
+            "and it counts towards what this key holds, which is what makes it \
+             money the wallet can name rather than a number in a map"
+        );
 
         // And a note that is spent takes its place with it, so the account
         // never carries a handle to money it no longer holds.
         history.take(&block(0, mine, Vec::new()), mine);
-        let (id, _) = history.held().next().unwrap();
-        assert!(history.fell_at(id, 5));
+        let (id, _) = history.held().find(|(id, _)| *id != unseen).unwrap();
+        assert!(history.fell_at(id, amount("50"), 5));
         let spend = Transfer::new(vec![Input::hot(id)], vec![Note::new(amount("49"), key(2))]);
         history.take(&block(1, key(2), vec![spend]), mine);
         assert_eq!(history.where_it_fell(&id), None);

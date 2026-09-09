@@ -15,6 +15,8 @@
     clippy::cast_precision_loss
 )]
 
+use cairn_ledger::block::HeaderSummary;
+use cairn_ledger::pow::{next_difficulty, DIFFICULTY_WINDOW, MIN_DIFFICULTY};
 use cairn_ledger::sampling::{draw, SAMPLES, SHALLOWEST};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_primitives::Hash32;
@@ -26,9 +28,32 @@ const PAPER: &str = include_str!("../../../docs/cairn-whitepaper.html");
 const THIRTY_YEARS: u64 = 30 * 365 * 24 * 60;
 
 /// What a forger has to wait out, in the papers' own terms: a thousand blocks
-/// at the difficulty floor, spaced at the target because the retarget demands
-/// more of them otherwise.
+/// at the difficulty floor, spaced as tightly as the retarget still allows.
 const CHEAP_BLOCKS: u64 = 1_000;
+
+/// The tightest spacing that leaves a chain at the difficulty floor, read off
+/// the rule rather than written down.
+///
+/// The prose used to say the target, and that is what the argument below used
+/// to be priced at. At the floor the retarget answers `floor(target / gap)`,
+/// which reaches one as soon as the gap passes half the target, so the true
+/// answer is 31 seconds and the run costs half the chain time the papers
+/// claimed for it. `tests/retarget_timewarp.rs` pins the same boundary against
+/// a chain that was mined rather than a window written by hand.
+fn cheapest_spacing_at_the_floor(target: u64) -> u64 {
+    (1..=target)
+        .find(|gap| {
+            let window: Vec<HeaderSummary> = (0..=DIFFICULTY_WINDOW as u64)
+                .map(|height| HeaderSummary {
+                    height,
+                    timestamp: 1_000_000 + height * gap,
+                    difficulty: MIN_DIFFICULTY,
+                })
+                .collect();
+            next_difficulty(&window, target) == MIN_DIFFICULTY
+        })
+        .unwrap_or(target)
+}
 
 /// The bound the cost argument rests on, and what the prose is allowed to say
 /// about it.
@@ -76,11 +101,31 @@ fn the_drift_the_joining_argument_rests_on_is_two_hours() {
     // against each other rather than each on its own: the cheap blocks have to
     // span a good deal more stated time than the reader will accept in
     // advance, or a forger waits out nothing.
-    let stated = CHEAP_BLOCKS * params.target_block_time;
+    //
+    // Priced at the spacing the rule actually permits. This used to multiply by
+    // the target, which is what the prose said and what no rule demands, and it
+    // put the margin at eight drifts where the rule buys four.
+    let spacing = cheapest_spacing_at_the_floor(params.target_block_time);
+    assert_eq!(spacing, 31, "the floor holds from {spacing} s a block");
     assert!(
-        stated > params.max_timestamp_drift * 8,
+        spacing > params.target_block_time / 2,
+        "half the target exactly would still ask for twice the floor"
+    );
+
+    let stated = CHEAP_BLOCKS * spacing;
+    assert!(
+        stated > params.max_timestamp_drift * 4,
         "a thousand cheap blocks span {stated} seconds against a drift of {}",
         params.max_timestamp_drift
+    );
+    assert!(
+        stated < params.max_timestamp_drift * 5,
+        "the margin is four drifts and a bit, and quoting more of it is how this \
+         went wrong the first time"
+    );
+    assert!(
+        !SAMPLING.contains("have to be spaced at the target"),
+        "the sampling doc is back to pricing the cheap run at the target"
     );
 }
 

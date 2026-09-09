@@ -36,7 +36,9 @@ use cairn_ledger::pow::{
     RECENT_HEADERS,
 };
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
-use cairn_ledger::validation::{assemble_block, connect_block, BlockError, ConsensusParams};
+use cairn_ledger::validation::{
+    assemble_block, connect_block, expected_difficulty, BlockError, ConsensusParams,
+};
 use cairn_ledger::LedgerState;
 
 /// Every live network in this repository targets a minute, except devnet.
@@ -49,6 +51,20 @@ const CEILING: u64 = 6 * TARGET;
 /// The most one retarget may move the difficulty, restated here for the same
 /// reason as the ceiling and checked against the code below.
 const RETARGET_FACTOR: u64 = 4;
+
+/// The cheapest spacing that still holds a chain at the difficulty floor.
+///
+/// Derived rather than chosen, and pinned on both sides in
+/// [`the_floor_holds_from_thirty_one_seconds_and_not_from_thirty`]. At the
+/// floor the retarget comes back as `floor(target / gap)`, so it asks for more
+/// than the floor until the gap passes half the target: `floor(60 / 30)` is
+/// two and `floor(60 / 31)` is one.
+const CHEAPEST_AT_THE_FLOOR: u64 = 31;
+
+/// The deepest reorganisation a node accepts, and the depth a handed over
+/// ledger is buried under. Restated here because this file measures what a
+/// branch that long costs in chain time.
+const REORG_WINDOW: u64 = 1_024;
 
 /// A retarget rule, so that a simulation can be run against more than one.
 type Retarget = fn(&[HeaderSummary], u64) -> u64;
@@ -1418,6 +1434,106 @@ fn a_header_may_not_choose_the_work_it_contributes() {
 // 6. What a floored difficulty did to the reorganisation window.
 // ---------------------------------------------------------------------------
 
+/// Blocks a chain keeps at the difficulty floor when its blocks are `gap`
+/// seconds apart, and what the rule asks for once it stops.
+///
+/// Mined for real rather than written by hand: `assemble_block` reads the
+/// difficulty off the chain and `connect_block` applies every rule to what
+/// comes back. The node's clock is put far ahead so that the drift is not what
+/// ends the run, since the drift is a separate rule and this is about the
+/// retarget.
+fn blocks_held_at_the_floor(gap: u64, most: u64) -> (u64, u64) {
+    let params = ConsensusParams::testnet();
+    let mut state = LedgerState::new();
+    let mut timestamp = 2_000_000_000u64;
+    let mut held = 0u64;
+    while held < most && expected_difficulty(&state, &params) == MIN_DIFFICULTY {
+        let block = mined_at(&state, &params, timestamp);
+        connect_block(&mut state, &block, &params, u64::MAX / 2).unwrap();
+        held += 1;
+        timestamp += gap;
+    }
+    (held, expected_difficulty(&state, &params))
+}
+
+/// What a run of blocks at the floor actually costs in chain time.
+///
+/// A published argument said blocks at the floor have to be spaced at the
+/// target or the retarget demands more of them, and priced the reorganisation
+/// window at 1024 minutes of chain time from that. The rule does not say that.
+/// At the floor the difficulty comes back as `floor(target / gap)` and the
+/// floor is one, so every gap past half the target is free: 31 seconds a block
+/// holds the floor for as long as an attacker cares to keep it, and 1024 of
+/// those span 8 h 49 m rather than 17 h 04 m.
+///
+/// It buys no way down from a real difficulty, where the same 31 seconds asks
+/// for very nearly twice the work a block, and it does not beat honest
+/// cumulative work. What it does is halve a duration that more than one
+/// argument leans on, so the boundary is pinned here on both sides and in two
+/// ways: on the rule alone over a full window, and on a chain mined block by
+/// block.
+#[test]
+fn the_floor_holds_from_thirty_one_seconds_and_not_from_thirty() {
+    // The rule on its own. A window on schedule at difficulty one weighs its
+    // gaps 1 to 90, which sum to 4095, so the answer is exactly
+    // `4095 * target / (4095 * gap)` before the fourfold clamp is applied.
+    for gap in 1..=TARGET {
+        let (window, _, _) = settled(MIN_DIFFICULTY, gap, DIFFICULTY_WINDOW as u64 + 1);
+        let demanded = window.next(TARGET);
+        assert_eq!(
+            demanded,
+            (TARGET / gap).clamp(MIN_DIFFICULTY, RETARGET_FACTOR),
+            "a window at the floor spaced {gap} s apart"
+        );
+        assert_eq!(
+            demanded == MIN_DIFFICULTY,
+            gap >= CHEAPEST_AT_THE_FLOOR,
+            "the floor at {gap} s a block came back as {demanded}"
+        );
+    }
+    assert_eq!(TARGET / 30, 2, "thirty seconds is still worth two");
+    assert_eq!(TARGET / 31, 1, "thirty one seconds is worth the floor");
+
+    // And on a chain mined block by block under the real rules. Thirty seconds
+    // leaves the floor at the second block, because two headers make one gap
+    // and one gap of half the target already asks for twice the difficulty.
+    let (thirty, asked) = blocks_held_at_the_floor(TARGET / 2, REORG_WINDOW);
+    assert_eq!(thirty, 2, "the floor held for {thirty} blocks at 30 s");
+    assert_eq!(asked, 2, "and the rule then asked for {asked}");
+
+    let (thirty_one, asked) = blocks_held_at_the_floor(CHEAPEST_AT_THE_FLOOR, REORG_WINDOW);
+    assert_eq!(
+        thirty_one, REORG_WINDOW,
+        "the floor held for {thirty_one} blocks at 31 s"
+    );
+    assert_eq!(asked, MIN_DIFFICULTY, "and stayed there");
+
+    // The duration the arguments quote, both ways round.
+    let cheapest = REORG_WINDOW * CHEAPEST_AT_THE_FLOOR;
+    let on_schedule = REORG_WINDOW * TARGET;
+    assert_eq!(cheapest, 31_744);
+    assert_eq!(on_schedule, 61_440);
+    println!(
+        "\n  a reorganisation window at the floor costs {} h {:02} m of chain time,\n  \
+         not the {} h {:02} m a spacing at the target would have made it\n",
+        cheapest / 3_600,
+        cheapest % 3_600 / 60,
+        on_schedule / 3_600,
+        on_schedule % 3_600 / 60,
+    );
+
+    // Off a chain that is not at the floor the same spacing is not free: it
+    // asks for very nearly the target over the gap, which is why this halves a
+    // duration rather than opening a door.
+    let high = 1u64 << 20;
+    let (window, _, _) = settled(high, CHEAPEST_AT_THE_FLOOR, DIFFICULTY_WINDOW as u64 + 1);
+    let demanded = window.next(TARGET);
+    assert!(
+        demanded > high * 19 / 10,
+        "31 s a block off 2^20 asked for {demanded}"
+    );
+}
+
 /// A chain sitting at the floor, built for real and checked block by block by
 /// the rules themselves.
 ///
@@ -1433,12 +1549,21 @@ fn a_header_may_not_choose_the_work_it_contributes() {
 /// once.
 ///
 /// Time is what it costs now. Holding a chain at the floor takes a timeline
-/// that really advances a target a block, because the retarget measures what
-/// the timestamps say and no longer forgets the half of it that runs backwards.
-/// A thousand and twenty four of those is seventeen hours of chain time, and a
-/// node refuses anything more than two hours ahead of its own clock, so the
-/// branch cannot arrive at once: the attacker has to sit through it in real
-/// time while the honest chain keeps working.
+/// that really advances, because the retarget measures what the timestamps say
+/// and no longer forgets the half of it that runs backwards.
+///
+/// How much it has to advance is [`CHEAPEST_AT_THE_FLOOR`] and not the target,
+/// which is where this used to be wrong. It said the branch had to advance a
+/// target a block and priced the window at seventeen hours. At the floor the
+/// rule asks for `floor(target / gap)`, which is already the floor at 31
+/// seconds, so the branch below is built at 31 and spans 8 h 49 m. That is the
+/// duration the argument is entitled to, and it is half what was claimed.
+///
+/// The conclusion survives the halving, and it is the same conclusion: a node
+/// refuses anything more than two hours ahead of its own clock, so the branch
+/// still cannot arrive at once and the attacker still sits through the
+/// difference in real time while the honest chain keeps working. What changed
+/// is that the difference is six hours and three quarters rather than fifteen.
 #[test]
 fn the_reorg_window_can_no_longer_be_had_for_a_thousand_hashes() {
     let params = ConsensusParams::testnet();
@@ -1483,10 +1608,10 @@ fn the_reorg_window_can_no_longer_be_had_for_a_thousand_hashes() {
     );
     assert!(demanded > 1_000_000, "it only reached {demanded}");
 
-    // And a branch that does keep the floor, built for real. Its timestamps
-    // have to advance a target a block, so it runs out of drift long before it
-    // runs out of blocks: `connect_block` refuses the rest until the clock
-    // catches up.
+    // And a branch that does keep the floor, built for real and built at the
+    // cheapest spacing that keeps it rather than at the target. It still runs
+    // out of drift long before it runs out of blocks: `connect_block` refuses
+    // the rest until the clock catches up.
     let mut state = LedgerState::archiving();
     let mut timestamp = opened;
     let mut accepted = 0usize;
@@ -1497,12 +1622,12 @@ fn the_reorg_window_can_no_longer_be_had_for_a_thousand_hashes() {
         let block = mined_at(&state, &params, timestamp);
         assert_eq!(
             block.header.difficulty, MIN_DIFFICULTY,
-            "a chain on schedule at the floor stays there"
+            "a chain spaced past half the target stays at the floor"
         );
         match connect_block(&mut state, &block, &params, fork_clock) {
             Ok(_) => {
                 accepted += 1;
-                timestamp += TARGET;
+                timestamp += CHEAPEST_AT_THE_FLOOR;
             }
             Err(error) => break Some(error),
         }
@@ -1513,18 +1638,21 @@ fn the_reorg_window_can_no_longer_be_had_for_a_thousand_hashes() {
         matches!(refusal, BlockError::TimestampTooFarAhead { .. }),
         "{refusal:?}"
     );
-    let span = window as u64 * TARGET;
+    let span = window as u64 * CHEAPEST_AT_THE_FLOOR;
     println!(
-        "  a branch that keeps the floor honestly spans {span} s, of which a node at\n  \
+        "  the cheapest branch that keeps the floor spans {span} s, of which a node at\n  \
          the fork takes {accepted} blocks and refuses the rest until its own clock\n  \
          catches up: {:.1} hours of waiting, not twenty minutes\n",
         (span - params.max_timestamp_drift) as f64 / 3_600.0
     );
     assert!(
-        accepted <= (params.max_timestamp_drift / TARGET + 1) as usize,
+        accepted <= (params.max_timestamp_drift / CHEAPEST_AT_THE_FLOOR + 1) as usize,
         "it took {accepted} blocks at once"
     );
-    assert!(span > params.max_timestamp_drift * 8);
+    // Four times the drift and not eight, which is what the spacing this used
+    // to assume was quietly worth.
+    assert!(span > params.max_timestamp_drift * 4);
+    assert!(span < params.max_timestamp_drift * 5);
 }
 
 /// A brand new network, from its opening difficulty down, driven by a miner

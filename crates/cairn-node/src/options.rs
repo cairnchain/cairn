@@ -432,6 +432,20 @@ pub(crate) fn describe(options: &Options) -> String {
             options.params.burial,
             size(floor_under_keep(&options.params)),
         );
+        // And what dropping them costs somebody else, which is the half an
+        // operator has no other way to learn. There are two ways onto this
+        // chain: being handed a ledger, which needs headers and no body at
+        // all, and reading it block by block, which needs every body. The
+        // first is refused on a chain whose difficulty has fallen far enough,
+        // and on that day the second is the only way in and it runs on blocks
+        // that nobody is obliged to have kept. A node at any budget serves
+        // newcomers perfectly well until then.
+        let _ = writeln!(
+            text,
+            "             what is dropped cannot be served: a newcomer that \
+             cannot be handed a ledger reads the chain block by block, from \
+             whoever kept the blocks"
+        );
     }
     match options.mine_to {
         Some(key) => {
