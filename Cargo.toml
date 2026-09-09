@@ -5,6 +5,7 @@ members = [
     "crates/cairn-chain",
     "crates/cairn-primitives",
     "crates/cairn-crypto",
+    "crates/cairn-docs",
     "crates/cairn-explorer",
     "crates/cairn-http",
     "crates/cairn-ledger",
@@ -28,6 +29,7 @@ repository = "https://github.com/cairnchain/cairn"
 cairn-accumulator = { path = "crates/cairn-accumulator" }
 cairn-chain = { path = "crates/cairn-chain" }
 cairn-crypto = { path = "crates/cairn-crypto" }
+cairn-docs = { path = "crates/cairn-docs" }
 cairn-explorer = { path = "crates/cairn-explorer" }
 cairn-http = { path = "crates/cairn-http" }
 cairn-ledger = { path = "crates/cairn-ledger" }
@@ -41,6 +43,10 @@ getrandom = "0.3"
 thiserror = "2"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 hex = "0.4"
+# The documents, and nothing anybody downloads: `cairn-docs` renders `docs/`
+# and no program depends on it. Default features off, because they bring the
+# HTML writer and a command line parser, and this crate writes its own HTML.
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

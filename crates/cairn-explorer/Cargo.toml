@@ -28,3 +28,8 @@ cairn-accumulator.workspace = true
 # For `tests/answers.rs`, which damages a header log on purpose to put a node
 # in the one state where its disk grows with the chain.
 cairn-store.workspace = true
+# For `tests/rendered_documents.rs`, which renders every document and holds it
+# against the HTML committed beside it. A dev-dependency and nothing more: the
+# papers are compiled into this binary as files, and the thing that makes them
+# is not part of it.
+cairn-docs.workspace = true

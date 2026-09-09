@@ -1,6 +1,6 @@
 <title>The Cairn Protocol</title>
 <link rel="stylesheet" href="cairn-whitepaper.css">
-<div class="paper">
+<div class="paper" lang="en">
 
 <header class="title">
   <h1>Cairn: a chain whose validation state does not grow</h1>
@@ -26,6 +26,7 @@
     rarely stated plainly: the more a chain succeeds, the fewer people can
     afford to verify it, and verification drifts toward the parties that can.
   </p>
+
   <p>
     Cairn caps that cost by rule. A bounded hot set of 131 072 notes is held in
     full by every node, measured at 516 bytes each, about 68 MB, and that
@@ -35,6 +36,7 @@
     spender and checked against roots the node already holds. Nothing is ever
     destroyed, expired, or charged rent.
   </p>
+
   <p>
     The design accepts a proven cost rather than claiming to escape it. Christ
     and Bonneau show that a succinct global state forces a near-linear rate of
@@ -56,6 +58,7 @@
       security of the system is therefore a function of how many people can
       afford to be one of those parties.
     </p>
+
     <p>
       That number falls as the chain succeeds. A full node holds the set of
       unspent outputs and validates every rule against it, and that set grows
@@ -65,6 +68,7 @@
       which its own roadmap places several years out and dependent on two other
       unfinished efforts <sup><a href="#r3">[3]</a></sup>.
     </p>
+
     <p>
       The usual answer is that hardware gets cheaper. Perhaps, but the
       direction is still wrong: the ratio between what a chain demands and what
@@ -72,6 +76,7 @@
       resolve this. They change who is trusted rather than removing the need to
       trust.
     </p>
+
     <p class="claim">
       Cairn treats the growth of validation state as the design problem, not as
       an operational detail to be managed later.
@@ -89,6 +94,7 @@
       among that transaction's outputs. It is written once and consumed once.
       This is the unspent output model, as in Bitcoin.
     </p>
+
     <p>
       The choice is not stylistic. An account balance must be read and written,
       so the account has to be held. A note is created once and destroyed once,
@@ -96,6 +102,7 @@
       itself, and can forget it entirely while remaining certain about what
       remains. Everything that follows depends on this property.
     </p>
+
     <p>
       Ordering over note identifiers is defined, so the note set has exactly
       one canonical enumeration, which the state commitment depends on.
@@ -104,6 +111,7 @@
       proof can be replaced with a fresh one without changing any identifier
       that anything else has committed to.
     </p>
+
     <p>
       Hashing is BLAKE3 with a distinct derived key per domain, so a value
       hashed as a note leaf can never be read as a header leaf or a Merkle
@@ -159,6 +167,7 @@
     </figure>
 
     <h3><span class="sub">3.1</span>The hot set</h3>
+
     <p>
       A sparse Merkle tree, persistent through structural sharing so that a
       reorganisation restores the previous root without a rebuild. Eviction is
@@ -169,11 +178,13 @@
     </p>
 
     <h3><span class="sub">3.2</span>The cold set</h3>
+
     <p>
       An append-only forest of perfect binary trees, held as one root per
       possible height. This is the structure introduced by Utreexo
       <sup><a href="#r4">[4]</a></sup>, and Cairn does not claim it.
     </p>
+
     <p>
       The property the whole design turns on is that adding a leaf requires
       only the roots. A node holding none of the set can still extend the
@@ -182,6 +193,7 @@
       swallows are its own siblings in order, and the inclusion proof falls out
       of the addition itself at no extra cost.
     </p>
+
     <p>
       Removal is batched. Every proof in a block is verified against the
       pre-block root before anything is applied, then applied in order with the
@@ -190,6 +202,7 @@
     </p>
 
     <h3><span class="sub">3.3</span>Where Cairn differs from prior accumulator work</h3>
+
     <p>
       Utreexo is a node-level optimisation. Any operator may adopt it
       independently, the protocol is unchanged, and the underlying set remains
@@ -199,6 +212,7 @@
       require a group of unknown order, meaning either a trusted setup or class
       groups, and likewise leave the set unbounded.
     </p>
+
     <p>
       Mina takes the opposite route to the same goal, compressing the entire
       chain to about 22 kB with recursive zero-knowledge proofs
@@ -209,6 +223,7 @@
       the state is bounded rather than eliminated, and everything used to do it
       is old and widely understood.
     </p>
+
     <p>
       Cairn's contribution is not the accumulator. It is the pairing of a
       consensus-enforced cap on the held tier with an accumulator for the
@@ -229,6 +244,7 @@
     </p>
 
     <h3><span class="sub">4.1</span>A proof is worth what it is worth now</h3>
+
     <p>
       A proof is checked against the cold set as it stands, and against nothing
       else. Earlier versions accepted one matching any of the last thirty two
@@ -240,6 +256,7 @@
       to be spent again. Every node computed the same wrong state, so the
       network agreed and nothing forked.
     </p>
+
     <p>
       Completing the rule instead of removing it would mean carrying, as
       committed state, whatever changed between an old root and the current
@@ -252,6 +269,7 @@
     </p>
 
     <h3><span class="sub">4.2</span>The grace window</h3>
+
     <p>
       A note that has just fallen remains spendable with no proof at all for
       <code>GRACE_BLOCKS = 64</code> blocks, bounded also at
@@ -260,6 +278,7 @@
       spender. Without it the boundary between tiers would be a cliff that a
       payer falls off for no reason of their own.
     </p>
+
     <p>
       Utreexo has a comparable observation, that outputs created and spent
       within one block need not enter the accumulator at all
@@ -270,6 +289,7 @@
     </p>
 
     <h3><span class="sub">4.3</span>Archivists</h3>
+
     <p>
       A wallet keeps its own proofs current from what every block already
       carries, and asks nobody. A wallet that has been offline long enough, or
@@ -280,10 +300,12 @@
       no one. What an archivist offers is recovery for a wallet that lost
       theirs.
     </p>
+
     <p>
       They were in the design from the first day, for an intuition. Section 8
       explains why they turn out to be structural rather than convenient.
     </p>
+
     <p>
       What an archivist costs is a number that had never been written down,
       and it is worth writing down beside the claim it is the exception to.
@@ -293,6 +315,7 @@
       has ever fallen</strong>. That is the size of the exception, and it is
       the price of being able to rebuild a proof for somebody who lost theirs.
     </p>
+
     <p>
       Both of those numbers were first published wrong, and how is worth more
       than the correction. They were read with <code>ps</code>, which reports
@@ -306,6 +329,7 @@
       number is worth exactly what the instrument is worth, and nobody had
       asked what this one measured.
     </p>
+
     <p>
       An audit found that the role had no protocol at all: nothing in the
       message set let a wallet ask an archivist for anything, and the error a
@@ -316,6 +340,7 @@
       against the root its own node worked out from blocks it checked itself,
       so the answer can come from a stranger.
     </p>
+
     <p>
       What is left of it is narrower and is still a real hole. A path is asked
       for by where the note sits, and where a note sits is learned as it falls.
@@ -332,8 +357,8 @@
   <div class="num">5</div>
   <div class="body">
     <h2>Consensus</h2>
-
     <h3><span class="sub">5.1</span>Proof of work, and why not stake</h3>
+
     <p>
       The reason is the beginning rather than the steady state. Proof of stake
       requires an initial distribution before it can function, which means
@@ -344,12 +369,14 @@
     </p>
 
     <h3><span class="sub">5.2</span>Difficulty and timestamps</h3>
+
     <p>
       Difficulty retargets every block over a linearly weighted moving average
       of the previous 90, with solve times clamped at six times the target in
       either direction and a maximum factor of four per retarget. A large miner
       arriving or leaving changes the rate without stranding the chain.
     </p>
+
     <p>
       In either direction is the load-bearing part, and it was not there at
       first. A solve time was read as the gap from the parent, floored at one
@@ -367,6 +394,7 @@
       ends however its middle was stamped. Simulated against every share up to
       a half, the fastest a liar can now make the chain run is the target.
     </p>
+
     <p>
       Timestamps are validated against the median of the previous 11 blocks
       rather than against the parent. A miner writes its own timestamp but holds
@@ -377,6 +405,7 @@
     </p>
 
     <h3><span class="sub">5.3</span>Fork choice</h3>
+
     <p>
       By cumulative work, not length. Ties keep the branch already followed, so
       churning the tip costs work rather than nothing. A switch is applied
@@ -384,10 +413,11 @@
       discovered partway through a switch returns the node exactly where it
       was.
     </p>
+
     <p>
       Undo records are kept for the most recent
       <code>MAX_REORG_DEPTH = 1 024</code> blocks. The switch is refused at the
-      network&rsquo;s own burial, which is the same 1 024 here and which is
+      network’s own burial, which is the same 1 024 here and which is
       what a handover is anchored at and what a reward matures at. Those three
       are one number on purpose: a node that undid past its burial would hand a
       newcomer a ledger anchored at a block it went on to orphan, and would
@@ -395,6 +425,7 @@
       further back than the refusal would be harmless, and a shorter test
       network makes use of that.
     </p>
+
     <p>
       The depth itself is a local safety policy rather than a consensus rule:
       two nodes with different limits build the same chain and differ only
@@ -414,6 +445,7 @@
       since has been paid for the work of finding a block. The first blocks of
       both existing networks pay nobody at all.
     </p>
+
     <p>
       The reward begins at 50 CAIRN and halves every 1 051 200 blocks, about two
       years at a one minute block time, until halving would take it below a
@@ -421,6 +453,7 @@
       CAIRN exist by the time the floor takes over. The smallest unit is the
       pebble, at 10<sup>8</sup> to one CAIRN.
     </p>
+
     <p>
       The perpetual tail is deliberate. Whether transaction fees alone can fund
       security in the long run is an open question, and a chain whose central
@@ -428,6 +461,7 @@
       on an open question. The price is a known, small and permanently
       decreasing rate of dilution.
     </p>
+
     <p>
       A block reward cannot be spent until its block is past the deepest
       reorganisation the rules accept. It is the one kind of note whose
@@ -441,6 +475,7 @@
       set are three ways of holding the same note and a rule covering one of
       them would be a way to launder the other two.
     </p>
+
     <p>
       The state root carries the money as well as the notes. A node can say
       how much exists and a header commits to the answer, so a defect that
@@ -463,6 +498,7 @@
     </p>
 
     <h3><span class="sub">7.1</span>The measured cost of arrival</h3>
+
     <p>
       On this implementation, at one block per minute with blocks carrying 64
       ordinary payments, thirty years of chain is 197 GB to download and about
@@ -471,20 +507,24 @@
     </p>
 
     <h3><span class="sub">7.2</span>What headers commit to</h3>
+
     <p>
       Every header carries two fields beyond its own block, for 48 bytes:
     </p>
+
     <p>
       <strong>Accumulated work.</strong> The work behind this block and every
       block before it, checked against the parent's, so a block cannot claim
       work it did not do.
     </p>
+
     <p>
       <strong>A commitment to every earlier header.</strong> The root of an
       append-only forest holding one leaf per header, carried by a node as
       sixty four hashes exactly like the cold set, at a cost of one append per
       block.
     </p>
+
     <p>
       These were added before any network carried value, because they could not
       be added afterwards: changing the shape of a header invalidates every
@@ -494,6 +534,7 @@
     </p>
 
     <h3><span class="sub">7.3</span>What sampling does not settle</h3>
+
     <p>
       Weighing settles which chain carries the most work. It settles nothing
       about what that chain's ledger says, and the two are easily confused. A
@@ -503,6 +544,7 @@
       the difference because it watched every transaction go past. A newcomer
       has watched none.
     </p>
+
     <p>
       So a newcomer that took the ledger of the heaviest tip would be buying an
       arbitrary ledger for the price of one block: mine one on top of the real
@@ -511,6 +553,7 @@
       rejects that block on sight), but the newcomer, which is the party this
       whole construction exists to serve, is not.
     </p>
+
     <p>
       Cairn does not take a ledger at the tip. It takes one from
       <code>BURIAL = 1 024</code> blocks below it and validates every block in
@@ -522,6 +565,7 @@
       light client: what a newcomer ends on is a ledger it built, from a
       starting point nobody could have written without doing the work.
     </p>
+
     <p>
       The depth is the same as the deepest reorganisation a node accepts, so a
       newcomer lands exactly where a node that was away and came back lands,
@@ -531,6 +575,7 @@
     </p>
 
     <h3><span class="sub">7.4</span>Sampled verification</h3>
+
     <p>
       One assumption is load-bearing here and was not stated before: that at
       least one of the peers a newcomer is talking to is honest and can answer.
@@ -551,6 +596,7 @@
       assumption as the chain itself, that no adversary controls a majority of
       the work.
     </p>
+
     <p>
       The earlier superblock approach, NIPoPoW <sup><a href="#r11">[11]</a></sup>,
       achieves a similar compression by showing only unusually heavy blocks,
@@ -558,6 +604,7 @@
       them. FlyClient's sampling has no equivalent target and is the
       construction to follow.
     </p>
+
     <p>
       Cairn takes the published construction with its proven distribution
       rather than devising its own. It is implemented: a newcomer draws 4 096
@@ -566,6 +613,7 @@
       tip's own commitment. Weighing a thirty year chain costs about 3 MB, of
       which the run described below is 200 kB.
     </p>
+
     <p>
       Four checks sit around the draw, and they are not decoration. An audit
       of the implementation found that without them a stranger could hand a
@@ -578,6 +626,7 @@
       lesson is worth stating plainly: a commitment places a header at a
       position, and a position is not a chain.
     </p>
+
     <p>
       So the tip must open the header it was built on, at the height below it,
       carrying the work its own total leaves over, which a tip mined on nothing
@@ -590,6 +639,7 @@
       the anchor upward and sees whether it arrives where the tip says it
       should, which catches a substituted header wherever it sat.
     </p>
+
     <p>
       That last one is also what makes the burial cost work rather than block
       count. The run is checked block by block against the difficulty its own
@@ -598,6 +648,7 @@
       the difficulty floor for a thousand hashes, and the phrase bought
       nothing.
     </p>
+
     <p>
       Those three were written first and were not enough, which is worth
       recording rather than tidying away. The draw deliberately stops
@@ -611,6 +662,7 @@
       the tip, because the whole run is the forger's. The anchor a newcomer is
       handed is then one of its headers, with whatever ledger it likes.
     </p>
+
     <p>
       What was missing is that the top of a chain was tied to no difficulty
       anybody could check. So the run from the deepest header the draw
@@ -621,6 +673,7 @@
       construction, because those headers have to chain into it, and swapping
       them would mean having mined the pinned header on top of one's own.
     </p>
+
     <p>
       The tip's timestamp is then measured against the reader's own clock,
       which is what turns the whole thing into a cost. Blocks at the
@@ -631,6 +684,7 @@
       ahead of the reader is refused. What the attack costs is therefore real
       waiting, and the honest chain out-mines it while it waits.
     </p>
+
     <p>
       That run is capped, at 16 474 headers, about 3.0 MB, and the cap is a
       real limit rather than a formality: past it a chain cannot be weighed at
@@ -653,11 +707,12 @@
       newcomer will allocate before one check about the chain has been made.
       What the cap costs is the shorter way in, not the chain.
     </p>
+
     <p>
       The count follows from the assumption the chain already makes. A forger
       cannot mine what it did not mine, so a chain heavier than the honest one,
       presented by a party holding a share <em>s</em> of the world's work, has
-      at least <em>1 &minus; s/(1&minus;s)</em> of itself invented: work no
+      at least <em>1 − s/(1−s)</em> of itself invented: work no
       block of it spans. At a third of the world's work that is half the chain.
       What does not follow (and an earlier version of this paper said it did)
       is that a draw lands in that invented part with the same probability. It
@@ -665,9 +720,10 @@
       one over the distance from the tip. That is what makes the bound
       indifferent to how deep a forger forks, and its price is a factor of the
       number of halvings on every draw. A draw lands in the gap with probability
-      <em>ln(1/(1&minus;lie)) / levels</em>, not <em>lie</em>, and that factor is
+      <em>ln(1/(1−lie)) / levels</em>, not <em>lie</em>, and that factor is
       the whole of the correction.
     </p>
+
     <p>
       Setting the count from the real expression gives 4 096 draws, holding
       against every forger up to 43% of the world's work over a thirty year
@@ -677,6 +733,7 @@
       and the smooth density it stands for. Past 50% nothing helps: a forger at
       half the work has nothing left to invent and can mine the chain.
     </p>
+
     <p>
       <strong>The guarantee is a depth, and it is worth stating as one.</strong>
       The draw stops resolving 1 024 blocks from the tip, deliberately, because
@@ -686,6 +743,7 @@
       1 240 blocks (twenty hours). Inside that it can, and so can a slow peer:
       it is where any node sits for its first blocks after connecting.
     </p>
+
     <p>
       That depth is deeper than the node's own reorganisation limit, and the
       two numbers have to be read together. The draw stops resolving 1 024
@@ -698,6 +756,7 @@
       said the opposite, that the depth was shallower than the deepest
       reorganisation, which its own two figures refute.
     </p>
+
     <p>
       This is a gap between a probabilistic bound and a retention policy, not a
       break in either. Closing it means one of three things: resolving the draw
@@ -707,6 +766,7 @@
       operator reads it. It is stated here rather than answered because the
       answer changes a rule, and a rule should not change in a paragraph.
     </p>
+
     <p>
       The first version of this paper claimed 512 draws and 45.7%, on the
       assumption that a draw lands in invented work with probability
@@ -719,6 +779,7 @@
       one family of placements, made in-house, and it is the part of this design
       that most wants an outside eye.
     </p>
+
     <p>
       Measurement checks the derivation the other way, by forging chains and
       watching them fail, and it also shows why the distribution must be taken
@@ -727,6 +788,7 @@
       time, which is precisely why FlyClient samples the recent end of the
       chain more densely.
     </p>
+
     <p>
       Serving that sample takes the headers and the forest they make, which a
       node keeps on disk at 182 bytes a header and 64 for its place in the
@@ -737,6 +799,7 @@
       the ledger they add up to, which is what stops a node's disk from growing
       with the chain.
     </p>
+
     <p>
       One practical note in Cairn's favour. A production study of FlyClient
       reports that proof size is dominated by header size, and that
@@ -762,10 +825,12 @@
       that so long as the succinct state is too small to capture the full
       state, enlarging it helps little.
     </p>
+
     <p class="claim">
       Cairn falls on the proof-update side of that dilemma, deliberately, and
       had accepted the cost before knowing it was proven inevitable.
     </p>
+
     <p>
       A wallet refreshes its own proofs from what every block already carries.
       The hot set does not repeal the result; what it changes is who is
@@ -780,6 +845,7 @@
       about twelve minutes. At a tenth of that traffic it is 32 hours, and at a
       hundredth, thirteen days.
     </p>
+
     <p>
       So the honest statement is that the validator's cost is capped and the
       saver's inconvenience is not: the busier the chain, the more of anyone's
@@ -789,6 +855,7 @@
       proofs and never notices. One that does not must keep them, or find
       somebody who did.
     </p>
+
     <p>
       The authors name proof-serving nodes, third parties holding the full
       state and producing current witnesses for others, as the natural
@@ -796,6 +863,7 @@
       Those are Cairn's archivists. They were included for an intuition and
       turn out to be structural.
     </p>
+
     <p>
       Cairn does not answer the compensation question; it narrows what rests on
       it. Two services were bundled under the name: showing a newcomer which
@@ -818,6 +886,7 @@
       Overclaiming is the fastest way to lose the only readers whose opinion
       matters.
     </p>
+
     <p>
       The append-only forest carried by its roots is Utreexo's
       <sup><a href="#r4">[4]</a></sup>. Spender-supplied inclusion proofs are
@@ -829,6 +898,7 @@
       be: BLAKE3 and Ed25519, both with domain separation and canonical
       encoding enforced, and no trusted setup anywhere.
     </p>
+
     <p>
       What a survey of the field did not find an equivalent of: a hot set
       capped by consensus rule; the two tiers paired, holding a bounded set in
@@ -841,6 +911,7 @@
       bound the state by removing value from its owner, which the first
       guarantee here forbids.
     </p>
+
     <p>
       A search is not proof of absence, and this section should be read as a
       claim about what was found rather than about what exists.
@@ -862,7 +933,6 @@
       <div><span class="k">Bytes per hot note, measured</span><span class="v">516</span></div>
       <div><span class="k">Hot set at capacity</span><span class="v">68 MB</span></div>
       <div><span class="k">Cold set carried by a node</span><span class="v">64 hashes, 2 kB</span></div>
-      
       <div><span class="k">Grace window</span><span class="v">64 blocks, 8 192 notes</span></div>
       <div><span class="k">Difficulty window</span><span class="v">90 blocks, LWMA</span></div>
       <div><span class="k">Median time past</span><span class="v">11 blocks</span></div>
@@ -935,6 +1005,7 @@
         </tbody>
       </table>
     </div>
+
     <p class="fig-note">
       The first three rows are what arriving used to cost, and section 7 is how
       it stopped costing that. Arriving now has three parts, and it is worth
@@ -947,6 +1018,7 @@
       and ninety-seven gigabytes of reading, and none of the three grows with
       the chain's age.
     </p>
+
     <p class="fig-note">
       Seven of the figures above were wrong until this draft, and how is worth
       more than the correction. A block carrying 64 payments was published at
@@ -975,6 +1047,7 @@
       taken place. The only network in existence is a test network whose
       currency is worthless by design and which will be reset.
     </p>
+
     <p>
       <strong>A node that started from a handed ledger is not the same node as
       one that read the chain.</strong> A validator that applied every block
@@ -989,6 +1062,7 @@
       one that holds against less than a majority of it, and that is worth
       saying rather than leaving to be inferred.
     </p>
+
     <p>
       <strong>The block by block way in needs blocks somebody kept.</strong>
       It is named above as what a newcomer falls back to when a chain cannot be
@@ -1002,6 +1076,7 @@
       the other half, finding an archivist on a network that has none, is not
       solved here.
     </p>
+
     <p>
       <strong>The sampling bound is measured, not proved.</strong> 4 096 draws
       hold to 40% of the world's work and a depth of about 1 240 blocks, and
@@ -1013,6 +1088,7 @@
       down is exactly what nobody outside this project has checked, and it is
       where an outside review should start.
     </p>
+
     <p>
       There is a second reason to start there. The next thing found was not in
       the bound at all but beside it: the sampling was sound about how much
@@ -1023,6 +1099,7 @@
       everybody looks at. It was in an assumption the arithmetic never made and
       the surrounding code quietly relied on.
     </p>
+
     <p>
       <strong>A chain that loses most of its miners cannot be weighed while it
       recovers.</strong> The run of headers a weighing carries is capped at
@@ -1042,6 +1119,7 @@
       fail in the same words, that the chain in front of it is what those
       failures have in common.
     </p>
+
     <p>
       <strong>A rule changes at a height, and a node that has not updated by
       then is on another chain.</strong> Renumbering the network, which is what
@@ -1057,12 +1135,14 @@
       lacks, and stops, because a wallet reading a balance off an abandoned
       chain answers confidently and wrongly.
     </p>
+
     <p>
       <strong>A node that joined cannot take in a newcomer.</strong> Showing
       which chain carries the most work takes the headers from the first block,
       and a node handed a ledger has them only from where it was handed on. It
       can become one by reading the chain; nothing else is lost.
     </p>
+
     <p>
       <strong>The theorem's cost is real.</strong> A wallet offline long enough,
       or one that lost its records, must ask an archivist. Nobody is paid for
@@ -1070,12 +1150,14 @@
       rather than solving it: a wallet in that position depends on someone
       having chosen to keep the cold set.
     </p>
+
     <p>
       <strong>Smaller.</strong> An archivist rebuilds a proof in time
       proportional to the depth of the set rather than its size. Over half of
       what a hot note costs is the tree that commits to it, which is where the
       room left is.
     </p>
+
     <p>
       The implementation is roughly 41 200 lines of Rust with 1 089 tests, no
       unsafe code, no asynchronous runtime, and five dependencies. Arithmetic

@@ -51,6 +51,62 @@ fn members() -> Vec<String> {
     names
 }
 
+/// The programs a release builds, which are the ones the claim on the page is
+/// about. `.github/workflows/release.yml` names these three and nothing else.
+const RELEASED: [&str; 3] = ["cairn-node", "cairn-wallet", "cairn-explorer"];
+
+/// What one crate names under `[dependencies]`, inside the workspace and out.
+///
+/// Only what a `cargo build` of this crate pulls in: the section ends at the
+/// next one, so `[dev-dependencies]` and `[lints]` are outside it.
+fn dependencies_of(crate_name: &str) -> Vec<String> {
+    let manifest = std::fs::read_to_string(format!("../../crates/{crate_name}/Cargo.toml"))
+        .expect("every crate in the workspace has a manifest");
+    let Some(section) = manifest.split_once("\n[dependencies]\n") else {
+        return Vec::new();
+    };
+    section
+        .1
+        .lines()
+        .take_while(|line| !line.starts_with('['))
+        .filter_map(|line| line.split_once('.'))
+        .map(|(name, _)| name.to_owned())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// The crates a build of the three programs people download actually reaches.
+///
+/// Not every workspace member, and the difference matters. `cairn-docs`
+/// renders `docs/` into the HTML a node serves and ships inside nothing: the
+/// release builds three binaries by name and never compiles it. Counting what
+/// it pulls in would move a number whose whole subject is what lands on
+/// somebody's machine, so the answer to "how much does this program pull in"
+/// would change because the repository grew a tool, which is the opposite of
+/// what the sentence on the page promises a reader.
+///
+/// Walked from the three rather than listed, so a crate that stops being
+/// reachable stops being counted without anyone editing this file.
+fn shipped(members: &[String]) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    let mut waiting: Vec<String> = RELEASED.iter().map(|name| (*name).to_owned()).collect();
+    while let Some(name) = waiting.pop() {
+        assert!(
+            members.contains(&name),
+            "{name} is built into a release and is not in the workspace"
+        );
+        if !found.insert(name.clone()) {
+            continue;
+        }
+        for dependency in dependencies_of(&name) {
+            if dependency.starts_with("cairn-") {
+                waiting.push(dependency);
+            }
+        }
+    }
+    found
+}
+
 /// The English word a number this small is written out as on the page.
 fn spelled_lower(count: usize) -> &'static str {
     match count {
@@ -369,6 +425,11 @@ fn the_site_does_not_call_the_sampled_start_unwritten() {
 ///
 /// Counted here rather than written down, because the whole point of the claim
 /// is that it is small, and a number that small is one somebody will check.
+///
+/// Counted over the crates a release actually builds, and not over every
+/// member of the workspace, which is the same distinction one level up: `hex`
+/// is not counted because no build of a program reaches it, and `cairn-docs`'s
+/// Markdown parser is not counted for exactly that reason.
 #[test]
 fn the_site_counts_the_dependencies_a_build_actually_pulls() {
     let mut named = BTreeSet::new();
@@ -377,20 +438,10 @@ fn the_site_counts_the_dependencies_a_build_actually_pulls() {
     // crate added to the workspace with a dependency of its own would not have
     // been counted, the number would not have moved, and the page would have
     // gone on saying a figure whose whole point is that a reader can check it.
-    for crate_name in members() {
-        let manifest = std::fs::read_to_string(format!("../../crates/{crate_name}/Cargo.toml"))
-            .expect("every crate in the workspace has a manifest");
-        // Only what a `cargo build` of this crate pulls in: the section ends at
-        // the next one, so `[dev-dependencies]` and `[lints]` are outside it.
-        let Some(section) = manifest.split_once("\n[dependencies]\n") else {
-            continue;
-        };
-        for line in section.1.lines().take_while(|line| !line.starts_with('[')) {
-            let Some((name, _)) = line.split_once('.') else {
-                continue;
-            };
-            if !name.starts_with("cairn-") && !name.is_empty() {
-                named.insert(name.to_owned());
+    for crate_name in shipped(&members()) {
+        for name in dependencies_of(&crate_name) {
+            if !name.starts_with("cairn-") {
+                named.insert(name);
             }
         }
     }
