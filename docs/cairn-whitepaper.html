@@ -976,6 +976,33 @@
       currency is worthless by design and which will be reset.
     </p>
     <p>
+      <strong>A node that started from a handed ledger is not the same node as
+      one that read the chain.</strong> A validator that applied every block
+      from the first refuses an invalid history however much work stands behind
+      it, and no amount of mining takes that from it. A node that started at an
+      anchor has that property for every block above the anchor and not for the
+      blocks below it: for those it has the work, and the commitments the
+      headers carry, and nothing else. The difference is invisible until
+      somebody out-mines the network for the length of the burial, which is the
+      assumption the chain already rests on, so the fast start adds no new one.
+      What it does is turn a check that held against any amount of work into
+      one that holds against less than a majority of it, and that is worth
+      saying rather than leaving to be inferred.
+    </p>
+    <p>
+      <strong>The block by block way in needs blocks somebody kept.</strong>
+      It is named above as what a newcomer falls back to when a chain cannot be
+      weighed, and it checks more rather than less, which is true. What is also
+      true is that an ordinary node keeps a bounded number of bytes of blocks
+      and drops the rest once its ledger is written, and no rule obliges anyone
+      to keep more. Headers are kept for ever and a header does not rebuild a
+      body. So the fallback rests on somebody having chosen to archive, and on
+      a newcomer being able to find them. A node says what its own retention
+      costs a newcomer when asked, which is the half an operator can act on;
+      the other half, finding an archivist on a network that has none, is not
+      solved here.
+    </p>
+    <p>
       <strong>The sampling bound is measured, not proved.</strong> 4 096 draws
       hold to 40% of the world's work and a depth of about 1 240 blocks, and
       both figures come from measuring the placement a forger would choose

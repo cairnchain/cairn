@@ -361,11 +361,27 @@ pub fn accept(handover: &Handover, params: &ConsensusParams) -> Result<LedgerSta
     // it. Saying "I am too old" instead is the difference between a node that
     // waits to be updated and an operator hunting an attacker who is not
     // there.
+    //
+    // The anchor's own version is not evidence here, and reading it was worth
+    // a node. This is the one verdict that stops one: `cairn-net` keeps it and
+    // `cairn-node` prints it and exits, telling the operator to update. The
+    // caller pins the tip, because a ledger has to name the header the
+    // weighing settled on, so a claim made out of `tip` was earned. Nothing
+    // pins `at` until the forest proof further down, so a claim made out of
+    // `at` was a number the sender wrote: this network, a timestamp past its
+    // opening, the difficulty floor where any identifier meets the target, and
+    // one hash shut any node that asked for a ledger. The same inversion the
+    // block path was mended for, arriving through the other door.
+    //
+    // Nothing honest is lost, because versions rise with height and the anchor
+    // sits below the tip: an anchor above this build's ceiling while the tip
+    // is not is a combination no chain produces. An anchor claiming one falls
+    // to the version rule below and is the sender's doing, which it is.
     let required = params.version_at(tip.height);
-    if required > BLOCK_VERSION || tip.version > BLOCK_VERSION || at.version > BLOCK_VERSION {
+    if required > BLOCK_VERSION || tip.version > BLOCK_VERSION {
         return Err(HandoverError::SoftwareTooOld {
             height: tip.height,
-            required: required.max(tip.version).max(at.version),
+            required: required.max(tip.version),
             known: BLOCK_VERSION,
         });
     }

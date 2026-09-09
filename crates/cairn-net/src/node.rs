@@ -1769,6 +1769,69 @@ fn cut_for(tip: u64, held: u64, bytes: u64, keep: u64) -> u64 {
     tip.saturating_add(1).saturating_sub(affordable)
 }
 
+/// The most header reads any one take of the log answers for.
+///
+/// Not a limit on what a peer may ask for. A run of [`MAX_HEADERS`] still
+/// comes back whole; it comes back in this many reads at a time, with the log
+/// let go of between them. What is bounded here is how long one answer keeps
+/// the disk to itself.
+///
+/// The disk is a single lock and [`Shared::persist`] takes it with the chain
+/// already in hand, so a thread that has just validated a block waits on the
+/// log holding the chain, and every thread that wants the chain waits behind
+/// that one. A stranger's read request therefore set how long this node took
+/// to accept its own block. Five hundred and twelve header reads measured
+/// 1.2 ms with the file in the page cache and 33 to 170 ms without it, and an
+/// address may buy sixteen of those runs per allowance window.
+const READS_PER_HOLD: u64 = 32;
+
+/// The same for block records.
+///
+/// Smaller, because a header is a fixed hundred and eighty two bytes and a
+/// block is anything up to `max_block_bytes`. `MAX_REQUESTED` of those is
+/// sixteen megabytes read, decoded and cloned, which is 13 ms of disk alone
+/// with the file already in the page cache.
+const BLOCKS_PER_HOLD: usize = 8;
+
+/// Gathers `total` positions a few at a time, so no one take of a lock
+/// answers for the whole of a run.
+///
+/// `take` is given a start and a length, answers for that much or less, and
+/// holds nothing by the time it returns. Its second answer says whether there
+/// is any point asking again.
+///
+/// `follows` says whether one thing belongs directly after another. A run
+/// assembled across several takes is a run assembled across a log that can
+/// move: a reorganisation between two of them leaves an answer whose halves
+/// come off different branches, which is a run that never existed. It is
+/// refused whole rather than served torn, and saying nothing is a legal
+/// answer to every ask that reaches here.
+fn gathered_a_few_at_a_time<T>(
+    total: usize,
+    per_take: usize,
+    mut take: impl FnMut(usize, usize) -> (Vec<T>, bool),
+    follows: impl Fn(&T, &T) -> bool,
+) -> Vec<T> {
+    let per_take = per_take.max(1);
+    let mut all: Vec<T> = Vec::new();
+    let mut at = 0;
+    while at < total {
+        let run = per_take.min(total.saturating_sub(at));
+        let (some, more) = take(at, run);
+        for one in some {
+            if all.last().is_some_and(|before| !follows(before, &one)) {
+                return Vec::new();
+            }
+            all.push(one);
+        }
+        if !more {
+            break;
+        }
+        at = at.saturating_add(run);
+    }
+    all
+}
+
 impl Shared {
     /// A poisoned lock means a thread panicked while holding it. The release
     /// profile aborts on panic, so this cannot happen there; in a debug build
@@ -2356,9 +2419,14 @@ impl Shared {
             (reaches, agreed)
         };
 
+        // The log is taken and let go of once per entry rather than held for
+        // the walk. A locator carries up to `MAX_LOCATOR` positions and each
+        // one read here is a whole block off the disk decoded and hashed, so
+        // the walk held the disk for megabytes while a thread with the chain
+        // in hand waited to write a block it had just validated. There is no
+        // run to tear: each entry is its own question, and the answer to it
+        // does not depend on what the entry before it found.
         let agreed = agreed.or_else(|| {
-            let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-            let log = log.as_ref()?;
             locator.iter().find_map(|entry| {
                 // A refusal here is not an entry the peer and this node
                 // disagree about. It is this node failing to look, and the two
@@ -2366,13 +2434,7 @@ impl Shared {
                 // the walk ran out of entries, and the peer was told from zero,
                 // which is this node's disk reported as a fact about somebody
                 // else's chain.
-                let block = match log.blocks.read_at(entry.height) {
-                    Ok(found) => found?,
-                    Err(error) => {
-                        self.could_not_read(Reading::Blocks, entry.height, &error);
-                        return None;
-                    }
-                };
+                let block = self.block_off_disk(entry.height)?;
                 (block.id() == entry.id).then_some(entry.height)
             })
         });
@@ -2405,18 +2467,43 @@ impl Shared {
 
     /// The blocks the followed branch carries at `heights`, in that order.
     ///
-    /// Two passes, so neither lock is held over the other's work. Memory
-    /// first, with the chain held for the length of a few clones and let go
-    /// before any disk is touched; then the log, which holds the branch in
+    /// A few at a time, with both locks let go of between them. What each take
+    /// does is two passes so that neither lock is held over the other's work:
+    /// memory first, with the chain held for the length of a few clones and let
+    /// go before any disk is touched, then the log, which holds the branch in
     /// order of height and answers for everything older.
     ///
     /// Order is the point. A peer catching up applies what arrives as it
     /// arrives, and a block whose parent has not landed is dropped, so a batch
     /// delivered out of order is a batch mostly thrown away.
     fn blocks_at(&self, heights: &[u64]) -> Vec<Block> {
-        if heights.is_empty() {
-            return Vec::new();
-        }
+        gathered_a_few_at_a_time(
+            heights.len(),
+            BLOCKS_PER_HOLD,
+            |at, run| {
+                let want = heights.get(at..at.saturating_add(run)).unwrap_or_default();
+                (self.blocks_under_one_hold(want), true)
+            },
+            // Only heights that came back next to each other can be checked,
+            // and those are the ones a peer applies as a chain. Two of them
+            // that do not link came off different branches, which is an
+            // answer this node never held.
+            |before, after| {
+                after.header.height != before.header.height.saturating_add(1)
+                    || after.header.previous == before.id()
+            },
+        )
+    }
+
+    /// A few of those blocks, with each of the two locks taken once and let go
+    /// of before this returns.
+    ///
+    /// The bound is written here rather than at the caller because this is the
+    /// function that holds the locks. It bounds both: the memory pass clones
+    /// what it finds, and `MAX_REQUESTED` blocks cloned under the chain is
+    /// sixteen megabytes of copying with everything else stopped.
+    fn blocks_under_one_hold(&self, heights: &[u64]) -> Vec<Block> {
+        let heights = heights.get(..BLOCKS_PER_HOLD).unwrap_or(heights);
         let mut found: Vec<Option<Block>> = {
             let chain = self.chain();
             heights
@@ -4565,6 +4652,18 @@ impl Shared {
         }
     }
 
+    /// One block off the disk, taken and let go of the same way.
+    fn block_off_disk(&self, height: u64) -> Option<Block> {
+        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        match log.as_ref()?.blocks.read_at(height) {
+            Ok(found) => found,
+            Err(error) => {
+                self.could_not_read(Reading::Blocks, height, &error);
+                None
+            }
+        }
+    }
+
     /// Where a header sits in the forest a chain of `leaves` committed to.
     fn proof_off_disk(&self, height: u64, leaves: u64) -> Option<ForestProof> {
         let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
@@ -4924,30 +5023,55 @@ impl Shared {
     /// Read from the header log, which every node keeps whole whatever it does
     /// with its blocks, so this is an answer almost any node can give.
     fn headers_from(&self, from: u64, count: u64) -> Vec<BlockHeader> {
+        let want = usize::try_from(count)
+            .unwrap_or(MAX_HEADERS)
+            .min(MAX_HEADERS);
+        let per_take = usize::try_from(READS_PER_HOLD).unwrap_or(1);
+        gathered_a_few_at_a_time(
+            want,
+            per_take,
+            |at, run| {
+                let at = from.saturating_add(u64::try_from(at).unwrap_or(0));
+                self.headers_under_one_hold(at, u64::try_from(run).unwrap_or(0))
+            },
+            // A run whose halves come off different branches is refused. The
+            // header log checks each record against its neighbour on the way
+            // out, so the only seam this covers is the one between two takes,
+            // and it is checked with nothing held.
+            |before, after| after.previous == before.id(),
+        )
+    }
+
+    /// A few of those headers, with the log taken once and let go of before
+    /// this returns.
+    ///
+    /// The bound is written here rather than at the caller because this is the
+    /// function that holds the lock, and what is being bounded is the hold.
+    ///
+    /// The second answer says whether the run goes on. It stops either way: a
+    /// newcomer applies headers in order and one with a gap in it is worth
+    /// nothing. What a stop says here is that asking again would read the same
+    /// nothing, and a run cut short by this node's own disk is still told apart
+    /// from one that simply ran out, which from the far end look the same.
+    fn headers_under_one_hold(&self, from: u64, count: u64) -> (Vec<BlockHeader>, bool) {
         let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(store) = log.as_ref() else {
-            return Vec::new();
+            return (Vec::new(), false);
         };
-        let stop = from
-            .saturating_add(count.min(MAX_HEADERS as u64))
-            .min(store.headers.reaches());
+        let asked = from.saturating_add(count.min(READS_PER_HOLD));
+        let stop = asked.min(store.headers.reaches());
         let mut headers = Vec::new();
         for height in from..stop {
-            // The run stops either way: a newcomer applies headers in order
-            // and one with a gap in it is worth nothing. What changes is that
-            // a run cut short by this node's own disk is no longer told apart
-            // from one that simply ran out, which from the far end look the
-            // same and from here do not.
             match store.headers.read_at(height) {
                 Ok(Some(header)) => headers.push(header),
-                Ok(None) => break,
+                Ok(None) => return (headers, false),
                 Err(error) => {
                     self.could_not_read(Reading::Headers, height, &error);
-                    break;
+                    return (headers, false);
                 }
             }
         }
-        headers
+        (headers, stop == asked)
     }
 
     /// Builds the whole of what a newcomer asked for, holding nothing.
@@ -7199,6 +7323,195 @@ mod tests {
                 block
             })
             .collect()
+    }
+
+    /// A chain of headers with nothing mined, for filling a header log.
+    ///
+    /// Nothing at this layer weighs work: the header log checks that each
+    /// record sits at its own height and links to its neighbour, and that is
+    /// all these have to satisfy. Mining five hundred and twelve blocks to
+    /// count reads would be minutes spent on the one thing the count does not
+    /// depend on.
+    fn linked_headers(count: u64, network: NetworkId) -> Vec<BlockHeader> {
+        let mut previous = Hash32::ZERO;
+        (0..count)
+            .map(|height| {
+                let header = BlockHeader {
+                    version: BLOCK_VERSION,
+                    network,
+                    height,
+                    previous,
+                    transactions_root: Hash32::from_bytes([7; 32]),
+                    state_root: Hash32::from_bytes([9; 32]),
+                    history: Hash32::from_bytes([11; 32]),
+                    timestamp: 1_000_000_u64.saturating_add(height.saturating_mul(600)),
+                    difficulty: 1,
+                    total_work: u128::from(height),
+                    nonce: height,
+                };
+                previous = header.id();
+                header
+            })
+            .collect()
+    }
+
+    /// How many reads one take of the disk answers for, which is what every
+    /// other thread waits out.
+    ///
+    /// There is one lock over the whole log, and `Shared::persist` takes it
+    /// with the chain already in hand. So a thread that has just validated a
+    /// block waits on the log holding the chain, and every thread that wants
+    /// the chain waits behind that one. A stranger asking for `MAX_HEADERS`
+    /// used to hold the log for all five hundred and twelve reads: measured on
+    /// this machine, 1.2 ms with the file in the page cache and 33 to 170 ms
+    /// without it, and one address may buy sixteen of those runs per allowance
+    /// window.
+    ///
+    /// Counted rather than timed, on purpose. Two wall clocks read at
+    /// different moments is what four tests here have had to be repaired for,
+    /// and the number that is the finding is how many reads one hold answers
+    /// for. That is arithmetic.
+    #[test]
+    fn one_take_of_the_disk_answers_for_a_bounded_run_of_headers() {
+        let params = ConsensusParams::testnet();
+        let directory = std::env::temp_dir().join(format!("cairn-hold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let (node, _) = Node::open(params, loopback(), &directory).unwrap();
+
+        let run = u64::try_from(MAX_HEADERS).unwrap();
+        {
+            let mut log = node
+                .shared
+                .log
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let store = log.as_mut().unwrap();
+            for header in linked_headers(run + 8, params.network) {
+                store.headers.append(&header).unwrap();
+            }
+        }
+
+        let (under_one, more) = node.shared.headers_under_one_hold(0, run);
+        assert_eq!(
+            u64::try_from(under_one.len()).unwrap(),
+            READS_PER_HOLD,
+            "one take of the log answered for {} reads, and a peer may ask for {run}",
+            under_one.len()
+        );
+        assert!(more, "and says the run goes on rather than ending there");
+
+        let whole = node.shared.headers_from(0, run);
+        assert_eq!(
+            whole.len(),
+            MAX_HEADERS,
+            "the peer still gets the whole run it asked for"
+        );
+        for (at, header) in whole.iter().enumerate() {
+            assert_eq!(
+                header.height,
+                u64::try_from(at).unwrap(),
+                "the run came back in order"
+            );
+        }
+
+        drop(node);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The same for blocks, where the take bounds the chain as well as the log.
+    ///
+    /// A block is anything up to `max_block_bytes` rather than the fixed
+    /// hundred and eighty two bytes of a header, and the memory pass clones
+    /// what it finds. `MAX_REQUESTED` of them is sixteen megabytes copied with
+    /// the chain held, which is not the disk waiting on the disk: it is every
+    /// thread that wants the chain waiting on one that is answering a
+    /// stranger.
+    #[test]
+    fn one_take_of_the_disk_answers_for_a_bounded_run_of_blocks() {
+        let params = ConsensusParams::testnet();
+        let blocks = chain_of(BLOCKS_PER_HOLD * 3, params);
+        let node = Node::bind(params, loopback()).unwrap();
+        {
+            let mut chain = node.shared.chain();
+            for block in &blocks {
+                chain.add_block(block.clone(), 2_000_000_000).unwrap();
+            }
+        }
+
+        let heights: Vec<u64> = (0..u64::try_from(blocks.len()).unwrap()).collect();
+        let under_one = node.shared.blocks_under_one_hold(&heights);
+        assert_eq!(
+            under_one.len(),
+            BLOCKS_PER_HOLD,
+            "one take answered for {} blocks, and a peer may name {} heights",
+            under_one.len(),
+            heights.len()
+        );
+
+        let whole = node.shared.blocks_at(&heights);
+        assert_eq!(
+            whole.len(),
+            blocks.len(),
+            "the peer still gets every block it named"
+        );
+        for (at, block) in whole.iter().enumerate() {
+            assert_eq!(
+                block.header.height,
+                u64::try_from(at).unwrap(),
+                "and gets them in the order it named them"
+            );
+        }
+    }
+
+    /// A run whose halves came off different branches is refused whole.
+    ///
+    /// This is what several takes buys and one take did not have to think
+    /// about. Between two of them the log can be rewritten by a
+    /// reorganisation, and the two halves then belong to chains that never
+    /// shared a tip. Serving that is worse than serving nothing: the far end
+    /// cannot tell it from a chain this node stands behind.
+    #[test]
+    fn a_run_assembled_across_a_log_that_moved_is_refused_rather_than_torn() {
+        let one = linked_headers(4, NetworkId::TESTNET);
+        let other = linked_headers(4, NetworkId::MAINNET);
+        let follows = |before: &BlockHeader, after: &BlockHeader| after.previous == before.id();
+
+        let takes = std::cell::Cell::new(0_usize);
+        let torn = gathered_a_few_at_a_time(
+            4,
+            2,
+            |at, _| {
+                takes.set(takes.get() + 1);
+                let from = if at == 0 { &one } else { &other };
+                (from.get(at..at + 2).unwrap().to_vec(), true)
+            },
+            follows,
+        );
+        assert_eq!(takes.get(), 2, "both takes ran");
+        assert!(
+            torn.is_empty(),
+            "a run whose second half came off another branch was served whole, \
+             {} headers of it, rather than refused",
+            torn.len()
+        );
+
+        let takes = std::cell::Cell::new(0_usize);
+        let whole = gathered_a_few_at_a_time(
+            4,
+            2,
+            |at, _| {
+                takes.set(takes.get() + 1);
+                (one.get(at..at + 2).unwrap().to_vec(), true)
+            },
+            follows,
+        );
+        assert_eq!(takes.get(), 2, "the same two takes");
+        assert_eq!(
+            whole.len(),
+            4,
+            "and a run that did not move comes back whole"
+        );
     }
 
     /// A log that fell behind is caught up, not written past.

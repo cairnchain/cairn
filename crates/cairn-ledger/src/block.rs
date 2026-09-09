@@ -74,8 +74,24 @@ pub struct BlockHeader {
     /// headers, check that each is really where it claims to be in this
     /// commitment, and work out what stands behind the tip without seeing the
     /// millions of headers in between. Without this field that takes every
-    /// header there has ever been, and it cannot be added later: changing a
-    /// header's shape invalidates every block already mined.
+    /// header there has ever been, and it could not have been added later.
+    ///
+    /// Two operations hide in "later" and the identifier shuts only one of
+    /// them. Adding a field to every header changes the bytes each identifier
+    /// is taken over, so every block already mined gets a new one and the
+    /// chain comes apart. That much is shut here, and
+    /// `tests/audit_two_builds_in_one_room.rs` pins the bytes this encoding
+    /// produces so that a reordering is a failing test rather than a second
+    /// network.
+    ///
+    /// Adding a field from an activation height onward is a different
+    /// operation and the identifier does not shut it: `Decode` reads the
+    /// version first and could branch on it, and every header below the height
+    /// would re-encode exactly as before. What shuts that one is
+    /// [`Self::ENCODED_BYTES`], which is one number for every header there
+    /// will ever be, and `cairn-store`'s header log finds a record by
+    /// multiplying an index by it. A header whose width depended on its
+    /// version would need a different log, not a different encoder.
     pub history: Hash32,
     /// Seconds since the Unix epoch.
     pub timestamp: u64,
