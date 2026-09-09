@@ -11,6 +11,15 @@
 //! figure with no instrument behind it, and inserting a section meant editing
 //! every number below it or publishing two sections called 7.
 //!
+//! What a document may vary is what it says, never the shape it says it in.
+//! One paper numbers its parts I to VIII and names each of them beside the
+//! numeral; another opens on a panel with no word over it; a third puts a line
+//! above its heading. So a section may carry a label, written before a `|` in
+//! its heading and set down beside the numeral; the numeral has a style; a
+//! subsection may go unnumbered; and the opening block's heading word is the
+//! `abstract:` the front matter names, or nothing when it names none. Five
+//! papers, one shell.
+//!
 //! Line breaks inside a paragraph are the ones the Markdown has. That is not
 //! cosmetic: guards in `cairn-explorer` and `cairn-ledger` look for phrases in
 //! the served text, several of them span a line break, and reflowing a
@@ -25,7 +34,7 @@
 
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-use crate::front::{self, Front};
+use crate::front::{self, Front, Subsections};
 use crate::{Error, Result};
 
 /// Renders one document.
@@ -115,11 +124,11 @@ impl<'a> Page<'a> {
         while let Some(event) = self.events.next() {
             match event {
                 Event::Start(Tag::Heading { level, .. }) => {
-                    open = self.heading(level, open)?;
+                    open = self.heading(level, open, front)?;
                 }
                 other => {
                     if open == Open::Nothing {
-                        open = self.open_summary(front)?;
+                        open = self.open_summary(front);
                     }
                     self.space();
                     let indent = open.indent();
@@ -134,7 +143,8 @@ impl<'a> Page<'a> {
         Ok(())
     }
 
-    /// The block at the top of the page: the heading, the strap and the byline.
+    /// The block at the top of the page: the kicker, the heading, the strap
+    /// and the byline.
     fn title_block(&mut self, front: &Front) -> Result<()> {
         let opened = self.events.next();
         if !matches!(
@@ -153,6 +163,10 @@ impl<'a> Page<'a> {
 
         self.blank();
         self.line(0, "<header class=\"title\">");
+        if let Some(kicker) = front.kicker.as_deref() {
+            let text = inline_of(kicker, 2)?;
+            self.line(2, &format!("<p class=\"kicker\">{text}</p>"));
+        }
         self.line(2, &format!("<h1>{heading}</h1>"));
         if let Some(strap) = front.strap.as_deref() {
             self.line(2, "<p class=\"strap\">");
@@ -187,19 +201,35 @@ impl<'a> Page<'a> {
     }
 
     /// A heading, which is also what opens and closes the containers.
-    fn heading(&mut self, level: HeadingLevel, open: Open) -> Result<Open> {
+    fn heading(&mut self, level: HeadingLevel, open: Open, front: &Front) -> Result<Open> {
         match level {
             HeadingLevel::H1 => Err(Error::new(
                 "a document has one `# ` heading, at the top. A section is `## `",
             )),
             HeadingLevel::H2 => {
-                let text = self.inline(Some(TagEnd::Heading(HeadingLevel::H2)), 4)?;
+                let written = self.inline(Some(TagEnd::Heading(HeadingLevel::H2)), 4)?;
+                let (label, text) = match written.split_once(" | ") {
+                    Some((label, heading)) => (Some(label), heading),
+                    None => (None, written.as_str()),
+                };
                 self.close(open);
                 self.blank();
                 self.section = self.section.saturating_add(1);
                 self.sub = 0;
+                let number = front.numerals.of(self.section);
                 self.line(0, "<section>");
-                self.line(2, &format!("<div class=\"num\">{}</div>", self.section));
+                // The numeral is wrapped so that a stylesheet can address it
+                // on its own; the label is not, because a label that is
+                // already an element would then sit inside one it never asked
+                // for. The design paper's status chips are spans, and a chip
+                // in a wrapper is a chip in a box.
+                match label {
+                    None => self.line(2, &format!("<div class=\"num\">{number}</div>")),
+                    Some(label) => self.line(
+                        2,
+                        &format!("<div class=\"num\"><span>{number}</span>{label}</div>"),
+                    ),
+                }
                 self.line(2, "<div class=\"body\">");
                 self.line(4, &format!("<h2>{text}</h2>"));
                 self.fresh = true;
@@ -215,13 +245,15 @@ impl<'a> Page<'a> {
                 let text = self.inline(Some(TagEnd::Heading(HeadingLevel::H3)), 4)?;
                 self.sub = self.sub.saturating_add(1);
                 self.space();
-                self.line(
-                    4,
-                    &format!(
+                let written = match front.subsections {
+                    Subsections::Numbered => format!(
                         "<h3><span class=\"sub\">{}.{}</span>{text}</h3>",
-                        self.section, self.sub
+                        front.numerals.of(self.section),
+                        self.sub
                     ),
-                );
+                    Subsections::Unnumbered => format!("<h3>{text}</h3>"),
+                };
+                self.line(4, &written);
                 Ok(Open::Section)
             }
             deeper => Err(Error::new(format!(
@@ -232,20 +264,22 @@ impl<'a> Page<'a> {
         }
     }
 
-    /// Opens the summary that some documents carry above their first section.
-    fn open_summary(&mut self, front: &Front) -> Result<Open> {
-        let Some(word) = front.summary_heading.as_deref() else {
-            return Err(Error::new(
-                "there is prose before the first `## ` heading, which is a document's \
-                 abstract, and the front matter does not say `abstract:` with the word \
-                 to head it",
-            ));
-        };
+    /// Opens the block some documents carry between the header and their first
+    /// section.
+    ///
+    /// The word over it is the one the front matter names, and a document that
+    /// names none opens on the block itself. That is not an omission to be
+    /// caught: the prior-art paper's opening is a three-part verdict panel that
+    /// heads itself, and a word invented to sit above it would be a word a
+    /// reader reads that nobody wrote.
+    fn open_summary(&mut self, front: &Front) -> Open {
         self.blank();
         self.line(0, "<div class=\"abstract\">");
-        self.line(2, &format!("<h2>{}</h2>", escape(word)));
+        if let Some(word) = front.summary_heading.as_deref() {
+            self.line(2, &format!("<h2>{}</h2>", escape(word)));
+        }
         self.fresh = true;
-        Ok(Open::Summary)
+        Open::Summary
     }
 
     fn close(&mut self, open: Open) {
@@ -530,12 +564,90 @@ mod tests {
         );
     }
 
+    /// The prior-art paper opens on a panel that heads itself, and a word
+    /// invented to sit over it would be a word a reader reads that nobody
+    /// wrote.
     #[test]
-    fn prose_above_the_first_section_without_a_word_to_head_it_is_refused() {
-        let said = render(&format!("{HEAD}\nA summary.\n\n## One\n\nText.\n"))
-            .unwrap_err()
-            .to_string();
-        assert!(said.contains("does not say `abstract:`"), "{said}");
+    fn an_opening_block_with_no_word_named_over_it_carries_none() {
+        let out = page("\nA summary.\n\n## One\n\nText.\n");
+        assert!(
+            out.contains("<div class=\"abstract\">\n  <p>\n    A summary.\n  </p>\n</div>"),
+            "{out}"
+        );
+    }
+
+    /// A section's label is a word a reader reads, so it is written where the
+    /// section is rather than in a list somebody keeps in step by hand.
+    #[test]
+    fn a_section_may_carry_a_label_beside_its_number() {
+        let out = page("\n## Le problème | Toutes se recentralisent\n\nText.\n");
+        assert!(
+            out.contains("<div class=\"num\"><span>1</span>Le problème</div>"),
+            "{out}"
+        );
+        assert!(out.contains("<h2>Toutes se recentralisent</h2>"), "{out}");
+    }
+
+    /// The label is inline like any other run of a document, so a paper whose
+    /// label is a status chip writes the chip and gets no wrapper it did not
+    /// ask for.
+    #[test]
+    fn a_label_written_as_html_is_set_down_as_it_was_written() {
+        let out = page("\n## <span class=\"chip locked\">Verrouillé</span> | Les décisions\n");
+        assert!(
+            out.contains(
+                "<div class=\"num\"><span>1</span><span class=\"chip locked\">Verrouillé</span></div>"
+            ),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_document_that_counts_in_roman_gets_roman_numbers() {
+        let source = "---\ntitle: A\nlanguage: en\nstylesheet: a.css\nnumerals: roman\n---\n\
+                      # A heading\n\n## One\n\n## Two\n\n## Three\n\n## Four\n";
+        let out = render(source).unwrap();
+        for number in ["I", "II", "III", "IV"] {
+            assert!(
+                out.contains(&format!("<div class=\"num\">{number}</div>")),
+                "{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_style_of_numbering_nobody_knows_is_refused() {
+        let source = "---\ntitle: A\nlanguage: en\nstylesheet: a.css\nnumerals: greek\n---\n\
+                      # A heading\n\n## One\n";
+        let said = render(source).unwrap_err().to_string();
+        assert!(said.contains("`numerals: greek`"), "{said}");
+    }
+
+    /// Four subsections named the same four things in every section is a paper
+    /// that would only be repeating "2.3" at its reader.
+    #[test]
+    fn a_paper_whose_subsections_are_unnumbered_gets_the_heading_alone() {
+        let source = "---\ntitle: A\nlanguage: en\nstylesheet: a.css\n\
+                      subsections: unnumbered\n---\n\
+                      # A heading\n\n## One\n\n### La position\n";
+        let out = render(source).unwrap();
+        assert!(out.contains("    <h3>La position</h3>\n"), "{out}");
+        assert!(!out.contains("class=\"sub\""), "{out}");
+    }
+
+    #[test]
+    fn a_kicker_sits_above_the_heading() {
+        let source = "---\ntitle: A\nlanguage: en\nstylesheet: a.css\n\
+                      kicker: Cairn · étude de l'existant\n---\n\
+                      # A heading\n\n## One\n";
+        let out = render(source).unwrap();
+        assert!(
+            out.contains(
+                "<header class=\"title\">\n  <p class=\"kicker\">Cairn · étude de \
+                 l'existant</p>\n  <h1>A heading</h1>"
+            ),
+            "{out}"
+        );
     }
 
     #[test]

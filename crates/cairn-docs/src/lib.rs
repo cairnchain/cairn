@@ -28,9 +28,15 @@ pub use render::render;
 ///
 /// A document that is not here is not generated, which is the whole of the
 /// difference between a Markdown source and a file somebody left in the
-/// folder. The four papers still written as HTML by hand are absent on
-/// purpose; they are migrated one at a time.
-pub const DOCUMENTS: [&str; 1] = ["cairn-whitepaper"];
+/// folder, and `no_markdown_document_is_left_out_of_the_list` fails on a
+/// document that is one and not the other.
+pub const DOCUMENTS: [&str; 5] = [
+    "cairn-design",
+    "cairn-open-questions",
+    "cairn-prior-art",
+    "cairn-specification",
+    "cairn-whitepaper",
+];
 
 /// Where the documents live, found from this crate rather than from wherever
 /// the command was run, so `cargo run -p cairn-docs` writes the same files

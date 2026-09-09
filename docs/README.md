@@ -105,9 +105,12 @@ The keys, and there are no others:
 | `title` | what a browser tab says, which is not always the heading |
 | `language` | the tag a browser hyphenates by and a screen reader speaks in |
 | `stylesheet` | the file beside this one that styles it |
+| `kicker` | the short line above the heading, for a document that has one |
 | `strap` | the sentence under the heading |
 | `byline` | one line of the byline; write the key again for the next one |
-| `abstract` | the word over the summary, for a document that opens with one |
+| `abstract` | the word over the opening block, when the opening carries one |
+| `numerals` | how a section is numbered: `arabic`, the default, or `roman` |
+| `subsections` | whether a `### ` carries its number: `numbered`, the default, or `unnumbered` |
 | `footer` | one item in the footer; write the key again for the next one |
 
 `title`, `language` and `stylesheet` are required. A value runs over several
@@ -118,7 +121,29 @@ would otherwise cost a byline and say nothing.
 **The section numbers are counted, not typed.** `## ` is a section and gets
 the next number; `### ` under it gets `section.subsection`. Do not write a
 number in a heading. Inserting a section used to mean editing every number
-below it, which is how a paper came to have two sections called 7.
+below it, which is how a paper came to have two sections called 7. The one
+place a number is still typed is a cross-reference in prose, "the whitepaper
+devotes its section 8 to it", and there is a guard on each of those.
+
+**A section may carry a label beside its number**, written before a `|` in
+its heading:
+
+```markdown
+## Le problème | Toutes les cryptomonnaies se recentralisent
+## <span class="chip locked">Verrouillé</span> | Les quatre décisions prises
+```
+
+The label is a word a reader reads, so it lives beside the section rather
+than in a list somebody keeps in step by hand. It is inline like the rest of
+a heading: a label that has to look like something writes the HTML for it and
+gets no wrapper it did not ask for. The whitepaper uses no labels at all, and
+writes its headings as they are.
+
+**The blocks above the first `## ` are the document's opening.** `abstract:`
+is the word set over them, and a document that names none opens on the block
+itself: the survey paper's opening is a verdict panel that heads itself, and
+a word invented to sit above it would be a word a reader reads that nobody
+wrote.
 
 **Where a paragraph wraps is part of the document.** The generated HTML keeps
 the line breaks the Markdown has, because several guards search the served

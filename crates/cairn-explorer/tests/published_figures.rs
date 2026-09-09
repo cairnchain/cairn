@@ -43,6 +43,12 @@ use cairn_primitives::Amount;
 const PAPER: &str = include_str!("../../../docs/cairn-whitepaper.html");
 const README: &str = include_str!("../../../README.md");
 const DESIGN: &str = include_str!("../../../docs/cairn-design.html");
+/// The survey of what already exists, which a node serves at `/prior-art`.
+///
+/// It had no guard at all until this line was written, and it publishes the
+/// cap, the header, the forest and the grace window, every one of them a
+/// figure this build decides.
+const PRIOR_ART: &str = include_str!("../../../docs/cairn-prior-art.html");
 const SITE_EN: &str = include_str!("../../../web/i18n/en.json");
 const SITE_FR: &str = include_str!("../../../web/i18n/fr.json");
 /// The source that acts on the cap, which quotes the same two figures in the
@@ -81,6 +87,67 @@ fn table_row(label: &str) -> String {
         .0
         .trim()
         .to_owned()
+}
+
+/// The small numbers the French papers write in words rather than digits.
+///
+/// A word is as much a published figure as a numeral, and this is the whole
+/// of what makes one checkable. A number nobody has taught this test the word
+/// for stops the test rather than passing quietly.
+fn in_french(value: usize) -> &'static str {
+    match value {
+        8 => "huit",
+        64 => "soixante-quatre",
+        other => panic!(
+            "the French papers write their small figures in words and this test \
+             has no word for {other}"
+        ),
+    }
+}
+
+/// The number beside the section whose heading is `heading`.
+///
+/// Section numbers are counted by `cairn-docs` and never typed, except in the
+/// one place a document points at a section in its own prose. That is the
+/// only place left where the number a reader is sent to and the number the
+/// section carries can part company.
+fn section_number(page: &str, heading: &str) -> String {
+    let above = page
+        .split_once(&format!("<h2>{heading}</h2>"))
+        .unwrap_or_else(|| panic!("no section of this page is headed `{heading}`"))
+        .0;
+    let rail = above
+        .rsplit_once("<div class=\"num\">")
+        .expect("a section carries its number beside it")
+        .1;
+    rail.trim_start_matches("<span>")
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect()
+}
+
+/// The figure a page writes immediately before `phrase`.
+///
+/// For a number the page quotes from somewhere else: read out of the page
+/// rather than written down here, so that a comparison against it is the
+/// document's own comparison and not a second copy of it.
+fn figure_before(page: &str, phrase: &str) -> usize {
+    let before = page
+        .split_once(phrase)
+        .unwrap_or_else(|| panic!("the page no longer says `{phrase}`"))
+        .0;
+    let mut digits: Vec<char> = before
+        .chars()
+        .rev()
+        .take_while(|character| character.is_ascii_digit() || *character == ' ')
+        .filter(char::is_ascii_digit)
+        .collect();
+    digits.reverse();
+    digits
+        .iter()
+        .collect::<String>()
+        .parse()
+        .unwrap_or_else(|_| panic!("no figure stands before `{phrase}`"))
 }
 
 /// A figure written the way the paper writes one: a space every three digits.
@@ -465,6 +532,13 @@ fn the_papers_weighing_is_the_size_this_build_encodes() {
         README.contains("about\nthree megabytes against the hundred and ninety-seven gigabytes"),
         "the README does not say what weighing costs in the same figure"
     );
+    assert!(
+        PRIOR_ART.contains(&format!(
+            "environ {megabytes:.0} Mo pour rejoindre trente ans de"
+        )),
+        "the survey paper's next-steps list does not say weighing costs \
+         {megabytes:.0} Mo, which is what this build puts on the wire"
+    );
 }
 
 /// What a newcomer validates for itself is the block limit times the window,
@@ -496,8 +570,8 @@ fn the_burial_a_newcomer_validates_is_the_block_limit_times_the_window() {
     );
 }
 
-/// The French design paper says what arriving costs, and it has to be the
-/// same cost the English one is held to.
+/// The French papers say what arriving costs, and it has to be the same cost
+/// the English one is held to.
 ///
 /// It was not. It said forty eight gigabytes to download thirty years of
 /// chain and a hundred megabytes of state at the end of it. The first is the
@@ -512,8 +586,11 @@ fn the_burial_a_newcomer_validates_is_the_block_limit_times_the_window() {
 /// the whitepaper and not over this document, and nothing at all looked at
 /// the download. A paper nothing reads is a paper that keeps whatever it was
 /// last told, and this one is the one a French reader is sent to first.
+///
+/// The survey paper repeats the same download beside what replaces it, and
+/// was read by nothing at all until it was added here.
 #[test]
-fn the_french_design_paper_quotes_the_arrival_the_english_one_is_held_to() {
+fn the_french_papers_quote_the_arrival_the_english_one_is_held_to() {
     let mut bench = Bench::new(8);
     let busy = bench.block(64).encode().len() as u64;
     let header = bench.block(0).header.encode().len() as u64;
@@ -535,6 +612,166 @@ fn the_french_design_paper_quotes_the_arrival_the_english_one_is_held_to() {
             DESIGN.contains(&said),
             "the design paper does not say `{said}`, which is what the English one \
              is held to and what this build encodes"
+        );
+    }
+    let said = format!("contre les {blocks:.0} Go qu'ils");
+    assert!(
+        PRIOR_ART.contains(&said),
+        "the survey paper does not say `{said}`, which is the download its own \
+         next-steps list says the weighing replaces"
+    );
+}
+
+/// The survey paper weighs our header against the one it quotes, and the
+/// ratio it prints has to be the ratio those two figures make.
+///
+/// This is the paper's headline finding, in the panel above the first
+/// section and again in the card the finding comes from: their headers are
+/// 1 487 bytes, ours are 182, so ours are eight times smaller. Nothing held
+/// either end of that. The header grew by forty eight bytes once already,
+/// when the two commitments went in, and the day it grows again "eight times"
+/// becomes seven and the sentence a reader trusts most in this document is
+/// the one that went stale first.
+///
+/// Their figure is read out of the page rather than written down here: the
+/// comparison is the document's own, and this test checks the arithmetic on
+/// it rather than replacing it.
+#[test]
+fn the_survey_papers_headers_are_eight_times_smaller_because_this_build_encodes_them_so() {
+    let mut bench = Bench::new(1);
+    let ours = bench.block(0).header.encode().len();
+    let theirs = figure_before(PRIOR_ART, " octets chacun sur cette chaîne");
+    let times = theirs.checked_div(ours).expect("a header of some size");
+    println!("their header is {theirs} bytes against our {ours}, {times} times");
+
+    for said in [
+        format!(
+            "en-tête fait {ours} octets, {} fois moins",
+            in_french(times)
+        ),
+        format!("Les nôtres sont {} fois plus petits", in_french(times)),
+        format!("Les nôtres font {ours} octets."),
+    ] {
+        assert!(
+            PRIOR_ART.contains(&said),
+            "the survey paper does not say `{said}`, which is what this build \
+             encodes and what its own quoted figure divides by"
+        );
+    }
+}
+
+/// What the survey paper's tables say Cairn bounds is what this build bounds.
+///
+/// The tables and the ledger set Cairn beside what everybody else built, and
+/// every Cairn cell in them is a rule this build applies: the size of the hot
+/// set, the hashes a node carries for everything else, and the grace window
+/// that makes the boundary a guarantee rather than a hope. A comparison is
+/// only worth reading if its own column is true.
+#[test]
+fn the_survey_papers_tables_bound_what_this_build_bounds() {
+    let params = ConsensusParams::testnet();
+    let notes = grouped(params.hot_capacity as u64);
+    let roots = cairn_accumulator::forest::MAX_HEIGHT;
+    let grace = cairn_ledger::state::GRACE_BLOCKS;
+    println!("{notes} hot notes, {roots} roots, {grace} blocks of grace");
+
+    for said in [
+        format!("Le tiroir : {notes} billets, un nombre"),
+        format!("Oui, {notes} billets"),
+        format!("{notes} est un effectif"),
+        format!("chaque nœud garde {roots} empreintes"),
+        format!("tout le reste en {} empreintes", in_french(roots)),
+        format!("Nos {} blocs de grâce", in_french(grace)),
+        format!("Chez nous, {} blocs de grâce", in_french(grace)),
+    ] {
+        assert!(
+            PRIOR_ART.contains(&said),
+            "the survey paper does not say `{said}`, which is what this build \
+             holds a node to"
+        );
+    }
+}
+
+/// A section a paper sends a reader to is the section that is there.
+///
+/// `cairn-docs` counts the section numbers, so no heading carries one that
+/// can go stale. A cross-reference in prose does: "the whitepaper devotes its
+/// section 8 to it" is a number typed by a person about a number counted by a
+/// program, and inserting a section anywhere above either of them moves one
+/// and not the other. This paper makes two such references, one to the
+/// English paper and one to itself.
+#[test]
+fn the_survey_paper_sends_a_reader_to_the_sections_that_are_there() {
+    let dilemma = section_number(PAPER, "The limit that applies, and where Cairn falls");
+    let closest = section_number(
+        PRIOR_ART,
+        "L'expiration d'état d'Ethereum, prise comme une construction",
+    );
+    println!(
+        "the dilemma is section {dilemma} of the whitepaper, the neighbour section {closest} here"
+    );
+
+    for said in [
+        format!("le whitepaper y consacre sa section {dilemma}."),
+        format!("section {closest}. Ce qui reste revendiqué"),
+    ] {
+        assert!(
+            PRIOR_ART.contains(&said),
+            "the survey paper does not say `{said}`, and a reader sent to a \
+             section that has moved is sent to the wrong one"
+        );
+    }
+}
+
+/// The proof a holder carries is the size the papers say it is.
+///
+/// Both French papers publish it, the design paper as the four rows of the
+/// table its whole thesis is in and the survey paper as the range between
+/// their ends, and it is the figure that answers the one objection this
+/// design invites: if the node holds nothing, what does the holder hold. It
+/// was measured once by `cairn-accumulator/examples/scale.rs` and typed into
+/// two documents, and nothing has looked at it since.
+///
+/// Measured here exactly as that example measures it, sampling evenly across
+/// the set, because an average over a different sample is a different figure.
+#[test]
+fn the_french_papers_quote_the_proof_a_holder_carries() {
+    use cairn_accumulator::{Key, SparseMerkleTree};
+    use cairn_primitives::hash::{hash, Domain};
+
+    let key = |index: u64| Key::from_hash(hash(Domain::StateEntry, &index.to_le_bytes()));
+    let mut tree = SparseMerkleTree::new();
+    let mut filled = 0u64;
+    let mut average = Vec::new();
+    for notes in [1_000u64, 10_000, 100_000, 1_000_000] {
+        while filled < notes {
+            tree.insert(key(filled), hash(Domain::MerkleLeaf, &filled.to_le_bytes()));
+            filled += 1;
+        }
+        let sampled = 2_000u64.min(notes);
+        let step = notes / sampled;
+        let total: usize = (0..sampled)
+            .map(|sample| tree.prove(key(sample * step)).size_in_bytes())
+            .sum();
+        average.push((notes, total / usize::try_from(sampled).unwrap_or(1)));
+    }
+    for (notes, bytes) in &average {
+        println!("{notes} notes: a proof is {bytes} bytes on average");
+    }
+    let (_, smallest) = average.first().expect("a measured size");
+    let (_, largest) = average.last().expect("a measured size");
+
+    assert!(
+        PRIOR_ART.contains(&format!("{smallest} à {largest} octets mesurés")),
+        "the survey paper does not say a proof is {smallest} to {largest} bytes, \
+         which is what this build measures at the ends of the design paper's table"
+    );
+    for (notes, bytes) in &average {
+        let said = format!("<td class=\"num\">{bytes} o</td>");
+        assert!(
+            DESIGN.contains(&said),
+            "the design paper's table has no row saying a proof at {notes} notes \
+             is {bytes} bytes"
         );
     }
 }

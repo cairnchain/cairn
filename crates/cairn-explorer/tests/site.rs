@@ -30,7 +30,6 @@ const FR: &str = include_str!("../../../web/i18n/fr.json");
 const SCRIPT: &str = include_str!("../../../web/cairn.js");
 const PAGE: &str = include_str!("../../../web/index.html");
 const PAPER: &str = include_str!("../../../docs/cairn-whitepaper.html");
-const ROAD: &str = include_str!("../../../docs/cairn-road-to-mainnet.html");
 
 /// The crates the workspace is made of, read from the workspace.
 fn members() -> Vec<String> {
@@ -645,16 +644,11 @@ fn the_papers_say_how_large_this_is_and_the_tree_agrees() {
         let apart = said.abs_diff(counted);
         apart.saturating_mul(10) <= counted
     };
-    for (document, text, what) in [
-        ("the whitepaper", PAPER, "tests, no"),
-        ("the road to mainnet", ROAD, "tests</span>"),
-    ] {
-        let said = quoted_before(text, what);
-        assert!(
-            near(said, tests),
-            "{document} says {said} tests and the tree holds {tests}"
-        );
-    }
+    let said = quoted_before(PAPER, "tests, no");
+    assert!(
+        near(said, tests),
+        "the whitepaper says {said} tests and the tree holds {tests}"
+    );
     let said = quoted_before(PAPER, "lines of Rust");
     assert!(
         near(said, lines),

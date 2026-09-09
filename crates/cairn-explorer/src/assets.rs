@@ -50,10 +50,14 @@ macro_rules! paper {
     };
 }
 
-const PAPERS: [(&str, &str); 4] = [
+const PAPERS: [(&str, &str); 5] = [
     (
         "/whitepaper",
         paper!("en", "../../../docs/cairn-whitepaper.html"),
+    ),
+    (
+        "/specification",
+        paper!("en", "../../../docs/cairn-specification.html"),
     ),
     ("/design", paper!("fr", "../../../docs/cairn-design.html")),
     (

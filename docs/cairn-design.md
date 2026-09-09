@@ -1,0 +1,239 @@
+---
+title: Cairn
+language: fr
+stylesheet: cairn-design.css
+strap:
+  Une monnaie que *ton téléphone* vérifie lui-même : aujourd'hui, et dans
+  trente ans.
+byline: Document de conception · v0.16
+byline: 26 août 2026
+byline: Nom de code (provisoire)
+numerals: roman
+footer: Cairn · document de conception v0.16
+footer: Statut : prêt à être lancé en public
+footer: Rien de ce document n'est un conseil en investissement
+---
+
+# CAIRN
+
+## Le problème | Toutes les cryptomonnaies se recentralisent en grandissant
+
+<p class="lede">Ce n'est pas un accident de parcours. C'est une conséquence directe de leur conception, et personne ne l'a corrigée.</p>
+
+Une cryptomonnaie, c'est un grand cahier de comptes public dont des milliers
+d'ordinateurs (les *nœuds*) gardent chacun une copie et sur le contenu duquel
+ils se mettent d'accord en permanence, sans banque, sans serveur central, sans
+patron. C'est cette redondance, et rien d'autre, qui rend le système
+décentralisé.
+
+Or ce cahier ne fait que grossir. Chaque compte, chaque transaction, depuis le
+premier jour, à conserver pour toujours. Tenir une copie complète devient
+chaque année plus cher.
+
+<div class="tablewrap">
+  <table>
+    <caption>Ce que coûte aujourd'hui un nœud validant complet</caption>
+    <thead><tr><th>Réseau</th><th>Stockage</th><th>Trajectoire</th></tr></thead>
+    <tbody>
+      <tr><td>Bitcoin</td><td class="num">≈ 700 Go</td><td>+ ~50 Go / an</td></tr>
+      <tr><td>Ethereum</td><td class="num">≈ 1,2 To</td><td>jusqu'à ~20 To en archive</td></tr>
+      <tr><td>Solana</td><td class="num">≈ 1 To</td><td>+ NVMe rapide, 256 Go de RAM</td></tr>
+      <tr class="us"><td>Cairn</td><td class="num">plafonné</td><td>+ 129 Mo / an d'en-têtes et d'arbre</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<p class="push-md">La conséquence est mécanique : de moins en moins de particuliers peuvent valider, de plus en plus ce sont des entreprises avec des datacenters.</p>
+
+<p class="pull">Plus l'une de ces monnaies a du succès, moins il reste de gens capables de la vérifier. Elles se détruisent avec leur propre réussite.</p>
+
+## La thèse | Ne pas transporter le cahier. Transporter son sceau.
+
+Et si les nœuds ne gardaient pas le cahier ? À la place, chacun garde un
+**sceau** : un très petit code, quelques dizaines de caractères, calculé à
+partir du cahier entier.
+
+Sa propriété (des mathématiques établies, pas une astuce) est qu'avec ce sceau
+seul, on peut **vérifier qu'une page est authentique sans jamais avoir eu le
+cahier**.
+
+Le fonctionnement s'inverse alors : c'est celui qui dépense qui présente sa
+page, accompagnée d'une preuve qu'elle appartient bien au cahier officiel. Le
+nœud vérifie la preuve, met à jour le sceau, et n'a rien à conserver.
+
+**Le cahier peut grossir à l'infini ; le sceau, lui, garde toujours la même
+taille.** Un nœud complet tient sur un ordinateur à soixante euros. Dans vingt
+ans aussi. Et sur un téléphone.
+
+<div class="tablewrap">
+  <table>
+    <caption>Mesuré sur l'implémentation</caption>
+    <thead><tr><th>Billets</th><th>Nœud classique</th><th>Nœud Cairn</th><th>Preuve portée</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1 000</td><td class="num">76 ko</td><td class="num">≤ 2 ko</td><td class="num">369 o</td></tr>
+      <tr><td class="num">10 000</td><td class="num">760 ko</td><td class="num">≤ 2 ko</td><td class="num">471 o</td></tr>
+      <tr><td class="num">100 000</td><td class="num">8 Mo</td><td class="num">≤ 2 ko</td><td class="num">582 o</td></tr>
+      <tr class="us"><td class="num">1 000 000</td><td class="num">76 Mo</td><td class="num">≤ 2 ko</td><td class="num">685 o</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<p class="push-md">Mille fois plus de billets : la première colonne est multipliée par mille, la deuxième reste au même plafond, et la preuve que porte un utilisateur ne fait même pas le double. C'est toute la thèse, en quatre lignes.</p>
+
+<p class="push-md">Le sceau est une liste d'au plus soixante-quatre racines de trente-deux octets chacune : sa taille est bornée par deux kilo-octets quel que soit le nombre de billets, et vaut quelques centaines d'octets aux tailles du tableau. C'est cette borne, et non une racine unique, que le nœud conserve.</p>
+
+## Le mécanisme | Deux températures : le tiroir et la cave
+
+Cette inversion a un prix : elle déplace la charge sur l'utilisateur. Sa
+preuve se périme dès que quiconque transige, et s'il la perd, il ne peut plus
+prouver ce qu'il possède. Une monnaie qui exige d'être connecté en permanence
+n'intéresse personne.
+
+Cairn sépare donc l'état en deux, selon la seule chose qui compte vraiment :
+depuis combien de temps ça n'a pas bougé.
+
+<div class="diagram">
+  <div class="drawers">
+    <div class="box warm">
+      <span class="label">Le tiroir</span>
+      <span class="big">Taille fixe, conservé par chaque nœud</span>
+      <span class="small">Ce qui sert régulièrement. Aucune preuve à fournir, aucune complication : la monnaie s'utilise comme n'importe quelle autre. C'est le cas de la quasi-totalité des usages.</span>
+    </div>
+    <div class="flows">
+      <div class="flow"><span class="arrow">→</span>n'a pas bougé<br>depuis longtemps</div>
+      <div class="flow"><span class="arrow">←</span>tu présentes<br>ta preuve</div>
+    </div>
+    <div class="box coldbox">
+      <span class="label">La cave</span>
+      <span class="big">Taille illimitée, résumée dans le sceau</span>
+      <span class="small">Ce qui dort. Un nœud n'en garde que <b>64 empreintes</b>, quel qu'en soit le contenu. Y toucher demande une preuve, que le porteur a gardée ou qu'un archiviste reconstitue.</span>
+    </div>
+  </div>
+  <p class="foot">Ce qu'un nœud doit tenir pour valider est plafonné par les règles : <b>68 Mo</b> de tiroir, et au pire de ce que les règles autorisent 233 Mo de blocs qu'il pourrait encore avoir à annuler. La cave, elle, tient en 64 empreintes chez chaque nœud, à jamais. Ce n'est pas une figure de style : y ajouter un billet ne demande que ces empreintes, jamais le contenu, et c'est cette propriété précise qui fait que le coût d'un nœud est plafonné pour de bon.</p>
+</div>
+
+<p class="push-md">La friction ne tombe ainsi que sur ce qui dort depuis des années : exactement le bon endroit où la mettre.</p>
+
+## <span class="chip locked">Verrouillé</span> | Les quatre décisions prises
+
+Elles ne sont plus rouvertes sans raison majeure : tout le reste s'appuie
+dessus.
+
+<div class="decisions">
+  <div class="dec">
+    <span class="q">Représentation de la valeur</span>
+    <span class="a">Des billets, pas des soldes</span>
+    <span class="why">On ne possède pas « un solde », on possède un ensemble de billets, comme du liquide. Payer 7 avec un billet de 10 consomme le 10 et rend un billet de 3. Un billet est créé une fois, détruit une fois, jamais modifié : c'est précisément ce que le système de sceau traite le mieux et le plus vite. Un solde qui change sans cesse se prouverait beaucoup plus mal.</span>
+  </div>
+  <div class="dec">
+    <span class="q">Passage du tiroir à la cave</span>
+    <span class="a">Quand le tiroir est plein, le plus ancien non touché descend</span>
+    <span class="why">La seule règle qui garantisse vraiment un coût de nœud plafonné, c'est-à-dire la raison d'être du projet. L'alternative, un délai fixe, laisserait le tiroir gonfler avec la popularité et recréerait le problème qu'on veut résoudre.</span>
+  </div>
+  <div class="dec">
+    <span class="q">Conservation de la cave</span>
+    <span class="a">Des archivistes, ouverts à tous, que personne ne paie</span>
+    <span class="why">Rien n'est jamais réellement perdu : tout est reconstituable depuis l'historique complet de la chaîne. Il faut seulement que quelqu'un le conserve. On en fait un rôle ouvert, non rémunéré, et surtout dont le réseau ne dépend pas : accueillir un nouveau venu ne demande que les en-têtes, que tout nœud garde, et un portefeuille tient ses propres preuves à jour. L'archiviste sert celui qui a perdu les siennes. Sans permission, sans privilège. Bitcoin et Ethereum reposent sur des archives que personne ne paie non plus, à ceci près que chez eux l'archive est l'histoire entière et qu'un nouveau venu en dépend. Ici il n'en dépend pas.</span>
+  </div>
+  <div class="dec">
+    <span class="q">Mécanisme du sceau</span>
+    <span class="a">Un arbre de hachage, sans aucune cérémonie de confiance</span>
+    <span class="why">Les constructions à preuves plus courtes exigent une cérémonie d'installation dont le secret doit être détruit. Un participant qui en garderait une copie pourrait fabriquer de fausses preuves d'appartenance, c'est-à-dire créer de la monnaie à partir de rien, indéfiniment, sans que personne puisse le détecter ; et aucun audit ne peut établir après coup qu'un secret a bien disparu. Un arbre de hachage n'exige aucune cérémonie, se vérifie en quelques dizaines de hachages, et résiste aux ordinateurs quantiques, ce dont aucune des familles écartées n'est capable. Cette résistance porte sur la structure de l'état, pas sur les fonds : un billet est verrouillé par une signature Ed25519, qui n'est pas post-quantique, et l'adresse étant la clé publique elle-même, cette clé est inscrite sur la chaîne dès la création du billet. La forme retenue est une forêt à ajout : y ajouter un billet ne demande que la liste des racines, jamais le contenu. C'est cette propriété précise qui permet à un nœud de suivre la cave sans la détenir, et donc qui rend le coût constant réel plutôt qu'annoncé.</span>
+  </div>
+  <div class="dec">
+    <span class="q">Mécanisme de consensus</span>
+    <span class="a">La preuve de travail, et l'arbitrage au travail cumulé</span>
+    <span class="why">La raison est le démarrage, pas la technique. La preuve d'enjeu confie la validation à ceux qui détiennent déjà de la monnaie ; au premier jour personne n'en détient, il faut donc en distribuer d'avance, et les fondateurs décident alors qui détiendra le pouvoir. Pour une chaîne dont la thèse est que personne n'a d'autorité, c'est une contradiction inscrite dans le bloc genèse. Avec le minage, la monnaie se gagne à partir de rien. Entre deux versions concurrentes de l'histoire, celle qui l'emporte est celle qui a coûté le plus de travail, pas la plus longue : une branche plus longue faite de blocs faciles est moins chère à produire qu'une branche courte faite de blocs difficiles, et confondre les deux revient à autoriser la réécriture du passé au rabais. À travail égal, la branche déjà suivie est conservée.</span>
+  </div>
+  <div class="dec">
+    <span class="q">Taille du tiroir</span>
+    <span class="a">131 072 billets, soit environ 68 Mo</span>
+    <span class="why">Mesuré, pas estimé : un billet chaud coûte 516 octets à travers les trois structures qu'un nœud tient pour lui, dont un peu plus de la moitié pour l'arbre qui les engage. Le chiffre découle de la promesse et non de ce qu'un serveur pourrait se permettre : un téléphone doit pouvoir le tenir, sinon le portefeuille redevient dépendant d'un serveur, c'est-à-dire exactement la centralisation que ce projet existe pour supprimer. Conséquence à assumer : à ce format, un billet inactif descend à la cave en quelques semaines, parfois en quelques jours si le réseau est très actif. La cave n'est pas une perte, mais cela rend le suivi des preuves par le portefeuille indispensable et non optionnel.</span>
+  </div>
+  <div class="dec">
+    <span class="q">Émission</span>
+    <span class="a">Division par deux tous les deux ans, jusqu'à un plancher perpétuel</span>
+    <span class="why">Les divisions successives distribuent environ 105 millions de CAIRN. Ensuite la récompense ne bouge plus : quelques milliers par an, soit un vingtième de pour cent, part qui décroît d'elle-même à mesure que le total grandit. Le plancher est le point discutable, et c'est un choix délibéré. Un calendrier qui atteint zéro laisse les seuls frais payer le travail qui sécurise la chaîne, et personne n'a démontré qu'un marché de frais y suffise : la question reste ouverte sur la seule chaîne assez vieille pour se la poser. Une chaîne dont toute la promesse est d'être encore vérifiable dans trente ans ne peut pas faire reposer cette promesse sur une question ouverte. Elle continue donc de payer.</span>
+  </div>
+  <div class="dec">
+    <span class="q">Combien d'en-têtes un nouveau venu ouvre</span>
+    <span class="a">Quatre mille quatre-vingt-seize, et la garantie s'énonce en profondeur</span>
+    <span class="why">Le tirage doit être plus dense près du sommet, sans quoi un faussaire forke profond et place son mensonge là où l'on tire peu : il en invente davantage en valeur absolue, mais on le lui demande beaucoup moins souvent. La densité qui neutralise ce choix est une sur la distance au sommet, et son prix est un facteur égal au nombre de halvings sur chaque tirage. La première version du calcul l'avait oublié : elle annonçait cinq cent douze tirages et quarante-cinq pour cent, et la mesure a montré que le placement qui arrange le mieux un faussaire ramenait cette garantie à deux puissance moins six. Le compte corrigé est quatre mille quatre-vingt-seize, soit trois mégaoctets pour rejoindre une chaîne de trente ans, contre les cent quatre-vingt-dix-sept gigaoctets qu'il remplace. Il tient, mesuré, jusqu'à quarante-trois pour cent de la puissance mondiale ; les papiers annoncent quarante, gardant trois points pour l'écart entre un escalier de halvings et la densité lisse qu'il représente. Le tirage cesse de distinguer à mille vingt-quatre blocs du sommet, délibérément : descendre plus fin coûterait un tiers du compte en plus pour séparer des chaînes que le choix de branche ne sépare pas non plus. La garantie s'énonce donc en profondeur, et c'est plus honnête ainsi : un faussaire à quarante pour cent ne peut pas placer un nouveau venu sur une branche qui s'écarte de la vraie de plus de mille deux cent quarante blocs, soit vingt heures. En deçà il le peut, comme un pair lent le peut : c'est la situation de tout nœud pendant ses premiers blocs, et c'est moins profond que la réorganisation qu'un nœud accepterait de toute façon. Au-delà de cinquante pour cent, plus rien ne protège : un faussaire qui détient la moitié du travail n'a plus rien à inventer.</span>
+  </div>
+  <div class="dec">
+    <span class="q">Changer une règle une fois la chaîne lancée</span>
+    <span class="a">Une hauteur d'activation inscrite dans le programme, jamais un vote</span>
+    <span class="why">Tant que la monnaie ne vaut rien, une règle qui change se paie en renumérotant le réseau : on jette la chaîne et on recommence. C'est arrivé trois fois, et ça n'a rien coûté. Le jour où elle vaut quelque chose, ce même geste efface les soldes de tout le monde. Une règle qui change porte donc désormais la hauteur à partir de laquelle elle s'applique : les blocs antérieurs continuent d'être jugés par la règle qui les jugeait, si bien que rien de ce qui est déjà miné ne devient invalide et qu'aucun solde n'est détruit. Personne ne vote. La hauteur est dans le code, publiée longtemps avant d'arriver, et un nœud qui n'est pas d'accord fait tourner un autre programme plutôt que de déposer un bulletin. Le signalement par les mineurs a été envisagé puis écarté : il donnerait à ceux qui minent un droit de veto sur les règles, c'est-à-dire exactement l'autorité que cette chaîne refuse d'accorder à quiconque, et c'est déjà l'objection qu'elle fait à la preuve d'enjeu. Ce qu'aucun mécanisme ne résout : un nœud qui n'a pas mis à jour à temps se retrouve sur une autre chaîne. Il ne fait pas semblant de fonctionner : il dit quelle version lui manque et il s'arrête, parce qu'un portefeuille qui lit un solde sur une chaîne abandonnée répond avec assurance et se trompe.</span>
+  </div>
+  <div class="dec">
+    <span class="q">Langage d'implémentation</span>
+    <span class="a">Rust</span>
+    <span class="why">Sécurité mémoire : un dépassement dans un validateur, ce sont des fonds volés. Pas de ramasse-miettes, donc un temps d'exécution des blocs prévisible. Le meilleur écosystème cryptographique existant. Et le langage où le code d'un nœud est le plus auditable par des tiers, ce qui compte le jour où l'on demande à des inconnus de le faire tourner.</span>
+  </div>
+</div>
+
+## <span class="chip locked">Verrouillé</span> | Trois garanties gravées dans le protocole
+
+Descendre à la cave n'est pas perdre son argent. La cave n'est pas une
+poubelle : un billet y vaut exactement ce qu'il vaut au tiroir. Ces trois
+règles rendent cette phrase littéralement vraie, et elles ne bougeront plus.
+
+<ol class="guar">
+  <li><div><b>Rien n'est jamais détruit ni grignoté.</b><span>Aucun loyer qui ronge un solde, aucune date d'expiration, aucune confiscation. Jamais, dans aucune circonstance.</span></div></li>
+  <li><div><b>Reconstituable pour toujours, sans limite de temps.</b><span>Même après la perte totale du portefeuille, les fonds se récupèrent depuis l'historique public via un archiviste. C'est cette garantie qui rend la règle du tiroir acceptable.</span></div></li>
+  <li><div><b>Le portefeuille absorbe toute la complexité.</b><span>Il conserve et rafraîchit les preuves en arrière-plan. Dépenser depuis la cave est un peu plus lent ; ce n'est pas une démarche.</span></div></li>
+</ol>
+
+## Raison d'être | À quoi ça sert, concrètement
+
+Une monnaie sans raison d'exister est un support de spéculation, pas un
+projet. Mais cette raison n'a pas à être une application posée par-dessus :
+chez Bitcoin, le protocole *est* le projet. Ici aussi. Et l'usage découle
+mécaniquement de la conception, il n'est pas plaqué dessus.
+
+Aujourd'hui, ouvrir une application crypto sur un téléphone ne vérifie rien du
+tout. L'appareil est incapable de porter le cahier, donc il interroge un
+serveur, souvent le même pour des millions de personnes. On fait confiance à
+une entreprise pour savoir ce qu'on possède. C'est la centralisation la plus
+massive de tout l'écosystème, et elle est presque invisible.
+
+<p class="pull">Chez Cairn, le cahier ne pèse rien. Le téléphone est donc un nœud du réseau à part entière : il vérifie lui-même, ne demande la permission à personne, et fonctionnera encore dans trente ans.</p>
+
+Aucune grande chaîne existante ne peut tenir cette promesse, parce qu'aucune
+n'a été conçue pour.
+
+## <span class="chip open">À trancher</span> | Ce qui reste ouvert
+
+Les questions encore posées, par ordre d'urgence. Aucune ne bloque le
+démarrage du code.
+
+<ul class="open">
+  <li><b>La borne d'échantillonnage n'est pas démontrée, elle est mesurée.</b> Quarante pour cent et mille deux cent quarante blocs sont des chiffres obtenus en cherchant le placement qui arrange le mieux un faussaire, pas en prouvant qu'il n'y en a pas de meilleur. La première version de ces chiffres était fausse d'un facteur considérable, et c'est une mesure qui l'a montré, pas un raisonnement. Qu'une seconde erreur du même genre ne soit pas cachée un cran plus bas est exactement ce que personne d'extérieur n'a vérifié.</li>
+  <li><b>L'histoire en mémoire.</b> Un nœud garde en mémoire tous les blocs de la chaîne qu'il suit. Ce n'est pas l'état de validation, qui lui est bien plafonné, c'est l'histoire. Le même engagement dans l'en-tête est ce qui lui permettra d'arrêter de la porter.</li>
+  <li><b>Les billets intelligents.</b> Des billets porteurs de règles plutôt que d'un simple montant. Reporté après le testnet, utile mais pas au prix d'un retard sur le cœur.</li>
+</ul>
+
+## Le chemin | L'ordre des choses
+
+<ol class="road">
+  <li class="done"><div><b>Le cœur<span class="state">Fait</span></b><span>Billets, signatures, blocs, validation. Écrit en Rust, 50 tests au vert : une chaîne produit des blocs, les vérifie, refuse une double dépense, une signature falsifiée, une création de valeur, un bloc rattaché au mauvais parent.</span></div></li>
+  <li class="done"><div><b>Le sceau<span class="state">Fait</span></b><span>L'accumulateur et les preuves d'appartenance et d'absence. Un million de billets tiennent dans une empreinte de 32 octets ; une preuve pèse 685 octets en moyenne. Une preuve périmée cesse de fonctionner, une preuve ne peut pas être rejouée pour un billet voisin, et l'empreinte ne dépend que du contenu, jamais de l'ordre des opérations.</span></div></li>
+  <li class="done"><div><b>Les deux tiroirs<span class="state">Fait</span></b><span>Le sceau est branché : le tiroir plafonné que les nœuds gardent, la cave qui ne vit que dans l'empreinte, la descente automatique du plus ancien, et la dépense sur preuve pour ce qui est descendu. Un billet qui remonte de la cave revient dans le tiroir. L'empreinte du bloc engage les deux tiroirs et leurs effectifs, donc la frontière elle-même est vérifiable.</span></div></li>
+  <li class="done"><div><b>Le consensus et l'arbitrage<span class="state">Fait</span></b><span>Minage, difficulté qui se réajuste en quelques blocs, horodatage adossé à la médiane des blocs récents, et la règle qui départage deux versions concurrentes de l'histoire. Chaque bloc appliqué inscrit son propre inverse, donc revenir en arrière coûte les blocs déplacés et non toute l'histoire. Un changement de branche est tout ou rien : un bloc invalide découvert en cours de route ramène le nœud exactement là où il était.</span></div></li>
+  <li class="done"><div><b>Le réseau<span class="state">Fait</span></b><span>Le transport entre machines, la présentation entre pairs, la propagation des blocs et la synchronisation d'un nœud qui démarre de zéro. Cinq nœuds branchés en ligne se transmettent une chaîne entière et un bloc neuf remonte la ligne de proche en proche. Tout ce qui décide quoi que ce soit est écrit pour être testable sans réseau ; la couche qui transporte, elle, ne décide de rien.</span></div></li>
+  <li class="done"><div><b>Tenir dans la durée<span class="state">Fait</span></b><span>Un nœud écrit sa chaîne sur disque et la rejoue au démarrage, en la revérifiant plutôt qu'en faisant confiance à son propre disque. Et il trouve ses voisins en les demandant à ceux qu'il a déjà : une seule adresse suffit pour rejoindre un réseau, et plus aucune pour y revenir. Un nœud est joignable à l'adresse d'où sa connexion arrive, jamais à celle qu'il prétend.</span></div></li>
+  <li class="done"><div><b>Les exécutables<span class="state">Fait</span></b><span>Un nœud et un portefeuille, en ligne de commande. Le portefeuille ne demande pas à un serveur ce qu'il possède : il rejoint le réseau, vérifie la chaîne lui-même et lit son solde dans le grand livre qu'il vient de valider. Les règles de consensus se choisissent en nommant un réseau et ne se règlent pas une par une. Une transaction attend maintenant dans une réserve qu'un bloc l'emporte, ce qui permet à quelqu'un de payer quelqu'un d'autre. Reste la version téléphone.</span></div></li>
+  <li class="done"><div><b>Le portefeuille qui garde ses preuves<span class="state">Fait</span></b><span>L'ajout d'un billet dans la forêt fournit sa preuve au passage : elle n'est jamais à demander. À partir de là, un nœud à qui l'on a nommé un propriétaire tient ses preuves à jour avec ce qui circule déjà dans les blocs, sans jamais interroger personne. Deux corrections sont venues du premier essai réel : une preuve prise il y a quelques blocs reste acceptée, sinon une transaction écrite pendant qu'un bloc se trouve serait perdue ; et un billet qui vient de descendre reste dépensable sans preuve pendant une fenêtre fixe, sinon la frontière entre les deux tiroirs serait une falaise dont le payeur ferait les frais sans avoir rien fait de mal.</span></div></li>
+  <li class="done"><div><b>De quoi ouvrir un réseau<span class="state">Fait</span></b><span>Chaque réseau part d'un bloc inscrit dans le programme, donc deux nœuds qui ne se sont jamais rencontrés sont sur la même chaîne par construction, et aucun n'a à croire un inconnu sur l'origine de l'histoire. Ce qui est écrit n'est pas une promesse mais des octets : n'importe qui recalcule l'empreinte et vérifie le travail derrière. Le premier bloc demande déjà un vrai travail, mesuré, sans quoi les premières secondes appartiennent à qui démarre en avance. Aucun bloc ne peut être daté avant l'ouverture annoncée. Et le premier bloc porte de quoi dire de quel jour il est, ce qui prouve que la chaîne n'a pas été lancée en douce des semaines plus tôt.</span></div></li>
+  <li class="done"><div><b>La porte d'entrée<span class="state">Fait</span></b><span>Un explorateur, qui est un nœud qui sert en plus un site : la chaîne en public, et l'explication de la chaîne. Il tient un index des propriétaires vers leurs billets, c'est-à-dire exactement le coût qui grandit que le protocole refuse d'imposer aux validateurs, et c'est la raison pour laquelle il vit dans un programme séparé que personne n'est obligé de faire tourner. Le site est écrit trois fois : le lecteur choisit en arrivant ce qu'il sait déjà, et ce choix le suit partout, si bien que la page d'un bloc explique ce qu'est un bloc ou donne la structure des engagements. Anglais et français, une langue étant un fichier et rien d'autre. La page ne fait que lire : elle ne détient aucune clé et ne peut rien signer, parce qu'un portefeuille dans un navigateur est d'où viennent la plupart des vols de ce milieu.</span></div></li>
+  <li class="done"><div><b>Tenir le choc<span class="state">Fait</span></b><span>Un nœud ne peut plus être immobilisé ni noyé. Un pair qui ouvre un message puis se tait était capable de bloquer un fil d'exécution aussi longtemps qu'il gardait la connexion ouverte, et une poignée d'entre eux suffisait à rendre un nœud sourd : il est maintenant relâché en quelques secondes, et la distinction est faite entre un pair qui n'a rien à dire, ce qui est normal, et un pair qui retient un message en cours, ce qui ne l'est pas. Le nombre de connexions est plafonné, ainsi que la part qu'une même adresse peut en prendre, et un pair qui envoie un bloc invalide est refusé pendant un moment plutôt que libre de recommencer aussitôt. Rien de ce qu'un inconnu fait ne décide plus de la mémoire que dépense le nœud : les enregistrements d'annulation, les blocs déjà jugés mauvais, les branches perdues et la file d'attente de chaque pair sont tous bornés. Enfin, le répertoire de données est tenu par un verrou que le système d'exploitation relâche à la mort du processus, si bien qu'un serveur qui perd le courant redémarre seul, là où un fichier oublié imposait une intervention humaine.</span></div></li>
+  <li class="done"><div><b>Pouvoir rejoindre sans tout télécharger<span class="state">Fait</span></b><span>Le coût de validation était plafonné, mais celui de l'arrivée ne l'était pas : mesuré, trente ans de chaîne chargée représentent 197 gigaoctets à télécharger, pour aboutir à un état qui en pèse 68 Mo. Chaque en-tête engage désormais deux choses de plus : le travail accumulé derrière toute la chaîne, et l'ensemble des en-têtes antérieurs, porté comme la cave sous forme de soixante-quatre empreintes. Cela permet de remettre à un nouveau venu un échantillon d'anciens en-têtes, qu'il vérifie être réellement à la place annoncée, et d'établir ce qui se tient derrière le sommet sans lire les millions d'en-têtes intermédiaires : quelques centaines de kilooctets au lieu de 2,9 gigaoctets, sans point de contrôle et sans croire personne. Le protocole qui s'en sert reste à écrire ; les champs, eux, ne pouvaient pas attendre, car changer la forme d'un en-tête invalide tous les blocs déjà minés. Le réseau de test a donc pris le numéro suivant, ce qui n'a rien coûté aujourd'hui et aurait tout coûté plus tard.</span></div></li>
+  <li class="done"><div><b>Pouvoir changer une règle sans jeter la chaîne<span class="state">Fait</span></b><span>Le seul outil dont disposait le projet pour changer une règle était de renuméroter le réseau, ce qui a servi trois fois et qui, sur une chaîne qui porte de l'argent, efface les soldes. Une règle qui change nomme désormais la hauteur à partir de laquelle elle s'applique, et les blocs d'avant restent jugés comme ils l'ont toujours été. Deux choses le rendaient déjà possible sans que personne l'ait prévu : chaque bloc porte un numéro de version, et c'est le tout premier champ qu'un nœud lit, donc il peut décider comment lire le reste après l'avoir lu ; et la hauteur est disponible partout où une règle est vérifiée. La moitié la moins évidente est ce que fait un nœud dépassé. Il refusait le bloc comme mauvais et coupait avec le pair qui l'envoyait, c'est-à-dire avec tous ceux qui avaient mis à jour, ce qui le laissait suivre la chaîne minoritaire de ceux qui ne l'avaient pas fait. Il distingue maintenant les deux cas, dit quelle version lui manque, et s'arrête.</span></div></li>
+  <li><div><b>Le testnet public</b><span>Une monnaie sans valeur, ouverte, que des inconnus font tourner. Le seul vrai test de décentralisation : tout ce qui précède peut être parfait et échouer ici.</span></div></li>
+</ol>
+
+<div class="note">
+  <span class="tag">À savoir, pas maintenant</span>
+  <p><b>Une cotation n'est pas une étape technique.</b> C'est une décision commerciale et juridique prise par des tiers, très en aval de tout ce qui précède : elle suppose une chaîne qui tourne, des nœuds tenus par des inconnus, et de la demande réelle. La laisser influencer les choix de conception aujourd'hui abîmerait le protocole sans rapprocher l'objectif d'un jour.</p>
+  <p class="push-sm">Côté cadre légal, l'Union européenne applique le règlement MiCA depuis fin 2024, et une émission publique y crée des obligations réelles. Un point mérite d'être connu tôt car il oriente la conception de l'émission : les crypto-actifs créés automatiquement en récompense du fonctionnement du réseau bénéficient d'un régime nettement plus léger qu'une vente au public. Ce n'est pas un avis juridique : c'est un sujet à faire regarder par un professionnel avant toute ouverture au public.</p>
+</div>

@@ -9,13 +9,16 @@
 //!
 //! ```text
 //! ---
-//! title:      what a browser tab says
-//! language:   the tag a browser hyphenates and a screen reader speaks by
-//! stylesheet: the file beside this one that styles it
-//! strap:      the sentence under the heading, may run over several lines
-//! byline:     one line of the byline; write it again for the next one
-//! abstract:   the word over the summary, if the document opens with one
-//! footer:     one item in the footer; write it again for the next one
+//! title:       what a browser tab says
+//! language:    the tag a browser hyphenates and a screen reader speaks by
+//! stylesheet:  the file beside this one that styles it
+//! kicker:      the short line above the heading, if the document has one
+//! strap:       the sentence under the heading, may run over several lines
+//! byline:      one line of the byline; write it again for the next one
+//! abstract:    the word over the opening, if the opening carries one
+//! numerals:    arabic, the default, or roman
+//! subsections: numbered, the default, or unnumbered
+//! footer:      one item in the footer; write it again for the next one
 //! ---
 //! ```
 //!
@@ -35,10 +38,73 @@ pub(crate) struct Front {
     pub(crate) title: String,
     pub(crate) language: String,
     pub(crate) stylesheet: String,
+    pub(crate) kicker: Option<String>,
     pub(crate) strap: Option<String>,
     pub(crate) byline: Vec<String>,
     pub(crate) summary_heading: Option<String>,
+    pub(crate) numerals: Numerals,
+    pub(crate) subsections: Subsections,
     pub(crate) footer: Vec<String>,
+}
+
+/// The figures a section is counted in.
+///
+/// Counted either way: the style is how the number is written, never what it
+/// is. A paper that numbers its parts I to VIII says so here and goes on
+/// having sections inserted into it without anybody editing a numeral.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Numerals {
+    Arabic,
+    Roman,
+}
+
+impl Numerals {
+    /// A section's number, written in this style.
+    pub(crate) fn of(self, value: usize) -> String {
+        match self {
+            Self::Arabic => value.to_string(),
+            Self::Roman => roman(value),
+        }
+    }
+}
+
+/// Whether a `### ` heading carries its number.
+///
+/// A paper whose subsections are cross-referenced needs them; a paper whose
+/// subsections are the four beats of an argument, repeated in every section,
+/// would only be repeating "2.3" at the reader.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Subsections {
+    Numbered,
+    Unnumbered,
+}
+
+/// A count in roman figures.
+fn roman(value: usize) -> String {
+    const SIGNS: [(usize, &str); 13] = [
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ];
+    let mut left = value;
+    let mut out = String::new();
+    for (size, sign) in SIGNS {
+        while left >= size {
+            out.push_str(sign);
+            left = left.saturating_sub(size);
+        }
+    }
+    out
 }
 
 /// The front matter and the Markdown body that follows it.
@@ -81,28 +147,39 @@ pub(crate) fn split(source: &str) -> Result<(Front, &str)> {
         title: String::new(),
         language: String::new(),
         stylesheet: String::new(),
+        kicker: None,
         strap: None,
         byline: Vec::new(),
         summary_heading: None,
+        numerals: Numerals::Arabic,
+        subsections: Subsections::Numbered,
         footer: Vec::new(),
     };
+    let mut numerals = None;
+    let mut subsections = None;
     for (key, value) in entries {
         match key.as_str() {
             "title" => once(&mut front.title, &key, value)?,
             "language" => once(&mut front.language, &key, value)?,
             "stylesheet" => once(&mut front.stylesheet, &key, value)?,
+            "kicker" => set(&mut front.kicker, &key, value)?,
             "strap" => set(&mut front.strap, &key, value)?,
             "abstract" => set(&mut front.summary_heading, &key, value)?,
+            "numerals" => set(&mut numerals, &key, value)?,
+            "subsections" => set(&mut subsections, &key, value)?,
             "byline" => front.byline.push(value),
             "footer" => front.footer.push(value),
             other => {
                 return Err(Error::new(format!(
                     "`{other}` is not a front matter key. The ones there are: title, \
-                     language, stylesheet, strap, byline, abstract, footer"
+                     language, stylesheet, kicker, strap, byline, abstract, numerals, \
+                     subsections, footer"
                 )))
             }
         }
     }
+    front.numerals = numerals_of(numerals.as_deref())?;
+    front.subsections = subsections_of(subsections.as_deref())?;
     for (what, value) in [
         ("title", &front.title),
         ("language", &front.language),
@@ -115,6 +192,31 @@ pub(crate) fn split(source: &str) -> Result<(Front, &str)> {
         }
     }
     Ok((front, body))
+}
+
+/// What `numerals:` names, or arabic when it names nothing.
+fn numerals_of(said: Option<&str>) -> Result<Numerals> {
+    match said {
+        None | Some("arabic") => Ok(Numerals::Arabic),
+        Some("roman") => Ok(Numerals::Roman),
+        Some(other) => Err(Error::new(format!(
+            "`numerals: {other}` is not a style of numbering. A section is counted \
+             in `arabic`, which is what a document says nothing about, or in `roman`"
+        ))),
+    }
+}
+
+/// What `subsections:` names, or numbered when it names nothing.
+fn subsections_of(said: Option<&str>) -> Result<Subsections> {
+    match said {
+        None | Some("numbered") => Ok(Subsections::Numbered),
+        Some("unnumbered") => Ok(Subsections::Unnumbered),
+        Some(other) => Err(Error::new(format!(
+            "`subsections: {other}` is not something a subsection is. It is \
+             `numbered`, which is what a document says nothing about, or \
+             `unnumbered`"
+        ))),
+    }
 }
 
 /// A key that may be written once, whose value is a plain string.
@@ -190,6 +292,20 @@ mod tests {
     fn a_document_with_no_front_matter_is_told_so() {
         let said = split("# A title\n").unwrap_err().to_string();
         assert!(said.contains("three dashes"), "{said}");
+    }
+
+    #[test]
+    fn a_count_in_roman_is_the_count_a_reader_knows() {
+        for (value, written) in [(1, "I"), (4, "IV"), (8, "VIII"), (14, "XIV"), (40, "XL")] {
+            assert_eq!(super::roman(value), written);
+        }
+    }
+
+    #[test]
+    fn a_subsection_that_is_neither_numbered_nor_not_is_refused() {
+        let source = "---\ntitle: A\nlanguage: en\nstylesheet: a.css\nsubsections: sideways\n---\n";
+        let said = split(source).unwrap_err().to_string();
+        assert!(said.contains("`subsections: sideways`"), "{said}");
     }
 
     #[test]

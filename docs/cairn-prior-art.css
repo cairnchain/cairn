@@ -42,11 +42,11 @@
     -webkit-font-smoothing:antialiased;
   }
 
-  .sheet{max-width:70rem;margin:0 auto;padding:0 clamp(1.1rem,4vw,3rem) 7rem}
+  .paper{max-width:70rem;margin:0 auto;padding:0 clamp(1.1rem,4vw,3rem) 7rem}
 
   /* ---- masthead ---- */
 
-  .head{
+  .title{
     padding:clamp(3rem,8vw,6rem) 0 2rem;
     border-bottom:2px solid var(--ink);
   }
@@ -60,12 +60,12 @@
     font-weight:700;line-height:1.06;letter-spacing:-.022em;
     margin:0 0 1rem;max-width:18ch;text-wrap:balance;
   }
-  .standfirst{
+  .strap{
     font-size:clamp(1.05rem,2.2vw,1.24rem);
     line-height:1.5;color:var(--ink-2);max-width:56ch;
     font-weight:300;margin:0;
   }
-  .stamp{
+  .byline{
     display:flex;flex-wrap:wrap;gap:.4rem 1.6rem;
     margin-top:1.8rem;
     font-family:"IBM Plex Mono",ui-monospace,monospace;
@@ -108,14 +108,14 @@
   }
   section:last-of-type{border-bottom:0}
 
-  .rail{
+  section > .num{
     font-family:"IBM Plex Mono",ui-monospace,monospace;
     font-size:.66rem;letter-spacing:.13em;text-transform:uppercase;
     color:var(--ink-3);
     display:flex;flex-direction:column;gap:.4rem;align-items:flex-start;
     padding-top:.55rem;
   }
-  .rail .n{
+  section > .num > span:first-child{
     font-family:"Spectral",Georgia,serif;font-size:1.5rem;font-weight:300;
     color:var(--ink-3);line-height:1;letter-spacing:0;
   }
