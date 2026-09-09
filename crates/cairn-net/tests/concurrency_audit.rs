@@ -361,13 +361,19 @@ fn many_threads_over_one_node_all_keep_moving() {
 
     // How many of eight one-second windows each thread got through.
     //
-    // A lock cycle stops a thread for good, so it scores nought. A thread on a
-    // busy machine can lose a window to the scheduler and nothing else, which
-    // is what happened on a runner where several other builds were competing,
-    // and requiring every window of every thread read that as a deadlock. Six
-    // of eight sits between the two with room on both sides.
+    // A lock cycle stops a thread for good, so it scores nought and nothing
+    // else does. That is the whole separation, and it is absolute, so the bound
+    // belongs near nought rather than near eight.
+    //
+    // Measured with six threads over one node: macOS and Linux give seven or
+    // eight of eight, and a Windows runner gave [5, 6, 7, 4, 8, 8] with nothing
+    // wrong, because its scheduler is coarser and the runner has two cores.
+    // Bounds of eight and then of six both read that as a deadlock. Two leaves
+    // the distinction intact, since a thread that advances twice is a thread
+    // that is running, and it survives a machine that hands one thread very
+    // little for a second or two at a time.
     const WINDOWS: usize = 8;
-    const ENOUGH: usize = 6;
+    const ENOUGH: usize = 2;
     let mut seen: Vec<u64> = ticks
         .iter()
         .map(|tick| tick.load(Ordering::SeqCst))
