@@ -46,6 +46,7 @@ dependencies = [
 name = "cairn-accumulator"
 version = "0.5.0"
 dependencies = [
+ "cairn-fuzz",
  "cairn-primitives",
  "hex",
  "thiserror",
@@ -96,6 +97,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn-fuzz"
+version = "0.5.0"
+
+[[package]]
 name = "cairn-http"
 version = "0.5.0"
 
@@ -105,6 +110,7 @@ version = "0.5.0"
 dependencies = [
  "cairn-accumulator",
  "cairn-crypto",
+ "cairn-fuzz",
  "cairn-primitives",
  "hex",
  "thiserror",
@@ -117,10 +123,12 @@ dependencies = [
  "cairn-accumulator",
  "cairn-chain",
  "cairn-crypto",
+ "cairn-fuzz",
  "cairn-ledger",
  "cairn-primitives",
  "cairn-store",
  "getrandom",
+ "hex",
  "thiserror",
 ]
 
@@ -140,6 +148,7 @@ name = "cairn-primitives"
 version = "0.5.0"
 dependencies = [
  "blake3",
+ "cairn-fuzz",
  "hex",
  "thiserror",
 ]
@@ -162,10 +171,12 @@ dependencies = [
  "cairn-accumulator",
  "cairn-chain",
  "cairn-crypto",
+ "cairn-fuzz",
  "cairn-http",
  "cairn-ledger",
  "cairn-net",
  "cairn-primitives",
+ "hex",
  "thiserror",
  "zeroize",
 ]

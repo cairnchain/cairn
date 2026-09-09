@@ -31,6 +31,16 @@
 //! could not reach the invented work at all, and the line under it said the two
 //! curves agreed.
 //!
+//! What it does not search is anything but the fork depth. The gap's alignment
+//! against the halving boundaries, which band it lands in, whether it is one
+//! piece, and above all the level count itself are all held fixed here, and the
+//! last of those is not the chain's to fix: `levels` is `bit_length(height /
+//! 1024)` and the height is a field of the tip. `examples/breaking_the_bound`
+//! searches those four, and finds a placement this file's conclusion does not
+//! survive; `tests/audit_the_bound.rs` builds one and puts it through
+//! `check_start`. The numbers below are still the numbers for a forger that
+//! takes the level count as given.
+//!
 //! Run with `cargo run --release -p cairn-ledger --example adversarial_placement`.
 
 #![allow(

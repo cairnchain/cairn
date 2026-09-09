@@ -106,8 +106,16 @@ use crate::validation::ConsensusParams;
 /// **The guarantee is a depth, and it is worth stating as one.** A forger at
 /// 40% cannot put a newcomer on a branch differing from the real one by more
 /// than about 1240 blocks. Inside that, it can, and so can a slow peer: it is
-/// where any node sits for its first blocks after connecting, and it is
-/// shallower than the reorganisation this node would accept anyway.
+/// where any node sits for its first blocks after connecting.
+///
+/// That depth is deeper than what a node will undo. This paragraph used to end
+/// by saying it was shallower than the reorganisation this node would accept,
+/// which its own two numbers refute: `MAX_REORG_DEPTH` is 1024 and the
+/// effective limit is the lesser of that and the network's burial. So a
+/// newcomer put at the far end of the guarantee cannot be carried back onto the
+/// real chain by the ordinary rule, and the whitepaper's limitations section
+/// states the gap and the three ways of closing it. None is chosen here,
+/// because each changes a rule.
 ///
 /// Twenty hours at a block a minute, and the depth is the part that is
 /// guaranteed. A branch sitting at the difficulty floor may state the same

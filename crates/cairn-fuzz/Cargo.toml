@@ -1,0 +1,18 @@
+[package]
+name = "cairn-fuzz"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Randomised testing for the decoders. Never a dependency of anything that ships."
+publish = false
+
+[lints]
+workspace = true
+
+# Deliberately empty, and this is the whole reason the crate exists as a crate
+# rather than as a dependency taken off a registry. It is a dev-dependency of
+# four crates whose release binaries must gain nothing, and the cheapest way to
+# be certain of that is to have nothing to gain.
+[dependencies]

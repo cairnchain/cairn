@@ -36,11 +36,26 @@ makes two honest nodes disagree about which chain is heaviest; anything that
 stops a node dead on a message anyone can send it; anything that makes a newcomer
 accept a chain that is not the heaviest one.
 
-The sampling bound that lets a newcomer join by opening 512 headers is a
-**conjecture, not a theorem** — our own derivation, unreviewed, and known not to
-account for adversarial placement under moving difficulty or for grinding the
-Fiat-Shamir seed. Work that proves it, or breaks it, is the single most useful
-thing anyone outside this project could do.
+The sampling bound that lets a newcomer weigh a chain by drawing 4 096 samples
+is a **conjecture, not a theorem**: our own derivation, unreviewed. Work that
+proves it, or breaks it, is the single most useful thing anyone outside this
+project could do.
+
+Two things this paragraph used to say are no longer true, and the correction
+matters because it moves where the weak point is. It said 512 samples, which
+was the count before a measurement put the adversary's best placement at a far
+better ratio than the derivation had assumed; the count went to 4 096 and the
+claim from 45.7% to 40%. And it said the derivation accounted for neither
+adversarial placement under moving difficulty nor grinding of the Fiat-Shamir
+seed. Both are measured now, in `crates/cairn-ledger/examples/adversarial_placement.rs`.
+
+What is worth knowing about that measurement is that it was itself wrong until
+recently, and in a way no test caught: it built a forgery by re-mining headers
+without rebuilding the links between them, so every attempt was refused for a
+broken parent chain and counted as a forgery the sampling had caught. It now
+separates what the draw refuses from what every other check refuses, and
+reports only the first. Anyone starting here should read that example before
+the bound, and doubt it in the same way.
 
 ## Scope
 

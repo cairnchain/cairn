@@ -170,3 +170,121 @@ fn hexadecimal_still_renders_the_way_it_did() {
     assert_eq!(hex::encode(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
     assert_eq!(hex::encode(&[]), "");
 }
+
+// ---------------------------------------------------------------------------
+// Part 1 of `docs/cairn-specification.md`, written from the document.
+//
+// The vectors above pin digests. These pin the sentences in *Primitives* that
+// say which bytes are hashed in the first place, which is the half a domain
+// vector cannot see: swapping two fields of a structure leaves every digest
+// here unchanged and changes every identifier in the chain.
+//
+// One link in that chain is still unpinned anywhere, and it is named rather
+// than left to be discovered. The document says each domain constant is
+// BLAKE3's `derive_key` over a published context string with empty key
+// material, and it publishes ten of the twenty strings. Nothing checks a
+// constant against the string that is said to produce it, here or elsewhere:
+// `DOMAIN_VECTORS` pins what the constants hash to, not what they are made
+// from. Checking it needs BLAKE3 in this crate's dev-dependencies.
+// ---------------------------------------------------------------------------
+
+use cairn_primitives::amount::PEBBLES_PER_CAIRN;
+use cairn_primitives::codec::{CodecError, Decode, MAX_SEQUENCE_LEN};
+use cairn_primitives::Amount;
+
+#[test]
+fn an_integer_encodes_little_endian_at_the_width_its_type_says() {
+    assert_eq!(0x12u8.encode(), vec![0x12]);
+    assert_eq!(0x1234u16.encode(), vec![0x34, 0x12]);
+    assert_eq!(0x1234_5678u32.encode(), vec![0x78, 0x56, 0x34, 0x12]);
+    assert_eq!(
+        0x1122_3344_5566_7788u64.encode(),
+        vec![0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11]
+    );
+    assert_eq!(u128::from(u64::MAX).encode().len(), 16);
+    assert_eq!(
+        u128::from(u64::MAX).encode(),
+        [vec![0xff; 8], vec![0x00; 8]].concat()
+    );
+
+    // "A decoder MUST read exactly the width the field's type says and no
+    // more", so a frame one byte short is refused and one byte long is too.
+    assert_eq!(u32::decode(&[1, 2, 3]), Err(CodecError::UnexpectedEnd));
+    assert_eq!(
+        u32::decode(&[1, 2, 3, 4, 5]),
+        Err(CodecError::TrailingBytes(1))
+    );
+}
+
+#[test]
+fn a_byte_array_and_a_hash_encode_as_their_bytes_with_no_prefix() {
+    let bytes = [0xab_u8; 7];
+    assert_eq!(bytes.encode(), bytes.to_vec());
+    let digest = hash(Domain::MerkleLeaf, PROBE);
+    assert_eq!(digest.encode(), digest.as_bytes().to_vec());
+    assert_eq!(digest.encode().len(), 32);
+}
+
+#[test]
+fn a_sequence_is_a_u32_count_then_the_items_back_to_back() {
+    let items: Vec<u16> = vec![0x0102, 0x0304, 0x0506];
+    assert_eq!(
+        items.encode(),
+        vec![3, 0, 0, 0, 0x02, 0x01, 0x04, 0x03, 0x06, 0x05]
+    );
+    assert_eq!(Vec::<u16>::new().encode(), vec![0, 0, 0, 0]);
+    assert_eq!(Vec::<u16>::decode(&items.encode()).unwrap(), items);
+}
+
+#[test]
+fn a_declared_count_past_the_floor_is_refused_before_any_item_is_read() {
+    assert_eq!(MAX_SEQUENCE_LEN, 1_048_576);
+
+    // The count and nothing after it. A decoder that reserved in proportion to
+    // the count before checking it would ask for four megabytes here.
+    let past = u32::try_from(MAX_SEQUENCE_LEN + 1).unwrap();
+    let mut frame = past.to_le_bytes().to_vec();
+    assert_eq!(
+        Vec::<u32>::decode(&frame),
+        Err(CodecError::SequenceTooLong {
+            declared: MAX_SEQUENCE_LEN + 1
+        }),
+        "the count is refused before any item is read"
+    );
+
+    // And the limit itself is allowed through the count check, failing only
+    // for want of the items, which is what puts the boundary at the right end.
+    frame = u32::try_from(MAX_SEQUENCE_LEN)
+        .unwrap()
+        .to_le_bytes()
+        .to_vec();
+    assert_eq!(Vec::<u32>::decode(&frame), Err(CodecError::UnexpectedEnd));
+}
+
+#[test]
+fn an_amount_is_a_count_of_pebbles_and_the_ceiling_is_refused_at_decode() {
+    assert_eq!(PEBBLES_PER_CAIRN, 100_000_000);
+    assert_eq!(Amount::MAX_MONEY.as_pebbles(), 100_000_000_000_000_000);
+    assert_eq!(
+        Amount::MAX_MONEY.as_pebbles() / PEBBLES_PER_CAIRN,
+        1_000_000_000
+    );
+
+    let amount = Amount::from_pebbles(1_234_567_890).unwrap();
+    assert_eq!(amount.encode(), 1_234_567_890u64.to_le_bytes().to_vec());
+    assert_eq!(amount.encode().len(), 8);
+
+    assert_eq!(
+        Amount::decode(&Amount::MAX_MONEY.as_pebbles().to_le_bytes()).unwrap(),
+        Amount::MAX_MONEY,
+        "the ceiling itself decodes"
+    );
+    assert_eq!(
+        Amount::decode(&(Amount::MAX_MONEY.as_pebbles() + 1).to_le_bytes()),
+        Err(CodecError::InvalidValue {
+            type_name: "Amount"
+        }),
+        "one pebble past the ceiling is refused rather than clamped"
+    );
+    assert!(Amount::from_pebbles(Amount::MAX_MONEY.as_pebbles() + 1).is_none());
+}

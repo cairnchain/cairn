@@ -27,3 +27,7 @@ cairn-http.workspace = true
 cairn-primitives.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
+
+[dev-dependencies]
+cairn-fuzz.workspace = true
+hex.workspace = true

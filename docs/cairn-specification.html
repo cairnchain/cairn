@@ -11,7 +11,7 @@
   <div class="byline">
     <span>Draft, against block version 1</span>
     <span><a href="https://github.com/cairnchain/cairn">github.com/cairnchain/cairn</a></span>
-    <span>Sections 1 to 7 drafted; consensus, state and joining to follow</span>
+    <span>Complete in draft, and held to the code where it names a number</span>
   </div>
 </header>
 
@@ -30,7 +30,7 @@
     This document is normative. Where it and the implementation disagree that is a
     defect in one of them, and neither is presumed right. Every statement here that
     names a number, a byte layout or an ordering is held against the code by a
-    test, and section 8 says where those tests are. A specification nobody checks
+    test, and the last section says where those tests are. A specification nobody checks
     goes wrong the way a comment goes wrong: quietly, and without anyone deciding
     to.
   </p>
@@ -156,6 +156,40 @@
       encoding is positional and unpadded, an identifier commits to every field of
       what it names, in order, and to nothing else.
     </p>
+
+    <p>
+      Each 32-byte domain constant is BLAKE3's <code>derive_key</code> over the context string
+      below with empty key material, and every hash under that domain is BLAKE3 keyed
+      with that constant. All twenty are given here, because a document that named
+      only some of them could not be used to compute an identifier, which is the one
+      thing it exists for.
+    </p>
+
+    <table>
+      <thead><tr><th>Called here</th><th>Context string</th></tr></thead>
+      <tbody>
+        <tr><td>transfer id</td><td><code>cairn v1 transfer id</code></td></tr>
+        <tr><td>coinbase id</td><td><code>cairn v1 coinbase id</code></td></tr>
+        <tr><td>block header id</td><td><code>cairn v1 block header id</code></td></tr>
+        <tr><td>signature message</td><td><code>cairn v1 signature message</code></td></tr>
+        <tr><td>merkle leaf</td><td><code>cairn v1 merkle leaf</code></td></tr>
+        <tr><td>merkle node</td><td><code>cairn v1 merkle node</code></td></tr>
+        <tr><td>merkle empty</td><td><code>cairn v1 merkle empty</code></td></tr>
+        <tr><td>state entry</td><td><code>cairn v1 state entry</code></td></tr>
+        <tr><td>accumulator empty</td><td><code>cairn v1 accumulator empty</code></td></tr>
+        <tr><td>accumulator leaf</td><td><code>cairn v1 accumulator leaf</code></td></tr>
+        <tr><td>accumulator node</td><td><code>cairn v1 accumulator node</code></td></tr>
+        <tr><td>note key</td><td><code>cairn v1 note key</code></td></tr>
+        <tr><td>hot note value</td><td><code>cairn v1 hot note value</code></td></tr>
+        <tr><td>state commitment</td><td><code>cairn v1 state commitment</code></td></tr>
+        <tr><td>forest leaf</td><td><code>cairn v1 forest leaf</code></td></tr>
+        <tr><td>forest node</td><td><code>cairn v1 forest node</code></td></tr>
+        <tr><td>forest roots</td><td><code>cairn v1 forest roots</code></td></tr>
+        <tr><td>header history leaf</td><td><code>cairn v1 header history leaf</code></td></tr>
+        <tr><td>sampling seed</td><td><code>cairn v1 sampling seed</code></td></tr>
+        <tr><td>grace window</td><td><code>cairn v1 grace window</code></td></tr>
+      </tbody>
+    </table>
 
     <p>
       Two consequences follow and both are load-bearing.
@@ -384,6 +418,18 @@
       to the body through <code>transactions_root</code>.
     </p>
 
+    <p>
+      <code>transactions_root</code> is the Merkle root, under the merkle domains, of one leaf
+      per transaction: the coinbase first, then the transfers in the order they
+      appear in the block. Each leaf is the hash under the merkle leaf domain of that
+      transaction's identifier. An interior node is the hash under the merkle node
+      domain of its two children in order, and a level with an odd count carries the
+      last node up unchanged rather than duplicating it, which is what stops two
+      different bodies producing one root. The root of no leaves is the hash under
+      the merkle empty domain, and a block always has at least its coinbase, so that
+      case does not arise here.
+    </p>
+
     <h3><span class="sub">6.1</span>The order a node applies the rules</h3>
 
     <p>
@@ -447,13 +493,2487 @@
 <section>
   <div class="num">7</div>
   <div class="body">
+    <h2>The state</h2>
+    <p>
+      The state is the set of unspent notes, split across two tiers, together with
+      three things a block's validity depends on that no note holds: what fell
+      recently, which coinbases cannot be spent yet, and how much money exists. A
+      block header carries all of it as one hash, <code>state_root</code>.
+    </p>
+
+    <p>
+      <strong>Nothing in a block declares any part of it.</strong> A block declares <code>state_root</code>
+      and nothing else about the state. Which notes fall, where each one lands, what
+      the grace window holds afterwards, which coinbases are still waiting and what
+      the issued total comes to are each derived by every node from the state it
+      already holds and the block's own transactions. A node that derives any of
+      them differently refuses the block with <code>StateRootMismatch</code>, and cannot say
+      which part it disagreed about. So every derivation below is normative in the
+      strongest sense available: getting one of them wrong is not a wrong answer to
+      one question, it is a different chain from the first block that reaches the
+      rule.
+    </p>
+
+    <h3><span class="sub">7.1</span>The two tiers</h3>
+
+    <p>
+      The <strong>hot set</strong> is the notes every node holds in full. A note enters it when
+      the transaction that creates it is applied, and leaves it when it is spent or
+      when it is evicted. Spending a note in the hot set takes nothing from the
+      spender but the note's identifier, because every node already has the rest.
+    </p>
+
+    <p>
+      The <strong>cold set</strong> is every note that has been evicted from the hot set and not
+      spent since. It has no bound and no node is required to hold any of it. What a
+      node holds is an append-only accumulator over it: at most 64 hashes and two
+      counters, whatever the set contains. Spending a note in the cold set means
+      supplying the note and a proof.
+    </p>
+
+    <p>
+      The hot set holds at most <code>hot_capacity</code> notes. <strong><code>hot_capacity</code> is a
+      consensus parameter of the network and MUST NOT be a choice an operator
+      makes.</strong> Two nodes running different values compute different roots for the
+      first block that fills the smaller of them, and go on computing different
+      roots for every block after it, while each believes it is on the same chain
+      as the other. There is no refusal that catches this and no message that
+      reports it, which is why it is written as a rule here rather than left as a
+      number an implementation picks.
+    </p>
+
+    <table>
+      <thead><tr><th>Parameter</th><th>testnet-6</th><th>devnet</th><th>What it bounds</th></tr></thead>
+      <tbody>
+        <tr><td>hot capacity</td><td class="n">131 072</td><td class="n">64</td><td>notes the hot set holds</td></tr>
+        <tr><td>evictions per block</td><td class="n">1 024</td><td class="n">1 024</td><td>notes one block may push out</td></tr>
+        <tr><td>coinbase maturity</td><td class="n">1 024</td><td class="n">32</td><td>blocks a reward waits</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      Mainnet is not in that table because it does not exist: a network exists once
+      its first block does, and there are no mainnet values to state until there is
+      one.
+    </p>
+
+    <p>
+      The grace window's two bounds, 64 blocks and 8 192 notes, are protocol
+      constants rather than network parameters: every network carries the same two.
+    </p>
+
+    <p>
+      Devnet is a throwaway network and is listed only because a second
+      implementation that supports it has to get it right. It lowers the hot
+      capacity and inherits the eviction cap, so there the cap is larger than the
+      tier and one block can empty the whole of it. On testnet-6 the cap is a
+      hundred and twenty eighth of the tier, so emptying the tier takes at least
+      128 blocks whatever shape the blocks take.
+    </p>
+
+    <h3><span class="sub">7.2</span>What the state root commits to</h3>
+
+    <p>
+      <code>state_root</code> is the hash, under the state commitment domain, of the following
+      in this order. Nothing else is folded in, and no field is ever left out: an
+      empty window is a count of nought and no entries, not an absent field.
+    </p>
+
+    <table>
+      <thead><tr><th class="n">#</th><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
+      <tbody>
+        <tr><td class="n">1</td><td>hot root</td><td>hash</td><td class="n">32</td></tr>
+        <tr><td class="n">2</td><td>hot count</td><td>u64</td><td class="n">8</td></tr>
+        <tr><td class="n">3</td><td>cold commitment</td><td>hash</td><td class="n">32</td></tr>
+        <tr><td class="n">4</td><td>cold count</td><td>u64</td><td class="n">8</td></tr>
+        <tr><td class="n">5</td><td>grace root</td><td>hash</td><td class="n">32</td></tr>
+        <tr><td class="n">6</td><td>maturing count</td><td>u64</td><td class="n">8</td></tr>
+        <tr><td class="n">7</td><td>each maturing entry, oldest first</td><td>u64 then hash</td><td class="n">40 each</td></tr>
+        <tr><td class="n">8</td><td>issued total</td><td>amount</td><td class="n">8</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      The hot count is the number of notes in the hot set, not the number of nodes
+      in the tree that commits to them. The cold count is the number of leaves in
+      the accumulator that have not been emptied, which is not the number of
+      positions it has handed out; the difference is committed to inside the cold
+      commitment rather than here.
+    </p>
+
+    <p>
+      <strong>Both counts are folded in, so the boundary between the tiers is itself part
+      of the commitment.</strong> Without them a node could hold more or fewer notes hot
+      than the rules allow and still agree with everyone on the roots.
+    </p>
+
+    <p>
+      The maturity window and the issued total are folded in here rather than each
+      through a commitment of its own, and neither is given a name in the header.
+      Both decide which blocks are valid, so both have to be committed to: a node
+      handed a state rather than building one would otherwise start with an empty
+      window and a supply of nothing, and disagree with the network about which
+      blocks are valid with nobody at fault. The window is written length first, so
+      no two windows produce the same bytes.
+    </p>
+
+    <p>
+      The domains this section uses are in the identifiers section, which publishes
+      all twenty.
+    </p>
+
+    <h3><span class="sub">7.3</span>The hot set</h3>
+
+    <p>
+      The hot set is committed to by a sparse Merkle tree keyed by note.
+    </p>
+
+    <p>
+      A note's key is the hash, under the note key domain, of the note identifier's
+      36-byte encoding. The 32 bytes are read as a path from the root, one bit per
+      level, starting at the most significant bit of the first byte; a set bit means
+      the right child. <strong>The identifier is hashed rather than used as the key
+      directly</strong>, because every note one transaction creates shares its source
+      identifier, and using it raw would pile those notes onto one path and deepen
+      every proof through it.
+    </p>
+
+    <p>
+      A note's value is the hash, under the hot note value domain, of the note's
+      40-byte encoding followed by the height of the block that created it, as a
+      <code>u64</code>. The height is committed to because it decides eviction order. Leaving
+      it out would let two nodes hold the same notes, agree on the root, and still
+      evict different ones.
+    </p>
+
+    <p>
+      The tree's hashes are defined by what a subtree holds, and by nothing else:
+    </p>
+
+    <table>
+      <thead><tr><th>A subtree holding</th><th>Hashes to</th></tr></thead>
+      <tbody>
+        <tr><td>no key</td><td>the hash of no bytes under the accumulator empty domain</td></tr>
+        <tr><td>exactly one key</td><td>that key's 32 bytes then its value, under the accumulator leaf domain</td></tr>
+        <tr><td>two keys or more</td><td>its left half then its right half, under the accumulator node domain</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      The single-key case is what makes the root a function of the set alone. A
+      subtree holding one key hashes the same whatever depth it sits at, so a tree
+      never remembers that a sibling once existed, and two nodes that reached the
+      same set by different sequences of insertions and removals reach the same
+      root. An implementation that keeps an internal node above a lone leaf computes
+      a different root for the same set of notes.
+    </p>
+
+    <p>
+      The hot root of an empty hot set is therefore the accumulator empty hash, and
+      the hot count is nought.
+    </p>
+
+    <h3><span class="sub">7.4</span>Eviction</h3>
+
+    <p>
+      Eviction happens on every block, after the block's transactions have been
+      resolved, and only where the tier would otherwise be over its capacity.
+    </p>
+
+    <p>
+      Let the hot set be the one that stood at the block's parent. Let <em>spent</em> be
+      the note identifiers this block's transfers take out of the hot set. A note
+      spent under the grace window is not one of these: it had already fallen, and
+      it comes out of the cold set. Let <em>created</em> be every note this block creates,
+      in this order: the transfers in the order they appear in the block, each
+      transfer's outputs in index order, then the coinbase's outputs in index order.
+    </p>
+
+    <p>
+      Let <code>surviving</code> be the hot count less the number of notes in <em>spent</em>, and let
+      <code>overflow</code> be <code>surviving</code> plus the number of notes in <em>created</em>, less
+      <code>hot_capacity</code>, or nought when that difference would be negative.
+    </p>
+
+    <p>
+      If <code>overflow</code> is nought, nothing falls.
+    </p>
+
+    <p>
+      Otherwise the notes that fall are the first <code>overflow</code> of the hot set, ordered
+      by the height they were created at ascending, then by note identifier
+      ascending, skipping any note in <em>spent</em>. Two note identifiers are ordered by
+      their 32-byte source hash first, compared byte by byte from the first, then by
+      their index as a number.
+    </p>
+
+    <p>
+      <strong>The ordering is normative and not merely a convention</strong>, because it decides
+      the order leaves are appended to the cold accumulator, and therefore which
+      position each fallen note takes, what the cold commitment comes to, and what
+      the grace window holds. Two nodes that break ties differently agree on which
+      notes fell and disagree on every root afterwards.
+    </p>
+
+    <p>
+      Nothing a block contains can move a note up or down that order. The key is the
+      creation height and the identifier, both settled the moment the note exists.
+      Spending notes only takes candidates off the list; it never promotes one. So
+      the only thing a block decides is how far down the list the cut falls, and it
+      pays for every step in notes it has to create.
+    </p>
+
+    <p>
+      If the hot set does not hold <code>overflow</code> such notes, the shortfall is made up
+      from <em>created</em>, ordered by note identifier ascending, taking from the start.
+      That is reachable only when one block creates more notes than the whole tier
+      holds, in which case those notes all sit at the same height and the identifier
+      is all that separates them.
+    </p>
+
+    <p>
+      A node MUST refuse a block whose eviction list is longer than
+      <code>max_evictions_per_block</code>, with <code>TooManyEvictions</code>. How fast the hot set turns
+      over is a shared resource: every note pushed out is somebody's money now
+      needing a proof to spend, and the pusher chooses whose by choosing nothing,
+      since it is always the oldest that falls. Fees put a price on that; a miner
+      includes its own transfers for free, so this is the bound that holds whatever
+      anyone pays.
+    </p>
+
+    <p>
+      The block's effect on the two tiers MUST be applied in this order, and the
+      order is part of the rule rather than an implementation's convenience:
+    </p>
+
+    <ol>
+      <li>every note the block spends out of the cold set is emptied from the
+      accumulator, all of them proved against the roots as they stood at the
+      parent before any of them is applied;</li>
+      <li>the accumulator is checked to have room for the notes about to fall;</li>
+      <li>every note the block spends out of the hot set is removed from the hot
+      tree;</li>
+      <li>every note the block creates is inserted into the hot tree, carrying this
+      block's height;</li>
+      <li>each note in the eviction list, in eviction order, is removed from the hot
+      tree and appended to the accumulator at the next free position.</li>
+    </ol>
+
+    <p>
+      Step 4 before step 5 is what lets a note created by this very block fall
+      straight through to the cold set, which is the case the shortfall rule above
+      is about. The eviction order skips every note the block spends, which is what
+      makes it true that a block never both spends a note and evicts it.
+    </p>
+
+    <h3><span class="sub">7.5</span>The grace window</h3>
+
+    <p>
+      The grace window is what fell recently, held in full by every node, so that a
+      note that fell moments ago can still be spent without the spender proving
+      anything.
+    </p>
+
+    <p>
+      It is a list of per-block landings, oldest first. Each landing is the notes
+      that fell in one block, in eviction order, each written as its identifier, the
+      position it took in the accumulator, and the note itself. A landing is kept
+      even when it is empty.
+    </p>
+
+    <p>
+      The <code>grace root</code> folded into the state root is the hash, under the grace
+      window domain, of: the number of landings as a <code>u64</code>; then, for each landing
+      in order, the number of notes in it as a <code>u64</code>, then for each note its
+      36-byte identifier, its position as a <code>u64</code>, and its 40-byte encoding.
+    </p>
+
+    <p>
+      After a block, the window is the parent's window changed as follows, in this
+      order:
+    </p>
+
+    <ol>
+      <li>every note this block spends out of the cold set is removed from whichever
+      landing holds it, the rest of that landing keeping its order. A note that
+      has been spent cannot be spent again, so it has no business in a window
+      that says what may be spent without a proof, and a node that left it there
+      would go on naming a note it can no longer prove;</li>
+      <li>this block's own landing is appended;</li>
+      <li>while the window holds more than 64 landings, or more than 8 192 notes in
+      total, the oldest landing is dropped.</li>
+    </ol>
+
+    <p>
+      Step 3 counts landings and notes, whichever runs out first, and it drops from
+      the oldest end only. If a block lands more notes than 8 192, step 3 runs the
+      window out and then reaches the landing this block just appended, and the
+      window is left empty: what that block landed was never in the window at all.
+      That cannot happen on a network whose eviction cap is below 8 192, and it is
+      specified because a network is free to set one that is not.
+    </p>
+
+    <p>
+      <strong>A node MUST hold, for every note in its window, the note in full, the
+      position it took, and a proof for that position that verifies against the cold
+      accumulator as it currently stands.</strong> A node that cannot produce one cannot
+      validate a proofless spend the rest of the network accepts, and cannot hand
+      its state to a newcomer.
+    </p>
+
+    <p>
+      Under the block bound, a note that fell in the block at height <em>f</em> is in the
+      window from the block at height <em>f</em> + 1 through the block at height <em>f</em> + 64
+      inclusive, and is out of it from <em>f</em> + 65. The note bound moves that edge
+      earlier whenever more than 128 notes a block are falling.
+    </p>
+
+    <h3><span class="sub">7.6</span>Which witness a spend must carry</h3>
+
+    <p>
+      Part 2 gives the two witness shapes. Which of them an input must carry is a
+      question about the state, and this is the answer.
+    </p>
+
+    <table>
+      <thead><tr><th>The note is</th><th>Tag 0, no proof</th><th>Tag 1, with a proof</th></tr></thead>
+      <tbody>
+        <tr><td>in the hot set</td><td>required</td><td>refused, UnexpectedProof</td></tr>
+        <tr><td>in the grace window</td><td>accepted</td><td>accepted</td></tr>
+        <tr><td>cold, outside the window</td><td>refused, MissingProof</td><td>required</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      Inside the window both tags are accepted and they reach the same state: either
+      way the note is taken out of the accumulator at its position, and either way
+      the transfer has the same identifier, because a transfer's identifier leaves
+      its witnesses out. A node MUST NOT treat the two as different transfers.
+    </p>
+
+    <p>
+      <code>MissingProof</code> names two situations a node cannot tell apart: a note that fell
+      and whose spender did not prove it, and a note that never existed. A node
+      holds neither the cold set nor a record of what was never in it.
+    </p>
+
+    <p>
+      The state-dependent refusals a transfer's inputs produce. Inputs are resolved
+      in the order they appear. Within one input, the first two are asked before
+      anything else, the middle four are the branches of where the note turns out to
+      be, and the last is asked once every input has resolved.
+    </p>
+
+    <table>
+      <thead><tr><th class="n">#</th><th>Refusal</th><th>When</th></tr></thead>
+      <tbody>
+        <tr><td class="n">1</td><td>UnknownNote</td><td>an earlier input in this block already spent it</td></tr>
+        <tr><td class="n">2</td><td>ImmatureCoinbase</td><td>its source is a coinbase still in the maturity window</td></tr>
+        <tr><td class="n">3</td><td>UnexpectedProof</td><td>it is in the hot set and the input carries a proof</td></tr>
+        <tr><td class="n">4</td><td>MissingProof</td><td>it is neither in the hot set nor in the window, and the input carries no proof</td></tr>
+        <tr><td class="n">5</td><td>UnknownNote</td><td>the window names it and the accumulator no longer holds it</td></tr>
+        <tr><td class="n">6</td><td>InvalidProof</td><td>the proof does not verify against the cold commitment</td></tr>
+        <tr><td class="n">7</td><td>OutputsExceedInputs</td><td>the outputs total more than the inputs, once every input has resolved</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      A transfer MUST NOT spend a note created by the same block. Every input is
+      resolved against the state as it stood at the block's parent, and a note this
+      block creates is not in it. There is no chaining inside a block.
+    </p>
+
+    <h3><span class="sub">7.7</span>The cold set</h3>
+
+    <p>
+      The cold set is committed to by an append-only forest of perfect binary trees.
+    </p>
+
+    <p>
+      A node holds two counters and one root per tree. <code>leaves</code> is the number of
+      positions ever handed out. <code>live</code> is the number of leaves not yet emptied.
+      The forest holds one tree for each set bit of <code>leaves</code>: the tree for bit <em>h</em>
+      is a perfect tree of height <em>h</em>, holding two to the power <em>h</em> leaves. The
+      trees are laid out largest first, so reading the bits of <code>leaves</code> from the
+      highest down, each tree that exists takes the next run of positions after the
+      one before it. So the oldest leaves sit in the biggest tree and a merge
+      only ever extends a tree upward, which is what keeps a position's meaning
+      stable for the life of the chain.
+    </p>
+
+    <p>
+      A position is handed out when a note falls and is never reused. Emptying a
+      leaf leaves the position where it is rather than reshaping the forest around
+      the hole, so a proof taken today describes the same place tomorrow. That costs
+      a forest that never shrinks, and buys a holder who can keep their own proof
+      current from what every block already carries.
+    </p>
+
+    <table>
+      <thead><tr><th>Hash</th><th>Is</th></tr></thead>
+      <tbody>
+        <tr><td>the leaf of a fallen note</td><td>its 36-byte identifier then its 40-byte encoding, under the forest leaf domain</td></tr>
+        <tr><td>the empty leaf</td><td>no bytes, under the forest leaf domain</td></tr>
+        <tr><td>an internal node</td><td>its left child then its right child, under the forest node domain</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      The identifier is folded into the leaf because a position carries no meaning
+      of its own: without it, a proof for one note would serve for another note of
+      the same value and owner sitting elsewhere. The creation height is not folded
+      in. A cold note never falls again, so nothing needs it, and putting it back
+      would add eight bytes to every cold leaf, every proof and every spend.
+    </p>
+
+    <p>
+      The <code>cold commitment</code> folded into the state root is the hash, under the forest
+      roots domain, of: <code>leaves</code> as a <code>u64</code>; <code>live</code> as a <code>u64</code>; then, <strong>for each
+      height from 0 to 63 in ascending order that has a tree</strong>, one byte of height
+      followed by that tree's 32-byte root. The ascending order here is the reverse
+      of the order the trees are laid out in, and getting it backwards produces a
+      commitment that agrees with nobody.
+    </p>
+
+    <p>
+      Appending a leaf reads and writes the roots and nothing else, which is what
+      lets a node holding none of the set keep the commitment current. The new leaf
+      becomes a tree of height 0; while a tree of the same height already exists,
+      that existing tree becomes the left child, the carry becomes the right, and
+      the two merge into a tree one height taller.
+    </p>
+
+    <h3><span class="sub">7.8</span>Proofs</h3>
+
+    <p>
+      A proof for a position is the siblings from its leaf up to the root of the
+      tree it sits in, bottom first, and nothing else. The position is not part of
+      the proof and is carried beside it.
+    </p>
+
+    <p>
+      Verifying a proof for a leaf at a position requires the current <code>leaves</code> count
+      and the current roots, and nothing more:
+    </p>
+
+    <ol>
+      <li>find the tree holding the position, reading <code>leaves</code> from the highest bit
+      down; if the position is at or above <code>leaves</code>, refuse;</li>
+      <li>the proof's sibling count MUST equal that tree's height, or refuse;</li>
+      <li>take the position's index within the tree, which is the position less the
+      tree's first position;</li>
+      <li>starting from the leaf, for each sibling in order: if the index's low bit
+      is nought the running value is the left child and the sibling the right,
+      otherwise the other way round; hash the pair as an internal node; then
+      shift the index right by one;</li>
+      <li>the result MUST equal the root of that tree.</li>
+    </ol>
+
+    <p>
+      <strong>A proof is checked against the accumulator as it stands and against nothing
+      else.</strong> There is no window of past roots. Accepting an old proof would be half
+      a rule: emptying a leaf folds the empty leaf up the path the proof carries,
+      and an old path does not reach the root that is there now, so the removal
+      would do nothing and the note could be spent again. Completing the other half
+      would mean holding, as committed state, everything that changed in between,
+      which grows the one thing this design bounds. Refusing a stale proof costs
+      nobody anything: a transfer whose proof went out of date is the same transfer
+      with a newer proof, offered again, and refreshing a witness does not change a
+      transfer's identifier.
+    </p>
+
+    <p>
+      Exactly three things change a proof, and a holder who follows every block can
+      keep one current from what the blocks already carry:
+    </p>
+
+    <ul>
+      <li>an append that merges the tree the position sits in adds one sibling at the
+      top, and the proof grows by one;</li>
+      <li>the emptying of another leaf in the same tree replaces exactly one sibling;</li>
+      <li>undoing either puts back what was there.</li>
+    </ul>
+
+    <p>
+      Nothing else touches it. A proof's length is always the height of the tree the
+      position currently sits in.
+    </p>
+
+    <p>
+      Emptying a leaf takes a proof for what is there. The presented leaf MUST NOT
+      be the empty leaf: after a removal the root above the position is exactly what
+      folding the empty leaf gives, so a second removal of the same place would
+      verify, and would take the count down for a leaf that is not there. The roots
+      do not move to show it and only the count would, and the count is committed
+      to. Emptying replaces the tree's root with the fold of the empty leaf up the
+      proof's path, and decreases <code>live</code> by one. <code>leaves</code> does not change.
+    </p>
+
+    <p>
+      Every cold spend in one block is verified against the roots as they stood at
+      the parent, all of them before any is applied, then applied in ascending
+      position order with the proofs still waiting brought up to date. <strong>So the
+      order the spends appear in the block does not affect either whether they are
+      accepted or what they leave behind.</strong> Verifying them one after another as they
+      are applied would refuse valid blocks, because emptying one leaf moves the
+      siblings of every other leaf in its tree.
+    </p>
+
+    <h3><span class="sub">7.9</span>The maturity window and the issued total</h3>
+
+    <p>
+      The maturity window is the coinbases whose notes cannot be spent yet. Each
+      entry is the first height at which that coinbase's notes may be spent,
+      followed by the coinbase's identifier, and the entries are ordered oldest
+      first. One entry covers however many notes that coinbase paid.
+    </p>
+
+    <p>
+      The entry names the coinbase rather than the notes because every input already
+      carries it: a note a coinbase created has that coinbase's identifier as the
+      source half of its own. So the rule can be asked of an input without knowing
+      where the note is, and a spender cannot get a different answer by letting the
+      note fall to the cold set and bringing it back with a proof.
+    </p>
+
+    <p>
+      After the block at height <em>h</em> the window is the parent's window with:
+    </p>
+
+    <ol>
+      <li>every entry whose height is at or below <em>h</em> removed. These form a prefix,
+      since heights only increase;</li>
+      <li>an entry appended, holding <em>h</em> + <code>coinbase_maturity</code> and this block's
+      coinbase identifier, unless the coinbase paid no outputs, or unless
+      <em>h</em> + <code>coinbase_maturity</code> is not above <em>h</em>. A coinbase whose notes are
+      spendable on the block that pays them never enters the window at all.</li>
+    </ol>
+
+    <p>
+      A transfer in a block at height <em>H</em> MUST NOT spend a note whose source names a
+      coinbase in the window whose height is above <em>H</em>. The refusal is
+      <code>ImmatureCoinbase</code>. A reward becomes spendable exactly on the block whose
+      height is the entry's, which is also the block that takes the entry out.
+    </p>
+
+    <p>
+      The issued total is every pebble this branch has created and not destroyed. It
+      is the one number that says how much money exists: the note set is the money,
+      but it is held as two accumulators of which no node holds one, so no node
+      could add it up.
+    </p>
+
+    <p>
+      A block creates whatever its coinbase pays and destroys whatever its transfers
+      gave up as fees, since the fees are money that already existed and whatever
+      the coinbase declines to claim is gone. So after a block:
+    </p>
+
+    <ul>
+      <li>if what the coinbase paid is at or above the fees, the total rises by the
+      difference, and a total above the monetary ceiling is a refusal;</li>
+      <li>otherwise the total falls by the difference, and a total that would go below
+      nought is a refusal.</li>
+    </ul>
+
+    <p>
+      The refusal is <code>SupplyDoesNotAddUp</code> either way. Neither direction saturates.
+      Going over the ceiling means a chain that has issued more than any amount can
+      hold; going under nought means a block destroyed more money than the chain
+      ever issued, which cannot happen to a sound ledger and is exactly the sort of
+      thing that should stop a block rather than be rounded away.
+    </p>
+
+    <h3><span class="sub">7.10</span>What a node MUST hold and what it MAY discard</h3>
+
+    <p>
+      This is the claim the design rests on, and it is stated as two lists so that
+      it can be checked rather than believed.
+    </p>
+
+    <p>
+      A node MUST hold:
+    </p>
+
+    <ul>
+      <li>every note in the hot set, in full, with the height of the block that
+      created it;</li>
+      <li>the cold accumulator's roots, at most 64 hashes, and its two counters;</li>
+      <li>every note in the grace window, in full, with the position it took, and a
+      proof for each position that verifies against the cold roots as they stand;</li>
+      <li>the maturity window;</li>
+      <li>the issued total.</li>
+    </ul>
+
+    <p>
+      Every one of those is bounded by a rule rather than by the chain's age. The
+      hot set is bounded by <code>hot_capacity</code>, the accumulator by the width of its leaf
+      count, the grace window by its two constants, and the maturity window by
+      <code>coinbase_maturity</code>, since an entry leaves on the block where its notes become
+      spendable and never comes back.
+    </p>
+
+    <p>
+      A node MAY discard, and the reference implementation does:
+    </p>
+
+    <ul>
+      <li>every note in the cold set that is not in the grace window: its value, its
+      owner, its position, and its leaf;</li>
+      <li>every proof for a position outside the grace window that it was not asked to
+      keep.</li>
+    </ul>
+
+    <p>
+      <strong>No rule in this document requires a node to hold any part of the cold set
+      beyond the grace window.</strong> That is checkable from the rules above rather than
+      taken on trust: every rule that reads the cold set reads its roots, its two
+      counters, and a proof somebody else supplied, and appending to it needs
+      nothing but the roots.
+    </p>
+
+    <p>
+      A node MAY keep every leaf the accumulator has ever held, which is the only
+      way to rebuild a proof for someone who lost theirs. Nothing in these rules
+      requires any node to do so, no rule depends on one existing, and nobody is
+      paid for it. The person who needs it is whoever lost their own proof.
+    </p>
+
+    <p>
+      A node MAY keep a current proof for the fallen notes of owners it was asked to
+      follow, which is what lets a wallet spend later without asking anyone. A node
+      that does SHOULD bound how many such notes it follows, and SHOULD choose which
+      to let go of by a rule that makes displacing one cost more than the note is
+      worth. An owner is a public key on a public chain, so the set of notes paid to
+      a followed owner is chosen by strangers: without a bound, a dust note costs its
+      sender one transfer and costs the node an entry and a full path for good. The
+      reference implementation follows at most 8 192 notes and lets go of the least
+      valuable first. Neither the bound nor the policy is consensus, and a node that
+      gets either wrong costs only itself and the wallets it serves.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">8</div>
+  <div class="body">
+    <h2>Consensus</h2>
+    <p>
+      This part specifies what decides which chain is the chain: the work a block
+      must carry, the difficulty it must carry it at, the timestamps it may claim,
+      what it is allowed to pay, and how a node chooses between two branches that
+      both hold. Everything here is a rule two nodes must reach the same answer on,
+      with one exception, which is named where it occurs and is the only one.
+    </p>
+
+    <p>
+      The values below belong to a network rather than to the protocol. Two nodes
+      that disagree about any of them build different chains while believing they
+      are on the same one, so they are chosen by naming a network and never set one
+      at a time by whoever starts a node.
+    </p>
+
+    <table>
+      <thead><tr><th>Parameter</th><th class="n">Value</th><th>What reads it</th></tr></thead>
+      <tbody>
+        <tr><td>target block time</td><td class="n">60 s</td><td>the retarget and the solve-time clamp</td></tr>
+        <tr><td>genesis difficulty</td><td class="n">2<sup>27</sup></td><td>the first block, before any history exists</td></tr>
+        <tr><td>drift allowance</td><td class="n">7 200 s</td><td>how far ahead of a reader a timestamp may sit</td></tr>
+        <tr><td>halving interval</td><td class="n">1 051 200</td><td>the emission schedule</td></tr>
+        <tr><td>initial reward</td><td class="n">5 000 000 000 pebbles</td><td>the emission schedule</td></tr>
+        <tr><td>tail reward</td><td class="n">1 000 000 pebbles</td><td>the emission schedule</td></tr>
+        <tr><td>burial</td><td class="n">1 024</td><td>settlement depth</td></tr>
+        <tr><td>coinbase maturity</td><td class="n">1 024</td><td>when a reward becomes spendable</td></tr>
+        <tr><td>activations</td><td class="n">height 0, version 1</td><td>which rules judge which height</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      A throwaway network may set some of them far lower, and the reference
+      implementation's does: a five second block, a genesis difficulty of
+      2<sup>23</sup>, and a burial and maturity of 32. The emission schedule and the
+      drift allowance are the same everywhere.
+    </p>
+
+    <h3><span class="sub">8.1</span>Proof of work</h3>
+
+    <p>
+      A block's difficulty is a plain <code>u64</code> in its header. There is no compact
+      encoding, no mantissa and no exponent: the number in the header is the
+      difficulty, and a second implementation has nothing to unpack.
+    </p>
+
+    <p>
+      The target is a 256-bit value derived from the difficulty. Write <code>MAX</code> for the
+      256-bit value whose every byte is <code>0xff</code>, which is 2<sup>256</sup> minus 1. Then
+      for a difficulty <code>d</code>:
+    </p>
+
+    <ul>
+      <li>if <code>d</code> is 0 or 1, the target is <code>MAX</code>;</li>
+      <li>otherwise the target is <code>MAX / d</code>, integer division, truncated.</li>
+    </ul>
+
+    <p>
+      The two branches agree at <code>d = 1</code>, so the first exists only to give an answer
+      at <code>d = 0</code>. A block claiming difficulty 0 is refused elsewhere, since the
+      difficulty a block may claim is fixed by the retarget and the retarget never
+      answers below 1.
+    </p>
+
+    <p>
+      Doubling the difficulty halves the space of acceptable identifiers, and the
+      division is over the whole 256-bit range rather than over a power of two, so a
+      second implementation MUST do the long division and MUST NOT approximate it.
+      The reference implementation divides four 64-bit limbs, most significant
+      first, carrying the remainder, and writes each quotient limb out big-endian.
+      These are the answers it produces, and a reimplementation that reproduces them
+      has reproduced the division:
+    </p>
+
+    <table>
+      <thead><tr><th class="n">Difficulty</th><th>Target, 32 bytes, most significant first</th></tr></thead>
+      <tbody>
+        <tr><td class="n">1</td><td><code>ff</code> repeated 32 times</td></tr>
+        <tr><td class="n">2</td><td><code>7f</code>, then <code>ff</code> 31 times</td></tr>
+        <tr><td class="n">3</td><td><code>55</code> repeated 32 times</td></tr>
+        <tr><td class="n">4</td><td><code>3f</code>, then <code>ff</code> 31 times</td></tr>
+        <tr><td class="n">5</td><td><code>33</code> repeated 32 times</td></tr>
+        <tr><td class="n">4 096</td><td><code>00 0f</code>, then <code>ff</code> 30 times</td></tr>
+        <tr><td class="n">2<sup>23</sup></td><td><code>00 00 01</code>, then <code>ff</code> 29 times</td></tr>
+        <tr><td class="n">2<sup>27</sup></td><td><code>00 00 00 1f</code>, then <code>ff</code> 28 times</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      What a node checks is one comparison. It computes the block's identifier,
+      which is the hash of the encoded header under the block header domain, reads
+      it as an unsigned 256-bit integer with its first byte most significant, and
+      accepts the block only if that integer is <strong>less than or equal to</strong> the
+      target. Equality passes. Both values are exactly 32 bytes, so comparing them
+      as unsigned big-endian integers and comparing the two byte arrays
+      lexicographically from the front are the same comparison, and an
+      implementation MAY do either.
+    </p>
+
+    <p>
+      The work a block contributes is its difficulty, unchanged and unscaled. The
+      header's <code>total_work</code> MUST equal the parent's <code>total_work</code> plus this block's
+      difficulty, and the first block's MUST equal its own difficulty. Difficulty is
+      the work directly because the chance a uniformly distributed 32-byte
+      identifier meets the target is one in <code>d</code> to within a part in
+      2<sup>256</sup>; a reader who expects a conversion between the two is
+      expecting one this protocol does not have.
+    </p>
+
+    <h3><span class="sub">8.2</span>The difficulty retarget</h3>
+
+    <p>
+      Every block retargets. There is no epoch and no boundary at which the
+      difficulty is allowed to move and between which it is not.
+    </p>
+
+    <table>
+      <thead><tr><th>Constant</th><th class="n">Value</th><th>What it is</th></tr></thead>
+      <tbody>
+        <tr><td>difficulty window</td><td class="n">90</td><td>gaps the answer is weighed over</td></tr>
+        <tr><td>solve-time clamp</td><td class="n">6</td><td>multiple of the target block time one gap may count for, in either direction</td></tr>
+        <tr><td>retarget clamp</td><td class="n">4</td><td>factor one step may move the difficulty by, in either direction</td></tr>
+        <tr><td>minimum difficulty</td><td class="n">1</td><td>the floor, at which every identifier meets the target</td></tr>
+        <tr><td>headers kept</td><td class="n">91</td><td>summaries a node must hold to apply every rule here</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      The input is a run of header summaries from the branch the candidate block
+      extends, oldest first. A summary is a height, a timestamp and a difficulty,
+      and nothing else: a node MUST hold the last 91 of them and MUST NOT let the
+      answer depend on holding more. A node given a longer run MUST use only the
+      last 91, or two honest nodes with different amounts of history would demand
+      different difficulties of the same block.
+    </p>
+
+    <p>
+      Given that run <code>h[0] … h[m-1]</code> and a target block time <code>T</code>:
+    </p>
+
+    <ol>
+      <li>If <code>m</code> is 0, the branch has no blocks and the answer is the network's
+      genesis difficulty, or 1 if that is lower.</li>
+      <li>Let <code>last</code> be <code>h[m-1]</code>, and let <code>n</code> be the smaller of <code>m - 1</code> and 90.</li>
+      <li>If <code>n</code> is 0, or <code>T</code> is 0, the answer is <code>last.difficulty</code>, or 1 if that is
+      lower. Stop.</li>
+      <li>Let <code>w[0] … w[n]</code> be the last <code>n + 1</code> summaries. <code>w[0]</code> is the anchor and
+      contributes no gap and no difficulty; the <code>n</code> after it contribute one each.</li>
+      <li>Let <code>ceiling</code> be <code>T * 6</code>.</li>
+      <li>Set <code>counted</code> to <code>w[0].timestamp</code>, <code>weighted</code> to 0, and <code>sum_d</code> to 0.</li>
+      <li>For <code>i</code> from 1 to <code>n</code>, in order, over signed arithmetic wide enough not to
+      wrap:
+      <code>gap = clamp(w[i].timestamp - counted, -ceiling, +ceiling)</code>,
+      then <code>counted = counted + gap</code>,
+      then <code>weighted = weighted + i * gap</code>,
+      then <code>sum_d = sum_d + w[i].difficulty</code>.</li>
+      <li>Let <code>previous</code> be <code>last.difficulty</code>, or 1 if that is lower.</li>
+      <li><strong>If <code>weighted</code> is zero or negative, the answer is <code>previous * 4</code>, and
+      nothing below applies.</strong> Stop.</li>
+      <li>Let <code>expected = n * (n + 1) / 2 * T</code>.</li>
+      <li>Let <code>average = sum_d / n</code>, or 1 if that is lower.</li>
+      <li>Let <code>next = average * expected / weighted</code>.</li>
+      <li>Let <code>low = previous / 4</code>, or 1 if that is lower, and <code>high = previous * 4</code>.</li>
+      <li>The answer is <code>next</code> clamped into <code>low … high</code>, and never below 1.</li>
+    </ol>
+
+    <p>
+      Every division is integer division truncated toward zero, and every quantity
+      divided at steps 10 to 14 is non-negative.
+    </p>
+
+    <p>
+      <strong>Each gap is measured from <code>counted</code> and not from the previous header's own
+      timestamp.</strong> That is the one step an implementer will write differently by
+      reflex, and writing it differently produces a different chain. <code>counted</code> is a
+      timeline the retarget keeps for itself: it opens at the anchor's timestamp and
+      then moves only by what the retarget actually counted, so a header thrown
+      forward past the clamp advances the timeline by the clamp and no more, and the
+      headers after it have their gaps measured from where the timeline really
+      stands. The excess comes back in full. Measuring each gap against its own
+      parent instead leaves the give-back short by whatever the clamp cut off, which
+      is exactly the difference a miner holding two blocks in a row keeps.
+    </p>
+
+    <p>
+      Three edge cases the rule answers explicitly, and each is a case a second
+      implementation reaches by accident before it reaches it on purpose.
+    </p>
+
+    <p>
+      <strong>A span of zero.</strong> A window whose timestamps are all the same measures no
+      time. It is not a division by zero and it is not an unchanged difficulty: the
+      answer is the steepest rise the rule allows, <code>previous * 4</code>.
+    </p>
+
+    <p>
+      <strong>A span running backwards.</strong> A gap may be negative, down to <code>-ceiling</code>, and a
+      window can therefore weigh out to a negative total. That is a chain claiming
+      it produced its blocks in less than no time, and it takes the same answer as a
+      span of zero: <code>previous * 4</code>. A negative gap is worth the time it gives back
+      and not one second more, which is what stops a miner buying difficulty by
+      alternating a forward jump with a backward one.
+    </p>
+
+    <p>
+      <strong>Saturation.</strong> Every addition and multiplication saturates rather than
+      wrapping. If <code>previous * 4</code> is past what a <code>u64</code> holds, the answer is
+      <code>u64::MAX</code>. If <code>average * expected</code> is past what a <code>u128</code> holds it saturates
+      there before the division, and the clamp at step 14 bounds the result in any
+      case. An implementation that wraps instead of saturating at any of these
+      points has left the protocol.
+    </p>
+
+    <p>
+      <strong>On a chain shorter than the window</strong> the same formula runs with <code>n = m - 1</code>,
+      and the weights, the expected span and the average all follow <code>n</code>. There is no
+      warm-up rule and no special case. Two consequences: the block at height 1 sees
+      one summary, so <code>n</code> is 0 and it MUST carry the genesis block's difficulty
+      unchanged; the block at height 2 is the first that can retarget, off a single
+      gap.
+    </p>
+
+    <p>
+      Two properties of this rule are easy to state backwards, and both have been
+      stated backwards in this project's own documents.
+    </p>
+
+    <p>
+      <strong>It answers slowly, in hours rather than minutes.</strong> The weights run 1 to 90
+      and sum to 4 095, so the newest gap carries 90 parts of 4 095, about 2.2 per
+      cent of the measurement. Measured on a chain warmed to a full window exactly
+      on schedule at difficulty 1 000 000, one block arriving at the clamp ceiling,
+      which is six times the target, brings the next difficulty to 900 990, about a
+      tenth of the way down, and a block arriving a hundred times the target late
+      brings it to the same 900 990, because the clamp makes the two the same block.
+      On the same fixture a hash rate that halves has half of the doubling
+      correction after 22 blocks and 2 247 seconds of chain time, which is 37
+      minutes, and ninety per cent of it after 90 blocks and 7 345 seconds, a little
+      over two hours. A tenfold loss reaches ninety per cent after 64 blocks and
+      13 080 seconds. The damping is what a miner writing its own timestamps cannot
+      get past, and it is the same damping that makes an honest answer take hours.
+    </p>
+
+    <p>
+      <strong>At the floor the rule reduces to a division, and the floor is held from 31
+      seconds a block and not from 60.</strong> When <code>previous</code> is 1 and every difficulty
+      in the window is 1, <code>average</code> is 1 and steps 10 to 12 collapse: with a window
+      spaced <code>g</code> seconds apart, <code>expected</code> is <code>4095 * T</code>, <code>weighted</code> is <code>4095 * g</code>,
+      and the answer is <code>T / g</code> clamped into 1 … 4. At a sixty second target:
+    </p>
+
+    <table>
+      <thead><tr><th class="n">Spacing</th><th class="n">Next difficulty</th></tr></thead>
+      <tbody>
+        <tr><td class="n">1 s</td><td class="n">4 (the clamp; the ratio is 60)</td></tr>
+        <tr><td class="n">15 s</td><td class="n">4</td></tr>
+        <tr><td class="n">20 s</td><td class="n">3</td></tr>
+        <tr><td class="n">30 s</td><td class="n">2</td></tr>
+        <tr><td class="n">31 s</td><td class="n">1</td></tr>
+        <tr><td class="n">60 s or more</td><td class="n">1</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      So a chain at the floor spaced 31 seconds apart holds the floor for as long as
+      anyone cares to keep it, and one spaced 30 apart leaves it at the second
+      block. Any argument that prices a run of blocks at the floor MUST price it at
+      31 seconds a block and not at the target, or it prices it at twice what it
+      costs. Off a real difficulty the same spacing is not free: 31 seconds a block
+      off 2<sup>20</sup> asks for very nearly twice the difficulty a block.
+    </p>
+
+    <h3><span class="sub">8.3</span>Timestamps</h3>
+
+    <p>
+      A timestamp is a <code>u64</code> count of seconds since the Unix epoch. There is no
+      sub-second part and no signed value, so no block can be dated before 1970.
+    </p>
+
+    <p>
+      Three rules read it, and they are not three of a kind.
+    </p>
+
+    <p>
+      <strong>Not before the network opened.</strong> A node MUST refuse a block whose timestamp
+      is below the network's opening moment. That moment is a network parameter,
+      published before the network exists, and it is what makes the opening the same
+      for everyone rather than the property of whoever knew first.
+    </p>
+
+    <p>
+      <strong>Later than the median time past.</strong> A node MUST refuse a block whose
+      timestamp is less than or equal to the median time past of the branch it
+      extends, when that branch has one. The median time past is computed from the
+      last 11 header summaries of the branch, or all of them if it holds fewer:
+      take their timestamps, sort them ascending, and take the element at index
+      <code>len / 2</code>, counting from zero, with <code>len</code> the number of timestamps. For an odd
+      count, which is every branch of 11 blocks or more, that is the median. For an
+      even count it is the upper of the two middle values, not their mean, and an
+      implementation MUST NOT average them. A branch with no blocks has no median
+      and the rule does not apply to its first block.
+    </p>
+
+    <p>
+      The median rather than the parent's own timestamp, because a miner writes its
+      own header but holds one vote in a median it cannot move, so backdating a
+      block to claim an easier difficulty stops working.
+    </p>
+
+    <p>
+      <strong>Not further ahead than the reader allows.</strong> A node MUST refuse a block whose
+      timestamp is greater than the node's own clock, read as seconds since the Unix
+      epoch, plus the network's drift allowance of 7 200 seconds.
+    </p>
+
+    <p>
+      <strong>The first two are facts about the block. The third is a fact about the
+      reader, and that distinction is load-bearing.</strong> Two nodes given the same bytes
+      and the same branch reach the same verdict on the opening moment and on the
+      median, and a block refused for either is refused everywhere and for good. The
+      drift bound is measured against a clock the block knows nothing about: the
+      same block is refused by one node and taken by another, and the same node
+      reverses its verdict by waiting. It is the only refusal in the whole of the
+      block rules that two honest nodes can disagree about.
+    </p>
+
+    <p>
+      Three obligations follow, and a node that gets any of them wrong harms itself
+      rather than the network, which is why they must be written down.
+    </p>
+
+    <ul>
+      <li>A node MUST NOT remember a drift refusal as a property of the block. The
+      block is not invalid; the reader is early. A node that records it will go on
+      refusing the block after its clock has caught up, and nothing will tell it
+      why.</li>
+      <li>A node MUST NOT hold a drift refusal against the peer that offered the
+      block. It MUST NOT close the connection, count it as misbehaviour, or refuse
+      the peer's address on account of it. Every peer relaying that block behaves
+      identically, so a node that penalises them refuses the entire network for
+      being right, and does it silently, and does it fastest when it is most
+      wrong.</li>
+      <li>A node re-applying a block it has already accepted and then undone SHOULD
+      ask the drift question against the block's own timestamp rather than against
+      its clock. A valid header cannot sit more than the drift ahead of its own
+      timestamp, so asking it that way asks a question the block has already
+      answered, and it removes the one rule whose answer can change while the
+      block does not. Without this, a clock that steps backwards, which is an NTP
+      correction or a flat battery, makes a node refuse its own history and stand
+      at a fork point it cannot leave.</li>
+    </ul>
+
+    <p>
+      Nothing else in these rules reads a clock. The drift bound is the whole of the
+      protocol's dependence on wall time.
+    </p>
+
+    <h3><span class="sub">8.4</span>Emission</h3>
+
+    <p>
+      The schedule is counted in blocks, so it is a property of the chain rather
+      than of anyone's clock.
+    </p>
+
+    <table>
+      <thead><tr><th>Quantity</th><th class="n">Pebbles</th><th class="n">CAIRN</th></tr></thead>
+      <tbody>
+        <tr><td>opening reward</td><td class="n">5 000 000 000</td><td class="n">50</td></tr>
+        <tr><td>floor reward</td><td class="n">1 000 000</td><td class="n">0.01</td></tr>
+        <tr><td>blocks between halvings</td><td class="n">1 051 200</td><td class="n"></td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      The reward at height <code>h</code> is computed as follows. Let <code>e = h / 1 051 200</code>,
+      integer division. Let <code>r</code> be the opening reward in pebbles shifted right by
+      <code>e</code> bits, taken as 0 when <code>e</code> is 64 or more. The reward is the larger of <code>r</code>
+      and the floor reward. The shift is on the pebble count, so it truncates:
+      through <code>e = 9</code> the halvings divide evenly, and from <code>e = 10</code> they do not. An
+      implementation that halves a decimal quantity and rounds will pay a different
+      reward at heights above 10 512 000 and fork there.
+    </p>
+
+    <table>
+      <thead><tr><th class="n">Era</th><th class="n">First height</th><th class="n">Reward, pebbles</th><th class="n">Reward, CAIRN</th></tr></thead>
+      <tbody>
+        <tr><td class="n">0</td><td class="n">0</td><td class="n">5 000 000 000</td><td class="n">50</td></tr>
+        <tr><td class="n">1</td><td class="n">1 051 200</td><td class="n">2 500 000 000</td><td class="n">25</td></tr>
+        <tr><td class="n">2</td><td class="n">2 102 400</td><td class="n">1 250 000 000</td><td class="n">12.5</td></tr>
+        <tr><td class="n">3</td><td class="n">3 153 600</td><td class="n">625 000 000</td><td class="n">6.25</td></tr>
+        <tr><td class="n">4</td><td class="n">4 204 800</td><td class="n">312 500 000</td><td class="n">3.125</td></tr>
+        <tr><td class="n">5</td><td class="n">5 256 000</td><td class="n">156 250 000</td><td class="n">1.5625</td></tr>
+        <tr><td class="n">6</td><td class="n">6 307 200</td><td class="n">78 125 000</td><td class="n">0.78125</td></tr>
+        <tr><td class="n">7</td><td class="n">7 358 400</td><td class="n">39 062 500</td><td class="n">0.390625</td></tr>
+        <tr><td class="n">8</td><td class="n">8 409 600</td><td class="n">19 531 250</td><td class="n">0.1953125</td></tr>
+        <tr><td class="n">9</td><td class="n">9 460 800</td><td class="n">9 765 625</td><td class="n">0.09765625</td></tr>
+        <tr><td class="n">10</td><td class="n">10 512 000</td><td class="n">4 882 812</td><td class="n">0.04882812</td></tr>
+        <tr><td class="n">11</td><td class="n">11 563 200</td><td class="n">2 441 406</td><td class="n">0.02441406</td></tr>
+        <tr><td class="n">12</td><td class="n">12 614 400</td><td class="n">1 220 703</td><td class="n">0.01220703</td></tr>
+        <tr><td class="n">13 and after</td><td class="n">13 665 600</td><td class="n">1 000 000</td><td class="n">0.01</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      The thirteenth halving would take the reward to 610 351 pebbles, which is
+      below the floor, so it never happens: the floor takes over at height
+      13 665 600 and the reward never falls again. The schedule never reaches zero.
+    </p>
+
+    <p>
+      <strong>The total the halvings pay out.</strong> Thirteen eras, each paying its own rate
+      for 1 051 200 blocks. The thirteen rates in the table sum to 9 998 779 296
+      pebbles. That is worth checking twice, because it is a number nothing else
+      produces. Halved exactly and without a floor the rates would sum to
+      10 000 000 000 pebbles less 1 220 703.125, which is everything the fourteenth
+      era and all those after it would have paid, giving 9 998 779 296.875; and
+      truncating the shift at eras 10, 11 and 12 takes off half a pebble, a quarter
+      and an eighth, which is the remaining 0.875. Multiplying by the interval:
+    </p>
+
+    <p>
+      <code>9 998 779 296 * 1 051 200 = 10 510 716 795 955 200</code> pebbles,
+    </p>
+
+    <p>
+      which is 105 107 167.959552 CAIRN. That is the whole of the halvings, paid by
+      height 13 665 599 inclusive.
+    </p>
+
+    <p>
+      Above that height the floor adds 1 000 000 pebbles a block for ever. At a
+      sixty second block that is 525 600 blocks and 5 256 CAIRN a year, about one
+      twenty-thousandth of what the halvings paid, and the share only falls as the
+      total grows.
+    </p>
+
+    <p>
+      Two things the schedule is and is not. It is a ceiling: a coinbase MUST NOT
+      claim more than the reward at its height plus the fees its block's transfers
+      gave up, and it MAY claim less, in which case the difference is destroyed and
+      goes nowhere. So the money a chain has actually issued at a height is at most
+      the running total above and may be under it, and the running total is the one
+      thing about a handed-over ledger that can be checked against the rules rather
+      than against a commitment its sender wrote.
+    </p>
+
+    <p>
+      And it is bounded by the monetary ceiling like every other amount. No amount
+      in this protocol may exceed 100 000 000 000 000 000 pebbles, which is
+      1 000 000 000 CAIRN, and a running total computed past it is answered as the
+      ceiling rather than allowed to wrap. No chain reaches it: from the last
+      halving the floor would need about 170 000 years to add the difference.
+    </p>
+
+    <h3><span class="sub">8.5</span>Fork choice</h3>
+
+    <p>
+      What is compared is one number, the <code>total_work</code> the tip of a branch states in
+      its header. On a valid branch that number is the sum of the difficulties of
+      every block up to and including the tip, and the header rules check it against
+      the parent's, so it is not a field a miner can choose. A node follows the
+      branch whose tip states the greatest <code>total_work</code>.
+    </p>
+
+    <p>
+      The comparison is strict. A branch whose tip states work less than <strong>or equal
+      to</strong> the followed branch's is recorded and not followed, so a tie keeps the
+      branch already followed.
+    </p>
+
+    <p>
+      <strong>This is not a total order and a second implementation MUST NOT assume it
+      is.</strong> Two miners finding a block at the same height is ordinary and produces
+      two branches of exactly equal work. Two honest nodes that heard them in
+      opposite orders follow different tips, and neither is wrong: what settles it
+      is the arrival order, which is a fact about each node and not about the
+      chain. The split stands until a further block makes one branch heavier, which
+      is one block interval in the ordinary case. This document defines no order
+      between branches of equal work, and in particular defines none on the block
+      identifier. Breaking the tie on the lower identifier settles it sooner and
+      costs more than it buys, because a node catching up along a rival branch
+      passes through equal work on the way and reorganises there, doing extra
+      rewinding to arrive one block later at the same place.
+    </p>
+
+    <p>
+      Before a branch can be compared its blocks have to be held, and a node SHOULD
+      refuse to hold a block whose identifier does not meet the target for the
+      difficulty it claims. That check needs nothing but the block, and without it a
+      peer fills a node's memory for the price of nothing. The difficulty a block
+      off the followed branch claims is otherwise taken at its word: whether it is
+      the difficulty the retarget demands is decided when the branch is applied, and
+      a block claiming more than it is entitled to had to do that much work to be
+      stored at all, so the most it buys is one wasted attempt.
+    </p>
+
+    <h3><span class="sub">8.6</span>Burial</h3>
+
+    <p>
+      Burial is the depth below the tip at which this network calls a block settled.
+      It is 1 024 blocks on the network specified here, and 32 on a throwaway one.
+      Three rules read it, and they are not the same kind of rule.
+    </p>
+
+    <table>
+      <thead><tr><th>What reads it</th><th>Kind</th></tr></thead>
+      <tbody>
+        <tr><td>a handed-over ledger is taken from a block this deep, never from the tip</td><td>consensus</td></tr>
+        <tr><td>a coinbase's notes cannot be spent until the block that paid them is this deep</td><td>consensus</td></tr>
+        <tr><td>a node refuses to switch to a branch that would undo more than this many blocks</td><td>local</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      The coinbase maturity is consensus in the strongest sense: the window of
+      coinbases still waiting is inside the state root, so two nodes with different
+      maturities do not merely disagree about one spend, they compute a different
+      root for every block. It MUST be at or above the network's burial. There is no
+      ceiling on it, only that floor, and the direction matters because it has been
+      written down backwards: a maturity below the burial means a reward becomes
+      spendable while the block that paid it can still be undone, which is the one
+      thing the rule exists to prevent. Every network specified here sets the two
+      equal.
+    </p>
+
+    <p>
+      What burial costs is chain time. At a sixty second block, 1 024 blocks on
+      schedule is 61 440 seconds, 17 h 04 m. At the difficulty floor a branch can be
+      held with gaps of 31 seconds, as the retarget section shows, so the same 1 024
+      blocks span 31 744 seconds, 8 h 49 m. <strong>The second figure is the one any
+      argument about how long an attacker must sit is entitled to</strong>, and it is half
+      the first. The drift bound is what keeps that time real: a node refuses a
+      block more than two hours ahead of its own clock, so a branch spanning nearly
+      nine hours cannot be handed over all at once, and its author waits out the
+      difference while everybody else keeps working.
+    </p>
+
+    <p>
+      <strong>The third rule in the table is not a consensus rule. It is a local retention
+      policy, and the difference has a consequence a second implementation must
+      know.</strong> Undoing a block needs the record of what applying it did. Keeping
+      those records for every block ever applied is a cost that grows with the
+      chain, on a node whose whole claim is that its cost does not, so they are kept
+      for a bounded window and a switch that would reach deeper is refused. The
+      reference implementation keeps 1 024 and the depth it will actually undo is
+      the smaller of that and the network's burial.
+    </p>
+
+    <p>
+      The consequence, plainly: two nodes with different windows build the same
+      chain and differ only when a fork deeper than one of them appears. When one
+      does, the node with the shorter window refuses the heavier branch and stays
+      where it is. It is then following a branch it can see is not the heaviest, no
+      rule in this document says it is wrong, and nothing will move it: the fork
+      choice above describes what a node prefers among branches it will consider,
+      not among branches that exist. On a live network a fork that deep is an attack
+      or a partition lasting the better part of a day. An implementation MAY choose
+      a different window. A window shorter than the burial is safe for the maturity
+      rule, since it undoes less rather than more, but it makes a handover taken at
+      the burial depth unreachable, so an implementation that serves or restores one
+      MUST keep a window at least as deep as the network's burial.
+    </p>
+
+    <h3><span class="sub">8.7</span>Rules that activate at a height</h3>
+
+    <p>
+      A network carries a schedule of activations, oldest first. Each is two fields.
+    </p>
+
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
+      <tbody>
+        <tr><td>height</td><td>u64</td><td class="n">8</td></tr>
+        <tr><td>version</td><td>u16</td><td class="n">2</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      The schedule is consensus like every other network parameter, and its order is
+      consensus too, which is easy to miss because it reads as tidiness. The first
+      entry MUST sit at height 0 and names the version the network opened under.
+      Every later entry MUST name both a strictly greater height and a strictly
+      greater version than the entry before it. Two builds carrying the same changes
+      in different orders put the same height under different rules and neither says
+      a word, so an implementation SHOULD refuse to build with a schedule that does
+      not have this shape. The network specified here carries one entry: height 0,
+      version 1.
+    </p>
+
+    <p>
+      <strong>How a node finds the rules in force at a height.</strong> Walk the schedule from
+      the end and take the first entry whose height is at or below the height asked
+      about. Because the first entry sits at height 0 there is always one, and an
+      implementation MUST NOT fall back to its own newest known version when the
+      walk finds nothing: the release that raised that version would make every
+      block below the first entry require the new version, and the chain would stop
+      replaying from its own first block.
+    </p>
+
+    <p>
+      The height asked about is the height the block will occupy on the branch it
+      extends, which is the parent's height plus one. A node MUST decide which rules
+      judge a block from that height and not from the height the block claims for
+      itself, or a block that lied about its height would choose the rules it is
+      judged by. The block's own claim is checked separately, further down the
+      order.
+    </p>
+
+    <p>
+      The block header's <code>version</code> MUST equal the version the schedule names at that
+      height. Exactly equal, not at least: a block carrying the version from the
+      abandoned side of a change is refused. That refusal is a fact about the block
+      and a node MAY remember it, but a node MUST NOT hold it against the peer,
+      because on the day a change takes effect every node that has not updated sends
+      these in good faith.
+    </p>
+
+    <p>
+      <strong>What a node one version behind does at the boundary.</strong> Two situations meet
+      there and they take opposite answers. Telling them apart is the whole of the
+      mechanism's value.
+    </p>
+
+    <table>
+      <thead><tr><th>What happened</th><th>What the node does</th></tr></thead>
+      <tbody>
+        <tr><td>the schedule names, at this height, a version above the highest this build knows</td><td>refuses the block, remembers nothing against it, blames nobody, and stops</td></tr>
+        <tr><td>the block carries a version above the highest this build knows, where the schedule does not</td><td>refuses the block, remembers nothing against it, blames nobody, and carries on</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      In the first the network has moved on without this node. It MUST NOT record
+      the block as invalid, because an update makes the same block valid and the
+      record would outlive the update. It MUST NOT hold it against the peer, because
+      every peer that has updated is sending the same block: a node that treated
+      this as misbehaviour would drop everyone who had updated and follow whoever
+      had not, which is a minority chain believed to be the chain, and it is the one
+      outcome a scheduled change exists to avoid. The reference implementation
+      reports which version it needs and stops rather than going on answering from a
+      chain it has been left behind by. A miner MUST NOT produce a block for a
+      height whose rules its build does not have.
+    </p>
+
+    <p>
+      In the second the node cannot judge the block and says so. It MUST NOT stop on
+      this: the version is a number a stranger can write in a field, and on a chain
+      at the difficulty floor writing one costs a single hash, so a node that
+      stopped would be handing any stranger the power to stop it. Deciding that a
+      run of these means the network has moved rather than that somebody is talking
+      nonsense needs evidence from more than one block and more than one peer, and
+      that evidence is not a rule about any single block.
+    </p>
+
+    <p>
+      Nobody votes. The height is in the code, published long before it arrives, and
+      a node that disagrees with it is running different software rather than
+      casting a ballot. There is no miner signalling in this protocol: the version
+      field is checked against the schedule and carries no vote.
+    </p>
+
+    <p>
+      <strong>What this mechanism can and cannot change, which is less than a reader will
+      assume.</strong> The schedule gates exactly one field: the <code>version</code> of the block
+      header. Nothing else in these rules is indexed by height. Every limit, every
+      window, every clamp and the whole emission schedule come from the network's
+      parameters, which are fixed for the life of the network.
+    </p>
+
+    <p>
+      Two further version numbers exist, one on a transfer and one on a coinbase,
+      and neither is on the schedule. Each is compared for equality against a
+      constant compiled into the build: a transfer MUST carry version 1, and a
+      coinbase MUST carry version 1, at every height. Raising either constant would
+      not take effect at a height. It would make every transfer and every coinbase
+      ever mined refuse on replay, because a node validating its own history from
+      the first block applies today's constant to blocks from every height. So the
+      two transaction versions cannot be changed by the mechanism described here,
+      and changing them at all needs a rule that reads them from the height, which
+      this protocol does not have.
+    </p>
+
+    <p>
+      One more limit sits outside this mechanism and is worth naming here because a
+      reader will look for it here. Adding a field to the block header from an
+      activation height onward would leave every header below that height encoding
+      exactly as before, so the identifiers would survive; what would not survive is
+      the header's fixed width, which a header log relies on to find a record by
+      multiplying an index. A header whose width depended on its version would need
+      a different log, not a different encoder.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">9</div>
+  <div class="body">
+    <h2>Joining a chain</h2>
+    <p>
+      A node with no chain has to answer two questions before it can check anything,
+      and they are answered by two separate exchanges. Which of the chains being
+      offered to it carries the most work, and what the ledger at that chain's tip
+      is. The first is settled by opening a few thousand of the chain's headers at
+      positions its prover cannot choose. The second is settled by taking a whole
+      ledger from far enough below the tip that whoever wrote it had to go on mining
+      over it, and checking it against the header that commits to it.
+    </p>
+
+    <p>
+      Neither exchange is a shortcut past validation of the blocks above the ledger's
+      own header. Those are read and checked one at a time, like any other block.
+      What the two exchanges replace is reading the chain below that point, and what
+      that costs a node is stated exactly under <em>What a newcomer ends up trusting</em>.
+    </p>
+
+    <h3><span class="sub">9.1</span>What a newcomer is shown</h3>
+
+    <p>
+      A weighing is one structure. Its fields are encoded in this order, which is not
+      the order they are most easily read in.
+    </p>
+
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>What it is</th></tr></thead>
+      <tbody>
+        <tr><td>tip</td><td>block header</td><td>the header everything else is measured against</td></tr>
+        <tr><td>history</td><td>forest</td><td>the header forest as it stood before the tip, roots only</td></tr>
+        <tr><td>parent</td><td>optional sample</td><td>the header the tip was built on, opened in the tip's own history</td></tr>
+        <tr><td>samples</td><td>sequence of sample</td><td>one opened header per drawn position, in the order drawn</td></tr>
+        <tr><td>tail</td><td>sequence of block header</td><td>a run of consecutive headers ending at the tip, oldest first</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      A sample is a header followed by a proof.
+    </p>
+
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
+      <tbody>
+        <tr><td>header</td><td>block header</td><td class="n">182</td></tr>
+        <tr><td>proof</td><td>sequence of hash</td><td class="n">4 + 32d</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      The proof is the siblings from the leaf up to the root of the tree it sits in,
+      nearest first, so <code>d</code> is the height of that tree and nothing else. A decoder
+      MUST refuse a proof of more than 64 siblings, which is the most trees a forest
+      can hold.
+    </p>
+
+    <p>
+      A forest on the wire is its leaf count, the number of leaves still standing,
+      and one root per tree.
+    </p>
+
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
+      <tbody>
+        <tr><td>leaves</td><td>u64</td><td class="n">8</td></tr>
+        <tr><td>live</td><td>u64</td><td class="n">8</td></tr>
+        <tr><td>roots</td><td>sequence of (u8, hash)</td><td class="n">4 + 33r</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      The <code>u8</code> beside each root is the height of the tree it is the root of. A
+      decoder MUST refuse more than 64 roots, MUST refuse two roots at one height,
+      MUST refuse <code>live</code> above <code>leaves</code>, and MUST refuse a set of roots whose heights
+      are not exactly the set bits of <code>leaves</code>. The last of those is what makes a
+      decoded forest one something could have produced rather than merely a
+      well-formed message.
+    </p>
+
+    <p>
+      The optional parent is a <code>u8</code> tag: <code>0</code> for absent, <code>1</code> followed by a sample. A
+      decoder MUST refuse any other tag.
+    </p>
+
+    <p>
+      Both counted sequences carry their own ceiling, checked before anything is
+      reserved for them, because both are chosen by whoever sent the structure. A
+      decoder MUST refuse more than 4 096 samples and more than 16 474 headers in the
+      tail. The second is the deepest run this weighing will ever walk, and it is
+      <code>16 * 1024 + 90</code>: sixteen times the band the draw leaves unresolved, plus one
+      retarget window. A chain whose difficulty has fallen far enough below its own
+      lifetime average has more blocks inside that band than the ceiling allows, and
+      such a chain cannot be weighed at all. It has to be read. That is a real limit
+      and it is stated rather than hidden.
+    </p>
+
+    <h3><span class="sub">9.2</span>The draw</h3>
+
+    <p>
+      Both sides derive the same list of work values from the tip alone, so no round
+      trip is needed to agree on the questions and nobody has to be trusted to ask
+      them honestly. A second implementation MUST reproduce the list exactly.
+    </p>
+
+    <p>
+      The seed is the hash, under the sampling domain, of the tip's identifier:
+    </p>
+
+    <pre><code>seed = H(sampling, id(tip))</code></pre>
+
+    <p>
+      Two further quantities come from the tip. The work the draw ranges over is the
+      work standing behind the tip, not counting the tip's own:
+    </p>
+
+    <pre><code>total = tip.total_work - tip.difficulty</code></pre>
+
+    <p>
+      and the span the draw is spread over is the tip's height. The tip is not in its
+      own history, so a draw that landed in the tip's own work would have nothing to
+      open, and nothing needs opening: the tip arrives whole and its work is checked
+      directly.
+    </p>
+
+    <p>
+      The number of halvings the draw is spread over is computed from that height:
+    </p>
+
+    <pre><code>separable = height / 1024
+levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
+
+    <p>
+      where <code>bit_length(x)</code> is 64 less the number of leading zero bits of <code>x</code> as a
+      <code>u64</code>, and the division is integer division. On a chain of thirty years at a
+      block a minute this is 14.
+    </p>
+
+    <p>
+      The draw is empty when <code>total</code> is zero or when no samples are asked for.
+      Otherwise, for each index <code>i</code> from <code>0</code> to <code>count - 1</code>, in order:
+    </p>
+
+    <table>
+      <thead><tr><th class="n">#</th><th>Step</th></tr></thead>
+      <tbody>
+        <tr><td class="n">1</td><td>form 40 bytes: the 32 bytes of the seed, then <code>i</code> as a little-endian <code>u64</code></td></tr>
+        <tr><td class="n">2</td><td><code>b = H(sampling, those 40 bytes)</code></td></tr>
+        <tr><td class="n">3</td><td><code>level = b[0] mod levels</code>, reading <code>b[0]</code> as a <code>u8</code></td></tr>
+        <tr><td class="n">4</td><td><code>within = u128</code> from <code>b[8..24]</code>, little-endian</td></tr>
+        <tr><td class="n">5</td><td><code>far = total >> level</code> and <code>near = total >> (level + 1)</code>, both shift counts clamped at 127</td></tr>
+        <tr><td class="n">6</td><td><code>width = max(far - near, 1)</code></td></tr>
+        <tr><td class="n">7</td><td><code>value = min(total - far + (within mod width), total - 1)</code></td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      Every arithmetic operation here saturates rather than wrapping, and the clamp
+      at 127 never binds while <code>levels</code> is at most 64. Level zero is the oldest half
+      of the work and the highest level the band nearest the tip; the work above
+      <code>total - (total &gt;&gt; levels)</code> is never drawn from at all.
+    </p>
+
+    <p>
+      <strong>The halving stops before it reaches a single block, and that is deliberate.</strong>
+      The <code>1 024</code> in the level count is the narrowest band the draw will separate.
+      Halving further would separate chains that the fork choice does not separate
+      either, since a node refuses to reorganise deeper than the same 1 024 blocks,
+      and it would be paid for by every draw at every level: resolving to one block
+      over thirty years takes twenty-four levels where this takes fourteen, and a
+      draw is worth <code>1 / levels</code> per question.
+    </p>
+
+    <p>
+      <strong>The level is drawn from one byte, and one byte does not divide evenly.</strong> With
+      <code>levels</code> at 14, 256 is <code>14 * 18 + 4</code>, so the four deepest levels come up
+      nineteen times in 256 and the other ten eighteen times, an under-draw of
+      1.5625 percent on the levels nearest the tip. Both sides run the same
+      computation over the same tip, so this cannot make them disagree; it is a
+      slightly weaker guarantee, not a split, and the figure the guarantee is
+      published at was measured through this biased draw rather than through a model
+      of it.
+    </p>
+
+    <p>
+      <strong>A drawn value names a height by covering rather than by arithmetic.</strong> The
+      header a draw lands in is the one whose own work spans the value: everything
+      before it falls short, and its own total reaches it. Formally, the header at
+      height <code>h</code> answers draw <code>i</code> when
+    </p>
+
+    <pre><code>h.total_work - h.difficulty &lt;= value[i]   and   h.total_work &gt; value[i]</code></pre>
+
+    <p>
+      Because work rises with height, the answering height is found by halving over
+      the heights rather than by scanning them.
+    </p>
+
+    <h3><span class="sub">9.3</span>What each sample must prove</h3>
+
+    <p>
+      For each drawn value, in draw order, the header opened against it MUST satisfy
+      all of the following, and a node MUST stop at the first one it fails.
+    </p>
+
+    <p>
+      It belongs to this network and is not dated before this network opened. It
+      carries real proof of work: its identifier meets the target its own difficulty
+      sets. It does not state more cumulative work than the tip. It covers the value
+      drawn, by the two comparisons above. And it sits in the tip's history forest at
+      the height it states, by the proof beside it.
+    </p>
+
+    <p>
+      The two comparisons that decide whether a header answers the right question are
+      applied before the proof is folded, because they are two comparisons on numbers
+      already in hand and a proof is up to 64 hashes.
+    </p>
+
+    <p>
+      Opening headers settles what the chain is worth at the places the draw looked.
+      It does not settle what the stretches between them are worth, and a draw over
+      work almost never lands in a stretch claiming no work. So the stretches are
+      bounded rather than opened. Every header whose place is established is a point
+      the chain is pinned at: the opened samples, the parent, and the tip. Between
+      two such points there are as many blocks as their heights differ by, and the
+      retarget bounds what those blocks can be worth. The difficulty may fall by at
+      most a factor of 4 per block and never below 1, so a run of <code>n</code> blocks starting
+      from a header of difficulty <code>d</code> is worth at least the sum of that descent, and
+      at most the matching climb. Below the lowest pinned point nothing is
+      established, so all that can be said is that every block down there is a block:
+      the whole opening is worth at least one unit per block.
+    </p>
+
+    <h3><span class="sub">9.4</span>The run up to the tip</h3>
+
+    <p>
+      The draw leaves a band of work near the tip unresolved, about 1 024 blocks wide
+      on a chain whose difficulty is near its own lifetime average, and for a while
+      nothing else looked up there. That was enough on its own to hand a newcomer a
+      forged anchor: a forger leaves the honest chain untouched, appends its own
+      headers at the difficulty floor at one hash each, and puts the work it is
+      inventing inside the band the draw never reaches. Every draw is answered by a
+      genuine honest header, and the run really is worth what it says, which is
+      almost nothing, honestly stated.
+    </p>
+
+    <p>
+      The tail closes that. It MUST be exactly the consecutive run of headers from
+      one full retarget window below the deepest header the draw landed on, up to and
+      including the tip, oldest first. The pinned header is the deepest by height
+      among the opened samples; the parent does not count, because it is required
+      rather than drawn and so a forger chooses it. The window below the pinned
+      header comes along because those headers have to chain into it, and a forger
+      cannot swap them without having mined the pinned header on top of its own.
+    </p>
+
+    <p>
+      Below the pinned header, only the chaining is checked, since the window that
+      would judge those difficulties is not present. At and above it, each header is
+      held to the same rules a node applies to any block it is handed: the difficulty
+      the retarget demands of it, a timestamp later than the median of its window,
+      and its own work added to its parent's total.
+    </p>
+
+    <p>
+      The tip's own timestamp is measured against the reading node's clock here,
+      against the same drift the block rules allow, which is two hours on every
+      network here. It is checked here rather than left to the validation that follows
+      because this is where the decision is made. Without it a forger hands over a
+      chain whose cheap blocks are spaced across days it never waited: blocks at the
+      difficulty floor have to be spaced past half the target or the retarget demands
+      more of them, so a run of them states far more time than a reader will take in
+      advance, and the forger has to sit through the difference in real time.
+    </p>
+
+    <p>
+      It is also the one refusal in this whole exchange that two honest nodes can
+      disagree about, for the reason already given where the block rules are
+      specified, and a node MUST NOT hold it against the peer that offered the
+      weighing.
+    </p>
+
+    <h3><span class="sub">9.5</span>The order a node applies the checks</h3>
+
+    <p>
+      This order is normative. The stages run as listed: the tip, then each sample in
+      draw order, then the parent, then the stretches nobody opened, then the run up
+      to the tip.
+    </p>
+
+    <table>
+      <thead><tr><th class="n">#</th><th>Refusal</th><th>What it means</th></tr></thead>
+      <tbody>
+        <tr><td class="n">1</td><td>WrongNetwork</td><td>the tip is another network's</td></tr>
+        <tr><td class="n">2</td><td>BeforeTheNetworkOpened</td><td>the tip is dated before this network existed</td></tr>
+        <tr><td class="n">3</td><td>TipWithoutWork</td><td>the tip's identifier does not meet its own target</td></tr>
+        <tr><td class="n">4</td><td>TipClaimsNothing</td><td>the tip states no cumulative work at all</td></tr>
+        <tr><td class="n">5</td><td>HistoryMismatch</td><td>the forest is not the one the tip commits to</td></tr>
+        <tr><td class="n">6</td><td>HistoryWrongLength</td><td>the forest holds a number of leaves other than the tip's height</td></tr>
+        <tr><td class="n">7</td><td>WrongCount</td><td>not as many samples as the draw asks for</td></tr>
+        <tr><td class="n">8</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>an opened header belongs elsewhere</td></tr>
+        <tr><td class="n">9</td><td>SampleWithoutWork</td><td>an opened header carries no proof of work</td></tr>
+        <tr><td class="n">10</td><td>PastTheTip</td><td>an opened header states more work than the tip</td></tr>
+        <tr><td class="n">11</td><td>WrongPlace</td><td>an opened header does not cover the work drawn</td></tr>
+        <tr><td class="n">12</td><td>NotInHistory</td><td>an opened header is not in the tip's history at its stated height</td></tr>
+        <tr><td class="n">13</td><td>ParentNotOpened</td><td>no parent was opened, on a chain more than one block long</td></tr>
+        <tr><td class="n">14</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>the parent belongs elsewhere</td></tr>
+        <tr><td class="n">15</td><td>ParentNotTheTipsOwn</td><td>the parent is not at the height below, or is not the header the tip names, or carries no work</td></tr>
+        <tr><td class="n">16</td><td>NotInHistory</td><td>the parent is not in the tip's history at the height below</td></tr>
+        <tr><td class="n">17</td><td>ParentNotTheTipsOwn</td><td>the parent's work plus the tip's own is not the tip's total</td></tr>
+        <tr><td class="n">18</td><td>OpeningWorthLessThanItCost</td><td>the chain below the lowest pinned point states less than one unit a block</td></tr>
+        <tr><td class="n">19</td><td>WorkRunsBackwards</td><td>work falls between two pinned points</td></tr>
+        <tr><td class="n">20</td><td>BlocksWorthLessThanTheyCost</td><td>a stretch states less than that many blocks can be worth</td></tr>
+        <tr><td class="n">21</td><td>BlocksWorthMoreThanTheyCould</td><td>a stretch states more than that many blocks can be worth</td></tr>
+        <tr><td class="n">22</td><td>TipFromTheFuture</td><td>the tip is dated further ahead than the reader allows</td></tr>
+        <tr><td class="n">23</td><td>NothingOpened</td><td>the draw opened nothing, so there is nothing to measure the tip against</td></tr>
+        <tr><td class="n">24</td><td>TailWrongLength</td><td>the run is not the length the pinned header and the tip demand, or that length is past the ceiling</td></tr>
+        <tr><td class="n">25</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a header in the run belongs elsewhere</td></tr>
+        <tr><td class="n">26</td><td>TailWithoutWork</td><td>a header in the run carries no proof of work</td></tr>
+        <tr><td class="n">27</td><td>TailNotConsecutive</td><td>a header in the run does not follow the one below it</td></tr>
+        <tr><td class="n">28</td><td>TailAtTheWrongDifficulty</td><td>above the pinned header, not the difficulty the retarget demands</td></tr>
+        <tr><td class="n">29</td><td>TailOutOfTime</td><td>above the pinned header, not later than the median of its window</td></tr>
+        <tr><td class="n">30</td><td>TailWorkDoesNotAddUp</td><td>above the pinned header, not the work below it plus its own</td></tr>
+        <tr><td class="n">31</td><td>TailMissesWhatWasOpened</td><td>the run does not carry the pinned header, or carries a different one at its height</td></tr>
+        <tr><td class="n">32</td><td>TailNotConsecutive</td><td>the run does not end at the tip</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      Twenty-three follows from the draw being empty, which happens exactly when no
+      work stands behind the tip. A chain one block long can therefore never be
+      weighed, and is read instead.
+    </p>
+
+    <p>
+      What comes out of a weighing that passes is three numbers: the tip's
+      identifier, its height, and its total work. Nothing else about the chain is
+      settled by it, and in particular a weighing that passes says that this chain's
+      work was really done and not that no heavier chain exists.
+    </p>
+
+    <h3><span class="sub">9.6</span>What the bound is worth</h3>
+
+    <p>
+      <strong>The bound this draw rests on is measured, not proved.</strong> It is this project's
+      own derivation, and the project's own <code>SECURITY.md</code> says so. What follows is
+      the shape of the argument and the figure the reference implementation is set
+      from, and neither is a theorem.
+    </p>
+
+    <p>
+      A forger holding share <code>s</code> of the world's work cannot mine what it did not
+      mine. To present a chain heavier than the honest one it must invent the
+      difference, so at least <code>1 - s / (1 - s)</code> of what it presents is work no block
+      of its chain spans. The draw's density is one over the distance from the tip,
+      which is what makes the guarantee indifferent to how deep a forger forks, and
+      the price of that density is a factor of <code>levels</code> on every draw: a draw lands in
+      the invented stretch with probability <code>ln(1 / (1 - lie)) / levels</code> rather than
+      with probability <code>lie</code>. Setting the count from that gives 4 096 draws over a
+      thirty year chain, which holds against every forger up to 40 percent of the
+      world's work and stops holding a few points above that.
+    </p>
+
+    <p>
+      Three things about that figure are load-bearing and MUST NOT be read out of it.
+    </p>
+
+    <p>
+      It is a guarantee about a depth and not about a duration. The draw does not
+      separate chains that differ by less than the band it stops halving at, which is
+      1 024 blocks, the same depth a node refuses to reorganise past. Inside that band
+      a forger can move a newcomer, and so can a slow honest peer: it is where any
+      node sits for its first blocks after connecting. Any argument that wants a
+      duration instead has to say which chain it is timing, because a branch sitting
+      at the difficulty floor states the same depth in a fraction of the time.
+    </p>
+
+    <p>
+      It is per tip. The seed is the tip's own identifier, so a forger that dislikes
+      the questions it drew can find another tip and ask again, and a forger with <code>g</code>
+      tips faces <code>g</code> times the chance. A tip costs the tip's own work, which is what
+      makes that a cost rather than a bar, but the figure is a per-tip figure.
+    </p>
+
+    <p>
+      Past half the world's work nothing here helps, and nothing anywhere else does
+      either: a forger at half has nothing left to invent and can mine the chain.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">10</div>
+  <div class="body">
+    <h2>The handover</h2>
+    <p>
+      Weighing settles which chain is heaviest. It says nothing about who owns what,
+      so a newcomer that has settled it still cannot check a single transaction. A
+      handover is the ledger at one header of that chain, with everything needed to
+      check it against what the header already committed to.
+    </p>
+
+    <p>
+      <strong>No ledger is taken at the tip.</strong> A newcomer has watched no transaction go
+      past, so what it is handed is only as good as the header that commits to it,
+      and a header's state root is a field its miner chose. Proof of work says that
+      somebody spent electricity on those bytes, not that the state in them is what
+      honest transactions would have produced. One block would buy an arbitrary
+      ledger. So the ledger is taken from an anchor at least the burial depth below
+      the tip. The burial depth is a rule of the network like any other, and on the
+      public networks it is 1 024 blocks, the same as the deepest reorganisation a
+      node accepts, so a newcomer lands exactly where a node that was away and came
+      back lands. A lie must therefore be that deep, and to be that deep while still
+      being the heaviest chain offered, its author had to out-mine everybody else for
+      as long as it took to build the burial.
+    </p>
+
+    <h3><span class="sub">10.1</span>What it carries</h3>
+
+    <p>
+      Encoded in this order.
+    </p>
+
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>What it is</th></tr></thead>
+      <tbody>
+        <tr><td>at</td><td>block header</td><td>the header this ledger belongs to, the anchor</td></tr>
+        <tr><td>tip</td><td>block header</td><td>the tip of the chain this ledger belongs to</td></tr>
+        <tr><td>tip_history</td><td>forest</td><td>the header forest as it stood before that tip</td></tr>
+        <tr><td>anchor</td><td>proof</td><td>that the anchor sits where it says in that forest</td></tr>
+        <tr><td>cold</td><td>forest</td><td>the cold set, roots only</td></tr>
+        <tr><td>headers</td><td>forest</td><td>the header forest as it stood before the anchor</td></tr>
+        <tr><td>hot</td><td>sequence of (note id, note, u64)</td><td>every note in the hot set, with the height that decides when it falls</td></tr>
+        <tr><td>grace</td><td>sequence of sequence of (note id, u64, note)</td><td>what fell in each of the last few blocks, oldest first</td></tr>
+        <tr><td>grace_proofs</td><td>sequence of (u64, proof)</td><td>a path for every note in that window</td></tr>
+        <tr><td>maturing</td><td>sequence of (u64, hash)</td><td>coinbases not spendable yet, oldest first</td></tr>
+        <tr><td>supply</td><td>amount</td><td>every pebble the chain had issued at the anchor</td></tr>
+        <tr><td>recent</td><td>sequence of block header</td><td>the last few headers in full, oldest first, ending at the anchor</td></tr>
+        <tr><td>buried</td><td>sequence of block header</td><td>every header between the anchor and the tip, oldest first, the last being the tip</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      Every count is bounded before anything is reserved for it, because a sender
+      chooses all of them. A decoder MUST refuse a hot set of more than 1 048 576
+      notes, a grace window of more than 64 blocks or more than 8 192 notes across
+      them, more than 8 192 grace proofs, more than 65 536 maturing coinbases, more
+      than 91 recent headers, and a buried run of more than 4 096 headers.
+    </p>
+
+    <p>
+      Two of those are wire ceilings rather than rules, and the difference matters. A
+      node MUST check the hot set against the capacity this network's rules set, which
+      is 131 072 notes on the public networks, and the maturity window against this
+      network's maturity depth, which every network here sets equal to its burial
+      depth. The decoder's larger numbers exist only so that a sender cannot make a
+      reader reserve for a set no network allows. The buried ceiling of 4 096 is there
+      because the sender chooses the length of a run the receiver has to walk, and
+      without one a peer could hand over an afternoon's work to check.
+    </p>
+
+    <p>
+      The grace proofs are not a courtesy. Spending a note that fell moments ago
+      takes no proof from the spender, because every node holds one; a node handed a
+      ledger holds none and cannot work them out, since they are paths through a set
+      nobody keeps. A handover that omits one is refused rather than believed and
+      found wanting later by whoever tries to spend.
+    </p>
+
+    <p>
+      The recent headers come in full rather than as summaries, because the
+      difficulty rule and the timestamp rule read them and an identifier is what the
+      header forest holds. A summary cannot be checked against anything.
+    </p>
+
+    <h3><span class="sub">10.2</span>The order a node applies the checks</h3>
+
+    <p>
+      This order is normative.
+    </p>
+
+    <table>
+      <thead><tr><th class="n">#</th><th>Refusal</th><th>What it means</th></tr></thead>
+      <tbody>
+        <tr><td class="n">1</td><td>WrongNetwork</td><td>the anchor or the tip belongs to another network</td></tr>
+        <tr><td class="n">2</td><td>BeforeTheNetworkOpened</td><td>either is dated before this network existed</td></tr>
+        <tr><td class="n">3</td><td>HeaderWithoutWork</td><td>either identifier does not meet its own target</td></tr>
+        <tr><td class="n">4</td><td>SoftwareTooOld</td><td>the rules at the tip's height, or the tip's own version, are past what this build knows</td></tr>
+        <tr><td class="n">5</td><td>WrongVersion</td><td>the anchor or the tip carries a version other than the one the rules require where it sits</td></tr>
+        <tr><td class="n">6</td><td>NotBuried</td><td>the anchor is not the burial depth or more below the tip</td></tr>
+        <tr><td class="n">7</td><td>HistoryMismatch</td><td>the forest offered is not the one the tip commits to</td></tr>
+        <tr><td class="n">8</td><td>NotOnTheWeighedChain</td><td>the anchor does not sit in that forest at the height it states</td></tr>
+        <tr><td class="n">9</td><td>HotSetTooLarge</td><td>more notes than this network's rules allow</td></tr>
+        <tr><td class="n">10</td><td>DuplicateHotNote</td><td>one note named twice</td></tr>
+        <tr><td class="n">11</td><td>MaturityWindowTooLarge</td><td>more waiting coinbases than the maturity depth</td></tr>
+        <tr><td class="n">12</td><td>SupplyAboveTheSchedule</td><td>more money than the schedule has paid by the anchor's height</td></tr>
+        <tr><td class="n">13</td><td>HistoryMismatch</td><td>the second forest is not the one the anchor commits to</td></tr>
+        <tr><td class="n">14</td><td>RecentNotEndingAtTip</td><td>the recent run is empty, or does not end at the anchor</td></tr>
+        <tr><td class="n">15</td><td>TooFewRecent</td><td>fewer recent headers than the anchor's height allows for</td></tr>
+        <tr><td class="n">16</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a recent header belongs elsewhere</td></tr>
+        <tr><td class="n">17</td><td>RecentWithoutWork</td><td>a recent header carries no proof of work</td></tr>
+        <tr><td class="n">18</td><td>RecentNotConsecutive</td><td>the recent run is not one chain</td></tr>
+        <tr><td class="n">19</td><td>BuriedRunWrongLength</td><td>the buried run is not the height difference, or is past the ceiling</td></tr>
+        <tr><td class="n">20</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a buried header belongs elsewhere</td></tr>
+        <tr><td class="n">21</td><td>BuriedRunNotConsecutive</td><td>a buried header does not follow the one below it</td></tr>
+        <tr><td class="n">22</td><td>BuriedWithoutWork</td><td>a buried header carries no proof of work</td></tr>
+        <tr><td class="n">23</td><td>SoftwareTooOld</td><td>the rules at a buried header's height are past what this build knows</td></tr>
+        <tr><td class="n">24</td><td>WrongVersion</td><td>a buried header carries a version other than the one its height requires</td></tr>
+        <tr><td class="n">25</td><td>BuriedAtTheWrongDifficulty</td><td>not what the retarget demands of it</td></tr>
+        <tr><td class="n">26</td><td>BuriedOutOfTime</td><td>not later than the median of the window before it</td></tr>
+        <tr><td class="n">27</td><td>BuriedWorkDoesNotAddUp</td><td>not the work below it plus its own</td></tr>
+        <tr><td class="n">28</td><td>BuriedRunNotEndingAtTheTip</td><td>the run does not end at the tip</td></tr>
+        <tr><td class="n">29</td><td>NotOnTheWeighedChain</td><td>the forest rebuilt from the run is not the one the tip commits to</td></tr>
+        <tr><td class="n">30</td><td>StateRootMismatch</td><td>the ledger rebuilt from this does not produce the anchor's state root</td></tr>
+        <tr><td class="n">31</td><td>BadGraceProof</td><td>a path for a note in the grace window does not fold to the cold commitment</td></tr>
+        <tr><td class="n">32</td><td>MissingGraceProof</td><td>a note in the grace window has no path</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      Nine, ten, eleven and twelve come before the ledger is rebuilt because each of
+      them needs nothing but a number that arrived on the wire, and the size of what
+      follows is otherwise decided by whoever sent it.
+    </p>
+
+    <p>
+      <strong>Ten is not covered by the state root and cannot be.</strong> The hot set is
+      committed to as a tree keyed by note identifier, so a list naming a note twice
+      folds to exactly the root of the list naming it once. The second entry rides in
+      free, past every check that ends at the header, and what it buys is not a note
+      but a place in the eviction order, which is the one structure a receiver builds
+      from the list rather than from the commitment.
+    </p>
+
+    <p>
+      Twenty-nine is what a forest proof alone cannot say. A proof says a header sits
+      at a position in a forest; it does not say the forest is a chain, and the forest
+      belongs to whoever made the tip. The header forest is append only, so the
+      receiver does not have to take the proof's word for it: it holds the forest as
+      it stood before the anchor, because the anchor commits to it, and it adds the
+      anchor and then every header of the run and sees whether it arrives at the
+      forest the tip commits to. Under a swap anywhere below the tip it does not, and
+      it does not matter whether any draw would have looked there. The tip is not in
+      its own history, so the tip's own leaf is the one leaf that MUST NOT be added.
+    </p>
+
+    <p>
+      Twenty-five, twenty-six and twenty-seven are what make the burial cost
+      something. Before them the sender chose those difficulties and could set them
+      all to the floor, so a thousand blocks of burial were a thousand hashes. The
+      window they are judged against starts as the recent headers that came with the
+      ledger and moves forward with the run, so every step is judged by the rule a
+      node applies to any block it is handed.
+    </p>
+
+    <h3><span class="sub">10.3</span>What is pinned by a commitment, and what is not</h3>
+
+    <p>
+      Everything in a handover except one field is checked against something the
+      header already committed to, and the header is checked against the work behind
+      it. That is a strong argument and it has a shape: it says a lie had to be
+      mined, not that a lie is impossible. Whoever did out-mine the network for the
+      burial chose the state root and everything under it.
+    </p>
+
+    <p>
+      <strong>One check does not go by that road.</strong> A coinbase claims at most what the
+      schedule pays at its height plus the fees its own block's transfers gave up,
+      and a fee the coinbase declines is destroyed, so a chain at a height holds at
+      most what the schedule has paid by then and never more. Refusal twelve is that
+      subtraction. It is the only place in this exchange where a newcomer is not
+      taking somebody's word, and no amount of work gets past it. The supply is also
+      inside the state root like everything else; the point is that it is weighed
+      against the rules as well.
+    </p>
+
+    <p>
+      <strong>The tip is pinned by the caller and the anchor is pinned by nothing until
+      refusal eight.</strong> The tip is the header the weighing settled on, and a node MUST
+      check that the handover names that header before anything is drawn from it.
+      The anchor is a header the sender chose; until the forest proof runs, every
+      field of it is a number the sender wrote.
+    </p>
+
+    <p>
+      That distinction decides where refusal four may read its version from. Four is
+      the one verdict in this exchange that stops a node rather than refusing a
+      message, so it MUST be drawn from the tip's height and the tip's own version
+      and from nothing else. Reading it off the anchor was worth a node: this
+      network, a timestamp past its opening, the difficulty floor where any
+      identifier meets the target, and one hash shut any node that asked for a
+      ledger. Nothing honest is lost by refusing to read it there, because versions
+      rise with height and the anchor sits below the tip, so an anchor above this
+      build's ceiling while the tip is not is a combination no chain produces. An
+      anchor claiming one falls to refusal five, which refuses the handover and does
+      not stop anything.
+    </p>
+
+    <p>
+      Five is the other half and is a judgement rather than a confession, so it may
+      rest on unpinned fields. A block carries exactly the version the rules require
+      where it sits, so a header carrying anything else is a header no chain
+      accepted. Checking only that a version was not too high let a handover arrive
+      under a version below the schedule and be taken, while the very same header
+      offered as a block would have been refused, which is the whole of what a
+      schedule is for.
+    </p>
+
+    <h3><span class="sub">10.4</span>What a newcomer ends up trusting</h3>
+
+    <p>
+      This is the trade the design makes, and a specification that leaves it implicit
+      is worse than useless.
+    </p>
+
+    <p>
+      A node that read the chain from its first block has validated every block in
+      it. It refuses an invalid history however much work stands behind it, because
+      it checked every rule against every block, and no quantity of proof of work
+      persuades it otherwise.
+    </p>
+
+    <p>
+      A node that started at an anchor does not have that property below the anchor.
+      Above the anchor it is in exactly the same position as any other node: it asks
+      for the blocks between the anchor and the tip and beyond, and it validates
+      every one of them against every rule, so from the anchor upward its own work
+      stands behind everything it will ever answer about. Below the anchor it holds
+      the work, the header commitments, and nothing else. It has:
+    </p>
+
+    <ul>
+      <li>proof of work on the tip, on every header the draw opened, on the parent, on
+      every header of the run up to the tip, on every header of the buried run, and
+      on the recent headers;</li>
+      <li>a bound on what every stretch it did not open can be worth, which follows
+      from the retarget rather than from anyone's word;</li>
+      <li>the anchor's own place in the tip's header forest, rebuilt leaf by leaf from
+      the run rather than taken from a proof;</li>
+      <li>the ledger reproducing the anchor's state root, and the anchor's supply at or
+      below what the schedule has paid.</li>
+    </ul>
+
+    <p>
+      It does not have, and cannot obtain without reading the chain, any check that
+      the transactions below the anchor were valid. A ledger that a majority of the
+      world's hash rate mined a burial deep over is a ledger this node takes, so long
+      as the money in it is at or below what the schedule has paid, which is the one
+      thing the schedule check still catches. What that costs an attacker is
+      out-mining the network for the burial while remaining the heaviest chain the
+      whole time, which is the assumption the chain already rests on; what it does
+      not cost is anything the newcomer can detect.
+    </p>
+
+    <p>
+      Two consequences follow and both are stated rather than softened. A newcomer
+      lands where a node that was away and came back lands, with the same ability to
+      be moved off by a heavier chain and no more. And the two kinds of node are not
+      interchangeable as sources: a node handed a ledger holds nothing below its
+      anchor and never will, so a branch forking under there cannot be assembled by
+      it however much of it arrives.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">11</div>
+  <div class="body">
+    <h2>The message set</h2>
+    <p>
+      Every message is a <code>u8</code> tag followed by the fields listed, in order. A decoder
+      MUST refuse a tag it does not know rather than skipping it, since it cannot
+      know how many bytes to skip.
+    </p>
+
+    <table>
+      <thead><tr><th class="n">Tag</th><th>Message</th><th>Carries</th><th>Answered with</th></tr></thead>
+      <tbody>
+        <tr><td class="n">0</td><td>Hello</td><td>handshake</td><td>Welcome, then GetChain when the peer claims more work, then GetPeers</td></tr>
+        <tr><td class="n">1</td><td>Welcome</td><td>handshake</td><td>GetChain when the peer claims more work, then GetPeers</td></tr>
+        <tr><td class="n">2</td><td>Ping</td><td>u64</td><td>Pong, carrying the same number</td></tr>
+        <tr><td class="n">3</td><td>Pong</td><td>u64</td><td>nothing</td></tr>
+        <tr><td class="n">4</td><td>GetChain</td><td>sequence of (u64, hash)</td><td>Chain</td></tr>
+        <tr><td class="n">5</td><td>Chain</td><td>u64, u64</td><td>GetBlocks, or GetChain, or nothing</td></tr>
+        <tr><td class="n">6</td><td>GetBlocks</td><td>sequence of u64</td><td>one Block per height held, in the order asked</td></tr>
+        <tr><td class="n">7</td><td>Block</td><td>block</td><td>GetBlocks or GetChain, or nothing</td></tr>
+        <tr><td class="n">8</td><td>Announce</td><td>sequence of (u64, hash)</td><td>GetBlocks, or GetChain, or nothing</td></tr>
+        <tr><td class="n">9</td><td>GetPeers</td><td>nothing</td><td>Peers</td></tr>
+        <tr><td class="n">10</td><td>Peers</td><td>sequence of address</td><td>nothing</td></tr>
+        <tr><td class="n">11</td><td>Transaction</td><td>transfer</td><td>nothing</td></tr>
+        <tr><td class="n">12</td><td>GetJoin</td><td>u8, u32</td><td>JoinPart, or nothing</td></tr>
+        <tr><td class="n">13</td><td>JoinPart</td><td>u8, hash, u32, u32, sequence of u8</td><td>GetJoin for the next piece, or GetChain once the ledger lands</td></tr>
+        <tr><td class="n">14</td><td>GetHeaders</td><td>u64, u64</td><td>Headers, or nothing</td></tr>
+        <tr><td class="n">15</td><td>Headers</td><td>u64, sequence of block header</td><td>nothing</td></tr>
+        <tr><td class="n">16</td><td>GetProofs</td><td>sequence of u64</td><td>Proofs</td></tr>
+        <tr><td class="n">17</td><td>Proofs</td><td>sequence of placed</td><td>nothing</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      A handshake is 108 bytes and carries the protocol version as a <code>u32</code>, the
+      network as a <code>u32</code>, the first block of the branch this node follows, its tip,
+      its height, the work behind that tip as a <code>u128</code>, the port it listens on as a
+      <code>u16</code>, a <code>u64</code> nonce drawn once when the node started, and two <code>u8</code> claims about
+      what it kept. A decoder MUST refuse either claim byte if it is neither <code>0</code> nor
+      <code>1</code>, because reading anything else as true is guessing on the peer's behalf.
+    </p>
+
+    <p>
+      The two claims are separate on purpose. Keeping the headers is what lets a node
+      show a newcomer what work stands behind its chain, and almost every node does
+      it. Keeping the whole cold set is what lets a node rebuild the path to a note
+      that fell long ago, and almost none does. They are claims and not facts, and
+      neither is taken on trust: everything either kind of node hands over is checked
+      against something the asker worked out for itself. What the claims save is
+      asking the wrong node and waiting.
+    </p>
+
+    <p>
+      An address is a <code>u8</code> tag: <code>4</code> followed by four octets and a <code>u16</code> port, or <code>6</code>
+      followed by sixteen octets and a port. A decoder MUST refuse any other tag.
+    </p>
+
+    <p>
+      A placed is a <code>u64</code> position and then a <code>u8</code> tag: <code>0</code> for no path, <code>1</code> followed
+      by a path. A decoder MUST refuse any other tag. A node that cannot produce the
+      path for a position it was asked about MUST answer with <code>0</code> at that position
+      rather than leaving it out or saying nothing, because silence from a peer is
+      indistinguishable from a peer that has hung up, and a wallet waiting on the one
+      thing that would let it spend its money has to be able to tell those apart and
+      go and ask somebody else. An answer names every position asked about, in the
+      order asked.
+    </p>
+
+    <p>
+      <code>GetJoin</code> and <code>JoinPart</code> carry a <code>u8</code> saying which answer is meant: <code>0</code> for the
+      weighing, <code>1</code> for the ledger. A decoder MUST refuse any other value. Both
+      answers are larger than one message carries, so they arrive in pieces. The
+      <code>at</code> field of a <code>JoinPart</code> is the tip the answer describes, so an asker can tell
+      that every piece came from the same moment: a node that mined a block partway
+      through is answering about a different ledger, and its pieces do not belong with
+      the ones already held. Whether pieces belong together is settled by checking the
+      whole against the header it names, never by the labels on them.
+    </p>
+
+    <p>
+      <strong>A node with no chain, meeting a peer whose chain is longer than the deepest
+      reorganisation it would accept, MUST NOT ask that peer for a chain on the
+      handshake.</strong> Past that length the fork choice is final, so the first long chain
+      a node commits to is the one it keeps. Left to the wire, that choice belongs to
+      whoever answers first, and the first answer is the one an attacker races to
+      give. The choice is therefore made once, against every claim the node has heard,
+      by the node itself. A node with a chain of its own, and a node facing a chain
+      short enough to be undone, simply asks: following the wrong short branch is
+      undone by the fork choice like any other.
+    </p>
+
+    <h3><span class="sub">11.1</span>What a node MUST refuse</h3>
+
+    <p>
+      Below the message set, a frame is a four byte network marker, a four byte
+      length, and the message. A reader MUST check the marker against its own network
+      and MUST refuse a declared length above 1 048 576 before reserving a byte for
+      it, because the length is the one number an anonymous peer chooses about this
+      node's memory. A reader MUST refuse a frame with bytes left over after the
+      message decodes.
+    </p>
+
+    <p>
+      Every counted list has a ceiling checked while decoding, before anything is
+      reserved. An encoder MUST NOT produce one past its ceiling.
+    </p>
+
+    <table>
+      <thead><tr><th>List</th><th class="n">Most</th></tr></thead>
+      <tbody>
+        <tr><td>GetChain locator</td><td class="n">64</td></tr>
+        <tr><td>Chain count</td><td class="n">2 000</td></tr>
+        <tr><td>GetBlocks heights</td><td class="n">128</td></tr>
+        <tr><td>Announce identifiers</td><td class="n">512</td></tr>
+        <tr><td>Peers addresses</td><td class="n">64</td></tr>
+        <tr><td>JoinPart pieces</td><td class="n">64</td></tr>
+        <tr><td>JoinPart bytes</td><td class="n">524 288</td></tr>
+        <tr><td>Headers headers</td><td class="n">512</td></tr>
+        <tr><td>GetProofs positions</td><td class="n">64</td></tr>
+        <tr><td>Proofs entries</td><td class="n">64</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      A decoder MUST also refuse a <code>JoinPart</code> whose piece number is not below its
+      stated count of pieces. Those two ceilings together bound what a collector can
+      be made to hold at 64 pieces of 524 288 bytes, which is 33 554 432 bytes and is
+      the real limit on what one join exchange costs a node in memory.
+    </p>
+
+    <p>
+      <code>GetHeaders</code> is the one ask whose count is not bounded at decode. It is clamped
+      to 512 when it is answered, and priced at what it asked for up to that clamp, so
+      asking for more than 512 buys 512 and costs what 512 costs.
+    </p>
+
+    <p>
+      Two refusals are about the conversation rather than about a message. A node
+      MUST refuse any message other than <code>Hello</code> or <code>Welcome</code> from a peer that has not
+      introduced itself, and MUST refuse a second introduction on one connection.
+      Both are broken or probing behaviour and a node SHOULD hold them against the
+      address for a while.
+    </p>
+
+    <p>
+      An introduction is examined in this order, and the order is what keeps a node
+      from spending a connection on itself. First, whether the peer has already
+      introduced itself. Then whether the handshake carries this node's own nonce,
+      which means the connection is this node's own. Then the protocol version, the
+      network, and the first block.
+    </p>
+
+    <p>
+      A node that reaches itself MUST close the connection, MUST NOT count it as
+      misbehaviour, and SHOULD take that address out of its book, or it will dial
+      itself again on the next sweep. Comparing addresses cannot detect this, since a
+      node behind a router does not know the address the world reaches it at.
+      Comparing a number the node drew for itself when it started can.
+    </p>
+
+    <p>
+      Three refusals are about the peer belonging elsewhere: another protocol version,
+      another network, or a first block that is not this node's. A node MUST close the
+      connection on any of them and MUST NOT hold any of them against the address,
+      because a node on another network or an older build has done nothing wrong and
+      may be on this one tomorrow.
+    </p>
+
+    <p>
+      The first block a node compares against is the one its own rules pin, and only
+      where the rules pin none is it the first block of the branch it happens to
+      follow. On a network that pins one, every node applies the check from its first
+      moment. Where nothing is pinned, a node with no branch has nothing to compare
+      against and MUST let the peer past, and so MUST a node meeting a peer that
+      advertises a first block of all zeroes, which is what a node with no chain says
+      about itself. Choosing whom to ask first is then what a seed address is, and it
+      is the one piece of trust in the whole protocol: it belongs to whoever runs the
+      node and not to the network.
+    </p>
+
+    <p>
+      A node that cannot build an answer MUST say nothing rather than answer badly.
+      That covers a node with no headers asked for a weighing, a node whose chain has
+      left the band a weighing can reach, and a node asked for a piece of an answer
+      it has no piece of.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">12</div>
+  <div class="body">
+    <h2>Versions</h2>
+    <p>
+      There are two version numbers in this protocol and they are compared
+      differently.
+    </p>
+
+    <p>
+      <strong>The protocol version is compared for equality.</strong> It is a <code>u32</code> in the
+      handshake, it is 6 today, and a node MUST close the connection with a peer
+      carrying anything else. What that costs is that a node on five and a node on
+      six turn each other away rather than talking; what it buys is that a message
+      whose meaning changed is never read under the old meaning. The alternative,
+      adding a question without saying so, is worse than it looks: a node on the older
+      version meeting the new question cannot decode it, takes that for a peer that is
+      broken or probing, and refuses the address. A wallet looking for the node that
+      answers the new question would work its way through the network banning itself
+      from it.
+    </p>
+
+    <p>
+      <strong>The block version is compared both ways, and which comparison is used decides
+      who is at fault.</strong> Every network carries a schedule of activations, oldest
+      first, each naming a height and the version in force from it. The version the
+      rules require at a height is the version of the last activation at or below it.
+      A build knows versions up to a ceiling, which is 1 today.
+    </p>
+
+    <table>
+      <thead><tr><th>Refusal</th><th>Comparison</th><th>What it says</th></tr></thead>
+      <tbody>
+        <tr><td>SoftwareTooOld</td><td>the version the rules require at this height is above this build's ceiling</td><td>this build cannot judge here</td></tr>
+        <tr><td>UnsupportedVersion</td><td>the version the header carries is above this build's ceiling</td><td>this build cannot judge this block</td></tr>
+        <tr><td>WrongVersion</td><td>the version the header carries is not the one the rules require where it sits</td><td>this block is wrong</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      The first is an ordering and is drawn from the height rather than from anything
+      the block says about itself, so a block that lied about its height cannot pick
+      the rules it is judged by. It is a verdict about the reader, so a node MUST NOT
+      hold it against the block or the peer, and MUST NOT go on following the chain it
+      can still judge: carrying on would mean refusing every peer that had updated and
+      following whoever had not, which is worse than not running, because a wallet
+      reading a balance off an abandoned chain is answered confidently and wrongly.
+      The reference implementation names the height and the version required and
+      stops.
+    </p>
+
+    <p>
+      The second is also an ordering and also a verdict about the reader, and an
+      update reverses it, so a node MUST NOT remember it against the block and MUST
+      NOT hold it against the peer. One of these means nothing on its own: it is a
+      number a stranger wrote in a field. Deciding that a run of them means the chain
+      has moved rather than that somebody is talking nonsense needs evidence from more
+      than one block and more than one peer.
+    </p>
+
+    <p>
+      The third is an equality and is a verdict about the block, so a node MUST
+      remember it against the block, since no update reverses it. It MUST NOT be held
+      against the peer either: on the day a rule changes, every node that has not
+      updated sends these in good faith, and refusing the host would turn the first
+      minutes of a rule change into an updated node banning most of the network.
+    </p>
+
+    <p>
+      <strong>When two builds meet across an activation</strong>, which of the two orderings fires
+      depends on whether the older build carries the schedule.
+    </p>
+
+    <p>
+      A build that carries the activation but not the rules, which is what a build
+      shipped before an announced change looks like once the chain reaches the height,
+      reaches the first refusal, says it is too old, and stops. A build that carries
+      neither, which is what a build that predates the announcement looks like, never
+      reaches the first refusal at all: it judges by its own schedule, which does not
+      know the change, and so meets the second refusal on every block instead. It
+      follows nothing further, holds nothing against anybody, and its height stops
+      moving. Both are honest answers to different questions, and neither of them is a
+      verdict about the peer.
+    </p>
+
+    <p>
+      The updated build, meeting a block from either of them, reaches the third
+      refusal, closes the connection, and MUST NOT refuse the address, because on the
+      day a rule changes that is most of the network.
+    </p>
+
+    <p>
+      Collapsing any two of the three has cost this project a defect in both
+      directions: a stranger able to stop any node by writing a number in a field, and
+      an un-updated node banning everyone who had updated.
+    </p>
+
+    <p>
+      <strong>The handover path carries only two of the three, and folds the second into the
+      first.</strong> A tip whose own version is above this build's ceiling is reported as
+      <code>SoftwareTooOld</code> rather than as <code>UnsupportedVersion</code>, so a build that carries
+      neither the schedule nor the rules stops on a handover where it would only have
+      gone quiet on a block. That is sound only because the tip is the header the
+      weighing settled on and is therefore pinned by the caller. Drawing the same
+      verdict from the anchor would not be. See <em>What is pinned by a commitment, and
+      what is not</em>.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">13</div>
+  <div class="body">
+    <h2>The allowance</h2>
+    <p>
+      <strong>The allowance bounds how often a peer may ask, and nothing else.</strong> How much
+      one answer weighs is bounded separately, by the per-message ceilings above and
+      by the frame limit; how many messages a peer may send is bounded separately
+      again. The three are worth keeping apart, because a price that counts only the
+      asking sells a gigabyte of blocks per window for about six and a half kilobytes
+      a second of asking: 128 heights fit in about a kilobyte of request and draw up
+      to 16 777 216 bytes of reply.
+    </p>
+
+    <p>
+      It is not consensus. A node that prices differently, or not at all, reaches the
+      same conclusions about every chain; what it decides is how much of itself that
+      node hands to strangers. So everything here is SHOULD, and the numbers are what
+      the reference implementation charges.
+    </p>
+
+    <p>
+      A peer's allowance is 8 192 units per window. A window is ten seconds, counted
+      off the clock rather than from whenever a peer first spoke, so a connection and
+      the address it arrived from are always talking about the same ten seconds. A
+      peer that has spent its window SHOULD be answered with silence rather than
+      closed: asking is not misbehaviour, there has only been a lot of it, and it asks
+      again a moment later against a fresh window.
+    </p>
+
+    <p>
+      The window belongs to the address and not to the socket. A connection's first
+      ask SHOULD begin where its address left off in the current window, or a peer
+      refills by hanging up and dialling back, which costs it a handshake and earns it
+      no refusal. Two connections open at once SHOULD each spend their own and the
+      address SHOULD keep the larger rather than the sum, because that is what an
+      honest pair of nodes behind one address is, and pooling makes two people behind
+      one carrier gateway invisible to each other.
+    </p>
+
+    <table>
+      <thead><tr><th>Ask</th><th>Cost</th></tr></thead>
+      <tbody>
+        <tr><td>GetChain</td><td>8, plus 1 per locator entry, counted up to 64</td></tr>
+        <tr><td>GetBlocks</td><td>1 per height, counted up to 128</td></tr>
+        <tr><td>GetHeaders</td><td>1 per header, counted up to 512</td></tr>
+        <tr><td>GetProofs</td><td>8 per position, counted up to 64</td></tr>
+        <tr><td>GetPeers</td><td>64</td></tr>
+        <tr><td>GetJoin</td><td>1 024</td></tr>
+        <tr><td>Peers</td><td>1 per address carried, counted up to 64</td></tr>
+        <tr><td>Transaction</td><td>4</td></tr>
+        <tr><td>Block this node asked for</td><td>1</td></tr>
+        <tr><td>Block nobody asked for</td><td>8</td></tr>
+        <tr><td>anything else</td><td>1</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      Three of those prices are worth the sentence that explains them.
+    </p>
+
+    <p>
+      <strong>An ask is priced by what it makes the answerer do, not by what it weighs.</strong>
+      A locator is priced by its entries because every entry the answerer does not
+      hold in memory is a seek, a read and a decode, and the walk stops only when one
+      matches, so a locator of entries matching nothing costs one read each. A
+      <code>GetPeers</code> is priced at the largest answer it can draw rather than at what this
+      node's book happens to hold, because a price that moves with the book is a price
+      whoever fills the book gets to set.
+    </p>
+
+    <p>
+      <strong>A <code>Peers</code> costs what it makes this node take in.</strong> Nothing on the wire says a
+      peer was asked, so a message this node requested is charged the same as one a
+      stranger sent unbidden, because taking one in costs the same either way.
+    </p>
+
+    <p>
+      <strong>The two largest answers a stranger can draw cost the same per byte.</strong> What is
+      put on the wire is charged separately from the ask, at one unit per 512 bytes
+      rounded up, for blocks. A join part is 524 288 bytes for 1 024 units, which is
+      the same rate. So a window buys about four megabytes of either. Blocks are the
+      one answer whose size the ask cannot state, since a block is anything up to what
+      the consensus rules allow and only whoever read it off the disk knows which;
+      headers and paths are bounded by the ask and are charged there instead.
+    </p>
+
+    <p>
+      A batch SHOULD be charged as it is served rather than after, so a peer that has
+      spent its window is handed what it could afford and the rest is not read, not
+      encoded and not queued. A short batch is what a peer already gets for heights
+      this node no longer holds, so it asks again for the rest.
+    </p>
+
+    <p>
+      <strong>What the allowance does not bound.</strong> It does not bound the number of messages
+      a peer sends: that is a separate ceiling, 2 000 messages in ten seconds, and
+      passing it closes the connection, because a peer asking the same question
+      hundreds of times a second is not syncing. It does not bound one answer's size:
+      the per-message ceilings and the one megabyte frame limit do. And it does not
+      decide how fast a catch-up runs. A batch of 128 empty blocks costs 128 units for
+      the asking and one more for each block put on the wire, so a window pays for
+      4 096 of them, which is four hundred a second and far above what a catch-up has
+      ever been measured at. Whatever paces a sync, and the exchange asks a fresh
+      locator and waits a round trip for every 128 blocks, it is not this. The
+      allowance is a ceiling an honest sync does not come near, which is all it was
+      ever for, and a document that turns it into a promise about a duration is
+      promising something no rule here delivers.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">14</div>
+  <div class="body">
     <h2>Where this document is held to the code</h2>
     <p>
       Every statement above that names a layout or a number is checked against the
       reference implementation by tests in
-      <code>crates/cairn-primitives/tests/audit_vectors.rs</code>. They pin the encoded bytes of
-      each structure and the identifier computed over them, so a change to either
-      side that the other did not make fails the build.
+      <code>crates/cairn-primitives/tests/audit_vectors.rs</code> and
+      <code>crates/cairn-explorer/tests/published_figures.rs</code>. They pin the encoded bytes
+      of each structure, the identifier computed over them, and the figures this
+      document quotes, so a change to either side that the other did not make fails
+      the build.
+    </p>
+
+    <p>
+      The draw is pinned now, which it was not when this document was first written.
+      <code>crates/cairn-ledger/tests/audit_the_specification.rs</code> implements it from the
+      procedure above and compares it against the shipped one over 82 476
+      combinations of seed, work and height, chosen to include every power of two and
+      either side of it, because a reimplementation that reached for a base-two
+      logarithm where this one counts leading zeros would be wrong at exactly those
+      heights and nowhere else.
+    </p>
+
+    <p>
+      Those vectors were written from this document by somebody forbidden to read the
+      encoders while writing them, which is the only way to find out whether a
+      specification says what its author meant or what the code does. Fifty three
+      agreed and none disagreed, so where this document speaks it is accurate. Where
+      it was silent it was not: ten of the twenty domain constants were named in
+      prose without being published, <code>transactions_root</code> was a header field and a
+      refusal with no definition anywhere, and four refusals the implementation makes
+      were not stated at all. The first two are fixed above. The four are
+      <code>CoinbaseExtraTooLarge</code>, <code>TooManyCoinbaseOutputs</code>, <code>ZeroValueCoinbaseOutput</code>
+      and <code>TooManyTransfers</code>, and by this document's own conformance section they are
+      either an omission here or a defect in the implementation; they are an omission
+      here, and the next revision states them with their numbers.
+    </p>
+
+    <p>
+      One gap is left and is not a defect. The allowance is written as SHOULD
+      throughout, because what an answer weighs is measured by encoding it, so two
+      implementations can charge slightly differently for the same batch without
+      either being wrong.
     </p>
 
     <p>
@@ -469,35 +2989,6 @@
       which bytes. Swapping two fields of the block header in both directions left
       every round trip passing, left the record width the header log asserts, left
       every domain vector green, and changed every block identifier ever computed.
-    </p>
-  </div>
-</section>
-
-<section>
-  <div class="num">8</div>
-  <div class="body">
-    <h2>What the remaining parts will cover</h2>
-    <p>
-      Part 2, transactions and blocks: the shape of a transfer and a coinbase, what a
-      signature commits to, the block header, and every rule a block must satisfy in
-      the order a node applies them, each with the refusal it produces.
-    </p>
-
-    <p>
-      Part 3, the state: the two tiers, what the state root commits to, how eviction
-      chooses, the grace window, and the accumulator.
-    </p>
-
-    <p>
-      Part 4, consensus: difficulty and timestamps, emission, fork choice, burial,
-      and the rules that activate at a height.
-    </p>
-
-    <p>
-      Part 5, joining and the wire: the handover, sampled verification, the message
-      set, versions, and the allowance. This part states the threat model and the
-      failures a conforming node is permitted to have, which the whitepaper discusses
-      and no document currently specifies.
     </p>
   </div>
 </section>

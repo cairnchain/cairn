@@ -581,10 +581,22 @@ half the work has nothing left to invent and can mine the chain.
 **The guarantee is a depth, and it is worth stating as one.**
 The draw stops resolving 1 024 blocks from the tip, deliberately, because
 resolving finer would cost a third of the count again to separate chains
-the fork choice does not separate either. So a forger at 40% cannot put a
-newcomer on a branch differing from the real one by more than about
-1 240 blocks (twenty hours). Inside that it can, and so can a slow peer:
-it is where any node sits for its first blocks after connecting.
+the fork choice does not separate either. So a forger cannot put a newcomer
+on a branch differing from the real one by more than about 1 240 blocks
+(twenty hours). Inside that it can, and so can a slow peer: it is where any
+node sits for its first blocks after connecting.
+
+**That depth is the same whatever share of the work the forger holds, and
+this paragraph used to imply otherwise.** Measured over the shipped draw, a
+forger at 5% of the world's work reaches exactly the depth a forger at 40%
+reaches: 1 237 blocks in both cases, and at every share between. The reason
+is that the crossing sits below the deepest band the draw resolves, where
+the overlap does not depend on the share at all. So the 40% is not a bound
+on how far a newcomer can be moved. It is the point past which there is no
+bound: at 44% the same measurement gives 10 525 577 blocks, two thirds of a
+thirty year chain, and at 45.7% it gives 91% of it. The failure is a cliff
+and not a slope, and a reader who took "a forger at 40%" to mean a weaker
+forger does less damage was reading something this paper did not check.
 
 That depth is deeper than the node's own reorganisation limit, and the
 two numbers have to be read together. The draw stops resolving 1 024
@@ -932,7 +944,7 @@ proportional to the depth of the set rather than its size. Over half of
 what a hot note costs is the tree that commits to it, which is where the
 room left is.
 
-The implementation is roughly 41 200 lines of Rust with 1 089 tests, no
+The implementation is roughly 44 700 lines of Rust with 1 235 tests, no
 unsafe code, no asynchronous runtime, and five dependencies. Arithmetic
 side effects, slice indexing, and panicking helpers are denied at the
 workspace level. It is small enough to be read, which is the point: a

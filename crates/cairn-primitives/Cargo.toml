@@ -20,4 +20,5 @@ blake3.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+cairn-fuzz.workspace = true
 hex.workspace = true
