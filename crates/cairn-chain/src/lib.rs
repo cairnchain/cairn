@@ -278,6 +278,11 @@ pub enum ChainError {
     TooOld { height: u64, floor: u64 },
     #[error("this node already follows a chain, and one is all it may follow")]
     AlreadyFollowing,
+    #[error(
+        "the run of headers handed with this ledger is not one chain: the header \
+         at height {height} does not follow on from the one before it"
+    )]
+    BrokenRun { height: u64 },
     #[error("block {id} was refused once already, and every branch through it with it")]
     KnownBad { id: Hash32 },
     #[error("the block tree lost a block it had recorded")]
@@ -1472,6 +1477,38 @@ impl ChainStore {
             return Err(ChainError::Corrupt);
         }
 
+        // And the run itself is walked before it is believed, because the
+        // branch is built out of it two different ways at once. `from_tail`
+        // files the nth header at the nth height above the first, and indexes
+        // it back by the height the header itself claims, so a run that is not
+        // one consecutive chain makes those two answers different numbers for
+        // the same block.
+        //
+        // What that costs is the node's word about where it is. Measured on a
+        // run of eight with the fourth left out: the branch said it ran to
+        // height 6 while the ledger said 7, `id_at` answered nothing for the
+        // tip, and `locator` offered a peer "height 6" beside the identifier
+        // of the header from height 7, and three more positions under it, none
+        // of which this node has ever held. A peer compares those against its
+        // own branch, so this node disagrees with the chain about heights it
+        // was never on, in both directions: `agrees_with` is the same lookup.
+        //
+        // Asked here for the reason the version is asked here. This is the
+        // door a ledger comes through however it was obtained, and what
+        // `Handover` checks is what a handover carries; nothing says every
+        // caller of a public entry point on this crate is one. It costs ninety
+        // hashes once in a node's life, against a branch that cannot say where
+        // it stands.
+        for (previous, header) in recent.iter().zip(recent.iter().skip(1)) {
+            if header.height != previous.height.saturating_add(1)
+                || header.previous != previous.id()
+            {
+                return Err(ChainError::BrokenRun {
+                    height: header.height,
+                });
+            }
+        }
+
         // A ledger from a height this build has no rules for is one this node
         // cannot stand behind, and standing behind it is exactly what adopting
         // means. Nothing here used to ask: a node whose rules stopped at some
@@ -1568,12 +1605,38 @@ impl ChainStore {
             Some(_) if self.branch.height_of(&id).is_some() => {
                 return Ok(Accepted::Duplicate);
             }
-            Some(held) if held.body.as_ref() == Some(&block) => {
-                // The same block, off the branch. There is nothing to check
-                // again, but the fork choice is not settled by having seen it
-                // once: the branch can move out from under a block that is
-                // already in memory. Weighed rather than followed blindly, so
-                // a peer resending one costs a comparison and not a walk.
+            Some(held) if held.body.is_some() => {
+                // A body is already held under that identifier, off the
+                // branch. There is nothing to check again, but the fork choice
+                // is not settled by having seen it once: the branch can move
+                // out from under a block that is already in memory. Weighed
+                // rather than followed blindly, so a peer resending one costs
+                // a comparison and not a walk.
+                //
+                // Weighed whether or not the body that arrived is the body
+                // held, because this used to ask, and a body that differed
+                // fell through to `hold` and was written over the one already
+                // there. Neither is known good, since a block held aside has
+                // not been applied, so what settles it is which arrived first:
+                // a twin is made by copying a block and cannot exist before
+                // the block it copies, while last is the half of the race an
+                // attacker wins by merely answering every honest delivery.
+                //
+                // What that bought was the branch. The forgery sat under the
+                // real block's identifier until the branch it was on became
+                // the heaviest, and the switch onto it then read the forged
+                // body, failed on a root that did not match, and left the node
+                // on the lighter branch, with `cairn-net` refusing the peer
+                // that had delivered the block above it for a body that peer
+                // never sent. Offering the real block again did not undo it:
+                // it weighs no more than the branch already followed, so it
+                // was filed aside, and nothing re-weighed the block above it.
+                //
+                // The one held is the one this node tries. A block whose body
+                // fails to apply is dropped by `follow`, so the next body to
+                // arrive under that identifier gets its turn, which is what
+                // `an_invalid_twin_seen_first_must_not_lock_out_the_honest_block`
+                // measures.
                 let total_work = held.total_work;
                 if total_work <= self.total_work() {
                     return Ok(Accepted::SideBranch);
