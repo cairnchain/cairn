@@ -131,8 +131,6 @@ fn decoding_never_panics_on_attacker_chosen_bytes() {
     }
 }
 
-/// Every domain the crate declares. Listed by hand because there is no
-/// iterator over the enum, which is exactly why a copy-paste in `key_for`
 /// A key file is read through `decode_array`, and it used to go through
 /// `decode`, which builds a vector on the heap holding the whole secret and
 /// drops it without wiping it. The caller wraps the array it is handed in
