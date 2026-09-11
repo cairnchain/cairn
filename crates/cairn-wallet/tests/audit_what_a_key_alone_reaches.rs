@@ -92,12 +92,13 @@ fn scratch(name: &str) -> PathBuf {
 
 /// Waits for something to become true, or says what it was waiting for.
 ///
-/// A minute, for the reason the recovery suite gives one: what is waited on is
-/// milliseconds of work inside this process, and the deadline exists for the
-/// case where it never happens at all. It costs no time when the condition is
-/// met, so it measures the code and not the machine.
+/// Five minutes, for the reason the recovery suite gives one: what is waited on
+/// is milliseconds of work inside this process, and the deadline exists only for
+/// the case where it never happens at all. It costs no time when the condition
+/// is met, so the only thing a short one buys is a failure that says nothing
+/// about the code.
 fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(300);
     while Instant::now() < deadline {
         if ready() {
             return;

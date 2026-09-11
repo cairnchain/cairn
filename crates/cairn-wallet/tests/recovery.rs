@@ -113,16 +113,21 @@ impl Forge {
 
 /// Waits for something to become true, or says what it was waiting for.
 ///
-/// A minute rather than fifteen seconds. What is waited on here is a handshake
-/// between two nodes in the same process, which takes milliseconds when the
-/// machine is free, and the deadline exists for the case where it never
-/// happens at all. Fifteen seconds is close enough to the work that a runner
-/// building the rest of this suite at the same time crossed it, and a deadline
-/// that measures the machine rather than the code is worth nothing: it costs
-/// no time at all when the condition is met, and the whole point of it is the
-/// case where it is not.
+/// Five minutes. What is waited on here is a handshake between two nodes in the
+/// same process, which takes milliseconds when the machine is free, and the
+/// deadline exists only for the case where it never happens at all. It costs no
+/// time when the condition is met, so the only thing a short one buys is a
+/// failure that says nothing about the code.
+///
+/// This was fifteen seconds, then a minute, and a runner building the rest of
+/// this suite at the same time crossed both. Each time the test was green on
+/// the same commit in another run, which is the whole tell: a deadline that
+/// measures the machine is a coin toss dressed as an assertion. Five minutes is
+/// chosen to be far past anything a loaded runner does rather than close to it,
+/// because the distance is the entire point and there is nothing on the other
+/// side of the trade.
 fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(300);
     while Instant::now() < deadline {
         if ready() {
             return;
