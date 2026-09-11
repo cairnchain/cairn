@@ -6,6 +6,7 @@
 //! ordinary hardware, so it would be strange to build the wallet any other way.
 
 use std::collections::BTreeMap;
+use std::io::IsTerminal as _;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -443,6 +444,14 @@ fn spend(arguments: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Where this wallet keeps its copy of the chain, and now its link as well.
+///
+/// One function rather than the string written twice, because the second place
+/// it was written would be the one that did not move.
+fn data_directory(flags: &Flags) -> PathBuf {
+    PathBuf::from(flags.value("data").unwrap_or("cairn-wallet-data"))
+}
+
 fn rules_of(flags: &Flags) -> Result<ConsensusParams, String> {
     let name = flags.value("network").unwrap_or("testnet-6");
     ConsensusParams::for_network(name).ok_or_else(|| {
@@ -469,18 +478,37 @@ fn open_page(arguments: &[String]) -> Result<(), String> {
             .map_err(|_| format!("`{text}` is not a port"))?,
     };
 
+    let data = data_directory(&flags);
     let wallet = Arc::new(join(&flags)?);
     let (listener, opened) = serve::open(port)?;
     let opened = Arc::new(opened);
     let running = Arc::new(AtomicBool::new(true));
 
+    // Where the link goes depends on what stdout is. See `Opened::hand_over`:
+    // a terminal is the operator's own screen, and anything else is a file or
+    // a journal that keeps a spending token longer than anyone means it to.
+    let link = opened.hand_over(&data, std::io::stdout().is_terminal())?;
+
     println!();
     println!("address   {}", wallet.address());
-    println!("open      {}", opened.url());
+    match &link {
+        serve::Link::Shown(url) => println!("open      {url}"),
+        serve::Link::Written(path) => println!("open      the address is in {}", path.display()),
+    }
     println!();
-    println!("That address carries a secret drawn for this run. Anyone with it can");
-    println!("spend from this wallet, so it goes no further than your own browser,");
-    println!("and it stops working the moment this command does.");
+    match &link {
+        serve::Link::Shown(_) => {
+            println!("That address carries a secret drawn for this run. Anyone with it can");
+            println!("spend from this wallet, so it goes no further than your own browser,");
+            println!("and it stops working the moment this command does.");
+        }
+        serve::Link::Written(_) => {
+            println!("That address carries a secret drawn for this run, and anyone with it can");
+            println!("spend from this wallet. This output is not a terminal, so it was written");
+            println!("to a file only its owner can read rather than into whatever is reading");
+            println!("this. It stops working the moment this command does.");
+        }
+    }
     println!();
     println!("Press Ctrl+C to close the wallet.");
 
@@ -489,6 +517,7 @@ fn open_page(arguments: &[String]) -> Result<(), String> {
     // as it arrived, and a transfer it handed over is with the network rather
     // than here.
     serve::run(&wallet, &listener, &opened, &running);
+    serve::Opened::let_the_link_go(&data);
     wallet.shutdown();
     Ok(())
 }
@@ -496,7 +525,7 @@ fn open_page(arguments: &[String]) -> Result<(), String> {
 /// Opens the wallet and brings it up to the chain the network is on.
 fn join(flags: &Flags) -> Result<Wallet, String> {
     let params = rules_of(flags)?;
-    let data = PathBuf::from(flags.value("data").unwrap_or("cairn-wallet-data"));
+    let data = data_directory(flags);
     let (wallet, blocks) =
         Wallet::open(&flags.key_file()?, params, &data).map_err(|error| error.to_string())?;
 

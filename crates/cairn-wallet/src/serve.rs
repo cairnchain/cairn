@@ -19,6 +19,7 @@
 //! to forget about.
 
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -45,12 +46,81 @@ pub struct Opened {
     pub secret: String,
 }
 
+/// Where the link to a running page was handed over.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Link {
+    /// The address itself, for an operator who is looking at a terminal.
+    Shown(String),
+    /// A file holding it, for a stdout that is not one.
+    Written(PathBuf),
+}
+
+/// What the file is called, in the wallet's own directory.
+const LINK_FILE: &str = "open-this-page";
+
 impl Opened {
     /// The address to open in a browser, secret and all.
     #[must_use]
     pub fn url(&self) -> String {
         format!("http://{}/?k={}", self.address, self.secret)
     }
+
+    /// Hands the link over, by the route that suits where stdout goes.
+    ///
+    /// The link carries the secret that guards the page, so printing it puts a
+    /// bearer token wherever stdout goes. On a terminal that is the operator's
+    /// own screen and is the whole point of the command. Redirected, it is a
+    /// file or a service journal that outlives anybody's attention and is often
+    /// readable by more people than the wallet's own directory: on a machine
+    /// where the wallet runs under a service manager, a token in the journal is
+    /// worth spending money with, for as long as the wallet runs, to anyone who
+    /// can read the journal and could not read the keys.
+    ///
+    /// So a stdout that is not a terminal is handed the path to a file instead,
+    /// written in the wallet's own directory, readable by its owner and nobody
+    /// else. That is the same protection the keys already have, which is the
+    /// right comparison: whoever can read it could have spent the money anyway.
+    ///
+    /// The token dies with the process either way. What this changes is how
+    /// long a copy of it lasts and who can reach that copy, not how long it
+    /// works.
+    pub fn hand_over(&self, data: &Path, to_a_terminal: bool) -> Result<Link, String> {
+        if to_a_terminal {
+            return Ok(Link::Shown(self.url()));
+        }
+        let path = data.join(LINK_FILE);
+        write_for_the_owner(&path, self.url().as_bytes())
+            .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+        Ok(Link::Written(path))
+    }
+
+    /// Takes the file back out, for a wallet that is closing.
+    ///
+    /// A link that no longer works is worth nothing to anybody, so this is
+    /// tidiness rather than safety: what it prevents is an operator opening a
+    /// stale file on the next run and finding a page that is not there.
+    pub fn let_the_link_go(data: &Path) {
+        let _ = std::fs::remove_file(data.join(LINK_FILE));
+    }
+}
+
+/// Writes a file the owner can read and nobody else can.
+///
+/// The mode is set as the file is created rather than afterwards, so there is
+/// no moment where the bytes are on disk under whatever the umask allowed.
+/// Windows has no mode to set and the file takes the directory's own access
+/// control, which is where the wallet already keeps its keys.
+fn write_for_the_owner(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(bytes)
 }
 
 /// Serves the wallet until `running` is cleared.
