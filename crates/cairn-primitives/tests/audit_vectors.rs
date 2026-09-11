@@ -28,7 +28,7 @@ const PROBE: &[u8] = b"cairn audit vector";
 ///
 /// The pairing matters as much as the values: a swap between two arms of
 /// `key_for` would keep every digest distinct and still be a fork.
-const DOMAIN_VECTORS: [(Domain, &str); 20] = [
+const DOMAIN_VECTORS: [(Domain, &str); 21] = [
     (
         Domain::TransferId,
         "8903a92f6a8473eb072c6c73ba4f3e71322010ddf3a6d961d1256bfa4e19e908",
@@ -109,7 +109,37 @@ const DOMAIN_VECTORS: [(Domain, &str); 20] = [
         Domain::GraceWindow,
         "deb7354cfac902db43130ba979205b8dcaaf4627869cff3afa4b20ab05356336",
     ),
+    (
+        Domain::WalletHistory,
+        "5577b3011c2de48346f32894271cb3eed164794f7eeb30d82c7c5f3a81917b7f",
+    ),
 ];
+
+/// The table above says "every domain", and nothing made that true.
+///
+/// It was twenty rows against twenty-one domains: `Domain::WalletHistory` was
+/// added and no vector came with it, so the one string nothing pinned was the
+/// one that stamps the wallet's own history file. Renaming it in a tidy-up
+/// would have left this suite green and left every wallet built afterwards
+/// refusing the file every wallet before it wrote.
+///
+/// [`Domain::ALL`] is the list this is checked against. It still has to be
+/// written by hand, since an enum cannot be walked, but a domain missing from
+/// the vectors now fails here instead of going unnoticed.
+#[test]
+fn every_domain_the_crate_declares_is_pinned_here() {
+    for domain in Domain::ALL {
+        assert!(
+            DOMAIN_VECTORS.iter().any(|(pinned, _)| *pinned == domain),
+            "{domain:?} has no vector, so its context string can change and nothing will say so"
+        );
+    }
+    assert_eq!(
+        DOMAIN_VECTORS.len(),
+        Domain::ALL.len(),
+        "the table pins something that is not a domain, or pins one twice"
+    );
+}
 
 #[test]
 fn every_domain_still_hashes_the_way_it_did() {
@@ -182,7 +212,9 @@ fn hexadecimal_still_renders_the_way_it_did() {
 // One link in that chain is still unpinned anywhere, and it is named rather
 // than left to be discovered. The document says each domain constant is
 // BLAKE3's `derive_key` over a published context string with empty key
-// material, and it publishes ten of the twenty strings. Nothing checks a
+// material, and it publishes twenty of the twenty-one strings: the one it
+// leaves out is `wallet history`, which stamps a file on one person's disk
+// rather than anything two nodes have to agree about. Nothing checks a
 // constant against the string that is said to produce it, here or elsewhere:
 // `DOMAIN_VECTORS` pins what the constants hash to, not what they are made
 // from. Checking it needs BLAKE3 in this crate's dev-dependencies.

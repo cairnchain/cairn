@@ -74,6 +74,41 @@ pub enum Domain {
 }
 
 impl Domain {
+    /// Every domain this crate declares.
+    ///
+    /// Rust offers no way to walk an enum, so a table with one row per domain
+    /// has to be written by hand, and a domain left out of such a table is a
+    /// domain nothing pins: its context string can be changed in a tidy-up and
+    /// every test still passes. `WalletHistory` was exactly that from the day
+    /// it was added, which is what this list is here to stop. The vectors in
+    /// `tests/audit_vectors.rs` are checked against it, so a domain with no
+    /// row fails a test rather than shipping.
+    ///
+    /// A new variant has to be added here as well as to the matches below.
+    pub const ALL: [Self; 21] = [
+        Self::TransferId,
+        Self::CoinbaseId,
+        Self::BlockHeaderId,
+        Self::SignatureMessage,
+        Self::MerkleLeaf,
+        Self::MerkleNode,
+        Self::MerkleEmpty,
+        Self::StateEntry,
+        Self::AccumulatorEmpty,
+        Self::AccumulatorLeaf,
+        Self::AccumulatorNode,
+        Self::NoteKey,
+        Self::HotNoteValue,
+        Self::StateCommitment,
+        Self::ForestLeaf,
+        Self::ForestNode,
+        Self::ForestRoots,
+        Self::HeaderHistoryLeaf,
+        Self::SamplingSeed,
+        Self::GraceWindow,
+        Self::WalletHistory,
+    ];
+
     const fn context(self) -> &'static str {
         match self {
             Self::TransferId => "cairn v1 transfer id",
