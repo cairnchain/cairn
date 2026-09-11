@@ -251,7 +251,7 @@ fn from_the_threat() {
          world's work at 2^-128. THAT MODEL IS WRONG and this line is its\n\
          obituary: the draw is one over the distance from the tip, not uniform,\n\
          and the factor that costs is what once hid a real 2^-5.8 behind a\n\
-         claimed 2^-128. The bound is 43% measured, 40% claimed in the papers,\n\
+         claimed 2^-128. The bound is 42.96% measured, 40% claimed in the papers,\n\
          and it comes from `--example adversarial_placement`, which measures the\n\
          real draw and then checks that model against forgeries it builds and\n\
          puts through the shipped `check_start`.",

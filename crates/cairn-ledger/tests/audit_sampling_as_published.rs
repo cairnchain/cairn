@@ -182,15 +182,18 @@ fn the_level_draw_leans_on_no_end_of_the_chain() {
         "the restatement has drifted from the shipped count"
     );
     assert_eq!(
-        levels, 14,
-        "a thirty year chain spreads over fourteen levels"
+        levels, 15,
+        "a thirty year chain spreads over fifteen levels"
     );
 
     // What the byte cost, in whole numbers, so the figure is not read off a
-    // float: 4096 draws, 18 of every 256 byte values per level, 14 levels.
-    assert_eq!(256 % levels, 4, "four levels got one extra byte value each");
-    let effective = u64::try_from(SAMPLES).unwrap() * 18 * u64::from(levels) / 256;
-    assert_eq!(effective, 4_032, "4096 draws did the work of 4032");
+    // float: 4096 draws, 17 of every 256 byte values per level, 15 levels.
+    // The band was 1024 blocks wide and fourteen levels when this was
+    // measured, where 256 was `14 * 18 + 4`; at fifteen it is `15 * 17 + 1`,
+    // so the shape of the loss is the same and its size is not.
+    assert_eq!(256 % levels, 1, "one level got an extra byte value");
+    let effective = u64::try_from(SAMPLES).unwrap() * 17 * u64::from(levels) / 256;
+    assert_eq!(effective, 4_080, "4096 draws did the work of 4080");
 
     // The real draw, which is what the bound is actually taken over. A million
     // of them puts the noise on one band at a third of a percent, so a bound
@@ -239,8 +242,10 @@ fn the_level_draw_leans_on_no_end_of_the_chain() {
         "the byte the draw used to read was only {:.2} percent off uniform, so          the bound above is not measuring the fix",
         worst * 100.0
     );
+    let over = usize::try_from(256 % levels).unwrap();
+    assert_eq!(over, 1, "one level of fifteen gets an extra byte value");
     assert!(
-        old[0..4].iter().min().unwrap() > old[4..levels as usize].iter().max().unwrap(),
-        "the four over-drawn levels have to be the deep ones, or the loss fell          somewhere other than where this reasoning puts it"
+        old[0..over].iter().min().unwrap() > old[over..levels as usize].iter().max().unwrap(),
+        "the over-drawn levels have to be the deep ones, or the loss fell somewhere other than where this reasoning puts it"
     );
 }

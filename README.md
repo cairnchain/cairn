@@ -146,11 +146,13 @@ A newcomer joins by opening 4 096 headers drawn against accumulated work, about
 three megabytes against the hundred and ninety-seven gigabytes of reading it
 replaces. That holds against a forger up to 40% of the world's work, and what
 it guarantees is a depth: such a forger cannot put a newcomer on a branch
-differing from the real one by more than about 1 240 blocks, twenty hours.
+differing from the real one by more than about 633 blocks, ten hours.
 Inside that it can, as can a slow peer — it is where any node sits for its
-first blocks after connecting. It is deeper than the deepest reorganisation a
-node will make, and the whitepaper's limitations section states the gap rather
-than rounding it away.
+first blocks after connecting. It is inside the 1 024 blocks a node will undo,
+so a newcomer put at the far end of it can be carried back onto the real chain
+by the ordinary rule. That was not true until the draw's floor was halved: the
+depth was 1 240 against a limit of 1 024, and the whitepaper had to state the
+gap rather than round it away.
 
 Those numbers are measured rather than proved, and they have been wrong twice.
 The first version was 512 draws and 45.7%, derived assuming the draw is uniform

@@ -689,10 +689,10 @@ fn a_tag_past_the_last_variant_is_refused() {
     assert!(ran.cases >= 100, "the campaign ran {} cases", ran.cases);
     // A tripwire rather than a fact about the version: a protocol change that
     // adds a message has to move the tag this campaign calls the last one.
-    // Seven changed which positions a chain is asked about and added no
-    // variant, so seventeen still is.
+    // Seven and eight both changed which positions a chain is asked about and
+    // neither added a variant, so seventeen still is.
     assert_eq!(
-        PROTOCOL_VERSION, 7,
+        PROTOCOL_VERSION, 8,
         "a protocol change should read this file"
     );
 }

@@ -238,8 +238,8 @@ fn the_threshold(boards: &[Board]) {
     }
     println!(
         "\n  A further {tried} placements were measured for this table. The published\n  \
-         figure is 40 percent, and `SAMPLES` says it was measured at 43 with three\n  \
-         points held back. The first row reproduces that. The third adds every level\n  \
+         figure is 40 percent, and `SAMPLES` says it was measured at 42.96. The\n  \
+         first row reproduces that. The third adds every level\n  \
          count a prover can state, and it does not move: understating the count makes\n  \
          each draw worth more, and overstating it is what the tip's own age refuses.\n  \
          When the count came off the stated height instead, this row read 31.2."
@@ -289,7 +289,7 @@ fn the_depth_guarantee(boards: &[Board], total: u128) {
         "\n  The columns count fork depths that get through with better than 2^{TARGET:.0},\n  \
          out of the depths swept, and name the shallowest of them in blocks. The honest\n  \
          column reproduces the published sentence: nothing the draw is responsible for\n  \
-         gets past it below 43 per cent. The second column lets the forger state any\n  \
+         gets past it below 42.96 per cent. The second column lets the forger state any\n  \
          level count a reader would accept, and it does not move.\n\n  \
          It used to. When the count came off the tip's stated height, a forger at 40\n  \
          per cent got every depth the draw resolves through: `check_the_gaps` prices\n  \

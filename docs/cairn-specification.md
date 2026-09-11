@@ -1547,9 +1547,9 @@ decoder MUST refuse any other tag.
 
 Both counted sequences carry their own ceiling, checked before anything is
 reserved for them, because both are chosen by whoever sent the structure. A
-decoder MUST refuse more than 4 096 samples and more than 16 474 headers in the
+decoder MUST refuse more than 4 096 samples and more than 8 282 headers in the
 tail. The second is the deepest run this weighing will ever walk, and it is
-`16 * 1024 + 90`: sixteen times the band the draw leaves unresolved, plus one
+`16 * 512 + 90`: sixteen times the band the draw leaves unresolved, plus one
 retarget window. A chain whose difficulty has fallen far enough below its own
 lifetime average has more blocks inside that band than the ceiling allows, and
 such a chain cannot be weighed at all. It has to be read. That is a real limit
@@ -1583,13 +1583,13 @@ how old the tip says its chain is:
 
 ```text
 age       = (tip.timestamp - opens_at) / target_block_time
-separable = min(age, tip.height) / 1024
+separable = min(age, tip.height) / 512
 levels    = max(bit_length(max(separable, 1)), 1)
 ```
 
 where `bit_length(x)` is 64 less the number of leading zero bits of `x` as a
 `u64`, and every division is integer division. On a chain of thirty years at a
-block a minute this is 14.
+block a minute this is 15.
 
 **The age is a ceiling the reading node holds itself.** A node refuses a tip
 dated more than its drift allowance past its own clock, and the opening moment
@@ -1614,7 +1614,7 @@ block, which is nine levels' worth of draws asking a question already answered.
 And a prover that understates either number buys nothing: fewer halvings makes
 each draw worth more, and it widens the band nearest the tip, which is the run of
 headers the prover then has to hand over in full and which is refused past
-16 474 of them.
+8 282 of them.
 
 **The height alone would not do, and this is the one place these rules changed
 for a break rather than for a feature.** Through testnet-6 the count was
@@ -1651,12 +1651,22 @@ of the work and the highest level the band nearest the tip; the work above
 `total - (total >> levels)` is never drawn from at all.
 
 **The halving stops before it reaches a single block, and that is deliberate.**
-The `1 024` in the level count is the narrowest band the draw will separate.
-Halving further would separate chains that the fork choice does not separate
-either, since a node refuses to reorganise deeper than the same 1 024 blocks,
-and it would be paid for by every draw at every level: resolving to one block
-over thirty years takes twenty-four levels where this takes fourteen, and a
-draw is worth `1 / levels` per question.
+The `512` in the level count is the narrowest band the draw will separate.
+Halving further would separate chains nothing else here separates either, and it
+would be paid for by every draw at every level: resolving to one block over
+thirty years takes twenty-four levels where this takes fifteen, and a draw is
+worth `1 / levels` per question.
+
+**512 rather than the 1 024 a node refuses to reorganise past, and the
+difference is the point.** Setting the two equal looked like the two rules
+agreeing and was not: the depth a newcomer can be moved by is not the band, it
+is the band plus what the staircase costs at its edges. At 1 024 that was 1 240
+blocks measured, against a reorganisation limit of 1 024, so a newcomer put at
+the far end of the guarantee was on a branch the ordinary rule could not carry
+it back from. At 512 the same measurement gives 633, which is inside 1 024 with
+room. What it costs is one more level, so a draw is worth `1/15` of a uniform
+one rather than `1/14`, which takes the share the count holds to from 43.37 per
+cent to 42.96. The figure published below is 40 either way.
 
 **The level is scaled rather than reduced, and that is what makes it even.**
 Through testnet-6 it was `b[0] mod levels`, and 256 does not divide by 14: the
@@ -1709,7 +1719,7 @@ the whole opening is worth at least one unit per block.
 
 ### The run up to the tip
 
-The draw leaves a band of work near the tip unresolved, about 1 024 blocks wide
+The draw leaves a band of work near the tip unresolved, about 512 blocks wide
 on a chain whose difficulty is near its own lifetime average, and for a while
 nothing else looked up there. That was enough on its own to hand a newcomer a
 forged anchor: a forger leaves the honest chain untouched, appends its own
@@ -1833,9 +1843,12 @@ its own draw does not reach.
 
 It is a guarantee about a depth and not about a duration. The draw does not
 separate chains that differ by less than the band it stops halving at, which is
-1 024 blocks, the same depth a node refuses to reorganise past. Inside that band
-a forger can move a newcomer, and so can a slow honest peer: it is where any
-node sits for its first blocks after connecting. Any argument that wants a
+512 blocks, and the depth a newcomer can actually be moved by is 633: the band
+plus what the staircase costs at its edges, measured rather than derived. Inside
+that a forger can move a newcomer, and so can a slow honest peer: it is where
+any node sits for its first blocks after connecting. Both numbers are inside the
+1 024 a node refuses to reorganise past, which is what makes the position a node
+can be carried back out of by the ordinary rule. Any argument that wants a
 duration instead has to say which chain it is timing, because a branch sitting
 at the difficulty floor states the same depth in a fraction of the time.
 

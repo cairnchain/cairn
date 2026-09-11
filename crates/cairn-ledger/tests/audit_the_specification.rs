@@ -1023,9 +1023,9 @@ fn spec_bit_length(value: u64) -> u32 {
     64 - value.leading_zeros()
 }
 
-/// `separable = height / 1024`, `levels = max(bit_length(max(separable, 1)), 1)`
+/// `separable = height / 512`, `levels = max(bit_length(max(separable, 1)), 1)`
 fn spec_levels(height: u64) -> u32 {
-    spec_bit_length((height / 1_024).max(1)).max(1)
+    spec_bit_length((height / 512).max(1)).max(1)
 }
 
 /// `age = (tip.timestamp - opens_at) / target_block_time`, and the count is
@@ -1038,7 +1038,7 @@ fn spec_levels_of(tip: &BlockHeader, params: &ConsensusParams) -> u32 {
 /// What a reimplementation reaching for a base-two logarithm writes instead.
 /// Identical everywhere except at a power of two, which is the point.
 fn logarithm_levels(height: u64) -> u32 {
-    let separable = (height / 1_024).max(1);
+    let separable = (height / 512).max(1);
     let mut levels = 0u32;
     while (1u64 << levels) < separable {
         levels += 1;
@@ -1095,26 +1095,20 @@ fn the_level_count_counts_leading_zeros_and_not_a_logarithm() {
     let mut apart = 0u32;
     for exponent in 1..40u32 {
         let separable = 1u64 << exponent;
-        let height = separable * 1_024;
+        let height = separable * 512;
         assert_eq!(spec_levels(height), exponent + 1);
         assert_eq!(logarithm_levels(height), exponent);
         apart += 1;
         // One block either side, where they agree again.
-        assert_eq!(
-            spec_levels(height + 1_024),
-            logarithm_levels(height + 1_024)
-        );
-        assert_eq!(
-            spec_levels(height - 1_024),
-            logarithm_levels(height - 1_024)
-        );
+        assert_eq!(spec_levels(height + 512), logarithm_levels(height + 512));
+        assert_eq!(spec_levels(height - 512), logarithm_levels(height - 512));
     }
     assert_eq!(apart, 39);
 
     // The figure the document publishes: thirty years at a block a minute.
-    assert_eq!(spec_levels(30 * 365 * 24 * 60), 14);
+    assert_eq!(spec_levels(30 * 365 * 24 * 60), 15);
     // And the narrowest band the draw separates.
-    assert_eq!(SHALLOWEST, 1_024);
+    assert_eq!(SHALLOWEST, 512);
     assert_eq!(SAMPLES, 4_096);
 }
 
@@ -1140,9 +1134,9 @@ fn the_level_count_is_the_age_the_document_gives() {
     let heights = [
         0u64,
         1,
-        1_023,
+        511,
+        512,
         1_024,
-        2_048,
         30 * 365 * 24 * 60,
         1 << 32,
         1 << 61,
@@ -1154,7 +1148,7 @@ fn the_level_count_is_the_age_the_document_gives() {
         59,
         60,
         61,
-        1_024 * 60,
+        512 * 60,
         30 * 365 * 24 * 60 * 60,
         1 << 40,
         u64::MAX,
@@ -1190,7 +1184,7 @@ fn the_level_count_is_the_age_the_document_gives() {
     assert_eq!(levels_of(&tip, &params), 1);
     assert_eq!(
         spec_levels(365 * 24 * 60),
-        10,
+        11,
         "what the age alone would say"
     );
 }
@@ -1205,12 +1199,12 @@ fn the_draw_is_the_seven_steps_the_document_gives() {
     ];
     // Heights chosen so that `separable` lands on a power of two on purpose,
     // and either side of one, and below the first band.
-    let mut heights = vec![0u64, 1, 1_023, 1_024, 1_025, 2_047, 30 * 365 * 24 * 60];
+    let mut heights = vec![0u64, 1, 511, 512, 513, 1_023, 30 * 365 * 24 * 60];
     for exponent in 0..24u32 {
         let separable = 1u64 << exponent;
-        heights.push(separable * 1_024);
-        heights.push(separable * 1_024 + 1);
-        heights.push(separable * 1_024 - 1);
+        heights.push(separable * 512);
+        heights.push(separable * 512 + 1);
+        heights.push(separable * 512 - 1);
     }
     // Totals on powers of two, either side, and at the extremes of a u128.
     let mut totals = vec![0u128, 1, 2, 3, 1_000, u128::MAX, u128::MAX - 1];
@@ -1258,7 +1252,7 @@ fn a_logarithm_in_place_of_the_leading_zeros_would_draw_different_questions() {
     let total = 1u128 << 40;
     let mut differed = 0u32;
     for exponent in 1..20u32 {
-        let blocks = (1u64 << exponent) * 1_024;
+        let blocks = (1u64 << exponent) * 512;
         let honest = spec_draw(seed, 32, total, spec_levels(blocks));
         let mistaken: Vec<u128> = {
             // The same seven steps with the one substitution.
@@ -2225,10 +2219,10 @@ fn the_constants_the_document_publishes_are_the_ones_the_build_carries() {
     assert_eq!(MOST_BURIED, 4_096);
     assert_eq!(
         MOST_TAIL,
-        16 * 1_024 + 90,
+        16 * 512 + 90,
         "sixteen times the unresolved band plus one retarget window"
     );
-    assert_eq!(MOST_TAIL, 16_474);
+    assert_eq!(MOST_TAIL, 8_282);
 
     // "A build knows versions up to a ceiling, which is 1 today."
     assert_eq!(cairn_ledger::block::BLOCK_VERSION, 1);

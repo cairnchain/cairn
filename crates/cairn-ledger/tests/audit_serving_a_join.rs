@@ -167,7 +167,7 @@ fn the_run_this_chain_asks_for_is_far_past_what_a_sampling_carries() {
 
     let held = tip.height - deepest.saturating_sub(window) + 1;
     assert_eq!(
-        held, 180_169,
+        held, 180_129,
         "the run between the deepest drawn header and the tip is {held} blocks"
     );
     assert!(
@@ -201,7 +201,7 @@ fn an_archivist_does_not_build_a_run_nobody_can_read() {
     // step. Seventeen or eighteen reads a sample over this chain, against the
     // 180 169 the run alone used to add on top.
     assert_eq!(
-        served.reads, 72_483,
+        served.reads, 72_436,
         "answering the draw took {} header reads",
         served.reads
     );
@@ -243,7 +243,7 @@ fn what_is_served_is_what_a_reader_will_take_back() {
         .expect("a chain inside the ceiling is answerable");
     assert_eq!(
         start.tail.len(),
-        1_059,
+        547,
         "served a run of {} against a ceiling of {MOST_TAIL}",
         start.tail.len()
     );

@@ -55,6 +55,23 @@ const TIPS: usize = 24;
 /// nothing could be caught while the table beside them read 100 per cent.
 const HEIGHT: u64 = 3 * SHALLOWEST;
 
+/// How far back a fork has to be to sit inside the band the draw leaves.
+///
+/// Written from [`SHALLOWEST`] rather than as a number, because it is a
+/// distance into that band and a number would be a distance into whatever the
+/// band happened to be the day it was typed. It was 400 on a chain whose band
+/// was 768 blocks wide; halving the band left 384 and put the fork outside it,
+/// so the two tests below started measuring the opposite of what they say. The
+/// assertion that the draw cannot reach it is what proves this is still inside.
+const INSIDE_THE_BAND: u64 = SHALLOWEST / 2;
+
+/// And how far back one has to be for the draw to reach it.
+///
+/// Two thirds of this chain, written from [`SHALLOWEST`] for the same reason:
+/// it was 2 000 blocks on a chain of 3 072, and on a chain of 1 536 that is not
+/// a depth, it is a subtraction that goes below zero.
+const WITHIN_THE_DRAWS_REACH: u64 = 2 * SHALLOWEST;
+
 fn params() -> ConsensusParams {
     ConsensusParams::testnet()
 }
@@ -272,7 +289,7 @@ fn a_forgery_whose_links_are_not_rebuilt_is_refused_for_its_links() {
     let tip_height = honest.last().unwrap().height;
     // Deep enough that the draw cannot reach the lie at all, so that any
     // refusal here is plainly not the draw's doing.
-    let fork = tip_height - 400;
+    let fork = tip_height - INSIDE_THE_BAND;
 
     let unlinked = forge(&honest, fork, 64, false);
     for tip in ground_tips(unlinked.shown.last().unwrap(), TIPS) {
@@ -302,7 +319,7 @@ fn the_draw_refuses_a_lie_it_reaches_and_never_one_it_does_not() {
     // Out of reach. The draw stops resolving `SHALLOWEST` blocks from the tip,
     // and on a chain this long that band is the whole of the top level. What
     // covers it is the walk up to the tip, not the draw.
-    let shallow = forge(&honest, tip_height - 400, 64, true);
+    let shallow = forge(&honest, tip_height - INSIDE_THE_BAND, 64, true);
     let mut by_the_run = 0usize;
     for tip in ground_tips(shallow.shown.last().unwrap(), TIPS) {
         assert!(
@@ -326,7 +343,7 @@ fn the_draw_refuses_a_lie_it_reaches_and_never_one_it_does_not() {
     // In reach, and the model and the check have to agree tip for tip: the draw
     // refuses exactly those tips whose drawn values land in work no block
     // spans, and no others.
-    let deep = forge(&honest, tip_height - 2_000, 200, true);
+    let deep = forge(&honest, tip_height - WITHIN_THE_DRAWS_REACH, 200, true);
     let mut caught = 0usize;
     let mut through = 0usize;
     for tip in ground_tips(deep.shown.last().unwrap(), TIPS) {

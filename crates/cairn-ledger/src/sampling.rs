@@ -86,9 +86,9 @@ use crate::validation::ConsensusParams;
 /// ```
 ///
 /// At 4096 draws over a thirty year chain that holds against every forger up
-/// to **43%** of the world's work, measured against this very function and
+/// to **42.96%** of the world's work, measured against this very function and
 /// against forgeries built and put through [`check_start`]. The papers claim
-/// **40%**, which leaves three points of margin for the difference between a
+/// **40%**, which leaves the rest as margin for the difference between a
 /// staircase of halvings and the smooth density it stands for.
 ///
 /// **`levels` is an input, and for six networks it was one a prover wrote
@@ -199,12 +199,37 @@ const FEWEST_LEVELS: u32 = 1;
 ///
 /// Which is not worth buying, because nothing else in this node pretends to
 /// tell those apart either: a node refuses to reorganise deeper than
-/// `MAX_REORG_DEPTH`, the same 1024 blocks, and below that it changes its mind
-/// freely. So the guarantee the sampling offers is stated to match the one the
-/// fork choice already offers: a newcomer cannot be put on the wrong chain by
-/// more than this, and within it, it is in the same position as any node that
-/// just reconnected.
-pub const SHALLOWEST: u64 = 1_024;
+/// `MAX_REORG_DEPTH`, and below that it changes its mind freely. So the
+/// guarantee the sampling offers is set against the one the fork choice
+/// already offers: a newcomer cannot be put on the wrong chain by more than
+/// this, and within it, it is in the same position as any node that just
+/// reconnected.
+///
+/// **Set against it rather than equal to it, and that is what this number
+/// changed for.** It was 1024, the same as `MAX_REORG_DEPTH`, which looked like
+/// the two rules agreeing and was not. The guarantee is not the band: it is the
+/// band plus what the staircase costs at its edges, measured at 1240 blocks
+/// against a reorganisation limit of 1024. So a newcomer put at the far end of
+/// the guarantee sat on a branch the ordinary rule could not carry it back
+/// from, and the whitepaper had to state the gap and name three ways of closing
+/// it. Halving the band closes it: measured on the shipped draw, the guarantee
+/// falls to 633 blocks, which is inside 1024 with room.
+///
+/// What it costs is one more halving, fifteen against fourteen on a thirty year
+/// chain, so every draw is worth `1/15` of a uniform one rather than `1/14`.
+/// Measured against forgeries placed at every band edge, that takes the share
+/// the count holds to from 43.37 to 42.96 per cent. [`SAMPLES`] publishes 40,
+/// so the margin goes from 3.37 points to 2.96 and the published figure does
+/// not move.
+///
+/// What it buys beyond the guarantee is the run up to the tip, which is the
+/// band measured in blocks and halves with it: 191 646 bytes to 104 104 on a
+/// thirty year chain, against a weighing of about three megabytes. And
+/// [`MOST_TAIL`] halves with it, which is the one number here that moves the
+/// wrong way: a chain whose difficulty has fallen far below its own lifetime
+/// average has the same proportion of room as before, since the band fell in
+/// the same ratio, but the ceiling in blocks is lower.
+pub const SHALLOWEST: u64 = 512;
 
 /// One header a prover opened, and the proof that it sits where it says.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -628,7 +653,7 @@ pub fn levels_of(tip: &BlockHeader, params: &ConsensusParams) -> u32 {
 /// nineteen times in 256 and the other ten eighteen, an under-draw of 1.5625
 /// percent on the ten levels nearest the tip, so 4096 draws did the work of
 /// 4032. `FlyClient` assumes the choice is uniform, so that was a real loss,
-/// small enough to sit inside the three points of margin [`SAMPLES`] holds
+/// small enough to sit inside the margin [`SAMPLES`] holds
 /// back and measured in `tests/audit_sampling_as_published.rs` rather than
 /// argued. Eight bytes multiplied by `levels` and shifted back down spread the
 /// same choice with a bias under one part in 2^64, which is below anything
@@ -1384,7 +1409,7 @@ mod tests {
 
         // And the claim is not idle. It stops holding a few points above what
         // is claimed, which is where the margin is: 4096 draws are measured to
-        // hold to 43%, and 40% is what is said out loud.
+        // hold to 42.96%, and 40% is what is said out loud.
         assert!(
             missed(0.46) > 2f64.powi(-128),
             "the count holds further than the papers say, so one of them is wrong"
@@ -1457,7 +1482,7 @@ mod tests {
     fn every_halving_is_drawn_from_as_often_as_every_other() {
         const DRAWS: usize = 1 << 20;
         let levels = levels_for(30 * 365 * 24 * 60);
-        assert_eq!(levels, 14, "the size every published figure is quoted at");
+        assert_eq!(levels, 15, "the size every published figure is quoted at");
 
         let total = 1u128 << 100;
         let mut counts = vec![0usize; usize::try_from(levels).unwrap()];
@@ -1474,7 +1499,7 @@ mod tests {
         }
 
         // Whole numbers throughout: `off * 50 < even` is a deviation under two
-        // per cent, and the old shape ran four levels at nearly four.
+        // per cent, and the old shape ran the deep levels at nearly four.
         let even = DRAWS / usize::try_from(levels).unwrap();
         for (level, count) in counts.iter().enumerate() {
             let off = count.abs_diff(even);

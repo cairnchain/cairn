@@ -392,7 +392,7 @@ fn the_stated_height_is_priced_at_one_unit_a_block_and_not_less() {
     // the count was set for fourteen.
     let real = REAL * u128::from(YEARS);
     let priced = u64::try_from(real / u128::from(MIN_DIFFICULTY)).unwrap_or(u64::MAX);
-    assert_eq!(levels_for(YEARS), 14, "what the count is set for");
+    assert_eq!(levels_for(YEARS), 15, "what the count is set for");
     assert!(
         levels_for(priced) >= 53,
         "a chain worth {real} prices a height of {priced}, which is only {} halvings",
@@ -587,7 +587,7 @@ fn the_share_the_draw_holds_to_is_above_the_published_forty() {
     );
     println!(
         "\n  Measured over {} level counts a prover can state, the count reaches 2^-128 up\n  \
-         to {:.1}% of the world's work. `SAMPLES` publishes 40% and says it measured 43.\n  \
+         to {:.2}% of the world's work. `SAMPLES` publishes 40% and says 42.96.\n  \
          Against a forger that also wrote down its own height this read 31.\n",
         boards.len(),
         low * 100.0,
@@ -688,9 +688,9 @@ fn a_forest_of_two_to_the_sixty_one_leaves_costs_four_of_them() {
     );
 }
 
-/// The narrowest band the draw separates, unchanged by any of this.
+/// The narrowest band the draw separates, and the count it buys.
 #[test]
-fn the_draw_still_stops_a_thousand_blocks_from_the_tip() {
-    assert_eq!(SHALLOWEST, 1_024);
-    assert_eq!(levels_for(YEARS), 14);
+fn the_draw_stops_five_hundred_blocks_from_the_tip() {
+    assert_eq!(SHALLOWEST, 512);
+    assert_eq!(levels_for(YEARS), 15);
 }

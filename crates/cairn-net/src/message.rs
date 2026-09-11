@@ -48,7 +48,12 @@ use cairn_primitives::Hash32;
 /// and what changed is one exchange between two nodes. That is what a protocol
 /// version is for, and reaching for a network number here would throw away a
 /// chain to fix a message.
-pub const PROTOCOL_VERSION: u32 = 7;
+/// Eight carries a shallower floor on the draw. The halving stopped 1024 blocks
+/// from the tip and now stops at 512, which is one more level and so a
+/// different list of positions. What it buys is that the depth a newcomer can
+/// be moved by falls to 633 blocks, inside the 1024 a node will undo, where it
+/// used to be 1240 and outside it.
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Identifiers one announcement may carry.
 pub const MAX_ANNOUNCED: usize = 512;

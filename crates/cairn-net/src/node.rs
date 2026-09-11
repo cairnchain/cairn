@@ -350,7 +350,7 @@ const UNJUDGED_SENDERS: usize = 64;
 /// fallen far below what it ran at needs a longer one. Measured over the
 /// project's own `draw`: a chain that loses twenty four to forty eight times
 /// its hash rate, depending on its length, and does not recover, cannot be
-/// weighed at all from about eleven days after the loss until months or years
+/// weighed at all from about five days after the loss until months or years
 /// after it. Every archivist then fails identically, honestly, and the node
 /// falls back to reading the chain. What was missing is anybody being told.
 ///

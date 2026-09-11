@@ -686,7 +686,7 @@
     </p>
 
     <p>
-      That run is capped, at 16 474 headers, about 3.0 MB, and the cap is a
+      That run is capped, at 8 282 headers, about 1.5 MB, and the cap is a
       real limit rather than a formality: past it a chain cannot be weighed at
       all, and a newcomer reads it block by block instead. The run is a band of
       work rather than a distance from the tip, so its length in blocks is that
@@ -695,12 +695,12 @@
       over this implementation's own draw, on chains from three months to
       thirty years old: a chain that loses twenty four to forty eight times its
       hash rate, depending on its length, and does not recover cannot be
-      weighed from about eleven days after the loss until months or years after
+      weighed from about five days after the loss until months or years after
       it. While that lasts, every honest node answering is refused in the same
       words a forger would be. The cap is kept rather than raised, because
       raising it moves the cliff instead of removing it: the same measurement
       puts the run a thirty year chain needs a year after a four thousand fold
-      loss at 526 494 headers and 96 MB, thirty two times the cap, and nothing
+      loss at 526 033 headers and 96 MB, sixty three times the cap, and nothing
       in the shape of the problem stops the next chain needing more: the run is
       work divided by a difficulty whose only floor is one. Every metre of
       whatever number were chosen instead would be memory a stranger decides a
@@ -734,7 +734,7 @@
       difficulty <em>d</em> could state a height <em>d</em> times its own, buy <em>log2(d)</em>
       halvings with it in work it was already inventing, and take that many
       slices off what every draw was worth. At a real chain's numbers that is
-      fifty odd halvings against the fourteen the count is set for, and it took a
+      fifty odd halvings against the fifteen the count is set for, and it took a
       forger at 40% from missing every draw with 2^-207 to missing them with
       2^-58, against the 2^-128 this paper publishes. The count now comes from
       how old the tip says its chain is, over the block time the network aims at,
@@ -749,59 +749,55 @@
 
     <p>
       Setting the count from the real expression gives 4 096 draws, holding
-      against every forger up to 43% of the world's work over a thirty year
+      against every forger up to 42.96% of the world's work over a thirty year
       chain, measured against the function this implementation ships, and
       against forgeries built and put through the check. This paper claims 40%,
-      keeping three points for the difference between a staircase of halvings
+      keeping the rest for the difference between a staircase of halvings
       and the smooth density it stands for. Past 50% nothing helps: a forger at
       half the work has nothing left to invent and can mine the chain.
     </p>
 
     <p>
       <strong>The guarantee is a depth, and it is worth stating as one.</strong>
-      The draw stops resolving 1 024 blocks from the tip, deliberately, because
-      resolving finer would cost a third of the count again to separate chains
-      the fork choice does not separate either. So a forger cannot put a newcomer
-      on a branch differing from the real one by more than about 1 240 blocks
-      (twenty hours). Inside that it can, and so can a slow peer: it is where any
-      node sits for its first blocks after connecting.
+      The draw stops resolving 512 blocks from the tip, deliberately, because
+      resolving finer would cost the count again to separate chains nothing else
+      here separates either. So a forger cannot put a newcomer on a branch
+      differing from the real one by more than about 633 blocks (ten hours).
+      Inside that it can, and so can a slow peer: it is where any node sits for
+      its first blocks after connecting.
     </p>
 
     <p>
       <strong>That depth is the same whatever share of the work the forger holds, and
       this paragraph used to imply otherwise.</strong> Measured over the shipped draw, a
       forger at 5% of the world's work reaches exactly the depth a forger at 40%
-      reaches: 1 237 blocks in both cases, and at every share between. The reason
+      reaches: 633 blocks in both cases, and at every share between. The reason
       is that the crossing sits below the deepest band the draw resolves, where
       the overlap does not depend on the share at all. So the 40% is not a bound
       on how far a newcomer can be moved. It is the point past which there is no
-      bound: at 44% the same measurement gives 10 525 577 blocks, two thirds of a
-      thirty year chain, and at 45.7% it gives 91% of it. The failure is a cliff
-      and not a slope, and a reader who took "a forger at 40%" to mean a weaker
-      forger does less damage was reading something this paper did not check.
+      bound: past the share the count holds to, the same measurement gives
+      millions of blocks. The failure is a cliff and not a slope, and a reader
+      who took "a forger at 40%" to mean a weaker forger does less damage was
+      reading something this paper did not check.
     </p>
 
     <p>
-      That depth is deeper than the node's own reorganisation limit, and the
-      two numbers have to be read together. The draw stops resolving 1 024
-      blocks from the tip and the measured guarantee is about 1 240, while
-      <code>MAX_REORG_DEPTH</code> is 1 024 and the effective undo limit is the
-      lesser of that and the network's burial. So a newcomer put on a branch at
-      the far end of the guarantee cannot be carried back onto the real chain by
-      the ordinary reorganisation rule: the switch it would need is deeper than
-      the deepest one the node will make. An earlier version of this paragraph
-      said the opposite, that the depth was shallower than the deepest
-      reorganisation, which its own two figures refute.
-    </p>
-
-    <p>
-      This is a gap between a probabilistic bound and a retention policy, not a
-      break in either. Closing it means one of three things: resolving the draw
-      finer so the guarantee falls under the limit, raising the limit above the
-      guarantee and paying for the undo data that costs, or accepting that a
-      newcomer this unlucky has to be started again and saying so where an
-      operator reads it. It is stated here rather than answered because the
-      answer changes a rule, and a rule should not change in a paragraph.
+      <strong>That depth sits inside the node's own reorganisation limit, and getting
+      the two to line up is what the 512 is for.</strong> <code>MAX_REORG_DEPTH</code> is 1 024
+      and the effective undo limit is the lesser of that and the network's
+      burial, so a newcomer put on a branch at the far end of the guarantee is
+      somewhere the ordinary reorganisation rule can carry it back from. It was
+      not always so. The draw stopped at 1 024, the same number, which looked
+      like the two rules agreeing and was not: the guarantee is not the band, it
+      is the band plus what the staircase costs at its edges, and that measured
+      1 240 against a limit of 1 024. This paper stated that gap and named three
+      ways of closing it. The first of them is what was done, and what it cost is
+      one more level of halving: a draw is now worth a fifteenth of a uniform one
+      rather than a fourteenth, which takes the share the count holds to from
+      43.37% to 42.96%. The published 40% did not move, and an earlier version of
+      this paragraph said the opposite of all of it, that the depth was shallower
+      than the deepest reorganisation, which its own two figures at the time
+      refute.
     </p>
 
     <p>
@@ -1116,7 +1112,7 @@
 
     <p>
       <strong>The sampling bound is measured, not proved.</strong> 4 096 draws
-      hold to 40% of the world's work and a depth of about 1 240 blocks, and
+      hold to 40% of the world's work and a depth of about 633 blocks, and
       both figures come from measuring the placement a forger would choose
       rather than from a theorem. The first version of this claimed 512 draws
       and 45.7% from a derivation that assumed a uniform draw; measurement put
@@ -1140,11 +1136,11 @@
     <p>
       <strong>A chain that loses most of its miners cannot be weighed while it
       recovers.</strong> The run of headers a weighing carries is capped at
-      16 474, and a chain whose difficulty at the tip has fallen far below its
+      8 282, and a chain whose difficulty at the tip has fallen far below its
       lifetime average needs a longer one. Measured over this implementation's
       own draw: a loss of twenty four to forty eight times the hash rate,
       depending on the chain's length, puts a chain out of reach of the short
-      way in from about eleven days after the loss until months or years after
+      way in from about five days after the loss until months or years after
       it. Nothing is lost and nobody is attacked. Newcomers read the chain
       block by block, which checks more rather than less; what it costs is the
       bandwidth and the hours the sampling exists to save, at the moment a
