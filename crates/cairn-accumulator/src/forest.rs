@@ -352,19 +352,31 @@ impl Decode for Forest {
         }
 
         let mut roots = vec![None; MAX_HEIGHT];
+        let mut last: Option<u8> = None;
         for (height, root) in held {
+            // Strictly increasing, which is the order `encode` writes and so
+            // the only order a forest has. Anything else was a second spelling
+            // of a value that already had one: a forest of three roots had six
+            // encodings, and a forest travels inside a handover three times
+            // over and inside a weighing once. The codec's first line is that
+            // the format "admits exactly one representation of any value", and
+            // this is what makes that true here.
+            //
+            // It subsumes the check that used to stand in its place, which
+            // refused two roots at one height so that a reader was never handed
+            // two and left choosing: two roots at one height are two heights
+            // that did not increase.
+            if last.is_some_and(|previous| height <= previous) {
+                return Err(CodecError::InvalidValue {
+                    type_name: "Forest",
+                });
+            }
+            last = Some(height);
             let Some(slot) = roots.get_mut(usize::from(height)) else {
                 return Err(CodecError::InvalidValue {
                     type_name: "Forest",
                 });
             };
-            if slot.is_some() {
-                // One root per height, or a reader could be handed two and
-                // have to choose.
-                return Err(CodecError::InvalidValue {
-                    type_name: "Forest",
-                });
-            }
             *slot = Some(root);
         }
 

@@ -68,15 +68,17 @@ fn holds<T: Encode + Decode + PartialEq + Debug>(bytes: &[u8], what: &str, case:
 
 /// The weaker claim, for the one type that does not hold the stronger one.
 ///
-/// `Forest` accepts its roots in any order and writes them in one, so a
-/// decoded forest need not re-encode to the bytes it came from. What still has
-/// to hold is that the canonical form is a fixed point: encoding a decoded
-/// forest gives bytes that decode to the same forest and encode to themselves.
-/// A decoder that lost or reordered anything on the way through would fail
-/// here.
+/// Stated as a fixed point rather than as a round trip, which is the weaker of
+/// the two and the one that holds for every type here: encoding a decoded value
+/// gives bytes that decode to the same value and encode to themselves. A
+/// decoder that lost or reordered anything on the way through fails here.
 ///
-/// See `a_forest_takes_its_roots_in_an_order_it_will_not_write` for the defect
-/// this is working around.
+/// It was written this way to work around a forest that took its roots in any
+/// order and wrote them in one, so a decoded forest need not have re-encoded to
+/// the bytes it came from. That is closed, and
+/// `a_forest_refuses_roots_in_an_order_it_would_not_write` is where. The
+/// weaker statement is kept because it is the one that says what a campaign
+/// over arbitrary bytes can ask of every type it is pointed at.
 fn settles<T: Encode + Decode + PartialEq + Debug>(bytes: &[u8], what: &str, case: usize) -> bool {
     let Ok(value) = T::decode(bytes) else {
         return false;
@@ -541,37 +543,31 @@ fn a_genuine_path_verifies_at_its_own_place_and_nowhere_else() {
     assert!(ran.cases >= 100, "the campaign ran {} cases", ran.cases);
 }
 
-/// A defect, pinned as it stands.
+/// The defect that was pinned here, and the rule that closed it.
 ///
-/// `Forest::decode` reads its roots as a list of (height, root) pairs and puts
-/// each one into the slot its height names. Nothing requires the list to be in
-/// order. `Forest::encode` writes it in ascending height. So a forest with two
-/// or more roots has as many encodings as there are ways to arrange them, and
-/// every one of them decodes to the same forest.
+/// `Forest::decode` read its roots as a list of (height, root) pairs and put
+/// each one into the slot its height named. Nothing required the list to be in
+/// order, and `Forest::encode` writes it in ascending height, so a forest with
+/// two or more roots had as many encodings as there are ways to arrange them
+/// and every one of them decoded to the same forest. That contradicts the first
+/// line of `cairn-primitives::codec`: the format "admits exactly one
+/// representation of any value". A forest travels inside `Handover` three times
+/// over and inside `SampledStart` once, so a stranger handing a newcomer a
+/// ledger had a factorial number of byte strings that all meant the same thing.
 ///
-/// That contradicts the first line of `cairn-primitives::codec`: the format
-/// "admits exactly one representation of any value". A forest travels inside
-/// `Handover` three times over and inside `SampledStart` once, so a stranger
-/// handing a newcomer a ledger has a factorial number of byte strings that all
-/// mean the same thing.
-///
-/// What it does not do, checked rather than assumed: `Forest::commitment`
-/// hashes the roots in canonical order and never touches the encoding, so no
-/// header commits to these bytes and two nodes cannot be made to disagree.
-/// Nothing hashes an encoded forest anywhere in the workspace. This is
-/// malleability with no path to a fork behind it, which is why it is pinned
-/// here rather than left as a failing test.
-///
-/// The fix is four lines in `Forest::decode`: require each height to be
-/// strictly greater than the last, which also makes the existing duplicate
-/// check unnecessary. This test should be inverted when that lands.
+/// What it never did, checked rather than assumed: `Forest::commitment` hashes
+/// the roots in canonical order and never touches the encoding, so no header
+/// committed to those bytes and two nodes could not be made to disagree.
+/// Nothing hashes an encoded forest anywhere in the workspace. That is why it
+/// was pinned rather than left failing, and why closing it needs no network
+/// number: no honest encoder ever wrote what is now refused.
 ///
 /// Found by the mutation campaign above at seed 0xca12f0221d05ca12, case 6349,
 /// through the operator that exchanges two runs of equal length. Reduced by
 /// `cairn_fuzz::smallest` to the 119 bytes below, and stated again underneath
-/// in the smallest shape that can show it at all: two roots, swapped.
+/// in the smallest shape that could show it at all: two roots, swapped.
 #[test]
-fn a_forest_takes_its_roots_in_an_order_it_will_not_write() {
+fn a_forest_refuses_roots_in_an_order_it_would_not_write() {
     // Leaf count 26, which is 0b11010, so the forest holds roots at heights 1,
     // 3 and 4. Written here as 1, 4, 3.
     let out_of_order = hex::decode(concat!(
@@ -587,22 +583,30 @@ fn a_forest_takes_its_roots_in_an_order_it_will_not_write() {
     ))
     .unwrap();
     assert_eq!(out_of_order.len(), 119);
-
-    let forest = Forest::decode(&out_of_order).expect("the decoder takes it");
-    assert_ne!(
-        forest.encode(),
-        out_of_order,
-        "the defect is gone: invert this test and delete the note above it"
+    assert!(
+        Forest::decode(&out_of_order).is_err(),
+        "a forest was decoded out of the bytes its encoder would not write"
     );
 
-    // And what it re-encodes to is the same forest, which is why nothing
-    // downstream notices.
-    let canonical = forest.encode();
-    let again = Forest::decode(&canonical).expect("its own encoding reads back");
-    assert_eq!(again, forest);
-    assert_eq!(again.commitment(), forest.commitment());
+    // The same three roots in the order the encoder writes them, which is the
+    // half that has to keep working.
+    let mut in_order = 26u64.encode();
+    in_order.extend_from_slice(&0u64.encode());
+    in_order.extend_from_slice(&3u32.encode());
+    for height in [1u8, 3, 4] {
+        in_order.extend_from_slice(&height.encode());
+        in_order.extend_from_slice(Hash32::ZERO.encode().as_slice());
+    }
+    assert_eq!(in_order.len(), 119);
+    let forest = Forest::decode(&in_order).expect("the order an encoder writes");
+    assert_eq!(
+        forest.encode(),
+        in_order,
+        "one value, and the bytes it came from are the bytes it writes"
+    );
 
-    // The smallest shape that can show it: two roots, in either order.
+    // The smallest shape that could show it: two roots, in either order. Now
+    // one byte string and one value rather than two of the first.
     let mut ascending = 3u64.encode();
     ascending.extend_from_slice(&0u64.encode());
     ascending.extend_from_slice(&2u32.encode());
@@ -620,12 +624,8 @@ fn a_forest_takes_its_roots_in_an_order_it_will_not_write() {
     descending.extend_from_slice(&0u8.encode());
     descending.extend_from_slice(Hash32::from_bytes([0xaa; 32]).encode().as_slice());
 
-    assert_ne!(ascending, descending, "two byte strings");
-    assert_eq!(
-        Forest::decode(&ascending).unwrap(),
-        Forest::decode(&descending).unwrap(),
-        "one value"
-    );
+    assert!(Forest::decode(&ascending).is_ok(), "the written order");
+    assert!(Forest::decode(&descending).is_err(), "and no other");
 }
 
 /// The half of the same rule that does hold, so a fix does not break it.

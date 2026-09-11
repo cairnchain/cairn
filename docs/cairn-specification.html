@@ -1925,11 +1925,21 @@
 
     <p>
       The <code>u8</code> beside each root is the height of the tree it is the root of. A
-      decoder MUST refuse more than 64 roots, MUST refuse two roots at one height,
-      MUST refuse <code>live</code> above <code>leaves</code>, and MUST refuse a set of roots whose heights
-      are not exactly the set bits of <code>leaves</code>. The last of those is what makes a
-      decoded forest one something could have produced rather than merely a
-      well-formed message.
+      decoder MUST refuse more than 64 roots, MUST refuse a height that is not
+      strictly greater than the one before it, MUST refuse <code>live</code> above <code>leaves</code>, and
+      MUST refuse a set of roots whose heights are not exactly the set bits of
+      <code>leaves</code>. The last of those is what makes a decoded forest one something could
+      have produced rather than merely a well-formed message.
+    </p>
+
+    <p>
+      The ordering rule subsumes refusing two roots at one height, which is what stood
+      in its place and which left a forest with three roots six encodings. A forest
+      travels inside a handover three times over and inside a weighing once, so that
+      was a factorial number of byte strings meaning one thing, against a format whose
+      first rule is that a value has one spelling. Nothing hashes an encoded forest,
+      so no header ever committed to those bytes and no two nodes could be made to
+      disagree by them.
     </p>
 
     <p>
@@ -2612,6 +2622,35 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
         <tr><td class="n">17</td><td>Proofs</td><td>sequence of placed</td><td>nothing</td></tr>
       </tbody>
     </table>
+
+    <p>
+      <strong>Every counted sequence here carries a ceiling, and a decoder MUST refuse a
+      count above it before it reads a single element.</strong> A count is four bytes a peer
+      chooses and the elements behind it are between seven and forty bytes each, so a
+      decoder that reads the list first and measures it after has let a one megabyte
+      frame build a list up to two thousand times the cap that governs it. The rule is
+      the same either way; read late it is a rule about what to throw away.
+    </p>
+
+    <table>
+      <thead><tr><th>Message</th><th>Ceiling</th></tr></thead>
+      <tbody>
+        <tr><td>GetChain</td><td class="n">64 entries</td></tr>
+        <tr><td>Chain</td><td class="n">2 000 (a count, not a sequence)</td></tr>
+        <tr><td>GetBlocks</td><td class="n">128 heights</td></tr>
+        <tr><td>Announce</td><td class="n">512 identifiers</td></tr>
+        <tr><td>Peers</td><td class="n">64 addresses</td></tr>
+        <tr><td>JoinPart</td><td class="n">64 parts, 524 288 bytes a part</td></tr>
+        <tr><td>Headers</td><td class="n">512 headers</td></tr>
+        <tr><td>GetProofs</td><td class="n">64 heights</td></tr>
+        <tr><td>Proofs</td><td class="n">64 placed proofs</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      A frame is at most 1 048 576 bytes whatever it carries, so these ceilings bound
+      what is built and the frame bounds what is read.
+    </p>
 
     <p>
       A handshake is 108 bytes and carries the protocol version as a <code>u32</code>, the

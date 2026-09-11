@@ -438,18 +438,18 @@ impl Read for Feeding {
     }
 }
 
-/// A defect, pinned as it stands.
+/// The defect that was pinned here, and the rule that closed it.
 ///
 /// `crates/cairn-net/src/message.rs` opens by saying "every list a peer can
 /// send is capped, and every cap is enforced while decoding". Eight variants
-/// enforce theirs after decoding instead: they read the whole sequence through
+/// enforced theirs after decoding instead: they read the whole sequence through
 /// `Vec::<T>::decode_from`, which stops at `MAX_SEQUENCE_LEN`, and only then
-/// compare its length against the cap that is meant to govern it.
+/// compared its length against the cap that was meant to govern it.
 ///
-/// What that costs is bounded, and the bound is the frame rather than the cap.
+/// What that cost was bounded, and the bound was the frame rather than the cap.
 /// A frame is a megabyte, and the smallest element of each of these lists is
-/// between seven and forty bytes, so what a peer gets built before its cap is
-/// consulted is:
+/// between seven and forty bytes, so what a peer got built before its cap was
+/// consulted was:
 ///
 /// | variant     | cap | built from one frame | over |
 /// |-------------|-----|----------------------|------|
@@ -462,26 +462,28 @@ impl Read for Feeding {
 /// | `Proofs`    |  64 |              116 508 | 1820x |
 /// | `JoinPart`  | 524 288 B |      1 048 530 B |   2x |
 ///
-/// `a_full_frame_of_peers_is_built_in_full_before_its_cap_is_read` measures
-/// the `Peers` row rather than arguing it. A hundred and fifty thousand
+/// `a_full_frame_of_peers_is_built_in_full_before_its_cap_is_read` measured the
+/// `Peers` row rather than arguing it: a hundred and fifty thousand
 /// `PeerAddress` is about four and a half megabytes held for a one megabyte
 /// frame, thrown away a moment later, and a node holds several dozen
 /// connections at once.
 ///
-/// So this is not the unbounded allocation the caps were written against. It
-/// is the same rule read late, and the distance between the rule and what is
-/// built before it runs is a factor of two thousand.
+/// So it was never the unbounded allocation the caps were written against. It
+/// was the same rule read late, and the distance between the rule and what was
+/// built before it ran was a factor of two thousand.
 ///
-/// The fix already exists in this repository and is one call per variant:
-/// `cairn_primitives::codec::take_at_most`, which is what `Block`, `Transfer`
-/// and `CoinbaseTransaction` use and what their own comments say is there
-/// "because decoding is not free and happens before any rule has looked at the
-/// frame". This test should be inverted when those eight follow.
+/// All eight now go through `cairn_primitives::codec::take_at_most`, which is
+/// what `Block`, `Transfer` and `CoinbaseTransaction` already used and what
+/// their own comments say it is there for: "because decoding is not free and
+/// happens before any rule has looked at the frame". Nothing a peer could send
+/// and have accepted before is refused now; what changed is where the refusal
+/// happens and what the answer is called, which is why this asks for
+/// `InvalidValue` where it used to ask for `UnexpectedEnd`.
 ///
 /// Found by the campaign above, through the probe that offers a count with
 /// nothing behind it.
 #[test]
-fn eight_message_lists_read_their_cap_after_they_have_built_the_list() {
+fn eight_message_lists_read_their_cap_before_they_build_the_list() {
     // A count far past every cap here and inside `MAX_SEQUENCE_LEN`, so what
     // decides the answer is the variant's own rule and not the codec ceiling.
     let declared = 900_000u32;
@@ -498,11 +500,12 @@ fn eight_message_lists_read_their_cap_after_they_have_built_the_list() {
     for (what, tag, cap) in late {
         let mut bytes = tag.encode();
         bytes.extend_from_slice(&declared.encode());
-        assert_eq!(
-            Message::decode(&bytes),
-            Err(CodecError::UnexpectedEnd),
-            "{what} now refuses a count of {declared} against its cap of {cap} where it \
-             reads it: invert this test and delete the note above it"
+        assert!(
+            matches!(
+                Message::decode(&bytes),
+                Err(CodecError::InvalidValue { .. })
+            ),
+            "{what} read a count of {declared} past its cap of {cap} before refusing it"
         );
     }
 
@@ -511,10 +514,12 @@ fn eight_message_lists_read_their_cap_after_they_have_built_the_list() {
     let mut headers = 15u8.encode();
     headers.extend_from_slice(&0u64.encode());
     headers.extend_from_slice(&declared.encode());
-    assert_eq!(
-        Message::decode(&headers),
-        Err(CodecError::UnexpectedEnd),
-        "Headers now refuses a count against its cap of {MAX_HEADERS} where it reads it"
+    assert!(
+        matches!(
+            Message::decode(&headers),
+            Err(CodecError::InvalidValue { .. })
+        ),
+        "Headers read a count past its cap of {MAX_HEADERS} before refusing it"
     );
 
     let mut join = 13u8.encode();
@@ -523,24 +528,33 @@ fn eight_message_lists_read_their_cap_after_they_have_built_the_list() {
     join.extend_from_slice(&0u32.encode());
     join.extend_from_slice(&1u32.encode());
     join.extend_from_slice(&declared.encode());
-    assert_eq!(
-        Message::decode(&join),
-        Err(CodecError::UnexpectedEnd),
-        "JoinPart now refuses a payload length against its cap of {JOIN_PART_BYTES} where it \
-         reads it"
+    assert!(
+        matches!(Message::decode(&join), Err(CodecError::InvalidValue { .. })),
+        "JoinPart read a payload length past its cap of {JOIN_PART_BYTES} before refusing it"
     );
+
+    // And the other half of the rule: a list inside its cap is still read.
+    let mut room = 10u8.encode();
+    room.extend_from_slice(&0u32.encode());
+    assert_eq!(Message::decode(&room), Ok(Message::Peers(Vec::new())));
 }
 
-/// The measurement behind the table above, for the widest row.
+/// The widest row of the table above, as a frame a peer could really send.
 ///
 /// A frame of exactly the size the wire allows, filled with the smallest
-/// address there is. `Peers` allows sixty four; this builds every one of a
-/// hundred and forty nine thousand seven hundred and ninety five, and the
-/// proof that it did is that the refusal names the cap. A decoder that had
-/// read the count first could not have reached that error, because it would
-/// have refused four bytes in.
+/// address there is: a hundred and forty nine thousand seven hundred and
+/// ninety five of them against a cap of sixty four. It used to be built in
+/// full and then measured, and the proof that it was is that the refusal named
+/// the cap rather than the end of the frame.
+///
+/// That proof no longer separates the two shapes, because the refusal is the
+/// same one read earlier. What separates them is the probe in the test above,
+/// which declares a count with nothing behind it: a decoder that reads the
+/// list first runs out of bytes and says so, and one that reads the count
+/// first names the cap. This is kept for the size, which is the part a reader
+/// of the table wants to check.
 #[test]
-fn a_full_frame_of_peers_is_built_in_full_before_its_cap_is_read() {
+fn a_full_frame_of_peers_is_refused_at_its_count() {
     // Tag, count, then seven bytes an address: a tag of four, four octets and
     // a port.
     let room = MAX_FRAME_BYTES.saturating_sub(5);
@@ -561,7 +575,7 @@ fn a_full_frame_of_peers_is_built_in_full_before_its_cap_is_read() {
         Err(CodecError::InvalidValue {
             type_name: "address list"
         }),
-        "the cap is now read where the count is: invert this test too"
+        "a full frame of addresses was not refused by the cap that governs it"
     );
     assert!(
         held > MAX_SHARED_ADDRESSES.saturating_mul(2_000),

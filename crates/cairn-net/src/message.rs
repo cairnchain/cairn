@@ -12,7 +12,7 @@ use cairn_chain::{Located, MAX_LOCATOR};
 use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::note::NetworkId;
 use cairn_ledger::transaction::Transfer;
-use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
+use cairn_primitives::codec::{take_at_most, CodecError, Decode, Encode, Reader};
 use cairn_primitives::Hash32;
 
 /// Bumped when the meaning of a message changes. Peers on another version are
@@ -543,26 +543,21 @@ impl Message {
     }
 }
 
-/// Decodes a list of identifiers, refusing one longer than `limit`.
-/// A bounded list of heights.
+/// A list of heights, refused before it is built if it is longer than `limit`.
+///
+/// [`take_at_most`] rather than a decode followed by a length check, and the
+/// difference is what gets built in between. A count is four bytes a peer
+/// writes, and reading the list first stops only at `MAX_SEQUENCE_LEN`: a
+/// single one megabyte frame declared a hundred and thirty one thousand
+/// heights against a cap of a hundred and twenty eight, and all of them were
+/// built and then thrown away. The rule was always there; it was read late.
 fn decode_heights(reader: &mut Reader<'_>, limit: usize) -> Result<Vec<u64>, CodecError> {
-    let heights = Vec::<u64>::decode_from(reader)?;
-    if heights.len() > limit {
-        return Err(CodecError::InvalidValue {
-            type_name: "height list",
-        });
-    }
-    Ok(heights)
+    take_at_most(reader, limit, "height list")
 }
 
+/// The same for a list of identifiers.
 fn decode_ids(reader: &mut Reader<'_>, limit: usize) -> Result<Vec<Located>, CodecError> {
-    let ids = Vec::<Located>::decode_from(reader)?;
-    if ids.len() > limit {
-        return Err(CodecError::InvalidValue {
-            type_name: "identifier list",
-        });
-    }
-    Ok(ids)
+    take_at_most(reader, limit, "identifier list")
 }
 
 impl Encode for Message {
@@ -633,15 +628,11 @@ impl Decode for Message {
             7 => Ok(Self::Block(Box::new(Block::decode_from(reader)?))),
             8 => Ok(Self::Announce(decode_ids(reader, MAX_ANNOUNCED)?)),
             9 => Ok(Self::GetPeers),
-            10 => {
-                let addresses = Vec::<PeerAddress>::decode_from(reader)?;
-                if addresses.len() > MAX_SHARED_ADDRESSES {
-                    return Err(CodecError::InvalidValue {
-                        type_name: "address list",
-                    });
-                }
-                Ok(Self::Peers(addresses))
-            }
+            10 => Ok(Self::Peers(take_at_most(
+                reader,
+                MAX_SHARED_ADDRESSES,
+                "address list",
+            )?)),
             11 => Ok(Self::Transaction(Box::new(Transfer::decode_from(reader)?))),
             12 => Ok(Self::GetJoin {
                 what: Joining::decode_from(reader)?,
@@ -659,12 +650,7 @@ impl Decode for Message {
                         type_name: "JoinPart",
                     });
                 }
-                let bytes = Vec::<u8>::decode_from(reader)?;
-                if bytes.len() > JOIN_PART_BYTES {
-                    return Err(CodecError::InvalidValue {
-                        type_name: "JoinPart",
-                    });
-                }
+                let bytes = take_at_most(reader, JOIN_PART_BYTES, "JoinPart")?;
                 Ok(Self::JoinPart {
                     what,
                     at,
@@ -679,24 +665,11 @@ impl Decode for Message {
             }),
             15 => {
                 let from = u64::decode_from(reader)?;
-                let headers = Vec::<BlockHeader>::decode_from(reader)?;
-                if headers.len() > MAX_HEADERS {
-                    return Err(CodecError::InvalidValue {
-                        type_name: "Headers",
-                    });
-                }
+                let headers = take_at_most(reader, MAX_HEADERS, "Headers")?;
                 Ok(Self::Headers { from, headers })
             }
             16 => Ok(Self::GetProofs(decode_heights(reader, MAX_PROVEN)?)),
-            17 => {
-                let placed = Vec::<Placed>::decode_from(reader)?;
-                if placed.len() > MAX_PROVEN {
-                    return Err(CodecError::InvalidValue {
-                        type_name: "Proofs",
-                    });
-                }
-                Ok(Self::Proofs(placed))
-            }
+            17 => Ok(Self::Proofs(take_at_most(reader, MAX_PROVEN, "Proofs")?)),
             _ => Err(CodecError::InvalidValue {
                 type_name: "Message",
             }),

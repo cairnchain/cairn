@@ -41,6 +41,7 @@ use cairn_primitives::codec::Encode;
 use cairn_primitives::Amount;
 
 const PAPER: &str = include_str!("../../../docs/cairn-whitepaper.html");
+const SPECIFICATION: &str = include_str!("../../../docs/cairn-specification.html");
 const README: &str = include_str!("../../../README.md");
 const DESIGN: &str = include_str!("../../../docs/cairn-design.html");
 /// The survey of what already exists, which a node serves at `/prior-art`.
@@ -1099,5 +1100,61 @@ fn the_depth_a_newcomer_can_be_put_at_is_read_against_the_depth_this_node_undoes
         PAPER.contains("deeper than the node's own reorganisation limit"),
         "the paper has to say that the depth a newcomer can be put at is deeper \
          than what this node will undo, because it is"
+    );
+}
+
+/// The ceilings the specification lists for each counted sequence on the wire.
+///
+/// They live here rather than beside the specification's other guards because
+/// this is the only crate that sees both the document and `cairn-net`. Each one
+/// is read from the constant the decoder uses, so a cap that moves takes the
+/// table with it or fails.
+#[test]
+fn the_specification_lists_the_ceiling_every_message_list_carries() {
+    use cairn_net::message::{
+        MAX_ANNOUNCED, MAX_CHAIN, MAX_HEADERS, MAX_PROVEN, MAX_REQUESTED, MAX_SHARED_ADDRESSES,
+    };
+
+    let spec = SPECIFICATION
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let rows = [
+        (
+            "GetChain",
+            grouped(cairn_chain::MAX_LOCATOR as u64),
+            "entries",
+        ),
+        ("Chain", grouped(MAX_CHAIN), "(a count, not a sequence)"),
+        ("GetBlocks", grouped(MAX_REQUESTED as u64), "heights"),
+        ("Announce", grouped(MAX_ANNOUNCED as u64), "identifiers"),
+        ("Peers", grouped(MAX_SHARED_ADDRESSES as u64), "addresses"),
+        ("Headers", grouped(MAX_HEADERS as u64), "headers"),
+        ("GetProofs", grouped(MAX_PROVEN as u64), "heights"),
+        ("Proofs", grouped(MAX_PROVEN as u64), "placed proofs"),
+    ];
+    for (message, cap, unit) in rows {
+        let row = format!("<tr><td>{message}</td><td class=\"n\">{cap} {unit}</td></tr>");
+        assert!(
+            spec.contains(&row),
+            "the specification does not give {message} a ceiling of {cap} {unit}"
+        );
+    }
+
+    // The two that are measured in bytes rather than in elements.
+    assert!(
+        spec.contains(&format!(
+            "<tr><td>JoinPart</td><td class=\"n\">{} parts, {} bytes a part</td></tr>",
+            grouped(u64::from(cairn_net::message::MAX_JOIN_PARTS)),
+            grouped(cairn_net::message::JOIN_PART_BYTES as u64),
+        )),
+        "the specification does not price a join part the way the decoder does"
+    );
+    assert!(
+        spec.contains(&format!(
+            "A frame is at most {} bytes",
+            grouped(cairn_net::wire::MAX_FRAME_BYTES as u64)
+        )),
+        "the specification does not give a frame the size the wire allows"
     );
 }

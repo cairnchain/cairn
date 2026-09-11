@@ -645,6 +645,27 @@ impl Encode for History {
     }
 }
 
+/// Whether a list names each note once and in the order a map writes them.
+///
+/// `held` and `fell` are `BTreeMap`s, so [`History::encode_to`] writes them in
+/// key order and never writes one note twice. Reading them back into a map
+/// without asking would lose an entry rather than refuse the file: two entries
+/// for one note came back as the later of the two, silently, and `fell` is the
+/// list that decides whether a fallen note can be spent at all. So a wallet
+/// reported a balance that was neither what the file said nor an error.
+///
+/// The stamp on the file does not stand in the way of that, and cannot:
+/// `History::save` appends `blake3(WalletHistory, bytes)`, which anybody who
+/// can write the file can recompute. It is there to catch a write that was cut
+/// short, not one that was meant.
+fn each_note_once<T>(items: &[T], id: impl Fn(&T) -> NoteId) -> bool {
+    items.windows(2).all(|pair| {
+        pair.first()
+            .zip(pair.get(1))
+            .is_none_or(|(a, b)| id(a) < id(b))
+    })
+}
+
 impl Decode for History {
     fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
         let next = u64::decode_from(reader)?;
@@ -662,6 +683,11 @@ impl Decode for History {
         } else {
             Vec::new()
         };
+        if !each_note_once(&held, |owned| owned.id) || !each_note_once(&fell, |fell| fell.id) {
+            return Err(CodecError::InvalidValue {
+                type_name: "History",
+            });
+        }
         Ok(Self {
             held: held.into_iter().map(|held| (held.id, held.value)).collect(),
             fell: fell

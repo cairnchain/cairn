@@ -160,37 +160,35 @@ fn a_history_from_before_the_places_reads_and_grows_by_four_bytes() {
     );
 }
 
-/// A defect, pinned as it stands.
+/// The defect that was pinned here, and the rule that closed it.
 ///
-/// `held` and `fell` are written as lists and read into `BTreeMap`s. Two
-/// entries naming the same note collapse into one, the later silently winning,
-/// and entries in any order come back sorted. So a file can say a wallet holds
-/// one note at fifty and the same note at nothing, and the wallet will read
+/// `held` and `fell` are written out of `BTreeMap`s, in key order and never
+/// twice, and were read back into `BTreeMap`s without anything asking. Two
+/// entries naming the same note collapsed into one, the later silently winning,
+/// and entries in any order came back sorted. So a file could say a wallet
+/// holds one note at fifty and the same note at nothing, and the wallet read
 /// that as holding it at nothing, without a word.
 ///
-/// The forest has the same shape of defect and it is only malleability there,
-/// because reordering roots loses nothing. This one loses an entry. A wallet
-/// reading such a file reports a balance that is neither what the file says
+/// The forest had the same shape of defect and it was only malleability there,
+/// because reordering roots loses nothing. This one lost an entry. A wallet
+/// reading such a file reported a balance that was neither what the file said
 /// nor an error, and `fell` is the list that decides whether a fallen note can
 /// be spent at all: two places for one note, one of them silently kept.
 ///
-/// The stamp does not stand in the way. `History::save` appends
+/// The stamp never stood in the way. `History::save` appends
 /// `blake3(WalletHistory, bytes)`, which anybody who can write the file can
 /// recompute, because it is there to catch a write that was cut short rather
 /// than a write that was meant.
 ///
-/// Nothing on the network reads a history, so there is no fork behind this.
-/// It is a local file and a wrong balance.
-///
-/// The fix is the same four lines as the forest's: refuse a repeated
-/// identifier, and require the list to arrive in the order it is written in.
-/// This test should be inverted when that lands.
+/// Nothing on the network reads a history, so there was no fork behind this. It
+/// was a local file and a wrong balance, and it is now a local file that is
+/// refused.
 ///
 /// Found by the long campaign at seed 0xca12f0221d05ca12, twenty seconds in,
 /// and reduced by `cairn_fuzz::smallest` to a hundred and forty eight bytes
 /// that are zero apart from one count of two.
 #[test]
-fn a_history_takes_two_entries_for_one_note_and_keeps_the_last() {
+fn a_history_refuses_two_entries_for_one_note() {
     // The reduced case, byte for byte: a file from before the places were
     // kept, whose held list names the all-zero note twice.
     let twice = hex::decode(concat!(
@@ -209,40 +207,41 @@ fn a_history_takes_two_entries_for_one_note_and_keeps_the_last() {
     ))
     .unwrap();
     assert_eq!(twice.len(), 148);
-
-    let read = History::decode(&twice).expect("the decoder takes it");
-    assert_eq!(
-        read.held().count(),
-        1,
-        "the defect is gone: invert this test and delete the note above it"
+    assert!(
+        History::decode(&twice).is_err(),
+        "a history was read out of a file naming one note twice"
     );
 
-    // And what is kept is the later of the two, so the value in the file that
-    // a reader would see first is the one thrown away.
-    let two_values = written(&[(0, 0, 50), (0, 0, 7)], &[]);
-    let read = History::decode(&two_values).expect("the decoder takes it");
-    let held: Vec<_> = read.held().collect();
-    assert_eq!(held.len(), 1);
-    assert_eq!(held[0].1.as_pebbles(), 7, "the later entry is the one kept");
+    // Two values for one note, which is the shape that used to keep the later
+    // one and throw away the one a reader would see first.
+    assert!(History::decode(&written(&[(0, 0, 50), (0, 0, 7)], &[])).is_err());
+    assert_eq!(
+        History::decode(&written(&[(0, 0, 50)], &[]))
+            .expect("one entry for one note is a file a wallet writes")
+            .held()
+            .count(),
+        1
+    );
 
     // The same for the places a note fell to, which is the list that decides
     // whether a fallen note can be spent.
-    let two_places = written(&[], &[(0, 11), (0, 22)]);
-    let read = History::decode(&two_places).expect("the decoder takes it");
-    assert_eq!(
-        read.encode().len(),
-        written(&[], &[(0, 22)]).len(),
-        "two places for one note came back as one"
-    );
+    assert!(History::decode(&written(&[], &[(0, 11), (0, 22)])).is_err());
+    assert!(History::decode(&written(&[], &[(0, 22)])).is_ok());
 
-    // And a list out of order comes back in order, which is the milder half of
-    // the same rule: one value, two encodings.
+    // And a list out of order is refused rather than quietly sorted, which is
+    // the milder half of the same rule: it was one value with two encodings.
     let descending = written(&[(2, 0, 1), (1, 0, 1)], &[]);
     let ascending = written(&[(1, 0, 1), (2, 0, 1)], &[]);
     assert_ne!(descending, ascending, "two byte strings");
+    assert!(
+        History::decode(&descending).is_err(),
+        "and only one of them"
+    );
     assert_eq!(
-        History::decode(&descending).unwrap().encode(),
-        History::decode(&ascending).unwrap().encode(),
-        "one value"
+        History::decode(&ascending)
+            .expect("the order a wallet writes")
+            .encode(),
+        ascending,
+        "what is read back writes the bytes it came from"
     );
 }
