@@ -1666,7 +1666,9 @@ the far end of the guarantee was on a branch the ordinary rule could not carry
 it back from. At 512 the same measurement gives 633, which is inside 1 024 with
 room. What it costs is one more level, so a draw is worth `1/15` of a uniform
 one rather than `1/14`, which takes the share the count holds to from 43.37 per
-cent to 42.96. The figure published below is 40 either way.
+cent to 42.96. Both are floors rather than point estimates, for the reason the
+reference implementation's own note gives: the measurement is a maximum over
+noisy estimates and so reads low. The figure published below is 40 either way.
 
 **The level is scaled rather than reduced, and that is what makes it even.**
 Through testnet-6 it was `b[0] mod levels`, and 256 does not divide by 14: the

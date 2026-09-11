@@ -7,3 +7,7 @@
 *.pem
 cairn-data/
 cairn-*-data/
+
+# Worktrees this tool makes for isolated work. They are checkouts of this
+# same repository and belong to nobody but the machine they are on.
+.claude/worktrees/

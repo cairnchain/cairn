@@ -592,9 +592,13 @@ band nearest the tip, which is the run of headers the prover then has to
 hand over in full.
 
 Setting the count from the real expression gives 4 096 draws, holding
-against every forger up to 42.96% of the world's work over a thirty year
-chain, measured against the function this implementation ships, and
-against forgeries built and put through the check. This paper claims 40%,
+against every forger up to at least 42.96% of the world's work over a
+thirty year chain, measured against the function this implementation
+ships, and against forgeries built and put through the check. At least,
+and the word is exact: the figure is a maximum over hundreds of
+placements, each a hit rate taken over a finite number of seeds, and a
+maximum over noisy estimates runs high, so the threshold reads low and
+reads lower the fewer seeds are spent. It is published as a floor. This paper claims 40%,
 keeping the rest for the difference between a staircase of halvings
 and the smooth density it stands for. Past 50% nothing helps: a forger at
 half the work has nothing left to invent and can mine the chain.

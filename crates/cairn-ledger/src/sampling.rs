@@ -86,10 +86,27 @@ use crate::validation::ConsensusParams;
 /// ```
 ///
 /// At 4096 draws over a thirty year chain that holds against every forger up
-/// to **42.96%** of the world's work, measured against this very function and
-/// against forgeries built and put through [`check_start`]. The papers claim
-/// **40%**, which leaves the rest as margin for the difference between a
-/// staircase of halvings and the smooth density it stands for.
+/// to at least **42.96%** of the world's work, measured against this very
+/// function and against forgeries built and put through [`check_start`]. The
+/// papers claim **40%**, which leaves the rest as margin for the difference
+/// between a staircase of halvings and the smooth density it stands for.
+///
+/// **"At least" is exact, and the estimator is why.** The figure is a maximum
+/// over hundreds of placements, each a hit rate taken over a finite number of
+/// seeds, and a maximum over noisy estimates runs high: the best-looking
+/// placement is partly the luckiest sample. So the threshold reads low, and
+/// lower the fewer seeds are spent. Measured on one sweep at three counts:
+/// 42.80 per cent at thirty two seeds, 42.96 at sixty four, 43.03 at five
+/// hundred and twelve. 42.96 is the figure at the count
+/// `examples/searching_for_a_break` runs, and it is published as a floor rather
+/// than as a point, which is the reading a margin wants anyway.
+///
+/// What it does not rest on is the resolution of the sweep. The same threshold
+/// over a grid sixteen times finer is the same threshold to four decimal
+/// places, which
+/// `tests/audit_the_bound.rs::the_share_the_bound_holds_to_does_not_rest_on_the_sweeps_grid`
+/// measures. This project has published a figure that moved with its own grid
+/// once already, and the note beside that one says so.
 ///
 /// **`levels` is an input, and for six networks it was one a prover wrote
 /// down.** It was `levels_for(tip.height)`, read off a field of the tip, and a

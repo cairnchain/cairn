@@ -2122,7 +2122,9 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
       it back from. At 512 the same measurement gives 633, which is inside 1 024 with
       room. What it costs is one more level, so a draw is worth <code>1/15</code> of a uniform
       one rather than <code>1/14</code>, which takes the share the count holds to from 43.37 per
-      cent to 42.96. The figure published below is 40 either way.
+      cent to 42.96. Both are floors rather than point estimates, for the reason the
+      reference implementation's own note gives: the measurement is a maximum over
+      noisy estimates and so reads low. The figure published below is 40 either way.
     </p>
 
     <p>
