@@ -253,8 +253,8 @@ Applied in this order, each producing the refusal named.
     <tr><td class="n">1</td><td>UnsupportedVersion</td><td>the version is not one these rules know</td></tr>
     <tr><td class="n">2</td><td>NoInputs</td><td>it spends nothing</td></tr>
     <tr><td class="n">3</td><td>NoOutputs</td><td>it pays nobody</td></tr>
-    <tr><td class="n">4</td><td>TooManyInputs</td><td>past the network's limit</td></tr>
-    <tr><td class="n">5</td><td>TooManyOutputs</td><td>past the network's limit</td></tr>
+    <tr><td class="n">4</td><td>TooManyInputs</td><td>past the network's limit, which is 256 on every network here</td></tr>
+    <tr><td class="n">5</td><td>TooManyOutputs</td><td>past the network's limit, which is 256 on every network here</td></tr>
     <tr><td class="n">6</td><td>DuplicateInput</td><td>one note named twice</td></tr>
     <tr><td class="n">7</td><td>ZeroValueOutput</td><td>a note worth nothing</td></tr>
     <tr><td class="n">8</td><td>ValueOverflow</td><td>the outputs do not sum</td></tr>
@@ -348,7 +348,7 @@ node's time for nothing.
     <tr><td class="n">12</td><td>WrongTotalWork</td><td>not the parent's work plus its own</td></tr>
     <tr><td class="n">13</td><td>HistoryMismatch</td><td>not committing to the headers before it</td></tr>
     <tr><td class="n">14</td><td>InsufficientWork</td><td>the identifier does not meet the target</td></tr>
-    <tr><td class="n">15</td><td>BlockTooLarge</td><td>past the byte limit</td></tr>
+    <tr><td class="n">15</td><td>BlockTooLarge</td><td>past the network's byte limit, which is 131 072 on every network here</td></tr>
     <tr><td class="n">16</td><td>TimestampTooFarAhead</td><td>further ahead than the reader allows</td></tr>
     <tr><td class="n">17</td><td>TimestampNotAfterMedian</td><td>not later than the median before it</td></tr>
     <tr><td class="n">18</td><td>CoinbaseHeightMismatch</td><td>a coinbase for another height</td></tr>
@@ -370,10 +370,37 @@ block, and MUST NOT hold it against the peer that offered it. Every other
 refusal here is a fact about the block that any node reaches from the same
 bytes.
 
-The body is evaluated between seventeen and eighteen: every transfer in order,
-each producing `InvalidTransfer` or `InvalidSignature`, then the coinbase
-against `CoinbaseOverpay`, then the eviction the block causes against
-`TooManyEvictions`. A block MUST NOT both spend a note and evict it.
+**The body is evaluated between nineteen and twenty**, and in this order. Four
+of these were made by the implementation and stated nowhere here until this
+revision; by the conformance section they were an omission in this document
+rather than a defect in the implementation, and they are written out with their
+numbers now. An earlier revision also put the body between seventeen and
+eighteen, which the implementation contradicts: the coinbase's height and the
+transactions root are checked before any of it.
+
+<table>
+  <thead><tr><th class="n">#</th><th>Refusal</th><th>When</th></tr></thead>
+  <tbody>
+    <tr><td class="n">1</td><td>UnsupportedCoinbaseVersion</td><td>the coinbase version is not one these rules know, which is 1</td></tr>
+    <tr><td class="n">2</td><td>CoinbaseExtraTooLarge</td><td>the coinbase carries more than 64 bytes beyond what consensus reads</td></tr>
+    <tr><td class="n">3</td><td>TooManyCoinbaseOutputs</td><td>past the network's limit, which is 16 on every network here</td></tr>
+    <tr><td class="n">4</td><td>ZeroValueCoinbaseOutput</td><td>a coinbase note worth nothing</td></tr>
+    <tr><td class="n">5</td><td>TooManyTransfers</td><td>past the network's limit, which is 4 096 on every network here</td></tr>
+    <tr><td class="n">6</td><td>InvalidTransfer, InvalidSignature</td><td>every transfer in order, against the transfer rules above</td></tr>
+    <tr><td class="n">7</td><td>CoinbaseOverpay</td><td>the coinbase claims more than the schedule pays plus the fees given up</td></tr>
+    <tr><td class="n">8</td><td>TooManyEvictions</td><td>past the network's eviction cap</td></tr>
+    <tr><td class="n">9</td><td>SupplyDoesNotAddUp</td><td>the running supply is not the parent's plus what this block issued</td></tr>
+  </tbody>
+</table>
+
+A block MUST NOT both spend a note and evict it.
+
+The four limits in that table are the network's rather than the format's, and
+the format holds a ceiling above each so that a decoder refuses what no network
+allows before any rule has read the frame: 256 inputs, 256 outputs, 16 coinbase
+outputs and 4 096 transfers. A build whose rules asked for more than its own
+decoder accepts would refuse blocks its rules allow, which is a fork with
+nobody at fault, so the two are checked against each other at compile time.
 
 ## The state
 
@@ -2422,7 +2449,9 @@ were not stated at all. The first two are fixed above. The four are
 `CoinbaseExtraTooLarge`, `TooManyCoinbaseOutputs`, `ZeroValueCoinbaseOutput`
 and `TooManyTransfers`, and by this document's own conformance section they are
 either an omission here or a defect in the implementation; they are an omission
-here, and the next revision states them with their numbers.
+here, and they are stated with their numbers where the body is evaluated. Fixing
+them turned up a fifth: the body was said to be evaluated between seventeen and
+eighteen, where the implementation evaluates it between nineteen and twenty.
 
 One gap is left and is not a defect. The allowance is written as SHOULD
 throughout, because what an answer weighs is measured by encoding it, so two

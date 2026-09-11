@@ -8,7 +8,7 @@ strap:
   ce que d'autres ont fait, publié et cassé. Voici l'état du terrain, et la
   position exacte de Cairn dessus.
 byline: 31 août 2026
-byline: 19 travaux examinés
+byline: 18 travaux cités
 byline: Un résultat théorique décisif
 subsections: unnumbered
 footer: Cairn · étude de l'existant · v2

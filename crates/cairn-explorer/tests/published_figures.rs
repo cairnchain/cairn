@@ -1158,3 +1158,111 @@ fn the_specification_lists_the_ceiling_every_message_list_carries() {
         "the specification does not give a frame the size the wire allows"
     );
 }
+
+/// The limits the specification writes into its refusal tables.
+///
+/// Each was named there without a number until the revision that added them,
+/// which the document's own closing section called an omission in itself rather
+/// than a defect in the implementation. A number in a table nobody holds to the
+/// code is the shape every one of the sixteen contradicted figures had.
+#[test]
+fn the_specification_gives_every_limit_it_names_the_number_the_rules_use() {
+    use cairn_ledger::transaction::{COINBASE_VERSION, MAX_COINBASE_EXTRA};
+
+    let rules = ConsensusParams::testnet();
+    let spec = SPECIFICATION
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let rows = [
+        (
+            "TooManyInputs",
+            grouped(rules.max_inputs_per_transfer as u64),
+        ),
+        (
+            "TooManyOutputs",
+            grouped(rules.max_outputs_per_transfer as u64),
+        ),
+        (
+            "TooManyCoinbaseOutputs",
+            grouped(rules.max_coinbase_outputs as u64),
+        ),
+        (
+            "TooManyTransfers",
+            grouped(rules.max_transfers_per_block as u64),
+        ),
+    ];
+    for (refusal, limit) in rows {
+        let said = format!("<td>{refusal}</td><td>past the network's limit, which is {limit} on every network here</td>");
+        assert!(
+            spec.contains(&said),
+            "the specification does not give {refusal} a limit of {limit}"
+        );
+    }
+
+    assert!(
+        spec.contains(&format!(
+            "<td>BlockTooLarge</td><td>past the network's byte limit, which is {} on every network here</td>",
+            grouped(rules.max_block_bytes as u64)
+        )),
+        "the specification does not give a block the byte limit the rules set"
+    );
+    assert!(
+        spec.contains(&format!(
+            "more than {} bytes beyond what consensus reads",
+            grouped(MAX_COINBASE_EXTRA as u64)
+        )),
+        "the specification does not bound a coinbase's extra at what the rules bound it at"
+    );
+    assert!(
+        spec.contains(&format!(
+            "the coinbase version is not one these rules know, which is {COINBASE_VERSION}"
+        )),
+        "the specification does not name the coinbase version this build knows"
+    );
+
+    // And the ceilings the format holds above each of those, so that a decoder
+    // refuses what no network allows before a rule has read the frame.
+    assert!(
+        spec.contains(&format!(
+            "{} inputs, {} outputs, {} coinbase outputs and {} transfers",
+            grouped(cairn_ledger::transaction::MOST_INPUTS as u64),
+            grouped(cairn_ledger::transaction::MOST_OUTPUTS as u64),
+            grouped(cairn_ledger::transaction::MOST_COINBASE_OUTPUTS as u64),
+            grouped(cairn_ledger::block::MOST_TRANSFERS as u64),
+        )),
+        "the specification does not give the format's own ceilings"
+    );
+}
+
+/// The count in the survey's byline, which nothing held it to.
+///
+/// It said nineteen works examined. The document's own sources section cites
+/// eighteen, and nothing anywhere counted either: "examined" is a claim about
+/// what somebody read, which no test can check, where "cited" is a claim about
+/// the document and this is it. A figure a reader can check and the project
+/// cannot is the shape every one of the sixteen contradicted figures had.
+#[test]
+fn the_surveys_byline_counts_the_works_the_survey_cites() {
+    let sources = PRIOR_ART
+        .split_once("Ce sur quoi tout ce qui précède repose")
+        .map_or("", |(_, after)| after);
+    assert!(!sources.is_empty(), "the survey has no sources section");
+
+    let mut cited: Vec<&str> = sources
+        .match_indices("<a href=\"")
+        .filter_map(|(at, _)| {
+            let rest = sources.get(at.saturating_add(9)..)?;
+            rest.split_once('"').map(|(link, _)| link)
+        })
+        .collect();
+    cited.sort_unstable();
+    cited.dedup();
+
+    let said = format!("{} travaux cités", cited.len());
+    assert!(
+        PRIOR_ART.contains(&said),
+        "the survey cites {} works and its byline does not say so",
+        cited.len()
+    );
+}

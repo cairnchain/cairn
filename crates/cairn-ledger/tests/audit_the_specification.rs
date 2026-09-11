@@ -65,12 +65,13 @@ use cairn_ledger::sampling::{
 };
 use cairn_ledger::state::{cold_leaf, note_key};
 use cairn_ledger::transaction::{
-    CoinbaseTransaction, Input, Transfer, Witness, COINBASE_VERSION, TRANSFER_VERSION,
+    CoinbaseTransaction, Input, Transfer, Witness, COINBASE_VERSION, MAX_COINBASE_EXTRA,
+    TRANSFER_VERSION,
 };
 use cairn_ledger::validation::{
     assemble_block, check_transfer_shape, connect_block, expected_difficulty, TransferError,
 };
-use cairn_ledger::{Block, ConsensusParams, LedgerState};
+use cairn_ledger::{Block, BlockError, ConsensusParams, LedgerState};
 use cairn_primitives::hash::{hash, Domain};
 use cairn_primitives::{Amount, Decode, Encode, Hash32};
 
@@ -2263,6 +2264,173 @@ fn the_limits_the_document_names_without_numbering_are_recorded_here() {
 // ---------------------------------------------------------------------------
 // 13. The refusals the document numbers, in the order it numbers them.
 // ---------------------------------------------------------------------------
+
+/// Where the body sits among the header's twenty refusals.
+///
+/// The document said the body was evaluated between seventeen and eighteen
+/// until this revision. The implementation evaluates it between nineteen and
+/// twenty: the coinbase's height and the transactions root are both checked
+/// first, and the state root is the only one checked after. That was found by
+/// writing the guard for the four refusals the document had never stated, which
+/// is the whole argument for writing guards for prose.
+///
+/// Each case breaks the body and one header rule at once, and says which wins.
+#[test]
+fn the_body_is_evaluated_between_nineteen_and_twenty() {
+    let params = ConsensusParams::testnet();
+    let mut state = LedgerState::new();
+    let honest = assemble_block(
+        &state,
+        CoinbaseTransaction::new(0, vec![note(1_000, 1)]),
+        Vec::<Transfer>::new(),
+        &params,
+        1_000,
+        0,
+    )
+    .expect("a first block on an empty state");
+    connect_block(&mut LedgerState::new(), &honest, &params, 2_000_000_000)
+        .expect("and it holds, so every refusal below is the damage and not the fixture");
+
+    // A body that fails refusal four on its own: a coinbase note worth nothing.
+    let mut broken = honest.clone();
+    broken
+        .coinbase
+        .outputs
+        .push(Note::new(Amount::ZERO, owner(1)));
+
+    // Nineteen first. The root still names the body the block had, so the body
+    // is never reached.
+    assert!(
+        matches!(
+            connect_block(&mut state, &broken, &params, 2_000_000_000),
+            Err(BlockError::TransactionsRootMismatch { .. })
+        ),
+        "19 before the body"
+    );
+
+    // Eighteen first, with the root made to match so that nineteen passes.
+    let mut wrong_height = broken.clone();
+    wrong_height.coinbase.height = wrong_height.header.height.saturating_add(1);
+    wrong_height.header.transactions_root = wrong_height.transactions_root();
+    assert!(
+        matches!(
+            connect_block(&mut state, &wrong_height, &params, 2_000_000_000),
+            Err(BlockError::CoinbaseHeightMismatch { .. })
+        ),
+        "18 before the body"
+    );
+
+    // And the body before twenty. The root matches the damaged body, so
+    // nineteen passes; the state root is the one the honest block committed to
+    // and cannot be right for this body, so twenty would refuse it if the body
+    // did not refuse it first.
+    let mut reaches_the_body = broken;
+    reaches_the_body.header.transactions_root = reaches_the_body.transactions_root();
+    assert_eq!(
+        reaches_the_body.header.state_root, honest.header.state_root,
+        "the state root has to be the honest one, or this case proves nothing"
+    );
+    assert!(
+        matches!(
+            connect_block(&mut state, &reaches_the_body, &params, 2_000_000_000),
+            Err(BlockError::ZeroValueCoinbaseOutput { .. })
+        ),
+        "the body before 20"
+    );
+}
+
+/// The body's own refusals, in the order the document now numbers them.
+///
+/// Four of these were made by the implementation and written nowhere: the
+/// document's closing section called that an omission in itself rather than a
+/// defect in the implementation, and said the next revision would state them
+/// with their numbers. This is the guard that goes with them.
+///
+/// Each case breaks two rules at once and the lower number must win, which is
+/// the only way to pin an order: a test that breaks one rule at a time pins
+/// which refusals exist and says nothing about which comes first.
+///
+/// One through six are pinned here. Seven, eight and nine run after them in the
+/// same function and are pinned by their own tests: a paired case for the
+/// eviction cap would need a state with more than a thousand notes about to
+/// fall, which is a fixture about the hot set rather than about this order.
+#[test]
+fn a_bodys_shape_is_refused_in_the_order_the_table_gives() {
+    let params = ConsensusParams::testnet();
+    let state = LedgerState::new();
+    let good = note(1_000, 1);
+    let zero = Note::new(Amount::ZERO, owner(1));
+    let long = vec![0u8; MAX_COINBASE_EXTRA + 1];
+    let crowd = vec![good; params.max_coinbase_outputs + 1];
+    let many: Vec<Transfer> = (0..=params.max_transfers_per_block)
+        .map(|_| Transfer::new(Vec::new(), Vec::new()))
+        .collect();
+    let evaluate = |coinbase: CoinbaseTransaction, transfers: &[Transfer]| {
+        cairn_ledger::validation::evaluate_block_body(&state, &coinbase, transfers, &params)
+            .expect_err("every case here is refused")
+    };
+
+    // 1 before 2: an unknown coinbase version and an oversized extra.
+    let mut version_and_extra = CoinbaseTransaction::with_extra(0, vec![good], long.clone());
+    version_and_extra.version = COINBASE_VERSION + 1;
+    assert!(
+        matches!(
+            evaluate(version_and_extra, &[]),
+            BlockError::UnsupportedCoinbaseVersion(_)
+        ),
+        "1 before 2"
+    );
+
+    // 2 before 3: an oversized extra and too many outputs.
+    assert!(
+        matches!(
+            evaluate(CoinbaseTransaction::with_extra(0, crowd.clone(), long), &[]),
+            BlockError::CoinbaseExtraTooLarge { .. }
+        ),
+        "2 before 3"
+    );
+
+    // 3 before 4: too many outputs, one of them worth nothing.
+    let mut crowd_with_a_zero = crowd;
+    crowd_with_a_zero[0] = zero;
+    assert!(
+        matches!(
+            evaluate(CoinbaseTransaction::new(0, crowd_with_a_zero), &[]),
+            BlockError::TooManyCoinbaseOutputs { .. }
+        ),
+        "3 before 4"
+    );
+
+    // 4 before 5: a coinbase note worth nothing and too many transfers.
+    assert!(
+        matches!(
+            evaluate(CoinbaseTransaction::new(0, vec![zero]), &many),
+            BlockError::ZeroValueCoinbaseOutput { .. }
+        ),
+        "4 before 5"
+    );
+
+    // 5 before 6: too many transfers, the first of them refused on its own.
+    assert!(
+        matches!(
+            evaluate(CoinbaseTransaction::new(0, Vec::new()), &many),
+            BlockError::TooManyTransfers { .. }
+        ),
+        "5 before 6"
+    );
+
+    // And 6 reached at all, with one fewer transfer than the limit allows.
+    assert!(
+        matches!(
+            evaluate(
+                CoinbaseTransaction::new(0, Vec::new()),
+                &many[..params.max_transfers_per_block]
+            ),
+            BlockError::InvalidTransfer { .. }
+        ),
+        "6 is reached once the count is inside the limit"
+    );
+}
 
 #[test]
 fn a_transfers_shape_is_refused_in_the_order_the_table_gives() {
