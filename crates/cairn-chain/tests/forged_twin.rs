@@ -19,6 +19,13 @@
 //! between a stranger and this node's memory are all about the header, which
 //! the twin copies exactly. What decided the matter was the body it arrived
 //! with, and the body is the one part an identifier does not commit to.
+//!
+//! The third is the half the branch does not settle: a block held *off* the
+//! branch, which is every rival a node is weighing. Nothing there has been
+//! applied, so neither body is known good, and whichever arrived last used to
+//! take the place of whichever arrived first. Last is the easy half of that
+//! race, and what it buys is a heavier branch the node then refuses, with the
+//! peer that brought it blamed for a body it never sent.
 
 #![allow(
     clippy::doc_markdown,
@@ -95,6 +102,15 @@ impl Branch {
 
     fn mine_empty(&mut self, miner: &SecretKey, count: usize) -> Vec<Block> {
         (0..count).map(|_| self.mine(miner, Vec::new())).collect()
+    }
+
+    /// A second branch carrying on from where this one stands.
+    fn fork(&self) -> Self {
+        Self {
+            params: self.params,
+            state: self.state.clone(),
+            clock: self.clock,
+        }
     }
 }
 
@@ -209,4 +225,97 @@ fn a_twin_of_a_block_already_followed_cannot_take_its_body() {
         "and what the node holds at that height is still the block it applied"
     );
     assert_eq!(store.height(), Some(11), "with nothing else disturbed");
+}
+
+/// Nor of a block held off it, which is where the same copy still landed.
+///
+/// The branch settles the case above and says nothing about this one. A block
+/// a node is holding aside has not been applied, so neither body under that
+/// identifier is known good, and `hold` wrote whichever arrived last over
+/// whichever arrived first. Last is the easy half of that race: a twin is made
+/// by copying a block, so it cannot exist before the block it copies, and an
+/// attacker who merely answers every honest delivery wins it every time.
+///
+/// What that buys is the branch. The forgery sits under the real block's
+/// identifier until the branch it is on becomes the heaviest, and then the
+/// switch onto it reads the forged body, fails on a root that does not match,
+/// and leaves the node on the lighter branch. `cairn-net` reads that refusal
+/// as `DropReason::BadBlock` against whoever delivered the block above it,
+/// which is the peer carrying the winning chain: it is disconnected and
+/// refused for a body it never sent.
+///
+/// And offering the real block again does not undo it. It weighs no more than
+/// the branch already followed, so it is filed aside as a side branch, and
+/// nothing re-weighs the block above it: measured here, the node stays where
+/// it was until the tip of the winning branch is offered a second time.
+///
+/// So a body is taken only for an identifier this node holds no body for. The
+/// one it holds is the one it tries; if that fails it is dropped, and the next
+/// to arrive gets its turn, which is what
+/// `an_invalid_twin_seen_first_must_not_lock_out_the_honest_block` measures.
+#[test]
+fn a_twin_of_a_block_held_off_the_branch_cannot_take_its_body() {
+    let params = params();
+    let miner = wallet(1);
+    let thief = wallet(9);
+
+    // Eleven blocks both branches share, then two on the one this node
+    // follows and three on the rival, which is therefore the heavier.
+    let mut branch = Branch::new(params);
+    let shared = branch.mine_empty(&miner, 11);
+    let mut aside = branch.fork();
+    let followed = branch.mine_empty(&miner, 2);
+    let rival = aside.mine_empty(&wallet(2), 3);
+
+    let mut store = ChainStore::new(params);
+    for block in shared.iter().chain(followed.iter()) {
+        store.add_block(block.clone(), NOW).unwrap();
+    }
+    assert_eq!(store.height(), Some(12));
+
+    // The rival's first two blocks, held aside: at that point it carries the
+    // same work as the branch being followed, and a tie keeps what is followed.
+    for block in &rival[..2] {
+        assert_eq!(
+            store.add_block(block.clone(), NOW),
+            Ok(Accepted::SideBranch)
+        );
+    }
+    assert_eq!(store.block(&rival[0].id()), Some(&rival[0]));
+
+    // The twin: the real header, so the real identifier and the real work,
+    // and a body paying the reward to somebody else.
+    let mut twin = rival[0].clone();
+    twin.coinbase = CoinbaseTransaction::new(
+        11,
+        vec![Note::new(params.reward_at(11), thief.public_key())],
+    );
+    assert_eq!(twin.id(), rival[0].id(), "the twin shares the identifier");
+    assert_ne!(twin.encode(), rival[0].encode(), "yet is a different block");
+
+    assert_eq!(
+        store.add_block(twin, NOW),
+        Ok(Accepted::SideBranch),
+        "the branch it hangs from is no heavier for the copy arriving"
+    );
+    assert_eq!(
+        store.block(&rival[0].id()),
+        Some(&rival[0]),
+        "the body this node holds under that identifier is the one it was \
+         holding, not the one that arrived over it"
+    );
+
+    // And then the block that makes the rival the heaviest branch, from the
+    // peer that has it. The switch reads the body held for the block below,
+    // so this is where a forgery taken above would be paid for.
+    assert_eq!(
+        store.add_block(rival[2].clone(), NOW),
+        Ok(Accepted::Reorganised {
+            removed: followed.iter().rev().map(Block::id).collect(),
+            added: rival.iter().map(Block::id).collect(),
+        }),
+        "the heavier branch was refused, and the peer that brought it blamed"
+    );
+    assert_eq!(store.height(), Some(13));
+    assert_eq!(store.tip(), Some(rival[2].id()));
 }
