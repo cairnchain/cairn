@@ -5102,7 +5102,14 @@ impl Shared {
                 // rather than from memory: holding it in memory would be a
                 // gigabyte at thirty years.
                 let prove = |height: u64| self.proof_off_disk(height, tip.height);
-                let start = open_start(&tip, ground.history.clone(), SAMPLES, header_at, prove)?;
+                let start = open_start(
+                    &tip,
+                    ground.history.clone(),
+                    SAMPLES,
+                    &self.params,
+                    header_at,
+                    prove,
+                )?;
                 Some(start.encode())
             }
             Joining::Ledger => {

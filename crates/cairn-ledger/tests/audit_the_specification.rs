@@ -60,7 +60,9 @@ use cairn_ledger::note::{NetworkId, Note, NoteId};
 use cairn_ledger::pow::{
     median_time_past, meets_target, next_difficulty, target_for, work_of, MIN_DIFFICULTY,
 };
-use cairn_ledger::sampling::{covering, draw, seed_of, work_before, Sample, SAMPLES, SHALLOWEST};
+use cairn_ledger::sampling::{
+    covering, draw, levels_of, seed_of, work_before, Sample, SAMPLES, SHALLOWEST,
+};
 use cairn_ledger::state::{cold_leaf, note_key};
 use cairn_ledger::transaction::{
     CoinbaseTransaction, Input, Transfer, Witness, COINBASE_VERSION, TRANSFER_VERSION,
@@ -1025,6 +1027,13 @@ fn spec_levels(height: u64) -> u32 {
     spec_bit_length((height / 1_024).max(1)).max(1)
 }
 
+/// `age = (tip.timestamp - opens_at) / target_block_time`, and the count is
+/// `spec_levels(min(age, tip.height))`.
+fn spec_levels_of(tip: &BlockHeader, params: &ConsensusParams) -> u32 {
+    let age = tip.timestamp.saturating_sub(params.opens_at) / params.target_block_time;
+    spec_levels(age.min(tip.height))
+}
+
 /// What a reimplementation reaching for a base-two logarithm writes instead.
 /// Identical everywhere except at a power of two, which is the point.
 fn logarithm_levels(height: u64) -> u32 {
@@ -1037,11 +1046,11 @@ fn logarithm_levels(height: u64) -> u32 {
 }
 
 /// The seven steps of the draw, in order.
-fn spec_draw(seed: Hash32, count: usize, total: u128, blocks: u64) -> Vec<u128> {
+fn spec_draw(seed: Hash32, count: usize, total: u128, levels: u32) -> Vec<u128> {
     if total == 0 || count == 0 {
         return Vec::new();
     }
-    let levels = u128::from(spec_levels(blocks));
+    let levels = u128::from(levels.max(1));
     let mut drawn = Vec::with_capacity(count);
     for index in 0..count as u64 {
         let mut preimage = Vec::with_capacity(40);
@@ -1050,7 +1059,9 @@ fn spec_draw(seed: Hash32, count: usize, total: u128, blocks: u64) -> Vec<u128> 
         let bytes = hash(Domain::SamplingSeed, &preimage);
         let bytes = bytes.as_bytes();
 
-        let level = u128::from(bytes[0]) % levels;
+        let mut level_bytes = [0u8; 8];
+        level_bytes.copy_from_slice(&bytes[0..8]);
+        let level = (u128::from(u64::from_le_bytes(level_bytes)) * levels) >> 64;
         let mut within_bytes = [0u8; 16];
         within_bytes.copy_from_slice(&bytes[8..24]);
         let within = u128::from_le_bytes(within_bytes);
@@ -1106,6 +1117,83 @@ fn the_level_count_counts_leading_zeros_and_not_a_logarithm() {
     assert_eq!(SAMPLES, 4_096);
 }
 
+/// The count comes from the tip's age, capped by its height, as the document
+/// says, and neither a height nor a clock outside the two can move it further.
+#[test]
+fn the_level_count_is_the_age_the_document_gives() {
+    let params = ConsensusParams::testnet();
+    let mut agreed = 0u32;
+    let mut tip = BlockHeader {
+        version: 1,
+        network: params.network,
+        height: 0,
+        previous: Hash32::ZERO,
+        transactions_root: Hash32::ZERO,
+        state_root: Hash32::ZERO,
+        history: Hash32::ZERO,
+        timestamp: 0,
+        difficulty: 1,
+        total_work: 1,
+        nonce: 0,
+    };
+    let heights = [
+        0u64,
+        1,
+        1_023,
+        1_024,
+        2_048,
+        30 * 365 * 24 * 60,
+        1 << 32,
+        1 << 61,
+        u64::MAX,
+    ];
+    let ages = [
+        0u64,
+        1,
+        59,
+        60,
+        61,
+        1_024 * 60,
+        30 * 365 * 24 * 60 * 60,
+        1 << 40,
+        u64::MAX,
+    ];
+    for height in heights {
+        for seconds in ages {
+            tip.height = height;
+            tip.timestamp = params.opens_at.saturating_add(seconds);
+            assert_eq!(
+                levels_of(&tip, &params),
+                spec_levels_of(&tip, &params),
+                "the count at height {height} and {seconds} s after opening"
+            );
+            agreed += 1;
+        }
+    }
+    assert_eq!(agreed, 81);
+
+    // A tip dated before its network opened is a tip of no age at all, rather
+    // than one whose subtraction ran backwards.
+    tip.height = 1 << 40;
+    tip.timestamp = 0;
+    let opened_later = ConsensusParams {
+        opens_at: 1_000_000,
+        ..params
+    };
+    assert_eq!(levels_of(&tip, &opened_later), 1);
+
+    // And the height is the smaller of the two wherever it is smaller: a chain
+    // of ten blocks opened a year ago halves once, not nine times.
+    tip.height = 10;
+    tip.timestamp = params.opens_at + 365 * 24 * 60 * 60;
+    assert_eq!(levels_of(&tip, &params), 1);
+    assert_eq!(
+        spec_levels(365 * 24 * 60),
+        10,
+        "what the age alone would say"
+    );
+}
+
 #[test]
 fn the_draw_is_the_seven_steps_the_document_gives() {
     let seeds = [
@@ -1136,8 +1224,8 @@ fn the_draw_is_the_seven_steps_the_document_gives() {
             for &total in &totals {
                 let count = 4;
                 assert_eq!(
-                    draw(seed, count, total, blocks),
-                    spec_draw(seed, count, total, blocks),
+                    draw(seed, count, total, spec_levels(blocks)),
+                    spec_draw(seed, count, total, spec_levels(blocks)),
                     "the draw at total {total}, height {blocks}"
                 );
                 agreed += 1;
@@ -1148,13 +1236,14 @@ fn the_draw_is_the_seven_steps_the_document_gives() {
 
     // The empty cases the document names, and a full draw at the published
     // count, which is the one a real weighing runs.
-    assert!(draw(seeds[0], 0, 1_000, 10_000).is_empty());
-    assert!(draw(seeds[0], 8, 0, 10_000).is_empty());
-    let full = draw(seeds[2], SAMPLES, 1 << 40, 30 * 365 * 24 * 60);
+    assert!(draw(seeds[0], 0, 1_000, spec_levels(10_000)).is_empty());
+    assert!(draw(seeds[0], 8, 0, spec_levels(10_000)).is_empty());
+    let years = 30 * 365 * 24 * 60;
+    let full = draw(seeds[2], SAMPLES, 1 << 40, spec_levels(years));
     assert_eq!(full.len(), SAMPLES);
     assert_eq!(
         full,
-        spec_draw(seeds[2], SAMPLES, 1 << 40, 30 * 365 * 24 * 60)
+        spec_draw(seeds[2], SAMPLES, 1 << 40, spec_levels(years))
     );
 }
 
@@ -1169,7 +1258,7 @@ fn a_logarithm_in_place_of_the_leading_zeros_would_draw_different_questions() {
     let mut differed = 0u32;
     for exponent in 1..20u32 {
         let blocks = (1u64 << exponent) * 1_024;
-        let honest = spec_draw(seed, 32, total, blocks);
+        let honest = spec_draw(seed, 32, total, spec_levels(blocks));
         let mistaken: Vec<u128> = {
             // The same seven steps with the one substitution.
             let levels = u128::from(logarithm_levels(blocks));
@@ -1180,7 +1269,9 @@ fn a_logarithm_in_place_of_the_leading_zeros_would_draw_different_questions() {
                     preimage.extend_from_slice(&index.to_le_bytes());
                     let bytes = hash(Domain::SamplingSeed, &preimage);
                     let bytes = bytes.as_bytes();
-                    let level = u128::from(bytes[0]) % levels;
+                    let mut level_bytes = [0u8; 8];
+                    level_bytes.copy_from_slice(&bytes[0..8]);
+                    let level = (u128::from(u64::from_le_bytes(level_bytes)) * levels) >> 64;
                     let mut within_bytes = [0u8; 16];
                     within_bytes.copy_from_slice(&bytes[8..24]);
                     let within = u128::from_le_bytes(within_bytes);

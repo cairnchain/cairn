@@ -28,7 +28,7 @@ use cairn_ledger::note::Note;
 use cairn_ledger::pow::DIFFICULTY_WINDOW;
 use cairn_ledger::pow::{meets_target, next_difficulty, RECENT_HEADERS};
 use cairn_ledger::sampling::{
-    check_start, draw, seed_of, work_before, Sample, SampledStart, SAMPLES,
+    check_start, draw, levels_of, seed_of, work_before, Sample, SampledStart, SAMPLES,
 };
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
@@ -198,7 +198,12 @@ fn a_free_run_cannot_swallow_the_anchor_any_more() {
     assert_eq!(archive.forest().leaves(), tip.height, "history length");
 
     // ---- the weighing -------------------------------------------------
-    let wanted = draw(seed_of(&tip), SAMPLES, work_before(&tip), tip.height);
+    let wanted = draw(
+        seed_of(&tip),
+        SAMPLES,
+        work_before(&tip),
+        levels_of(&tip, &params),
+    );
     let samples: Vec<Sample> = wanted
         .iter()
         .map(|value| {

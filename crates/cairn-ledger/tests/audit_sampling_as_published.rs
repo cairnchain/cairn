@@ -17,7 +17,7 @@
 
 use cairn_ledger::block::HeaderSummary;
 use cairn_ledger::pow::{next_difficulty, DIFFICULTY_WINDOW, MIN_DIFFICULTY};
-use cairn_ledger::sampling::{draw, SAMPLES, SHALLOWEST};
+use cairn_ledger::sampling::{draw, levels_for, SAMPLES, SHALLOWEST};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_primitives::Hash32;
 
@@ -129,12 +129,10 @@ fn the_drift_the_joining_argument_rests_on_is_two_hours() {
     );
 }
 
-/// Halvings the draw spreads itself over, restated here so the test can name a
-/// level without reaching into a private function.
-///
-/// Checked below against the levels the real draw actually lands on, so this
-/// staying in step with `levels_for` is a measurement rather than a promise.
-fn levels_for(blocks: u64) -> u32 {
+/// Halvings the draw spreads itself over, restated here from the two constants
+/// rather than called, so that the shipped function is measured rather than
+/// quoted back at itself.
+fn restated_levels(blocks: u64) -> u32 {
     let separable = blocks / SHALLOWEST;
     u64::BITS - separable.max(1).leading_zeros()
 }
@@ -151,63 +149,98 @@ fn band_of(value: u128, total: u128, levels: u32) -> u32 {
     levels
 }
 
-/// The bias in the level draw, stated as a property rather than fixed.
+/// Draws taken for the even-spread measurement below.
+///
+/// A million puts the noise on one band at a third of a per cent, which is
+/// enough to separate an even spread from the 3.9 per cent the four over-drawn
+/// levels used to run at.
+const DRAWS: usize = 1_000_000;
+
+/// The bias the level draw used to carry, and the shape that carries none.
 ///
 /// `bytes[0] % levels` is not uniform when `levels` does not divide 256. At
-/// fourteen levels, which is a thirty year chain, four levels come up 19 times
-/// in 256 and ten come up 18. The four are the deep end and the ten are the
-/// end nearest the tip, so the loss falls exactly where `FlyClient` wants the
-/// density: 4096 draws do the work of 4032.
+/// fourteen levels, which is a thirty year chain, four levels came up 19 times
+/// in 256 and ten came up 18. The four were the deep end and the ten the end
+/// nearest the tip, so the loss fell exactly where `FlyClient` wants the
+/// density: 4096 draws did the work of 4032.
 ///
-/// Not fixed, and `draw`'s own doc says why at length. The short of it is that
-/// both sides compute the same biased draw so nothing disagrees, that the 43
-/// percent the papers hold three points back from was measured through this
-/// very draw and so already contains the loss, and that changing which
-/// positions a chain is asked about costs a network number.
+/// It was left alone for as long as the draw was left alone, on the grounds
+/// that both sides computed the same biased list so nothing disagreed, and
+/// that changing which positions a chain is asked about is a change every
+/// prover and every newcomer makes on the same day. The level count moving off
+/// the tip's height is that change, so the byte went with it.
+///
+/// The old extraction is written out below and put through the same bound the
+/// new one passes, because a test for an even spread that cannot fail on an
+/// uneven one measures nothing.
 #[test]
-fn the_level_draw_is_biased_towards_the_deep_end_by_this_much() {
-    let levels = levels_for(THIRTY_YEARS);
+fn the_level_draw_leans_on_no_end_of_the_chain() {
+    let levels = restated_levels(THIRTY_YEARS);
+    assert_eq!(
+        levels,
+        levels_for(THIRTY_YEARS),
+        "the restatement has drifted from the shipped count"
+    );
     assert_eq!(
         levels, 14,
         "a thirty year chain spreads over fourteen levels"
     );
-    assert_eq!(256 % levels, 4, "four levels get one extra byte value each");
 
-    let over = 19.0 * f64::from(levels) / 256.0;
-    let under = 18.0 * f64::from(levels) / 256.0;
-    assert!(
-        (under - 0.984_375).abs() < 1e-9,
-        "under-drawn by 1.5625 percent"
-    );
-    // In whole numbers, so the published count is not read off a float:
-    // 4096 draws, 18 of every 256 byte values per level, 14 levels.
+    // What the byte cost, in whole numbers, so the figure is not read off a
+    // float: 4096 draws, 18 of every 256 byte values per level, 14 levels.
+    assert_eq!(256 % levels, 4, "four levels got one extra byte value each");
     let effective = u64::try_from(SAMPLES).unwrap() * 18 * u64::from(levels) / 256;
-    assert_eq!(effective, 4_032, "4096 draws do the work of 4032");
+    assert_eq!(effective, 4_032, "4096 draws did the work of 4032");
 
-    // And the real draw, which is what the bound is actually taken over.
+    // The real draw, which is what the bound is actually taken over. A million
+    // of them puts the noise on one band at a third of a percent, so a bound
+    // of one percent separates an even spread from the 3.9 percent the four
+    // over-drawn levels used to run at.
+    let tip = Hash32::from_bytes([9; 32]);
     let total = u128::from(THIRTY_YEARS);
-    let count = 1_000_000usize;
-    let mut seen = vec![0u64; levels as usize + 1];
-    for value in draw(Hash32::from_bytes([9; 32]), count, total, THIRTY_YEARS) {
-        seen[band_of(value, total, levels) as usize] += 1;
+    let mut landed = vec![0u64; levels as usize + 1];
+    for value in draw(tip, DRAWS, total, levels) {
+        landed[band_of(value, total, levels) as usize] += 1;
     }
     assert_eq!(
-        seen[levels as usize], 0,
+        landed[levels as usize], 0,
         "every draw has to land in a level the halving reaches"
     );
 
-    let uniform = count as f64 / f64::from(levels);
-    for (level, drawn) in seen.iter().take(levels as usize).enumerate() {
-        let share = *drawn as f64 / uniform;
-        let expected = if level < 4 { over } else { under };
+    let uniform = DRAWS as f64 / f64::from(levels);
+    for (level, drawn) in landed.iter().take(levels as usize).enumerate() {
+        let off = (*drawn as f64 - uniform) / uniform;
         assert!(
-            (share - expected).abs() < 0.01,
-            "level {level} was drawn {share:.4} of uniform against {expected:.4}"
+            off.abs() < 0.01,
+            "level {level} was drawn {:.4} of uniform",
+            off + 1.0
         );
     }
+
+    // And the same bound against the extraction that shipped for six networks,
+    // rebuilt here from its own description. It fails, which is what makes the
+    // paragraph above a measurement.
+    let mut old = vec![0u64; levels as usize];
+    for index in 0..DRAWS as u64 {
+        let mut preimage = Vec::with_capacity(40);
+        preimage.extend_from_slice(tip.as_bytes());
+        preimage.extend_from_slice(&index.to_le_bytes());
+        let bytes =
+            cairn_primitives::hash::hash(cairn_primitives::hash::Domain::SamplingSeed, &preimage);
+        let level = u32::from(bytes.as_bytes()[0]) % levels;
+        old[level as usize] += 1;
+    }
+    let worst = old
+        .iter()
+        .map(|drawn| ((*drawn as f64 - uniform) / uniform).abs())
+        .fold(0.0f64, f64::max);
     assert!(
-        seen[0..4].iter().min().unwrap() > seen[4..levels as usize].iter().max().unwrap(),
-        "the four over-drawn levels have to be the deep ones, or the loss falls \
-         somewhere other than where this reasoning puts it"
+        worst > 0.03,
+        "the byte the draw used to read was only {:.2} percent off uniform, so          the bound above is not measuring the fix",
+        worst * 100.0
+    );
+    assert!(
+        old[0..4].iter().min().unwrap() > old[4..levels as usize].iter().max().unwrap(),
+        "the four over-drawn levels have to be the deep ones, or the loss fell          somewhere other than where this reasoning puts it"
     );
 }

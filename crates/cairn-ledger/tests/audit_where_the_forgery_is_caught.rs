@@ -31,7 +31,8 @@ use cairn_ledger::block::BlockHeader;
 use cairn_ledger::note::Note;
 use cairn_ledger::pow::{meets_target, work_of, DIFFICULTY_WINDOW};
 use cairn_ledger::sampling::{
-    check_start, draw, seed_of, work_before, Sample, SampledStart, StartError, SHALLOWEST,
+    check_start, draw, levels_of, seed_of, work_before, Sample, SampledStart, StartError,
+    SHALLOWEST,
 };
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
@@ -150,32 +151,37 @@ impl Forgery {
     /// counted by the old harness as a forgery caught.
     fn present(&self, tip: BlockHeader, count: usize, reach_up: bool) -> SampledStart {
         let last = self.shown.len() - 1;
-        let samples: Vec<Sample> = draw(seed_of(&tip), count, work_before(&tip), tip.height)
-            .into_iter()
-            .map(|work| {
-                // The block spanning the draw where there is one. Where the
-                // draw fell in invented work there is none, and the forgery has
-                // two neighbours to choose between: the block below the gap,
-                // whose total falls short of the value, and the block above it,
-                // whose own work starts past the value. `reach_up` picks which,
-                // because the check refuses each for a different half of one
-                // comparison and a test that only ever offers one of them
-                // measures half the rule.
-                let above = self.shown[..last]
-                    .partition_point(|header| header.total_work <= work)
-                    .min(last - 1);
-                let spans = work_before(&self.shown[above]) <= work;
-                let at = if spans || reach_up {
-                    above
-                } else {
-                    above.saturating_sub(1)
-                };
-                Sample {
-                    header: self.shown[at],
-                    proof: self.before_tip.prove(at as u64).unwrap(),
-                }
-            })
-            .collect();
+        let samples: Vec<Sample> = draw(
+            seed_of(&tip),
+            count,
+            work_before(&tip),
+            levels_of(&tip, &params()),
+        )
+        .into_iter()
+        .map(|work| {
+            // The block spanning the draw where there is one. Where the
+            // draw fell in invented work there is none, and the forgery has
+            // two neighbours to choose between: the block below the gap,
+            // whose total falls short of the value, and the block above it,
+            // whose own work starts past the value. `reach_up` picks which,
+            // because the check refuses each for a different half of one
+            // comparison and a test that only ever offers one of them
+            // measures half the rule.
+            let above = self.shown[..last]
+                .partition_point(|header| header.total_work <= work)
+                .min(last - 1);
+            let spans = work_before(&self.shown[above]) <= work;
+            let at = if spans || reach_up {
+                above
+            } else {
+                above.saturating_sub(1)
+            };
+            Sample {
+                header: self.shown[at],
+                proof: self.before_tip.prove(at as u64).unwrap(),
+            }
+        })
+        .collect();
 
         let deepest = samples
             .iter()
@@ -203,9 +209,14 @@ impl Forgery {
     /// nothing else, so that it can be held against what the check did.
     fn the_draw_reaches(&self, tip: &BlockHeader, count: usize) -> bool {
         let (from, to) = self.invented;
-        draw(seed_of(tip), count, work_before(tip), tip.height)
-            .into_iter()
-            .any(|work| work >= from && work < to)
+        draw(
+            seed_of(tip),
+            count,
+            work_before(tip),
+            levels_of(tip, &params()),
+        )
+        .into_iter()
+        .any(|work| work >= from && work < to)
     }
 }
 

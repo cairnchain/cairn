@@ -33,13 +33,15 @@
 //!
 //! What it does not search is anything but the fork depth. The gap's alignment
 //! against the halving boundaries, which band it lands in, whether it is one
-//! piece, and above all the level count itself are all held fixed here, and the
-//! last of those is not the chain's to fix: `levels` is `bit_length(height /
-//! 1024)` and the height is a field of the tip. `examples/breaking_the_bound`
-//! searches those four, and finds a placement this file's conclusion does not
-//! survive; `tests/audit_the_bound.rs` builds one and puts it through
-//! `check_start`. The numbers below are still the numbers for a forger that
-//! takes the level count as given.
+//! piece, and the level count itself are all held fixed here.
+//! `examples/searching_for_a_break` searches those four. It found one: the
+//! level count used to be `bit_length(tip.height / 1024)`, read off a field a
+//! prover writes down, and a forger that wrote a larger one walked past this
+//! file's conclusion. `levels_of` takes the count from the tip's own age
+//! instead, which a reader's clock bounds, and `tests/audit_the_bound.rs` is
+//! the break and its closure put through `check_start`. The numbers below are
+//! the numbers for a forger at the honest count, which is now the only count
+//! there is to be at.
 //!
 //! Run with `cargo run --release -p cairn-ledger --example adversarial_placement`.
 
@@ -64,8 +66,8 @@ use cairn_ledger::block::{BlockHeader, HeaderSummary};
 use cairn_ledger::note::Note;
 use cairn_ledger::pow::{meets_target, next_difficulty, work_of, DIFFICULTY_WINDOW};
 use cairn_ledger::sampling::{
-    check_start, covering, draw, seed_of, work_before, Sample, SampledStart, StartError, SAMPLES,
-    SHALLOWEST,
+    check_start, covering, draw, levels_of, seed_of, work_before, Sample, SampledStart, StartError,
+    SAMPLES, SHALLOWEST,
 };
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
@@ -77,11 +79,12 @@ use cairn_primitives::hash::{hash, Domain};
 
 /// Halvings the draw spreads itself over on a chain of this many blocks.
 ///
-/// `sampling.rs` keeps this private and the constant it reads from public, so
-/// it is restated here rather than reached for, and held against the real draw
-/// in [`one_chain`]: no drawn value may reach past the last band this says the
-/// halving makes.
-fn levels_for(blocks: u64) -> u32 {
+/// Restated from the two constants rather than called, and held against the
+/// real draw in [`one_chain`]: no drawn value may reach past the last band this
+/// says the halving makes. What ships takes the count from a tip through
+/// `levels_of`, and the chains built here are chains whose age and height
+/// agree, so the two answer the same. That is asserted rather than assumed.
+fn restated_levels(blocks: u64) -> u32 {
     let separable = blocks / SHALLOWEST;
     u64::BITS
         .saturating_sub(separable.max(1).leading_zeros())
@@ -232,7 +235,13 @@ fn built_and_checked() {
 fn one_chain(name: &str, moving: bool) {
     let honest = build(HEIGHT, moving);
     let tip = honest.last().unwrap();
-    let levels = levels_for(tip.height);
+    let levels = levels_of(tip, &params());
+    assert_eq!(
+        levels,
+        restated_levels(tip.height),
+        "this chain's clock and its height disagree, so it is not the chain the \
+         table below describes"
+    );
     let hardest = honest.iter().map(|header| header.difficulty).max().unwrap();
     let easiest = honest.iter().map(|header| header.difficulty).min().unwrap();
     println!(
@@ -272,9 +281,14 @@ fn one_chain(name: &str, moving: bool) {
             // What the model says before the check is asked: the draw
             // catches this tip if any drawn value lands in work no block
             // spans. Nothing else in the model, and nothing about links.
-            let reaches = draw(seed_of(&ground), COUNT, work_before(&ground), ground.height)
-                .into_iter()
-                .any(|work| work >= from && work < to);
+            let reaches = draw(
+                seed_of(&ground),
+                COUNT,
+                work_before(&ground),
+                levels_of(&ground, &params()),
+            )
+            .into_iter()
+            .any(|work| work >= from && work < to);
             tally.note(
                 reaches,
                 start.tail.len(),
@@ -307,7 +321,7 @@ fn one_chain(name: &str, moving: bool) {
 ///
 /// And the two figures this file restates rather than reaches for: the way it
 /// answers a draw, against the [`covering`] a prover ships, and its own
-/// [`levels_for`] against the draw that ships.
+/// [`restated_levels`] against the draw that ships.
 fn control_and_calibration(honest: &[BlockHeader], levels: u32) {
     let chain_tip = *honest.last().unwrap();
     // The control. Nothing is forged, so the same harness that builds every
@@ -347,7 +361,7 @@ fn control_and_calibration(honest: &[BlockHeader], levels: u32) {
         seed_of(&honest_tip),
         COUNT,
         work_before(&honest_tip),
-        honest_tip.height,
+        levels_of(&honest_tip, &params()),
     ) {
         assert_eq!(
             Some(control.best_answer(work)),
@@ -356,13 +370,18 @@ fn control_and_calibration(honest: &[BlockHeader], levels: u32) {
         );
     }
 
-    // And the restated `levels_for` against the draw that ships. The top band
+    // And the restated level count against the draw that ships. The top band
     // is the one the halving stops before, and nothing may be drawn in it: that
     // is what leaves the run up to the tip a job to do, and it is the first row
     // of the table below.
     let reach = work_before(&chain_tip);
     let ceiling = reach.saturating_sub(reach >> levels);
-    for work in draw(seed_of(&chain_tip), SAMPLES, reach, chain_tip.height) {
+    for work in draw(
+        seed_of(&chain_tip),
+        SAMPLES,
+        reach,
+        levels_of(&chain_tip, &params()),
+    ) {
         assert!(
             work < ceiling,
             "a draw reached {work}, past the last band the halving makes at {ceiling}"
@@ -603,16 +622,21 @@ impl Forgery {
     /// run, refused for the mismatch, counted as a forgery caught.
     fn present(&mut self, tip: BlockHeader, count: usize) -> SampledStart {
         let last = self.shown.len().saturating_sub(1);
-        let samples: Vec<Sample> = draw(seed_of(&tip), count, work_before(&tip), tip.height)
-            .into_iter()
-            .map(|work| {
-                let height = self.best_answer(work);
-                Sample {
-                    header: self.shown[usize::try_from(height).unwrap()],
-                    proof: self.path(height),
-                }
-            })
-            .collect();
+        let samples: Vec<Sample> = draw(
+            seed_of(&tip),
+            count,
+            work_before(&tip),
+            levels_of(&tip, &params()),
+        )
+        .into_iter()
+        .map(|work| {
+            let height = self.best_answer(work);
+            Sample {
+                header: self.shown[usize::try_from(height).unwrap()],
+                proof: self.path(height),
+            }
+        })
+        .collect();
 
         let deepest = samples
             .iter()
@@ -892,7 +916,7 @@ fn every_draw(total: u128) -> Vec<u128> {
     let mut all = Vec::with_capacity((SEEDS as usize) * SAMPLES);
     for trial in 0..SEEDS {
         let seed = hash(Domain::SamplingSeed, &trial.to_le_bytes());
-        all.extend(draw(seed, SAMPLES, total, BLOCKS));
+        all.extend(draw(seed, SAMPLES, total, restated_levels(BLOCKS)));
     }
     all.sort_unstable();
     all

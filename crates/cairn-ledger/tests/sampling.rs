@@ -14,7 +14,8 @@ use cairn_ledger::block::BlockHeader;
 use cairn_ledger::note::Note;
 use cairn_ledger::pow::{work_of, DIFFICULTY_WINDOW};
 use cairn_ledger::sampling::{
-    check_start, covering, draw, open_start, seed_of, work_before, Sample, SampledStart, StartError,
+    check_start, covering, draw, levels_of, open_start, seed_of, work_before, Sample, SampledStart,
+    StartError,
 };
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
@@ -99,18 +100,23 @@ impl Keeper {
             .map(|header| (header.height, header.total_work, header.difficulty))
             .collect();
 
-        let samples: Vec<Sample> = draw(seed_of(&tip), count, work_before(&tip), tip.height)
-            .into_iter()
-            .map(|work| {
-                let height = covering(&ledger, work).expect("some block spans it");
-                let header = self.headers[usize::try_from(height).unwrap()];
-                let proof = self
-                    .before_tip
-                    .prove(height)
-                    .expect("a keeper can prove what it kept");
-                Sample { header, proof }
-            })
-            .collect();
+        let samples: Vec<Sample> = draw(
+            seed_of(&tip),
+            count,
+            work_before(&tip),
+            levels_of(&tip, &params()),
+        )
+        .into_iter()
+        .map(|work| {
+            let height = covering(&ledger, work).expect("some block spans it");
+            let header = self.headers[usize::try_from(height).unwrap()];
+            let proof = self
+                .before_tip
+                .prove(height)
+                .expect("a keeper can prove what it kept");
+            Sample { header, proof }
+        })
+        .collect();
 
         let below = usize::try_from(tip.height).unwrap() - 1;
         let deepest = samples
@@ -179,20 +185,25 @@ fn a_tip_that_overstates_its_work_is_caught() {
         .rev()
         .map(|header| (header.height, header.total_work, header.difficulty))
         .collect();
-    let samples = draw(seed_of(&forged), 64, work_before(&forged), forged.height)
-        .into_iter()
-        .map(|work| {
-            // The best it has: the block spanning the draw where one does,
-            // and otherwise the deepest header its forest can prove, since
-            // the tip is not in its own history.
-            let height = covering(&ledger, work)
-                .unwrap_or(HEIGHT - 2)
-                .min(HEIGHT - 2);
-            let header = keeper.headers[usize::try_from(height).unwrap()];
-            let proof = keeper.before_tip.prove(height).unwrap();
-            Sample { header, proof }
-        })
-        .collect();
+    let samples = draw(
+        seed_of(&forged),
+        64,
+        work_before(&forged),
+        levels_of(&forged, &params()),
+    )
+    .into_iter()
+    .map(|work| {
+        // The best it has: the block spanning the draw where one does,
+        // and otherwise the deepest header its forest can prove, since
+        // the tip is not in its own history.
+        let height = covering(&ledger, work)
+            .unwrap_or(HEIGHT - 2)
+            .min(HEIGHT - 2);
+        let header = keeper.headers[usize::try_from(height).unwrap()];
+        let proof = keeper.before_tip.prove(height).unwrap();
+        Sample { header, proof }
+    })
+    .collect();
 
     let start = SampledStart {
         tip: forged,
@@ -305,7 +316,7 @@ fn a_header_that_does_not_span_the_work_drawn_is_refused() {
         seed_of(&start.tip),
         16,
         work_before(&start.tip),
-        start.tip.height,
+        levels_of(&start.tip, &params()),
     );
     let elsewhere = keeper
         .headers
@@ -402,6 +413,7 @@ fn a_keeper_answers_a_draw_it_did_not_choose() {
         &tip,
         keeper.before_tip.forest().roots_only(),
         64,
+        &params(),
         |height| by_height.get(usize::try_from(height).ok()?).copied(),
         |height| keeper.before_tip.prove(height),
     )
@@ -413,7 +425,12 @@ fn a_keeper_answers_a_draw_it_did_not_choose() {
 
     // The heights it opened are the ones the draw asked about, found by
     // halving rather than by walking, which is the only way this scales.
-    let wanted = draw(seed_of(&tip), 64, work_before(&tip), tip.height);
+    let wanted = draw(
+        seed_of(&tip),
+        64,
+        work_before(&tip),
+        levels_of(&tip, &params()),
+    );
     for (sample, work) in start.samples.iter().zip(wanted) {
         assert_eq!(
             covering(
@@ -442,6 +459,7 @@ fn a_node_that_did_not_keep_the_headers_cannot_answer() {
         &tip,
         keeper.before_tip.forest().roots_only(),
         16,
+        &params(),
         |height| by_height.get(usize::try_from(height).ok()?).copied(),
         // Sixty four hashes is enough to check a proof and not to build one.
         |_| None,
@@ -509,18 +527,23 @@ fn a_chain_padded_out_with_weightless_blocks_is_refused() {
         .rev()
         .map(|header| (header.height, header.total_work, header.difficulty))
         .collect();
-    let samples: Vec<Sample> = draw(seed_of(&forged), 64, work_before(&forged), forged.height)
-        .into_iter()
-        .map(|work| {
-            let height = covering(&ledger, work).expect("the honest chain spans every draw");
-            Sample {
-                header: keeper.headers[usize::try_from(height).unwrap()],
-                proof: padded
-                    .prove(height)
-                    .expect("the forger kept the honest leaves"),
-            }
-        })
-        .collect();
+    let samples: Vec<Sample> = draw(
+        seed_of(&forged),
+        64,
+        work_before(&forged),
+        levels_of(&forged, &params()),
+    )
+    .into_iter()
+    .map(|work| {
+        let height = covering(&ledger, work).expect("the honest chain spans every draw");
+        Sample {
+            header: keeper.headers[usize::try_from(height).unwrap()],
+            proof: padded
+                .prove(height)
+                .expect("the forger kept the honest leaves"),
+        }
+    })
+    .collect();
 
     // The forger mines a header of its own to sit under the tip, so that the
     // tip has a parent to open. At the floor every hash satisfies it.

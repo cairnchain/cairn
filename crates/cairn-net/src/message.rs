@@ -31,7 +31,24 @@ use cairn_primitives::Hash32;
 /// to decode it, would take that for a peer that is broken or probing, and
 /// would refuse the address for an hour. A wallet looking for an archivist
 /// would then work its way through the network banning itself from it.
-pub const PROTOCOL_VERSION: u32 = 6;
+///
+/// Seven carries a changed draw. The headers a newcomer asks a chain to open
+/// are spread over a number of halvings that used to be read off the tip's
+/// stated height, which a prover writes down and `check_the_gaps` prices at one
+/// unit of work a block. `cairn_ledger::sampling::levels_of` takes the count
+/// from the tip's own age instead, and the level within a draw now comes from
+/// eight bytes rather than one. Both change which positions a chain is asked
+/// about, so a prover on six answers a list a newcomer on seven never asked
+/// for.
+///
+/// The network number does not move with it, and the difference is worth
+/// stating. A network starts over when a rule makes blocks already mined
+/// invalid. This one does not: every block of testnet-6 is as valid under these
+/// rules as it was under the last, the chain a node follows is the same chain,
+/// and what changed is one exchange between two nodes. That is what a protocol
+/// version is for, and reaching for a network number here would throw away a
+/// chain to fix a message.
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Identifiers one announcement may carry.
 pub const MAX_ANNOUNCED: usize = 512;

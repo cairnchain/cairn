@@ -1,12 +1,11 @@
 //! Searching for a placement the sampling bound does not survive.
 //!
 //! `adversarial_placement` searches one family: a fork depth, the work gap that
-//! depth forces, and a count of draws. Everything else it holds fixed, and in
-//! particular it holds fixed the one input to the draw that a prover writes
-//! down itself. This searches the wider family, and the wider family contains a
-//! placement the published figure does not survive.
+//! depth forces, and a count of draws. Everything else it holds fixed. This
+//! searches the wider family, and the wider family is where the one break this
+//! project has found was found.
 //!
-//! Four axes, and the fourth is the one that matters.
+//! Four axes, and the fourth is the one that mattered.
 //!
 //! **Where the gap sits inside a halving band.** The density the bound is
 //! derived for is `1/x`, and the density the draw ships is a staircase of
@@ -21,31 +20,41 @@
 //! which is why `SAMPLES` says 43 measured against a derivation saying more.
 //! It is separated out here so that the next person does not search it again.
 //!
-//! **Which band.** One byte modulo `levels` does not divide evenly, so the
-//! first `256 mod levels` bands are drawn more often than the rest. A forger
-//! puts its gap in one of the others. Worth 1.6 per cent at the honest height,
-//! and more once the level count is larger.
+//! **Which band.** The level used to be drawn as one byte modulo `levels`,
+//! which does not divide evenly, so the first `256 mod levels` bands were drawn
+//! more often than the rest and a forger put its gap in one of the others. The
+//! level now comes from eight bytes scaled rather than reduced, so the axis is
+//! worth nothing; it is still swept, because a family nobody searches is not a
+//! family nobody can use.
 //!
 //! **Whether the gap is one piece.** It is: the density falls with depth, so
 //! splitting the lie moves part of it shallower. Searched and reported anyway,
-//! because a family nobody searched is not a family nobody can use.
+//! for the same reason.
 //!
-//! **How many bands there are.** `levels` is `bit_length(height / 1024)`, read
-//! off the tip's stated height. Height is not work. The only thing holding a
-//! stated height down is `check_the_gaps`, which asks a run of `n` blocks to be
-//! worth at least `n * MIN_DIFFICULTY`, and `MIN_DIFFICULTY` is one. A chain
-//! running at difficulty `d` can therefore state a height `d` times its own and
-//! still price it, in work it was inventing anyway, and every doubling of the
-//! stated height takes another slice off what each draw is worth. This is the
-//! axis nobody varied, and it is worth twelve points of the forger's share:
-//! the count reaches 2^-128 to 43.3 per cent against a forger that takes the
-//! height as given, and to 31.2 against one that writes it down.
+//! **How many bands there are.** This is the axis that broke the bound, and the
+//! axis the rule has since been changed under. `levels` used to be
+//! `bit_length(tip.height / 1024)`, read off the tip's stated height, and a
+//! height is not work: the only thing holding one down is `check_the_gaps`,
+//! which asks a run of `n` blocks to be worth at least `n * MIN_DIFFICULTY`,
+//! and `MIN_DIFFICULTY` is one. A chain running at difficulty `d` could state a
+//! height `d` times its own and price it in work it was inventing anyway, and
+//! every doubling took another slice off what each draw was worth. Nobody had
+//! varied it. It was worth twelve points of the forger's share: the count
+//! reached 2^-128 to 43.3 per cent against a forger taking the height as given,
+//! and to 31.2 against one writing it down.
 //!
-//! That a forger can write it down is not arithmetic and is not measured here.
-//! It is built and put through the shipped check in
-//! `tests/audit_the_bound.rs`.
+//! `levels_of` is what the rule became. The halvings are counted from how old
+//! the chain says it is rather than from how tall, over the block time the
+//! network aims at, and never past the height. A reader refuses a tip dated
+//! more than its drift allowance ahead of its own clock, so the deepest a
+//! stated chain can halve is the deepest the real one can. The axis still has a
+//! range, because a prover may always understate, and what it costs to
+//! understate is a wider band nearest the tip and so a longer run of headers to
+//! hand over: past `MOST_TAIL` the weighing is refused before a draw is looked
+//! at. So this sweeps every level count a prover can reach, says which of them
+//! a reader would refuse outright, and searches the rest.
 //!
-//! Run with `cargo run --release -p cairn-ledger --example breaking_the_bound`.
+//! Run with `cargo run --release -p cairn-ledger --example searching_for_a_break`.
 
 #![allow(
     clippy::unwrap_used,
@@ -60,8 +69,8 @@
     clippy::too_many_lines
 )]
 
-use cairn_ledger::pow::{DIFFICULTY_WINDOW, MIN_DIFFICULTY};
-use cairn_ledger::sampling::{draw, SAMPLES, SHALLOWEST};
+use cairn_ledger::pow::DIFFICULTY_WINDOW;
+use cairn_ledger::sampling::{draw, levels_for, MOST_TAIL, SAMPLES, SHALLOWEST};
 use cairn_primitives::hash::{hash, Domain};
 use cairn_primitives::Hash32;
 
@@ -82,8 +91,6 @@ const SEEDS: u64 = 64;
 const SEEDS_FOR_THE_WINNER: u64 = 512;
 /// What the count is set to reach.
 const TARGET: f64 = -128.0;
-/// A header and its path's length prefix, from `Sample`'s own encoding.
-const SAMPLES_BYTES: u32 = 182 + 4;
 
 fn main() {
     let total = PER_BLOCK * u128::from(BLOCKS);
@@ -92,17 +99,28 @@ fn main() {
          {SAMPLES} draws. Every number below comes from the shipped `draw`.\n"
     );
 
-    let heights = claimable_heights(total);
-    let mut boards: Vec<Board> = Vec::with_capacity(heights.len());
-    for height in heights {
-        boards.push(Board::of(height, total, SEEDS));
-    }
+    let every: Vec<Board> = reachable_levels()
+        .into_iter()
+        .map(|levels| Board::of(levels, total, SEEDS))
+        .collect();
+    let refused: Vec<u32> = every
+        .iter()
+        .filter(|board| !board.weighable())
+        .map(|board| board.levels)
+        .collect();
+    let boards: Vec<Board> = every.into_iter().filter(Board::weighable).collect();
+    println!(
+        "  The honest count is {} halvings, and a prover may state anything up to it.\n           {} of those are refused before a draw is looked at, because the run up to\n           the tip they ask for is past the ceiling of {MOST_TAIL} headers: {refused:?}.\n           The other {} are searched.\n",
+        levels_for(BLOCKS),
+        refused.len(),
+        boards.len(),
+    );
 
     let mut tried = 0usize;
     println!("What the best placement in each family is worth, by the forger's share:\n");
     println!(
         "{:>7} {:>11} {:>11} {:>11} {:>11}",
-        "share", "derivation", "one band", "aligned", "any height"
+        "share", "derivation", "one band", "aligned", "any count"
     );
     println!(
         "{:>7} {:>11} {:>11} {:>11} {:>11}",
@@ -139,12 +157,12 @@ fn main() {
     }
 
     println!(
-        "\n  'derivation' is `(1 - log2(1/sigma)/levels)^{SAMPLES}` at the honest height,\n  \
+        "\n  'derivation' is `(1 - log2(1/sigma)/levels)^{SAMPLES}` at the honest count,\n  \
          which is what `SAMPLES` computes its count from. 'one band' is the sweep\n  \
-         `adversarial_placement` already does, at the honest height. 'aligned' is the\n  \
-         same sweep with the gap's shallow end put on a band boundary. 'any height' adds\n  \
-         the stated height to the search. {tried} placements were measured over\n  \
-         {SEEDS} seeds apiece to fill this table."
+         `adversarial_placement` already does, at the honest count. 'aligned' is the\n  \
+         same sweep with the gap's shallow end put on a band boundary. 'any count' adds\n  \
+         every level count a prover can state to the search. {tried} placements were\n  \
+         measured over {SEEDS} seeds apiece to fill this table."
     );
 
     the_winner(&rows, total);
@@ -157,19 +175,18 @@ fn main() {
 fn the_winner(rows: &[Row], total: u128) {
     println!("\n\nThe best placement found, at each share, re-measured over {SEEDS_FOR_THE_WINNER} seeds:\n");
     println!(
-        "{:>7} {:>9} {:>7} {:>9} {:>11} {:>12} {:>10}",
-        "share", "height", "levels", "band", "fork at", "gap/chain", "log2 miss"
+        "{:>7} {:>8} {:>9} {:>11} {:>12} {:>10}",
+        "share", "levels", "band", "fork at", "gap/chain", "log2 miss"
     );
-    println!("{}", "-".repeat(72));
+    println!("{}", "-".repeat(64));
     for row in rows {
         let placement = row.anywhere;
-        let board = Board::of(placement.height, total, SEEDS_FOR_THE_WINNER);
+        let board = Board::of(placement.levels, total, SEEDS_FOR_THE_WINNER);
         let hit = board.landing_in(&placement.pieces);
         let miss = miss_log2(hit);
         println!(
-            "{:>6.2}% {:>9} {:>7} {:>7} {:>10.4}% {:>11.5}% {:>10.1}",
+            "{:>6.2}% {:>8} {:>9} {:>10.4}% {:>11.5}% {:>10.1}",
             row.share * 100.0,
-            spell(placement.height),
             placement.levels,
             placement.band,
             placement.fork as f64 / total as f64 * 100.0,
@@ -177,26 +194,18 @@ fn the_winner(rows: &[Row], total: u128) {
             miss
         );
     }
-    let deepest = rows
-        .iter()
-        .map(|row| row.anywhere.height.trailing_zeros())
-        .max()
-        .unwrap_or(0);
-    let wire = u64::from(SAMPLES_BYTES + 32 * deepest) * SAMPLES as u64;
     println!(
-        "\n  'height' is what the tip states, against {BLOCKS} blocks that carry the work.\n  \
-         'fork at' is how far back the forgery starts, as a share of the chain's work;\n  \
-         'gap/chain' how much of what it presents no block of it spans. A row whose\n  \
-         'log2 miss' is above {TARGET:.0} is a forgery the shipped count does not stop.\n\n  \
-         A taller forest means longer paths, and that is the only thing the height costs\n  \
-         on the wire: {SAMPLES} answers at {deepest} siblings apiece is {wire} bytes,\n  \
-         against the 3.1 MB a weighing of the honest chain takes and the 48 MB a node\n  \
-         will hold for one.\n\n  \
-         And the margin for grinding goes with it. `SAMPLES` says a forger with 2^80\n  \
-         tips faces 2^80 times the chance and that 2^80 against 2^-128 is still 2^-48,\n  \
-         so the margin absorbs it. Against the 40 per cent row above it does not: 2^80\n  \
-         tips against a miss of 2^-58 is a certainty, and what is left holding the line\n  \
-         is only the price of a tip, which is a tip's own work."
+        "\n  'levels' is how many halvings the tip's own age buys it, against the {}\n  \
+         the honest chain of {BLOCKS} blocks gets. 'fork at' is how far back the\n  \
+         forgery starts, as a share of the chain's work; 'gap/chain' how much of what\n  \
+         it presents no block of it spans. A row whose 'log2 miss' is above\n  \
+         {TARGET:.0} is a forgery the shipped count does not stop.\n\n  \
+         The margin for grinding survives with the figure. `SAMPLES` says a forger\n  \
+         with 2^80 tips faces 2^80 times the chance and that 2^80 against 2^-128 is\n  \
+         still 2^-48, so the margin absorbs it. When the level count could be written\n  \
+         down that was no longer true: 2^80 tips against a miss of 2^-58 is a\n  \
+         certainty, and all that held the line was the price of a tip.",
+        levels_for(BLOCKS),
     );
 }
 
@@ -221,7 +230,7 @@ fn the_threshold(boards: &[Board]) {
             threshold(std::slice::from_ref(honest), &Sweep::Aligned, &mut tried),
         ),
         (
-            "and the stated height",
+            "and the stated level count",
             threshold(boards, &Sweep::Aligned, &mut tried),
         ),
     ] {
@@ -230,11 +239,10 @@ fn the_threshold(boards: &[Board]) {
     println!(
         "\n  A further {tried} placements were measured for this table. The published\n  \
          figure is 40 percent, and `SAMPLES` says it was measured at 43 with three\n  \
-         points held back. The first row reproduces that. The third is what a forger\n  \
-         that also writes down its own height gets, and it is below the published\n  \
-         figure, not above it. Every row of it is a placement whose stated height is\n  \
-         priced by the gap it carries, at `MIN_DIFFICULTY` a block, so none of them is\n  \
-         asking the forger for work it was not already inventing."
+         points held back. The first row reproduces that. The third adds every level\n  \
+         count a prover can state, and it does not move: understating the count makes\n  \
+         each draw worth more, and overstating it is what the tip's own age refuses.\n  \
+         When the count came off the stated height instead, this row read 31.2."
     );
 }
 
@@ -242,8 +250,8 @@ fn the_threshold(boards: &[Board]) {
 ///
 /// "A forger at 40% cannot put a newcomer on a branch differing from the real
 /// one by more than about 1240 blocks." That is the sentence, and this is the
-/// sweep behind it, run twice: once with the height the honest chain has, and
-/// once with the height a forger writes down for itself.
+/// sweep behind it, run twice: once at the count the honest chain's own age
+/// buys, and once over every count a prover could state instead.
 ///
 /// Only depths the draw is responsible for are swept. A fork shallower than the
 /// band the draw leaves unresolved, plus the retarget window under it, is caught
@@ -253,11 +261,11 @@ fn the_depth_guarantee(boards: &[Board], total: u128) {
     println!("\n\nHow deep a forgery can be and still get past the draw:\n");
     println!(
         "{:>7} {:>12} {:>14} {:>12} {:>14} {:>8}",
-        "share", "honest", "shallowest", "chosen", "shallowest", "levels"
+        "share", "honest", "shallowest", "any", "shallowest", "levels"
     );
     println!(
         "{:>7} {:>12} {:>14} {:>12} {:>14} {:>8}",
-        "", "height", "through", "height", "through", ""
+        "", "count", "through", "count", "through", ""
     );
     println!("{}", "-".repeat(72));
 
@@ -281,18 +289,15 @@ fn the_depth_guarantee(boards: &[Board], total: u128) {
         "\n  The columns count fork depths that get through with better than 2^{TARGET:.0},\n  \
          out of the depths swept, and name the shallowest of them in blocks. The honest\n  \
          column reproduces the published sentence: nothing the draw is responsible for\n  \
-         gets past it below 43 per cent. The chosen column is the same forger writing\n  \
-         down a larger height, and at 40 per cent every depth the draw resolves gets\n  \
-         through.\n\n  \
-         The band a draw lands in is one byte modulo `levels`, so the least a band can\n  \
-         be worth is `floor(256/levels)/256`: {}/256 at the honest height and {}/256 at\n  \
-         2^61. Every draw a forger faces is worth the second, and the count was set from\n  \
-         the first. A stated height is priced by `check_the_gaps` at `MIN_DIFFICULTY` a\n  \
-         block, which on a chain worth {total} allows a stated height of\n  \
-         {} before anything refuses it.",
-        256 / levels_for(BLOCKS),
-        256 / levels_for(1 << 61),
-        total / u128::from(MIN_DIFFICULTY),
+         gets past it below 43 per cent. The second column lets the forger state any\n  \
+         level count a reader would accept, and it does not move.\n\n  \
+         It used to. When the count came off the tip's stated height, a forger at 40\n  \
+         per cent got every depth the draw resolves through: `check_the_gaps` prices\n  \
+         an unopened run at one unit a block, so a chain worth {total} priced a\n  \
+         stated height of as many blocks, and that bought {} halvings against the\n  \
+         honest {}.",
+        levels_for(u64::try_from(total).unwrap_or(u64::MAX)),
+        levels_for(BLOCKS),
     );
 }
 
@@ -336,9 +341,6 @@ fn through_at(boards: &[Board], share: f64, total: u128) -> Through {
         let mut swept = false;
         for board in boards {
             if gap == 0 || shallow < board.out_of_the_runs_reach() {
-                continue;
-            }
-            if u128::from(board.height) * u128::from(MIN_DIFFICULTY) > gap {
                 continue;
             }
             swept = true;
@@ -400,46 +402,41 @@ failure is worth about forty bits and is already inside the published figure:
 it is the difference between the derivation column above and the measured 43
 per cent.
 
-The second failure is that neither `p_band` nor `levels` is the verifier's to
-set. `levels` is `bit_length(height / 1024)` and `height` is a field of the
-tip; `p_band` is at worst `floor(256/levels)/256`, so it falls with `levels`
-too. Nothing ties `height` to work except `check_the_gaps`, which prices an
-unopened run at `MIN_DIFFICULTY` a block, and `MIN_DIFFICULTY` is one. A proof
-needs a premise the protocol does not supply: that the number of bands is
-bounded by something the forger cannot write down. This failure is worth twelve
-points of share and is not inside the published figure.
+The second failure was that neither `p_band` nor `levels` was the verifier's to
+set, and this is the one the rule has since been changed under. `levels` was
+`bit_length(height / 1024)` and `height` is a field of the tip; `p_band` was at
+worst `floor(256/levels)/256`, so it fell with `levels` too. Nothing tied
+`height` to work except `check_the_gaps`, which prices an unopened run at
+`MIN_DIFFICULTY` a block, and `MIN_DIFFICULTY` is one. That failure was worth
+twelve points of share and was not inside the published figure.
 
-So a proof would need three things, and the protocol as it stands supplies none
-of them.
+A proof would need three things, and the protocol now supplies two of them.
 
-  - A ceiling `Lmax` on `levels` that no prover can raise.
-  - A floor `q` on `p_band` over every band a forger can address. While the
-    level is drawn from one byte this follows from `Lmax`; drawn from more, it
-    stops depending on it.
+  - A ceiling `Lmax` on `levels` that no prover can raise. `levels_of` is that
+    ceiling: the count comes from how old the tip says the chain is, over the
+    block time the network aims at, and a reader refuses a tip dated more than
+    its drift allowance past its own clock. So `Lmax` is the honest chain's own
+    count, and a prover reaches it rather than passing it. Understating is left
+    open and costs the prover: fewer halvings means a wider band nearest the
+    tip, and that band is a run of headers it has to hand over in full, refused
+    past `MOST_TAIL`.
+  - A floor `q` on `p_band` over every band a forger can address. The level is
+    drawn from eight bytes scaled by `levels` rather than one byte reduced by
+    it, so `q` is `1/levels` to within one part in 2^64 and no longer depends
+    on how the byte divides.
   - `(1 - q*(1/sigma - 1))^count <= 2^-128` at the share being claimed, which
     is the inequality `SAMPLES` already writes down, with the per-draw term it
-    should have had.
+    should have had. This one is still not proved here. What is measured is
+    that no placement this file can construct beats it.
 
-Three ways to supply the first, each a changed rule and so each a new network
-number. Choosing among them is a decision rather than a patch.
-
-  - Take `levels` from the tip's stated total work rather than its height. A
-    forger then buys a band only by claiming twice the work, and claiming work
-    is the one thing the draw is already looking for, so the lever closes on
-    itself.
-  - Name `levels` as a protocol constant, so that no field of the tip enters
-    the draw at all, and set `count` from that constant. Cheapest to state, and
-    the easiest to get wrong on a chain much shorter or much longer than the
-    one it was named for.
-  - Keep the height and price it: refuse a weighing whose stated height exceeds
-    its stated work divided by something above `MIN_DIFFICULTY`, or charge an
-    unopened run more than one unit a block. The only one of the three that
-    leaves the draw alone, and the only one that has to argue with an honest
-    chain that really did fall to the floor.
-
-Independently of all three, the level should be drawn from more than one byte,
-which `draw`'s own documentation already says, and which is what takes `p_band`
-out of the forger's hands.
+Two ways of supplying the first were considered and not taken. Naming `levels`
+as a protocol constant puts no field of the tip in the draw at all, and is the
+easiest to get wrong on a chain much shorter or much longer than the one the
+constant was named for. Pricing the height, by charging an unopened run more
+than one unit a block, leaves the draw alone and has to argue with an honest
+chain that really did fall to the floor. The age was taken because it is the
+only one of the three whose ceiling a reader can check against something it
+holds itself.
 ";
 
 /// One share and the best placement found for it.
@@ -451,7 +448,6 @@ struct Row {
 /// A gap, where it sits, and what the draw does to it.
 #[derive(Clone, Copy)]
 struct Placement {
-    height: u64,
     levels: u32,
     band: u32,
     fork: u128,
@@ -465,7 +461,6 @@ struct Placement {
 impl Placement {
     fn nothing() -> Self {
         Self {
-            height: 0,
             levels: 0,
             band: 0,
             fork: 0,
@@ -486,28 +481,38 @@ enum Sweep {
     Split,
 }
 
-/// Every draw the shipped function makes for one stated height, sorted.
+/// Every draw the shipped function makes for one stated level count, sorted.
 struct Board {
-    height: u64,
     levels: u32,
     total: u128,
     drawn: Vec<u128>,
 }
 
 impl Board {
-    fn of(height: u64, total: u128, seeds: u64) -> Self {
+    fn of(levels: u32, total: u128, seeds: u64) -> Self {
         let mut drawn = Vec::with_capacity((seeds as usize) * SAMPLES);
         for trial in 0..seeds {
             let seed: Hash32 = hash(Domain::SamplingSeed, &trial.to_le_bytes());
-            drawn.extend(draw(seed, SAMPLES, total, height));
+            drawn.extend(draw(seed, SAMPLES, total, levels));
         }
         drawn.sort_unstable();
         Self {
-            height,
-            levels: levels_for(height),
+            levels,
             total,
             drawn,
         }
+    }
+
+    /// Whether a chain stating this many halvings can be weighed at all.
+    ///
+    /// The run up to the tip carries every block of the band the draw leaves
+    /// unresolved, plus a retarget window. Past `MOST_TAIL` headers a reader
+    /// refuses the weighing before it looks at a single draw, so a forger that
+    /// states too few halvings has refused its own forgery.
+    fn weighable(&self) -> bool {
+        let band = self.total >> self.levels.min(127);
+        let blocks = band / PER_BLOCK + u128::from(DIFFICULTY_WINDOW as u64) + 1;
+        blocks <= u128::from(MOST_TAIL)
     }
 
     /// The share of draws landing in any of the pieces.
@@ -554,12 +559,6 @@ fn best_over(board: &Board, share: f64, sweep: &Sweep, tried: &mut usize) -> Pla
             continue;
         }
         let gap = deep - shallow;
-        // The height has to be priced by the gap it is carried in: a run of
-        // `height` blocks between two opened headers must state at least
-        // `height * MIN_DIFFICULTY`, and the gap is what states it.
-        if u128::from(board.height) * u128::from(MIN_DIFFICULTY) > gap {
-            continue;
-        }
         let pieces = if matches!(sweep, Sweep::Split) {
             let Some(pieces) = split(board, deep, gap, floor) else {
                 continue;
@@ -574,7 +573,6 @@ fn best_over(board: &Board, share: f64, sweep: &Sweep, tried: &mut usize) -> Pla
         let miss = miss_log2(board.landing_in(&pieces));
         if miss > best.miss {
             best = Placement {
-                height: board.height,
                 levels: board.levels,
                 band: band_of(shallow, board.total, board.levels),
                 fork: deep,
@@ -646,7 +644,7 @@ fn shallow_ends(board: &Board, sweep: &Sweep) -> Vec<u128> {
         Sweep::Depths => {
             let mut ends = Vec::new();
             let mut depth = SHALLOWEST / 2;
-            while depth < board.height {
+            while depth < BLOCKS {
                 ends.push(u128::from(depth) * PER_BLOCK);
                 depth = (depth * 1_020) / 1_000;
             }
@@ -709,33 +707,13 @@ fn band_of(depth: u128, total: u128, levels: u32) -> u32 {
     levels.saturating_sub(1)
 }
 
-/// Heights worth claiming: the honest one, then every doubling that
-/// `check_the_gaps` still prices out of a chain worth `total`.
-fn claimable_heights(total: u128) -> Vec<u64> {
-    let mut heights = vec![BLOCKS];
-    let ceiling = u64::try_from(total / u128::from(MIN_DIFFICULTY)).unwrap_or(u64::MAX);
-    let mut height = BLOCKS.next_power_of_two();
-    while height <= ceiling / 2 {
-        heights.push(height);
-        height *= 2;
-    }
-    heights
-}
-
-/// Halvings the draw spreads itself over, restated from `sampling.rs`, which
-/// keeps it private and the constant it reads from public.
-fn levels_for(blocks: u64) -> u32 {
-    let separable = blocks / SHALLOWEST;
-    u64::BITS
-        .saturating_sub(separable.max(1).leading_zeros())
-        .max(1)
-}
-
-/// A height as a power of two where it is one, since the table is mostly those.
-fn spell(height: u64) -> String {
-    if height.is_power_of_two() {
-        format!("2^{}", height.trailing_zeros())
-    } else {
-        format!("{height}")
-    }
+/// Level counts a prover can reach on this chain, honest one first.
+///
+/// The ceiling is the honest count, because that is what the reader's clock
+/// allows: a tip cannot say the network has been running longer than it has.
+/// Everything below it a prover may state freely, so everything below it is
+/// searched, and the ones a reader would refuse for the length of the run they
+/// demand are marked rather than dropped.
+fn reachable_levels() -> Vec<u32> {
+    (1..=levels_for(BLOCKS)).rev().collect()
 }

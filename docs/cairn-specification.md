@@ -1539,21 +1539,60 @@ work standing behind the tip, not counting the tip's own:
 total = tip.total_work - tip.difficulty
 ```
 
-and the span the draw is spread over is the tip's height. The tip is not in its
-own history, so a draw that landed in the tip's own work would have nothing to
-open, and nothing needs opening: the tip arrives whole and its work is checked
-directly.
+The tip is not in its own history, so a draw that landed in the tip's own work
+would have nothing to open, and nothing needs opening: the tip arrives whole and
+its work is checked directly.
 
-The number of halvings the draw is spread over is computed from that height:
+The other is the number of halvings the draw is spread over, and it comes from
+how old the tip says its chain is:
 
 ```text
-separable = height / 1024
+age       = (tip.timestamp - opens_at) / target_block_time
+separable = min(age, tip.height) / 1024
 levels    = max(bit_length(max(separable, 1)), 1)
 ```
 
 where `bit_length(x)` is 64 less the number of leading zero bits of `x` as a
-`u64`, and the division is integer division. On a chain of thirty years at a
+`u64`, and every division is integer division. On a chain of thirty years at a
 block a minute this is 14.
+
+**The age is a ceiling the reading node holds itself.** A node refuses a tip
+dated more than its drift allowance past its own clock, and the opening moment
+is a constant of the network rather than something a peer sends, so no chain can
+state an age past the one the network has had. The retarget is what makes an
+honest chain's age and height agree, since it holds the chain to
+`target_block_time` a block.
+
+**The clock bounds the count and MUST NOT enter it.** Nothing in the expression
+above reads the time of day. The count is a function of the tip and of this
+network's constants, so every node derives the same one for the same tip and a
+prover answers the list its reader asked for. An implementation that clamped the
+age against the reading node's own clock here would draw a different list from
+its neighbour the first time the two disagreed about the hour. Where the clock
+does its work is the refusal above, which a node MUST apply before it derives
+anything from the tip.
+
+The height is read as the smaller of the two and can therefore only take
+halvings away. That is deliberate in both directions. A chain that has stalled,
+ten blocks mined over a year, must not have nine halvings spread across its last
+block, which is nine levels' worth of draws asking a question already answered.
+And a prover that understates either number buys nothing: fewer halvings makes
+each draw worth more, and it widens the band nearest the tip, which is the run of
+headers the prover then has to hand over in full and which is refused past
+16 474 of them.
+
+**The height alone would not do, and this is the one place these rules changed
+for a break rather than for a feature.** Through testnet-6 the count was
+`bit_length(height / 1024)` and nothing else. A height is not work: the only
+rule holding the two together is the one that prices an unopened stretch, which
+asks a run of `n` blocks to be worth at least `n` units, one unit being the
+difficulty floor. So a chain whose blocks averaged difficulty `d` could state a
+height `d` times the one it had, buy `log2(d)` halvings with it, and take that
+many slices off what every draw was worth, in work it was already inventing. A
+forest of any size costs what is opened in it and nothing for the rest, so there
+was no second price either. Measured on a thirty year chain, a forger holding
+40 per cent of the world's work went from missing all 4 096 draws with 2^-207 to
+missing them with 2^-58, against a figure published as 2^-128.
 
 The draw is empty when `total` is zero or when no samples are asked for.
 Otherwise, for each index `i` from `0` to `count - 1`, in order:
@@ -1563,7 +1602,7 @@ Otherwise, for each index `i` from `0` to `count - 1`, in order:
   <tbody>
     <tr><td class="n">1</td><td>form 40 bytes: the 32 bytes of the seed, then <code>i</code> as a little-endian <code>u64</code></td></tr>
     <tr><td class="n">2</td><td><code>b = H(sampling, those 40 bytes)</code></td></tr>
-    <tr><td class="n">3</td><td><code>level = b[0] mod levels</code>, reading <code>b[0]</code> as a <code>u8</code></td></tr>
+    <tr><td class="n">3</td><td><code>level = (u64 from b[0..8], little-endian) * levels &gt;&gt; 64</code>, in 128-bit arithmetic</td></tr>
     <tr><td class="n">4</td><td><code>within = u128</code> from <code>b[8..24]</code>, little-endian</td></tr>
     <tr><td class="n">5</td><td><code>far = total >> level</code> and <code>near = total >> (level + 1)</code>, both shift counts clamped at 127</td></tr>
     <tr><td class="n">6</td><td><code>width = max(far - near, 1)</code></td></tr>
@@ -1584,14 +1623,14 @@ and it would be paid for by every draw at every level: resolving to one block
 over thirty years takes twenty-four levels where this takes fourteen, and a
 draw is worth `1 / levels` per question.
 
-**The level is drawn from one byte, and one byte does not divide evenly.** With
-`levels` at 14, 256 is `14 * 18 + 4`, so the four deepest levels come up
-nineteen times in 256 and the other ten eighteen times, an under-draw of
-1.5625 percent on the levels nearest the tip. Both sides run the same
-computation over the same tip, so this cannot make them disagree; it is a
-slightly weaker guarantee, not a split, and the figure the guarantee is
-published at was measured through this biased draw rather than through a model
-of it.
+**The level is scaled rather than reduced, and that is what makes it even.**
+Through testnet-6 it was `b[0] mod levels`, and 256 does not divide by 14: the
+four deepest levels came up nineteen times in 256 and the other ten eighteen, an
+under-draw of 1.5625 per cent on the ten levels nearest the tip, so 4 096 draws
+did the work of 4 032. Taking eight bytes as a `u64`, multiplying by `levels` in
+128-bit arithmetic and keeping the high half spreads the same choice with a bias
+under one part in 2^64. The multiplication cannot overflow: the product of a
+`u64` and a level count of at most 64 is well inside a `u128`.
 
 **A drawn value names a height by covering rather than by arithmetic.** The
 header a draw lands in is the one whose own work spans the value: everything
@@ -1658,14 +1697,17 @@ held to the same rules a node applies to any block it is handed: the difficulty
 the retarget demands of it, a timestamp later than the median of its window,
 and its own work added to its parent's total.
 
-The tip's own timestamp is measured against the reading node's clock here,
-against the same drift the block rules allow, which is two hours on every
-network here. It is checked here rather than left to the validation that follows
-because this is where the decision is made. Without it a forger hands over a
-chain whose cheap blocks are spaced across days it never waited: blocks at the
-difficulty floor have to be spaced past half the target or the retarget demands
-more of them, so a run of them states far more time than a reader will take in
-advance, and the forger has to sit through the difference in real time.
+The tip's own timestamp is measured against the reading node's clock, against
+the same drift the block rules allow, which is two hours on every network here.
+It is checked before the draw rather than left to the validation that follows,
+for two reasons. It is where the decision is made: without it a forger hands
+over a chain whose cheap blocks are spaced across days it never waited, since
+blocks at the difficulty floor have to be spaced past half the target or the
+retarget demands more of them, so a run of them states far more time than a
+reader will take in advance and the forger has to sit through the difference in
+real time. And the same timestamp is what the number of halvings is counted
+from, so the bound on it has to be in force before any question is asked rather
+than after the answers are in.
 
 It is also the one refusal in this whole exchange that two honest nodes can
 disagree about, for the reason already given where the block rules are
@@ -1683,26 +1725,26 @@ to the tip.
   <tbody>
     <tr><td class="n">1</td><td>WrongNetwork</td><td>the tip is another network's</td></tr>
     <tr><td class="n">2</td><td>BeforeTheNetworkOpened</td><td>the tip is dated before this network existed</td></tr>
-    <tr><td class="n">3</td><td>TipWithoutWork</td><td>the tip's identifier does not meet its own target</td></tr>
-    <tr><td class="n">4</td><td>TipClaimsNothing</td><td>the tip states no cumulative work at all</td></tr>
-    <tr><td class="n">5</td><td>HistoryMismatch</td><td>the forest is not the one the tip commits to</td></tr>
-    <tr><td class="n">6</td><td>HistoryWrongLength</td><td>the forest holds a number of leaves other than the tip's height</td></tr>
-    <tr><td class="n">7</td><td>WrongCount</td><td>not as many samples as the draw asks for</td></tr>
-    <tr><td class="n">8</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>an opened header belongs elsewhere</td></tr>
-    <tr><td class="n">9</td><td>SampleWithoutWork</td><td>an opened header carries no proof of work</td></tr>
-    <tr><td class="n">10</td><td>PastTheTip</td><td>an opened header states more work than the tip</td></tr>
-    <tr><td class="n">11</td><td>WrongPlace</td><td>an opened header does not cover the work drawn</td></tr>
-    <tr><td class="n">12</td><td>NotInHistory</td><td>an opened header is not in the tip's history at its stated height</td></tr>
-    <tr><td class="n">13</td><td>ParentNotOpened</td><td>no parent was opened, on a chain more than one block long</td></tr>
-    <tr><td class="n">14</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>the parent belongs elsewhere</td></tr>
-    <tr><td class="n">15</td><td>ParentNotTheTipsOwn</td><td>the parent is not at the height below, or is not the header the tip names, or carries no work</td></tr>
-    <tr><td class="n">16</td><td>NotInHistory</td><td>the parent is not in the tip's history at the height below</td></tr>
-    <tr><td class="n">17</td><td>ParentNotTheTipsOwn</td><td>the parent's work plus the tip's own is not the tip's total</td></tr>
-    <tr><td class="n">18</td><td>OpeningWorthLessThanItCost</td><td>the chain below the lowest pinned point states less than one unit a block</td></tr>
-    <tr><td class="n">19</td><td>WorkRunsBackwards</td><td>work falls between two pinned points</td></tr>
-    <tr><td class="n">20</td><td>BlocksWorthLessThanTheyCost</td><td>a stretch states less than that many blocks can be worth</td></tr>
-    <tr><td class="n">21</td><td>BlocksWorthMoreThanTheyCould</td><td>a stretch states more than that many blocks can be worth</td></tr>
-    <tr><td class="n">22</td><td>TipFromTheFuture</td><td>the tip is dated further ahead than the reader allows</td></tr>
+    <tr><td class="n">3</td><td>TipFromTheFuture</td><td>the tip is dated further ahead than the reader allows</td></tr>
+    <tr><td class="n">4</td><td>TipWithoutWork</td><td>the tip's identifier does not meet its own target</td></tr>
+    <tr><td class="n">5</td><td>TipClaimsNothing</td><td>the tip states no cumulative work at all</td></tr>
+    <tr><td class="n">6</td><td>HistoryMismatch</td><td>the forest is not the one the tip commits to</td></tr>
+    <tr><td class="n">7</td><td>HistoryWrongLength</td><td>the forest holds a number of leaves other than the tip's height</td></tr>
+    <tr><td class="n">8</td><td>WrongCount</td><td>not as many samples as the draw asks for</td></tr>
+    <tr><td class="n">9</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>an opened header belongs elsewhere</td></tr>
+    <tr><td class="n">10</td><td>SampleWithoutWork</td><td>an opened header carries no proof of work</td></tr>
+    <tr><td class="n">11</td><td>PastTheTip</td><td>an opened header states more work than the tip</td></tr>
+    <tr><td class="n">12</td><td>WrongPlace</td><td>an opened header does not cover the work drawn</td></tr>
+    <tr><td class="n">13</td><td>NotInHistory</td><td>an opened header is not in the tip's history at its stated height</td></tr>
+    <tr><td class="n">14</td><td>ParentNotOpened</td><td>no parent was opened, on a chain more than one block long</td></tr>
+    <tr><td class="n">15</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>the parent belongs elsewhere</td></tr>
+    <tr><td class="n">16</td><td>ParentNotTheTipsOwn</td><td>the parent is not at the height below, or is not the header the tip names, or carries no work</td></tr>
+    <tr><td class="n">17</td><td>NotInHistory</td><td>the parent is not in the tip's history at the height below</td></tr>
+    <tr><td class="n">18</td><td>ParentNotTheTipsOwn</td><td>the parent's work plus the tip's own is not the tip's total</td></tr>
+    <tr><td class="n">19</td><td>OpeningWorthLessThanItCost</td><td>the chain below the lowest pinned point states less than one unit a block</td></tr>
+    <tr><td class="n">20</td><td>WorkRunsBackwards</td><td>work falls between two pinned points</td></tr>
+    <tr><td class="n">21</td><td>BlocksWorthLessThanTheyCost</td><td>a stretch states less than that many blocks can be worth</td></tr>
+    <tr><td class="n">22</td><td>BlocksWorthMoreThanTheyCould</td><td>a stretch states more than that many blocks can be worth</td></tr>
     <tr><td class="n">23</td><td>NothingOpened</td><td>the draw opened nothing, so there is nothing to measure the tip against</td></tr>
     <tr><td class="n">24</td><td>TailWrongLength</td><td>the run is not the length the pinned header and the tip demand, or that length is past the ceiling</td></tr>
     <tr><td class="n">25</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a header in the run belongs elsewhere</td></tr>
@@ -1743,7 +1785,16 @@ with probability `lie`. Setting the count from that gives 4 096 draws over a
 thirty year chain, which holds against every forger up to 40 percent of the
 world's work and stops holding a few points above that.
 
-Three things about that figure are load-bearing and MUST NOT be read out of it.
+Four things about that figure are load-bearing and MUST NOT be read out of it.
+
+It rests on `levels` being the honest chain's own count. Every other quantity in
+the inequality is fixed by the forger's share, so `levels` is the one input a
+prover could hope to move, and while it was read off the stated height a prover
+could move it a long way. That is why the count now comes from the tip's age
+against a clock the reading node holds itself, and why a second implementation
+that takes it from anywhere else is not implementing this protocol: it will
+agree with nobody about which positions to open, and it will publish a figure
+its own draw does not reach.
 
 It is a guarantee about a depth and not about a duration. The draw does not
 separate chains that differ by less than the band it stops halving at, which is
@@ -2143,9 +2194,9 @@ There are two version numbers in this protocol and they are compared
 differently.
 
 **The protocol version is compared for equality.** It is a `u32` in the
-handshake, it is 6 today, and a node MUST close the connection with a peer
-carrying anything else. What that costs is that a node on five and a node on
-six turn each other away rather than talking; what it buys is that a message
+handshake, it is 7 today, and a node MUST close the connection with a peer
+carrying anything else. What that costs is that a node on six and a node on
+seven turn each other away rather than talking; what it buys is that a message
 whose meaning changed is never read under the old meaning. The alternative,
 adding a question without saying so, is worse than it looks: a node on the older
 version meeting the new question cannot decode it, takes that for a peer that is

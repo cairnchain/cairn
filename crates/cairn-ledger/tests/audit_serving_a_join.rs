@@ -57,6 +57,16 @@ const QUIET_FROM: u64 = 20_000;
 /// tip is still nearly all of it the busy years' work.
 const BLOCKS: u64 = 200_000;
 
+/// The rules this chain is weighed under.
+///
+/// `opens_at` is nought and the block time is the default, which is what makes
+/// the timestamps above an honest minute apart: the level count comes from how
+/// old a tip says its chain is, so a fixture that dates its blocks badly is a
+/// fixture weighed as a chain that was never this long.
+fn params() -> cairn_ledger::validation::ConsensusParams {
+    cairn_ledger::validation::ConsensusParams::testnet()
+}
+
 fn difficulty_at(height: u64) -> u64 {
     if height < QUIET_FROM {
         BUSY
@@ -127,7 +137,7 @@ fn serve() -> Served {
             siblings: vec![Hash32::from_bytes([7; 32]); 17],
         })
     };
-    let answer = open_start(&tip, Forest::default(), SAMPLES, read, prove);
+    let answer = open_start(&tip, Forest::default(), SAMPLES, &params(), read, prove);
     Served {
         answer,
         reads: reads.get(),
@@ -151,7 +161,7 @@ fn the_run_this_chain_asks_for_is_far_past_what_a_sampling_carries() {
         cairn_ledger::sampling::seed_of(&tip),
         SAMPLES,
         cairn_ledger::sampling::work_before(&tip),
-        tip.height,
+        cairn_ledger::sampling::levels_of(&tip, &params()),
     );
     let deepest = drawn.into_iter().map(height_spanning).max().unwrap();
 
@@ -191,7 +201,7 @@ fn an_archivist_does_not_build_a_run_nobody_can_read() {
     // step. Seventeen or eighteen reads a sample over this chain, against the
     // 180 169 the run alone used to add on top.
     assert_eq!(
-        served.reads, 72_515,
+        served.reads, 72_483,
         "answering the draw took {} header reads",
         served.reads
     );
@@ -214,6 +224,10 @@ fn what_is_served_is_what_a_reader_will_take_back() {
         }
         let mut header = header_at(0).unwrap();
         header.height = height;
+        // Dated the way the chain above is dated. A fixture whose blocks all
+        // carry one timestamp is a chain that says it is sixteen blocks old,
+        // and the level count is read from exactly that.
+        header.timestamp = 1_000 + height * 60;
         header.difficulty = 1;
         header.total_work = u128::from(height) + 1;
         header.nonce = height;
@@ -225,7 +239,7 @@ fn what_is_served_is_what_a_reader_will_take_back() {
             siblings: vec![Hash32::from_bytes([7; 32]); 17],
         })
     };
-    let start = open_start(&tip, Forest::default(), SAMPLES, short, prove)
+    let start = open_start(&tip, Forest::default(), SAMPLES, &params(), short, prove)
         .expect("a chain inside the ceiling is answerable");
     assert_eq!(
         start.tail.len(),

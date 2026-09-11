@@ -32,7 +32,7 @@ use cairn_accumulator::Archive;
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::note::{Note, NoteId};
-use cairn_ledger::sampling::{draw, open_start, seed_of, MOST_TAIL, SAMPLES};
+use cairn_ledger::sampling::{draw, levels_for, open_start, seed_of, MOST_TAIL, SAMPLES};
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
@@ -462,6 +462,7 @@ fn the_papers_weighing_is_the_size_this_build_encodes() {
         &tip,
         built.state.headers_before_tip(),
         SAMPLES,
+        &ConsensusParams::testnet(),
         |height| {
             usize::try_from(height)
                 .ok()
@@ -493,7 +494,12 @@ fn the_papers_weighing_is_the_size_this_build_encodes() {
     let thirty = THIRTY_YEARS;
     let leaves = thirty - 1;
     let mut levels_then = 0u64;
-    for at in draw(seed_of(&tip), SAMPLES, u128::from(thirty), thirty) {
+    for at in draw(
+        seed_of(&tip),
+        SAMPLES,
+        u128::from(thirty),
+        levels_for(thirty),
+    ) {
         let position = u64::try_from(at).unwrap_or(0);
         levels_then += tree_of(leaves, position).map_or(0, |(depth, _)| depth) as u64;
     }
@@ -844,7 +850,7 @@ impl Fallen {
             cairn_primitives::Hash32::from_bytes([seed; 32]),
             SAMPLES,
             behind,
-            tip,
+            cairn_ledger::sampling::levels_for(tip),
         )
         .iter()
         .map(|work| self.covering(*work))

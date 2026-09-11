@@ -18,7 +18,7 @@ use std::time::Instant;
 use cairn_accumulator::forest::tree_of;
 use cairn_crypto::SecretKey;
 use cairn_ledger::note::Note;
-use cairn_ledger::sampling::{draw, sample_bytes, SAMPLES};
+use cairn_ledger::sampling::{draw, levels_for, sample_bytes, SAMPLES};
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
 use cairn_ledger::LedgerState;
@@ -297,7 +297,7 @@ fn main() {
 fn sampled_bytes(blocks: u64, header_bytes: usize) -> u64 {
     let seed = Hash32::from_bytes([7; 32]);
     let mut total = 0u64;
-    for work in draw(seed, SAMPLES, u128::from(blocks), blocks) {
+    for work in draw(seed, SAMPLES, u128::from(blocks), levels_for(blocks)) {
         let position = u64::try_from(work).unwrap_or(0);
         let depth = tree_of(blocks, position).map_or(0, |(height, _)| height);
         // The header, and the proof beside it: a sibling per level, and the

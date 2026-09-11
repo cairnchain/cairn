@@ -13,10 +13,13 @@
 //! done has to lie about some of its headers, and the positions are drawn so
 //! that a lie large enough to matter is almost certain to be opened.
 //!
-//! Two things make the questions unanswerable in advance. The positions come
-//! from hashing the tip, so choosing them means redoing the tip's work. And
-//! they are drawn against work rather than height, so a chain claiming work it
-//! did not do is asked about the part it claimed.
+//! Three things make the questions unanswerable in advance. The positions come
+//! from hashing the tip, so choosing them means redoing the tip's work. They
+//! are drawn against work rather than height, so a chain claiming work it did
+//! not do is asked about the part it claimed. And how many of them there are
+//! is decided by how old the chain says it is, which the reader's own clock
+//! bounds: see [`levels_of`], which is where six networks' worth of this got
+//! it wrong.
 //!
 //! What this settles is which chain is heaviest, and nothing else. A newcomer
 //! that has settled it still needs the ledger at that tip before it can check
@@ -87,6 +90,25 @@ use crate::validation::ConsensusParams;
 /// against forgeries built and put through [`check_start`]. The papers claim
 /// **40%**, which leaves three points of margin for the difference between a
 /// staircase of halvings and the smooth density it stands for.
+///
+/// **`levels` is an input, and for six networks it was one a prover wrote
+/// down.** It was `levels_for(tip.height)`, read off a field of the tip, and a
+/// height is not work: the only rule holding the two together is
+/// `check_the_gaps`, which prices a run of blocks nobody opened at
+/// [`MIN_DIFFICULTY`] apiece. So a chain whose blocks averaged difficulty `d`
+/// could state a height `d` times the one it had, buy `log2(d)` halvings with
+/// it, and take that many slices off what every draw was worth. At a real
+/// chain's numbers that is fifty-odd halvings against the fourteen the count
+/// was set for, bought in work the forger was already inventing. Measured on
+/// this very function, a forger at 40% went from missing all 4096 draws with
+/// 2^-207 to missing them with 2^-58, against a figure published as 2^-128,
+/// and the share the count held to was 31% rather than 40%.
+///
+/// [`levels_of`] is what closes it: the halvings are counted from how old the
+/// chain says it is rather than from how tall, and the age is the one number
+/// on a tip that a reader's own clock bounds. A prover cannot spread the draw
+/// over more halvings than the honest chain has had time for, and the height
+/// is still read, where it can only take halvings away.
 ///
 /// What that costs is about three megabytes to weigh a thirty-year chain,
 /// against the three gigabytes of headers it replaces reading. What it buys
@@ -525,52 +547,100 @@ pub fn seed_of(tip: &BlockHeader) -> Hash32 {
 /// One per halving until a band is narrower than [`SHALLOWEST`], since past
 /// that the draw would be separating chains that the fork choice does not
 /// separate either, at a cost paid by every draw at every level.
-fn levels_for(blocks: u64) -> u32 {
+///
+/// This is the honest count for a chain of that length, and it is public
+/// because it is what every published figure is computed from and what
+/// [`levels_of`] holds a stranger's tip to.
+#[must_use]
+pub fn levels_for(blocks: u64) -> u32 {
     let separable = blocks / SHALLOWEST;
     let significant = u64::BITS.saturating_sub(separable.max(1).leading_zeros());
     significant.max(FEWEST_LEVELS)
 }
 
-/// The work values a newcomer asks about, given a tip's total and how many
-/// blocks stand behind it.
+/// Halvings the draw spreads itself over, for a tip a stranger is offering.
+///
+/// Two numbers, and the smaller of them wins.
+///
+/// The first is the chain's age counted in blocks: how long the tip says the
+/// network has been running, over the block time the network aims at. That is
+/// a ceiling a prover cannot lift, because a reader refuses a tip dated more
+/// than [`ConsensusParams::max_timestamp_drift`] past its own clock and the
+/// opening moment is written into the software rather than sent by a peer. So
+/// the deepest a stated chain can halve is the deepest the real one can,
+/// whatever else it says about itself.
+///
+/// The second is the tip's height, which is what this read alone for six
+/// networks and what a prover could write down for one unit of work a block.
+/// It is kept because it is the right answer for a chain that has stalled: ten
+/// blocks mined over a year should not be halved nine times into the last of
+/// them. Taken as the smaller of the two it can only take halvings away, and a
+/// draw spread over fewer of them is worth more per question, not less.
+///
+/// So there is no side of this to lean on. Overstating either number is
+/// refused or ignored; understating either widens the band nearest the tip,
+/// and that band is the run of headers a prover then has to hand over in full,
+/// which is refused past [`MOST_TAIL`].
+///
+/// On an honest chain the two agree, because the retarget is what makes them
+/// agree: it holds the chain to `target_block_time` a block, so its age in
+/// blocks is its height. A chain that ran fast for its whole life states fewer
+/// halvings than its height would, and pays for it in a longer run up to the
+/// tip rather than in a weaker draw.
+///
+/// **The reader's clock bounds this and does not enter it.** Nothing here reads
+/// the time of day: the count is a function of the tip and of constants, so
+/// every node computes the same one for the same tip and a prover answers the
+/// list its reader asked for. Clamping the age against the reader's own clock
+/// here instead would be a second implementation that splits the network the
+/// first time two nodes disagree about the hour. What the clock does is decide
+/// whether the tip is looked at at all, in [`check_start`], before this is
+/// called. A node whose clock runs fast raises its own ceiling by exactly the
+/// error: a year fast on a thirty year chain moves the count from fourteen to
+/// fourteen, which is the scale of the dependency.
+#[must_use]
+pub fn levels_of(tip: &BlockHeader, params: &ConsensusParams) -> u32 {
+    let since_opening = tip.timestamp.saturating_sub(params.opens_at);
+    let by_the_clock = since_opening
+        .checked_div(params.target_block_time.max(1))
+        .unwrap_or(0);
+    levels_for(by_the_clock.min(tip.height))
+}
+
+/// The work values a newcomer asks about, given a tip's total and the number
+/// of halvings the questions are spread over.
 ///
 /// Whole numbers throughout, because both sides have to draw exactly the same
 /// list and floating point is not the same everywhere. The halving that makes
 /// the distribution is done on the work itself rather than on a fraction of it.
 ///
-/// **The level is drawn from one byte, and one byte does not divide evenly.**
-/// On a thirty year chain `levels` is 14 and 256 is 14 * 18 + 4, so the first
-/// four levels come up 19 times in 256 and the other ten 18 times. Level zero
-/// is the oldest half of the work and level thirteen the band nearest the tip,
-/// so what is over-drawn is the deep end and what is under-drawn is the ten
-/// levels nearest the tip, by 1.5625 percent: 4096 draws do the work of 4032.
-/// `FlyClient` assumes the choice is uniform, so this is a real loss, and it
-/// is measured in `tests/audit_sampling_as_published.rs` rather than argued.
+/// **`levels` is asked for rather than worked out here.** It used to be
+/// `levels_for(tip.height)`, computed inside this function off a number a
+/// prover writes down, and that was the break [`SAMPLES`] describes. Naming it
+/// as an argument is what makes a caller say where its count came from, and
+/// makes the old mistake a type error rather than a plausible line: a height
+/// is a `u64` and this wants the count itself. [`levels_of`] is what a real
+/// tip goes through; [`levels_for`] is what a modelled chain of a given length
+/// goes through.
 ///
-/// It is left alone, for three reasons that have to hold together.
-///
-/// A prover and a newcomer run this same function over the same tip, so the
-/// bias cannot make them disagree. It is not a split, it is a slightly weaker
-/// guarantee.
-///
-/// The guarantee it weakens was measured through this function and not through
-/// a model of it: `examples/adversarial_placement` runs the real draw, so the
-/// 43 percent it reports is this biased draw's own number, and the 40 percent
-/// [`SAMPLES`] publishes holds three points back from it. The loss is inside
-/// the published figure rather than outside it.
-///
-/// And removing it changes which positions a chain is asked about, which every
-/// prover and every newcomer would have to change on the same day: a new
-/// network number, by this project's own rule for a changed rule. That is not
-/// worth spending on 1.6 percent. Whenever the draw next changes for something
-/// that is worth it, the level should be taken from more than one byte, which
-/// puts the bias below anything measurable at no cost in code.
+/// **The level is drawn from eight bytes rather than one.** One byte was the
+/// first shape, and 256 does not divide by 14: the four deepest levels came up
+/// nineteen times in 256 and the other ten eighteen, an under-draw of 1.5625
+/// percent on the ten levels nearest the tip, so 4096 draws did the work of
+/// 4032. `FlyClient` assumes the choice is uniform, so that was a real loss,
+/// small enough to sit inside the three points of margin [`SAMPLES`] holds
+/// back and measured in `tests/audit_sampling_as_published.rs` rather than
+/// argued. Eight bytes multiplied by `levels` and shifted back down spread the
+/// same choice with a bias under one part in 2^64, which is below anything
+/// this is quoted to. It costs one multiplication, and it is done now because
+/// changing which positions a chain is asked about is a change both sides make
+/// on the same day, and the level count moving is already one of those.
 #[must_use]
-pub fn draw(seed: Hash32, count: usize, total_work: u128, blocks: u64) -> Vec<u128> {
+pub fn draw(seed: Hash32, count: usize, total_work: u128, levels: u32) -> Vec<u128> {
     if total_work == 0 || count == 0 {
         return Vec::new();
     }
-    let levels = levels_for(blocks);
+    let levels = levels.max(FEWEST_LEVELS);
 
     let mut drawn = Vec::with_capacity(count);
     for index in 0..count {
@@ -586,9 +656,17 @@ pub fn draw(seed: Hash32, count: usize, total_work: u128, blocks: u64) -> Vec<u1
         let bytes = hash(Domain::SamplingSeed, &material);
         let bytes = bytes.as_bytes();
 
-        let level = u32::from(bytes.first().copied().unwrap_or(0))
-            .checked_rem(levels)
-            .unwrap_or(0);
+        // Multiplied and shifted rather than reduced: `chosen` spans the
+        // whole of a `u64`, so scaling it by `levels` and taking the high half
+        // lands in `0..levels` with a bias under one part in 2^64.
+        let chosen = u64::from_le_bytes(
+            bytes
+                .get(..8)
+                .and_then(|slice| <[u8; 8]>::try_from(slice).ok())
+                .unwrap_or([0; 8]),
+        );
+        let level =
+            u32::try_from(u128::from(chosen).saturating_mul(u128::from(levels)) >> 64).unwrap_or(0);
         let within = u128::from_le_bytes(
             bytes
                 .get(8..24)
@@ -647,7 +725,7 @@ fn opened_header_bytes(depth: usize) -> u64 {
 #[must_use]
 pub fn sample_bytes(seed: Hash32, blocks: u64) -> u64 {
     let mut total = 0u64;
-    for work in draw(seed, SAMPLES, u128::from(blocks), blocks) {
+    for work in draw(seed, SAMPLES, u128::from(blocks), levels_for(blocks)) {
         let position = u64::try_from(work).unwrap_or(0);
         let depth = tree_of(blocks, position).map_or(0, |(height, _)| height);
         total = total.saturating_add(opened_header_bytes(depth));
@@ -751,6 +829,14 @@ pub fn check_start(
 ) -> Result<Weighed, StartError> {
     let tip = &start.tip;
     belongs_to_this_network(tip, params)?;
+    // Before the draw rather than after it, because how old the tip says the
+    // chain is decides how many questions are asked, and this is what bounds
+    // what it can say. See [`levels_of`].
+    if tip.timestamp > now.saturating_add(params.max_timestamp_drift) {
+        return Err(StartError::TipFromTheFuture {
+            timestamp: tip.timestamp,
+        });
+    }
     if !meets_target(&tip.id(), tip.difficulty) {
         return Err(StartError::TipWithoutWork);
     }
@@ -773,7 +859,12 @@ pub fn check_start(
     // is not in its own history, so there would be nothing to open for a draw
     // that landed in it, and nothing needs opening: the tip arrives whole and
     // its own work is checked directly.
-    let wanted = draw(seed_of(tip), count, work_before(tip), tip.height);
+    let wanted = draw(
+        seed_of(tip),
+        count,
+        work_before(tip),
+        levels_of(tip, params),
+    );
     if start.samples.len() != wanted.len() {
         return Err(StartError::WrongCount {
             wanted: wanted.len(),
@@ -813,7 +904,7 @@ pub fn check_start(
 
     check_the_parent(start, params)?;
     check_the_gaps(start)?;
-    check_the_tail(start, now, params)?;
+    check_the_tail(start, params)?;
 
     Ok(Weighed {
         tip: tip.id(),
@@ -831,22 +922,15 @@ pub fn check_start(
 /// the window demands, a timestamp past that window's median, its own work
 /// added to the total, and real work behind its own identifier.
 ///
-/// The tip's timestamp is measured against the reader's own clock here rather
-/// than left to the forward validation that comes later, because this is
-/// where the decision is made. Without it a forger can hand over a chain whose
-/// cheap blocks are spaced out across days it never waited.
-fn check_the_tail(
-    start: &SampledStart,
-    now: u64,
-    params: &ConsensusParams,
-) -> Result<(), StartError> {
+/// The tip's timestamp is measured against the reader's own clock rather than
+/// left to the forward validation that comes later, because this is where the
+/// decision is made: without it a forger hands over a chain whose cheap blocks
+/// are spaced out across days it never waited. That check has moved up to the
+/// top of [`check_start`], since the same timestamp now decides how many
+/// questions get asked and the bound on it has to be in force before the draw
+/// rather than after the answers.
+fn check_the_tail(start: &SampledStart, params: &ConsensusParams) -> Result<(), StartError> {
     let tip = &start.tip;
-    if tip.timestamp > now.saturating_add(params.max_timestamp_drift) {
-        return Err(StartError::TipFromTheFuture {
-            timestamp: tip.timestamp,
-        });
-    }
-
     // The deepest thing the draw actually landed on. The parent does not
     // count: it is required rather than drawn, so a forger chooses it.
     let Some(pinned) = start
@@ -1048,6 +1132,11 @@ fn check_the_gaps(start: &SampledStart) -> Result<(), StartError> {
 
 /// Builds the answer to a newcomer's draw, for a node that kept the headers.
 ///
+/// `params` is read for the same reason the reader reads it: the number of
+/// questions comes from the tip's age under this network's own opening moment
+/// and block time, so a prover that took it from anywhere else would answer a
+/// list nobody asked for.
+///
 /// `header_at` reads one header of the followed branch by height, which is a
 /// seek in a log rather than anything held in memory. `prove` is what only an
 /// archivist can do: a path through the header forest, which cannot be built
@@ -1060,10 +1149,16 @@ pub fn open_start(
     tip: &BlockHeader,
     history: Forest,
     count: usize,
+    params: &ConsensusParams,
     header_at: impl Fn(u64) -> Option<BlockHeader>,
     prove: impl Fn(u64) -> Option<ForestProof>,
 ) -> Option<SampledStart> {
-    let wanted = draw(seed_of(tip), count, work_before(tip), tip.height);
+    let wanted = draw(
+        seed_of(tip),
+        count,
+        work_before(tip),
+        levels_of(tip, params),
+    );
     let mut samples = Vec::with_capacity(wanted.len());
 
     // Where each draw lands, found by walking back from the tip. A chain is
@@ -1238,7 +1333,7 @@ mod tests {
         // And no path anywhere near the depth a forest could hold. Sixty-four
         // is the count of trees at 2^64 leaves; this chain's deepest tree is
         // twenty-three, which is what the figure above is made of.
-        let deepest = draw(seed(7), SAMPLES, u128::from(blocks), blocks)
+        let deepest = draw(seed(7), SAMPLES, u128::from(blocks), levels_for(blocks))
             .into_iter()
             .filter_map(|work| tree_of(blocks, u64::try_from(work).ok()?))
             .map(|(height, _)| height)
@@ -1303,10 +1398,105 @@ mod tests {
         );
     }
 
+    /// The break, closed: a stated height buys no halvings.
+    ///
+    /// The chain is 2048 blocks old by its own clock, and says so. Whatever it
+    /// says about its height, the count is the one those 2048 blocks earn.
+    #[test]
+    fn a_stated_height_no_longer_buys_halvings() {
+        let params = ConsensusParams::testnet();
+        let honest = 2_048u64;
+        let mut tip = bare_header();
+        tip.height = honest;
+        tip.timestamp = params.opens_at + honest * params.target_block_time;
+        assert_eq!(levels_of(&tip, &params), levels_for(honest));
+
+        for stated in [honest * 64, honest * 1_000_000, 1 << 61, u64::MAX] {
+            tip.height = stated;
+            assert_eq!(
+                levels_of(&tip, &params),
+                levels_for(honest),
+                "a stated height of {stated} moved the count"
+            );
+        }
+    }
+
+    /// And the height is still read, where it can only take halvings away.
+    ///
+    /// Ten blocks mined over a year are ten blocks. Counting the halvings from
+    /// the year would spread nine of them over the last block, which is nine
+    /// levels' worth of draws asking a question already answered.
+    #[test]
+    fn a_stalled_chain_halves_over_its_blocks_and_not_over_its_years() {
+        let params = ConsensusParams::testnet();
+        let mut tip = bare_header();
+        tip.height = 10;
+        tip.timestamp = params.opens_at + 365 * 24 * 60 * 60;
+        assert_eq!(levels_of(&tip, &params), levels_for(10));
+        assert_eq!(levels_of(&tip, &params), FEWEST_LEVELS);
+    }
+
+    /// A chain dated before its own network opened halves once, not forever.
+    #[test]
+    fn a_tip_older_than_its_network_counts_no_halvings_from_its_clock() {
+        let params = ConsensusParams::testnet();
+        let mut tip = bare_header();
+        tip.height = 1 << 40;
+        tip.timestamp = params.opens_at.saturating_sub(1);
+        assert_eq!(levels_of(&tip, &params), FEWEST_LEVELS);
+    }
+
+    /// Every halving is drawn from as often as every other.
+    ///
+    /// The level used to come from one byte reduced by `levels`, and 256 does
+    /// not divide by 14: four levels drew 19 times in 256 and ten drew 18, so
+    /// the four deepest ran 3.9 percent over and the ten nearest the tip 1.6
+    /// percent under. At this many draws the noise is a third of a percent, so
+    /// the bound below refuses the old shape and passes the new one with room.
+    #[test]
+    fn every_halving_is_drawn_from_as_often_as_every_other() {
+        const DRAWS: usize = 1 << 20;
+        let levels = levels_for(30 * 365 * 24 * 60);
+        assert_eq!(levels, 14, "the size every published figure is quoted at");
+
+        let total = 1u128 << 100;
+        let mut counts = vec![0usize; usize::try_from(levels).unwrap()];
+        for value in draw(seed(5), DRAWS, total, levels) {
+            // Which band the value came from, read back out of it: a band runs
+            // from `total >> (level + 1)` behind the tip up to `total >> level`.
+            let distance = total - value;
+            let level = (0..levels)
+                .find(|level| {
+                    distance > total >> level.saturating_add(1) && distance <= total >> level
+                })
+                .expect("every drawn value sits in a band");
+            counts[usize::try_from(level).unwrap()] += 1;
+        }
+
+        // Whole numbers throughout: `off * 50 < even` is a deviation under two
+        // per cent, and the old shape ran four levels at nearly four.
+        let even = DRAWS / usize::try_from(levels).unwrap();
+        for (level, count) in counts.iter().enumerate() {
+            let off = count.abs_diff(even);
+            assert!(
+                off * 50 < even,
+                "level {level} drew {count} times against {even}, which is past two percent"
+            );
+        }
+    }
+
+    /// A count of nothing is still a count of one, because a draw with no
+    /// levels has no band to land in.
+    #[test]
+    fn a_draw_over_no_levels_draws_over_one() {
+        let total = 1_000_000u128;
+        assert_eq!(draw(seed(2), 32, total, 0), draw(seed(2), 32, total, 1));
+    }
+
     #[test]
     fn a_draw_asks_about_work_that_exists() {
         let total = 1_000_000u128;
-        for value in draw(seed(1), 256, total, 1_000) {
+        for value in draw(seed(1), 256, total, levels_for(1_000)) {
             assert!(value < total, "drew {value}, past a total of {total}");
         }
     }
@@ -1315,12 +1505,12 @@ mod tests {
     /// prover is answering a list the verifier never asked for.
     #[test]
     fn a_draw_is_the_same_every_time() {
-        let first = draw(seed(7), 64, 9_999_991, 10_000);
-        let second = draw(seed(7), 64, 9_999_991, 10_000);
+        let first = draw(seed(7), 64, 9_999_991, levels_for(10_000));
+        let second = draw(seed(7), 64, 9_999_991, levels_for(10_000));
         assert_eq!(first, second);
         assert_ne!(
             first,
-            draw(seed(8), 64, 9_999_991, 10_000),
+            draw(seed(8), 64, 9_999_991, levels_for(10_000)),
             "and it turns on the seed"
         );
     }
@@ -1330,7 +1520,7 @@ mod tests {
     #[test]
     fn a_draw_leans_towards_the_tip() {
         let total = 1_000_000u128;
-        let drawn = draw(seed(3), 4_096, total, 100_000);
+        let drawn = draw(seed(3), 4_096, total, levels_for(100_000));
         let near = drawn.iter().filter(|value| **value > total / 2).count();
         let far = drawn.len().saturating_sub(near);
         assert!(
@@ -1361,8 +1551,8 @@ mod tests {
 
     #[test]
     fn nothing_is_drawn_from_a_chain_with_no_work() {
-        assert!(draw(seed(1), 64, 0, 100).is_empty());
-        assert!(draw(seed(1), 0, 1_000, 100).is_empty());
+        assert!(draw(seed(1), 64, 0, levels_for(100)).is_empty());
+        assert!(draw(seed(1), 0, 1_000, levels_for(100)).is_empty());
     }
 
     /// The block a draw lands in is the one whose own work spans it.

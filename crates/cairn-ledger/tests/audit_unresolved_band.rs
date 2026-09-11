@@ -23,7 +23,7 @@ use cairn_crypto::SecretKey;
 use cairn_ledger::block::{BlockHeader, BLOCK_VERSION};
 use cairn_ledger::note::Note;
 use cairn_ledger::sampling::{
-    check_start, draw, seed_of, work_before, Sample, SampledStart, SAMPLES,
+    check_start, draw, levels_for, levels_of, seed_of, work_before, Sample, SampledStart, SAMPLES,
 };
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
@@ -155,7 +155,12 @@ fn forge(honest: &Honest, run: u64, delta: u128) -> Forgery {
 
     // Answering the draw. Every value the verifier asks about is spanned by
     // some header the forger holds, honest or invented.
-    let wanted = draw(seed_of(&tip), SAMPLES, work_before(&tip), tip.height);
+    let wanted = draw(
+        seed_of(&tip),
+        SAMPLES,
+        work_before(&tip),
+        levels_of(&tip, &params()),
+    );
     // The forger answers each draw with the header spanning it, or with the
     // deepest thing it has when the draw lands in a gap of its own making.
     // Answering badly and not answering at all are the same outcome here,
@@ -226,7 +231,7 @@ fn unresolved(total: u128, blocks: u64) -> u128 {
         }),
         SAMPLES,
         total,
-        blocks,
+        levels_for(blocks),
     );
     let highest = drawn.iter().copied().max().unwrap_or(0);
     total - highest
@@ -242,7 +247,12 @@ fn the_honest_chain_still_checks_out() {
         archive.add(header_leaf(&header.id()));
     }
     let tip = *honest.headers.last().unwrap();
-    let wanted = draw(seed_of(&tip), 512, work_before(&tip), tip.height);
+    let wanted = draw(
+        seed_of(&tip),
+        512,
+        work_before(&tip),
+        levels_of(&tip, &params()),
+    );
     let samples: Vec<Sample> = wanted
         .iter()
         .map(|value| {
@@ -394,7 +404,7 @@ fn the_budget_at_thirty_years() {
         }),
         SAMPLES,
         total,
-        blocks,
+        levels_for(blocks),
     );
     let highest = drawn.iter().copied().max().unwrap();
     let band = total - highest;

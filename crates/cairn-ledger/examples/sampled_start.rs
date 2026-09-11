@@ -39,7 +39,8 @@ use cairn_crypto::SecretKey;
 use cairn_ledger::block::BlockHeader;
 use cairn_ledger::note::Note;
 use cairn_ledger::sampling::{
-    check_start, covering, draw, sample_bytes, seed_of, work_before, Sample, SampledStart, SAMPLES,
+    check_start, covering, draw, levels_for, levels_of, sample_bytes, seed_of, work_before, Sample,
+    SampledStart, SAMPLES,
 };
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
@@ -164,12 +165,14 @@ fn at_full_size() {
                     cairn_primitives::hash::Domain::SamplingSeed,
                     &trial.to_le_bytes(),
                 );
-                let caught = draw(seed, count, claimed, blocks).into_iter().any(|work| {
-                    // Which block's stretch this lands in, and whereabouts.
-                    let stretch = claimed / u128::from(blocks).max(1);
-                    let within = work % stretch.max(1);
-                    within >= per_block
-                });
+                let caught = draw(seed, count, claimed, levels_for(blocks))
+                    .into_iter()
+                    .any(|work| {
+                        // Which block's stretch this lands in, and whereabouts.
+                        let stretch = claimed / u128::from(blocks).max(1);
+                        let within = work % stretch.max(1);
+                        within >= per_block
+                    });
                 if !caught {
                     missed += 1;
                 }
@@ -352,17 +355,22 @@ fn caught_out(honest: &[BlockHeader], claim: f64, count: usize, salt: u64, lie: 
         .map(|header| (header.height, header.total_work, header.difficulty))
         .collect();
 
-    let samples: Vec<Sample> = draw(seed_of(&forged), count, work_before(&forged), forged.height)
-        .into_iter()
-        .map(|work| {
-            // The best it can do: the block that spans the draw, or the
-            // closest thing it has when the draw lands in a gap.
-            let height = covering(&ledger, work).unwrap_or(last as u64);
-            let header = shown[usize::try_from(height).unwrap()];
-            let proof = before_tip.prove(height).unwrap();
-            Sample { header, proof }
-        })
-        .collect();
+    let samples: Vec<Sample> = draw(
+        seed_of(&forged),
+        count,
+        work_before(&forged),
+        levels_of(&forged, &ConsensusParams::testnet()),
+    )
+    .into_iter()
+    .map(|work| {
+        // The best it can do: the block that spans the draw, or the
+        // closest thing it has when the draw lands in a gap.
+        let height = covering(&ledger, work).unwrap_or(last as u64);
+        let header = shown[usize::try_from(height).unwrap()];
+        let proof = before_tip.prove(height).unwrap();
+        Sample { header, proof }
+    })
+    .collect();
 
     let start = SampledStart {
         tip: forged,

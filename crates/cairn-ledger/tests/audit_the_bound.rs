@@ -1,9 +1,10 @@
-//! AUDIT: the sampling bound, and the two places it is not a theorem.
+//! AUDIT: the sampling bound, the input a prover used to write down, and the
+//! rule that took it back.
 //!
 //! `SECURITY.md` says the bound is a conjecture and asks for work that proves
-//! it or breaks it. This breaks it, and the break is not in the arithmetic: it
-//! is in an input the derivation treats as the chain's and the protocol lets a
-//! prover write down.
+//! it or breaks it. An earlier round of this file broke it, and the break was
+//! not in the arithmetic: it was in an input the derivation treated as the
+//! chain's and the protocol let a prover write down.
 //!
 //! `SAMPLES` sets the count from
 //!
@@ -12,30 +13,30 @@
 //! ```
 //!
 //! and every quantity in it but `levels` is fixed by the forger's share. The
-//! `levels` is `bit_length(tip.height / 1024)`, read off a field of the tip.
+//! `levels` was `bit_length(tip.height / 1024)`, read off a field of the tip.
 //! Height is not work, and the only rule holding the two together is
 //! `check_the_gaps`, which asks a run of `n` blocks between two opened headers
 //! to be worth at least what a descent to the floor allows. That is
 //! `n * MIN_DIFFICULTY`, and `MIN_DIFFICULTY` is one. So a chain whose blocks
-//! average difficulty `d` can state a height `d` times the one it has, buy
+//! averaged difficulty `d` could state a height `d` times the one it had, buy
 //! `log2(d)` more halvings with it, and take that many slices off what every
-//! draw is worth.
+//! draw was worth.
 //!
-//! The first test builds one and puts it through the shipped check. The second
-//! prices it, from both sides: exactly one unit a block, and the check refuses a
-//! unit less. The fifth is the other half of the price, and the sharper half: a
-//! stated block need not exist at all. A forest travels as a leaf count and its
-//! roots, and only the positions a draw opens are ever folded, so a forger
-//! commits to a forest of any size in as many hashes as it has heights. What it
-//! pays for a stated height is what `check_the_gaps` charges, in work it was
-//! already inventing, and nothing else.
+//! `levels_of` is the rule now: the halvings come from how old the tip says its
+//! chain is, over the block time the network aims at, and never past the
+//! height. A reader refuses a tip dated more than its drift allowance ahead of
+//! its own clock, so the deepest a stated chain can halve is the deepest the
+//! real one can.
 //!
-//! The third and fourth are what that does to the published figure, measured on
-//! the shipped `draw` at the size the figure is quoted at: 40 per cent stops
-//! holding, and what does hold is nearer 31.
+//! The first two tests are the closure, on a chain that is built and put
+//! through the shipped check. The third and fourth are why the height had to
+//! come out of the draw rather than be bounded inside it: it is priced at
+//! exactly one unit a block, and a stated height need not exist at all. The
+//! fifth and sixth are what the rule is worth, measured on the shipped `draw`
+//! at the size every published figure is quoted at.
 //!
-//! `examples/breaking_the_bound` is the search these conclusions came out of.
-//! Counted rather than timed throughout: nothing here measures a duration.
+//! `examples/searching_for_a_break` is the search these conclusions came out
+//! of. Counted rather than timed throughout: nothing here measures a duration.
 
 #![allow(
     clippy::unwrap_used,
@@ -54,7 +55,8 @@ use cairn_ledger::block::BlockHeader;
 use cairn_ledger::note::NetworkId;
 use cairn_ledger::pow::{work_of, DIFFICULTY_WINDOW, MIN_DIFFICULTY};
 use cairn_ledger::sampling::{
-    check_start, draw, seed_of, work_before, Sample, SampledStart, StartError, SAMPLES, SHALLOWEST,
+    check_start, draw, levels_for, levels_of, seed_of, work_before, Sample, SampledStart,
+    StartError, MOST_TAIL, SAMPLES, SHALLOWEST,
 };
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::CoinbaseTransaction;
@@ -69,8 +71,8 @@ const CARRYING: u64 = 2_048;
 ///
 /// Above the floor, and that is the whole point: the ratio between this and
 /// [`MIN_DIFFICULTY`] is how far a stated height can be inflated. A real chain
-/// runs this ratio at forty bits and more; here it is nine, which is enough to
-/// take the level count from two to eight.
+/// runs this ratio at forty bits and more; here it is nine, which used to be
+/// enough to take the level count from two to eight.
 const HARD: u64 = 512;
 /// Height the tip states.
 const STATED: u64 = 1 << 17;
@@ -79,17 +81,16 @@ const ATTEMPTS: u64 = 1 << 22;
 /// When the chain opens, in its own clock.
 const OPENS: u64 = 1_000_000;
 
+/// The rules this chain is weighed under.
+///
+/// The opening moment is the fixture's own, because the level count is now read
+/// from the distance between it and the tip: a network whose opening the test
+/// does not set is a network the tip is measured against by accident.
 fn params() -> ConsensusParams {
-    ConsensusParams::testnet()
-}
-
-/// Halvings the draw spreads itself over, restated from `sampling.rs`, which
-/// keeps this private and the constant it reads from public.
-fn levels_for(blocks: u64) -> u32 {
-    let separable = blocks / SHALLOWEST;
-    u64::BITS
-        .saturating_sub(separable.max(1).leading_zeros())
-        .max(1)
+    ConsensusParams {
+        opens_at: OPENS,
+        ..ConsensusParams::testnet()
+    }
 }
 
 /// A chain that states a height far past the blocks carrying its work.
@@ -111,7 +112,7 @@ struct Padded {
 /// `descend` gives the first four floor blocks the difficulties the retarget's
 /// steepest descent allows, 128 down to 2, which is what makes the run worth
 /// exactly what the gap check demands of it. Without them it is worth 166 less,
-/// and the check says so; that is the second test.
+/// and the check says so; that is the third test.
 fn build(descend: bool) -> Padded {
     let params = params();
     let mut shown: Vec<BlockHeader> = Vec::with_capacity(usize::try_from(STATED).unwrap() + 1);
@@ -202,7 +203,12 @@ impl Padded {
     /// with a disk instead.
     fn present(&self, count: usize) -> SampledStart {
         let tip = self.tip();
-        let drawn = draw(seed_of(&tip), count, work_before(&tip), tip.height);
+        let drawn = draw(
+            seed_of(&tip),
+            count,
+            work_before(&tip),
+            levels_of(&tip, &params()),
+        );
         let mut wanted: Vec<u64> = drawn.iter().map(|work| self.answer(*work)).collect();
         wanted.push(tip.height - 1);
         wanted.sort_unstable();
@@ -250,55 +256,115 @@ impl Padded {
     }
 }
 
-/// A prover writes down the number the draw's level count is computed from, and
-/// the shipped check takes it.
+/// The break, closed: the number the level count is read from is not one the
+/// prover writes down.
 ///
-/// This is the break. Everything else in this file is what it costs and what it
-/// is worth.
+/// The chain below is the one that broke the bound. It is still accepted, and
+/// it should be: a chain that really is this old and this tall, with the work
+/// to price both, is not a forgery. What has changed is what it is asked. The
+/// same tip stating a height of 2^61 draws the same questions, because the
+/// questions come from the distance between the network's opening and the
+/// tip's own timestamp, and the chain cannot be older than the network.
 #[test]
-fn the_level_count_is_read_from_a_number_the_prover_writes_down() {
+fn the_level_count_is_not_read_from_a_number_the_prover_writes_down() {
     let padded = build(true);
     let tip = padded.tip();
     let start = padded.present(SAMPLES);
     let now = tip.timestamp;
 
     // Through the wire and back first. A weighing that only exists as a struct
-    // in this process is not a weighing a peer can send, and the decoder is
-    // where a ceiling on the stated height would have to live if there were
-    // one. There is not: it bounds the sample count and the run up to the tip,
-    // and nothing else.
+    // in this process is not a weighing a peer can send.
     let wire = start.encode();
     let start = SampledStart::decode(&wire).expect("a forged weighing has to survive its own wire");
     check_start(&start, SAMPLES, now, &params())
-        .expect("a chain padded to a stated height has to be accepted, or there is no break");
+        .expect("a chain whose work and age are both real has to be accepted");
+
+    let params = params();
+    let asked = levels_of(&tip, &params);
+
+    // The break, in two lines. The stated height moves the old count and not
+    // the new one.
+    for stated in [STATED * 64, STATED * 4_096, 1 << 61, u64::MAX] {
+        let taller = BlockHeader {
+            height: stated,
+            ..tip
+        };
+        assert_ne!(
+            levels_for(tip.height),
+            levels_for(taller.height),
+            "a height of {stated} was supposed to move the count that used to be read"
+        );
+        assert_eq!(
+            asked,
+            levels_of(&taller, &params),
+            "a height of {stated} moved the count that is read now"
+        );
+    }
+
+    // And the count it is asked at is the one its own age buys, which is the
+    // one every chain of that age is asked at, honest or not.
+    let age = (tip.timestamp - params.opens_at) / params.target_block_time;
+    assert_eq!(asked, levels_for(age.min(tip.height)));
 
     let carried = u128::from(CARRYING) * u128::from(HARD);
     let padding = tip.total_work - carried;
-    assert_eq!(tip.height, STATED);
-    assert_eq!(levels_for(CARRYING), 2, "the blocks carrying the work");
-    assert_eq!(levels_for(tip.height), 8, "the height the tip states");
-
-    // What the extra six halvings cost, which is one hash a block.
-    assert!(
-        padding * 8 < carried,
-        "the padding is {padding} against {carried} carried, which is not cheap"
-    );
     println!(
         "\n  {CARRYING} blocks at difficulty {HARD} carry {carried} work. Stating a height\n  \
-         of {STATED} costs {padding} more, at MIN_DIFFICULTY a block, and takes the\n  \
-         draw from {} halvings to {}. Every draw is then worth 1/{} of what the count\n  \
-         was set assuming, and the check accepted it.\n",
+         of {STATED} costs {padding} more, at MIN_DIFFICULTY a block, and used to take\n  \
+         the draw from {} halvings to {}. It now takes it to {asked}, which is what the\n  \
+         chain's own age buys and what a chain of that age gets whatever it says about\n  \
+         its height.\n",
         levels_for(CARRYING),
         levels_for(tip.height),
-        levels_for(tip.height) / levels_for(CARRYING),
     );
 }
 
-/// And it is priced at exactly `MIN_DIFFICULTY` a block, from both sides.
+/// And the ceiling is the reader's own clock, held before a question is asked.
 ///
-/// The run above the carrying blocks states exactly what `check_the_gaps`
-/// demands of it. One unit a block less, which is what dropping the retarget's
-/// descent takes off it, and the same check refuses.
+/// The same chain, offered to a reader whose clock says the network opened only
+/// as long ago as the work in it took. The tip is dated past what that reader
+/// will take, and it is refused for that and not for anything the draw found:
+/// the samples are emptied first, so a refusal for the count or for a sample
+/// would come out instead if the order had drifted.
+#[test]
+fn a_tip_dated_past_the_reader_is_refused_before_a_question_is_asked() {
+    let padded = build(true);
+    let tip = padded.tip();
+    let mut start = padded.present(SAMPLES);
+    let params = params();
+
+    let honestly = OPENS + CARRYING * params.target_block_time;
+    assert!(tip.timestamp > honestly + params.max_timestamp_drift);
+
+    start.samples.clear();
+    let refusal = check_start(&start, SAMPLES, honestly, &params);
+    assert!(
+        matches!(refusal, Err(StartError::TipFromTheFuture { .. })),
+        "a tip from the future was refused for {refusal:?} instead"
+    );
+
+    // A drift's worth of slack and no more, which is 120 blocks at a block a
+    // minute against a chain of {STATED}.
+    let blocks_of_slack = params.max_timestamp_drift / params.target_block_time;
+    assert_eq!(blocks_of_slack, 120);
+    let accepted = levels_for((tip.timestamp - OPENS) / params.target_block_time);
+    let honest_count = levels_for(CARRYING + blocks_of_slack);
+    assert!(
+        accepted > honest_count,
+        "the fixture is not one where the clock is the binding constraint"
+    );
+}
+
+/// A stated height is priced at exactly `MIN_DIFFICULTY` a block, from both
+/// sides.
+///
+/// This is why the height had to come out of the draw rather than be bounded
+/// inside it. The run above the carrying blocks states exactly what
+/// `check_the_gaps` demands of it, and one unit a block less is refused by the
+/// same check. There is no ceiling to be had from the pricing: a chain worth
+/// `W` prices a stated height of `W / MIN_DIFFICULTY`, so the level count a
+/// prover could reach was decided by the chain's work and by nothing the draw
+/// or the decoder said.
 #[test]
 fn the_stated_height_is_priced_at_one_unit_a_block_and_not_less() {
     let short = build(false);
@@ -322,18 +388,14 @@ fn the_stated_height_is_priced_at_one_unit_a_block_and_not_less() {
         "the descent's own cost"
     );
 
-    // And that price is the only ceiling there is. A chain worth `W` prices a
-    // stated height of `W / MIN_DIFFICULTY`, so the level count a prover can
-    // reach is decided by the chain's work and not by anything the draw or the
-    // decoder says. At a real chain's numbers that is fifty-odd halvings where
+    // At a real chain's numbers that pricing allowed fifty-odd halvings where
     // the count was set for fourteen.
     let real = REAL * u128::from(YEARS);
     let priced = u64::try_from(real / u128::from(MIN_DIFFICULTY)).unwrap_or(u64::MAX);
-    assert_eq!(levels_for(YEARS), 14, "what the count was set for");
+    assert_eq!(levels_for(YEARS), 14, "what the count is set for");
     assert!(
         levels_for(priced) >= 53,
-        "a chain worth {real} prices a height of {priced}, which is only \
-         {} halvings",
+        "a chain worth {real} prices a height of {priced}, which is only {} halvings",
         levels_for(priced)
     );
 }
@@ -341,41 +403,50 @@ fn the_stated_height_is_priced_at_one_unit_a_block_and_not_less() {
 /// Thirty years of a chain a minute, which is the size every published figure
 /// is quoted at.
 const YEARS: u64 = 30 * 365 * 24 * 60;
-/// Difficulty a real chain runs at, which is what decides how far its stated
-/// height can be inflated.
+/// Difficulty a real chain runs at.
 const REAL: u128 = 1 << 40;
 /// Seeds a hit rate is measured over here.
 ///
 /// The seed is the tip's own identifier, so a placement is worth its average
-/// over seeds. Enough to tell 2^-58 from 2^-128 and no more: the search that
-/// found these placements is in `examples/breaking_the_bound` and runs at 512.
+/// over seeds. Enough to tell one figure from another and no more: the search
+/// that found these placements is in `examples/searching_for_a_break` and runs
+/// at 512.
 const SEEDS: u64 = 32;
 
-/// Every draw the shipped function makes for one stated height, sorted.
+/// Every draw the shipped function makes for one level count, sorted.
 ///
-/// Built once per height and asked many questions, because the questions are
+/// Built once per count and asked many questions, because the questions are
 /// what a search is and the draws are what they are asked of.
 struct Board {
-    height: u64,
     levels: u32,
     total: u128,
     drawn: Vec<u128>,
 }
 
 impl Board {
-    fn of(height: u64, total: u128) -> Self {
+    fn of(levels: u32, total: u128) -> Self {
         let mut drawn = Vec::with_capacity((SEEDS as usize) * SAMPLES);
         for trial in 0..SEEDS {
             let seed: Hash32 = hash(Domain::SamplingSeed, &trial.to_le_bytes());
-            drawn.extend(draw(seed, SAMPLES, total, height));
+            drawn.extend(draw(seed, SAMPLES, total, levels));
         }
         drawn.sort_unstable();
         Self {
-            height,
-            levels: levels_for(height),
+            levels,
             total,
             drawn,
         }
+    }
+
+    /// Whether a chain stating this many halvings can be weighed at all.
+    ///
+    /// The run up to the tip carries every block of the band the draw leaves
+    /// unresolved, plus a retarget window. Past [`MOST_TAIL`] a reader refuses
+    /// the weighing before it looks at a draw, so a prover that understates the
+    /// count has refused its own weighing.
+    fn weighable(&self) -> bool {
+        let band = self.total >> self.levels.min(127);
+        band / REAL + u128::from(DIFFICULTY_WINDOW as u64) < u128::from(MOST_TAIL)
     }
 
     /// The share of draws landing in `[from, to)`.
@@ -394,7 +465,7 @@ fn miss_log2(hit: f64) -> f64 {
     SAMPLES as f64 * (1.0 - hit).log2()
 }
 
-/// The best gap a forger at `share` can place on a chain stating this height.
+/// The best gap a forger at `share` can place on a chain stating this count.
 ///
 /// The gap runs from a band's shallow edge down by a factor of `1/sigma`, which
 /// is where the staircase is cheapest: inside one band the draw is uniform, so
@@ -402,9 +473,7 @@ fn miss_log2(hit: f64) -> f64 {
 /// shallow edge. The smooth `1/x` density the derivation assumes prices the
 /// same gap at `log2(1/sigma)/levels`, which is higher.
 ///
-/// Only bands the run up to the tip does not already cover are considered, and
-/// only heights the gap itself prices: a run of `height` blocks has to be worth
-/// `height * MIN_DIFFICULTY`, and the gap is what states it.
+/// Only bands the run up to the tip does not already cover are considered.
 fn best_miss(board: &Board, share: f64) -> f64 {
     let sigma = share / (1.0 - share);
     let total = board.total;
@@ -419,62 +488,80 @@ fn best_miss(board: &Board, share: f64) -> f64 {
         if deep >= total || deep <= shallow {
             continue;
         }
-        if u128::from(board.height) * u128::from(MIN_DIFFICULTY) > deep - shallow {
-            continue;
-        }
         best = best.max(miss_log2(board.landing_in(total - deep, total - shallow)));
     }
     best
 }
 
-/// At forty per cent the count reaches 2^-128 at the honest height and does not
-/// at a height the prover chooses.
+/// Every level count a prover can state on a thirty year chain, and whether a
+/// reader would weigh a chain stating it.
+fn every_count(total: u128) -> Vec<Board> {
+    (1..=levels_for(YEARS))
+        .map(|levels| Board::of(levels, total))
+        .collect()
+}
+
+/// At forty per cent, no level count a prover can state puts the forgery
+/// through.
 ///
-/// The published figure is forty per cent. It survives everything
-/// `adversarial_placement` searches. It does not survive the height.
+/// The published figure is forty per cent. This is the test that failed before
+/// the rule changed: a stated height of 2^61 took the same forgery from 2^-207
+/// to 2^-58 against a published 2^-128. The ceiling is now the honest count, so
+/// the only counts left to search are the honest one and the ones below it, and
+/// a count below it makes every draw worth more rather than less.
 #[test]
-fn at_forty_percent_a_chosen_height_puts_the_forgery_through() {
+fn at_forty_percent_no_count_a_prover_can_state_puts_the_forgery_through() {
     let total = REAL * u128::from(YEARS);
-    let honest = best_miss(&Board::of(YEARS, total), 0.40);
-    // 2^61 is priced by a gap of a quarter of the chain, which is what a forger
-    // at forty per cent has to invent to outweigh a fork three quarters back.
-    let chosen = best_miss(&Board::of(1 << 61, total), 0.40);
+    let boards = every_count(total);
+    let honest = boards.last().unwrap();
+    assert_eq!(honest.levels, levels_for(YEARS));
+
+    let mut refused = 0u32;
+    let mut worst = f64::NEG_INFINITY;
+    for board in &boards {
+        if !board.weighable() {
+            refused += 1;
+            continue;
+        }
+        worst = worst.max(best_miss(board, 0.40));
+    }
 
     assert!(
-        honest < -128.0,
-        "at the honest height the best placement misses with 2^{honest:.1}, and the \
-         count is supposed to reach 2^-128"
+        best_miss(honest, 0.40) < -128.0,
+        "at the honest count the best placement misses with 2^{:.1}",
+        best_miss(honest, 0.40)
     );
     assert!(
-        chosen > -128.0,
-        "a chosen height was supposed to break the bound and only reached 2^{chosen:.1}"
+        worst < -128.0,
+        "some count a prover can state reached 2^{worst:.1} against a published 2^-128"
     );
+    assert!(
+        refused > 0,
+        "every count was weighable, so the filter is idle"
+    );
+
     println!(
-        "\n  A forger at 40% of the world's work, on a chain of {YEARS} blocks:\n  \
-         at the honest height its best placement misses every one of {SAMPLES} draws\n  \
-         with 2^{honest:.1}. Stating a height of 2^61 instead, which costs it nothing it\n  \
-         was not already inventing, the same forgery misses with 2^{chosen:.1}. The\n  \
-         published figure is 2^-128.\n"
+        "\n  A forger at 40% of the world's work, on a chain of {YEARS} blocks. Of the\n  \
+         {} level counts a prover can state, {refused} are refused for the length of the\n  \
+         run they demand. Over the rest its best placement misses every one of {SAMPLES}\n  \
+         draws with 2^{worst:.1}. The published figure is 2^-128, and when the count came\n  \
+         off the stated height this read 2^-58.\n",
+        boards.len(),
     );
 }
 
-/// The share the draw actually holds to, measured the same way.
-///
-/// `SAMPLES` says 43 per cent measured and 40 published, three points of margin.
-/// Against a forger that also writes down its own height there is no margin:
-/// the figure is below 40, not above it.
+/// And the share the draw holds to is back above the published forty.
 #[test]
-fn the_share_the_draw_holds_to_is_below_the_published_forty() {
+fn the_share_the_draw_holds_to_is_above_the_published_forty() {
     let total = REAL * u128::from(YEARS);
-    let heights = [YEARS, 1 << 32, 1 << 45, 1 << 52, 1 << 61];
-    let boards: Vec<Board> = heights
-        .iter()
-        .map(|height| Board::of(*height, total))
+    let boards: Vec<Board> = every_count(total)
+        .into_iter()
+        .filter(Board::weighable)
         .collect();
 
     let mut low = 0.05f64;
     let mut high = 0.50f64;
-    for _ in 0..8 {
+    for _ in 0..12 {
         let middle = f64::midpoint(low, high);
         let best = boards
             .iter()
@@ -488,16 +575,20 @@ fn the_share_the_draw_holds_to_is_below_the_published_forty() {
     }
 
     assert!(
-        low < 0.40,
-        "the draw held to {:.2}% and the published figure is 40%, so this test is \
-         measuring the wrong thing",
+        low > 0.40,
+        "the draw held to {:.2}% and the published figure is 40%",
+        low * 100.0
+    );
+    assert!(
+        low < 0.46,
+        "the draw held to {:.2}%, which is further than `SAMPLES` claims, so one of \
+         the two is wrong",
         low * 100.0
     );
     println!(
-        "\n  Measured over {} stated heights, the count reaches 2^-128 up to {:.1}% of the\n  \
-         world's work and no further. `SAMPLES` publishes 40% and says it measured 43.\n  \
-         The difference is the level count, which the derivation treats as the chain's\n  \
-         and the protocol lets a prover write down.\n",
+        "\n  Measured over {} level counts a prover can state, the count reaches 2^-128 up\n  \
+         to {:.1}% of the world's work. `SAMPLES` publishes 40% and says it measured 43.\n  \
+         Against a forger that also wrote down its own height this read 31.\n",
         boards.len(),
         low * 100.0,
     );
@@ -530,20 +621,21 @@ fn subtree(level: u32, start: u64, real: &[Hash32], empty: &[Hash32]) -> Hash32 
 
 /// A stated height also costs nothing to commit to.
 ///
-/// The other half of "free", and the one that decides whether the height a
-/// forger states is bounded by what it can hold. It is not. A forest travels as
-/// its leaf count and one root per tree, and a path is checked by folding it
-/// against that root. Nothing asks what is at a position nobody opened, and a
-/// forger opens [`SAMPLES`] of them.
+/// The other half of "free", and the one that decided whether the height a
+/// prover states could be bounded by what it can hold. It cannot. A forest
+/// travels as its leaf count and one root per tree, and a path is checked by
+/// folding it against that root. Nothing asks what is at a position nobody
+/// opened, and a prover opens [`SAMPLES`] of them.
 ///
 /// So it picks one filler leaf, folds it up to every height in as many hashes
 /// as there are heights, builds the small subtrees that hold what it does open,
 /// and commits the fold. The forest below is 2^61 leaves, of which four exist,
 /// and the shipped `Forest::verify` accepts every one of them.
 ///
-/// This is why the price of a stated height is the one `check_the_gaps` charges
-/// and no other: `MIN_DIFFICULTY` a block, in work the forger was inventing
-/// anyway. It is not `n` headers, `n` hashes, or `n` bytes of anything.
+/// This is why the height could not be bounded where it was read: the price of
+/// a stated height is the one `check_the_gaps` charges and no other, at
+/// `MIN_DIFFICULTY` a block, in work the forger was inventing anyway. It is not
+/// `n` headers, `n` hashes, or `n` bytes of anything.
 #[test]
 fn a_forest_of_two_to_the_sixty_one_leaves_costs_four_of_them() {
     const DEPTH: u32 = 61;
@@ -594,4 +686,11 @@ fn a_forest_of_two_to_the_sixty_one_leaves_costs_four_of_them() {
          built: what a forest costs is what is opened in it. Every path is {DEPTH}\n  \
          siblings, and the shipped verifier takes all of them.\n"
     );
+}
+
+/// The narrowest band the draw separates, unchanged by any of this.
+#[test]
+fn the_draw_still_stops_a_thousand_blocks_from_the_tip() {
+    assert_eq!(SHALLOWEST, 1_024);
+    assert_eq!(levels_for(YEARS), 14);
 }

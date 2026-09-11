@@ -148,15 +148,21 @@ replaces. That holds against a forger up to 40% of the world's work, and what
 it guarantees is a depth: such a forger cannot put a newcomer on a branch
 differing from the real one by more than about 1 240 blocks, twenty hours.
 Inside that it can, as can a slow peer — it is where any node sits for its
-first blocks after connecting, and it is shallower than the deepest
-reorganisation a node would accept anyway.
+first blocks after connecting. It is deeper than the deepest reorganisation a
+node will make, and the whitepaper's limitations section states the gap rather
+than rounding it away.
 
-Those numbers are measured rather than proved, and the first version of them was
-wrong: 512 draws and 45.7% were derived assuming the draw is uniform over the
-chain, when it is deliberately denser towards the tip, and a forger picks how
-deep to fork. `cargo run --release -p cairn-ledger --example
-adversarial_placement` is the measurement, and it checks itself against
-forgeries that were actually built.
+Those numbers are measured rather than proved, and they have been wrong twice.
+The first version was 512 draws and 45.7%, derived assuming the draw is uniform
+over the chain when it is deliberately denser towards the tip, and a forger
+picks how deep to fork. The second was the number of halvings the draw spreads
+over, which was read off the height a tip states: a height is not work, and a
+chain could state a large one for one unit of work a block and dilute every
+draw with it. The share the count really held to was 31%, not 40%. It now comes
+from the age the tip claims, which a reader's own clock bounds. `cargo run
+--release -p cairn-ledger --example adversarial_placement` is the measurement
+and `--example searching_for_a_break` is the search that found the second one;
+both check themselves against forgeries that were actually built.
 
 What is left before a network worth trusting: an outside eye on that bound, an
 audit, and enough people running nodes that no single one of them matters.

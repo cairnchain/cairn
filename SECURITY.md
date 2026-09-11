@@ -57,6 +57,25 @@ separates what the draw refuses from what every other check refuses, and
 reports only the first. Anyone starting here should read that example before
 the bound, and doubt it in the same way.
 
+**The bound has been broken once, by this project, and the break is worth
+reading before looking for the next one.** The count is set from an inequality
+in which every quantity but one is fixed by the forger's share. The one was
+`levels`, the number of halvings the draw spreads over, and through testnet-6
+it was read off the height the tip states. A height is not work, and the only
+rule holding the two together prices a stretch nobody opened at one unit a
+block. So a chain could state a height far past the blocks carrying its work,
+buy halvings with it in work it was already inventing, and dilute every draw. A
+forger at 40% of the world's work went from missing all 4 096 draws with 2^-207
+to missing them with 2^-58, against a published 2^-128, and the share the count
+held to was 31% rather than 40%. The count now comes from the tip's own age
+against a clock the reading node holds itself, which is a ceiling no prover can
+raise. The break, the closure, and the measurements of both are in
+`crates/cairn-ledger/tests/audit_the_bound.rs` and
+`crates/cairn-ledger/examples/searching_for_a_break.rs`.
+
+The lesson generalises, and it is the thing to look for next: an input the
+derivation treats as the chain's that the protocol lets a prover write down.
+
 ## Scope
 
 In scope: `crates/cairn-ledger`, `crates/cairn-chain`, `crates/cairn-accumulator`,

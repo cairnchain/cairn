@@ -188,7 +188,7 @@ fn a_tip_on_no_chain_has_no_parent_to_open() {
         seed_of(&forged_tip),
         SAMPLES,
         work_before(&forged_tip),
-        forged_tip.height,
+        cairn_ledger::sampling::levels_of(&forged_tip, &params()),
     );
     let roots: Forest = forest.forest().roots_only();
     let samples: Vec<Sample> = wanted
@@ -291,7 +291,7 @@ fn an_invented_ledger_cannot_borrow_a_weight_it_did_not_earn() {
         seed_of(&forged_tip),
         SAMPLES,
         work_before(&forged_tip),
-        forged_tip.height,
+        cairn_ledger::sampling::levels_of(&forged_tip, &params()),
     );
     let samples: Vec<Sample> = wanted
         .iter()
@@ -451,7 +451,7 @@ fn padding_a_forest_out_to_the_burial_depth_is_refused() {
         seed_of(&forged_tip),
         SAMPLES,
         work_before(&forged_tip),
-        forged_tip.height,
+        cairn_ledger::sampling::levels_of(&forged_tip, &params()),
     );
     assert!(
         wanted.iter().all(|work| *work < real_tip.total_work),

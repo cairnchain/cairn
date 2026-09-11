@@ -322,6 +322,7 @@ fn valid_join_answers() -> (Handover, SampledStart) {
         &tip,
         state.headers_before_tip(),
         16,
+        &params,
         |height| headers.get(usize::try_from(height).unwrap()).copied(),
         |height| archive.prove_in(height, tip.height),
     )

@@ -42,7 +42,9 @@ use cairn_ledger::block::BlockHeader;
 use cairn_ledger::handover::BURIAL;
 use cairn_ledger::note::{NetworkId, Note};
 use cairn_ledger::pow::RECENT_HEADERS;
-use cairn_ledger::sampling::{draw, sample_bytes, Sample, SampledStart, SAMPLES, SHALLOWEST};
+use cairn_ledger::sampling::{
+    draw, levels_for, sample_bytes, Sample, SampledStart, SAMPLES, SHALLOWEST,
+};
 use cairn_ledger::state::{GRACE_BLOCKS, GRACE_NOTES};
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
@@ -222,7 +224,7 @@ fn sampled_start_bytes(blocks: u64) -> usize {
     let path = |position: u64| ForestProof {
         siblings: vec![Hash32::ZERO; tree_of(blocks, position).map_or(0, |(height, _)| height)],
     };
-    let samples: Vec<Sample> = draw(seed, SAMPLES, u128::from(blocks), blocks)
+    let samples: Vec<Sample> = draw(seed, SAMPLES, u128::from(blocks), levels_for(blocks))
         .into_iter()
         .map(|work| Sample {
             header: blank_header(),
