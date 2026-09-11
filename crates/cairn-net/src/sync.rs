@@ -301,6 +301,34 @@ const COST_PER_BLOCK_SERVED: u32 = 1;
 /// Flat, unlike the block charge, because a header is a fixed size and the ask
 /// therefore states what the answer weighs.
 const COST_PER_HEADER_SERVED: u32 = 1;
+/// What one header a peer hands this node costs to take in.
+///
+/// The same price as handing one out, for the same reason the address charges
+/// are the same in both directions: filing a header is a record appended to a
+/// log, and a write is not the cheaper end of a disk. A run of
+/// [`MAX_HEADERS`] of them was one unit for all five hundred and twelve, and
+/// it is the only list in the protocol whose price did not move with its
+/// length.
+///
+/// The argument for the flat price was that a run from anybody but the peer
+/// this node is filling from is refused before a byte of it is written, so an
+/// unwanted one costs a comparison. True, and it is an argument about
+/// strangers rather than about the price: the peer holding the turn is a
+/// stranger too, chosen by nothing better than being the lowest connection
+/// number this node had, and what it hands over is written record by record
+/// before anything has looked at whether it is the truth. A node handed a
+/// ledger a million and a half blocks up would file that whole gap, read it
+/// all back to weigh it, and build a forest over it, for about three thousand
+/// units: a third of one window, where reading the same headers out of the
+/// same node costs a hundred and eighty three of them.
+///
+/// A node that has filled its headers in asks for nothing and is handed
+/// nothing, and one still filling asks once a round, which is one run a
+/// second: five thousand one hundred and twenty units of a supplier's window
+/// out of eight thousand one hundred and ninety two. That leaves what an
+/// honest supplier spends on everything else it does, and it is the rate the
+/// exchange already ran at rather than a new one.
+const COST_PER_HEADER_TAKEN: u32 = COST_PER_HEADER_SERVED;
 /// What one address handed to a peer that asked costs.
 ///
 /// The cheapest message there is drew the largest answer a peer can get for
@@ -1112,10 +1140,14 @@ fn cost_of(message: &Message, peer: &PeerState) -> u32 {
                 u32::try_from(addresses.len().min(MAX_SHARED_ADDRESSES)).unwrap_or(u32::MAX);
             carried.saturating_mul(COST_PER_ADDRESS_LEARNED)
         }
-        // A run of headers offered rather than asked for. Charged as one
-        // message and not as five hundred writes, because a run from anybody
-        // but the peer this node is filling from is refused before a byte of
-        // it is written, so what an unwanted one costs is a comparison.
+        // A run of headers offered rather than asked for. Priced by what it
+        // carries, like the address list above and for the same reason: what
+        // it carries is what this node does with it, which here is a record
+        // appended to a log for every header in the run.
+        Message::Headers { headers, .. } => {
+            let carried = u32::try_from(headers.len().min(MAX_HEADERS)).unwrap_or(u32::MAX);
+            carried.saturating_mul(COST_PER_HEADER_TAKEN)
+        }
         _ => COST_TRIVIAL,
     }
 }
