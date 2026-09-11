@@ -1,0 +1,39 @@
+# What CodeQL is pointed at, and what it is not.
+#
+# Default setup analyses everything, which sounds right and is not: this
+# workspace is about a third test code by line, and test code is written to be
+# reproducible rather than secret. Every fixture key is `[7; 32]`, every seed is
+# a counter, every nonce a miner searches upward from is nought. CodeQL reads
+# each of those as a hard-coded cryptographic value, correctly by its own
+# definition and uselessly by ours: three hundred and eight alerts were raised
+# against this repository and exactly one was a defect, in `crates/cairn-wallet`
+# and now repaired.
+#
+# That ratio is the problem to fix, not the alerts. An alert list nobody reads
+# is worse than no alert list, and a check that turns red on every pull request
+# that adds a test teaches everyone to merge over it. So the analysis is pointed
+# at what ships.
+#
+# What this gives up, said plainly: a real defect written into a test file will
+# not be found here. Test code is not shipped, is not reachable by a stranger,
+# and holds nothing worth taking, so that is a trade rather than a hole. The
+# rules themselves are untouched, so anything new in `src` is still read.
+name: cairn
+
+paths-ignore:
+  - "**/tests/**"
+  - "**/examples/**"
+  - "**/benches/**"
+
+# `web/` is not on that list, and the first version of this file had it there.
+# The argument above is that test code is not shipped and no stranger reaches
+# it. The site is the opposite of both: it is served to anybody who asks, its
+# script reads from a node's explorer and writes what it finds into a page, and
+# that is exactly the shape the JavaScript queries are written for. Excluding
+# it was reaching for the same reason where the reason does not hold.
+#
+# The analysis said so itself, which is worth writing down: with `web/` ignored
+# there was no JavaScript left in the repository at all, and the run failed
+# rather than passing on an empty database. A configuration that silently
+# analysed nothing would have looked exactly like one that analysed everything
+# and found nothing.

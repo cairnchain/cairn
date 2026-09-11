@@ -1,0 +1,66 @@
+# What a static analyser makes of this repository.
+#
+# Written out rather than left to the setup GitHub configures for you, for one
+# reason: that setup analyses every file and cannot be told otherwise. This
+# workspace is about a third test code, and a test fixture is a hard-coded key
+# by any analyser's definition. Three hundred and eight alerts were raised
+# against this repository under it and one was a defect. A check that turns red
+# on every pull request adding a test is a check people learn to merge over,
+# which is worse than not running one.
+#
+# So the queries are the same and the configuration says where to point them:
+# `.github/codeql/config.yml`, which is where the reasoning lives and what has
+# to be argued with to change this.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # A dependency does not have to change for an analysis to start finding
+  # something: the queries are updated on their own schedule. So this runs
+  # weekly as well, for the same reason `audit.yml` does.
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyse:
+    name: analyse
+    runs-on: ubuntu-latest
+    permissions:
+      # Writing the findings back is the whole point, and is the only write
+      # anything in this repository's workflows has.
+      security-events: write
+      contents: read
+      # Needed by the analyser to resolve which workflows exist when it reads
+      # the `actions` language.
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: rust
+            build-mode: none
+          - language: javascript-typescript
+            build-mode: none
+          - language: actions
+            build-mode: none
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Initialise
+        uses: github/codeql-action/init@311b4ee155dcdab395044f00946f664bd51ff173 # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          config-file: ./.github/codeql/config.yml
+
+      - name: Analyse
+        uses: github/codeql-action/analyze@311b4ee155dcdab395044f00946f664bd51ff173 # v4
+        with:
+          category: "/language:${{ matrix.language }}"
