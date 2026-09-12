@@ -689,9 +689,10 @@ fn a_path_written_down_comes_back_the_same_path() {
 /// hundred with a threshold of eight, which is two orders of magnitude of room:
 /// this test is not trying to tell one and a half from one.
 ///
-/// The removal half used to be measured and then never asserted on, which is
-/// the more expensive of the two operations and the one with the climb through
-/// sixty four heights inside it. Both are asserted now.
+/// The removal half used to be here too, and it is a count next door now: it
+/// timed one removal of the sixty four it thought it was timing, over a forest
+/// watching a thousand places whatever row it was on, and the shape it
+/// asserted was not the shape a removal has.
 #[test]
 fn the_cost_of_a_block_does_not_grow_with_what_the_node_watches() {
     const DEPTH: usize = 24;
@@ -701,11 +702,10 @@ fn the_cost_of_a_block_does_not_grow_with_what_the_node_watches() {
     /// milliseconds, so the machine's floor is a small part of the reading.
     const ADDS: u64 = 8_192;
 
-    let mut measured: Vec<(usize, u128, u128)> = Vec::new();
+    let mut measured: Vec<(usize, u128)> = Vec::new();
 
     for watching in [0usize, 1_024, 8_192, 65_536] {
         let mut adds = u128::MAX;
-        let mut removes = u128::MAX;
 
         for run in 0..RUNS {
             let mut forest = Forest::new();
@@ -730,42 +730,17 @@ fn the_cost_of_a_block_does_not_grow_with_what_the_node_watches() {
                 forest.add(leaf(index + from)).unwrap();
             }
             adds = adds.min(adding.elapsed().as_micros());
-
-            // And a removal, which is the more expensive of the two: it climbs
-            // through sixty four heights for every place it touches.
-            let mut archive = Archive::new();
-            for index in 0..1_024u64 {
-                archive.add(leaf(index)).unwrap();
-            }
-            let mut small = archive.forest().clone();
-            for index in 0..watching.min(1_024) as u64 {
-                small.watch(index, archive.prove(index).unwrap());
-            }
-            let proofs: Vec<_> = (0..64u64)
-                .map(|index| archive.prove(index * 8).unwrap())
-                .collect();
-            let removing = std::time::Instant::now();
-            for (index, proof) in proofs.iter().enumerate() {
-                let at = index as u64 * 8;
-                small.remove(at, leaf(at), proof);
-            }
-            removes = removes.min(removing.elapsed().as_micros());
         }
 
-        println!(
-            "watching {watching:>6}: least of {RUNS} runs, {ADDS} adds {adds:>8} us, \
-             64 removes {removes:>8} us"
-        );
-        measured.push((watching, adds, removes));
+        println!("watching {watching:>6}: least of {RUNS} runs, {ADDS} adds {adds:>8} us");
+        measured.push((watching, adds));
     }
 
-    let (_, none, no_removes) = measured[0];
-    let (many, lots, lots_of_removes) = measured[measured.len() - 1];
+    let (_, none) = measured[0];
+    let (many, lots) = measured[measured.len() - 1];
     println!(
-        "watching {many} makes an ordinary block's additions {:.1}x the cost of watching \
-         nothing, and its removals {:.1}x",
-        lots as f64 / none.max(1) as f64,
-        lots_of_removes as f64 / no_removes.max(1) as f64
+        "watching {many} makes an ordinary block's additions {:.1}x the cost of watching nothing",
+        lots as f64 / none.max(1) as f64
     );
 
     // Eight, against a defect worth seven hundred. Two orders of magnitude of
@@ -775,11 +750,82 @@ fn the_cost_of_a_block_does_not_grow_with_what_the_node_watches() {
         lots < none.saturating_mul(8),
         "watching {many} made an ordinary block's additions {lots} us against {none} us"
     );
-    // The half that was measured and never asserted on, which is the more
-    // expensive of the two.
-    assert!(
-        lots_of_removes < no_removes.saturating_mul(8),
-        "watching {many} made an ordinary block's removals {lots_of_removes} us against \
-         {no_removes} us"
-    );
+}
+
+/// **And what a removal costs, counted rather than timed.**
+///
+/// A path beside an emptied leaf loses exactly one sibling, and every path in
+/// that leaf's tree is beside it at exactly one level. So the count of paths a
+/// removal rewrites is the count of watched paths in that tree, exactly, and
+/// nothing about it needs a clock.
+///
+/// There was a clock here, in the test above, and it measured neither of the
+/// things it named. Three of its four rows watched the same thousand places,
+/// because the archive that row built held a thousand leaves and it took
+/// `min(watching, 1024)`. And of the sixty four removals it timed, one
+/// happened: the sixty four proofs were taken against one set of roots and
+/// applied one at a time, so the first moved a sibling on all sixty three
+/// others and every one of them was refused inside `verify` without reaching
+/// the function the assertion existed to guard. The message that printed
+/// 65 536 was reading a run that watched 1 024 and removed once.
+///
+/// It also asserted the wrong shape. A removal is not constant in what a node
+/// watches and cannot be: it is linear, which is what the count below says.
+/// What the range-query rewrite took out was the climb and not the count: it
+/// was watched paths times the tree height and it is watched paths. Measured
+/// honestly, with every removal landing and 65 536 places really watched, it
+/// reads about four times watching nothing, which passes a threshold of eight
+/// and says nothing while passing.
+///
+/// So what bounds a block's cost is not this being constant. It is
+/// `GRACE_NOTES`: a node watches a path for a note in the grace window and for
+/// nothing else, and that window holds a fixed number of notes whatever the
+/// chain's age. That is the sentence the thesis needs, and it is about a rule
+/// rather than about a Merkle forest.
+///
+/// The rule lives in `cairn-ledger`, which depends on this crate and cannot be
+/// reached from here, so the ceiling is not named as a number below and must
+/// not be written out as one: a figure copied across a dependency edge is a
+/// second implementation of it. What this states is the shape. The ledger
+/// keeps the ceiling, and `cairn-ledger/src/state.rs` is where it is written
+/// down once.
+#[test]
+fn one_removal_rewrites_one_sibling_on_every_watched_path_in_its_tree() {
+    /// A power of two, so the forest is one tree and every watched place sits
+    /// in the same tree as the one emptied.
+    const LEAVES: u64 = 1 << 14;
+
+    let mut archive = Archive::new();
+    for index in 0..LEAVES {
+        archive.add(leaf(index)).unwrap();
+    }
+
+    for watching in [0u64, 1_024, 8_192, LEAVES - 1] {
+        let mut forest = archive.forest().clone();
+        for position in 0..watching {
+            forest.watch(position, archive.prove(position).unwrap());
+        }
+        let before: Vec<Vec<Hash32>> = (0..watching)
+            .map(|at| forest.proof_of(at).unwrap().siblings.clone())
+            .collect();
+
+        let spent = LEAVES - 1;
+        assert!(
+            forest.remove(spent, leaf(spent), &archive.prove(spent).unwrap()),
+            "the removal has to land, or what follows counts nothing"
+        );
+
+        let moved = (0..watching)
+            .filter(|at| {
+                forest
+                    .proof_of(*at)
+                    .is_some_and(|now| now.siblings != before[*at as usize])
+            })
+            .count();
+        println!("watching {watching:>6}: one removal rewrote {moved} paths");
+        assert_eq!(
+            moved, watching as usize,
+            "watching {watching}, one removal rewrote {moved} paths"
+        );
+    }
 }

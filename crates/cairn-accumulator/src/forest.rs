@@ -280,10 +280,19 @@ impl PathsBefore {
         self.depths.is_empty() && self.emptied.is_empty()
     }
 
-    /// What this takes in memory.
+    /// What this holds, in bytes of content.
     ///
     /// The figure a node's own ceiling is stated in. Nothing stated it before,
     /// which is how nine gigabytes of it went unnoticed.
+    ///
+    /// Content and not occupancy, and the difference is the same one
+    /// `tests/archivist_cost.rs` draws for the archive: what a structure holds
+    /// is a property of the design and does not vary, and what a process
+    /// holding it occupies is larger and moves with the allocator. These are
+    /// two `BTreeMap`s and a set, and a B-tree node carries fixed eleven-slot
+    /// arrays however full it is, so the resident figure is the larger one.
+    /// This said "what this takes in memory", which is the figure it does not
+    /// return.
     pub fn bytes_held(&self) -> usize {
         let node = std::mem::size_of::<((u8, u64), Hash32)>();
         let place = std::mem::size_of::<(u64, u8)>();
@@ -838,9 +847,16 @@ impl Forest {
     /// and the forest itself is only touched once that has come out true, so a
     /// refusal leaves the forest exactly as it was. Before, a batch that
     /// failed on its third entry had already emptied two, and the one caller
-    /// that could act on the answer read it as "nothing happened". The trial
-    /// costs a copy of sixty four hashes, which is what [`Self::roots_only`]
-    /// is for.
+    /// that could act on the answer read it as "nothing happened".
+    ///
+    /// What the trial costs is a copy of sixty four hashes and then the whole
+    /// batch folded against it, so a batch removal is about three passes: the
+    /// verify above, the trial, and the removal. The note here used to price
+    /// the copy and read as pricing the trial, which is the more expensive
+    /// half of it by far. Immaterial in absolute terms, since a full block
+    /// holds about a hundred and sixty cold spends and the second pass is
+    /// microseconds, and worth saying correctly because a price nobody has
+    /// worked out is how a ceiling stops binding.
     pub fn remove_batch(&mut self, removals: &[(u64, Hash32, ForestProof)]) -> bool {
         for (position, leaf, proof) in removals {
             if !self.verify(*position, *leaf, proof) {

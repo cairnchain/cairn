@@ -13,8 +13,25 @@ pub const MAX_DEPTH: usize = KEY_LEN * 8;
 /// Where an entry sits in the tree.
 ///
 /// Callers derive keys by hashing, so they are spread uniformly and the tree
-/// stays balanced. An adversary who could choose keys freely could pile entries
-/// onto one path and make proofs there as deep as [`MAX_DEPTH`].
+/// stays balanced. Both sentences are true and neither is the one a reader
+/// needs, because the note went on: "An adversary who could choose keys freely
+/// could pile entries onto one path", and nobody chooses a key. Anybody
+/// chooses a preimage. `note_key` hashes an identifier a transaction's author
+/// settles, so grinding for `d` bits shared with a named holder costs about
+/// `2^d` hashes and deepens that holder's path by one level per bit.
+///
+/// Measured: in a tree of a thousand honestly derived keys, a holder carries
+/// fourteen siblings and 453 bytes. Ten notes ground at about 2^24 hashes,
+/// which is seconds on one core, take that same holder to twenty five
+/// siblings and 805 bytes, and the path still verifies.
+///
+/// Bounded, and less than it looks. Each level costs twice the one before, so
+/// the reach is a handful of levels past the honest depth rather than
+/// [`MAX_DEPTH`]; the ground notes have to stay in a tier that evicts by age,
+/// so it is rent rather than a purchase; and nothing on the spending path
+/// asks for one of these proofs, since a hot spend names its note. What it
+/// reaches is the published figure for what a proof costs a holder, for one
+/// holder somebody picked.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Key([u8; KEY_LEN]);
 
