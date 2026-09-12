@@ -28,6 +28,38 @@ const KNOWN: [&str; 11] = [
     "data", "listen", "seed", "network", "mine", "status", "run-for", "archive", "keep", "help",
     "check",
 ];
+
+/// Names that are the command line's alone, and what to say when one turns up
+/// in the file.
+///
+/// The rule above was applied to names this node does not understand and not
+/// to names it understands and then never reads. `resolve_options` takes these
+/// three from `command_line` and only from there, so a file carrying one was
+/// validated, filed, and dropped without a word. `data = /mnt/chain` ran on
+/// `cairn-data`; `check = yes` started a node, bound a port and wrote a
+/// directory, which is the one thing `--check` exists so an operator can avoid.
+///
+/// Refused rather than honoured, because none of the three is a setting. `data`
+/// cannot be one: it says where the file this line is in was looked for.
+/// `help` and `check` are questions put to the program, answered once and not
+/// carried from one run to the next.
+const ONLY_ON_THE_COMMAND_LINE: [(&str, &str); 3] = [
+    (
+        "data",
+        "names the directory this file was found in, so setting it here cannot \
+         mean anything. Pass --data on the command line.",
+    ),
+    (
+        "help",
+        "is a question put to the program, not a setting. Pass --help on the \
+         command line.",
+    ),
+    (
+        "check",
+        "asks what this node would do without starting one, which is a question \
+         about a single run. Pass --check on the command line.",
+    ),
+];
 const DEFAULT_DATA: &str = "cairn-data";
 const DEFAULT_LISTEN: &str = "0.0.0.0:9944";
 
@@ -188,6 +220,12 @@ fn parse_config(text: &str) -> Result<Given, String> {
         let name = name.trim();
         if !KNOWN.contains(&name) {
             return Err(format!("unknown setting `{name}` in {CONFIG_FILE}"));
+        }
+        if let Some((_, why)) = ONLY_ON_THE_COMMAND_LINE
+            .iter()
+            .find(|(only, _)| *only == name)
+        {
+            return Err(format!("`{name}` in {CONFIG_FILE} {why}"));
         }
         given.push(name, value.trim().to_owned());
     }

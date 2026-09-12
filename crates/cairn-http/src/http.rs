@@ -275,13 +275,25 @@ where
         let host = stream.peer_addr().ok().map(|address| address.ip());
         let Some(slot) = slots.take(host) else {
             let _ = stream.set_nonblocking(true);
+            // Body and all. This is written before a byte of the request has
+            // been read, so nothing here knows whether a HEAD was asked for,
+            // and it used to pass the flag that means "compute the body and do
+            // not send it". The caller then got a head declaring
+            // `content-length: 32` and no body: not a short answer but an
+            // incomplete message, which reaches a reader as a transport error
+            // rather than as a 503. The one answer this server gives under
+            // load was the one answer nobody could read.
+            //
+            // Sending it is right for a GET, which is what almost every caller
+            // sends, and harmless for a HEAD: `connection: close` ends the
+            // exchange, so there is no next message to frame wrongly.
             let _ = write_response(
                 &mut Timed {
                     stream: &stream,
                     until: deadline(accepted, Duration::ZERO),
                 },
                 &Response::error(503, "too many connections"),
-                true,
+                false,
             );
             let _ = stream.shutdown(Shutdown::Both);
             continue;
@@ -404,7 +416,7 @@ where
             (answer(&request), head_only)
         }
         Ok(None) => (Response::error(405, "only GET and HEAD are served"), false),
-        Err(status) => (Response::error(status, "malformed request"), false),
+        Err(status) => (Response::error(status, refusal(status)), false),
     };
     let sent = if response.1 { 0 } else { response.0.body.len() };
     let until = deadline(accepted, answering(sent));
@@ -684,9 +696,28 @@ fn reason(status: u16) -> &'static str {
         404 => "Not Found",
         405 => "Method Not Allowed",
         408 => "Request Timeout",
+        413 => "Content Too Large",
         431 => "Request Header Fields Too Large",
+        500 => "Internal Server Error",
         503 => "Service Unavailable",
         _ => "Error",
+    }
+}
+
+/// What a refusal made while reading a request says happened.
+///
+/// Every one of them said "malformed request", whatever had gone wrong. A
+/// caller cut off at the deadline was told its request was malformed; so was
+/// one whose header block was larger than this server takes, and one whose
+/// form body was. The status line was right in each case and the sentence
+/// under it was about a different failure, which is the one thing a person
+/// reading an error has to go on.
+fn refusal(status: u16) -> &'static str {
+    match status {
+        408 => "the request did not arrive in time",
+        413 => "the form body is larger than this server takes",
+        431 => "the request head is larger than this server takes",
+        _ => "malformed request",
     }
 }
 
