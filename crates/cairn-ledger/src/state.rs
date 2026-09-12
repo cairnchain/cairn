@@ -1192,18 +1192,41 @@ impl LedgerState {
         &mut self,
         proofs: &[(u64, ForestProof)],
     ) -> Result<(), crate::handover::HandoverError> {
+        // What the window says sits where, worked out first and refusing a
+        // position it names twice.
+        //
+        // Positions are handed out in order and never reused, so a window
+        // naming one twice is not a window this chain produced. It mattered
+        // because the leaf to check was found by walking to the first entry at
+        // a position: a second entry there was never verified against
+        // anything, and the loop below found a watched proof for its position
+        // and let it through. Two entries, two spendable notes, one leaf in
+        // the cold set.
+        //
+        // The same shape as a hot set naming a note twice and as a note named
+        // in both tiers: `accept` checks every piece against the header, and a
+        // piece that disagrees with itself or with its neighbour is a piece
+        // the header cannot speak for.
+        let mut wanted: BTreeMap<u64, Hash32> = BTreeMap::new();
+        for (id, position, note) in self.grace.iter().flatten() {
+            if wanted.insert(*position, cold_leaf(id, note)).is_some() {
+                return Err(crate::handover::HandoverError::GracePositionTwice {
+                    position: *position,
+                });
+            }
+        }
         for (position, proof) in proofs {
-            let Some(leaf) = self.grace_leaf_at(*position) else {
+            let Some(leaf) = wanted.get(position) else {
                 continue;
             };
-            if !self.cold.now.verify(*position, leaf, proof) {
+            if !self.cold.now.verify(*position, *leaf, proof) {
                 return Err(crate::handover::HandoverError::BadGraceProof {
                     position: *position,
                 });
             }
             self.cold.now.watch(*position, proof.clone());
         }
-        for (_, position, _) in self.grace.iter().flatten() {
+        for position in wanted.keys() {
             if self.cold.now.proof_of(*position).is_none() {
                 return Err(crate::handover::HandoverError::MissingGraceProof {
                     position: *position,
@@ -1211,15 +1234,6 @@ impl LedgerState {
             }
         }
         Ok(())
-    }
-
-    /// The cold leaf the grace window expects at `position`.
-    fn grace_leaf_at(&self, position: u64) -> Option<Hash32> {
-        self.grace
-            .iter()
-            .flatten()
-            .find(|(_, at, _)| *at == position)
-            .map(|(id, _, note)| cold_leaf(id, note))
     }
 
     /// The cold set as this node holds it, roots only.

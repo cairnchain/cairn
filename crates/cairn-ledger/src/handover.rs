@@ -200,6 +200,10 @@ pub enum HandoverError {
     HotSetTooLarge { held: usize, limit: usize },
     #[error("the hot set names note {0:?} twice")]
     DuplicateHotNote(NoteId),
+    #[error("note {0:?} is named in the hot set and in the grace window at once")]
+    NoteInBothTiers(NoteId),
+    #[error("the grace window names cold position {position} twice")]
+    GracePositionTwice { position: u64 },
     #[error("the maturity window holds {held} coinbases, more than the {limit} allowed")]
     MaturityWindowTooLarge { held: usize, limit: u64 },
     #[error(
@@ -209,6 +213,15 @@ pub enum HandoverError {
     SupplyAboveTheSchedule {
         height: u64,
         supply: Amount,
+        ceiling: Amount,
+    },
+    #[error(
+        "the hot set holds {held} at height {height}, and the ledger it came with declares \
+         {ceiling} issued altogether"
+    )]
+    HotSetAboveTheSchedule {
+        height: u64,
+        held: Amount,
         ceiling: Amount,
     },
     #[error("the ledger rebuilt from this does not produce the header's state root")]
@@ -320,6 +333,106 @@ impl LedgerState {
             recent,
         })
     }
+}
+
+/// Checks the pieces of a handover against each other.
+///
+/// Everything else `accept` does ends at the header: each piece is rebuilt and
+/// held against a commitment the work behind that header vouches for. That is
+/// a strong argument with a shape, and the shape is that a sender who did
+/// out-mine the network for the burial chose every one of those commitments
+/// together. What such a sender cannot choose is agreement between them,
+/// because the rules that produced a ledger leave the pieces consistent and
+/// nothing about writing a state root does.
+///
+/// So this is where a piece is asked about its neighbour, and every defect of
+/// that family found so far lives here: a hot set naming a note twice, a note
+/// named in both tiers at once, and a hot set worth more than the total the
+/// same message declares. The grace window's own places are checked in
+/// `take_grace_proofs`, where the leaves are already in hand.
+fn against_each_other(handover: &Handover, declared: Amount) -> Result<(), HandoverError> {
+    // Each note once, which the state root cannot ask. The hot set
+    // is committed to as a tree keyed by note identifier, so a list naming a
+    // note twice folds to exactly the root of the list naming it once: the
+    // second entry rides in free, past every check a handover has, and the
+    // root matches the header.
+    //
+    // What it buys is not a note but a place in the eviction order, which is
+    // kept by age beside the tree and is the one structure a receiver builds
+    // from the list rather than from the commitment. Two entries for one note
+    // at two heights are two places there and one entry in the tree.
+    //
+    // Measured, with fifteen notes handed over and one of them named a second
+    // time at another height. A release build took the ledger, took two
+    // blocks, and refused the third for a state root it did not produce, and
+    // every honest block after it for the same reason: its tier had stopped
+    // being the tier the network was keeping. A debug build did not get that
+    // far, because the first block applied trips the assertion that the two
+    // structures are the same size, so a stranger offering a ledger could
+    // stop any node built that way.
+    //
+    // The eviction order is also written in one place now rather than two,
+    // which is what makes this a second line rather than the only one: see
+    // `LedgerState::from_handover`.
+    let mut once = BTreeSet::new();
+    for (id, _) in &handover.hot {
+        if !once.insert(*id) {
+            return Err(HandoverError::DuplicateHotNote(*id));
+        }
+    }
+    // And never in the other tier as well, which is the same question asked
+    // across two pieces instead of within one.
+    //
+    // "A note may be in one tier or the other and never in both or in neither"
+    // is true of a ledger a node replayed, because eviction takes the note out
+    // of the hot set on the way down, and `audit_two_tier_ceiling.rs` measures
+    // it over a hundred and twenty blocks. A handed ledger is the second door
+    // to the same state, and the hot list and the window arrive side by side,
+    // each checked against the header and neither against the other. The state
+    // root cannot ask it either: the two are separate commitments, and a note
+    // named in both folds correctly into each.
+    //
+    // What it buys is the note twice. One block spends it out of the hot set,
+    // which takes it out of that tier and leaves the window naming it, since
+    // `advance_grace` lifts cold spends and not hot ones. The next block
+    // offers the same identifier, `hot_note` answers nothing, `within_grace`
+    // answers, and the path the handover itself supplied verifies. Measured
+    // with a fifty CAIRN note at cold position 82: two payees, one note.
+    //
+    // Free, because the receiver holds both lists. The other pieces are
+    // checked against each other for the same reason below.
+    for fell in &handover.grace {
+        for (id, _, _) in fell {
+            if once.contains(id) {
+                return Err(HandoverError::NoteInBothTiers(*id));
+            }
+        }
+    }
+    // The half of it a receiver can weigh for itself.
+    //
+    // Every note in the hot set is on the wire, so their values add up to a
+    // number this node works out rather than takes, and a tier holding more
+    // than the chain has ever issued is a ledger nobody could have replayed.
+    // One pass over at most `hot_capacity` notes.
+    let mut in_hand = Amount::ZERO;
+    for (_, entry) in &handover.hot {
+        in_hand =
+            in_hand
+                .checked_add(entry.note.value)
+                .ok_or(HandoverError::HotSetAboveTheSchedule {
+                    height: handover.at.height,
+                    held: Amount::MAX_MONEY,
+                    ceiling: declared,
+                })?;
+    }
+    if in_hand > declared {
+        return Err(HandoverError::HotSetAboveTheSchedule {
+            height: handover.at.height,
+            held: in_hand,
+            ceiling: declared,
+        });
+    }
+    Ok(())
 }
 
 /// Rebuilds a ledger from a handover, or says why it cannot be believed.
@@ -437,35 +550,7 @@ pub fn accept(handover: &Handover, params: &ConsensusParams) -> Result<LedgerSta
             limit: hot_capacity,
         });
     }
-    // And each note once, which the state root below cannot ask. The hot set
-    // is committed to as a tree keyed by note identifier, so a list naming a
-    // note twice folds to exactly the root of the list naming it once: the
-    // second entry rides in free, past every check a handover has, and the
-    // root matches the header.
-    //
-    // What it buys is not a note but a place in the eviction order, which is
-    // kept by age beside the tree and is the one structure a receiver builds
-    // from the list rather than from the commitment. Two entries for one note
-    // at two heights are two places there and one entry in the tree.
-    //
-    // Measured, with fifteen notes handed over and one of them named a second
-    // time at another height. A release build took the ledger, took two
-    // blocks, and refused the third for a state root it did not produce, and
-    // every honest block after it for the same reason: its tier had stopped
-    // being the tier the network was keeping. A debug build did not get that
-    // far, because the first block applied trips the assertion that the two
-    // structures are the same size, so a stranger offering a ledger could
-    // stop any node built that way.
-    //
-    // The eviction order is also written in one place now rather than two,
-    // which is what makes this a second line rather than the only one: see
-    // `LedgerState::from_handover`.
-    let mut once = BTreeSet::new();
-    for (id, _) in &handover.hot {
-        if !once.insert(*id) {
-            return Err(HandoverError::DuplicateHotNote(*id));
-        }
-    }
+    against_each_other(handover, handover.supply)?;
     // For the same reason, and against the rule this chain runs under rather
     // than against the ceiling the wire enforces: a window holding more than
     // the maturity depth is not a window this network ever produced.
@@ -488,10 +573,23 @@ pub fn accept(handover: &Handover, params: &ConsensusParams) -> Result<LedgerSta
     // This one does not end at the header. A coinbase claims at most what the
     // schedule pays plus the fees the block's own transfers gave up, and a fee
     // the coinbase declines is destroyed, so a chain at a height holds at most
-    // what the schedule has paid by then and never more. A ledger that holds
-    // more was not produced by these rules, whatever work stands behind the
-    // header that commits to it. It is a subtraction, and it is the only place
-    // in this exchange where a newcomer is not taking somebody's word.
+    // what the schedule has paid by then and never more.
+    //
+    // What it bounds is this number, and the sentence here used to go one step
+    // further than that: "A ledger that holds more was not produced by these
+    // rules." The ledger and the number are two fields of one state root, and
+    // a sender who mined the burial chooses both. Nothing compared them. So a
+    // handover declaring the lawful four thousand five hundred and fifty CAIRN
+    // could carry a note worth five hundred million, be accepted, and spend it
+    // on the next block.
+    //
+    // The hot set arrives in full, so what it holds can be added up and held
+    // against this, and that is done below. The cold set arrives as sixty four
+    // hashes and cannot be added up by anyone, so no check a receiver makes
+    // can close the other half: the same five hundred million travels there
+    // instead, with the proof the sender kept. What this number is, exactly,
+    // is a ceiling on the issued total a handover may declare, and the tier
+    // that can be counted is held to it.
     //
     // Asked before the ledger is rebuilt, because it needs nothing but the
     // height and a number that arrived on the wire.

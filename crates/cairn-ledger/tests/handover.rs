@@ -404,10 +404,24 @@ fn a_supply_the_header_does_not_commit_to_is_refused() {
         if lie == handover.supply {
             continue;
         }
-        assert_eq!(
-            accept(&bent, &params).err(),
-            Some(HandoverError::StateRootMismatch),
-            "a chain's supply is the chain's to state, not the sender's"
+        // Two rules can refuse a lowered total now and either is an answer.
+        // The state root is what this test was written for: the supply is one
+        // of the eight fields folded into it, so a number the header does not
+        // commit to cannot be rebuilt into the header. The hot set is what
+        // reaches it first, and cheaper: the notes handed over are worth more
+        // than the total the same message declares, which is a disagreement
+        // between two pieces and needs nothing rebuilt to see.
+        //
+        // Named rather than accepted as "some error", because a refusal for an
+        // unrelated reason would pass that and say nothing.
+        let refused = accept(&bent, &params)
+            .expect_err("a chain's supply is the chain's to state, not the sender's");
+        assert!(
+            matches!(
+                refused,
+                HandoverError::StateRootMismatch | HandoverError::HotSetAboveTheSchedule { .. }
+            ),
+            "refused for something other than the number: {refused}"
         );
     }
 }
