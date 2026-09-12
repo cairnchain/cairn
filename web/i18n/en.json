@@ -255,7 +255,7 @@
 
   "pool": { "eyebrow": "Waiting room", "title": "Transfers waiting for a block", "empty": "Nothing is waiting." },
 
-  "holders": { "eyebrow": "Distribution", "title": "Largest holders" },
+  "holders": { "eyebrow": "Distribution", "title": "Largest holders", "countedAt": "Worked out at block {n}. The distribution is reckoned once every sixteen blocks, because doing it costs the whole index rather than the block just read." },
 
   "rules": {
     "eyebrow": "Consensus",

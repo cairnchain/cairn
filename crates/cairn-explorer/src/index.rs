@@ -133,6 +133,12 @@ pub(crate) struct Index {
     /// Kept here rather than in the walk because a walk now stops on a batch
     /// bound and the debt outlives the turn that ran up.
     stock_due: bool,
+    /// The height the distribution was last worked out at.
+    ///
+    /// `None` until it has been worked out once. What it gates is how often
+    /// the one piece of work here whose cost is the whole index runs, and
+    /// what it is published as is the age of the answer.
+    stock_at: Option<u64>,
     /// The height the next turn of the walk asks for.
     ///
     /// The walk used to work this out from the span, which is only set once a
@@ -231,6 +237,15 @@ pub(crate) enum Held {
 
 /// Owners listed in the holders table.
 const RICHEST: usize = 50;
+
+/// Blocks between one reckoning of the distribution and the next.
+///
+/// The one piece of work in the walk whose cost is the whole index rather
+/// than the block just read. Sixteen blocks is a quarter of an hour on this
+/// network, and a table of the largest holders a quarter of an hour old is
+/// still a table of the largest holders; what it must not do is pretend
+/// otherwise, so the answer says the height it was worked out at.
+const STOCK_EVERY: u64 = 16;
 
 /// Heights one turn of the walk gets through before it puts the index down.
 ///
@@ -477,11 +492,12 @@ impl Index {
             *self = Self::new();
             self.stock_due = true;
         }
-        // Not between batches: sorting every owner is the one thing here that
-        // costs more than the blocks do, and a rebuild would otherwise pay for
-        // it once per turn all the way up the chain.
+        // Not between batches: reckoning the distribution is the one thing here
+        // that costs the whole index rather than the block just read, and a
+        // rebuild would otherwise pay for it once per turn all the way up the
+        // chain. `take_stock` bounds how often it runs beyond that.
         if self.stock_due && reading == Reading::Done && !started_over {
-            self.take_stock();
+            self.take_stock(head.tip);
         }
         // And `reading` as the walk left it, not `More` because of the reset.
         // `Explorer::refresh` loops until a turn says `Done`, so a reset that
@@ -657,9 +673,39 @@ impl Index {
         self.holders
     }
 
-    /// Works out the distribution once, after the chain has moved.
-    fn take_stock(&mut self) {
+    /// Works out the distribution, at most once every [`STOCK_EVERY`] blocks.
+    ///
+    /// This is the one thing in the walk whose cost is the whole index rather
+    /// than the block that was just read, and the reason `BATCH` exists is
+    /// that a visitor should wait for a turn and not for the chain. It ran on
+    /// every turn that reached the tip, which on a running site is every
+    /// block, and it took the index lock while it iterated every owner and
+    /// sorted them all to keep fifty:
+    ///
+    /// | owners | one new block |
+    /// |---:|---:|
+    /// | 24 576 | 2.4 ms |
+    /// | 98 304 | 8.3 ms |
+    /// | 393 216 | 32.8 ms |
+    /// | 1 572 864 | 138.8 ms |
+    ///
+    /// Sixty four times the owners cost fifty eight times the turn, for the
+    /// same block. Two things changed. The fifty heaviest are selected rather
+    /// than sorted, which is one pass instead of a sort of everything; and it
+    /// runs on a block in sixteen rather than on every one, because a table
+    /// of the largest holders is a summary and nobody is owed it to the
+    /// block. What it costs to be that stale is stated rather than hidden:
+    /// the answer carries the height it was worked out at.
+    fn take_stock(&mut self, tip: u64) {
+        let due = match self.stock_at {
+            Some(at) => tip.saturating_sub(at) >= STOCK_EVERY,
+            None => true,
+        };
+        if !due {
+            return;
+        }
         self.stock_due = false;
+        self.stock_at = Some(tip);
         let mut held: Vec<(PublicKey, Amount)> = self
             .owners
             .iter()
@@ -667,8 +713,22 @@ impl Index {
             .filter(|(_, balance)| *balance > Amount::ZERO)
             .collect();
         self.holders = held.len();
+        // Ordered only as far as the fifty that are kept. The rest of the
+        // order is nobody's answer, and paying for it was the larger half of
+        // what this cost.
+        let keep = RICHEST.min(held.len());
+        if keep < held.len() {
+            held.select_nth_unstable_by(keep, |left, right| {
+                right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0))
+            });
+            held.truncate(keep);
+        }
         held.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-        held.truncate(RICHEST);
         self.richest = held;
+    }
+
+    /// The height the distribution above was worked out at.
+    pub(crate) fn stock_at(&self) -> Option<u64> {
+        self.stock_at
     }
 }

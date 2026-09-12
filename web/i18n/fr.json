@@ -255,7 +255,7 @@
 
   "pool": { "eyebrow": "Salle d'attente", "title": "Transferts en attente d'un bloc", "empty": "Rien n'attend." },
 
-  "holders": { "eyebrow": "Répartition", "title": "Plus gros détenteurs" },
+  "holders": { "eyebrow": "Répartition", "title": "Plus gros détenteurs", "countedAt": "Calculée au bloc {n}. La répartition est établie un bloc sur seize, parce que la calculer coûte l'index entier et non le seul bloc qui vient d'être lu." },
 
   "rules": {
     "eyebrow": "Consensus",

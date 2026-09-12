@@ -988,7 +988,14 @@ async function holders() {
         // was counted. An unread chain used to answer it with an empty table
         // and nothing else, which is what a chain nobody owns anything on
         // would look like too.
-        coverageLine(data.coverage)
+        coverageLine(data.coverage),
+        // And when it was counted, which is a different question. Working the
+        // distribution out costs the whole index rather than the block just
+        // read, so it is done on a block in sixteen; a table a few blocks old
+        // is worth having and is not worth passing off as current.
+        data.countedAt !== null && data.countedAt !== undefined
+          ? el('p', { class: 'small dim', text: t('holders.countedAt', { n: count(data.countedAt) }) })
+          : null
       )
     )
   );
