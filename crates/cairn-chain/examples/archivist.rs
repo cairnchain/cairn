@@ -45,10 +45,17 @@ const NOTES_PER_PAYMENT: u64 = 1;
 /// Structural, and worth saying so: a forest of `n` leaves holds `n` of them
 /// and `n - 1` nodes above, at thirty two bytes each, so it costs two hashes
 /// an item on disk. It is not a reading of a process, and it must not be
-/// quoted as one. The whitepaper's "about 64 bytes for every note that has
-/// ever fallen" is a separate number that happens to land in the same place:
-/// that one is an archiving node's memory, measured with `footprint` over 3.2
-/// million notes. Two numbers, two provenances, and only this one is exact.
+/// quoted as one.
+///
+/// This used to say the whitepaper's "about 64 bytes for every note that has
+/// ever fallen" was a separate number that happened to land in the same place,
+/// an archiving node's memory read with `footprint`. They are the same number
+/// now, and the paper says so: `cairn-accumulator/tests/archivist_cost.rs`
+/// established that the content is exactly this and does not vary, while a
+/// resident reading swings between it and about ninety as the vectors holding
+/// the hashes double. The design figure is the one worth publishing, because
+/// it is a property of the design and not of an allocator, and it is checked
+/// against `Archive::hashes_held` rather than against itself.
 const ARCHIVED_BYTES: u64 = 2 * 32;
 /// What a header takes on disk, which is what it takes on the wire.
 ///

@@ -244,11 +244,24 @@ What an archivist costs is a number that had never been written down,
 and it is worth writing down beside the claim it is the exception to.
 Measured over 3.2 million notes falling to the cold set, a plain node's
 ledger stays flat between 15 and 20 MB, from 319 000 notes to ten times
-that. An archiving node costs **about 64 bytes for every note that
-has ever fallen**. That is the size of the exception, and it is
-the price of being able to rebuild a proof for somebody who lost theirs.
+that. An archiving node costs **exactly 64 bytes for every note that
+has ever fallen**: the note's leaf, and the one inner node that leaf
+completes, at thirty two bytes each. That is the size of the exception,
+and it is the price of being able to rebuild a proof for somebody who
+lost theirs.
 
-Both of those numbers were first published wrong, and how is worth more
+That second figure is structural rather than measured, and saying which
+is the point. What an archive holds is 64 bytes a note and does not
+vary. What a process holding one occupies is more and moves about: the
+hashes live in vectors that grow by doubling, so between two doublings a
+vector carries up to its own length again in capacity nobody is using,
+and occupancy swings between 64 and about 90 bytes a note as the set
+grows. A slope read off a handful of points lands wherever those points
+happened to fall on that swing, which is how the explorer came to serve
+72 for the same quantity. The design costs 64. What a process costs is a
+fact about an allocator.
+
+The measurements here were first published wrong, and how is worth more
 than the correction. They were read with `ps`, which reports
 the pages a process has resident. A cold set is written once and never
 read again, which is exactly what an operating system's memory
