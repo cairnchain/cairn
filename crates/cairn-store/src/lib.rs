@@ -4,12 +4,21 @@
 //! order is always replayable: a node only ever accepts a block whose parent it
 //! already holds, so a parent can never appear after its child.
 //!
-//! There is no checksum on a record. Every block is verified cryptographically
-//! when it is replayed, which catches anything a checksum would and a great
-//! deal more. What a checksum would have been for on the other two files is
-//! there already and cheaper: a header carries its parent's identifier, and a
-//! forest node is the two beneath it folded together, so both are checked
-//! against bytes that are already on the disk.
+//! There is no checksum on any of the three files, and none is wanted. What a
+//! checksum would have been for is already in the bytes and is stronger: a
+//! header carries its parent's identifier and names the transactions beneath
+//! it, and a forest node is the two beneath it folded together, so every file
+//! here is checked against bytes that are already on the disk, and what the
+//! check says is which chain a record belongs to and not merely that it has
+//! not rotted.
+//!
+//! Every block is also verified cryptographically when it is replayed, which
+//! catches anything a checksum would and a great deal more. That sentence used
+//! to stand here on its own, and it is about the replay, which is a start.
+//! Between two starts the log is served, out of [`BlockLog::read_at`], to
+//! every peer catching up, and until the check that function now makes it was
+//! the height alone: eight bytes of a record that is hundreds. See `read_at`
+//! for what the rest of them came back as.
 //!
 //! The other rule this file keeps is about which of two files wins. The log is
 //! the record; the index beside it is worked out from the log and never the
@@ -50,7 +59,7 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use cairn_ledger::block::Block;
+use cairn_ledger::block::{Block, BlockHeader};
 use cairn_primitives::codec::{CodecError, Decode, Encode};
 
 /// The name the block log takes inside a node's directory.
@@ -169,6 +178,8 @@ pub enum StoreError {
     },
     #[error("the header at height {height} and the record beside it do not name each other")]
     Unlinked { height: u64 },
+    #[error("the record at height {height} holds transactions its own header does not name")]
+    Unrooted { height: u64 },
     #[error(
         "the forest node of height {height} covering the leaves from {start} is not the two \
          beneath it folded together"
@@ -495,21 +506,38 @@ impl BlockLog {
     /// any other once bytes have changed on a disk, so the block answers for
     /// its own height before it is handed over.
     ///
-    /// [`HeaderLog::read`] has kept this check since a header that had moved
-    /// came back as truth at every read for the life of a node. The block log
-    /// did not, and it is the one a node serves blocks out of: a record whose
-    /// height field changed still decoded, still matched the length its index
-    /// gave it, and still opened a log reporting nothing wrong, so `read_at`
-    /// answered a question about height five with the block from height nine.
-    /// `cairn-net` sends that answer to whoever asked for height five, which
-    /// refuses it and has every reason to think the sender is the problem.
-    /// The check costs one comparison on a block that is decoded already, and
-    /// what it buys is the failure being this node's, where it happened.
+    /// This is the file a node serves blocks out of, and what leaves here
+    /// leaves the node: `cairn_net` reads a peer's catch-up out of `read_at`,
+    /// and a peer handed a record that is not the block it asked for refuses
+    /// it and has every reason to think the sender is the problem. Every check
+    /// below is there to make that failure this node's, where it happened.
     ///
-    /// Only here, and not in [`BlockLog::read`], which is asked about a
-    /// position and answers about one: it is what `height_of_first` uses to
-    /// learn where the log begins, so a height check there would be asking the
-    /// record to confirm the number taken from it.
+    /// The height was once the whole of it, and a height is eight bytes of a
+    /// record that is hundreds. Every other byte came back as truth: a state
+    /// root, a nonce, a transaction. Swept one bit at a time over a four block
+    /// log, 1681 of 1984 flips inside the log answered a height with a block
+    /// nobody mined, and the log opened reporting nothing wrong. The header log
+    /// beside it has refused that damage since the audit that put its link
+    /// check in.
+    ///
+    /// Two more checks, and both read bytes that are here already. A header
+    /// names its transactions through `transactions_root`, so the body answers
+    /// to its own header. And a block carries its parent's identifier, which
+    /// makes this file the same hash chain the header log is, so the record
+    /// after this one has to name it; a block encodes its header first and a
+    /// header is a fixed width, so that neighbour costs one seek and
+    /// [`HEADER_BYTES`] however large the block is.
+    ///
+    /// The last record has nothing after it and is checked the other way
+    /// instead, which covers its height and its parent and not the rest of it.
+    /// The last record is the tip, which a node holds in memory as well and
+    /// answers about from there.
+    ///
+    /// None of it in [`BlockLog::read`], which is asked about a position and
+    /// answers about one: it is what `height_of_first` uses to learn where the
+    /// log begins, so a height check there would be asking the record to
+    /// confirm the number taken from it, and it is what `recover` walks, which
+    /// has to stay the cheap open this whole file is built around.
     pub fn read_at(&self, height: u64) -> Result<Option<Block>, StoreError> {
         if !self.holds(height) {
             return Ok(None);
@@ -527,7 +555,60 @@ impl BlockLog {
                 expected: height,
             });
         }
+        // Before the neighbour, because the neighbour covers the header alone
+        // and the header is not the record: with the link check by itself the
+        // 1681 wrong answers fell to 572, and every one of those 572 was a
+        // byte of a transaction.
+        if block.transactions_root() != block.header.transactions_root {
+            return Err(StoreError::Unrooted { height });
+        }
+        if !self.named_by_its_neighbour(index, &block.header) {
+            return Err(StoreError::Unlinked { height });
+        }
         Ok(Some(block))
+    }
+
+    /// Whether the record beside record `index` names it.
+    ///
+    /// The record after it, which carries its identifier, or the record before
+    /// it where there is none after.
+    ///
+    /// A neighbour that cannot be reached at all is not this record's failure
+    /// and does not condemn it. That is the rule this whole file keeps about
+    /// the index: it is derived, and one rotted offset in it must cost the one
+    /// record it covers and not the sound record next door. The refusal for
+    /// that entry is still raised, by whoever asks for the record it names.
+    fn named_by_its_neighbour(&self, index: usize, header: &BlockHeader) -> bool {
+        if let Ok(Some(next)) = self.header_of(index.saturating_add(1)) {
+            return next.previous == header.id();
+        }
+        let Some(before) = index.checked_sub(1) else {
+            return true;
+        };
+        match self.header_of(before) {
+            Ok(Some(earlier)) => header.previous == earlier.id(),
+            _ => true,
+        }
+    }
+
+    /// The header at the front of record `index`, and nothing else off it.
+    ///
+    /// `None` where there is no such record. A record too short to hold a
+    /// header is not a block whatever else is true, and says so through the
+    /// decoder rather than through a guess made here.
+    fn header_of(&self, index: usize) -> Result<Option<BlockHeader>, StoreError> {
+        let Some((start, end)) = self.bounds(index)? else {
+            return Ok(None);
+        };
+        let body = usize::try_from(end.saturating_sub(start).saturating_sub(4)).unwrap_or(0);
+        let want = body.min(HEADER_BYTES);
+        let mut file = &self.file;
+        file.seek(SeekFrom::Start(start.saturating_add(4)))?;
+        let mut bytes = [0u8; HEADER_BYTES];
+        file.read_exact(bytes.get_mut(..want).unwrap_or_default())?;
+        BlockHeader::decode(bytes.get(..want).unwrap_or_default())
+            .map(Some)
+            .map_err(|source| StoreError::Malformed { index, source })
     }
 
     /// Cuts the log back so that it holds nothing at `height` or past it.

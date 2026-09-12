@@ -208,9 +208,12 @@ impl HeaderLog {
     /// ever performs out of the one cost this whole design exists to keep
     /// flat.
     ///
-    /// The two runs have to meet exactly: `front` ends where this log begins.
-    /// Anything else is refused before a byte is written, where it used to be
-    /// found halfway through the refill.
+    /// The two runs have to meet exactly, and meeting is two things and not
+    /// one: `front` ends at the height this log begins at, and the record this
+    /// log begins with names the record `front` ends with. Either alone is
+    /// satisfied by a run off another chain. Both are checked before a byte is
+    /// written, where the first used to be found halfway through the refill
+    /// and the second was not checked at all.
     ///
     /// Nothing left behind of a merge that fails, and nothing changed: the
     /// staged file goes, both logs stand where they were, and the caller is
@@ -221,12 +224,28 @@ impl HeaderLog {
         if front.is_empty() {
             return Ok(());
         }
-        if self.count > 0 && front.reaches() != self.first {
-            return Err(StoreError::OutOfOrder {
-                expected: self.first,
-                found: front.reaches(),
+        if self.count > 0 {
+            if front.reaches() != self.first {
+                return Err(StoreError::OutOfOrder {
+                    expected: self.first,
+                    found: front.reaches(),
+                }
+                .into());
             }
-            .into());
+            // Meeting in height is not meeting. Two runs off two chains abut
+            // wherever one stops and the other starts, and this took them: one
+            // file, reported written, holding a record at the seam that
+            // nothing reads back for the rest of that node's life, because the
+            // record after it does not name it.
+            //
+            // What says whether they join is already in the bytes, as it is
+            // everywhere else in this file. It costs two records read on a
+            // merge that reads every record it holds anyway.
+            let ends = front.one(front.reaches().saturating_sub(1))?;
+            let begins = self.one(self.first)?;
+            if begins.previous != ends.id() {
+                return Err(StoreError::Unlinked { height: self.first }.into());
+            }
         }
         let joined_first = front.first;
         let joined_count = front.count.saturating_add(self.count);
