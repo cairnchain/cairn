@@ -42,180 +42,110 @@ impl fmt::Debug for Hash32 {
     }
 }
 
-/// The hashing context a digest is computed under.
+/// Declares every hashing domain once, and writes out everything that has to
+/// agree with it.
 ///
-/// Each variant selects an independent hash function. A preimage hashed under
-/// one context can never produce the same digest under another, so a value of
-/// one kind can never be reinterpreted as a value of another kind. Adding a
-/// variant is safe; changing an existing context string is a hard fork.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Domain {
-    TransferId,
-    CoinbaseId,
-    BlockHeaderId,
-    SignatureMessage,
-    MerkleLeaf,
-    MerkleNode,
-    MerkleEmpty,
-    StateEntry,
-    AccumulatorEmpty,
-    AccumulatorLeaf,
-    AccumulatorNode,
-    NoteKey,
-    HotNoteValue,
-    StateCommitment,
-    ForestLeaf,
-    ForestNode,
-    ForestRoots,
-    HeaderHistoryLeaf,
-    SamplingSeed,
-    GraceWindow,
-    WalletHistory,
-}
-
-impl Domain {
-    /// Every domain this crate declares.
-    ///
-    /// Rust offers no way to walk an enum, so a table with one row per domain
-    /// has to be written by hand, and a domain left out of such a table is a
-    /// domain nothing pins: its context string can be changed in a tidy-up and
-    /// every test still passes. `WalletHistory` was exactly that from the day
-    /// it was added, which is what this list is here to stop. The vectors in
-    /// `tests/audit_vectors.rs` are checked against it, so a domain with no
-    /// row fails a test rather than shipping.
-    ///
-    /// A new variant has to be added here as well as to the matches below.
-    pub const ALL: [Self; 21] = [
-        Self::TransferId,
-        Self::CoinbaseId,
-        Self::BlockHeaderId,
-        Self::SignatureMessage,
-        Self::MerkleLeaf,
-        Self::MerkleNode,
-        Self::MerkleEmpty,
-        Self::StateEntry,
-        Self::AccumulatorEmpty,
-        Self::AccumulatorLeaf,
-        Self::AccumulatorNode,
-        Self::NoteKey,
-        Self::HotNoteValue,
-        Self::StateCommitment,
-        Self::ForestLeaf,
-        Self::ForestNode,
-        Self::ForestRoots,
-        Self::HeaderHistoryLeaf,
-        Self::SamplingSeed,
-        Self::GraceWindow,
-        Self::WalletHistory,
-    ];
-
-    const fn context(self) -> &'static str {
-        match self {
-            Self::TransferId => "cairn v1 transfer id",
-            Self::CoinbaseId => "cairn v1 coinbase id",
-            Self::BlockHeaderId => "cairn v1 block header id",
-            Self::SignatureMessage => "cairn v1 signature message",
-            Self::MerkleLeaf => "cairn v1 merkle leaf",
-            Self::MerkleNode => "cairn v1 merkle node",
-            Self::MerkleEmpty => "cairn v1 merkle empty",
-            Self::StateEntry => "cairn v1 state entry",
-            Self::AccumulatorEmpty => "cairn v1 accumulator empty",
-            Self::AccumulatorLeaf => "cairn v1 accumulator leaf",
-            Self::AccumulatorNode => "cairn v1 accumulator node",
-            Self::NoteKey => "cairn v1 note key",
-            Self::HotNoteValue => "cairn v1 hot note value",
-            Self::StateCommitment => "cairn v1 state commitment",
-            Self::ForestLeaf => "cairn v1 forest leaf",
-            Self::ForestNode => "cairn v1 forest node",
-            Self::ForestRoots => "cairn v1 forest roots",
-            Self::HeaderHistoryLeaf => "cairn v1 header history leaf",
-            Self::SamplingSeed => "cairn v1 sampling seed",
-            Self::GraceWindow => "cairn v1 grace window",
-            Self::WalletHistory => "cairn v1 wallet history",
+/// There were five listings of the same twenty one names: the enum, `ALL`,
+/// `context`, the key struct with its derivation, and `key_for`. Three of
+/// those the compiler demanded, because an exhaustive `match` and a struct
+/// literal will not build with a name missing. `ALL` it did not, and `ALL` is
+/// the one the guard against an unpinned domain rests on.
+///
+/// So the guard did not guard. Adding a variant with the three edits the
+/// compiler asks for, and leaving it out of `ALL`, left its context string
+/// pinned by nothing and every test passing, which is the exact state
+/// `WalletHistory` was in from the day it was added. The note beside `ALL`
+/// said "Rust offers no way to walk an enum, so a table with one row per
+/// domain has to be written by hand". True, and the wrong question: what
+/// matters is not whether an enum can be walked but whether the compiler can
+/// be made to demand a row, and a macro that emits all five from one list is
+/// how. There is now nothing to leave a domain out of.
+///
+/// On a crate where changing a context string invalidates every digest on the
+/// network, the list below is the whole of what a reader has to check.
+macro_rules! domains {
+    ($($variant:ident => $field:ident, $context:literal;)+) => {
+        /// The hashing context a digest is computed under.
+        ///
+        /// Each variant selects an independent hash function. A preimage
+        /// hashed under one context can never produce the same digest under
+        /// another, so a value of one kind can never be reinterpreted as a
+        /// value of another kind. Adding a variant is safe; changing an
+        /// existing context string is a hard fork.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub enum Domain {
+            $($variant,)+
         }
-    }
+
+        impl Domain {
+            /// Every domain this crate declares, in declaration order.
+            ///
+            /// Emitted from the same list as the enum, so it cannot be short
+            /// of it. The vectors in `tests/audit_vectors.rs` are checked
+            /// against this, and a domain with no vector fails a test rather
+            /// than shipping.
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)+];
+
+            /// The string this domain's key is derived from.
+            ///
+            /// Published, because a second implementer cannot reproduce a
+            /// single identifier in this chain without it. The specification
+            /// prints the same table, and `audit_vectors.rs` holds the two
+            /// against each other.
+            #[must_use]
+            pub const fn context(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $context,)+
+                }
+            }
+        }
+
+        /// Per domain BLAKE3 keys, derived once and reused.
+        ///
+        /// `blake3::derive_key` is deliberately expensive, so calling it on
+        /// every hash would dominate the cost of building a Merkle tree.
+        struct DomainKeys {
+            $($field: [u8; HASH_LEN],)+
+        }
+
+        fn domain_keys() -> &'static DomainKeys {
+            static KEYS: OnceLock<DomainKeys> = OnceLock::new();
+            KEYS.get_or_init(|| DomainKeys {
+                $($field: blake3::derive_key(Domain::$variant.context(), &[]),)+
+            })
+        }
+
+        fn key_for(domain: Domain) -> &'static [u8; HASH_LEN] {
+            let keys = domain_keys();
+            match domain {
+                $(Domain::$variant => &keys.$field,)+
+            }
+        }
+    };
 }
 
-/// Per domain BLAKE3 keys, derived once and reused.
-///
-/// `blake3::derive_key` is deliberately expensive, so calling it on every hash
-/// would dominate the cost of building a Merkle tree.
-struct DomainKeys {
-    transfer_id: [u8; HASH_LEN],
-    coinbase_id: [u8; HASH_LEN],
-    block_header_id: [u8; HASH_LEN],
-    signature_message: [u8; HASH_LEN],
-    merkle_leaf: [u8; HASH_LEN],
-    merkle_node: [u8; HASH_LEN],
-    merkle_empty: [u8; HASH_LEN],
-    state_entry: [u8; HASH_LEN],
-    accumulator_empty: [u8; HASH_LEN],
-    accumulator_leaf: [u8; HASH_LEN],
-    accumulator_node: [u8; HASH_LEN],
-    note_key: [u8; HASH_LEN],
-    hot_note_value: [u8; HASH_LEN],
-    state_commitment: [u8; HASH_LEN],
-    forest_leaf: [u8; HASH_LEN],
-    forest_node: [u8; HASH_LEN],
-    forest_roots: [u8; HASH_LEN],
-    header_history_leaf: [u8; HASH_LEN],
-    sampling_seed: [u8; HASH_LEN],
-    grace_window: [u8; HASH_LEN],
-    wallet_history: [u8; HASH_LEN],
-}
-
-fn domain_keys() -> &'static DomainKeys {
-    static KEYS: OnceLock<DomainKeys> = OnceLock::new();
-    KEYS.get_or_init(|| DomainKeys {
-        transfer_id: blake3::derive_key(Domain::TransferId.context(), &[]),
-        coinbase_id: blake3::derive_key(Domain::CoinbaseId.context(), &[]),
-        block_header_id: blake3::derive_key(Domain::BlockHeaderId.context(), &[]),
-        signature_message: blake3::derive_key(Domain::SignatureMessage.context(), &[]),
-        merkle_leaf: blake3::derive_key(Domain::MerkleLeaf.context(), &[]),
-        merkle_node: blake3::derive_key(Domain::MerkleNode.context(), &[]),
-        merkle_empty: blake3::derive_key(Domain::MerkleEmpty.context(), &[]),
-        state_entry: blake3::derive_key(Domain::StateEntry.context(), &[]),
-        accumulator_empty: blake3::derive_key(Domain::AccumulatorEmpty.context(), &[]),
-        accumulator_leaf: blake3::derive_key(Domain::AccumulatorLeaf.context(), &[]),
-        accumulator_node: blake3::derive_key(Domain::AccumulatorNode.context(), &[]),
-        note_key: blake3::derive_key(Domain::NoteKey.context(), &[]),
-        hot_note_value: blake3::derive_key(Domain::HotNoteValue.context(), &[]),
-        state_commitment: blake3::derive_key(Domain::StateCommitment.context(), &[]),
-        forest_leaf: blake3::derive_key(Domain::ForestLeaf.context(), &[]),
-        forest_node: blake3::derive_key(Domain::ForestNode.context(), &[]),
-        forest_roots: blake3::derive_key(Domain::ForestRoots.context(), &[]),
-        header_history_leaf: blake3::derive_key(Domain::HeaderHistoryLeaf.context(), &[]),
-        sampling_seed: blake3::derive_key(Domain::SamplingSeed.context(), &[]),
-        grace_window: blake3::derive_key(Domain::GraceWindow.context(), &[]),
-        wallet_history: blake3::derive_key(Domain::WalletHistory.context(), &[]),
-    })
-}
-
-fn key_for(domain: Domain) -> &'static [u8; HASH_LEN] {
-    let keys = domain_keys();
-    match domain {
-        Domain::TransferId => &keys.transfer_id,
-        Domain::CoinbaseId => &keys.coinbase_id,
-        Domain::BlockHeaderId => &keys.block_header_id,
-        Domain::SignatureMessage => &keys.signature_message,
-        Domain::MerkleLeaf => &keys.merkle_leaf,
-        Domain::MerkleNode => &keys.merkle_node,
-        Domain::MerkleEmpty => &keys.merkle_empty,
-        Domain::StateEntry => &keys.state_entry,
-        Domain::AccumulatorEmpty => &keys.accumulator_empty,
-        Domain::AccumulatorLeaf => &keys.accumulator_leaf,
-        Domain::AccumulatorNode => &keys.accumulator_node,
-        Domain::NoteKey => &keys.note_key,
-        Domain::HotNoteValue => &keys.hot_note_value,
-        Domain::StateCommitment => &keys.state_commitment,
-        Domain::ForestLeaf => &keys.forest_leaf,
-        Domain::ForestNode => &keys.forest_node,
-        Domain::ForestRoots => &keys.forest_roots,
-        Domain::HeaderHistoryLeaf => &keys.header_history_leaf,
-        Domain::SamplingSeed => &keys.sampling_seed,
-        Domain::GraceWindow => &keys.grace_window,
-        Domain::WalletHistory => &keys.wallet_history,
-    }
+domains! {
+    TransferId => transfer_id, "cairn v1 transfer id";
+    CoinbaseId => coinbase_id, "cairn v1 coinbase id";
+    BlockHeaderId => block_header_id, "cairn v1 block header id";
+    SignatureMessage => signature_message, "cairn v1 signature message";
+    MerkleLeaf => merkle_leaf, "cairn v1 merkle leaf";
+    MerkleNode => merkle_node, "cairn v1 merkle node";
+    MerkleEmpty => merkle_empty, "cairn v1 merkle empty";
+    StateEntry => state_entry, "cairn v1 state entry";
+    AccumulatorEmpty => accumulator_empty, "cairn v1 accumulator empty";
+    AccumulatorLeaf => accumulator_leaf, "cairn v1 accumulator leaf";
+    AccumulatorNode => accumulator_node, "cairn v1 accumulator node";
+    NoteKey => note_key, "cairn v1 note key";
+    HotNoteValue => hot_note_value, "cairn v1 hot note value";
+    StateCommitment => state_commitment, "cairn v1 state commitment";
+    ForestLeaf => forest_leaf, "cairn v1 forest leaf";
+    ForestNode => forest_node, "cairn v1 forest node";
+    ForestRoots => forest_roots, "cairn v1 forest roots";
+    HeaderHistoryLeaf => header_history_leaf, "cairn v1 header history leaf";
+    SamplingSeed => sampling_seed, "cairn v1 sampling seed";
+    GraceWindow => grace_window, "cairn v1 grace window";
+    WalletHistory => wallet_history, "cairn v1 wallet history";
 }
 
 /// Bytes hashed on this thread, for the audits that measure what one message

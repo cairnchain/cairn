@@ -20,5 +20,11 @@ blake3.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# The same BLAKE3 the crate hashes with, brought in again so a test can derive
+# a domain key from the context string the specification publishes and check
+# it against the one the crate uses. A vector pins what a constant hashes to;
+# only this pins what the constant is made from, which is the half a second
+# implementer has to reproduce.
+blake3.workspace = true
 cairn-fuzz.workspace = true
 hex.workspace = true

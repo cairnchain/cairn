@@ -123,14 +123,57 @@ const DOMAIN_VECTORS: [(Domain, &str); 21] = [
 /// would have left this suite green and left every wallet built afterwards
 /// refusing the file every wallet before it wrote.
 ///
-/// [`Domain::ALL`] is the list this is checked against. It still has to be
-/// written by hand, since an enum cannot be walked, but a domain missing from
-/// the vectors now fails here instead of going unnoticed.
+/// Every domain's key is derived from the string the specification publishes.
+///
+/// The vectors above pin what a constant hashes to. This pins what the
+/// constant is made from, which is the other half and the one a second
+/// implementer needs: the document says each domain key is BLAKE3's
+/// `derive_key` over a published context string with empty key material, and
+/// until now nothing checked that sentence against the code. A string could be
+/// corrected in the document, or in the crate, and the vectors would go on
+/// passing while the two said different things.
+///
+/// `WalletHistory` is the one domain the document leaves out, deliberately: it
+/// stamps a file on one person's disk rather than anything two nodes have to
+/// agree about. It is still derived the same way, so it is checked the same
+/// way and only its publication is not required.
+#[test]
+fn every_domain_key_is_the_published_string_derived() {
+    const SPECIFICATION: &str = include_str!("../../../docs/cairn-specification.md");
+
+    for domain in Domain::ALL {
+        let context = domain.context();
+        let expected = Hash32::from_bytes(
+            *blake3::keyed_hash(&blake3::derive_key(context, &[]), PROBE).as_bytes(),
+        );
+        assert_eq!(
+            hash(*domain, PROBE),
+            expected,
+            "{domain:?} does not hash as `derive_key({context:?})` says it does"
+        );
+
+        if matches!(domain, Domain::WalletHistory) {
+            continue;
+        }
+        assert!(
+            SPECIFICATION.contains(&format!("<code>{context}</code>")),
+            "{domain:?} hashes under {context:?}, which the specification does \
+             not publish, so nobody can reproduce a digest from the document"
+        );
+    }
+}
+
+/// [`Domain::ALL`] is the list this is checked against, and for a while that
+/// list was itself written by hand, which made this guard one nothing guarded:
+/// a variant added with the three edits the compiler asks for, and left out of
+/// `ALL`, was pinned by nothing and passed every test. `ALL` is emitted from
+/// the same declaration as the enum now, so there is nothing to leave a domain
+/// out of, and a domain missing from the vectors fails here.
 #[test]
 fn every_domain_the_crate_declares_is_pinned_here() {
     for domain in Domain::ALL {
         assert!(
-            DOMAIN_VECTORS.iter().any(|(pinned, _)| *pinned == domain),
+            DOMAIN_VECTORS.iter().any(|(pinned, _)| pinned == domain),
             "{domain:?} has no vector, so its context string can change and nothing will say so"
         );
     }
@@ -209,15 +252,16 @@ fn hexadecimal_still_renders_the_way_it_did() {
 // vector cannot see: swapping two fields of a structure leaves every digest
 // here unchanged and changes every identifier in the chain.
 //
-// One link in that chain is still unpinned anywhere, and it is named rather
-// than left to be discovered. The document says each domain constant is
-// BLAKE3's `derive_key` over a published context string with empty key
-// material, and it publishes twenty of the twenty-one strings: the one it
-// leaves out is `wallet history`, which stamps a file on one person's disk
-// rather than anything two nodes have to agree about. Nothing checks a
-// constant against the string that is said to produce it, here or elsewhere:
-// `DOMAIN_VECTORS` pins what the constants hash to, not what they are made
-// from. Checking it needs BLAKE3 in this crate's dev-dependencies.
+// The link this note used to say was unpinned is pinned now. The document says
+// each domain constant is BLAKE3's `derive_key` over a published context
+// string with empty key material, and it publishes twenty of the twenty-one
+// strings: the one it leaves out is `wallet history`, which stamps a file on
+// one person's disk rather than anything two nodes have to agree about.
+// `every_domain_key_is_the_published_string_derived` derives each key from the
+// crate's own context string and checks the string against the document's
+// table, so the two can no longer say different things. The reason given for
+// leaving it undone was that "checking it needs BLAKE3 in this crate's
+// dev-dependencies", which is true and was one line.
 // ---------------------------------------------------------------------------
 
 use cairn_primitives::amount::PEBBLES_PER_CAIRN;

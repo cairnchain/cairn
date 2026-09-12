@@ -22,20 +22,20 @@
 //! document, and the header vector still checks the document's own byte
 //! widths, which sum to the 182 it names.
 //!
-//! Two things the document does not contain at all, and which had to be taken
-//! from the code because a vector cannot be written without them:
+//! One thing the document does not contain at all, and which had to be taken
+//! from the code because a vector cannot be written without it: how
+//! `transactions_root` is built. It is a header field and refusal nineteen,
+//! and the document never says which leaves go into it, in what order, or
+//! under what tree.
 //!
-//! - the context strings of ten of the twenty hash domains. The table in
-//!   *What the state root commits to* publishes ten. The transfer domain, the
-//!   coinbase domain, the block header domain, the signature domain, the
-//!   sampling domain, the three Merkle domains and the header history domain
-//!   are named in the prose and their constants are never given, and a tenth,
-//!   the state entry domain, is not named anywhere in the document. `Domain`
-//!   is used by name below wherever that happens, so what these vectors pin
-//!   is the preimage and not the key it is hashed under.
-//! - how `transactions_root` is built. It is a header field and refusal
-//!   nineteen, and the document never says which leaves go into it, in what
-//!   order, or under what tree.
+//! A second used to be listed here and is no longer true. It said the document
+//! published ten of the twenty context strings, and named nine domains whose
+//! constants "are never given" plus the state entry domain as "not named
+//! anywhere in the document". All twenty are in the table in *What the state
+//! root commits to*, and the document says so in the sentence above it.
+//! `cairn-primitives/tests/audit_vectors.rs` now holds every one of them
+//! against that table, so a stale note of this kind fails a test rather than
+//! standing.
 
 #![allow(
     clippy::unwrap_used,
