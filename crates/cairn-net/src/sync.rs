@@ -382,6 +382,20 @@ const COST_PER_ADDRESS_LEARNED: u32 = 1;
 /// At this price an allowance window buys sixteen full requests, which is a
 /// thousand and twenty four paths, and a wallet recovering asks once.
 const COST_PER_PLACE_PROVED: u32 = 8;
+/// What one path a peer hands this node costs to take in.
+///
+/// The same price as building one, for the same reason the header and address
+/// charges are the same in both directions: the two ends of this exchange do
+/// comparable work. Serving a place walks a tree and puts about a kilobyte on
+/// the wire; taking one reads that kilobyte back and folds it against a
+/// commitment this node worked out for itself, under the chain's lock.
+///
+/// `Proofs` fell through to the catch-all arm at one unit for the whole
+/// message, and a message carries [`MAX_PROVEN`] paths. So the same node
+/// charged eight units to build a path and a five hundred and twelfth of a
+/// unit to fold one, which is the last of the take-and-serve pairs to be
+/// priced in the same currency.
+const COST_PER_PLACE_TAKEN: u32 = COST_PER_PLACE_PROVED;
 
 /// What one piece of a join answer costs to build and send.
 ///
@@ -1127,6 +1141,14 @@ fn cost_of(message: &Message, peer: &PeerState) -> u32 {
         Message::GetProofs(positions) => {
             let wanted = u32::try_from(positions.len().min(MAX_PROVEN)).unwrap_or(u32::MAX);
             wanted.saturating_mul(COST_PER_PLACE_PROVED)
+        }
+        // Paths offered back. Priced by what it carries, like the run of
+        // headers above and the address list below it: what it carries is what
+        // this node does with it, which here is a fold per path against the
+        // cold set, taken while the chain is held.
+        Message::Proofs(placed) => {
+            let carried = u32::try_from(placed.len().min(MAX_PROVEN)).unwrap_or(u32::MAX);
+            carried.saturating_mul(COST_PER_PLACE_TAKEN)
         }
         Message::GetPeers => {
             let carried = u32::try_from(MAX_SHARED_ADDRESSES).unwrap_or(u32::MAX);

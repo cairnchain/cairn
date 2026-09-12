@@ -1383,17 +1383,89 @@ impl Asking {
     }
 }
 
-/// The account of one question about where fallen notes sit.
+/// The account of one question about where fallen notes sit, and the end of
+/// the question.
 ///
 /// Taken from the collection rather than kept alongside it, so there is one
 /// record of what happened and not two that can disagree.
-fn finished(asking: &Asking, archivists: usize) -> Recovered {
-    Recovered {
+///
+/// The collection is emptied here, which is the whole of what ends a question.
+/// Nothing else did: `recover_proofs` wrote a fresh [`Asking`] on the way in
+/// and left it standing on the way out, so a wallet that had recovered once
+/// kept, for as long as the process ran, a list of places it was still willing
+/// to be told about and a list of peers still allowed to tell it. Every one of
+/// those peers could hand over [`MAX_PROVEN`] paths whenever it liked, and
+/// each of them was folded against the cold set with the chain held. A
+/// question nobody is waiting on is not a question.
+fn finished(asking: &mut Asking, archivists: usize) -> Recovered {
+    let done = Recovered {
         asked: asking.asked.len(),
         archivists,
         answered: asking.answered.len(),
-        proofs: asking.found.clone(),
+        proofs: std::mem::take(&mut asking.found),
         refused: asking.refused,
+    };
+    *asking = Asking::default();
+    done
+}
+
+/// What ends a question, and what a question that never ended left open.
+///
+/// Kept next to [`finished`] rather than in the suite, because what is being
+/// pinned is the state of a collection nothing outside this file can see. It
+/// is the reason the defect ran as long as it did: `recover_proofs` writes a
+/// fresh [`Asking`] on the way in, so a second recovery looks correct from
+/// outside however the first one ended.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod ending_a_question {
+    use super::{finished, Asking, ForestProof, Hash32};
+    use std::collections::{BTreeMap, HashSet};
+
+    /// A question in the state `recover_proofs` leaves one in: places still
+    /// wanted, a peer that was asked, and a path that folded.
+    fn mid_question() -> Asking {
+        Asking {
+            wanted: BTreeMap::from([(7, Hash32::ZERO), (9, Hash32::ZERO)]),
+            asked: HashSet::from([3]),
+            answered: HashSet::from([3]),
+            found: BTreeMap::from([(
+                7,
+                ForestProof {
+                    siblings: Vec::new(),
+                },
+            )]),
+            refused: 1,
+        }
+    }
+
+    /// **A question nobody is waiting on accepts nothing.**
+    ///
+    /// Both lists are what let a peer through: `asked` decides whose paths are
+    /// looked at, `wanted` decides which places are folded. Left standing,
+    /// they were a channel every peer that had ever been asked could keep
+    /// sending [`crate::message::MAX_PROVEN`] paths down, each of them folded
+    /// against the cold set with the chain held, for as long as the process
+    /// ran. A wallet asks once and then holds that open for its lifetime.
+    #[test]
+    fn the_end_of_a_question_is_the_end_of_what_it_will_accept() {
+        let mut asking = mid_question();
+        let done = finished(&mut asking, 1);
+
+        assert_eq!(done.asked, 1, "the account is taken before the reset");
+        assert_eq!(done.refused, 1);
+        assert_eq!(done.proofs.len(), 1, "the paths that folded come out");
+
+        assert!(
+            asking.asked.is_empty(),
+            "a peer that was asked can still be answered by"
+        );
+        assert!(
+            asking.wanted.is_empty(),
+            "places are still being watched for"
+        );
+        assert!(asking.found.is_empty() && asking.answered.is_empty());
+        assert_eq!(asking.refused, 0);
     }
 }
 
@@ -3799,18 +3871,18 @@ impl Node {
                     .send_to(peer, Message::GetProofs(positions.clone()));
             }
             {
-                let asking = self.shared.asking();
+                let mut asking = self.shared.asking();
                 // Every place answered for, or everyone asked has answered and
                 // there is nothing further to wait on.
                 if asking.satisfied()
                     || (!asking.asked.is_empty() && asking.answered.len() >= asking.asked.len())
                 {
-                    return finished(&asking, archivists);
+                    return finished(&mut asking, archivists);
                 }
             }
             if deadline.is_none_or(|end| Instant::now() >= end) {
-                let asking = self.shared.asking();
-                return finished(&asking, archivists);
+                let mut asking = self.shared.asking();
+                return finished(&mut asking, archivists);
             }
             thread::sleep(RECOVERY_POLL);
         }
