@@ -7,6 +7,15 @@
 
 use std::fmt::Write as _;
 
+/// Where a document stood, for [`Writer::rewind`].
+#[derive(Clone, Copy, Debug)]
+pub struct Mark {
+    at: usize,
+    /// Whether the container this mark sits in was still empty, so that
+    /// rewinding the first row of an array does not leave a comma behind.
+    empty: Option<bool>,
+}
+
 /// A JSON document under construction.
 ///
 /// Commas and nesting are tracked here rather than left to the caller, so a
@@ -21,6 +30,47 @@ pub struct Writer {
 impl Writer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Bytes written so far.
+    ///
+    /// What a caller building a list holds itself to. A page capped in rows is
+    /// not capped in bytes, and bytes are what the connection's deadline is
+    /// counted in.
+    #[must_use]
+    pub fn written(&self) -> usize {
+        self.out.len()
+    }
+
+    /// Where the document stands, so a row that turns out not to fit can be
+    /// taken back off it.
+    #[must_use]
+    pub fn mark(&self) -> Mark {
+        Mark {
+            at: self.out.len(),
+            empty: self.empty.last().copied(),
+        }
+    }
+
+    /// Undoes everything written since `mark`.
+    ///
+    /// A page has to decide whether a row fits after writing it, because what
+    /// a row weighs is not knowable before. Stopping after the row that went
+    /// over means going over by a row, and a ceiling exceeded by a row is not
+    /// a ceiling; so the row comes back off and the page names it as the next
+    /// one.
+    ///
+    /// Only meaningful at the same nesting depth the mark was taken at, which
+    /// is what a caller writing one whole row at a time has. Anything deeper
+    /// is still open and rewinding to here would leave the document unclosed.
+    pub fn rewind(&mut self, mark: Mark) {
+        if mark.at > self.out.len() {
+            return;
+        }
+        self.out.truncate(mark.at);
+        if let (Some(empty), Some(was)) = (self.empty.last_mut(), mark.empty) {
+            *empty = was;
+        }
     }
 
     /// Emits the separator this position needs, if any.
@@ -155,6 +205,63 @@ fn escape_into(text: &str, out: &mut String) {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::Writer;
+
+    /// A row taken back off leaves a document that still parses.
+    ///
+    /// The comma is the whole of the difficulty. A row written into an array
+    /// that already held one puts a comma in front of itself, and truncating
+    /// the bytes without putting the container's emptiness back leaves either
+    /// a trailing comma or a missing one, both of which parse as something
+    /// other than what was meant.
+    #[test]
+    fn a_row_that_did_not_fit_comes_back_off_cleanly() {
+        for kept in 0..3usize {
+            let mut json = Writer::new();
+            json.begin_object();
+            json.key("rows");
+            json.begin_array();
+            for row in 0..kept {
+                json.begin_object();
+                json.field_u64("n", row as u64);
+                json.end_object();
+            }
+            let mark = json.mark();
+            json.begin_object();
+            json.field_u64("n", 99);
+            json.end_object();
+            json.rewind(mark);
+            json.end_array();
+            json.field_u64("next", 99);
+            json.end_object();
+
+            let rows: String = (0..kept)
+                .map(|row| format!("{{\"n\":{row}}}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            assert_eq!(
+                json.finish(),
+                format!("{{\"rows\":[{rows}],\"next\":99}}"),
+                "rewinding the row after {kept} of them"
+            );
+        }
+    }
+
+    /// And a mark from before anything was written is honoured.
+    #[test]
+    fn rewinding_past_what_was_written_does_nothing() {
+        let mut json = Writer::new();
+        json.begin_object();
+        let mark = json.mark();
+        json.field_u64("a", 1);
+        let later = json.mark();
+        json.rewind(mark);
+        // A mark taken after the point rewound to is stale, and applying it
+        // must not grow the document back.
+        json.rewind(later);
+        json.field_u64("b", 2);
+        json.end_object();
+        assert_eq!(json.finish(), "{\"b\":2}");
+    }
 
     #[test]
     fn an_empty_object_is_written() {
