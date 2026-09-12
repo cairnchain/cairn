@@ -981,6 +981,27 @@ impl Archive {
         self.forest.is_empty()
     }
 
+    /// Hashes this archive is holding, which is what its cost is counted in.
+    ///
+    /// One per leaf plus one per inner node that some leaf completed, at
+    /// thirty two bytes each. This is the quantity the whitepaper publishes as
+    /// sixty four bytes a note, and it is here rather than worked out from
+    /// [`Archive::len`] by whoever is publishing it: a figure re-derived at
+    /// the place it is quoted is a second implementation that can drift from
+    /// the first without anything noticing, and `tests/archivist_cost.rs` was
+    /// checking its own arithmetic against itself for exactly that reason.
+    ///
+    /// What this does not count is the capacity the vectors have asked for and
+    /// are not using, which is the difference between what an archive holds
+    /// and what a process holding one occupies. The same test measures that
+    /// gap and says why the two figures differ.
+    pub fn hashes_held(&self) -> u64 {
+        let leaves = u64::try_from(self.leaves.len()).unwrap_or(u64::MAX);
+        self.inner.iter().fold(leaves, |held, level| {
+            held.saturating_add(u64::try_from(level.len()).unwrap_or(u64::MAX))
+        })
+    }
+
     pub fn add(&mut self, leaf: Hash32) -> Option<(u64, ForestProof)> {
         let added = self.forest.add(leaf)?;
         self.leaves.push(leaf);

@@ -16,9 +16,12 @@
 //! as the set grows, and a slope taken at a handful of points lands wherever
 //! those points fell on that swing.
 //!
-//! The content is what the papers should publish, because it is a property of
-//! the design rather than of a `Vec`'s growth policy, and it is what
-//! `cairn-chain/examples/archivist.rs` already counts with.
+//! The content is what the papers publish, because it is a property of the
+//! design rather than of a `Vec`'s growth policy, and it is what
+//! `cairn-chain/examples/archivist.rs` counts with. The whitepaper said "about
+//! 64 bytes" under a paragraph about what was measured; it now says exactly 64
+//! and says why the resident reading differs. The explorer goes on serving 72
+//! and goes on calling it a slope, which is what it is.
 
 #![allow(
     clippy::unwrap_used,
@@ -40,10 +43,14 @@ const ARCHIVED_BYTES: u64 = 64;
 /// Hashes the archive holds for `leaves` leaves: one each, plus the inner
 /// nodes that are complete.
 ///
+/// Restated here rather than called, so that [`Archive::hashes_held`] is
+/// measured against a count worked out from the design rather than quoted back
+/// at itself. The test below holds the two together at every size it uses.
+///
 /// A node of height `h` is complete once its whole span has arrived, so there
 /// are `leaves >> h` of them, and summing over the heights gives one inner
 /// node per leaf less one per tree the forest currently holds.
-fn hashes_held(leaves: u64) -> u64 {
+fn restated_hashes(leaves: u64) -> u64 {
     let mut inner = 0u64;
     let mut span = 2u64;
     while span <= leaves {
@@ -55,8 +62,15 @@ fn hashes_held(leaves: u64) -> u64 {
 
 /// The structural count is the one the papers publish, and it is 64 bytes.
 ///
-/// Checked against an archive that was actually built, so the arithmetic
-/// cannot drift from what `Archive::add` does.
+/// Taken from archives that were built rather than from the arithmetic above.
+/// This used to build one archive, check that its leaf count was the number of
+/// leaves put into it, and then work the published figure out from
+/// [`restated_hashes`] alone. That is true and it answers the wrong question:
+/// what was compared against `Archive` was the leaf count, which is the one
+/// number the two cannot disagree about, while the figure being published came
+/// from a second implementation of the count that nothing held to the first.
+/// `Archive::add` could have stopped closing inner nodes altogether and this
+/// test would have gone on reporting 64 bytes a note.
 #[test]
 fn an_archivist_holds_sixty_four_bytes_for_every_note_that_ever_fell() {
     let mut archive = Archive::new();
@@ -68,10 +82,15 @@ fn an_archivist_holds_sixty_four_bytes_for_every_note_that_ever_fell() {
 
     // A power of two is one tree, so there is exactly one inner node per leaf
     // less the one root that no leaf completed.
-    assert_eq!(hashes_held(count), count * 2 - 1);
+    assert_eq!(archive.hashes_held(), count * 2 - 1);
+    assert_eq!(
+        restated_hashes(count),
+        archive.hashes_held(),
+        "the arithmetic has drifted from what the archive stores"
+    );
     // Sixty-four less the roots no leaf completed, which is at most sixty-four
     // hashes over the whole set and so vanishes into the per-note figure.
-    let per_note = hashes_held(count) as f64 * 32.0 / count as f64;
+    let per_note = archive.hashes_held() as f64 * 32.0 / count as f64;
     assert!(
         (per_note - ARCHIVED_BYTES as f64).abs() < 0.01,
         "an archivist holds {per_note} bytes a note, not {ARCHIVED_BYTES}"
@@ -79,10 +98,23 @@ fn an_archivist_holds_sixty_four_bytes_for_every_note_that_ever_fell() {
 
     // And it does not drift with the size, which is the whole reason it can be
     // published as one number: the count of trees is what varies, and it is at
-    // most sixty-four whatever the set holds.
+    // most sixty-four whatever the set holds. Every size here is a size an
+    // archive is grown to, not a size the formula is evaluated at: the sizes
+    // that matter are the ones between powers of two, where the forest holds
+    // many trees and many roots no leaf completed.
+    let mut growing = Archive::new();
+    let mut reached = 0u64;
     for leaves in [1_000u64, 100_000, 1_000_000, 3_000_000] {
-        let held = hashes_held(leaves) * 32;
-        let each = held as f64 / leaves as f64;
+        for index in reached..leaves {
+            growing.add(forest_leaf(&index.to_le_bytes()));
+        }
+        reached = leaves;
+        assert_eq!(
+            restated_hashes(leaves),
+            growing.hashes_held(),
+            "the arithmetic has drifted at {leaves} leaves"
+        );
+        let each = growing.hashes_held() as f64 * 32.0 / leaves as f64;
         assert!(
             (63.0..=64.0).contains(&each),
             "{leaves} leaves come to {each} bytes each"

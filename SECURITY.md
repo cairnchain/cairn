@@ -16,8 +16,8 @@ channel we watch for this. **Please do not open a public issue for a security
 flaw**, and please do not disclose it publicly before we have answered.
 
 If the advisory form is not available to you for any reason, open an ordinary
-issue saying only that you have something to report — no detail — and we will
-come back with a private channel.
+issue saying only that you have something to report, with no detail in it,
+and we will come back with a private channel.
 
 ## What to expect
 
@@ -73,8 +73,55 @@ raise. The break, the closure, and the measurements of both are in
 `crates/cairn-ledger/tests/audit_the_bound.rs` and
 `crates/cairn-ledger/examples/searching_for_a_break.rs`.
 
-The lesson generalises, and it is the thing to look for next: an input the
-derivation treats as the chain's that the protocol lets a prover write down.
+## The shape every flaw here has had so far
+
+This project has found a fair number of defects in itself, and every one of
+them has had the same shape: **a sentence that is true and answers a different
+question from the one the argument needed answered.** Not one of them was a
+false statement. Each was a correct observation standing where a different
+observation was required, which is exactly why they survived reading: checking
+the sentence confirms it.
+
+Four that shipped, and what each one actually answered:
+
+*"The draw spreads over `bit_length(height / 1024)` levels."* True. The bound
+needed to know how much work the chain carries, and a height is a field the
+prover writes down. That is the break described above.
+
+*"A run of headers from anybody but the peer this node is filling from is
+refused before a byte of it is written."* True, and it answers who can reach
+the code where the question was what reaching it costs. The peer holding the
+turn is a stranger too, chosen by nothing better than having the lowest
+connection number this node happened to have, and a million and a half records
+went onto a disk for a third of one allowance window.
+
+*"The worst a join request held the chain shut for was 53.6 milliseconds."*
+True of that run on that machine. The question was whether the code holds the
+lock, and the answer given was the machine's load: the same commit read 7.5
+against 53.6, then 8.6 against 48.8, then 12.0 against 35.0. Any claim resting
+on two wall clock readings taken at different moments is measuring the machine
+at both of them.
+
+*"The share the sampling bound holds to is 42.96 per cent."* True, and it is a
+floor rather than a measurement. The figure is a maximum over noisy per seed
+estimates, so it reads low, and lower the fewer seeds are spent: 42.80 at
+thirty two, 42.96 at sixty four, 43.03 at five hundred and twelve.
+
+So the useful question to put to any justification in this repository is not
+whether it is true. It is **what question it answers, and whether that is the
+question the claim above it needed.** Concretely, the ones that have caught
+something here:
+
+- A quantity a derivation treats as the chain's that the protocol lets a
+  prover write down.
+- A cost argument that prices what the code is expected to be sent rather than
+  what the rules permit anyone to send it.
+- An argument about who can reach something, standing in for one about what
+  reaching it costs.
+- A price that does not move with the length of what it is charging for, or
+  that differs between the two directions of the same exchange.
+- A test whose claim rests on a comparison between two wall clock readings.
+- A figure quoted as a point estimate that an estimator produces as a bound.
 
 ## Scope
 

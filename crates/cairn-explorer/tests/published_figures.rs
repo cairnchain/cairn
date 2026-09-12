@@ -330,7 +330,25 @@ fn the_headers_a_year_figure_counts_the_forest_the_headers_make() {
     let header = bench.block(0).header.encode().len() as u64;
     // A leaf and the inner node above it, which is what a forest holds per
     // item; the same figure `cairn-chain/examples/archivist.rs` counts with.
-    let forest_node = 64u64;
+    //
+    // Grown rather than written down. Every other number in this file is read
+    // out of the code it describes, and this one was a literal sitting in the
+    // middle of them: the forest could have stopped closing inner nodes and
+    // the 129 MB a year would still have been reported as made of 64. A power
+    // of two is one tree, so the archive holds two hashes an item less the one
+    // root no leaf completed, and rounding that one root away over four
+    // thousand items is what makes the figure quotable as a whole number.
+    let forest_node = {
+        let mut forest = Archive::new();
+        let items = 1u64 << 12;
+        for index in 0..items {
+            forest.add(header_leaf(&cairn_primitives::Hash32::from_bytes(
+                [u8::try_from(index % 256).unwrap_or(0); 32],
+            )));
+        }
+        (forest.hashes_held() * 32).div_ceil(items)
+    };
+    assert_eq!(forest_node, 64, "a forest holds two hashes an item");
     let a_year = 365 * 24 * 60;
     let each = header + forest_node;
     let megabytes = (a_year * each) as f64 / 1e6;
