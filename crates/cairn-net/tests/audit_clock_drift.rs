@@ -156,6 +156,13 @@ fn hello(nonce: u64, listen: u16) -> Message {
     })
 }
 
+///
+/// `patience` is a liveness bound and not a measurement: it costs nothing when
+/// the condition is met, so the only thing a short one buys is a failure that
+/// says nothing about the code. This suite has had three of those in one day,
+/// at fifteen seconds, at a minute, and at twenty milliseconds, each green on a
+/// quiet machine and red on a busy one. They are set far past anything a loaded
+/// runner does rather than near it.
 fn wait_until(patience: Duration, mut ready: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + patience;
     while Instant::now() < deadline {
@@ -376,7 +383,7 @@ fn a_real_node_keeps_the_peer_that_offered_a_block_its_clock_is_behind() {
     let mut socket = TcpStream::connect(node.address()).unwrap();
     write_message(&mut socket, params().network, &hello(4_711, 4_242)).unwrap();
     assert!(
-        wait_until(Duration::from_secs(5), || node.peer_count() == 1),
+        wait_until(Duration::from_secs(60), || node.peer_count() == 1),
         "the peer never arrived, so nothing below is being tested"
     );
 
@@ -389,7 +396,7 @@ fn a_real_node_keeps_the_peer_that_offered_a_block_its_clock_is_behind() {
 
     // Long enough that a connection being torn down would have been. The
     // question is what the node settled on, not what it had got to.
-    let dropped = wait_until(Duration::from_secs(3), || node.peer_count() == 0);
+    let dropped = wait_until(Duration::from_secs(60), || node.peer_count() == 0);
     let held = node.peer_count();
     let height = node.height();
     node.shutdown();
@@ -439,7 +446,7 @@ fn a_run_of_them_from_two_peers_tells_the_operator_about_the_clock() {
         sockets.push(socket);
     }
     assert!(
-        wait_until(Duration::from_secs(5), || node.peer_count() == 2),
+        wait_until(Duration::from_secs(60), || node.peer_count() == 2),
         "both peers never arrived, so nothing below is being tested"
     );
     for _ in 0..4 {
@@ -453,7 +460,7 @@ fn a_run_of_them_from_two_peers_tells_the_operator_about_the_clock() {
         }
     }
 
-    let said = wait_until(Duration::from_secs(5), || node.clock_behind().is_some());
+    let said = wait_until(Duration::from_secs(60), || node.clock_behind().is_some());
     let behind = node.clock_behind();
     node.shutdown();
 

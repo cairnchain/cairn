@@ -29,6 +29,13 @@ fn loopback() -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
 }
 
+///
+/// `patience` is a liveness bound and not a measurement: it costs nothing when
+/// the condition is met, so the only thing a short one buys is a failure that
+/// says nothing about the code. This suite has had three of those in one day,
+/// at fifteen seconds, at a minute, and at twenty milliseconds, each green on a
+/// quiet machine and red on a busy one. They are set far past anything a loaded
+/// runner does rather than near it.
 fn wait_until(patience: Duration, mut ready: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + patience;
     while Instant::now() < deadline {
@@ -182,7 +189,7 @@ fn a_node_with_no_flood_dials_its_seed() {
     let victim = Node::bind(params(), loopback()).unwrap();
     victim.remember_seed(honest.address());
 
-    let dialled = wait_until(Duration::from_secs(12), || honest.peer_count() >= 1);
+    let dialled = wait_until(Duration::from_secs(120), || honest.peer_count() >= 1);
     assert!(dialled, "a node with a seed and no flood should dial it");
 
     honest.shutdown();
@@ -202,7 +209,7 @@ fn inbound_connections_do_not_starve_outbound_peer_discovery() {
         flood.push(TcpStream::connect(victim.address()).unwrap());
     }
     assert!(
-        wait_until(Duration::from_secs(5), || victim.peer_count()
+        wait_until(Duration::from_secs(60), || victim.peer_count()
             >= TARGET_PEERS),
         "the victim should accept the inbound flood",
     );
@@ -212,7 +219,7 @@ fn inbound_connections_do_not_starve_outbound_peer_discovery() {
     victim.remember_seed(honest.address());
 
     // It should reach its seed regardless of how many strangers are attached.
-    let dialled = wait_until(Duration::from_secs(12), || honest.peer_count() >= 1);
+    let dialled = wait_until(Duration::from_secs(120), || honest.peer_count() >= 1);
     assert!(
         dialled,
         "victim never dialled its seed while {TARGET_PEERS} inbound connections were held: \

@@ -91,6 +91,13 @@ fn seconds_now() -> u64 {
         .unwrap_or_default()
 }
 
+///
+/// `patience` is a liveness bound and not a measurement: it costs nothing when
+/// the condition is met, so the only thing a short one buys is a failure that
+/// says nothing about the code. This suite has had three of those in one day,
+/// at fifteen seconds, at a minute, and at twenty milliseconds, each green on a
+/// quiet machine and red on a busy one. They are set far past anything a loaded
+/// runner does rather than near it.
 fn wait_until(patience: Duration, mut ready: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + patience;
     while Instant::now() < deadline {
@@ -208,7 +215,7 @@ fn a_real_node_lets_go_of_a_dripping_peer() {
     drip.flush().unwrap();
 
     assert!(
-        wait_until(Duration::from_secs(5), || node.peer_count() == 1),
+        wait_until(Duration::from_secs(60), || node.peer_count() == 1),
         "the node should take the connection",
     );
 
@@ -283,7 +290,7 @@ fn dripping_peers_cannot_take_every_connection_slot() {
     });
 
     assert!(
-        wait_until(Duration::from_secs(10), || node.peer_count()
+        wait_until(Duration::from_secs(100), || node.peer_count()
             >= cairn_net::node::MAX_PEERS),
         "the node should take the connections: it took {}",
         node.peer_count(),
@@ -479,7 +486,7 @@ fn a_stranger_cannot_point_a_node_at_private_addresses() {
 
     // Long enough for several rounds of upkeep, so this is what the node
     // settled on and not what it had got to.
-    let taken = wait_until(Duration::from_secs(5), || {
+    let taken = wait_until(Duration::from_secs(60), || {
         let book = node.known_addresses();
         named.iter().any(|address| book.contains(address))
     });
@@ -1340,7 +1347,7 @@ fn two_connections_to_one_peer_come_down_to_one() {
     let mut first = TcpStream::connect(node.address()).unwrap();
     write_message(&mut first, params().network, &hello(1_001, claimed)).unwrap();
     assert!(
-        wait_until(Duration::from_secs(10), || node.peers_introduced() == 1),
+        wait_until(Duration::from_secs(100), || node.peers_introduced() == 1),
         "the first connection introduced itself"
     );
 
@@ -1366,7 +1373,7 @@ fn two_connections_to_one_peer_come_down_to_one() {
     }
     // The slot is the last thing given up, after both of that connection's
     // threads are finished with it, so it lags the socket closing.
-    let settled = wait_until(Duration::from_secs(10), || node.peer_count() == 1);
+    let settled = wait_until(Duration::from_secs(100), || node.peer_count() == 1);
     let held = node.peer_count();
     let introduced = node.peers_introduced();
     node.shutdown();
@@ -1434,7 +1441,7 @@ fn one_silent_address_cannot_take_every_outbound_slot() {
     node.remember_seed(sink_at);
     node.remember_seed(honest.address());
 
-    let found = wait_until(Duration::from_secs(20), || honest.peer_count() >= 1);
+    let found = wait_until(Duration::from_secs(200), || honest.peer_count() >= 1);
     // Several more rounds of upkeep, so what the sink holds is what the node
     // settled on rather than what it had got to.
     std::thread::sleep(Duration::from_secs(5));

@@ -427,6 +427,24 @@ fn many_threads_over_one_node_all_keep_moving() {
 /// chain let go of, and the log is taken one read at a time rather than for
 /// the length of the build, since a thread wanting the log holds the chain
 /// while it waits.
+///
+/// **This measured the runner twice over, and both halves had to go.** It took
+/// the worst wait on the chain lock over 400 ms with nobody asking, then the
+/// worst wait over 3 s with a peer asking, and required the second to be within
+/// 20 ms of the first. A maximum over 3 s has seven times the chances to catch
+/// an unrelated stall that a maximum over 400 ms has, so the longer sample runs
+/// high whatever the code does; and 20 ms is inside what a loaded runner hands
+/// out for nothing. It read 7.5 against 53.6, then 8.6 against 48.8, then 12.0
+/// against 35.0, green on a quiet machine and red on a busy one, on the same
+/// commit. Two independent audits reported it in the same afternoon.
+///
+/// What it is now is one experiment rather than two, and it is measured against
+/// the size of the defect rather than against a baseline. The build is timed
+/// from outside, by a ping put behind the question on the same connection, and
+/// the chain lock is sampled from another thread over exactly that window. If
+/// the chain were held for the build the worst wait would be the build; what has
+/// to hold is that it is a small fraction of one. Nothing here compares two
+/// measurements taken at different moments, because there is only one moment.
 #[test]
 fn a_join_request_does_not_hold_the_chain_shut() {
     // Settable so the same probe can be run against a longer chain: the
@@ -439,39 +457,52 @@ fn a_join_request_does_not_hold_the_chain_shut() {
 
     let directory = scratch("joinstall");
     let (node, _) = Node::open_archiving(params(), loopback(), &directory).unwrap();
+    let node = Arc::new(node);
     let mut forge = Forge::new(params());
     for block in forge.mine_many(height) {
         node.submit_block(block).unwrap();
     }
 
-    let quiet = worst_chain_wait(&node, Duration::from_millis(400));
-
     let mut peer = TcpStream::connect(node.address()).unwrap();
+    peer.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    peer.set_nodelay(true).unwrap();
     write_message(&mut peer, params().network, &hello(987_654)).unwrap();
-    write_message(
-        &mut peer,
-        params().network,
-        &Message::GetJoin {
-            what: Joining::Weight,
-            part: 0,
-        },
-    )
-    .unwrap();
 
-    let asked = worst_chain_wait(&node, Duration::from_secs(3));
-    println!(
-        "chain of {height}: worst wait on the chain lock {quiet:?} with nobody asking, \
-         {asked:?} while one peer asks to join"
-    );
+    // The sampler runs for as long as the build does and not a moment more, so
+    // the window it takes its worst over is the window the build happens in.
+    let sampling = Arc::new(AtomicBool::new(true));
+    let watcher = {
+        let (node, sampling) = (Arc::clone(&node), Arc::clone(&sampling));
+        thread::spawn(move || {
+            let mut worst = Duration::ZERO;
+            while sampling.load(Ordering::SeqCst) {
+                let at = Instant::now();
+                let _ = node.height();
+                worst = worst.max(at.elapsed());
+            }
+            worst
+        })
+    };
+
+    // The first ask is the one that pays for the build, because a node that has
+    // not been asked holds no answer.
+    let build = what_it_cost(&mut peer, Joining::Weight, 0, 1);
+    sampling.store(false, Ordering::SeqCst);
+    let worst = watcher.join().expect("the sampler thread");
 
     node.shutdown();
     let _ = std::fs::remove_dir_all(&directory);
 
+    println!(
+        "chain of {height}: building the answer cost {build:?}, and the longest any \
+         caller waited on the chain lock while it was being built was {worst:?}"
+    );
     assert!(
-        asked < quiet + Duration::from_millis(20),
-        "one peer asking to be handed the chain held the chain lock shut for {asked:?}, \
-         against {quiet:?} when nobody was asking. Every other peer, the miner and the \
-         HTTP server waited that long, and it grew with the chain."
+        worst * 4 < build,
+        "one peer asking to be handed the chain held the chain lock for {worst:?} out \
+         of the {build:?} the build took. Every other peer, the miner and the HTTP \
+         server waited that long, and it grows with the chain."
     );
 }
 

@@ -669,66 +669,117 @@ fn a_path_written_down_comes_back_the_same_path() {
 /// emptied leaf asking for the one subtree beside it at each level. The map is
 /// sorted by position, so both runs were there to be asked for.
 ///
-/// Timed rather than argued. Run with `--nocapture` for the figures.
+/// **This is a clock, and there is no counter to use instead.** The project's
+/// standing rule is not to compare two wall-clock measurements taken at
+/// different moments, because the difference between two small durations is the
+/// machine's load. Every other place that rule bit has been repaired by
+/// counting something instead. Here there is nothing to count: what the defect
+/// does is walk entries it then leaves as they were, so the forest that comes
+/// out is the same forest either way and no public accessor can tell the two
+/// apart. Removing the clock would take an operation counter inside the crate,
+/// behind a feature this test turns on, which is a real change to shipped code
+/// for a test's benefit and has not been made.
+///
+/// So the clock is made as honest as a clock gets. Each measurement is the
+/// **least** of seven runs rather than one run, because every sample of a cost
+/// is that cost plus whatever the machine was doing, and the smallest has the
+/// least of the machine in it. The work is scaled until the least run is
+/// milliseconds rather than microseconds, so the noise floor is a small part of
+/// what is being read. And what is guarded against is a factor of seven
+/// hundred with a threshold of eight, which is two orders of magnitude of room:
+/// this test is not trying to tell one and a half from one.
+///
+/// The removal half used to be measured and then never asserted on, which is
+/// the more expensive of the two operations and the one with the climb through
+/// sixty four heights inside it. Both are asserted now.
 #[test]
 fn the_cost_of_a_block_does_not_grow_with_what_the_node_watches() {
     const DEPTH: usize = 24;
+    /// Runs each measurement is taken over, of which the least is kept.
+    const RUNS: usize = 7;
+    /// Additions in one measured run. Large enough that the least of seven is
+    /// milliseconds, so the machine's floor is a small part of the reading.
+    const ADDS: u64 = 8_192;
+
     let mut measured: Vec<(usize, u128, u128)> = Vec::new();
 
     for watching in [0usize, 1_024, 8_192, 65_536] {
-        let mut forest = Forest::new();
-        // A forest big enough that a position sits deep in a real tree.
-        for index in 0..(1u64 << 16) {
-            forest.add(leaf(index)).unwrap();
-        }
-        for index in 0..watching as u64 {
-            forest.watch(
-                index,
-                ForestProof {
-                    siblings: vec![leaf(index); DEPTH],
-                },
-            );
+        let mut adds = u128::MAX;
+        let mut removes = u128::MAX;
+
+        for run in 0..RUNS {
+            let mut forest = Forest::new();
+            // A forest big enough that a position sits deep in a real tree.
+            for index in 0..(1u64 << 16) {
+                forest.add(leaf(index)).unwrap();
+            }
+            for index in 0..watching as u64 {
+                forest.watch(
+                    index,
+                    ForestProof {
+                        siblings: vec![leaf(index); DEPTH],
+                    },
+                );
+            }
+
+            // A fresh stretch of positions per run, so no run is measuring a
+            // forest another run already grew.
+            let from = (1u64 << 20) + (run as u64) * ADDS;
+            let adding = std::time::Instant::now();
+            for index in 0..ADDS {
+                forest.add(leaf(index + from)).unwrap();
+            }
+            adds = adds.min(adding.elapsed().as_micros());
+
+            // And a removal, which is the more expensive of the two: it climbs
+            // through sixty four heights for every place it touches.
+            let mut archive = Archive::new();
+            for index in 0..1_024u64 {
+                archive.add(leaf(index)).unwrap();
+            }
+            let mut small = archive.forest().clone();
+            for index in 0..watching.min(1_024) as u64 {
+                small.watch(index, archive.prove(index).unwrap());
+            }
+            let proofs: Vec<_> = (0..64u64)
+                .map(|index| archive.prove(index * 8).unwrap())
+                .collect();
+            let removing = std::time::Instant::now();
+            for (index, proof) in proofs.iter().enumerate() {
+                let at = index as u64 * 8;
+                small.remove(at, leaf(at), proof);
+            }
+            removes = removes.min(removing.elapsed().as_micros());
         }
 
-        let adding = std::time::Instant::now();
-        for index in 0..1_024u64 {
-            forest.add(leaf(index + (1 << 20))).unwrap();
-        }
-        let adds = adding.elapsed().as_micros();
-
-        // And a removal, which is the more expensive of the two.
-        let mut archive = Archive::new();
-        for index in 0..1_024u64 {
-            archive.add(leaf(index)).unwrap();
-        }
-        let mut small = archive.forest().clone();
-        for index in 0..watching.min(1_024) as u64 {
-            small.watch(index, archive.prove(index).unwrap());
-        }
-        let removing = std::time::Instant::now();
-        for index in 0..64u64 {
-            small.remove(
-                index * 8,
-                leaf(index * 8),
-                &archive.prove(index * 8).unwrap(),
-            );
-        }
-        let removes = removing.elapsed().as_micros();
-
-        println!("watching {watching:>6}: 1024 adds {adds:>8} us, 64 removes {removes:>8} us");
+        println!(
+            "watching {watching:>6}: least of {RUNS} runs, {ADDS} adds {adds:>8} us, \
+             64 removes {removes:>8} us"
+        );
         measured.push((watching, adds, removes));
     }
 
-    let (_, none, _) = measured[0];
-    let (many, lots, _) = measured[measured.len() - 1];
+    let (_, none, no_removes) = measured[0];
+    let (many, lots, lots_of_removes) = measured[measured.len() - 1];
     println!(
-        "watching {many} makes an ordinary block's additions {:.1}x the cost of watching nothing",
-        lots as f64 / none.max(1) as f64
+        "watching {many} makes an ordinary block's additions {:.1}x the cost of watching \
+         nothing, and its removals {:.1}x",
+        lots as f64 / none.max(1) as f64,
+        lots_of_removes as f64 / no_removes.max(1) as f64
     );
-    // Generous, because this is a clock on a machine doing other things. What
-    // it is guarding against is the seven hundredfold, not a factor of two.
+
+    // Eight, against a defect worth seven hundred. Two orders of magnitude of
+    // room, because this is still a clock and the point is not to tell one and
+    // a half from one.
     assert!(
         lots < none.saturating_mul(8),
         "watching {many} made an ordinary block's additions {lots} us against {none} us"
+    );
+    // The half that was measured and never asserted on, which is the more
+    // expensive of the two.
+    assert!(
+        lots_of_removes < no_removes.saturating_mul(8),
+        "watching {many} made an ordinary block's removals {lots_of_removes} us against \
+         {no_removes} us"
     );
 }
