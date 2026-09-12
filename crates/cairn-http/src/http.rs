@@ -81,11 +81,22 @@ const SLOWEST_LINK: u64 = 4 * 1024;
 /// The asking half can be a flat number because a request head is a few
 /// hundred bytes whatever it asks for. An answer is not, so what it is worth
 /// is worked out from its length at the rate above, and this is the ceiling on
-/// that. Thirty seconds is a hundred and twenty kilobytes at that rate, and
-/// the largest thing this server sends is well inside it: the biggest document
-/// compiled in is some fifty kilobytes, and the API pages are capped at a
-/// couple of hundred rows. So for everything actually served the length is
-/// what decides, and this only ever catches an answer nobody has written yet.
+/// that.
+///
+/// It was thirty seconds, which is a hundred and twenty kilobytes at that
+/// rate, and the reason given was that "the biggest document compiled in is
+/// some fifty kilobytes, and the API pages are capped at a couple of hundred
+/// rows". Both halves had stopped being true. The specification is 167 016
+/// bytes and was cut off about three thousand short of its end, which is not a
+/// partial paper but an incomplete message: a body under its own
+/// `content-length` gives the reader a transport error. And a page capped in
+/// rows is not capped in bytes, which is the whole of what this ceiling
+/// measures: one page of the pool came to eight megabytes.
+///
+/// Sixty seconds now, which is [`most_one_answer_carries`] and leaves the
+/// largest document this site is for with room above it. The other half of
+/// the repair is that the explorer holds its answers under that number rather
+/// than under a count of rows.
 ///
 /// A ceiling as well as a rate, because a length is only a bound while
 /// somebody keeps the answers short. And the rate is read off the length
@@ -94,7 +105,24 @@ const SLOWEST_LINK: u64 = 4 * 1024;
 /// accepted, and a loopback socket swallows the best part of a megabyte before
 /// it blocks, so paying by bytes written would hand a caller that read nothing
 /// at all several minutes for the buffering.
-pub const ANSWER_DEADLINE: Duration = Duration::from_secs(30);
+pub const ANSWER_DEADLINE: Duration = Duration::from_secs(60);
+
+/// The largest answer this server undertakes to deliver, in bytes.
+///
+/// What [`ANSWER_DEADLINE`] is worth at [`SLOWEST_LINK`], and therefore the
+/// exact length past which an answer cannot reach a reader on the slowest link
+/// this server writes for: it is cut off mid body and the reader gets a
+/// transport error rather than a short page.
+///
+/// Published so that whoever builds an answer can hold it to the same number
+/// rather than restate it. A ceiling on rows is not a ceiling on bytes, and
+/// this is the one the socket actually enforces.
+#[must_use]
+pub fn most_one_answer_carries() -> usize {
+    let seconds = usize::try_from(ANSWER_DEADLINE.as_secs()).unwrap_or(usize::MAX);
+    let rate = usize::try_from(SLOWEST_LINK).unwrap_or(usize::MAX);
+    seconds.saturating_mul(rate)
+}
 /// Bytes a form body may reach. A spend names an address, an amount and a
 /// fee; anything past this is not one.
 const MAX_BODY_BYTES: usize = 4096;

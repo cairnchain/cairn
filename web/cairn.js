@@ -676,9 +676,12 @@ async function block(reference) {
       panel(null, explainer('explain.block'), rows, coverageLine(data.coverage)),
       coinbasePanel,
       panel(
-        t('block.transfers.title', { n: count(data.transfers.length) }),
+        t('block.transfers.title', { n: count(data.transferCount ?? data.transfers.length) }),
         explainer('explain.transfers'),
-        data.transfers.length ? el('div', { class: 'stack' }, data.transfers.map((transfer) => transferCard(transfer))) : el('div', { class: 'empty', text: t('block.transfers.none') })
+        data.transfers.length ? el('div', { class: 'stack' }, data.transfers.map((transfer) => transferCard(transfer))) : el('div', { class: 'empty', text: t('block.transfers.none') }),
+        data.transfersNext !== null && data.transfersNext !== undefined
+          ? el('div', { class: 'more' }, el('a', { class: 'action', href: '/block/' + data.height + '?from=' + data.transfersNext, 'data-link': true, text: t('common.more') }))
+          : null
       )
     )
   );

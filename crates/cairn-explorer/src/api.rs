@@ -23,7 +23,7 @@ use cairn_primitives::codec::Encode;
 use cairn_primitives::{hex, Amount, Hash32};
 
 use crate::index::{Head, Held, Index, NoteRecord, Reading, Size};
-use cairn_http::Writer;
+use cairn_http::{Mark, Writer};
 use cairn_http::{Request, Response};
 
 /// Blocks listed per page.
@@ -35,6 +35,55 @@ const PAGE: usize = 25;
 /// on what one stranger can make this node carry. It is the same order as the
 /// number of blocks a peer may ask for in one message, for the same reason.
 const MAX_PAGE: usize = 128;
+/// Bytes one answer may reach before a list stops adding to it.
+///
+/// [`MAX_PAGE`]'s note used to say a ceiling on a page "is a ceiling on what
+/// one stranger can make this node carry". True of the blocks a page quotes,
+/// and it answers the wrong question: a row of `/api/pool` is a whole transfer
+/// written out, the rules allow one transfer two hundred and fifty six
+/// outputs, and every output is a note reference, a value, an owner and four
+/// fields about where it stands. One page of a hundred and twenty eight such
+/// rows came to 8 063 655 bytes for a forty nine byte request, with the chain
+/// held for the whole of it.
+///
+/// The number is not this crate's to choose. It is exactly what the server
+/// downstream undertakes to deliver, so that an answer is never built that a
+/// reader cannot be given: past it the socket is shut with the body part
+/// written, and a body short of its own `content-length` is an incomplete
+/// message rather than a short page.
+fn most_one_answer_carries() -> usize {
+    cairn_http::most_one_answer_carries()
+}
+
+/// What a list leaves for what is written after it closes.
+///
+/// An answer is not only its list. The pointer to the next page, the note
+/// saying how much of the chain has been read, and the fields the route wrote
+/// before the list all count against the same ceiling, and a list that filled
+/// it exactly would push them over.
+const ROOM_FOR_THE_REST: usize = 4 * 1024;
+
+/// Takes back the row just written if it put the answer over the ceiling, and
+/// says whether the list should stop.
+///
+/// A page has to decide whether a row fits after writing it, because what a
+/// row weighs is not knowable before. Stopping after the row that went over
+/// means going over by a row, and a ceiling exceeded by a row is not one.
+///
+/// Never true for the first row, so that a page is never empty. A page that
+/// cannot advance is a caller asking the same question for ever, which is the
+/// shape of defect this project fixed once already at `chain_after`. One
+/// oversized row is served whole and the deliverability net downstream is what
+/// catches it, which is a refusal that says so rather than a socket shut
+/// mid body.
+fn too_much_now(json: &mut Writer, listed: usize, before: Mark) -> bool {
+    let ceiling = most_one_answer_carries().saturating_sub(ROOM_FOR_THE_REST);
+    if listed == 0 || json.written() <= ceiling {
+        return false;
+    }
+    json.rewind(before);
+    true
+}
 /// Entries returned for one address before the caller has to ask for more.
 ///
 /// Both the notes an address holds and the movements through it are paged. An
@@ -278,7 +327,9 @@ impl Explorer {
             .collect();
         // Whatever the second reading still wants is a block this node does
         // not hold, and it is answered around rather than asked for again.
-        self.read(request, &fetched, Pass::Answering, &health).0
+        self.read(request, &fetched, Pass::Answering, &health)
+            .0
+            .map(deliverable)
     }
 
     /// One reading of the request, with the blocks fetched for it so far, and
@@ -519,6 +570,26 @@ fn field_size(json: &mut Writer, context: &Context<'_>, encode: impl FnOnce() ->
     }
 }
 
+/// Refuses an answer this server cannot deliver, whatever built it.
+///
+/// Every list below stops on [`most_one_answer_carries`], so nothing honest
+/// reaches this. It is here because the ceiling is a property of the server
+/// and not of any one route: a route added later that forgets to page is a
+/// route whose answers are cut off mid body, and a body short of its own
+/// `content-length` reaches the reader as a transport error rather than as a
+/// short page. Refusing is the worse answer to give and the better one to
+/// receive, because it says what happened.
+///
+/// `one_answer_is_never_longer_than_a_connection_can_carry` holds every route
+/// against this, so it firing at all is a defect rather than a mode of
+/// operation.
+fn deliverable(answer: Response) -> Response {
+    if answer.body.len() <= most_one_answer_carries() {
+        return answer;
+    }
+    Response::error(500, "this answer is longer than this server can deliver")
+}
+
 fn route(context: &Context<'_>, request: &Request) -> Option<Response> {
     if let Some(rest) = request.after("/api/") {
         return Some(match rest {
@@ -529,7 +600,7 @@ fn route(context: &Context<'_>, request: &Request) -> Option<Response> {
             "holders" => holders(context),
             "search" => search(context, request),
             other => match other.split_once('/') {
-                Some(("block", reference)) => block(context, reference),
+                Some(("block", reference)) => block(context, request, reference),
                 Some(("tx", id)) => transaction(context, id),
                 Some(("address", owner)) => address(context, owner, request),
                 Some(("note", id)) => note(context, id),
@@ -1022,6 +1093,7 @@ fn blocks(context: &Context<'_>, request: &Request) -> Response {
     let mut height = from;
     let mut walked = 0usize;
     while walked < limit {
+        let before = json.mark();
         // The naming reading wants the heights and nothing else, and this is
         // the page where that is the whole of the difference: a hundred and
         // twenty eight blocks named costs a hundred and twenty eight lookups,
@@ -1031,6 +1103,9 @@ fn blocks(context: &Context<'_>, request: &Request) -> Response {
         if let Some(block) = context.block_at(height) {
             if context.answering() {
                 block_summary(&mut json, context, &block);
+                if too_much_now(&mut json, walked, before) {
+                    break;
+                }
             }
         }
         walked = walked.saturating_add(1);
@@ -1115,7 +1190,20 @@ fn block_fees(context: &Context<'_>, block: &Block) -> Option<Amount> {
     Some(paid)
 }
 
-fn block(context: &Context<'_>, reference: &str) -> Response {
+/// One block, with its transfers a page at a time.
+///
+/// The transfers used to be written out whole, and a block is the one answer
+/// here whose size nobody pays for twice: filling the pool costs whoever fills
+/// it, but once a block is on the chain it is inside every consensus rule and
+/// this is the answer to `/api/block/N` for ever, for free. A block of 124 456
+/// wire bytes carrying twelve transfers came out as 747 809 bytes, six times
+/// the block and four times what a connection can carry, for a forty four byte
+/// request.
+///
+/// `max_block_bytes` bounds the block and not what this writes: every hash
+/// becomes sixty six bytes of text and every note carries four fields about
+/// where it stands, so no ceiling on the chain's side is a ceiling here.
+fn block(context: &Context<'_>, request: &Request, reference: &str) -> Response {
     let Some(block) = resolve_block(context, reference) else {
         return Response::error(404, "no such block");
     };
@@ -1193,12 +1281,26 @@ fn block(context: &Context<'_>, reference: &str) -> Response {
     json.end_array();
     json.end_object();
 
+    let carried = block.transfers.len();
+    let offset = offset_of(request);
+    let limit = limit_of(request);
+    json.field_usize("transferCount", carried);
     json.key("transfers");
     json.begin_array();
-    for transfer in &block.transfers {
+    let mut listed = 0usize;
+    for transfer in block.transfers.iter().skip(offset).take(limit) {
+        let before = json.mark();
         transfer_object(&mut json, context, transfer, false);
+        if too_much_now(&mut json, listed, before) {
+            break;
+        }
+        listed = listed.saturating_add(1);
     }
     json.end_array();
+    match next_after(offset, listed, carried) {
+        Some(next) => json.field_usize("transfersNext", next),
+        None => json.field_null("transfersNext"),
+    }
 
     // This page is read off the chain and its notes are read off the index, so
     // it is the one place the two can be seen disagreeing: the block is here,
@@ -1667,7 +1769,11 @@ fn pool(context: &Context<'_>, request: &Request) -> Response {
     json.begin_array();
     let mut listed = 0usize;
     for (_, transfer) in context.chain.pooled_transfers().skip(offset).take(limit) {
+        let before = json.mark();
         transfer_object(&mut json, context, transfer, false);
+        if too_much_now(&mut json, listed, before) {
+            break;
+        }
         listed = listed.saturating_add(1);
     }
     json.end_array();

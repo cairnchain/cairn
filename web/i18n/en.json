@@ -47,7 +47,8 @@
     "loading": "Reading the chain",
     "nothing": "Nothing here yet.",
     "seeAll": "See all blocks",
-    "older": "Older"
+    "older": "Older",
+    "more": "Show more"
   },
 
   "unit": {
