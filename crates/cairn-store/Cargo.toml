@@ -17,3 +17,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 cairn-crypto.workspace = true
+# For `tests/audit_what_the_block_log_vouches_for.rs`, which counts the bytes
+# the checks on a served record hash rather than timing them. Only the test
+# build asks for it.
+cairn-primitives = { workspace = true, features = ["count-hashing"] }
