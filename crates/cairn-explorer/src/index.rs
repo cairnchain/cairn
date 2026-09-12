@@ -181,6 +181,24 @@ pub(crate) struct Head {
     pub(crate) at_last_read: Option<Hash32>,
 }
 
+/// Whether the branch still carries `id` at `height`.
+///
+/// `None` from the chain means the height is past what it still holds an
+/// identifier for. Nothing that deep can have changed, since a switch deeper
+/// than the undo window is refused, so it is taken as agreeing as long as the
+/// height is one the branch reaches at all.
+fn still_the_branch(
+    height: u64,
+    id: Hash32,
+    tip: u64,
+    id_at: &impl Fn(u64) -> Option<Hash32>,
+) -> bool {
+    match id_at(height) {
+        Some(now) => now == id,
+        None => height <= tip,
+    }
+}
+
 /// What a node could produce for one height of the branch it follows.
 ///
 /// Four answers and not two. A node keeps one run of blocks and drops the
@@ -243,25 +261,48 @@ pub(crate) enum Reading {
 ///
 /// Every note ever made, spent or not, with its owner, its value, the two
 /// heights and the movements on both sides of it. It is the explorer's real
-/// growing cost and it is nearly eight times the one the site used to name: a
+/// growing cost and it is nearly nine times the one the site used to name: a
 /// node that keeps the whole cold set carries seventy two bytes for each note
 /// that has fallen, and a node that keeps none carries nothing at all.
 ///
 /// A note is what is counted, and a note is not the whole of what is kept: the
-/// index also holds an entry per transaction and a movement per side of every
-/// note, and neither of those is fixed per note. So the cost per note moves
-/// with the shape of the traffic, and `audit_index_cost.rs` weighs three
-/// shapes of it, one test each. The dearest is the ordinary payment, one note
-/// to the payee and one back as change, which has the fewest notes to spread
-/// the rest over: 565 bytes a note. The wide fan-outs come out between five
-/// hundred and six and five hundred and thirty.
+/// index also holds an entry per transaction, a movement per side of every
+/// note, and an entry per owner with two lists hanging off it. None of those
+/// is fixed per note, so the figure is a function of two things and not one.
 ///
-/// The dearest is the one quoted. It was five hundred, which is rounder than
-/// any of the readings and under all of them, and it was calibrated on the
-/// widest fan-out alone, which is the cheapest per note and which nobody
-/// sends. An operator sizing a machine off this figure is not helped by the
-/// friendliest shape of traffic.
-pub(crate) const BYTES_PER_NOTE: u64 = 565;
+/// **The shape of the traffic.** `audit_index_cost.rs` weighs three, one test
+/// each. The dearest is the ordinary payment, one note to the payee and one
+/// back as change, which has the fewest notes to spread the rest over; the
+/// wide fan-outs come out cheaper. That variable was found and fixed, and the
+/// note here said so: the figure had been calibrated on the widest fan-out
+/// alone, "which is the cheapest per note and which nobody sends".
+///
+/// **How many notes an owner holds.** Not found at the same time, and it is
+/// the larger term. Every shape weighed there reuses one pool of addresses
+/// block after block, so an owner entry and its two lists are spread over
+/// about a hundred and thirty notes, and a hundred and thirty is not a
+/// property of the traffic shape. Counted out of the index's own tables, with
+/// every hash-table slot, B-tree slack and allocator header left out, so
+/// these are floors:
+///
+/// | notes an owner holds | bytes a note |
+/// |---:|---:|
+/// | 1 | **627** |
+/// | 2 | 396 |
+/// | 4 | 308 |
+/// | 130 | 346 |
+///
+/// One address per note is the privacy-standard shape and the cheapest way to
+/// inflate somebody else's index, and a payee's address is the payee's choice
+/// and not the sending wallet's. So it is the one quoted, the way the dearest
+/// traffic shape is: an operator sizing a machine off this figure is not
+/// helped by the friendliest of either variable.
+///
+/// This is content and not occupancy, which is the distinction
+/// `cairn-accumulator`'s `archivist_cost.rs` draws for the archive. Taken
+/// resident at the same shape it reads 916 to 936, about one and a half times
+/// this, and that is what a machine actually has to have.
+pub(crate) const BYTES_PER_NOTE: u64 = 627;
 
 /// What the index is made of, for the operator who has to pay for it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -302,12 +343,22 @@ impl Index {
     /// branch carries at the highest height read, and after a turn that is a
     /// different height. Handing the same one back says the branch changed
     /// under the index, and the whole of it is read again.
-    pub(crate) fn refresh(&mut self, head: &Head, block_at: impl Fn(u64) -> Held) -> Reading {
+    pub(crate) fn refresh(
+        &mut self,
+        head: &Head,
+        block_at: impl Fn(u64) -> Held,
+        id_at: impl Fn(u64) -> Option<Hash32>,
+    ) -> Reading {
         // Whether what was read last time is still on the branch. Only the
         // last block has to be checked: everything under it was checked when
         // it was read, and a branch that changed under one of them changed
         // under this one too.
         if let Some(span) = self.span {
+            // From the head, which was taken with the chain in hand before
+            // this turn started. The check at the bottom asks the chain again
+            // and is the one that sees a switch land inside the turn; asking
+            // the chain here as well would be asking it about a moment that
+            // has not happened yet.
             let agrees = match head.at_last_read {
                 Some(id) => id == span.id,
                 // Past what the chain still holds an identifier for. Nothing
@@ -318,6 +369,15 @@ impl Index {
                 *self = Self::new();
             }
         }
+        // Every height this turn ends up relying on, and the identifier it
+        // relied on there. Asked again once the turn is over, which is the
+        // whole of the second half of this check. At most one more than
+        // `BATCH` entries: the top of what was already read, and what this
+        // turn reads on top of it.
+        let mut relies_on: Vec<(u64, Hash32)> = self
+            .span
+            .map(|span| vec![(span.through, span.id)])
+            .unwrap_or_default();
 
         // Height zero on a fresh index, and the walk steps over whatever of
         // the bottom of the chain this node no longer holds rather than
@@ -333,6 +393,7 @@ impl Index {
             match block_at(height) {
                 Held::Block(block) => {
                     let id = block.id();
+                    relies_on.push((height, id));
                     self.apply(&block);
                     self.stock_due = true;
                     self.span = Some(match self.span {
@@ -349,6 +410,9 @@ impl Index {
                     });
                 }
                 Held::Dropped => {
+                    // Nothing read before this height is worth checking any
+                    // more, because nothing read before it is kept.
+                    relies_on.clear();
                     // Below anything read this is only a shorter index, and
                     // the index says where it starts. Above it, the log was
                     // cut while this walk was inside it, so everything read
@@ -376,12 +440,56 @@ impl Index {
             self.resume = height;
             walked = walked.saturating_add(1);
         }
+        // And the branch was still that branch when the turn ended.
+        //
+        // The check at the top asks once, before a block is read, and the
+        // sentence beside it is true: everything under the last block read
+        // was checked when it was read. What it does not cover is the turn
+        // itself. `read_a_batch` takes the chain, asks two questions, gives it
+        // back, and only then reads up to sixty four heights, taking the lock
+        // again for each. A switch landing inside that window changes the
+        // branch under heights already read, and the walk then reads the
+        // heights above it off the branch that won and stamps the span with
+        // the winner's identifier, so the check at the top of the next turn
+        // agrees. And agrees for ever, because nothing looks below the last
+        // block again.
+        //
+        // What that leaves is an index holding blocks off a branch nobody
+        // has, permanently, with `coverage.whole` true. Measured: a transfer
+        // the followed branch carries answered "no such transaction" while
+        // `/api/block` printed it in the same instant off the same program,
+        // and an address was shown a balance it was never paid.
+        //
+        // Asked of every height the turn relies on and not of the one it
+        // ended at. The end of the span cannot see a switch below it, because
+        // the span's own top was read after the switch landed and agrees with
+        // it; and the height the turn started from cannot see a switch above
+        // itself, which a generator over this walk found in eighteen cases.
+        // A branch is a chain, so two heights agreeing says nothing about the
+        // heights between them when what is between them came off somewhere
+        // else. There is no cheaper sufficient question than all of them, and
+        // all of them is at most sixty five, against the sixty four blocks
+        // the turn has just read off a disk.
+        let started_over = relies_on
+            .iter()
+            .any(|(height, id)| !still_the_branch(*height, *id, head.tip, &id_at));
+        if started_over {
+            *self = Self::new();
+            self.stock_due = true;
+        }
         // Not between batches: sorting every owner is the one thing here that
         // costs more than the blocks do, and a rebuild would otherwise pay for
         // it once per turn all the way up the chain.
-        if self.stock_due && reading == Reading::Done {
+        if self.stock_due && reading == Reading::Done && !started_over {
             self.take_stock();
         }
+        // And `reading` as the walk left it, not `More` because of the reset.
+        // `Explorer::refresh` loops until a turn says `Done`, so a reset that
+        // asked for another turn would be a reset that asked for another turn
+        // for as long as the disagreement lasted. One reset per call, and the
+        // rebuild is the next call's work: the index says how much of the
+        // chain it has read, and right after a reset the honest answer is
+        // none of it.
         reading
     }
 

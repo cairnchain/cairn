@@ -131,7 +131,7 @@ const COLD_BYTES_PER_NOTE: u64 = 72;
 ///
 /// Named here so `/api/status` can carry both figures side by side. The site
 /// used to call the cold set the explorer's growing cost, and the index is
-/// nearly eight times larger, so the page was pointing at the smaller half.
+/// nearly nine times larger, so the page was pointing at the smaller half.
 const INDEX_BYTES_PER_NOTE: u64 = crate::index::BYTES_PER_NOTE;
 
 /// The node the explorer reads, plus what it keeps on top of it.
@@ -237,7 +237,11 @@ impl Explorer {
         let Some(head) = head else {
             return Reading::Done;
         };
-        index.refresh(&head, |height| self.held_at(height))
+        index.refresh(
+            &head,
+            |height| self.held_at(height),
+            |height| self.node.with_chain(|chain| chain.id_at(height)),
+        )
     }
 
     /// One block of the followed branch, with the chain held for as little of
@@ -793,6 +797,21 @@ fn coverage(json: &mut Writer, context: &Context<'_>) {
     // have not got there yet".
     json.field_bool("whole", context.index.reads_from_the_start() && behind == 0);
     json.end_object();
+}
+
+/// Whether the index has read the whole chain, which is the one condition
+/// under which a count off it is a count and not a floor.
+///
+/// Both halves, and the second is the one that was missing where this is used
+/// below: "the index goes back to block zero" is true from the instant the
+/// first block goes in and says nothing about the tip. An address page printed
+/// its note count bare, with no "at least" in front of it, beside a coverage
+/// note in the same object saying the index was behind. That is not the corner
+/// case: it is where a running site sits between two turns of its indexer, and
+/// where it sits for the whole of its first pass and for the whole of every
+/// rebuild after a reorganisation, which on a long chain is minutes.
+fn has_read_it_all(context: &Context<'_>) -> bool {
+    context.index.reads_from_the_start() && behind_of(context.height(), context.index.covers()) == 0
 }
 
 /// A four hundred and four that says how much of the chain was looked in.
@@ -1634,7 +1653,7 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
         // this chain, and answering "nought, and that is exact" about every
         // address on it is the worst thing this program can do: a reader has
         // no way at all to tell it from a real balance of nought.
-        json.field_bool("counted", context.index.reads_from_the_start());
+        json.field_bool("counted", has_read_it_all(context));
         json.key("unspent");
         json.begin_array();
         json.end_array();
@@ -1669,13 +1688,19 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
     json.field_bool("moreNotes", held.unspent > held.listed.len());
     // Whether that count is the whole of it, or the floor the walk stopped at.
     // A reader is owed the difference: a figure that quietly means "at least"
-    // is the kind of wrong nobody notices until it matters. Two ways it can
-    // be a floor, and one answer for both: the walk over this address stopped
-    // at its ceiling, or the index itself does not go back to the first block.
-    json.field_bool(
-        "counted",
-        held.whole && context.index.reads_from_the_start(),
-    );
+    // is the kind of wrong nobody notices until it matters.
+    //
+    // Three ways it can be a floor and one answer for all of them. The walk
+    // over this address stopped at its ceiling; the index does not go back to
+    // the first block; or the index has not reached the tip. The note here
+    // used to name the first two, and the third is the commonest of the
+    // three: `reads_from_the_start` is true from the instant the first block
+    // goes in. One answer carried `"counted":true` beside
+    // `"coverage":{"behind":1,"whole":false}`, and the page reads this field
+    // and not that one, so it printed a note count with no "at least" in
+    // front of it while a spend of one of those notes sat unread on the
+    // chain.
+    json.field_bool("counted", held.whole && has_read_it_all(context));
 
     // One line per movement: a note arriving, and later the transfer that
     // spent it. The index records these as the chain produces them, so they

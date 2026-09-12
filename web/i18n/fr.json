@@ -134,13 +134,13 @@
           "Cela coûte environ {perNote} octets par billet ayant jamais existé, et cela ne cesse jamais de grandir. Garder la cave, ce que cet ordinateur fait aussi, coûte environ {coldPerNote} octets par billet tombé. Un nœud ordinaire ne garde ni l'un ni l'autre, et ne paie ni l'un ni l'autre."
         ],
         "curious": [
-          "L'index est le coût croissant propre à l'explorateur, et c'est le plus lourd de ses deux coûts, d'un facteur huit environ : {perNote} octets pour chaque billet jamais créé, contre {coldPerNote} octets pour chaque billet tombé dans l'ensemble froid. Aucun des deux n'est borné, et les deux pèsent sur qui choisit de rendre ce service.",
+          "L'index est le coût croissant propre à l'explorateur, et c'est le plus lourd de ses deux coûts, d'un facteur neuf environ : {perNote} octets pour chaque billet jamais créé, contre {coldPerNote} octets pour chaque billet tombé dans l'ensemble froid. Aucun des deux n'est borné, et les deux pèsent sur qui choisit de rendre ce service.",
           "Un nœud ordinaire ne porte ni l'un ni l'autre. Sa mémoire ne bouge pas du tout avec l'ensemble froid, et c'est là-dessus que repose toute la conception ; cette page montre à quoi ressemble une exception."
         ],
         "technical": [
           "Propriétaire vers billets, billet vers fiche, identifiant de transaction vers emplacement, et un mouvement enregistré à chaque crédit comme à chaque débit. Rien n'en sort jamais : la taille dépend donc de toute l'histoire de la chaîne et non de son état courant.",
           "Mesuré sur l'implémentation réelle : {perNote} octets par billet jamais créé pour l'index, {coldPerNote} octets par billet tombé pour l'ensemble froid d'un nœud archiviste, et aucune pente du tout pour un nœud qui ne garde que les soixante-quatre racines.",
-          "Rien de tout cela n'est borné par une règle. Un bloc rempli jusqu'à la limite d'octets peut contenir trois mille billets de poussière vers trois mille adresses neuves, soit environ 1,7 Mo d'index pour ce seul bloc, et environ 910 Go par an à raison d'un bloc par minute. Celui qui mine ce bloc ne paie rien pour cela : le plancher de frais est la politique de chaque nœud sur ce qu'il accepte de porter, pas une règle de la chaîne."
+          "Rien de tout cela n'est borné par une règle. Un bloc rempli jusqu'à la limite d'octets peut contenir trois mille billets de poussière vers trois mille adresses neuves, soit environ 1,9 Mo d'index pour ce seul bloc, et environ 1010 Go par an à raison d'un bloc par minute. Celui qui mine ce bloc ne paie rien pour cela : le plancher de frais est la politique de chaque nœud sur ce qu'il accepte de porter, pas une règle de la chaîne."
         ]
       }
     },

@@ -533,8 +533,16 @@ fn the_site_asks_the_node_how_it_is() {
     assert!(says(&status, "joining", "\"no\""), "{page}");
     assert!(says(&status, "outOfReach", "0"), "{page}");
 
-    // And what the index costs, which nobody had written down.
-    assert!(page.contains("\"bytesPerNote\":565"), "{page}");
+    // And what the index costs, which nobody had written down. Read out of
+    // the constant rather than written here, because this figure has moved
+    // twice and a literal in a test is one more place to forget.
+    assert!(
+        page.contains(&format!(
+            "\"bytesPerNote\":{}",
+            cairn_explorer_index_bytes_per_note()
+        )),
+        "{page}"
+    );
     assert!(page.contains("\"bytesPerNote\":72"), "{page}");
     assert!(page.contains("\"movements\":"), "{page}");
 
@@ -896,7 +904,7 @@ fn a_refused_read_costs_the_blocks_under_it_nothing() {
         tip,
         at_last_read: None,
     };
-    while index.refresh(&head, read) == Reading::More {}
+    while index.refresh(&head, read, |_| None) == Reading::More {}
 
     assert_eq!(
         index.covers(),
@@ -918,7 +926,7 @@ fn a_refused_read_costs_the_blocks_under_it_nothing() {
         tip,
         at_last_read: Some(chain[6].id()),
     };
-    while index.refresh(&head, read) == Reading::More {}
+    while index.refresh(&head, read, |_| None) == Reading::More {}
     assert_eq!(index.covers(), Some((0, tip)), "and the hole is filled in");
     assert!(index.locate(&chain[7].coinbase.id()).is_some());
     assert!(index.locate(&chain[0].coinbase.id()).is_some());
@@ -955,7 +963,7 @@ fn a_rebuild_of_the_same_length_still_counts_who_holds_what() {
         tip: 9,
         at_last_read: None,
     };
-    while index.refresh(&head, read) == Reading::More {}
+    while index.refresh(&head, read, |_| None) == Reading::More {}
     assert_eq!(index.blocks_read(), 10);
     assert_eq!(index.holders(), 1, "the miner holds what it mined");
 
@@ -964,7 +972,7 @@ fn a_rebuild_of_the_same_length_still_counts_who_holds_what() {
         tip: 20,
         at_last_read: Some(chain[9].id()),
     };
-    while index.refresh(&head, read) == Reading::More {}
+    while index.refresh(&head, read, |_| None) == Reading::More {}
     assert_eq!(index.blocks_read(), 10, "ten in, ten out");
     assert_eq!(index.covers(), Some((11, 20)));
     assert_eq!(
@@ -1218,18 +1226,23 @@ fn a_route_is_answered_while_the_index_is_being_built() {
 /// distance between them.
 ///
 /// Five sentences in four files say the index is the larger of the explorer's
-/// two growing costs by about eight, and the eight is not written down
-/// anywhere: it is 565 over 72, and it moves the day either of those moves.
-/// Both halves have instruments and the ratio between them had none, so a
-/// correction to one constant would have left every one of those sentences
-/// confidently wrong, in two languages, with nothing to catch it. That is the
-/// exact shape of the last thirteen wrong figures: the number was checked and
-/// the sentence built on it was not.
+/// two growing costs by about nine, and the nine is not written down
+/// anywhere: it is the per-note figure over 72, and it moves the day either
+/// of those moves. Both halves have instruments and the ratio between them
+/// had none, so a correction to one constant would have left every one of
+/// those sentences confidently wrong, in two languages, with nothing to catch
+/// it. That is the exact shape of the last thirteen wrong figures: the number
+/// was checked and the sentence built on it was not.
+///
+/// It has since earned its place. The per-note figure went from 565 to 627
+/// when it stopped being calibrated on owners holding a hundred and thirty
+/// notes each, and this is what said that five sentences and a help text had
+/// to move with it.
 ///
 /// The ratio is what is held, not the wording, and it is held to the whole
 /// number the sentences round it to. The failure names where to go.
 #[test]
-fn the_ratio_the_site_calls_eight_is_the_one_this_program_serves() {
+fn the_ratio_the_site_calls_nine_is_the_one_this_program_serves() {
     const EN: &str = include_str!("../../../web/i18n/en.json");
     const FR: &str = include_str!("../../../web/i18n/fr.json");
     const SCRIPT: &str = include_str!("../../../web/cairn.js");
@@ -1268,17 +1281,17 @@ fn the_ratio_the_site_calls_eight_is_the_one_this_program_serves() {
         (
             "web/i18n/en.json",
             EN,
-            "the larger of its two by about eight times",
+            "the larger of its two by about nine times",
         ),
         (
             "web/i18n/fr.json",
             FR,
-            "le plus lourd de ses deux coûts, d'un facteur huit environ",
+            "le plus lourd de ses deux coûts, d'un facteur neuf environ",
         ),
         (
             "web/cairn.js",
             SCRIPT,
-            "the smaller half of it by nearly eight times",
+            "the smaller half of it by nearly nine times",
         ),
     ] {
         assert!(
@@ -1287,13 +1300,19 @@ fn the_ratio_the_site_calls_eight_is_the_one_this_program_serves() {
         );
     }
     assert_eq!(
-        times, 8,
+        times, 9,
         "the index costs {index} bytes a note and the cold set {cold}, which is {times} \
-         times and not eight. Every one of these says eight and all of them are now \
+         times and not nine. Every one of these says nine and all of them are now \
          wrong: web/i18n/en.json, web/i18n/fr.json, web/cairn.js, and the doc comments \
          on INDEX_BYTES_PER_NOTE in cairn-explorer/src/api.rs and on BYTES_PER_NOTE in \
          cairn-explorer/src/index.rs"
     );
+}
+
+/// What the index charges a note, read out of the crate rather than written
+/// down beside a page that quotes it.
+fn cairn_explorer_index_bytes_per_note() -> u64 {
+    index::BYTES_PER_NOTE
 }
 
 /// Read out of the running route rather than written down here, so the day the

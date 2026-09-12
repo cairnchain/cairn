@@ -55,7 +55,7 @@ cairn-explorer, a Cairn node that also serves a website
 The explorer always keeps the cold set, because answering questions about
 notes that have fallen is the whole point of it. That is a cost which grows
 with the chain, which is exactly what a plain node refuses to carry. The
-index it builds on top grows faster still: 565 bytes for every note that has
+index it builds on top grows faster still: 627 bytes for every note that has
 ever existed, against seventy two for every note that has fallen. Both are
 reported live at /api/status.";
 

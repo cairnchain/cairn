@@ -89,6 +89,7 @@ dependencies = [
  "cairn-chain",
  "cairn-crypto",
  "cairn-docs",
+ "cairn-fuzz",
  "cairn-http",
  "cairn-ledger",
  "cairn-net",

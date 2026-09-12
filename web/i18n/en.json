@@ -134,13 +134,13 @@
           "It costs about {perNote} bytes for every note that has ever existed, and it never stops growing. Keeping the cave, which this computer also does, costs about {coldPerNote} bytes for each note that has fallen. An ordinary node keeps neither and pays for neither."
         ],
         "curious": [
-          "The index is the explorer's own growing cost, and it is the larger of its two by about eight times: {perNote} bytes for every note ever created, against {coldPerNote} bytes for every note that has fallen into the cold set. Both are unbounded, and both are carried by whoever chooses to offer this service.",
+          "The index is the explorer's own growing cost, and it is the larger of its two by about nine times: {perNote} bytes for every note ever created, against {coldPerNote} bytes for every note that has fallen into the cold set. Both are unbounded, and both are carried by whoever chooses to offer this service.",
           "A plain node carries neither. Its memory does not move with the cold set at all, which is the claim the whole design rests on, and this page is what an exception to it looks like."
         ],
         "technical": [
           "Owner to notes, note to record, transaction identifier to location, and one movement recorded per credit and per debit. Nothing is ever removed, so the size is a function of the chain's whole history rather than of its current state.",
           "Measured on the running implementation: {perNote} bytes per note ever created for the index, {coldPerNote} bytes per fallen note for an archiving node's cold set, and no slope at all for a node that keeps only the sixty four roots.",
-          "None of it is bounded by a rule. One block filled to the byte limit can be three thousand dust notes to three thousand fresh addresses, which is about 1.7 MB of index for that one block, and about 910 GB a year at a block a minute. Whoever mines that block pays nothing for it: the fee floor is a node's own policy about what it will carry, not a rule of the chain."
+          "None of it is bounded by a rule. One block filled to the byte limit can be three thousand dust notes to three thousand fresh addresses, which is about 1.9 MB of index for that one block, and about 1010 GB a year at a block a minute. Whoever mines that block pays nothing for it: the fee floor is a node's own policy about what it will carry, not a rule of the chain."
         ]
       }
     },

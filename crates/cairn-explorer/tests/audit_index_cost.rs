@@ -79,7 +79,7 @@ fn read_all(
         let Some(now) = head(index) else {
             return;
         };
-        if index.refresh(&now, &block_at) == Reading::Done {
+        if index.refresh(&now, &block_at, |_| None) == Reading::Done {
             return;
         }
     }
@@ -775,12 +775,13 @@ fn what_a_block_of_dust_costs_the_index() {
     assert!(size.bytes > 0);
 
     // The two figures the site publishes about this block, which are the ones
-    // an operator would size a machine from. They were written when a note cost
-    // the index five hundred bytes and were not taken again when the figure was
-    // corrected to five hundred and sixty five, so the sentence quoted the new
-    // per-note figure out of the running route and then multiplied it out with
-    // the old one, in both languages: 1.6 MB and 810 GB where this build gives
-    // 1.7 and 910.
+    // an operator would size a machine from. They have been out of step with
+    // the running figure twice now, each time because the per-note cost was
+    // corrected and the sentences that multiply it out were not taken again:
+    // once at five hundred against five hundred and sixty five, and once at
+    // five hundred and sixty five against six hundred and twenty seven, when
+    // the figure stopped being calibrated on owners holding a hundred and
+    // thirty notes each. This is what holds them together.
     let a_block = notes_per_block as u64 * index::BYTES_PER_NOTE;
     let a_year = a_block * 525_600;
     let megabytes = format!("{:.1}", a_block as f64 / 1e6);

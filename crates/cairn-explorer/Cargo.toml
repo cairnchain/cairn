@@ -33,3 +33,7 @@ cairn-store.workspace = true
 # papers are compiled into this binary as files, and the thing that makes them
 # is not part of it.
 cairn-docs.workspace = true
+# For `tests/fuzz_index_walk.rs`. The walk is a state machine over a branch
+# that moves under it, and it is the one surface in this crate that a
+# generator reaches places a hand-written case does not.
+cairn-fuzz.workspace = true
