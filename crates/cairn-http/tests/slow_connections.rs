@@ -238,3 +238,34 @@ fn a_flood_over_the_loopback_is_released_by_the_deadline() {
         "the server answers again once the deadline has cut the flood, said {answer:?}"
     );
 }
+
+/// **A browser is told not to hand these bytes to a page from somewhere else.**
+///
+/// The wallet holds everything about itself behind a secret and lets its own
+/// look and script through without one, because "the look and the script are
+/// the same bytes for anyone who asks". True, and it answers a different
+/// question from whether answering tells a stranger anything. A subresource
+/// load sends no `Origin`, and the `Host` is the loopback the browser itself
+/// wrote, so a page on any site could pull `/wallet.js` off a range of
+/// loopback ports and learn that this machine runs a Cairn wallet and on which
+/// port.
+///
+/// `cross-origin-resource-policy` is what stops a browser handing the bytes
+/// over. It costs the explorer nothing: its page loads its own assets from its
+/// own origin, and nothing here ever sent an `access-control-allow-origin`, so
+/// no cross-origin fetch worked before it either.
+#[test]
+fn every_answer_says_it_is_not_for_a_page_somewhere_else() {
+    let address = start();
+    for request in [
+        "GET / HTTP/1.1\r\nhost: cairn\r\n\r\n",
+        "GET /nowhere HTTP/1.1\r\nhost: cairn\r\n\r\n",
+        "GET http://elsewhere/ HTTP/1.1\r\n\r\n",
+    ] {
+        let said = ask(address, request);
+        assert!(
+            said.contains("cross-origin-resource-policy: same-origin"),
+            "an answer a browser would hand to any page that asked: {said}"
+        );
+    }
+}

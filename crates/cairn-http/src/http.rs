@@ -127,6 +127,10 @@ pub fn most_one_answer_carries() -> usize {
 /// fee; anything past this is not one.
 const MAX_BODY_BYTES: usize = 4096;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long to wait after an accept that failed, so a failure that persists is
+/// a wait rather than a spin.
+const ACCEPT_PAUSE: Duration = Duration::from_millis(50);
+
 /// How long to leave a socket alone that has no room for more of the answer.
 ///
 /// Short enough that the deadline is what ends a connection rather than this,
@@ -266,6 +270,19 @@ where
             return;
         }
         let Ok(stream) = incoming else {
+            // An accept that fails leaves the connection queued, so a loop
+            // that goes straight round asks for the same one again at
+            // once. The case that matters is running out of descriptors,
+            // and it is one this process can reach on its own: a node's
+            // peer sockets live here too. A pause turns that spin into a
+            // wait, and costs nothing on the path where accepts succeed,
+            // which is every other time round.
+            //
+            // Not tested, and saying so beats implying it is: reaching it
+            // means lowering this process's descriptor limit, which a test
+            // in this suite cannot do without deciding what every other
+            // test in the process may open.
+            thread::sleep(ACCEPT_PAUSE);
             continue;
         };
         let accepted = Instant::now();
@@ -679,6 +696,20 @@ fn write_response<W: Write>(out: &mut W, response: &Response, head_only: bool) -
 /// The policy allows nothing from anywhere else: no third-party script, no
 /// remote font, no analytics. A page about a chain that asks you to trust
 /// nobody should not itself call out to four companies to render a heading.
+///
+/// `cross-origin-resource-policy` is the one that is not about this page. The
+/// wallet holds everything about itself behind a secret and lets its own look
+/// and script through without one, on the grounds that "the look and the
+/// script are the same bytes for anyone who asks". True, and it answers a
+/// different question from "does answering tell a stranger anything": a
+/// subresource load sends no `Origin`, and the `Host` is the loopback the
+/// browser itself wrote, so a page on any site could pull `/wallet.js` off a
+/// range of loopback ports and learn that this machine runs a Cairn wallet and
+/// on which port. This header is what stops a browser handing the bytes to a
+/// document from somewhere else. It costs the explorer nothing: its own page
+/// loads its own assets from its own origin, and nothing here ever sent an
+/// `access-control-allow-origin`, so no cross-origin fetch worked before it
+/// either.
 const SECURITY_HEADERS: &str = concat!(
     "content-security-policy: default-src 'none'; script-src 'self'; style-src 'self'; ",
     "img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; ",
@@ -686,6 +717,7 @@ const SECURITY_HEADERS: &str = concat!(
     "x-content-type-options: nosniff\r\n",
     "referrer-policy: no-referrer\r\n",
     "cross-origin-opener-policy: same-origin\r\n",
+    "cross-origin-resource-policy: same-origin\r\n",
     "permissions-policy: geolocation=(), microphone=(), camera=(), payment=(), usb=()\r\n",
 );
 

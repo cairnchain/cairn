@@ -963,8 +963,14 @@ impl ChainStore {
     /// those are identifiers and nothing else: a walk that wants headers has
     /// to start here.
     ///
-    /// On a node that joined a chain this is its anchor, which is the honest
-    /// answer: the chain below it is one that node was never given.
+    /// On a node that joined a chain this is one past its tip, because a node
+    /// handed a ledger has applied no block itself and this is where the
+    /// headers it writes begin. Its anchor is [`Self::branch_start`], and this
+    /// used to say it was this: the two answer 6 and 0 on a node that adopted
+    /// at height 5. The one caller wants the first number, which is why the
+    /// wrong sentence cost nothing, and a sentence that is wrong about what a
+    /// function answers is worth correcting before somebody reaches for the
+    /// second.
     #[must_use]
     pub fn held_from(&self) -> u64 {
         self.undo_from
@@ -1508,6 +1514,25 @@ impl ChainStore {
             return Err(ChainError::Corrupt);
         };
         if last.id() != tip.id {
+            return Err(ChainError::Corrupt);
+        }
+        // And the two numbers the branch is indexed by, which the identifier
+        // alone does not settle here. `total_work` is what
+        // `ChainStore::total_work` answers from and what every fork choice on
+        // this node is decided against; `height` is what `Branch::from_tail`
+        // files the run under. A ledger whose tip disagrees with the header
+        // carrying its identifier about either is the same defect `BrokenRun`
+        // closes, arriving through the other door.
+        //
+        // Unreachable today and kept as the last word all the same, the way
+        // the depth check in `follow` is. Every `LedgerState` with a tip gets
+        // it from `rebuilt`, which reads both numbers off the header it is
+        // given, so nothing in this workspace can produce the mismatch. What
+        // makes that an argument about callers rather than about this door is
+        // that `adopt` is public and nothing says every caller of it is one of
+        // ours, which is the reason the version and the run are checked here
+        // too. Two comparisons.
+        if tip.total_work != last.total_work || tip.height != last.height {
             return Err(ChainError::Corrupt);
         }
 
