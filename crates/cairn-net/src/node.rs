@@ -65,6 +65,21 @@ pub const TARGET_PEERS: usize = 8;
 /// what turns an unbounded cost into a known one.
 pub const MAX_PEERS: usize = 48;
 
+/// Connections somebody else can hold on a node that has reached nobody.
+///
+/// [`MAX_PEERS`] less the slots held back for the peers a node goes out and
+/// chooses, which is the whole of [`TARGET_PEERS`] while it has reached
+/// nobody and shrinks to nothing once it has.
+///
+/// There was no number between the two. The accept loop and the dialling
+/// round asked the same question, so a table somebody else filled was a table
+/// this node could not dial out of, and filling it is not misbehaviour:
+/// forty eight connections that greet, are welcomed and speak every few
+/// seconds are never refused and never fall quiet. `MAX_PER_HOST` is two per
+/// exact address, so that is twenty four addresses, a quarter of a /24 or
+/// twenty four out of one machine's IPv6 /64.
+pub const MOST_FROM_OUTSIDE: usize = MAX_PEERS - TARGET_PEERS;
+
 /// Connections accepted from any one address.
 ///
 /// A single machine opening every slot would leave a node surrounded by one
@@ -1992,6 +2007,45 @@ impl Shared {
             .filter(|peer| peer.host == Some(host))
             .count();
         from_host < MAX_PER_HOST
+    }
+
+    /// Whether one more connection somebody else opened is welcome.
+    ///
+    /// See [`MOST_FROM_OUTSIDE`] for the figure this leaves a node that has
+    /// reached nobody.
+    ///
+    /// The ceiling above, less the slots this node still needs to reach the
+    /// peers it chooses for itself. There was no number between
+    /// [`TARGET_PEERS`] and [`MAX_PEERS`]: the accept loop and the dialling
+    /// round asked the same question, so once the table was full the dialling
+    /// round could not open anything, and the table filling was not something
+    /// this node decided.
+    ///
+    /// Nothing about filling it is misbehaviour. Forty eight connections that
+    /// greet, are welcomed and say a word every few seconds are never refused
+    /// and never fall quiet, and `MAX_PER_HOST` is two per exact address, so
+    /// that is twenty four addresses: a quarter of a /24, or twenty four out
+    /// of one machine's IPv6 /64. Measured: the victim reported forty eight
+    /// peers, knew thirty three addresses, and never dialled the one its
+    /// operator gave it. For a node with no chain that hands the one
+    /// irreversible choice it makes to whoever filled the table, because every
+    /// claim it hears is theirs and it cannot reach anybody else.
+    ///
+    /// "Has this node room for another connection" is true, and it is the
+    /// question the accept loop needed answered. The dialling round needed
+    /// "has this node room for a connection it chooses".
+    fn has_room_to_accept(&self, host: Option<IpAddr>) -> bool {
+        let held = {
+            let peers = self.peers();
+            let dialled = peers.values().filter(|peer| peer.dialled).count();
+            peers
+                .len()
+                .saturating_add(TARGET_PEERS.saturating_sub(dialled))
+        };
+        if held >= MAX_PEERS {
+            return false;
+        }
+        self.has_room_for(host)
     }
 
     /// Ends one connection, leaving its own threads to clear it up.
@@ -5661,7 +5715,7 @@ fn accept_loop(shared: &Arc<Shared>, listener: &TcpListener) {
                     break;
                 }
                 let host = from.ip();
-                if shared.refuses(host, unix_now()) || !shared.has_room_for(Some(host)) {
+                if shared.refuses(host, unix_now()) || !shared.has_room_to_accept(Some(host)) {
                     let _ = stream.shutdown(Shutdown::Both);
                     continue;
                 }
@@ -6372,17 +6426,27 @@ fn dial_from_book(shared: &Arc<Shared>, now: u64) {
     // Most recently heard from first, so a node spends its attention on peers
     // that have proved they exist rather than on whatever sorts lowest, and
     // only those whose wait after a failed dial is over.
+    //
+    // Not cut to `wanted` here, which is the whole of the second half of this
+    // repair. `wanted` is a bound on dials to make, and truncating the list to
+    // it made it a bound on candidates to consider: every address skipped
+    // inside the loop, for a refusal or for no room, was a dial that simply
+    // did not happen. Filling the front of the order with addresses that
+    // refuse every dial then stopped a node dialling anything, which is what
+    // one stranger and twenty four claimed ports did. The loop counts what it
+    // opened instead, the book is bounded at `MAX_ADDRESSES` so the walk is
+    // too, and `DIAL_BUDGET` still ends a round that is taking too long.
     let candidates: Vec<SocketAddr> = shared
         .book()
         .ready(now)
         .into_iter()
         .filter(|address| *address != shared.address && !connected.contains(address))
-        .take(wanted)
         .collect();
 
     let dialling_since = Instant::now();
+    let mut opened = 0usize;
     for address in candidates {
-        if !shared.running.load(Ordering::SeqCst) {
+        if opened >= wanted || !shared.running.load(Ordering::SeqCst) {
             return;
         }
         // Checked before the dial rather than after, so a round always opens at
@@ -6398,6 +6462,7 @@ fn dial_from_book(shared: &Arc<Shared>, now: u64) {
         match TcpStream::connect_timeout(&address, DIAL_TIMEOUT) {
             Ok(stream) => {
                 attach_peer(shared, stream, Some(address));
+                opened = opened.saturating_add(1);
             }
             // An address that never answers would otherwise be dialled every
             // second forever, and handed to every peer that asks.
@@ -6667,6 +6732,57 @@ fn held_off(shared: &Arc<Shared>, id: PeerId, peer: &PeerState, message: &Messag
     peer.greeted && matches!(message, Message::Transaction(_)) && shared.probation().is_some()
 }
 
+/// What this connection turns out to be, once the peer has named itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ending {
+    Keep,
+    HangUp,
+}
+
+/// Files a peer's own account of where it listens, and says whether this half
+/// of a duplicate pair is the one to end.
+///
+/// Run once per connection, the first time the peer names an address.
+///
+/// Two things happen here and only one of them is about the address the peer
+/// named. The book is told what this node reached, which is the address this
+/// node chose and not the one the peer chose: an address that answers a dial
+/// goes to the front of the order this node dials and gossips from, and an
+/// address that dialled in has proved its host exists and nothing about
+/// whether anything listens where it says it does. The port in a handshake is
+/// a number the peer wrote.
+///
+/// That was not the rule, and one stranger from one address said hello 2 135
+/// times from twenty four claimed ports and took the whole front of the order.
+/// Every dial a round went to an address that refused it, a greeting cleared
+/// the retry pause each time, and the victim never reached the one address its
+/// operator gave it. It held one connection and knew twenty five addresses, so
+/// neither the connection ceiling nor an empty book is what stopped it.
+fn what_it_said_it_was(
+    shared: &Arc<Shared>,
+    id: PeerId,
+    peer: &PeerState,
+    dialled: Option<SocketAddr>,
+    last_heard: u64,
+) -> Ending {
+    if let Some(reached) = dialled {
+        shared.book().answered(&reached, last_heard);
+    }
+    let Some(address) = peer.advertised else {
+        return Ending::Keep;
+    };
+    if let Registration::Redundant(other) = register(shared, id, address) {
+        if loses_the_tie(shared.address, address, dialled.is_some()) {
+            return Ending::HangUp;
+        }
+        // This is the half to keep, so the other half goes. Both ends work the
+        // rule out the same way, so they end the same connection; what neither
+        // end could do before was end it from this side of the pair.
+        shared.hang_up(other);
+    }
+    Ending::Keep
+}
+
 fn read_loop(
     shared: &Arc<Shared>,
     mut stream: TcpStream,
@@ -6749,30 +6865,16 @@ fn read_loop(
 
         if introduction && peer.greeted {
             note_claim(shared, id, &peer);
-            // Written down beside the connection and in the book. Beside the
-            // connection so a wallet can pick who to ask now; in the book so
-            // one that comes back tomorrow, needing a proof and connected to
-            // nobody who can give it, has a door to knock on.
+        }
+        shared.remember(&reaction.learned);
+        if introduction && peer.greeted {
             shared.note_what_it_keeps(id, peer.advertised, peer.keeps.cold_set);
         }
-
-        shared.remember(&reaction.learned);
         shared.forget(&reaction.forget);
-        if !announced {
-            if let Some(address) = peer.advertised {
-                announced = true;
-                // It spoke, so whatever was held against it no longer holds.
-                shared.book().answered(&address, last_heard);
-                if let Registration::Redundant(other) = register(shared, id, address) {
-                    if loses_the_tie(shared.address, address, initiator) {
-                        break;
-                    }
-                    // This is the half to keep, so the other half goes. Both
-                    // ends work the rule out the same way, so they end the
-                    // same connection; what neither end could do before was
-                    // end it from this side of the pair.
-                    shared.hang_up(other);
-                }
+        if !announced && peer.advertised.is_some() {
+            announced = true;
+            if what_it_said_it_was(shared, id, &peer, dialled, last_heard) == Ending::HangUp {
+                break;
             }
         }
 

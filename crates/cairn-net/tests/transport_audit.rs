@@ -289,9 +289,16 @@ fn dripping_peers_cannot_take_every_connection_slot() {
         sent
     });
 
+    // `MOST_FROM_OUTSIDE` and not `MAX_PEERS`: a node holds back the slots it
+    // still needs to reach peers of its own, so what somebody else can fill is
+    // forty of the forty eight. That is the repair to the sentence this test's
+    // own note ends on, that a node whose slots are full "cannot dial out
+    // either, because dial_from_book asks the same has_room_for". It asks a
+    // different one now. What is measured here is unchanged and is the other
+    // half: whether an honest peer can still get in.
     assert!(
         wait_until(Duration::from_secs(100), || node.peer_count()
-            >= cairn_net::node::MAX_PEERS),
+            >= cairn_net::node::MOST_FROM_OUTSIDE),
         "the node should take the connections: it took {}",
         node.peer_count(),
     );

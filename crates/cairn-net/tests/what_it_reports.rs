@@ -25,7 +25,7 @@ use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
 use cairn_ledger::LedgerState;
-use cairn_net::node::{Node, NodeError, MAX_PEERS};
+use cairn_net::node::{Node, NodeError, MAX_PEERS, MOST_FROM_OUTSIDE};
 use cairn_primitives::Amount;
 
 const NOW: u64 = 2_000_000_000;
@@ -129,15 +129,54 @@ fn a_connection_this_node_let_go_of_is_not_a_peer_reached() {
     for _ in 0..MAX_PEERS {
         held.push(TcpStream::connect(crowded.address()).unwrap());
     }
+    // As full as somebody else can make it, which is `MOST_FROM_OUTSIDE`: a
+    // node holds back the slots it still needs to reach peers of its own.
+    assert!(
+        until(Duration::from_secs(10), || crowded.peer_count()
+            >= MOST_FROM_OUTSIDE),
+        "the table filled: {} of {MOST_FROM_OUTSIDE}",
+        crowded.peer_count()
+    );
+    // And those held-back slots are a way out. This used to be the point at
+    // which a dial was refused, because the accept loop and the dialling round
+    // asked the same question and a table somebody else filled was a table
+    // this node could not leave.
+    crowded
+        .connect(listening)
+        .expect("a table somebody else filled still leaves a node a way out of it");
+
+    // To reach the refusal the rest of this test is about, the node has to be
+    // at `MAX_PEERS` and not merely crowded, which takes its own dials as well
+    // as everybody else's. A plain listener is enough: what fills a slot is a
+    // connection, and loopback is exempt from `MAX_PER_HOST` so one address
+    // can hold them all.
+    let parking = std::net::TcpListener::bind(loopback()).unwrap();
+    let parked = parking.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let mut taken = Vec::new();
+        for stream in parking.incoming() {
+            match stream {
+                Ok(socket) => taken.push(socket),
+                Err(_) => break,
+            }
+        }
+    });
+    for _ in crowded.peer_count()..MAX_PEERS {
+        if crowded.connect(parked).is_err() {
+            break;
+        }
+    }
     assert!(
         until(Duration::from_secs(10), || crowded.peer_count()
             >= MAX_PEERS),
-        "the table filled: {} of {MAX_PEERS}",
+        "the table has to be full for the refusal below: {} of {MAX_PEERS}",
         crowded.peer_count()
     );
 
     let before = crowded.peer_count();
-    let refused = crowded.connect(listening).unwrap_err();
+    let refused = crowded
+        .connect(listening)
+        .expect_err("a full table refuses a dial");
     assert!(
         matches!(refused, NodeError::NotKept { .. }),
         "a dial this node cannot keep says so: {refused}"

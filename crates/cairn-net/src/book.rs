@@ -477,7 +477,27 @@ impl AddressBook {
             .collect()
     }
 
+    /// Takes an address out, unless the operator put it in.
+    ///
+    /// "An address the operator gave is the one thing in the book that was not
+    /// learned from the network, so it is the one thing the network cannot
+    /// take away" is this book's own rule, and `missed` kept it while this did
+    /// not. The one caller is the self-detection path: a peer whose handshake
+    /// carries this node's own nonce is this node talking to itself, and the
+    /// address the connection came from, completed by the port the handshake
+    /// names, is this node's own.
+    ///
+    /// The nonce is not a secret. It goes out in every `Hello` and every
+    /// `Welcome` this node sends, so a stranger reads one off a first
+    /// connection and says it back on a second, naming whatever port it wants
+    /// removed at whatever address the node sees it at. On the open internet
+    /// that is the stranger's own address and costs nothing. On a devnet,
+    /// inside one office, or behind one carrier gateway, every node shares
+    /// that address, and one hello took the operator's seed out of the book.
     pub fn remove(&mut self, address: &SocketAddr) -> bool {
+        if self.known.get(address).is_some_and(|known| known.seed) {
+            return false;
+        }
         let Some(gone) = self.known.remove(address) else {
             return false;
         };
@@ -495,10 +515,26 @@ impl AddressBook {
         true
     }
 
-    /// Notes that this address introduced itself.
+    /// Notes that this address answered a dial this node made.
     ///
-    /// Clears whatever was held against it: a peer that speaks now is a peer
-    /// that exists now, whatever it did earlier.
+    /// Clears whatever was held against it, and moves it to the front of the
+    /// order this node dials and gossips from: an address that answers now is
+    /// an address that answers now, whatever it did earlier.
+    ///
+    /// Only for an address this node reached. It used to be called for any
+    /// peer that greeted, inbound as well, and the sentence beside it was "a
+    /// peer that speaks now is a peer that exists now". True of the host, and
+    /// the question this order needs answered is whether a node answers at
+    /// this address: a peer that dialled in has proved the first and nothing
+    /// of the second, and the port in its handshake is a number it wrote.
+    ///
+    /// What it cost, measured: one address, twenty four claimed ports, 2 135
+    /// greetings over two minutes. All twenty four sat at the front of the
+    /// order, so every dial a round went to an address that refused it, a
+    /// greeting cleared the retry pause each time, and the victim never
+    /// reached the one address its operator gave it. It held one connection
+    /// and knew twenty five addresses, so neither the connection ceiling nor
+    /// an empty book was what stopped it.
     pub fn answered(&mut self, address: &SocketAddr, now: u64) {
         let Some(known) = self.known.get_mut(address) else {
             return;
