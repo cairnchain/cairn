@@ -25,7 +25,7 @@
 
 use std::process::Command;
 
-use cairn_chain::{ChainStore, HELD_WINDOW, MAX_REORG_DEPTH};
+use cairn_chain::{ChainStore, HELD_WINDOW, MAX_REORG_DEPTH, MILESTONE as MILESTONE_SPACING};
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::note::{Note, NoteId};
@@ -108,13 +108,32 @@ fn main() {
     );
     println!("{:>28}  {:>14}", "the hot set, at its own", "68 MB");
 
+    // The one thing here that does grow with the chain, named rather than
+    // left out of a total that says nothing does. Its own note used to price
+    // it at thirty two kilobytes over thirty years, which is a thousand and
+    // twenty four milestones: that is the spacing and not the count.
+    let thirty_years = 30 * 365 * 24 * 60 * 60 / params.target_block_time;
+    let milestones = thirty_years / MILESTONE_SPACING + 1;
     println!(
-        "\nAll of it is bounded and none of it grows with the chain, which is the\n\
-         whole claim. The window used to be the largest of the three by some way,\n\
-         because a node held the body of every block it might have to undo. It\n\
-         holds the recent ones now and the headers of the rest, and reads a body\n\
-         back off its own disk on the one occasion that needs it: a switch to\n\
-         another branch that fails partway and has to put this one back.",
+        "{:>28}  {:>14}",
+        "milestones, at thirty years",
+        format_bytes(milestones * 32)
+    );
+
+    println!(
+        "\nOne of those five grows with the chain and the other four do not. The\n\
+         milestones are one identifier every {MILESTONE_SPACING} heights for everything\n\
+         older than the window, which is what lets two nodes agree where to look\n\
+         without either holding the whole of its own branch. Half a megabyte over\n\
+         thirty years, against the gigabyte and a quarter that holding every\n\
+         identifier would take. It is the exception, and a total that leaves it\n\
+         out is a total that is not answering the question.\n\
+         \n\
+         The window used to be the largest of the others by some way, because a\n\
+         node held the body of every block it might have to undo. It holds the\n\
+         recent ones now and the headers of the rest, and reads a body back off\n\
+         its own disk on the one occasion that needs it: a switch to another\n\
+         branch that fails partway and has to put this one back.",
     );
 }
 

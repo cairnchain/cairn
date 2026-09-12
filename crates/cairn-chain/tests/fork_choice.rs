@@ -575,6 +575,12 @@ fn rival_branches_do_not_pile_up_forever() {
 /// A count of blocks does not bound memory, because a block is not a fixed
 /// size. What bounds it is the bytes, so the count of those has to follow
 /// every block taken in and every block let go.
+///
+/// What is counted is what holding a block costs and not what it arrived as,
+/// so the figures here carry `HELD_OVERHEAD` per entry: the identifier, the
+/// fields of the entry and the map's spare slots. Counting the wire form alone
+/// put the smallest block, which is the one a peer sends when it wants the
+/// node to hold as many as possible, at a fifth of what it really costs.
 #[test]
 fn what_is_held_is_counted_in_bytes_and_the_count_follows() {
     let miner = wallet(1);
@@ -584,7 +590,10 @@ fn what_is_held_is_counted_in_bytes_and_the_count_follows() {
     assert_eq!(store.held_bytes(), 0, "nothing held, nothing counted");
 
     let blocks = shared.mine_empty(&miner, 12, 600);
-    let sent: usize = blocks.iter().map(|block| block.encode().len()).sum();
+    let sent: usize = blocks
+        .iter()
+        .map(|block| block.encode().len() + cairn_chain::HELD_OVERHEAD)
+        .sum();
     feed(&mut store, &blocks);
     assert_eq!(
         store.held_bytes(),
@@ -603,7 +612,12 @@ fn what_is_held_is_counted_in_bytes_and_the_count_follows() {
     feed(&mut store, &far);
     let counted: usize = store.held_bytes();
     assert!(
-        counted < sent + far.iter().map(|block| block.encode().len()).sum::<usize>(),
+        counted
+            < sent
+                + far
+                    .iter()
+                    .map(|block| block.encode().len() + cairn_chain::HELD_OVERHEAD)
+                    .sum::<usize>(),
         "blocks left memory and the count stayed behind"
     );
 }
@@ -705,6 +719,13 @@ fn fat_block(height: u64, previous: Hash32, bytes: usize, owner: &SecretKey) -> 
 /// which is its first week, and a throwaway network may never leave it. That
 /// is the week a new chain is most worth pushing over.
 ///
+/// The ceiling holds at every point now and not only after the node's own
+/// branch moves. It used to be that the sweeps ran from `follow` and from
+/// nowhere else, so this test could require the node to go past its ceiling
+/// and then require one branch block to bring it back. That measured the
+/// sweeps working rather than the gap they left, and nothing in the code told
+/// twenty rival blocks from twenty thousand.
+///
 /// The block size here is lowered so the published ceiling is within reach of
 /// a test. Nothing else is contrived: the rivals fork at the first block, stay
 /// lighter than the branch throughout, and are held exactly as a peer's blocks
@@ -742,21 +763,27 @@ fn what_a_node_holds_is_bounded_on_a_chain_younger_than_the_window() {
     }
     let offered = store.held_bytes();
     assert!(
-        offered > ceiling,
-        "the rivals have to take the node past its ceiling of {ceiling} bytes,          and they took it to {offered}"
+        offered <= ceiling,
+        "the rivals took the node to {offered} bytes against a ceiling of {ceiling}, \
+         without its own branch moving"
     );
 
-    // One ordinary block on the branch, which is where the sweeps run.
+    // One ordinary block on the branch, which used to be the only place the
+    // sweeps ran. This test required the node to be past its ceiling here and
+    // asserted only that the block brought it back, which measured the sweeps
+    // working and not the gap they left: the sweeps ran from `follow` alone,
+    // so between two blocks of a node's own branch nothing looked at the pile.
+    // A block interval on this network is a minute.
     store.add_block(chain[30].clone(), NOW).unwrap();
     println!(
-        "a chain of 31 blocks, ceiling {ceiling} bytes: held {offered} before          the branch moved and {} after",
+        "a chain of 31 blocks, ceiling {ceiling} bytes: held {offered} before \
+         the branch moved and {} after",
         store.held_bytes()
     );
     assert!(
         store.held_bytes() <= ceiling,
-        "the node holds {} bytes against a ceiling of {ceiling}, and the sweep          that binds it dropped {} of the {offered} it found",
+        "the node holds {} bytes against a ceiling of {ceiling}",
         store.held_bytes(),
-        offered.saturating_sub(store.held_bytes())
     );
 }
 

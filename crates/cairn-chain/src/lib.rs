@@ -418,13 +418,38 @@ struct StoredBlock {
     body: Option<Block>,
     /// Work of this block plus every block behind it.
     total_work: u128,
-    /// What this block takes on the wire, measured once when it arrives.
+    /// What holding this block costs, measured once when it arrives.
     ///
     /// Held rather than recomputed because what it bounds is checked on every
     /// block, and encoding a full one to ask its size would cost more than
     /// keeping the answer.
+    ///
+    /// The wire form plus [`HELD_OVERHEAD`]. It was the wire form alone, and
+    /// the factor between the two was published from a block filled to the
+    /// limit, where the notes and proofs are nearly all of it: "decoding costs
+    /// 1.4x". True of that block, and the block this ceiling is up against is
+    /// the smallest one, because the smallest block is what a peer sends when
+    /// it wants the node to hold as many as possible. An empty block is three
+    /// hundred and twelve bytes on the wire and measured 1 608 resident.
     bytes: usize,
 }
+
+/// What one entry costs beyond the bytes its block arrived as.
+///
+/// The identifier it is filed under, the fields of the entry itself, and an
+/// eighth again for the spare slots the map keeps so it can answer in constant
+/// time. Taken from the types rather than written down, so it cannot drift
+/// from them.
+///
+/// A floor and not a measurement. What an allocator rounds each of a block's
+/// four vectors up to is left out, and so is the per-element cost of a decoded
+/// transfer against its wire form, both of which only make the real figure
+/// larger. What it buys is that the ceiling is now within a factor of two of
+/// what the smallest block really costs rather than a fifth of it.
+pub const HELD_OVERHEAD: usize = {
+    let entry = size_of::<Hash32>() + size_of::<StoredBlock>();
+    entry + entry / 8
+};
 
 /// Positions a locator may name.
 ///
@@ -442,10 +467,19 @@ pub const MAX_LOCATOR: usize = 64;
 /// whole of its own, and being out by up to this many blocks costs a few
 /// hundred extra sent once.
 ///
-/// A thousand and twenty four of these is thirty two kilobytes over thirty
-/// years, against the gigabyte and a quarter that holding every identifier
-/// would take.
-const MILESTONE: u64 = 1_024;
+/// This is the one structure in a `ChainStore` that grows with the chain, and
+/// saying so is worth more than the number beside it, because the claim this
+/// whole design rests on is that nothing does.
+///
+/// It said "a thousand and twenty four of these is thirty two kilobytes over
+/// thirty years". The arithmetic is right and the quantity is wrong: a
+/// thousand and twenty four is the spacing, not the count. Thirty years of a
+/// block a minute is 15 768 000 blocks, so 15 399 milestones and 492 768
+/// bytes, fifteen times what was written down. Against the gigabyte and a
+/// quarter holding every identifier would take, half a megabyte over thirty
+/// years is still the right trade, and it is still an exception to the claim
+/// and has to be named as one.
+pub const MILESTONE: u64 = 1_024;
 
 /// A block, and where it sits on the branch that holds it.
 ///
@@ -1721,6 +1755,25 @@ impl ChainStore {
         self.hold(id, block, total_work);
 
         if total_work <= self.total_work() {
+            // The sweeps that bound what this node holds ran from `follow` and
+            // from nowhere else, so they ran when a block joined this node's
+            // own branch and never when one did not. Between two blocks of its
+            // branch, which on this network is a minute, a node held whatever
+            // it was sent.
+            //
+            // What it was sent costs a stranger nothing. A block that loses
+            // the fork choice is never validated, never sized against
+            // `max_block_bytes`, and needs no work beyond the target its own
+            // header claims, so every one of them can hang off one parent and
+            // differ only in a nonce. Twelve thousand of them left a node
+            // holding 52 747 320 bytes against a ceiling of 41 951 232, and
+            // twenty four thousand left it holding 105 487 320: a straight
+            // line in what was offered.
+            //
+            // Swept here, where the block lands. The decision costs a length
+            // and a comparison when there is nothing to do, which is every
+            // block on an honest network.
+            self.forget_unreachable_branches();
             // Ties keep the block already followed, and this is a choice with
             // a cost, so it is worth writing down rather than implying.
             //
@@ -2163,7 +2216,7 @@ impl ChainStore {
 
     /// Takes a block into memory, keeping the byte count with it.
     fn hold(&mut self, id: Hash32, block: Block, total_work: u128) {
-        let bytes = block.encode().len();
+        let bytes = block.encode().len().saturating_add(HELD_OVERHEAD);
         let header = block.header;
         if let Some(replaced) = self.blocks.insert(
             id,
@@ -2216,6 +2269,20 @@ impl ChainStore {
     }
 
     /// Bytes of blocks that are not on the followed branch.
+    /// Entries held off the followed branch, body or no body.
+    ///
+    /// Counted rather than weighed, and counted whether or not a body is still
+    /// there, because what this bounds is the map: an entry whose body has
+    /// gone still holds a header, a work total and a slot, which is two
+    /// hundred bytes that nothing was counting.
+    fn side_blocks(&self) -> usize {
+        let branch = &self.branch;
+        self.blocks
+            .values()
+            .filter(|stored| branch.height_of(&stored.header.id()).is_none())
+            .count()
+    }
+
     fn side_bytes(&self) -> usize {
         let branch = &self.branch;
         self.blocks
@@ -2227,14 +2294,25 @@ impl ChainStore {
     }
 
     /// Drops the oldest blocks off the followed branch until what is held off
-    /// it is back under [`MAX_SIDE_BYTES`].
+    /// it is back under [`MAX_SIDE_BYTES`] and under [`MAX_SIDE_BLOCKS`].
     ///
     /// Never touches the branch being followed: those are the blocks a
     /// reorganisation has to undo, and losing one would leave the node unable
     /// to do it.
+    ///
+    /// Both limits, because [`MAX_SIDE_BLOCKS`] was a trigger and never a
+    /// bound. Its only reader decided whether to look; what was then dropped
+    /// was decided by height and after that by bytes, so blocks small enough
+    /// and recent enough survived however many there were. Thirty thousand
+    /// empty rivals of three hundred and fourteen bytes left a node at 30 031
+    /// entries against the 5 120 the constant names, and the sweep that had
+    /// just run had dropped none of them. Steady state was `MAX_SIDE_BYTES`
+    /// divided by the smallest block, which is about a hundred thousand
+    /// entries, and an entry costs far more than the bytes it is counted at.
     fn forget_oldest_side_blocks(&mut self) {
         let mut over = self.side_bytes();
-        if over <= MAX_SIDE_BYTES {
+        let mut counted = self.side_blocks();
+        if over <= MAX_SIDE_BYTES && counted <= MAX_SIDE_BLOCKS {
             return;
         }
         let branch = &self.branch;
@@ -2252,9 +2330,10 @@ impl ChainStore {
         candidates.sort_unstable_by_key(|(height, id, _)| (*height, *id));
 
         for (_, id, bytes) in candidates {
-            if over <= MAX_SIDE_BYTES {
+            if over <= MAX_SIDE_BYTES && counted <= MAX_SIDE_BLOCKS {
                 break;
             }
+            counted = counted.saturating_sub(1);
             // Only what was actually being counted, which is the rule
             // `release` and `recount` already keep: an entry whose body has
             // gone costs nothing, so dropping it frees nothing. It used to be
@@ -2929,8 +3008,8 @@ mod tests {
 
         let first = block_at(0, Hash32::ZERO, 1);
         let second = block_at(1, first.id(), 1);
-        let first_bytes = first.encode().len();
-        let second_bytes = second.encode().len();
+        let first_bytes = first.encode().len() + HELD_OVERHEAD;
+        let second_bytes = second.encode().len() + HELD_OVERHEAD;
         let (first_id, second_id) = (first.id(), second.id());
 
         store.hold(first_id, first.clone(), 0);
