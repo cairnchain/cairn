@@ -245,6 +245,14 @@ pub enum Discarded {
     /// here, and telling somebody their disk is suspect over it would send
     /// them looking at hardware that is fine.
     FromANewerVersion,
+    /// There and would not open.
+    ///
+    /// The one case that is not about the bytes, because nothing here got to
+    /// read any. A permission a restore left wrong, a disk that will not
+    /// answer, a name taken by a directory. Said rather than passed over,
+    /// since the next save replaces the file and whatever it held goes with
+    /// it.
+    WouldNotOpen,
 }
 
 impl History {
@@ -279,7 +287,24 @@ impl History {
         self.next
     }
 
-    /// The first height it saw, or `None` if it has seen nothing.
+    /// The first height this account can still answer for, or `None` if it
+    /// has seen nothing.
+    ///
+    /// Not simply the first height it read, which is what it used to answer.
+    /// The two part company the moment the list is full: `record` drops the
+    /// oldest movements past [`MAX_MOVEMENTS`] and used to leave the reading
+    /// point where it was, so an account that had read four thousand two
+    /// hundred blocks and kept the last four thousand and ninety six still
+    /// said it reached block zero. A face prints this under the list as "as
+    /// far back as block {from}: this wallet did not read what came before",
+    /// so the blocks it dropped read as a stretch in which nothing happened to
+    /// this key, which for a miner is plausible and false.
+    ///
+    /// Moved forward where the dropping happens rather than worked out here,
+    /// because the oldest movement held is not the answer either: a wallet
+    /// that read from block zero and was first paid at five hundred did read
+    /// those five hundred blocks and found nothing in them, and saying it
+    /// reached only five hundred would be the same lie the other way round.
     #[must_use]
     pub const fn from(&self) -> Option<u64> {
         self.from
@@ -442,6 +467,13 @@ impl History {
         if self.movements.len() > MAX_MOVEMENTS {
             let over = self.movements.len().saturating_sub(MAX_MOVEMENTS);
             self.movements.drain(..over);
+            // What was dropped is what this account can no longer answer for,
+            // so how far back it reaches moves with it. Leaving the reading
+            // point where it was is how a list that reached block 104 went on
+            // saying it reached block 0.
+            if let Some(oldest) = self.movements.first().map(|held| held.height) {
+                self.from = Some(self.from.map_or(oldest, |began| began.max(oldest)));
+            }
         }
     }
 
@@ -522,8 +554,21 @@ impl History {
     /// always be read again.
     #[must_use]
     pub fn load(path: &Path) -> (Self, Option<Discarded>) {
-        let Ok(bytes) = std::fs::read(path) else {
-            return (Self::default(), None);
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            // A file that is not there is a wallet that has never run, and
+            // there is nothing to say about it. A file that is there and will
+            // not open is the opposite case, and it took the same exit: empty
+            // account, nothing reported, and the next save writes over it,
+            // because a rename needs the directory and not the file. Every
+            // variant below is worked out from bytes, so they were only ever
+            // reached when there were bytes, and this is the case where
+            // "worth looking into" is most likely to be the right thing to
+            // say.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return (Self::default(), None)
+            }
+            Err(_) => return (Self::default(), Some(Discarded::WouldNotOpen)),
         };
         if let Some(history) = Self::verified(&bytes) {
             return (history, None);

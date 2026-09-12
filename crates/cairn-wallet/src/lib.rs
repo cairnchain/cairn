@@ -533,10 +533,10 @@ pub struct Progress {
 /// The line for a wallet whose own account of what it was paid did not read
 /// back.
 ///
-/// Its own function because the three reasons need three different sentences
-/// and the one thing they must not do is share a vague one: an operator told
-/// their disk is suspect looks at hardware, and one told their wallet is a
-/// version behind looks at the version.
+/// Its own function because the reasons need different sentences and the one
+/// thing they must not do is share a vague one: an operator told their disk is
+/// suspect looks at hardware, and one told their wallet is a version behind
+/// looks at the version.
 fn lost_its_account(why: Discarded) -> String {
     let because = match why {
         Discarded::BeforeTheStamp => {
@@ -552,6 +552,12 @@ fn lost_its_account(why: Discarded) -> String {
             "It was written by a newer version of this wallet and holds things this \
              one has no reader for. The file is whole and your disk is fine. Going \
              back to the newer version reads it again."
+        }
+        Discarded::WouldNotOpen => {
+            "It is there and would not open, so nothing here has read a byte of it: a \
+             permission this wallet does not have, a disk that would not answer, or a \
+             name something else has taken. This is worth looking into before the next \
+             save writes over it."
         }
     };
     format!(
@@ -1376,6 +1382,25 @@ impl Wallet {
     /// spendable and the notes decide what the pool is holding.
     #[allow(clippy::too_many_lines)]
     fn reckon(&self) -> (Holdings, Vec<Waiting>) {
+        // Before a coin of it is counted. This wallet's account answers for
+        // what this key held as of the last block the account read, and every
+        // line below reads it as what this key holds now. A note this key was
+        // paid and a note a block carried away look identical from the
+        // account, and only reading that block tells them apart.
+        //
+        // So a wallet that had spent money and not yet read the block carrying
+        // the payment counted every note it spent back onto its own balance,
+        // as `stranded`: real money the node cannot place. Four rewards of
+        // fifty, a payment of a hundred and twenty, and a key that owns 79.5
+        // was shown 229.5 with 150 of it stuck. The same notes then went onto
+        // the list of places this wallet asks strangers to rebuild paths to,
+        // which are places it no longer owns.
+        //
+        // `history` reads to the tip for the same reason and says so, and the
+        // two disagreed inside one answer: the served page counted the money
+        // out of an account that was behind and listed the movements out of
+        // one that was not, in the same object.
+        while self.follow() > 0 {}
         let mine = self.address();
         // This wallet's own account of what it has been paid, which is what
         // lets it notice a note the node has stopped following, and where each
