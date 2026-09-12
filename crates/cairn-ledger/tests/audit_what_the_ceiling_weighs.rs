@@ -10,12 +10,15 @@
 //! declared total of four thousand five hundred and fifty and was spent on the
 //! next block.
 //!
-//! Half of it is closed here and half of it cannot be. The hot set is on the
-//! wire, so what it holds is added up and held against the declared total. The
-//! cold set is sixty four hashes, and adding those up would mean holding the
-//! set, which is the one thing this design exists so a node does not have to
-//! do. The third test below takes the same money through that tier and passes:
-//! it is here to record what stands, not to be fixed.
+//! Part of it is closed here and part of it cannot be. The hot set is on the
+//! wire, so what it holds is added up and held against the declared total, and
+//! so is the grace window, which travels note by note for the same reason and
+//! which this file's first repair left out: see
+//! `audit_the_window_is_on_the_wire_too.rs`. The cold set is sixty four
+//! hashes, and adding those up would mean holding the set, which is the one
+//! thing this design exists so a node does not have to do. The third test
+//! below takes the same money through that tier and passes: it is here to
+//! record what stands, not to be fixed.
 
 #![allow(
     clippy::unwrap_used,
@@ -299,8 +302,9 @@ fn the_root_rebuilt_here_is_the_root_the_anchor_carries() {
 /// the ledger rather than the ledger. Both are in the state root, so a sender
 /// who mined the burial chooses both, and nothing compared them.
 ///
-/// The hot set is on the wire, so it can be added up. It is, and this is
-/// refused now.
+/// The hot set is on the wire, so it can be added up. It is, together with
+/// the grace window, which is on the wire too and was not counted until
+/// `audit_the_window_is_on_the_wire_too.rs` said so. This is refused now.
 #[test]
 fn a_handed_ledger_holding_more_than_it_declares_is_refused() {
     let params = rules();

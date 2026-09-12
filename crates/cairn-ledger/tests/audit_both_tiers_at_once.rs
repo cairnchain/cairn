@@ -445,12 +445,17 @@ fn a_window_that_names_one_place_twice_is_not_a_window_this_chain_produced() {
     // nothing in the cold set ever held. The proof list is left alone: it
     // already carries one for that position, which is the whole of what made
     // this work.
+    // Worth one pebble, and the value matters. What this test is about is the
+    // place, and a note worth more than the total the same message declares
+    // is refused by the sum over the tiers that arrive in full before the
+    // place is ever looked at. A forgery that trips two rules measures the
+    // first one.
     let (_, position, _) = window[0];
     let invented = (
         NoteId::new(Hash32::from_bytes([0xB1; 32]), 0),
         position,
         Note::new(
-            cairn_primitives::Amount::from_pebbles(500_000_000_000).unwrap(),
+            cairn_primitives::Amount::from_pebbles(1).unwrap(),
             wallet(9).public_key(),
         ),
     );

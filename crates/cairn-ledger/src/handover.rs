@@ -216,14 +216,16 @@ pub enum HandoverError {
         ceiling: Amount,
     },
     #[error(
-        "the hot set holds {held} at height {height}, and the ledger it came with declares \
-         {ceiling} issued altogether"
+        "the tiers that arrive in full hold {held} at height {height}, and the ledger they \
+         came with declares {ceiling} issued altogether"
     )]
-    HotSetAboveTheSchedule {
+    TiersAboveTheSchedule {
         height: u64,
         held: Amount,
         ceiling: Amount,
     },
+    #[error("the grace window holds {held} blocks, more than the {limit} allowed")]
+    GraceWindowTooLarge { held: usize, limit: usize },
     #[error("the ledger rebuilt from this does not produce the header's state root")]
     StateRootMismatch,
     #[error("the headers handed over are not the ones the header commits to")]
@@ -408,25 +410,51 @@ fn against_each_other(handover: &Handover, declared: Amount) -> Result<(), Hando
             }
         }
     }
-    // The half of it a receiver can weigh for itself.
+    // The part of it a receiver can weigh for itself.
     //
-    // Every note in the hot set is on the wire, so their values add up to a
-    // number this node works out rather than takes, and a tier holding more
-    // than the chain has ever issued is a ledger nobody could have replayed.
-    // One pass over at most `hot_capacity` notes.
+    // A note whose value is on the wire is a note this node adds up rather
+    // than takes, and a ledger holding more than the chain has ever issued is
+    // one nobody could have replayed.
+    //
+    // Two of the four pieces are like that and the note here used to name
+    // one. It said the hot set arrives in full and the cold set is sixty four
+    // hashes, which is true of both and partitions a ledger into two when it
+    // has more parts than that. The grace window travels note by note and
+    // value by value, because a receiver cannot spend out of it otherwise, so
+    // it is exactly as countable as the hot set and nothing was counting it.
+    //
+    // A handover declaring the lawful four thousand five hundred and fifty
+    // CAIRN carried a note worth five hundred million in that window, was
+    // accepted, and the note was spent on the next block with `Input::hot`
+    // and no proof at all, because a note in the window is the one kind that
+    // needs none from the spender.
+    //
+    // The cold set stays what the note said it was: sixty four hashes that
+    // nobody can add up without holding the set, which is the one thing this
+    // design exists so a node does not have to do.
     let mut in_hand = Amount::ZERO;
-    for (_, entry) in &handover.hot {
-        in_hand =
-            in_hand
-                .checked_add(entry.note.value)
-                .ok_or(HandoverError::HotSetAboveTheSchedule {
-                    height: handover.at.height,
-                    held: Amount::MAX_MONEY,
-                    ceiling: declared,
-                })?;
+    let counted = handover
+        .hot
+        .iter()
+        .map(|(_, entry)| entry.note.value)
+        .chain(
+            handover
+                .grace
+                .iter()
+                .flatten()
+                .map(|(_, _, note)| note.value),
+        );
+    for value in counted {
+        in_hand = in_hand
+            .checked_add(value)
+            .ok_or(HandoverError::TiersAboveTheSchedule {
+                height: handover.at.height,
+                held: Amount::MAX_MONEY,
+                ceiling: declared,
+            })?;
     }
     if in_hand > declared {
-        return Err(HandoverError::HotSetAboveTheSchedule {
+        return Err(HandoverError::TiersAboveTheSchedule {
             height: handover.at.height,
             held: in_hand,
             ceiling: declared,
@@ -551,6 +579,16 @@ pub fn accept(handover: &Handover, params: &ConsensusParams) -> Result<LedgerSta
         });
     }
     against_each_other(handover, handover.supply)?;
+    // And the same for the grace window, which had this only from the wire.
+    // The decoder's ceiling is what a message carries; this is what the rules
+    // produce, and the two are not the same question. A window holding more
+    // blocks than the window keeps is not a window this network ever made.
+    if handover.grace.len() > GRACE_BLOCKS {
+        return Err(HandoverError::GraceWindowTooLarge {
+            held: handover.grace.len(),
+            limit: GRACE_BLOCKS,
+        });
+    }
     // For the same reason, and against the rule this chain runs under rather
     // than against the ceiling the wire enforces: a window holding more than
     // the maturity depth is not a window this network ever produced.
@@ -583,13 +621,20 @@ pub fn accept(handover: &Handover, params: &ConsensusParams) -> Result<LedgerSta
     // could carry a note worth five hundred million, be accepted, and spend it
     // on the next block.
     //
-    // The hot set arrives in full, so what it holds can be added up and held
-    // against this, and that is done below. The cold set arrives as sixty four
-    // hashes and cannot be added up by anyone, so no check a receiver makes
-    // can close the other half: the same five hundred million travels there
-    // instead, with the proof the sender kept. What this number is, exactly,
-    // is a ceiling on the issued total a handover may declare, and the tier
-    // that can be counted is held to it.
+    // Two of the pieces arrive in full, so what they hold can be added up and
+    // held against this, and that is done in `against_each_other`. The hot
+    // set is one and the grace window is the other: the window travels note
+    // by note and value by value, because a receiver cannot spend out of it
+    // otherwise. This note used to name the hot set alone and partition the
+    // ledger into two when it has more parts than that, which is how the
+    // same five hundred million went through the window instead.
+    //
+    // The cold set arrives as sixty four hashes and cannot be added up by
+    // anyone, because adding it up would mean holding the set, which is the
+    // one thing this design exists so a node does not have to do. That half
+    // no check a receiver makes can close. What this number is, exactly, is a
+    // ceiling on the issued total a handover may declare, and the pieces that
+    // can be counted are held to it.
     //
     // Asked before the ledger is rebuilt, because it needs nothing but the
     // height and a number that arrived on the wire.

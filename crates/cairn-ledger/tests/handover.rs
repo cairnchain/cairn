@@ -419,7 +419,7 @@ fn a_supply_the_header_does_not_commit_to_is_refused() {
         assert!(
             matches!(
                 refused,
-                HandoverError::StateRootMismatch | HandoverError::HotSetAboveTheSchedule { .. }
+                HandoverError::StateRootMismatch | HandoverError::TiersAboveTheSchedule { .. }
             ),
             "refused for something other than the number: {refused}"
         );
