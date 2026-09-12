@@ -41,7 +41,43 @@
 //!   is spent. This is the long campaign, and it is out of `cargo test` by
 //!   default for the same reason `CAIRN_AUDIT_FULL_DIR` keeps the full-disk
 //!   tests out of it: a suite that takes minutes is a suite people stop
-//!   running.
+//!   running. `.github/workflows/fuzz.yml` runs it nightly on a seed that
+//!   moves, because for a while nothing ran it at all: the two regressions
+//!   pinned in the targets were both found by somebody typing the variable by
+//!   hand, once, and nothing arranged for that to happen again.
+//!
+//! # What the campaigns reach, and what they do not
+//!
+//! Every campaign here has two arms: bytes built from nothing, and a corpus
+//! entry with a few bytes changed. They do not reach the same depth and the
+//! difference is worth stating, because for a long time one guard counted
+//! both and a green result said "some input reached the decoder" while being
+//! read as "both kinds do".
+//!
+//! **Bytes from nothing essentially never decode.** Measured over the default
+//! seed: zero of 5 076 for `Message`, zero of 6 626 for a framed read, zero
+//! of 9 838 for each accumulator decoder, zero of 20 000 for the sequence
+//! decoders, of which 19 416 died on `SequenceTooLong`. Not one ever reached
+//! the second element of any sequence. That arm now draws from
+//! [`Rng::plausible_bytes`], which holds half its bytes at zero so a length
+//! prefix is one a decoder acts on, and it still will not produce a whole
+//! valid frame for a decoder that has to consume its buffer exactly. What it
+//! measures is that garbage is refused rather than panicked on, which is
+//! worth measuring and is not what it was being read as.
+//!
+//! **The mutation arm is what reaches**, and how far depends on how close the
+//! corpus already is. The deepest target in the suite is the one that bends
+//! three bytes of a real twelve kilobyte handover: 87 to 98 per cent of those
+//! decode, and they go on into `handover::accept` and `check_start`.
+//!
+//! **What has no target at all**, named so it is a gap and not an omission:
+//! `cairn-http`'s request reader, which is the most exposed parser here and
+//! sees every byte from every stranger before anything else does;
+//! `cairn-store`'s record framing, which is what a rebuild reads; the address
+//! book's file reader; and `cairn-primitives`'s hexadecimal parser, which is
+//! behind every identifier in a URL and the wallet's key file. There is no
+//! corpus on disk either: every campaign rebuilds its seeds in process, so a
+//! case found today is not a case tomorrow's run starts from.
 //!
 //! Each case gets its own generator, seeded from the run seed and the case
 //! number, so case 91 941 of a two-minute campaign is reachable in a
@@ -130,6 +166,36 @@ impl Rng {
 
     pub fn bytes(&mut self, len: usize) -> Vec<u8> {
         (0..len).map(|_| self.edgy_byte()).collect()
+    }
+
+    /// Bytes a decoder will act on rather than refuse at the first field.
+    ///
+    /// [`Rng::bytes`] draws from the values that sit on a boundary, which is
+    /// the right thing for a scalar and the wrong thing for a frame. A
+    /// sequence is written as a four byte count, and a count drawn this way
+    /// is above `MAX_SEQUENCE_LEN` about ninety nine times in a hundred, so
+    /// the decoder refuses on the first four bytes it reads and nothing
+    /// behind them is ever looked at.
+    ///
+    /// Measured across every campaign in this workspace, over the default
+    /// seed: the raw arm accepted nothing at all. Zero of 5 076 for
+    /// `Message`, zero of 6 626 for a framed read, zero of 9 838 for each of
+    /// the three accumulator decoders, zero of 20 000 for the sequence
+    /// decoders, of which 19 416 died on `SequenceTooLong`. Not one random
+    /// input ever reached the second element of any sequence. Every
+    /// anti-vacuity guard those campaigns carry was satisfied by the mutation
+    /// arm alone, so a green raw arm answered "does the length check refuse
+    /// garbage" and was read as "does this decoder handle a hostile
+    /// structure".
+    ///
+    /// Half the bytes here are zero, so a count read anywhere in the run is
+    /// one a decoder acts on, and what follows it is reached. The other half
+    /// is [`Rng::edgy_byte`], so the boundaries it was drawing are still
+    /// drawn.
+    pub fn plausible_bytes(&mut self, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|_| if self.chance(2) { 0 } else { self.edgy_byte() })
+            .collect()
     }
 
     /// One element of `from`, or nothing when it is empty.

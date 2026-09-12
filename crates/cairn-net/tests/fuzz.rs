@@ -73,8 +73,17 @@ impl Rng {
         usize::try_from(self.next() % span).unwrap_or(0)
     }
 
+    /// A run a decoder will act on rather than refuse at its first length.
+    ///
+    /// Half the bytes are zero, so a four byte count read anywhere in the run
+    /// is inside `MAX_SEQUENCE_LEN` rather than above it. Uniform bytes put a
+    /// count above that ceiling about ninety nine times in a hundred, and
+    /// what the uniform arm of this campaign measured was that ceiling:
+    /// twelve acceptances across forty thousand probes.
     fn bytes(&mut self, len: usize) -> Vec<u8> {
-        (0..len).map(|_| self.byte()).collect()
+        (0..len)
+            .map(|_| if self.next() & 1 == 0 { 0 } else { self.byte() })
+            .collect()
     }
 }
 

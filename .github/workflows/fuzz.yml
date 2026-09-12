@@ -1,0 +1,69 @@
+# The long campaign, run by something other than a person remembering.
+#
+# `CAIRN_FUZZ_SECONDS` turns every campaign in the suite from a few thousand
+# cases into a time budget, and it reaches two to three orders of magnitude
+# further: a one second budget per campaign runs half a million to two and a
+# half million cases where the default runs twenty thousand. It has found two
+# defects that are pinned as regressions in the targets, and both were found
+# by somebody typing the variable by hand, once. Nothing arranged for that to
+# happen again, and a fuzzer nobody runs is a fuzzer.
+#
+# Kept out of check.yml deliberately, the way audit.yml is: a check that runs
+# on every push has to finish in the time somebody will wait for it, and this
+# one is meant not to.
+#
+# The seed moves with the run. Every other campaign in this repository is
+# pinned to `DEFAULT_SEED` so that a regression cannot hide behind a lucky
+# seed, which is the right rule for the suite; the point of this job is the
+# opposite one, to reach cases the fixed seed never draws. A failure prints
+# the seed and the case number, and reproducing it needs nothing installed.
+
+name: fuzz
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds per campaign"
+        required: false
+        default: "120"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  campaigns:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the toolchain this repository pins
+        run: rustup show
+      - name: Pick a seed for this run
+        id: seed
+        run: echo "value=$(( RANDOM * 65536 + RANDOM ))" >> "$GITHUB_OUTPUT"
+      - name: Run every campaign against the clock
+        env:
+          CAIRN_FUZZ_SECONDS: ${{ github.event.inputs.seconds || '120' }}
+          CAIRN_FUZZ_SEED: ${{ steps.seed.outputs.value }}
+        # Named rather than `--workspace`: these are the targets that read
+        # bytes from strangers, and running the whole suite under a time
+        # budget would spend the budget on tests that ignore it.
+        run: |
+          cargo test --release --locked \
+            -p cairn-primitives --test fuzz_codec \
+            -p cairn-accumulator --test fuzz_accumulator \
+            -p cairn-ledger --test fuzz_ledger_structures \
+            -p cairn-net --test fuzz --test fuzz_wire \
+            -p cairn-wallet --test fuzz_history \
+            -p cairn-explorer --test fuzz_index_walk \
+            -- --nocapture
+      - name: Say which seed that was
+        if: always()
+        run: echo "CAIRN_FUZZ_SEED=${{ steps.seed.outputs.value }}"

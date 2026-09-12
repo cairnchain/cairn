@@ -264,18 +264,36 @@ fn every_message_variant_refuses_or_round_trips() {
     let seeds = corpus(&mut campaign.stream(0));
     let mut reached = [0usize; 18];
     let mut accepted = 0usize;
+    // Kept apart, because a campaign with two arms and one count is a
+    // campaign where one arm can be dead and nothing says so. The raw arm of
+    // every campaign in this workspace was: zero of 5 076 here, and the guard
+    // below was satisfied by the mutation arm alone.
+    let mut from_nothing = (0usize, 0usize);
+    let mut from_a_seed = (0usize, 0usize);
 
     let ran = campaign.run(20_000, |case, rng| {
-        let bytes = if rng.chance(4) {
+        let invented = rng.chance(4);
+        let bytes = if invented {
             let len = rng.between(0, 400);
-            rng.bytes(len)
+            rng.plausible_bytes(len)
         } else {
             let seed = rng.pick(&seeds).cloned().unwrap_or_default();
             mutate(rng, &seed, &seeds)
         };
+        let arm = if invented {
+            &mut from_nothing
+        } else {
+            &mut from_a_seed
+        };
+        arm.0 += 1;
 
         if round_trips::<Message>(&bytes, "Message", case) {
             accepted += 1;
+            if invented {
+                from_nothing.1 += 1;
+            } else {
+                from_a_seed.1 += 1;
+            }
             if let Ok(message) = Message::decode(&bytes) {
                 let tag = bytes.first().copied().unwrap_or(0) as usize;
                 if let Some(slot) = reached.get_mut(tag) {
@@ -295,6 +313,29 @@ fn every_message_variant_refuses_or_round_trips() {
 
     assert!(ran.cases >= 1_000, "the campaign ran {} cases", ran.cases);
     assert!(accepted > 0, "not one input reached the message decoder");
+    println!(
+        "raw {}/{} accepted, mutated {}/{}",
+        from_nothing.1, from_nothing.0, from_a_seed.1, from_a_seed.0
+    );
+    // Which arm carries the claim, said rather than left to be worked out.
+    //
+    // `Message::decode` has to consume the whole buffer, so a run of bytes
+    // built from nothing will essentially never be one: measured over the
+    // default seed, zero of 5 076, and no generator without the shape of the
+    // format in it will do better. That arm is worth running and it measures
+    // one thing, that garbage is refused rather than panicked on. The guard
+    // above used to be the only one and both arms fed it, so a green result
+    // said "some input reached the decoder" and was read as "both kinds do".
+    assert!(
+        from_nothing.0 >= 1_000,
+        "the arm built from nothing ran {} cases",
+        from_nothing.0
+    );
+    assert!(
+        from_a_seed.1 > 0,
+        "not one bent message reached the decoder, and it is the only arm that \
+         ever does: nothing else here is exercising a decode at all"
+    );
     let variants = reached.iter().filter(|count| **count > 0).count();
     assert!(
         variants >= 15,
@@ -352,7 +393,7 @@ fn the_frame_reader_refuses_anything_it_cannot_read() {
     let ran = campaign.run(20_000, |_, rng| {
         let bytes = if rng.chance(3) {
             let len = rng.between(0, 64);
-            rng.bytes(len)
+            rng.plausible_bytes(len)
         } else {
             let seed = rng.pick(&seeds).cloned().unwrap_or_default();
             mutate(rng, &seed, &seeds)

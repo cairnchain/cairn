@@ -342,7 +342,7 @@ fn the_small_structures_refuse_or_round_trip() {
     let ran = campaign.run(20_000, |case, rng| {
         let bytes = if rng.bool() {
             let len = rng.between(0, 200);
-            rng.bytes(len)
+            rng.plausible_bytes(len)
         } else {
             let seed = rng.pick(&seeds).cloned().unwrap_or_default();
             mutate(rng, &seed, &seeds)
@@ -383,7 +383,7 @@ fn the_transactions_refuse_or_round_trip() {
     let ran = campaign.run(20_000, |case, rng| {
         let bytes = if rng.chance(4) {
             let len = rng.between(0, 400);
-            rng.bytes(len)
+            rng.plausible_bytes(len)
         } else {
             let seed = rng.pick(&seeds).cloned().unwrap_or_default();
             mutate(rng, &seed, &seeds)
@@ -415,7 +415,7 @@ fn the_join_answers_refuse_or_settle() {
     let ran = campaign.run(8_000, |case, rng| {
         let bytes = if rng.chance(6) {
             let len = rng.between(0, 600);
-            rng.bytes(len)
+            rng.plausible_bytes(len)
         } else {
             let seed = rng.pick(&seeds).cloned().unwrap_or_default();
             mutate(rng, &seed, &seeds)

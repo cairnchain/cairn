@@ -92,7 +92,7 @@ fn arbitrary_bytes_are_refused_or_read_and_settle() {
     let ran = campaign.run(20_000, |_, rng| {
         let bytes = if rng.bool() {
             let len = rng.between(0, 300);
-            rng.bytes(len)
+            rng.plausible_bytes(len)
         } else {
             let seed = rng.pick(&seeds).cloned().unwrap_or_default();
             mutate(rng, &seed, &seeds)

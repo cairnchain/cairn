@@ -195,7 +195,7 @@ fn arbitrary_bytes_decode_or_refuse_and_never_anything_else() {
 
     let ran = campaign.run(20_000, |case, rng| {
         let len = rng.between(0, 256);
-        let bytes = rng.bytes(len);
+        let bytes = rng.plausible_bytes(len);
         feed_every_type(&bytes, case, &mut tally);
     });
 
@@ -245,7 +245,7 @@ fn what_a_decode_reads_is_settled_by_the_bytes_it_consumed() {
     let ran = campaign.run(10_000, |case, rng| {
         let bytes = if rng.bool() {
             let len = rng.between(0, 256);
-            rng.bytes(len)
+            rng.plausible_bytes(len)
         } else {
             let seed = rng.pick(&corpus).cloned().unwrap_or_default();
             mutate(rng, &seed, &corpus)
