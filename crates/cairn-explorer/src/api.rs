@@ -1830,6 +1830,15 @@ fn holders(context: &Context<'_>) -> Response {
         json.end_object();
     }
     json.end_array();
+    // When this was worked out, which is not the same as how much of the
+    // chain the index has read. Reckoning the distribution is the one piece
+    // of work in the walk whose cost is the whole index rather than the block
+    // just read, so it runs on a block in sixteen rather than on every one,
+    // and a table a few blocks old is worth having as long as it says so.
+    match context.index.stock_at() {
+        Some(height) => json.field_u64("countedAt", height),
+        None => json.field_null("countedAt"),
+    }
     coverage(&mut json, context);
     json.end_object();
     Response::json(json.finish())
