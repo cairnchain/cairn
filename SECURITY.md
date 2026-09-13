@@ -82,7 +82,7 @@ false statement. Each was a correct observation standing where a different
 observation was required, which is exactly why they survived reading: checking
 the sentence confirms it.
 
-Four that shipped, and what each one actually answered:
+Six that shipped, and what each one actually answered:
 
 *"The draw spreads over `bit_length(height / 1024)` levels."* True. The bound
 needed to know how much work the chain carries, and a height is a field the
@@ -107,6 +107,20 @@ floor rather than a measurement. The figure is a maximum over noisy per seed
 estimates, so it reads low, and lower the fewer seeds are spent: 42.80 at
 thirty two, 42.96 at sixty four, 43.03 at five hundred and twelve.
 
+*"A thousand cheap `Chain` messages cannot grow the awaiting set past its
+ceiling."* True, and a passing test says so. The ceiling is `MAX_AWAITING` and
+what it claims is that the set does not go past 512. What the test shows is
+that one of the two messages that put heights there cannot push it past 512.
+The other read the room once and then admitted a whole announcement against
+that one reading, and the set held 639.
+
+*"These are the places that were asked about and not answered for."* True of
+every place in the set until there are more than one message carries. Past
+that the wallet's question is cut on the way in, the tail is written into the
+same set, and what reads it decides that asking again would get the same
+nothing. Waiting is the right answer for a place that was asked about. For one
+nobody was asked about it buys nothing at all.
+
 So the useful question to put to any justification in this repository is not
 whether it is true. It is **what question it answers, and whether that is the
 question the claim above it needed.** Concretely, the ones that have caught
@@ -122,6 +136,12 @@ something here:
   that differs between the two directions of the same exchange.
 - A test whose claim rests on a comparison between two wall clock readings.
 - A figure quoted as a point estimate that an estimator produces as a bound.
+- A guard on a ceiling whose test does not depend on the size of what it is
+  about to admit.
+- A set whose name says how its members got in, filled from a step earlier
+  than the one the name describes.
+- A test that holds a claim about a quantity by driving one of the several
+  paths that reach it.
 
 ## Scope
 
