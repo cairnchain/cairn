@@ -465,6 +465,7 @@ fn what_can_never_be_asked_about_is_not_reported_as_worth_waiting_for() {
         answered: 2,
         rebuilt: 3,
         refused: 0,
+        not_yet_asked: 0,
     };
     let words = both.words().expect("four notes are stuck");
     assert!(
@@ -486,6 +487,7 @@ fn what_can_never_be_asked_about_is_not_reported_as_worth_waiting_for() {
         answered: 0,
         rebuilt: 0,
         refused: 0,
+        not_yet_asked: 0,
     };
     let words = alone.words().expect("four notes are stuck");
     assert!(
