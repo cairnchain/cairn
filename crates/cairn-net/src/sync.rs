@@ -397,6 +397,28 @@ const COST_PER_PLACE_PROVED: u32 = 8;
 /// priced in the same currency.
 const COST_PER_PLACE_TAKEN: u32 = COST_PER_PLACE_PROVED;
 
+/// What one identifier in an announcement costs to take.
+///
+/// A lookup in the block table, which is cheaper than any other entry priced
+/// here: an address is weighed and written into the book under the book's
+/// lock, a header is a record appended to a log, and a path is a fold against
+/// the cold set. One unit is the floor of this table's currency, so it is what
+/// the cheapest entry costs, and what it buys is that the price moves with the
+/// length at all.
+///
+/// The lock is why it is not free. The block table is behind the chain, which
+/// is the one lock in this node every other thread waits on, and an
+/// announcement is a stranger handing this node a run of lookups to do while
+/// holding it. `MAX_ANNOUNCED` of them cost one unit between them, so one
+/// window bought four million of those lookups where the same window buys
+/// eight thousand addresses. Both are bounded runs a stranger sends unasked
+/// and this node then walks one by one.
+///
+/// An honest announcement carries one identifier, because a node announces
+/// what it has just applied and that is one block per message it took. Nothing
+/// in an ordinary exchange pays more than it did.
+const COST_PER_ANNOUNCED: u32 = 1;
+
 /// What one piece of a join answer costs to build and send.
 ///
 /// An eighth of a window, so a newcomer collecting twenty two pieces takes
@@ -1174,6 +1196,17 @@ fn cost_of(message: &Message, peer: &PeerState) -> u32 {
         Message::Proofs(placed) => {
             let carried = u32::try_from(placed.len().min(MAX_PROVEN)).unwrap_or(u32::MAX);
             carried.saturating_mul(COST_PER_PLACE_TAKEN)
+        }
+        // Priced by what it carries, like the three below it. What this node
+        // does with each identifier is a lookup in the block table, and the
+        // block table is behind the chain lock. A flat price here meant a
+        // stranger could hand over `MAX_ANNOUNCED` of those for what one of
+        // them costs, and the only message in this table whose price said
+        // nothing about its length was the one whose work happens under the
+        // lock everything else in this node waits on.
+        Message::Announce(ids) => {
+            let carried = u32::try_from(ids.len().min(MAX_ANNOUNCED)).unwrap_or(u32::MAX);
+            carried.saturating_mul(COST_PER_ANNOUNCED)
         }
         Message::GetPeers => {
             let carried = u32::try_from(MAX_SHARED_ADDRESSES).unwrap_or(u32::MAX);
