@@ -279,7 +279,41 @@ const ALLOWANCE: u32 = 8_192;
 /// what an honest peer asks for and far below what a busy one could spend.
 const COST_TRIVIAL: u32 = 1;
 const COST_CHAIN: u32 = 8;
-const COST_TRANSFER: u32 = 4;
+/// What one input of a transfer costs to take.
+///
+/// This was the price of a whole transfer, and a transfer carries between one
+/// and `max_inputs_per_transfer` of them. Every input is a note resolved out
+/// of the ledger and an Ed25519 signature checked against it, and verifying
+/// one is the dearest thing this node does per byte received: more than a fold
+/// against the cold set, which the same table prices at eight a place.
+///
+/// Flat, the price bought whatever the sender chose to make the message out
+/// of. One unit bought thirty seven bytes of a one input transfer and six
+/// thousand four hundred and seventy six bytes of a two hundred and fifty six
+/// input one, so the largest and dearest shape was the cheapest to send, by
+/// the full ratio between the two.
+///
+/// **Why the cheap refusals do not cover it.** A transfer whose signatures are
+/// nonsense is refused after a handful of checks, because `first_failure`
+/// stops at the first that does not hold and splits the work across threads
+/// that each stop at their own. A transfer whose arithmetic is wrong is
+/// refused before a signature is looked at, because the fee is worked out in
+/// the same pass that resolves the inputs and returns first. So a transfer's
+/// whole signature cost is reached only by one whose signatures all hold,
+/// which is a sender that owns the notes.
+///
+/// **Which is not a defence.** Two hundred and fifty six notes are one
+/// transfer's worth of outputs. Spending them again in a variant differing by
+/// a pebble is a different identifier, resolves the same way, and is refused
+/// by the pool only on the rate it offers, which `ChainStore::accept_transfer`
+/// works out after `check_transfer` has verified every signature.
+///
+/// Four an input, which is what a whole transfer used to cost, so the ordinary
+/// one input transfer pays exactly what it did. At the block ceiling this
+/// network allows, relaying every transfer the chain can carry costs about a
+/// twelfth of one window whatever shape they are in, where under the flat
+/// price that fraction was decided by the shape.
+const COST_PER_INPUT: u32 = 4;
 const COST_BLOCK: u32 = 8;
 /// What reaching the disk for one block costs.
 ///
@@ -1154,7 +1188,14 @@ fn cost_of(message: &Message, peer: &PeerState) -> u32 {
                 COST_BLOCK
             }
         }
-        Message::Transaction(_) => COST_TRANSFER,
+        // Priced by the inputs it presents, for the reason every list here is
+        // priced by what it carries: what it carries is what this node does
+        // with it, and here that is a note resolved and a signature verified
+        // apiece.
+        Message::Transaction(transfer) => {
+            let presented = u32::try_from(transfer.inputs.len()).unwrap_or(u32::MAX);
+            presented.saturating_mul(COST_PER_INPUT)
+        }
         Message::GetBlocks(ids) => {
             let wanted = u32::try_from(ids.len().min(MAX_REQUESTED)).unwrap_or(u32::MAX);
             wanted.saturating_mul(COST_PER_BLOCK_SERVED)
