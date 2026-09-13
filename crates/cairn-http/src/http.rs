@@ -11,7 +11,7 @@
 //! long any one of them may take to ask its question and take its answer.
 
 use std::collections::HashMap;
-use std::io::{self, BufReader, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -130,6 +130,14 @@ pub fn most_one_answer_carries() -> usize {
 /// fee; anything past this is not one.
 pub const MAX_BODY_BYTES: usize = 4096;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bytes one read of [`drain`] takes off the socket.
+const DRAIN_CHUNK: usize = 2 * 1024;
+/// Reads [`drain`] makes before it stops.
+///
+/// Eight of those chunks is sixteen kilobytes, which is past the head cap and
+/// the body cap together, so an honest caller is cleared whole and a caller
+/// still sending is left to its own reset.
+const DRAIN_READS: usize = 8;
 /// How long to wait after an accept that failed, so a failure that persists is
 /// a wait rather than a spin.
 const ACCEPT_PAUSE: Duration = Duration::from_millis(50);
@@ -315,7 +323,7 @@ where
                 &Response::error(503, "too many connections"),
                 false,
             );
-            let _ = stream.shutdown(Shutdown::Both);
+            hang_up(&stream);
             continue;
         };
 
@@ -446,7 +454,66 @@ where
     // socket that refuses to block is what puts the deadline back in charge.
     let _ = stream.set_nonblocking(true);
     let _ = write_response(&mut Timed { stream, until }, &response.0, response.1);
-    let _ = stream.shutdown(Shutdown::Both);
+    hang_up(stream);
+}
+
+/// Bytes taken off the socket and dropped, before it is closed.
+///
+/// Closing a connection while bytes it received are still unread resets it,
+/// and a reset takes with it whatever the caller has not already read of the
+/// answer just written. Every answer this server gives is small, so what the
+/// caller loses is all of it: the head arrives, the body does not, and the
+/// message reaches a reader as a transport error rather than as the status it
+/// says.
+///
+/// Every stack does this. What differs between them is whether the caller has
+/// already taken the answer out of its own buffer before the reset lands,
+/// which is a race, and `tests/audit_what_a_refusal_says.rs` has been winning
+/// it on the machines this was written on and losing it on the Windows
+/// runner.
+///
+/// The refusal a full server sends is the path that always leaves bytes
+/// unread, because it answers before reading any. The ordinary path leaves
+/// them whenever a caller sent more than its request head, which is any caller
+/// that sent a body this server did not want.
+///
+/// Bounded, and never waiting on anything. The socket is non-blocking by the
+/// time this runs, so a read with nothing in the buffer comes back rather than
+/// blocking, and the refusal path runs in the accept loop, where waiting would
+/// stop every other caller. What it has to clear is a request head and at most
+/// a body, both of which are already capped, and a caller that goes on sending
+/// past that is one this is right to stop reading.
+fn drain(stream: &TcpStream) {
+    let mut sink = [0u8; DRAIN_CHUNK];
+    let mut source = stream;
+    for _ in 0..DRAIN_READS {
+        match source.read(&mut sink) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+    }
+}
+
+/// Ends a connection so that the answer just written survives it.
+///
+/// The write half, which sends the end of the message and puts what is still
+/// buffered on its way, and then what the caller sent and nobody read, so that
+/// closing has nothing to reset over.
+///
+/// **The read half is left alone.** Shutting it buys nothing on a connection
+/// about to be dropped, and it costs something: from that moment every byte
+/// the caller is still sending arrives at a half nothing will take, and the
+/// answer to that is a reset. The refusal path writes before the request has
+/// necessarily arrived at all, so those bytes are often still on their way
+/// when this runs, and this used to shut the door in front of them.
+///
+/// What is left is the close the drop does, which resets if bytes turn up
+/// unread after all. That window is what draining narrows and nothing here
+/// closes: closing it would mean waiting for a caller to finish sending, in
+/// the accept loop, while every other caller queues behind it.
+fn hang_up(stream: &TcpStream) {
+    let _ = stream.shutdown(Shutdown::Write);
+    drain(stream);
 }
 
 /// When a connection accepted at `accepted` is over, given `answering` to say
