@@ -150,6 +150,23 @@ fn a_socket_that_says_nothing_is_not_the_network() {
     let recipient = SecretKey::from_bytes(&[9; 32]).public_key();
 
     let quiet = TcpStream::connect(reachable(wallet.node().address())).unwrap();
+    // Reads what the node sends and answers nothing, which is what "says
+    // nothing" means here. A socket nobody reads from is a different thing:
+    // the node goes on sending, the receive buffer fills, a write times out
+    // and the connection is closed. That is the node behaving correctly and it
+    // has nothing to do with this test, but it lands on the same number the
+    // assertion at the end reads, and how long it takes depends on how much
+    // the node happens to send and when the scheduler runs it.
+    if let Ok(mut reading) = quiet.try_clone() {
+        std::thread::spawn(move || {
+            let mut scratch = [0u8; 4096];
+            while let Ok(read) = std::io::Read::read(&mut reading, &mut scratch) {
+                if read == 0 {
+                    return;
+                }
+            }
+        });
+    }
     assert!(
         until(Duration::from_secs(10), || wallet.node().peer_count() == 1),
         "the connection was accepted, which is all the old answer looked at"
