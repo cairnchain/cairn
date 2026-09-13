@@ -163,6 +163,37 @@ fn hello(nonce: u64, listen: u16) -> Message {
 /// at fifteen seconds, at a minute, and at twenty milliseconds, each green on a
 /// quiet machine and red on a busy one. They are set far past anything a loaded
 /// runner does rather than near it.
+/// Reads everything a node sends down `socket` and answers nothing.
+///
+/// A test that opens a socket, says one thing and then goes quiet is modelling
+/// a peer that has nothing to say. A socket nobody reads from is a different
+/// thing: the node goes on sending, the receive buffer fills, a write times
+/// out and the connection is closed. That is the node behaving correctly and
+/// it has nothing to do with what these tests are about, but it lands in the
+/// same place, `peer_count` going to zero, and the tests here read that as the
+/// node having judged the peer.
+///
+/// How long it takes depends on how much the node happens to send and when
+/// the scheduler runs it, so it is not a thing a deadline can be set around:
+/// measured on one machine on one tree it was seven seconds, thirty seconds,
+/// and never, in three runs. Draining the socket removes it rather than racing
+/// it.
+///
+/// The handle is dropped and the thread ends when the socket does.
+fn drain(socket: &TcpStream) {
+    let Ok(mut reading) = socket.try_clone() else {
+        return;
+    };
+    std::thread::spawn(move || {
+        let mut scratch = [0u8; 4096];
+        while let Ok(read) = std::io::Read::read(&mut reading, &mut scratch) {
+            if read == 0 {
+                return;
+            }
+        }
+    });
+}
+
 fn wait_until(patience: Duration, mut ready: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + patience;
     while Instant::now() < deadline {
@@ -381,6 +412,7 @@ fn a_real_node_keeps_the_peer_that_offered_a_block_its_clock_is_behind() {
     let future = mine_block(future, ATTEMPTS).expect("a nonce exists");
 
     let mut socket = TcpStream::connect(node.address()).unwrap();
+    drain(&socket);
     write_message(&mut socket, params().network, &hello(4_711, 4_242)).unwrap();
     assert!(
         wait_until(Duration::from_secs(60), || node.peer_count() == 1),
@@ -394,9 +426,20 @@ fn a_real_node_keeps_the_peer_that_offered_a_block_its_clock_is_behind() {
     )
     .unwrap();
 
-    // Long enough that a connection being torn down would have been. The
-    // question is what the node settled on, not what it had got to.
-    let dropped = wait_until(Duration::from_secs(60), || node.peer_count() == 0);
+    // Long enough that a connection being torn down would have been, and no
+    // longer. This is the one shape of deadline where more is worse: what is
+    // being asserted is that nothing happened, so every second added is
+    // another second in which something unrelated may. A drop caused by this
+    // block is worked out in the peer's own thread as the message is read,
+    // which is milliseconds, so ten seconds is three orders of magnitude of
+    // margin.
+    //
+    // It was three seconds, and a sweep that raised fifteen liveness
+    // deadlines raised it too. That sweep was right about the fourteen: a
+    // deadline waiting for something to happen costs nothing when it happens,
+    // so a short one only buys a failure that says nothing. It is exactly
+    // wrong about this one.
+    let dropped = wait_until(Duration::from_secs(10), || node.peer_count() == 0);
     let held = node.peer_count();
     let height = node.height();
     node.shutdown();
@@ -442,6 +485,7 @@ fn a_run_of_them_from_two_peers_tells_the_operator_about_the_clock() {
     let mut sockets = Vec::new();
     for (nonce, listen) in [(4_711u64, 4_242u16), (4_712, 4_243)] {
         let mut socket = TcpStream::connect(node.address()).unwrap();
+        drain(&socket);
         write_message(&mut socket, params().network, &hello(nonce, listen)).unwrap();
         sockets.push(socket);
     }
