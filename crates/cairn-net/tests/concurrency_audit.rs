@@ -1017,6 +1017,18 @@ fn dribbler(address: SocketAddr, stop: &Arc<AtomicBool>) -> thread::JoinHandle<(
 /// The read loop can be deep inside one frame for as long as the peer keeps
 /// feeding it, so stopping cannot depend on the loop noticing `running`. It
 /// does not: `shutdown` shuts the socket under it, and the read fails at once.
+///
+/// A deadline for a thing that must happen, so it is set far past what the
+/// work takes rather than near it: met, it costs nothing, and a short one buys
+/// only failures that say nothing about the code. It read two seconds and a
+/// loaded runner missed it by a quarter of one, which is the machine and not
+/// the mechanism.
+///
+/// What it has to stay under is the thing it is telling this apart from. A
+/// stop that waited on the loop noticing `running` would wait on the frame,
+/// and a frame is given [`cairn_net::wire::FRAME_PATIENCE`], which is twenty
+/// seconds. Ten is half of that and five times what the slowest reading here
+/// has taken, so it still fails on the defect and stops failing on the load.
 #[test]
 fn a_peer_that_will_not_close_does_not_hold_a_shutdown_up() {
     let node = Node::bind(params(), loopback()).unwrap();
@@ -1037,8 +1049,10 @@ fn a_peer_that_will_not_close_does_not_hold_a_shutdown_up() {
     let _ = hand.join();
 
     assert!(
-        took < Duration::from_secs(2),
-        "shutting down waited {took:?} on a peer that was still feeding a frame"
+        took < Duration::from_secs(10),
+        "shutting down waited {took:?} on a peer that was still feeding a frame, \
+         which is the frame being waited on rather than the socket being shut \
+         under it"
     );
 }
 
