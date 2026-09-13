@@ -45,6 +45,33 @@ use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
 /// without this having to move in step.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
+/// A block this wire carries has to fit in the log that stores it.
+///
+/// The paragraph above ties this ceiling to the one end of a block's journey,
+/// what the consensus rules allow it to be, and `tests/protocol.rs` holds that
+/// tie. The other end is a record in the block log, which refuses a body over
+/// [`cairn_store::MAX_RECORD_BYTES`] and answers `BlockTooLarge`. Three
+/// numbers in three crates, in one order, and only two of them were tied to
+/// each other.
+///
+/// What the missing tie costs is not a silent divergence: a node that
+/// validated a block off this wire and could not write it down reaches the
+/// state `Node::unwritten` reports and stops itself over, with its chain
+/// ahead of its disk. That is the right answer to the situation and the wrong
+/// situation to be in, and it would be reachable by a change to either number
+/// with nothing in between to say so.
+///
+/// Stated as `<=` rather than as the exact relation, which is
+/// `MAX_FRAME_BYTES - 1 <= MAX_RECORD_BYTES`: a frame carries a one byte tag
+/// before the block, so the largest block a frame holds is one byte short of
+/// the frame. The stronger statement implies the one that is needed and reads
+/// as what it means, that this wire never carries more than the log will take.
+///
+/// Held where the numbers are written rather than where a test runs. Nothing
+/// sends a block at either ceiling, and a test that did would be building a
+/// megabyte block to prove an inequality between two constants.
+const _: () = assert!(MAX_FRAME_BYTES <= cairn_store::MAX_RECORD_BYTES);
+
 const HEADER_BYTES: usize = 8;
 
 /// How long one frame may take, from its first byte to its last.

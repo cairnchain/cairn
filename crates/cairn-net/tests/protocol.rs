@@ -1087,6 +1087,14 @@ fn blocks_this_node_asked_for_do_not_use_up_its_allowance() {
 /// them agree. If the rules allowed a block this wire refused, a miner could
 /// produce one that is valid and cannot be handed to anyone: it would follow a
 /// chain nobody else can follow, and no attacker would be needed for the fork.
+///
+/// There is a third number in the chain and it is held elsewhere. A block that
+/// crosses this wire is written into the block log, which refuses a body over
+/// `cairn_store::MAX_RECORD_BYTES`. That half is a relation between two
+/// constants and nothing else, so it is a compile time assertion beside
+/// `MAX_FRAME_BYTES` rather than a test here: proving it at runtime would mean
+/// building a megabyte block to compare two numbers. Named here so that a
+/// reader who finds one end of the chain finds the other.
 #[test]
 fn the_wire_carries_the_largest_block_the_rules_allow() {
     let allowed = params().max_block_bytes;
