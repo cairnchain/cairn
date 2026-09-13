@@ -17,8 +17,8 @@ use cairn_primitives::Hash32;
 
 use crate::book::worth_hearing_about;
 use crate::message::{
-    Handshake, Joining, Keeps, Message, PeerAddress, MAX_ANNOUNCED, MAX_HEADERS, MAX_PROVEN,
-    MAX_REQUESTED, MAX_SHARED_ADDRESSES, PROTOCOL_VERSION,
+    Handshake, Joining, Keeps, Message, PeerAddress, Placed, MAX_ANNOUNCED, MAX_HEADERS,
+    MAX_PROVEN, MAX_REQUESTED, MAX_SHARED_ADDRESSES, PROTOCOL_VERSION,
 };
 
 /// Everything of the surrounding node this layer is allowed to see.
@@ -603,6 +603,20 @@ pub struct Reaction {
     /// be kept on disk is the branch being followed, not every block that ever
     /// arrived.
     pub applied: Option<Accepted>,
+    /// Paths a peer offered back for places this node asked about.
+    ///
+    /// Named rather than folded here, like the locator and the join piece
+    /// below it and for the same reason: folding one reads the cold set, and
+    /// this runs with the chain held.
+    ///
+    /// It is named *here* rather than taken before this layer, which is where
+    /// it used to be taken. The node's reading loop hands an answer to
+    /// whatever asked for it before the chain has been near it, which is right
+    /// for an answer nobody asked for: it is dropped without costing
+    /// anything. What it also did was carry this message past the one place
+    /// that charges for work, so the price the table puts on a path folded
+    /// against the cold set was never asked for.
+    pub placed: Vec<Placed>,
     /// Blocks newly worth telling every other peer about, with where they sit.
     pub broadcast: Vec<Located>,
     /// A locator a peer sent, waiting to be answered.
@@ -1305,11 +1319,16 @@ pub fn on_message(
         // A pong needs no answer, a second introduction was already refused
         // above, and a piece of a join answer belongs to whoever is collecting
         // one rather than here.
-        Message::Pong(_)
-        | Message::Hello(_)
-        | Message::Welcome(_)
-        | Message::JoinPart { .. }
-        | Message::Proofs(_) => Reaction::idle(),
+        Message::Pong(_) | Message::Hello(_) | Message::Welcome(_) | Message::JoinPart { .. } => {
+            Reaction::idle()
+        }
+        // Named rather than folded, and named here rather than before this
+        // layer, which is what makes the price above it something the peer
+        // actually pays.
+        Message::Proofs(placed) => Reaction {
+            placed,
+            ..Reaction::idle()
+        },
         // Headers from before this node arrived. Named rather than taken, and
         // named here rather than earlier: this is where a peer has to have
         // introduced itself and to have an allowance left, and a run that

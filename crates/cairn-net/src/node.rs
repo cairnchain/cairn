@@ -1432,6 +1432,78 @@ fn finished(asking: &mut Asking, archivists: usize) -> Recovered {
 /// fresh [`Asking`] on the way in, so a second recovery looks correct from
 /// outside however the first one ended.
 #[cfg(test)]
+mod what_is_taken_for_nothing {
+    use super::{taken_before_the_allowance, Joining, Message};
+    use crate::message::Placed;
+    use cairn_primitives::Hash32;
+
+    /// One message, and being able to say so is the repair.
+    ///
+    /// What is on this list is taken before the chain has been near it and
+    /// before the allowance has been asked about, so every entry is work a
+    /// stranger gets for nothing. The list had no name, which is how it came
+    /// to have two entries.
+    #[test]
+    fn one_message_is_taken_before_the_allowance_and_it_is_the_join_piece() {
+        assert!(taken_before_the_allowance(&Message::JoinPart {
+            what: Joining::Ledger,
+            at: Hash32::ZERO,
+            part: 0,
+            parts: 1,
+            bytes: Vec::new(),
+        }));
+    }
+
+    /// The one that used to be on it, and what it cost to be there.
+    ///
+    /// A run of paths is work: each is folded against the cold set with the
+    /// chain held, and `cost_of` prices it at eight, the same as asking for
+    /// one. Taken here, it went past `cost_of` entirely, so the price was
+    /// charged to nobody: a peer this node had asked could offer the same
+    /// sixty four paths again and again inside the few seconds the question
+    /// stays open, every one of them folded, for free.
+    ///
+    /// The test that held that price drives `on_message`, which is a path this
+    /// message did not take.
+    #[test]
+    fn a_run_of_paths_is_not_taken_before_the_allowance() {
+        let offered = Message::Proofs(vec![Placed {
+            position: 0,
+            proof: None,
+        }]);
+        assert!(
+            !taken_before_the_allowance(&offered),
+            "a run of paths folded against the cold set has a price, and this \
+             is what decides whether anybody is asked for it"
+        );
+    }
+
+    /// And nothing else drifted onto it.
+    #[test]
+    fn nothing_else_is_taken_before_the_allowance() {
+        for message in [
+            Message::Ping(1),
+            Message::Pong(1),
+            Message::GetPeers,
+            Message::Peers(Vec::new()),
+            Message::Announce(Vec::new()),
+            Message::GetBlocks(Vec::new()),
+            Message::GetProofs(Vec::new()),
+            Message::Chain { from: 0, count: 0 },
+            Message::GetChain {
+                locator: Vec::new(),
+            },
+        ] {
+            assert!(
+                !taken_before_the_allowance(&message),
+                "{} is taken for nothing",
+                message.kind()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod ending_a_question {
     use super::{finished, Asking, ForestProof, Hash32};
@@ -4073,19 +4145,68 @@ fn join_piece(shared: &Arc<Shared>, from: PeerId, message: Message, outbound: &O
 
 /// Hands a message to whichever of this node's own collections it answers.
 ///
-/// Two things this node goes out and asks for: the pieces of a chain it is
-/// joining, and the paths for notes it can no longer place. Both are answers
-/// to a question this node asked, both belong to a collection it is keeping
-/// rather than to any decision about the peer that sent them, and an answer
-/// nobody asked for is dropped before it costs anything. That last part is
-/// what makes it safe to take these before the chain has been near them.
+/// **One message, and the set is the point.** What is taken here is taken
+/// before the chain has been near it and before the allowance has been asked
+/// about, so everything in this set is work a stranger gets for nothing. That
+/// is the right trade for a join piece: it is a piece of an answer to a
+/// question this node put to one named peer, anybody else's copy is dropped on
+/// a comparison, and the alternative is a node that cannot be handed a chain
+/// without paying for every stranger who offers it one.
+///
+/// It was the wrong trade for a run of paths, and nothing said so because the
+/// set had no name. `Proofs` was taken here too, which carried it past
+/// `cost_of` entirely: the price the table puts on a path folded against the
+/// cold set is eight, the same as asking for one, and it was charged to
+/// nobody. A peer this node had asked could offer the same sixty four paths
+/// again and again inside the few seconds the question stays open, and every
+/// one of them was folded with the chain held, for free.
+///
+/// So a run of paths is named in the reaction and folded once the chain is let
+/// go of, like the locator and the join piece the same reaction carries, and
+/// it goes through the one place that charges for work on the way.
 fn collected(shared: &Arc<Shared>, from: PeerId, message: Message, outbound: &Outbound) -> Taken {
-    match join_piece(shared, from, message, outbound) {
-        Taken::Other(Message::Proofs(placed)) => {
-            shared.take_placed(from, &placed);
-            Taken::Handled
-        }
-        other => other,
+    if !taken_before_the_allowance(&message) {
+        return Taken::Other(message);
+    }
+    join_piece(shared, from, message, outbound)
+}
+
+/// Whether this message is taken before the allowance has been asked about.
+///
+/// The set is the point, and until now it was not written down anywhere: it
+/// was whatever `collected` happened to match on, and it grew by one without
+/// anybody noticing. What an entry on it costs is nothing at all, so it is
+/// worth being able to read the whole of it in one place.
+///
+/// Exhaustive rather than a `matches!`, so that a new message is a decision
+/// somebody has to make here rather than a default somebody gets.
+const fn taken_before_the_allowance(message: &Message) -> bool {
+    match message {
+        // A piece of an answer to a question this node put to one named peer.
+        // Anybody else's copy is dropped on a comparison, and the alternative
+        // is a node that cannot be handed a chain without paying for every
+        // stranger who offers it one.
+        Message::JoinPart { .. } => true,
+        // Everything else, and `Proofs` in particular. A run of paths is work:
+        // each one is folded against the cold set with the chain held, and the
+        // table prices it at eight, the same as asking for it.
+        Message::Hello(_)
+        | Message::Welcome(_)
+        | Message::Ping(_)
+        | Message::Pong(_)
+        | Message::GetChain { .. }
+        | Message::Chain { .. }
+        | Message::GetBlocks(_)
+        | Message::Block(_)
+        | Message::Announce(_)
+        | Message::GetPeers
+        | Message::Peers(_)
+        | Message::Transaction(_)
+        | Message::GetJoin { .. }
+        | Message::GetHeaders { .. }
+        | Message::Headers { .. }
+        | Message::GetProofs(_)
+        | Message::Proofs(_) => false,
     }
 }
 
@@ -6862,6 +6983,14 @@ fn read_loop(
         // The chain is held for the decision and for writing the log, and let
         // go before anything is sent, so a slow peer never stalls the chain.
         let (mut reaction, passing) = decide(shared, &mut peer, message);
+
+        // Paths offered back for places this node asked about, folded now that
+        // the chain has been let go of. Named in the reaction rather than
+        // taken before this layer, which is what carried them past the one
+        // place that charges for work.
+        if !reaction.placed.is_empty() {
+            shared.take_placed(id, &reaction.placed);
+        }
 
         if introduction && peer.greeted {
             note_claim(shared, id, &peer);
