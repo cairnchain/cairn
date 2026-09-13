@@ -17,6 +17,10 @@ thiserror.workspace = true
 
 [dev-dependencies]
 cairn-crypto.workspace = true
+# For `tests/fuzz_record_framing.rs`. An audit found the block log's record
+# framing and the header log had no fuzz target between them, which is a gap
+# in the one reader whose input is a disk rather than a sender.
+cairn-fuzz.workspace = true
 # For `tests/audit_what_the_block_log_vouches_for.rs`, which counts the bytes
 # the checks on a served record hash rather than timing them. Only the test
 # build asks for it.

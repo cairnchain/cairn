@@ -10,3 +10,9 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+
+[dev-dependencies]
+# The request reader is the most exposed parser in this workspace and had no
+# fuzz target. `tests/fuzz_request.rs` is that target; nothing a node ships
+# gains anything, because this crate's own `[dependencies]` is still empty.
+cairn-fuzz.workspace = true

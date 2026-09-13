@@ -83,10 +83,12 @@
 //! number, so case 91 941 of a two-minute campaign is reachable in a
 //! millisecond by asking for that one case.
 
+pub mod arms;
 pub mod campaign;
 pub mod mutate;
 pub mod shrink;
 
+pub use arms::{Arm, Arms, Built};
 pub use campaign::{Campaign, Ran, DEFAULT_SEED};
 pub use mutate::{mutate, splice, INTERESTING_U32, INTERESTING_U64, INTERESTING_U8};
 pub use shrink::smallest;

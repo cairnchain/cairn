@@ -57,10 +57,12 @@ jobs:
         # budget would spend the budget on tests that ignore it.
         run: |
           cargo test --release --locked \
-            -p cairn-primitives --test fuzz_codec \
+            -p cairn-primitives --test fuzz_codec --test fuzz_hex \
             -p cairn-accumulator --test fuzz_accumulator \
             -p cairn-ledger --test fuzz_ledger_structures \
-            -p cairn-net --test fuzz --test fuzz_wire \
+            -p cairn-net --test fuzz --test fuzz_wire --test fuzz_address_book \
+            -p cairn-store --test fuzz_record_framing \
+            -p cairn-http --test fuzz_request \
             -p cairn-wallet --test fuzz_history \
             -p cairn-explorer --test fuzz_index_walk \
             -- --nocapture

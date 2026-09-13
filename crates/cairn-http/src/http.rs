@@ -19,9 +19,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// Longest request line and header block accepted.
-const MAX_HEAD_BYTES: usize = 8 * 1024;
+///
+/// Published for the same reason [`read_request`] is: a test that restated
+/// the number would pass on the day somebody changed it here.
+pub const MAX_HEAD_BYTES: usize = 8 * 1024;
 /// Longest single line accepted while reading the head.
-const MAX_LINE_BYTES: usize = 2 * 1024;
+pub const MAX_LINE_BYTES: usize = 2 * 1024;
 /// Connections served at once. Beyond this a caller is turned away rather than
 /// queued, so a flood costs threads that are already bounded.
 pub const MAX_CONNECTIONS: usize = 64;
@@ -125,7 +128,7 @@ pub fn most_one_answer_carries() -> usize {
 }
 /// Bytes a form body may reach. A spend names an address, an amount and a
 /// fee; anything past this is not one.
-const MAX_BODY_BYTES: usize = 4096;
+pub const MAX_BODY_BYTES: usize = 4096;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long to wait after an accept that failed, so a failure that persists is
 /// a wait rather than a spin.
@@ -554,7 +557,25 @@ impl Write for Timed<'_> {
 /// Reads one request head.
 ///
 /// `Ok(None)` means a well-formed request this server does not answer.
-fn read_request<R: io::Read>(reader: &mut R) -> Result<Option<Request>, u16> {
+///
+/// # Why this is public
+///
+/// It is the most exposed parser in the workspace: every byte from every
+/// stranger arrives here, before routing and before anything else has looked
+/// at them. An audit found it had no fuzz target, and the reason it had none
+/// is that it was private, which put every test of it behind a real socket
+/// and a real connection and so behind the deadlines, the slot accounting and
+/// the answer writer. None of those are the parser.
+///
+/// Public rather than `pub(crate)` with a wrapper, because a wrapper would be
+/// a second entry point that a change to this one need not go through, and
+/// the point of the target is that it feeds the bytes the socket feeds. It
+/// takes an [`io::Read`], so a test hands it an [`io::Cursor`] and gets to
+/// watch what it consumed, which is one of the things the target checks and
+/// the socket path cannot show.
+///
+/// `crates/cairn-http/tests/fuzz_request.rs` is the caller this is for.
+pub fn read_request<R: io::Read>(reader: &mut R) -> Result<Option<Request>, u16> {
     let mut consumed = 0usize;
     let start = read_line(reader, &mut consumed)?;
 
@@ -604,7 +625,20 @@ fn read_request<R: io::Read>(reader: &mut R) -> Result<Option<Request>, u16> {
     }
     let (raw_path, query) = target.split_once('?').unwrap_or((target, ""));
     let path = percent_decode(raw_path);
-    if path.contains('\0') {
+    // A NUL was the one byte refused here, and the two beside it are the
+    // delimiters of this protocol. The path is percent decoded, so `%0d%0a`
+    // put a whole line ending into it, and a campaign against this reader
+    // found `GET /a%0D%0AX-Injected:+1` coming back as a `Request` whose path
+    // was `/a\r\nX-Injected:+1`.
+    //
+    // Nothing downstream can be made to write it out today: `write_response`
+    // builds its head from a status, a length, a content type and a compiled
+    // in constant, with no request byte in it. Refused all the same, because
+    // the rule was already here and was refusing the byte that cannot reach a
+    // delimiter while admitting the two that are them. A path with a line
+    // ending in it matches no route, so the only thing this changes for an
+    // honest caller is a 400 where there used to be a 404.
+    if path.contains(['\0', '\r', '\n']) {
         return Err(400);
     }
 
@@ -631,7 +665,14 @@ fn read_request<R: io::Read>(reader: &mut R) -> Result<Option<Request>, u16> {
     }))
 }
 
-fn read_line<R: io::Read>(reader: &mut R, consumed: &mut usize) -> Result<String, u16> {
+/// Reads one line of the head, counting every byte it took against the head
+/// cap.
+///
+/// Public alongside [`read_request`], and for the same audit: the two caps it
+/// keeps are the only thing standing between a stranger and an unbounded
+/// read, and a target that could only reach it through a whole request could
+/// not say which of the two refused.
+pub fn read_line<R: io::Read>(reader: &mut R, consumed: &mut usize) -> Result<String, u16> {
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
     loop {
@@ -650,6 +691,18 @@ fn read_line<R: io::Read>(reader: &mut R, consumed: &mut usize) -> Result<String
         if read == b'\n' {
             if line.last() == Some(&b'\r') {
                 line.pop();
+            }
+            // A carriage return anywhere but immediately before the line feed
+            // is not the end of a line, and it is not part of one either.
+            // This dropped one only in that position, so an interior one
+            // survived into whatever the line turned into: a campaign against
+            // this reader found `host: x\ry` coming back as a host of `x\ry`,
+            // and the same for an origin. Both are compared for exact
+            // equality by the wallet, so the value was refused a moment
+            // later, but a header value carrying a delimiter is a value no
+            // caller has a use for and the right place to say so is here.
+            if line.contains(&b'\r') {
+                return Err(400);
             }
             return String::from_utf8(line).map_err(|_| 400);
         }
@@ -757,7 +810,15 @@ fn refusal(status: u16) -> &'static str {
 ///
 /// A stray percent sign is far more likely to be a person pasting an address
 /// than an attack, and turning it into an error would only hide the paste.
-fn percent_decode(text: &str) -> String {
+///
+/// Public for the audit that put a fuzz target on [`read_request`]. "Leaving
+/// anything malformed as written" is a claim that this is total: it has no
+/// failure case at all, so every byte a stranger can write has to come back
+/// as something. That is a property worth a campaign of its own, and a
+/// campaign that could only arrive here through [`read_request`] would spend
+/// almost all of itself on request lines that are refused before a target is
+/// ever decoded.
+pub fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0usize;
