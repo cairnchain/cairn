@@ -15,6 +15,21 @@
 //! got a head declaring a length and then nothing. A body short of its own
 //! `content-length` is not a short answer: the reader gets a transport error
 //! rather than a 503.
+//!
+//! It was written with that flag, and then it was closed over bytes nobody had
+//! read. Both produce the same thing at the reader, and only the first was
+//! fixed. A connection closed while what it received is still unread is reset,
+//! and the reset takes with it whatever the caller has not already read of the
+//! answer, which for an answer this small is the whole body. The refusal is
+//! the path where those bytes are always there, because it answers before
+//! reading any.
+//!
+//! Which host it shows on is timing and not the rule. Every stack resets a
+//! connection closed over bytes nobody read; what differs is whether the
+//! caller has already taken the answer out of its own buffer before the reset
+//! lands. That race was won on the machines this was written on and lost on
+//! the Windows runner, and the fix is to take what the caller sent before
+//! hanging up rather than to race it better.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -158,6 +173,65 @@ fn the_answer_a_full_server_gives_carries_the_body_it_promises() {
         declared(head),
         "the head promised {} bytes and {} arrived, which reaches a reader as a \
          transport error and not as a 503",
+        declared(head),
+        body.len()
+    );
+    assert!(body.contains("too many connections"), "{body}");
+}
+
+/// **And it is still whole when the caller sent more than the refusal reads.**
+///
+/// The refusal answers before reading a byte, so whatever the caller sent is
+/// sitting unread when the connection is closed, and a close over unread bytes
+/// is a reset. This sends a request head and then a body on top of it, which
+/// is the same condition the test above meets by accident and this one meets
+/// on purpose: a caller with a form to post, turned away because the server is
+/// full.
+///
+/// The assertion is the same and so is the rule. What differs between hosts is
+/// only whether the caller reads the answer before the reset reaches it, which
+/// is why this is worth a case of its own rather than a stronger assertion on
+/// the one above: on a host that wins that race, both pass whatever the server
+/// does about it.
+#[test]
+fn the_refusal_is_whole_for_a_caller_that_sent_more_than_it_reads() {
+    let address = start();
+
+    let mut holding: Vec<TcpStream> = Vec::new();
+    for _ in 0..MAX_CONNECTIONS {
+        let Ok(stream) = TcpStream::connect(address) else {
+            break;
+        };
+        holding.push(stream);
+    }
+
+    // A head and a body under the cap, so nothing here is refused for its
+    // size: what is being tested is the bytes nobody read, not the length.
+    let mut request = Vec::new();
+    request
+        .extend_from_slice(b"POST /form HTTP/1.1\r\nhost: cairn\r\ncontent-length: 2048\r\n\r\n");
+    request.extend_from_slice(&[b'x'; 2048]);
+
+    let mut refused = String::new();
+    for _ in 0..8 {
+        let said = ask(address, &request);
+        if said.starts_with("HTTP/1.1 503") {
+            refused = said;
+            break;
+        }
+    }
+    assert!(
+        !refused.is_empty(),
+        "the slots did not fill, so there is nothing here to measure"
+    );
+
+    let (head, body) = split(&refused);
+    assert_eq!(
+        body.len(),
+        declared(head),
+        "the head promised {} bytes and {} arrived. The caller sent a body this \
+         path never reads, and closing over it reset the connection, which \
+         takes the answer with it.",
         declared(head),
         body.len()
     );
