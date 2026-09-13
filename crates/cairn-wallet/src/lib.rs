@@ -31,7 +31,7 @@ use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::transaction::{Input, Transfer};
 use cairn_ledger::validation::{ConsensusParams, TransferError};
 use cairn_net::node::{Probation, Refused, Stranded, Unjudged, Unread, Unweighable, Unwritten};
-use cairn_net::{Joined, Node};
+use cairn_net::{Joined, Node, MAX_PROVEN};
 use cairn_primitives::codec::Encode;
 use cairn_primitives::{Amount, Hash32};
 
@@ -345,6 +345,16 @@ pub struct Recovery {
     /// Answers this wallet would not use, because what came back did not fit
     /// the chain its own node has checked.
     pub refused: usize,
+    /// Notes left for the next round, because one question does not carry
+    /// them.
+    ///
+    /// A question to the network names at most [`MAX_PROVEN`] places, and a
+    /// wallet with more stranded notes than that asks about the first of them
+    /// and comes back for the rest. Counted and said out loud, because
+    /// "stranded 100, rebuilt 64" invites the reader to conclude that
+    /// thirty six were asked about and went unanswered, and none of them was
+    /// asked about at all.
+    pub not_yet_asked: usize,
 }
 
 impl Recovery {
@@ -422,6 +432,27 @@ impl Recovery {
                 self.archivists
             )
         };
+
+        // The notes that are not waiting on anything above, because nobody was
+        // asked about them yet. Every sentence above ends in a reason the
+        // money has not come back: nobody could answer, nobody here keeps the
+        // record, there is nobody to ask. None of those is true of a note that
+        // is simply behind the first sixty four in the queue, and reading
+        // "rebuilt 64 of 100" without this invites exactly the wrong
+        // conclusion, that thirty six were asked about and went unanswered.
+        //
+        // Before the line below rather than after it, because this one ends in
+        // waiting and that one ends in nothing to wait for, and the order the
+        // rest of this follows is worst last.
+        if self.not_yet_asked > 0 {
+            let _ = write!(
+                said,
+                " {} of them have not been asked about yet: one question to \
+                 the network carries {MAX_PROVEN} at a time, and this wallet \
+                 comes back for the rest by itself.",
+                self.not_yet_asked
+            );
+        }
 
         // And the part of it that none of those sentences is true about. Every
         // one of them ends in something worth doing: wait, connect to an
@@ -850,6 +881,45 @@ pub struct Wallet {
     /// Kept because a face reads this as often as it redraws, and the asking
     /// is a round trip to a stranger.
     last_recovery: Mutex<Asked>,
+}
+
+/// The places one question to the network carries, out of everything this
+/// wallet would like to ask about.
+///
+/// `Node::recover_proofs` caps the list at [`MAX_PROVEN`] on the way in, which
+/// is right for it: one message carries that many and a caller that asked
+/// about more would otherwise have its question truncated by whoever answered
+/// it. What the cap does not do is tell this wallet which half is which, and
+/// this wallet is the only party that needs to know.
+fn one_question(wanted: &[(u64, Hash32)]) -> &[(u64, Hash32)] {
+    wanted.get(..wanted.len().min(MAX_PROVEN)).unwrap_or(wanted)
+}
+
+/// The places that were put to the network and came back without an answer.
+///
+/// Takes everything the wallet wanted to ask about and does the cut itself,
+/// rather than trusting a caller to hand it the asked-about half. That is the
+/// whole repair: what used to stand here was filled from `wanted`, which is a
+/// different set the moment there are more than [`MAX_PROVEN`] of them, and
+/// there was nothing in the shape of the call to say which of the two it
+/// should have been.
+///
+/// What it feeds is the decision to wait. [`Asked::unresolved`] says "the
+/// places that were asked about and not answered for", and the pause reads it
+/// as exactly that: a wallet stuck on the same places with the same peers
+/// would get the same nothing, so waiting is right. For a place nobody was
+/// asked about, waiting buys nothing at all, and a wallet with a hundred
+/// stranded notes spent [`RECOVERY_PAUSE`] between each batch of sixty four
+/// it had never put a question about.
+fn still_outstanding(
+    wanted: &[(u64, Hash32)],
+    answered: &BTreeMap<u64, ForestProof>,
+) -> BTreeSet<u64> {
+    one_question(wanted)
+        .iter()
+        .map(|(at, _)| *at)
+        .filter(|at| !answered.contains_key(at))
+        .collect()
 }
 
 /// The last time this wallet asked the network for paths, and what came of it.
@@ -1307,7 +1377,13 @@ impl Wallet {
         }
 
         let unplaceable = holdings.unprovable.len().saturating_sub(wanted.len());
-        let answer = self.node.recover_proofs(&wanted, RECOVERY_PATIENCE);
+        // Cut here rather than left to be cut on the way in. `recover_proofs`
+        // takes the first [`MAX_PROVEN`] and drops the rest, which is right
+        // for it and leaves this wallet unable to tell what it asked about
+        // from what it merely wrote down.
+        let asking = one_question(&wanted);
+        let not_yet_asked = wanted.len().saturating_sub(asking.len());
+        let answer = self.node.recover_proofs(asking, RECOVERY_PATIENCE);
 
         // Back from places to notes. The answer is about places because that
         // is all the answerer was told, and this wallet is the only party that
@@ -1337,15 +1413,13 @@ impl Wallet {
             answered: answer.answered,
             rebuilt: mended,
             refused: answer.refused,
+            not_yet_asked,
         };
         let mut last = self
             .last_recovery
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        last.unresolved = places
-            .into_iter()
-            .filter(|at| !answer.proofs.contains_key(at))
-            .collect();
+        last.unresolved = still_outstanding(&wanted, &answer.proofs);
         last.report = recovery;
         last.at = Some(Instant::now());
         recovery
@@ -1987,8 +2061,8 @@ fn wait_until(patience: Duration, ready: impl Fn() -> bool) -> bool {
 )]
 mod tests {
     use super::{
-        ceiling, said_plainly, select, shuffle, too_old_for_this_chain, Held, NoDraft, Outdated,
-        Progress,
+        ceiling, one_question, said_plainly, select, shuffle, still_outstanding,
+        too_old_for_this_chain, Held, NoDraft, Outdated, Progress, Recovery, MAX_PROVEN,
     };
     use cairn_accumulator::ForestProof;
     use cairn_crypto::SecretKey;
@@ -1997,6 +2071,7 @@ mod tests {
     use cairn_net::node::{Probation, Reading, Refused, Unread};
     use cairn_net::Joined;
     use cairn_primitives::{Amount, Hash32};
+    use std::collections::BTreeMap;
 
     fn cairn(text: &str) -> Amount {
         Amount::from_cairn(text).unwrap()
@@ -2252,5 +2327,104 @@ mod tests {
         shuffle(&mut many).unwrap();
         many.sort_unstable();
         assert_eq!(many, (0..64).collect::<Vec<u32>>());
+    }
+
+    /// A place beyond the first question was never asked about, and what the
+    /// wallet writes down has to say so.
+    ///
+    /// The set this feeds is read as "the places that were asked about and not
+    /// answered for", and what it decides is whether asking again is worth
+    /// anything. It used to be filled from every place the wallet wanted to
+    /// ask about. With more stranded notes than one question carries, the
+    /// places nobody had put a question about landed in a set meaning nobody
+    /// could answer them, and the wallet then waited out its pause before
+    /// asking.
+    #[test]
+    fn what_one_question_did_not_carry_is_not_a_place_that_went_unanswered() {
+        let wanted: Vec<(u64, Hash32)> = (0..(MAX_PROVEN as u64 * 2))
+            .map(|at| (at, Hash32::from_bytes([0; 32])))
+            .collect();
+
+        assert_eq!(
+            one_question(&wanted).len(),
+            MAX_PROVEN,
+            "one message carries this many"
+        );
+
+        // Nobody answered, which is the case the pause is about. Handed the
+        // whole of `wanted`, exactly as the wallet hands it, because the cut
+        // belongs to the rule and not to its caller.
+        let answered: BTreeMap<u64, ForestProof> = BTreeMap::new();
+        let outstanding = still_outstanding(&wanted, &answered);
+
+        assert_eq!(
+            outstanding.len(),
+            MAX_PROVEN,
+            "every place that was asked about went unanswered, and all of them \
+             belong here"
+        );
+        for at in 0..MAX_PROVEN as u64 {
+            assert!(outstanding.contains(&at), "place {at} was asked about");
+        }
+        for at in MAX_PROVEN as u64..(MAX_PROVEN as u64 * 2) {
+            assert!(
+                !outstanding.contains(&at),
+                "place {at} was never put to anybody, so calling it unanswered \
+                 is what makes this wallet wait instead of ask"
+            );
+        }
+    }
+
+    /// A question that fits is not cut, and the answers that came back are not
+    /// counted as outstanding.
+    #[test]
+    fn a_question_that_fits_is_asked_whole_and_what_came_back_is_settled() {
+        let wanted: Vec<(u64, Hash32)> =
+            (0..3).map(|at| (at, Hash32::from_bytes([0; 32]))).collect();
+        assert_eq!(one_question(&wanted).len(), 3, "nothing was left behind");
+
+        let mut answered: BTreeMap<u64, ForestProof> = BTreeMap::new();
+        answered.insert(1, ForestProof::default());
+        let outstanding = still_outstanding(&wanted, &answered);
+
+        assert_eq!(outstanding.len(), 2);
+        assert!(!outstanding.contains(&1), "that one came back");
+    }
+
+    /// The number said out loud, because "rebuilt 64 of 100" on its own reads
+    /// as thirty six that were asked about and went unanswered.
+    #[test]
+    fn a_wallet_says_how_many_it_has_not_asked_about_yet() {
+        let waiting = Recovery {
+            stranded: 100,
+            unplaceable: 0,
+            asked: 2,
+            archivists: 1,
+            answered: 2,
+            rebuilt: 64,
+            refused: 0,
+            not_yet_asked: 36,
+        };
+        let words = waiting.words().expect("a hundred notes are stuck");
+        assert!(
+            words.contains("36 of them have not been asked about yet"),
+            "the ones nobody was asked about are named: {words}"
+        );
+        assert!(
+            words.contains("comes back for the rest by itself"),
+            "and what happens next is said rather than left to be worked out: \
+             {words}"
+        );
+
+        // And a wallet whose whole question fit in one says nothing about it.
+        let all_asked = Recovery {
+            not_yet_asked: 0,
+            ..waiting
+        };
+        let words = all_asked.words().expect("the notes are still stuck");
+        assert!(
+            !words.contains("have not been asked about yet"),
+            "nothing was held back, so there is nothing to say: {words}"
+        );
     }
 }
