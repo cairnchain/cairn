@@ -13,13 +13,14 @@ use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cairn_chain::ChainStore;
+use cairn_chain::{ChainStore, Located};
 use cairn_ledger::validation::ConsensusParams;
-use cairn_net::message::{Message, MAX_HEADERS, MAX_REQUESTED};
+use cairn_net::message::{Message, MAX_ANNOUNCED, MAX_HEADERS, MAX_REQUESTED};
 use cairn_net::node::TARGET_PEERS;
-use cairn_net::sync::{on_message, Local, PeerState};
+use cairn_net::sync::{on_message, Local, PeerState, MAX_AWAITING};
 use cairn_net::Keeps;
 use cairn_net::Node;
+use cairn_primitives::Hash32;
 
 fn params() -> ConsensusParams {
     ConsensusParams::testnet()
@@ -171,6 +172,82 @@ fn a_peer_cannot_grow_the_awaiting_set_without_bound() {
         "awaiting grew to {} heights from 1000 cheap Chain messages: a peer \
          sending these indefinitely would exhaust the node's memory",
         peer.awaiting.len(),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FINDING 2b: the test above drives the one path that keeps that ceiling.
+//
+// Two messages put heights into `awaiting`. A `Chain` goes through
+// `request_range`, which counts what a batch would newly wait on and refuses
+// the batch that does not fit. An `Announce` goes through `request_announced`,
+// which read the room once and then admitted every new height in the
+// announcement as long as there was room for a single one.
+//
+// So the guard above is true and demonstrates a different thing from what the
+// ceiling claims. It says a `Chain` cannot push the set past 512. What
+// `MAX_AWAITING` says is that the set does not go past 512.
+//
+// While it is over, the path that does keep the ceiling refuses everything:
+// `request_range` finds no room and answers `idle`, so this node stops asking
+// for the stretches it is catching up on until `BATCH_PATIENCE` empties the
+// set. An announcement a peer chose to send bought a stall in this node's own
+// sync, for one unit.
+// ---------------------------------------------------------------------------
+
+/// Fills `awaiting` to one place short of the ceiling, without going through
+/// either path under test.
+///
+/// Written into the set rather than driven there by messages, because what is
+/// being measured is what one announcement adds to a nearly full set, and
+/// reaching that state through `request_range` would be measuring the path
+/// that already holds.
+fn one_place_short(peer: &mut PeerState) {
+    for height in 0..(MAX_AWAITING as u64 - 1) {
+        peer.awaiting.insert(height);
+    }
+    assert_eq!(peer.awaiting.len(), MAX_AWAITING - 1);
+}
+
+#[test]
+fn an_announcement_cannot_push_the_awaiting_set_past_the_ceiling_either() {
+    let mut chain = ChainStore::new(params());
+    let mut peer = greeted();
+    one_place_short(&mut peer);
+
+    // Every height fresh, every identifier one this node has never held, which
+    // is what an announcement from a peer ahead of it looks like.
+    let announced: Vec<Located> = (0..MAX_ANNOUNCED as u64)
+        .map(|step| {
+            let mut id = [0u8; 32];
+            id[..8].copy_from_slice(&step.to_le_bytes());
+            Located::new(1_000_000 + step, Hash32::from_bytes(id))
+        })
+        .collect();
+    let reaction = on_message(
+        &mut solo(&mut chain),
+        &mut peer,
+        Message::Announce(announced),
+        2_000_000_000,
+    );
+    assert!(
+        reaction.drop_peer.is_none(),
+        "an announcement is not misbehaviour"
+    );
+
+    assert!(
+        peer.awaiting.len() <= MAX_AWAITING,
+        "one announcement took the set to {} heights against a ceiling of \
+         {MAX_AWAITING}. While it is over, `request_range` finds no room and \
+         this node stops asking for the blocks it is catching up on.",
+        peer.awaiting.len(),
+    );
+    // And the one place that was left was spent rather than passed over, so
+    // this is the ceiling being met and not the announcement being refused.
+    assert_eq!(
+        peer.awaiting.len(),
+        MAX_AWAITING,
+        "the room that was there should have been filled"
     );
 }
 

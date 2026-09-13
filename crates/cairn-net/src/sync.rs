@@ -864,7 +864,18 @@ pub const JOIN_RATHER_THAN_READ: u64 = 1_024;
 /// and the node waited out `BATCH_PATIENCE` instead: a minute of nothing, for
 /// each stretch, on a sync that should take seconds. Four is still four
 /// kilobytes and still a ceiling; unbounded was the defect, not the size.
-const MAX_AWAITING: usize = MAX_REQUESTED * 4;
+///
+/// Two paths reach it, and only one of them used to keep it.
+/// `request_range` counts what a batch would newly wait on and refuses the
+/// batch that does not fit; `request_announced` asked whether there was any
+/// room at all and then admitted up to [`MAX_REQUESTED`] heights against it.
+/// The set reached 639 where this says 512, and while it is over, every range
+/// this node asks for is refused by the path that does keep the ceiling: an
+/// announcement a peer chose to send stalled this node's own catching up.
+///
+/// Public so a test names this number rather than restating it. A test that
+/// wrote `512` would pass on the day somebody changed it here.
+pub const MAX_AWAITING: usize = MAX_REQUESTED * 4;
 
 /// Asks for a stretch of a peer's branch, starting at `from`.
 fn request_range(peer: &mut PeerState, from: u64, count: u64, now: u64) -> Reaction {
@@ -904,12 +915,26 @@ fn request_announced(
     ids: &[Located],
     now: u64,
 ) -> Reaction {
-    let room = MAX_AWAITING.saturating_sub(peer.awaiting.len());
+    // Spent down per height rather than read once. Asked once, this admitted
+    // every new height in the announcement as long as there was room for a
+    // single one, so a set with one place left took a hundred and twenty eight
+    // more: `MAX_AWAITING` named 512 and the set held 639. A height already
+    // outstanding costs nothing, because asking again for it grows nothing.
+    let mut room = MAX_AWAITING.saturating_sub(peer.awaiting.len());
     let wanted: Vec<u64> = ids
         .iter()
         .filter(|entry| !chain.contains(&entry.id))
         .map(|entry| entry.height)
-        .filter(|at| peer.awaiting.contains(at) || room > 0)
+        .filter(|at| {
+            if peer.awaiting.contains(at) {
+                return true;
+            }
+            if room == 0 {
+                return false;
+            }
+            room = room.saturating_sub(1);
+            true
+        })
         .take(MAX_REQUESTED)
         .collect();
     if wanted.is_empty() {
