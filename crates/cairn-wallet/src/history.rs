@@ -648,7 +648,7 @@ impl History {
         let mut bytes = self.encode();
         bytes.extend_from_slice(hash(Domain::WalletHistory, &bytes).as_bytes());
         {
-            let mut file = std::fs::File::create(&partial)?;
+            let mut file = create_private(&partial)?;
             file.write_all(&bytes)?;
             file.sync_all()?;
         }
@@ -660,6 +660,44 @@ impl History {
         }
         Ok(())
     }
+}
+
+/// Creates a file only its owner can read, replacing whatever is there.
+///
+/// The key file has a paragraph on why it is `0600`, and this file needs the
+/// same one for a different reason. It holds no key, and it holds everything
+/// else: every note this key was paid, what each is worth, which of them are
+/// still held, and where each of the fallen ones sits. That is one person's
+/// whole account, and on a shared machine it was written at whatever the
+/// umask allowed, which is `0644` on most of them.
+///
+/// The mode is asked for on the way in and set again afterwards, because a
+/// mode given to `open` applies to a file being created and not to one already
+/// there: a partial file left by a write that stopped halfway would otherwise
+/// keep whatever it was made with, and the rename would carry it onto the
+/// account itself.
+#[cfg(unix)]
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(file)
+}
+
+/// The same where there is no mode to ask for.
+///
+/// Windows decides who may read a file by an access control list inherited
+/// from the directory it is made in, which `keyfile::create_private` sets out
+/// at length. The account is exactly as private as the directory holding it.
+#[cfg(not(unix))]
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::create(path)
 }
 
 impl Encode for History {
