@@ -6,6 +6,28 @@
 //! beside it as the control, because a measurement that shows no slope is
 //! only worth something if the same instrument shows one where a slope is
 //! known to exist.
+//!
+//! **Measured is not checked, and this used to stop at measured.** Every
+//! reading above went to the terminal and nothing failed on any of them: the
+//! three assertions in this file were that the run set up the kind of node it
+//! asked for and that an archive is really an archive. A plain node whose held
+//! state grew with the chain would have printed a rising column and passed.
+//!
+//! What decides now is counted and not weighed. Resident-set figures are a
+//! reading of the machine, and this repository does not fail on those: the
+//! same run reads differently on a loaded host, and `SECURITY.md` names a
+//! claim resting on two machine readings as one of the shapes every defect
+//! here has had. So the bytes stay printed, for whoever wants the shape, and
+//! what is asserted is the thing the bytes are a proxy for: over a run where
+//! the cold set grows by millions of notes, every count a plain node holds is
+//! no larger at the end than at the beginning, and each stays inside the
+//! ceiling its own constant names.
+//!
+//! The archivist's slope is still only printed. It rests on the resident set
+//! and there is no counted quantity on a `ColdSet` that separates the two
+//! kinds by size, so asserting on it would be asserting on the machine.
+//! Saying so is better than quietly holding one half to counts and the other
+//! to bytes.
 
 #![allow(
     clippy::cast_sign_loss,
@@ -110,6 +132,96 @@ fn fresh_owners(count: usize) -> Vec<PublicKey> {
     out
 }
 
+/// What a node holds at one mark, counted.
+///
+/// Every field here is a number both nodes agree on and no machine has a say
+/// in, which is what makes it something to fail on. The bytes beside them in
+/// the printed table are the same quantities seen through an allocator and an
+/// operating system, and those are a reading rather than a fact.
+#[derive(Clone, Copy, Debug)]
+struct Held {
+    leaves: u64,
+    hot: usize,
+    grace: usize,
+    watched: usize,
+    maturing: usize,
+}
+
+/// The claim, in the only currency it can be failed on.
+///
+/// A plain node's cost does not grow with the chain. What the chain grows is
+/// the cold set, which a plain node commits to in the roots and does not hold,
+/// so the whole of what it does hold is these four counts and each of them has
+/// a ceiling written into the rules.
+///
+/// Two things are asserted and they are not the same thing. Each count stays
+/// inside its own ceiling, which is what the rules promise; and no count is
+/// larger at the end of the run than partway through it, which is what "does
+/// not grow with the chain" means and is the one a rising column would have
+/// broken. A ceiling alone would pass on a node that climbed towards it for
+/// ever and stopped just short.
+///
+/// **Partway and not from the first mark.** A window that has not filled yet
+/// is not a cost growing with the chain, it is a window filling: the maturing
+/// one spans `coinbase_maturity` blocks, so on a short run the first mark is
+/// taken before it has ever been full and it reads 250 against the 1024 it
+/// settles at. The byte slopes printed above are read over the second half
+/// for the same reason and say so, and a counted check that started earlier
+/// would be holding the counts to something the bytes are not held to.
+fn held_does_not_grow(held: &[Held], params: &ConsensusParams) {
+    let settled = held
+        .get(held.len() / 2)
+        .copied()
+        .expect("the run took marks");
+    let last = *held.last().expect("the run took at least one mark");
+    assert!(
+        last.leaves > settled.leaves,
+        "the cold set has to go on growing across the stretch being read, and \
+         it went from {} notes to {}",
+        settled.leaves,
+        last.leaves
+    );
+
+    assert!(
+        last.hot <= params.hot_capacity,
+        "the hot set holds {} notes against a capacity of {}",
+        last.hot,
+        params.hot_capacity
+    );
+    // Notes and not blocks: `grace_len` counts what the window holds, and the
+    // window has a ceiling in each currency. Reading the block ceiling here
+    // was the first thing this check got wrong, which is the sort of thing a
+    // printed column never has to answer for.
+    assert!(
+        last.grace <= cairn_ledger::state::GRACE_NOTES,
+        "the grace window holds {} notes against a ceiling of {}",
+        last.grace,
+        cairn_ledger::state::GRACE_NOTES
+    );
+    assert!(
+        last.watched <= cairn_ledger::state::WATCHED_NOTES,
+        "{} paths are kept current against a ceiling of {}",
+        last.watched,
+        cairn_ledger::state::WATCHED_NOTES
+    );
+
+    for (name, from, to) in [
+        ("the hot set", settled.hot, last.hot),
+        ("the grace window", settled.grace, last.grace),
+        ("the paths kept current", settled.watched, last.watched),
+        ("the maturing window", settled.maturing, last.maturing),
+    ] {
+        assert!(
+            to <= from,
+            "{name} held {from} at {} notes and {to} at {}, so it grows with \
+             the chain, which is the one thing this design says nothing a \
+             plain node holds does",
+            settled.leaves,
+            last.leaves
+        );
+    }
+}
+
 /// The same parameters `falling_chain` uses, so the two are comparable.
 /// Mining is left out: the proof of work is not what is being weighed, and
 /// `connect_block` is given `assemble_block`'s output directly.
@@ -137,6 +249,9 @@ fn run(blocks: usize, archiving: bool) {
         "blocks", "cold", "rss kB", "peak kB", "foot kB", "hot", "grace", "watch", "mature"
     );
     let mut marks: Vec<(u64, u64, u64)> = Vec::new();
+    // What the node holds, counted, at each mark. The bytes beside them are a
+    // proxy for these; these are the claim.
+    let mut held: Vec<Held> = Vec::new();
     let mut peak = rss_kb();
     let base = peak;
     for at in 0..blocks {
@@ -172,6 +287,13 @@ fn run(blocks: usize, archiving: bool) {
                 state.maturing().len(),
             );
             marks.push((leaves, peak, foot));
+            held.push(Held {
+                leaves,
+                hot: state.hot_notes().count(),
+                grace: state.grace_len(),
+                watched: state.watched_paths(),
+                maturing: state.maturing().len(),
+            });
         }
     }
 
@@ -229,6 +351,12 @@ fn run(blocks: usize, archiving: bool) {
         state.grace_len() as f64 * 3.2e9_f64.log2() * 32.0 / 1e6,
         state.grace_len() as f64 * (l1 as f64).log2() * 32.0 / 1e6,
     );
+
+    // Last, so that everything above is on the terminal whichever way this
+    // goes: a failure here is about a column somebody will want to read.
+    if !archiving {
+        held_does_not_grow(&held, &params);
+    }
 }
 
 #[test]
