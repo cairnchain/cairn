@@ -2035,7 +2035,73 @@ impl ChainStore {
             removed.push(id);
         }
         self.undo_from = self.undo_from.min(self.branch.len());
+        self.take_back_the_bodies_leaving(&removed);
         Ok(removed)
+    }
+
+    /// Reads back the body of every block on its way off the branch, while
+    /// there is still somewhere to read it from.
+    ///
+    /// [`Self::release_bodies`] lets go of a body because the log holds it,
+    /// and says so: "A body is in memory or on disk and never in neither."
+    /// True of the branch this node follows, which is what a log is. It is not
+    /// true of a branch this node has left, and a switch reads the bodies of
+    /// the branch it is going *back* to.
+    ///
+    /// What happens without this is the four steps that cannot be taken apart,
+    /// because each is right on its own. Bodies below the warm window go,
+    /// because the log holds them. A rival deeper than that window wins, and
+    /// the switch works, because the log still holds them while it runs. The
+    /// caller then cuts its log to the fork and writes the new branch over it,
+    /// because a log is the followed branch in order of height and leaving the
+    /// old records there would give them positions that are not their heights.
+    /// And then the branch that was left is heavier again. Its blocks between
+    /// the fork and the warm window are in neither place: memory let go, the
+    /// disk was written over.
+    ///
+    /// `apply` asks `body_of`, which reads by height, is handed the block that
+    /// sits there now, refuses it on the identifier, and answers `Corrupt`.
+    /// `cairn-net` reads that as `DropReason::OwnStore` and closes the
+    /// connection: an honest peer offering the real chain is turned away for
+    /// it, and the node stays on the lighter branch.
+    ///
+    /// Here rather than at the caller, because the moment a body stops being
+    /// on the disk is decided by the caller and the moment it stops being on
+    /// the branch is decided here, and this is the earlier of the two.
+    ///
+    /// It costs nothing that was not already being spent: `repool` reads the
+    /// bodies of everything undone anyway, and now reads them out of memory.
+    /// What it holds is bounded by what the branch that lost is worth keeping
+    /// at all, which is [`MAX_SIDE_BYTES`], and those blocks are dropped by
+    /// age like any other side branch.
+    fn take_back_the_bodies_leaving(&mut self, leaving: &[Hash32]) {
+        let Some(bodies) = self.bodies.clone() else {
+            return;
+        };
+        let wanted: Vec<(Hash32, u64)> = leaving
+            .iter()
+            .filter_map(|id| {
+                let held = self.blocks.get(id)?;
+                held.body.is_none().then_some((*id, held.header.height))
+            })
+            .collect();
+        for (id, height) in wanted {
+            let Some(block) = bodies.body(height) else {
+                continue;
+            };
+            // The disk answers about a height and not about a block, and what
+            // sits at a height is not always what sat there when this was
+            // called. The same check `body_of` makes, for the same reason.
+            if block.id() != id {
+                continue;
+            }
+            if let Some(held) = self.blocks.get_mut(&id) {
+                if held.body.is_none() {
+                    self.held_bytes = self.held_bytes.saturating_add(held.bytes);
+                    held.body = Some(block);
+                }
+            }
+        }
     }
 
     /// Lets go of blocks now deeper than [`HELD_WINDOW`].
