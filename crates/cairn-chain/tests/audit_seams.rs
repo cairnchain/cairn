@@ -1052,3 +1052,119 @@ fn a_failed_switch_leaves_the_branch_naming_the_deepest_fork_the_rules_allow() {
     }
     assert_eq!(store.height(), Some(tip + 1));
 }
+
+/// **A branch this node left, and then had to go back to, whose bodies are in
+/// neither place.**
+///
+/// `release_bodies` says it plainly: "A body is in memory or on disk and never
+/// in neither." True of the branch this node follows, at the moment the log is
+/// written. What a switch needs is the bodies of the branch it is going *back*
+/// to, and those are neither the branch being followed nor written by anybody.
+///
+/// Every step is a thing the node does on purpose:
+///
+/// 1. Following A, bodies between the undo floor and `tip - WARM_BODIES` are
+///    released, because the log holds them.
+/// 2. A rival B wins a switch deeper than `WARM_BODIES`. It succeeds: the log
+///    still holds A's blocks while the switch runs, which is what the guard in
+///    `release_bodies` was built for.
+/// 3. `write_blocks` cuts the log to the fork and writes B over it. That is
+///    right: a log is the branch being followed in order of height, and
+///    leaving A's records there would give them positions that are not their
+///    heights.
+/// 4. A is extended and is heavier again.
+///
+/// A's blocks between the fork and `tip - WARM_BODIES` are now in neither
+/// place: memory let go in step 1, the disk was overwritten in step 3.
+///
+/// **The three depths have to be chosen and not guessed**, which is the thing
+/// this got wrong first time. The first switch has to be deeper than the sixty
+/// four kept warm, or nothing was released above the fork. The second has to
+/// be inside the burial, or `ForkTooDeep` refuses it before a body is asked
+/// for and the test measures the depth rule instead. With a burial of eighty,
+/// a first switch of seventy leaves both true: five of A's blocks above the
+/// fork have no body anywhere, and the way back is seventy one deep.
+#[test]
+fn a_branch_left_behind_can_be_switched_back_onto() {
+    let burial = 80u64;
+    let rules = params().with_burial(burial);
+
+    let miner = wallet(1);
+    let shelf = Arc::new(Shelf::default());
+    let mut store = ChainStore::new(rules);
+    store.reads_bodies_from(shelf.clone());
+
+    let mut source = Source::new();
+    let mut blocks = Vec::new();
+    source.run(&miner, 31, &mut blocks);
+    let fork = source.clone();
+    source.run(&miner, 70, &mut blocks);
+
+    for block in &blocks {
+        shelf.put(block);
+        store.add_block(block.clone(), NOW).unwrap();
+    }
+    let tip = store.height().unwrap();
+    assert_eq!(tip, 100);
+
+    // Step 1. What the node does after every write.
+    store.release_bodies(0, tip + 1);
+    let orphaned: Vec<u64> = (31..=tip)
+        .filter(|height| store.block_at(*height).is_none())
+        .collect();
+    assert!(
+        !orphaned.is_empty(),
+        "nothing above the fork was released, so this measures nothing"
+    );
+    println!(
+        "above the fork, bodies read off the disk: {}..={}",
+        orphaned[0],
+        orphaned[orphaned.len() - 1]
+    );
+
+    // Step 2. A rival takes the branch, one block heavier.
+    let mut rival = fork.clone();
+    let mut theirs = Vec::new();
+    rival.run(&wallet(3), 71, &mut theirs);
+    let mut took = None;
+    for block in &theirs {
+        took = Some(store.add_block(block.clone(), NOW).unwrap());
+    }
+    assert!(
+        matches!(took, Some(Accepted::Reorganised { .. })),
+        "the rival has to win for this to be about anything: {took:?}"
+    );
+
+    // Step 3. What `write_blocks` does with the log on a switch: cut to the
+    // fork, write the branch now followed over it.
+    for height in 31..=tip {
+        shelf.lose(height);
+    }
+    for block in &theirs {
+        shelf.put(block);
+    }
+
+    // Step 4. The branch this node left is heavier again. Two blocks, so it
+    // wins outright rather than tying.
+    let mut back = source;
+    let mut ours = Vec::new();
+    back.run(&miner, 2, &mut ours);
+    let mut verdict = None;
+    for block in ours {
+        verdict = Some(store.add_block(block, NOW));
+    }
+
+    assert!(
+        !matches!(verdict, Some(Err(ChainError::Corrupt))),
+        "going back to a branch this node followed itself came back \
+         `Corrupt`: its bodies were let go of because the log held them, and \
+         the log was then written over with the branch that replaced it. \
+         `cairn-net` reads that as `OwnStore` and closes the connection, so an \
+         honest peer offering the real chain is turned away for it."
+    );
+    assert_eq!(
+        store.height(),
+        Some(102),
+        "and the heavier branch is the one being followed"
+    );
+}
