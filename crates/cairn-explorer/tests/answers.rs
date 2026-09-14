@@ -1132,8 +1132,22 @@ fn the_holders_table_says_how_much_of_the_chain_it_counted() {
 /// flight waited the whole of it.
 ///
 /// The walk now stops every so often and puts the index down. What is held
-/// here is that a route is answered many times over during a rebuild, and that
-/// no one answer waits anything like the length of it.
+/// here is that the index is put down and picked up again while the walk is
+/// still running, and that no one answer waits anything like the length of it.
+///
+/// **Two answers and not ten.** The count used to be ten, which is a count of
+/// another thread's turns and so a reading of the scheduler: a loaded runner
+/// got eight through and failed. What the defect gives is nought, and at most
+/// one, since the single request it leaves in flight can unblock between
+/// `refresh` returning and the count being read. Two is therefore the smallest
+/// number that cannot be that one request, which makes it the number this is
+/// about; anything above it is the machine being asked how fast it schedules.
+///
+/// The bound below it is the one with the teeth. On the defect the request in
+/// flight waits the whole walk, so a ratio between what one answer took and
+/// what the rebuild took fails by orders of magnitude, and unlike an absolute
+/// count it is two readings from the same run rather than one reading held to
+/// a number written down on another machine.
 #[test]
 fn a_route_is_answered_while_the_index_is_being_built() {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1180,9 +1194,11 @@ fn a_route_is_answered_while_the_index_is_being_built() {
              times while it ran, and the longest answer took {waited} us"
         );
         assert!(
-            during >= 10,
+            during >= 2,
             "{during} answers got through during the read, which is a site \
-             that stopped rather than one that kept talking"
+             that stopped rather than one that kept talking: nought is the \
+             index held across the whole walk, and one is the single request \
+             that was in flight when it started"
         );
         assert!(
             u128::from(waited) * 2 < rebuild.as_micros().max(2),
