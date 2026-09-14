@@ -692,7 +692,7 @@ fn a_branch_that_wins_while_ending_lower_is_noticed() {
         "a block that was dropped is not a block that changed"
     );
 
-    history.forget();
+    history.forget(None);
     assert_eq!(history.len(), 0);
     assert_eq!(
         history.undone().count(),

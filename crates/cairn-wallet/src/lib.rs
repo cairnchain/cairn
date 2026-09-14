@@ -1156,7 +1156,13 @@ impl Wallet {
         if history.diverged(Some(tip), |height| {
             self.node.archived_at(height).map(|block| block.id())
         }) {
-            history.forget();
+            // How deep a switch this node will follow, which is the rule its
+            // own `follow` enforces and so a ceiling on what a reorganisation
+            // can have taken away. Everything paid below it is settled, and
+            // what the account keeps of it is set out on `History::forget`.
+            let reach = self.node.with_chain(cairn_chain::ChainStore::undo_limit);
+            let settled_below = tip.checked_sub(reach);
+            history.forget(settled_below);
             self.write_history(&history);
         }
 
