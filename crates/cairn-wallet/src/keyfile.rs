@@ -15,6 +15,16 @@
 //! hexadecimal parser builds a vector of its own that it frees itself. Closing
 //! either means changing `cairn-primitives`, and neither of them outlives the
 //! process the way a file does.
+//!
+//! There was a third, and naming two of them is what kept it out of sight: a
+//! list of what cannot be closed reads as a list of everywhere the key goes.
+//! The one place outside [`read`] that opens a key file is the refusal
+//! [`write`] gives when one is already there, which reads it to tell an empty
+//! file from a full one, and the full one is the key holding the money. It
+//! read into a buffer nothing wiped. That one closes in this module, so it is
+//! closed; [`whitespace_only`] is where a key file is read outside [`read`],
+//! and it is the only such place because it is now the only one there is a
+//! name for.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -180,7 +190,7 @@ pub fn write(path: &Path, secret: &SecretKey) -> Result<(), String> {
 /// hit it round a loop: writing says the file is already there, reading says
 /// it is not a key, and neither says the file is empty and can go.
 fn already_there(path: &Path) -> String {
-    if std::fs::read(path).is_ok_and(|held| held.iter().all(u8::is_ascii_whitespace)) {
+    if whitespace_only(path) {
         return format!(
             "{} is already there and it is empty: it holds no key. That is what a write that \
              never finished leaves behind, and there is nothing in it to lose. Delete it and run \
@@ -193,6 +203,20 @@ fn already_there(path: &Path) -> String {
          the only copy, so replacing it would destroy the money it holds.",
         path.display()
     )
+}
+
+/// Whether a file holds nothing but whitespace.
+///
+/// The only place outside [`read`] that opens a key file, and it is a named
+/// place so that it stays the only one. What it is asked is whether the file
+/// is empty; what it has in its hands while answering is whatever the file
+/// holds, which on the branch that matters is the key somebody is about to be
+/// told not to overwrite. So it wipes it, like everything else here that has
+/// held a key, rather than leaving the one buffer in this module that did not.
+fn whitespace_only(path: &Path) -> bool {
+    std::fs::read(path)
+        .map(Zeroizing::new)
+        .is_ok_and(|held| held.iter().all(u8::is_ascii_whitespace))
 }
 
 /// Makes the file's name durable, where the platform has a way to say so.
@@ -293,6 +317,41 @@ mod tests {
         let read_back = read(&path).unwrap();
         assert_eq!(read_back.to_bytes(), secret.to_bytes());
         assert_eq!(read_back.public_key(), secret.public_key());
+    }
+
+    /// The question the one other reader of a key file is asked.
+    ///
+    /// What wipes its buffer is the type it reads into, which no test can
+    /// watch: a wipe leaves nothing behind by definition, and a test that
+    /// claimed to see one would be reading a freed allocation. What is
+    /// testable is that it still answers the question `already_there` puts to
+    /// it, which is the half a change could break while the type went on
+    /// looking right.
+    #[test]
+    fn a_file_of_whitespace_is_told_from_a_file_with_a_key_in_it() {
+        let directory = scratch("whitespace");
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let empty = directory.join("empty");
+        std::fs::write(&empty, "").unwrap();
+        assert!(whitespace_only(&empty));
+
+        let blank = directory.join("blank");
+        std::fs::write(&blank, "\n  \t\r\n").unwrap();
+        assert!(whitespace_only(&blank), "a write cut off leaves this too");
+
+        let held = directory.join("key");
+        write(&held, &SecretKey::from_bytes(&[5; 32])).unwrap();
+        assert!(
+            !whitespace_only(&held),
+            "this is the branch that matters: the file holds the money"
+        );
+
+        assert!(
+            !whitespace_only(&directory.join("missing")),
+            "a file that is not there is not an empty one, and saying it was \
+             would tell somebody to delete a name that holds nothing"
+        );
     }
 
     #[test]
