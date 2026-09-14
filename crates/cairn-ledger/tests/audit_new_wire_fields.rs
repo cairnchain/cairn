@@ -5,6 +5,26 @@
 //! a hostile length is refused rather than turned into an allocation, and an
 //! encode-decode round trip is exact in both directions (two byte strings
 //! decoding to one value would give a message two identities).
+//!
+//! **How the middle one is held, and how it used to be.** A count refused
+//! before anything is reserved and a count refused after four billion
+//! elements were reserved differ in which refusal comes back, and that is
+//! what is asserted. It used to be a stopwatch: the decode had to return
+//! inside two hundred milliseconds.
+//!
+//! A stopwatch cannot see this. `Vec::with_capacity` of four billion elements
+//! asks an allocator for address space, and an allocator on a host that
+//! overcommits hands it back without touching a page, in microseconds. So the
+//! reading the timer takes is the same whether the reservation happened or
+//! not, and the one thing it does track is how loaded the machine is. It
+//! could fail on a busy runner and pass on the defect, which is both ways
+//! round the wrong way.
+//!
+//! What it is now is a fact about the code and not about the host: a count
+//! past the cap comes back as the cap's own refusal, and a count the cap
+//! allows with no bytes behind it comes back as the input ending. The second
+//! is what keeps the first from being an assertion that a decoder refuses
+//! rather than one about which refusal it was.
 
 #![allow(
     clippy::unwrap_used,
@@ -19,9 +39,8 @@ use cairn_ledger::block::{BlockHeader, BLOCK_VERSION};
 use cairn_ledger::handover::{Handover, MOST_BURIED};
 use cairn_ledger::note::NetworkId;
 use cairn_ledger::sampling::{Sample, SampledStart, SAMPLES};
-use cairn_primitives::codec::{Decode, Encode};
+use cairn_primitives::codec::{CodecError, Decode, Encode};
 use cairn_primitives::{Amount, Hash32};
-use std::time::Instant;
 
 fn header(height: u64) -> BlockHeader {
     BlockHeader {
@@ -117,15 +136,21 @@ fn a_hostile_count_is_refused_without_reserving_for_it() {
     ] {
         let mut bent = bytes.clone();
         bent[count_at..count_at + 4].copy_from_slice(&lie.to_le_bytes());
-        let started = Instant::now();
+        let refused = SampledStart::decode(&bent)
+            .err()
+            .unwrap_or_else(|| panic!("a sample count of {lie} was accepted"));
         assert!(
-            SampledStart::decode(&bent).is_err(),
-            "a sample count of {lie} was accepted"
-        );
-        assert!(
-            started.elapsed().as_millis() < 200,
-            "refusing a count of {lie} took {:?}",
-            started.elapsed()
+            matches!(
+                refused,
+                CodecError::InvalidValue {
+                    type_name: "SampledStart"
+                }
+            ),
+            "a count of {lie} was refused as `{refused}`, and what has to \
+             refuse it is the cap: that is the one refusal that happens before \
+             a byte is read for it. Any other answer here is the answer of a \
+             decoder that went on reading and was stopped by something \
+             further down."
         );
     }
 
@@ -133,9 +158,28 @@ fn a_hostile_count_is_refused_without_reserving_for_it() {
     // bytes for it are not there: what must not happen is a reservation for it.
     let mut bent = bytes.clone();
     bent[count_at..count_at + 4].copy_from_slice(&u32::try_from(SAMPLES).unwrap().to_le_bytes());
-    let started = Instant::now();
-    assert!(SampledStart::decode(&bent).is_err());
-    assert!(started.elapsed().as_millis() < 200);
+    let refused = SampledStart::decode(&bent)
+        .expect_err("the largest allowed count, with no bytes behind it");
+    // Refused by something, and not by the cap, which is the whole of what
+    // this case is for: it is what makes `InvalidValue` above mean "the cap
+    // refused this count" rather than "a decoder refused these bytes".
+    //
+    // Not by the input ending, which is what this expected at first and is
+    // worth writing down. With the count set to what the cap allows, the
+    // decoder reads samples out of bytes that are not samples, and the first
+    // guard the noise trips is the sequence ceiling: it comes back saying a
+    // sequence declares 1 381 564 417 elements. Refused before anything is
+    // reserved for that either, one layer down.
+    assert!(
+        !matches!(
+            refused,
+            CodecError::InvalidValue {
+                type_name: "SampledStart"
+            }
+        ),
+        "a count the cap allows was refused by the cap, which would mean the \
+         refusal above says nothing about which guard fired: `{refused}`"
+    );
 }
 
 /// The same for the buried run, whose ceiling is `MOST_BURIED`.
@@ -160,15 +204,18 @@ fn a_hostile_buried_count_is_refused_without_reserving_for_it() {
     ] {
         let mut bent = bytes.clone();
         bent[count_at..].copy_from_slice(&lie.to_le_bytes());
-        let started = Instant::now();
+        let refused = Handover::decode(&bent)
+            .err()
+            .unwrap_or_else(|| panic!("a buried count of {lie} was accepted"));
         assert!(
-            Handover::decode(&bent).is_err(),
-            "a buried count of {lie} was accepted"
-        );
-        assert!(
-            started.elapsed().as_millis() < 200,
-            "refusing a count of {lie} took {:?}",
-            started.elapsed()
+            matches!(
+                refused,
+                CodecError::InvalidValue {
+                    type_name: "Handover buried run"
+                }
+            ),
+            "a count of {lie} was refused as `{refused}`, and what has to \
+             refuse it is the cap, before a byte is read for it"
         );
     }
 }
