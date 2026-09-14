@@ -170,6 +170,41 @@ impl Given {
     fn has(&self, name: &str) -> bool {
         self.values.contains_key(name)
     }
+
+    /// Refuses a setting given twice with two different values.
+    ///
+    /// The rule this file states above [`KNOWN`] is that a setting silently
+    /// ignored is how an operator ends up running rules they did not choose,
+    /// and on a chain that means following a different one. It was applied to
+    /// a name this node does not know and not to a name it knows given twice,
+    /// where exactly the same thing happens and the example in that sentence
+    /// is the one it happens to: `--network devnet --network testnet-6` ran on
+    /// devnet and said nothing about the other.
+    ///
+    /// Given twice with the same value, nothing is dropped and nothing is
+    /// said. `seed` is a list rather than a setting and every one of them is
+    /// used, so it is not asked about here.
+    ///
+    /// Asked of the command line and of the file separately, because the
+    /// command line winning over the file is the rule and not a collision.
+    fn one_value_each(&self, where_from: &str) -> Result<(), String> {
+        for (name, values) in &self.values {
+            if name == "seed" {
+                continue;
+            }
+            let Some(first) = values.first() else {
+                continue;
+            };
+            let Some(other) = values.iter().find(|value| *value != first) else {
+                continue;
+            };
+            return Err(format!(
+                "`{name}` is given twice {where_from}, as `{first}` and as `{other}`, and only \
+                 the first would ever be used. Say which one you mean."
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn parse_arguments(arguments: &[String]) -> Result<Given, String> {
@@ -258,9 +293,12 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         return Ok(None);
     }
 
+    command_line.one_value_each("on the command line")?;
+
     let data = PathBuf::from(command_line.first("data").unwrap_or(DEFAULT_DATA));
     let file = read_config(&data.join(CONFIG_FILE))?;
     let config = parse_config(&file)?;
+    config.one_value_each(&format!("in {CONFIG_FILE}"))?;
 
     let setting = |name: &str| -> Option<String> {
         command_line
