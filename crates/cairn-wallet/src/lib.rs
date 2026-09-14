@@ -1165,9 +1165,28 @@ impl Wallet {
         while history.next() < stop && (taken as u64) < CATCH_UP_BATCH {
             let height = history.next();
             let Some(block) = self.node.archived_at(height) else {
-                // Nothing to read here. If the wallet holds later blocks, the
+                // Nothing to read here. If the node holds later blocks, the
                 // history begins where they do rather than staying stuck.
-                let first = self.node.with_chain(cairn_chain::ChainStore::branch_start);
+                //
+                // Where the node can be read from, and not where the branch it
+                // follows begins. Those are different numbers on any node that
+                // has let go of its oldest blocks, which is every node past
+                // `--keep`: the branch still begins at zero and the log begins
+                // wherever trimming left it. Asked the branch, this walked to a
+                // height the node had nothing at, found the answer was not
+                // above where it already stood, and stopped there for good. An
+                // account that had to start over on such a node read no block
+                // ever again, and the line that says it is reading the chain
+                // again to rebuild itself was true of the intention only.
+                //
+                // The higher of the two, because a block below where the branch
+                // begins is not on this chain whatever the log still holds.
+                let first = self
+                    .node
+                    .blocks_from()
+                    .into_iter()
+                    .chain(self.node.with_chain(cairn_chain::ChainStore::branch_start))
+                    .max();
                 match first {
                     Some(first) if first > height => history.skip_to(first),
                     _ => break,
