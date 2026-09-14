@@ -82,7 +82,7 @@ false statement. Each was a correct observation standing where a different
 observation was required, which is exactly why they survived reading: checking
 the sentence confirms it.
 
-Six that shipped, and what each one actually answered:
+Seven that shipped, and what each one actually answered:
 
 *"The draw spreads over `bit_length(height / 1024)` levels."* True. The bound
 needed to know how much work the chain carries, and a height is a field the
@@ -114,6 +114,16 @@ that one of the two messages that put heights there cannot push it past 512.
 The other read the room once and then admitted a whole announcement against
 that one reading, and the set held 639.
 
+*"Fifty milliseconds of idle polling buys an exit that always works."* True,
+and it answers whether the loop that takes connections can be made to leave.
+The question was whether it can leave when nobody asked. Any error the loop did
+not recognise ended it, and the thread owned the listening socket, so the port
+closed for the life of the process. The error that reaches there is the machine
+being out of file descriptors for a moment, which is a fact about that moment
+and clears the instant somebody hangs up. Meanwhile the node went on following
+the chain, went on dialling out, and went on printing every line a working node
+prints.
+
 *"These are the places that were asked about and not answered for."* True of
 every place in the set until there are more than one message carries. Past
 that the wallet's question is cut on the way in, the tail is written into the
@@ -142,6 +152,8 @@ something here:
   than the one the name describes.
 - A test that holds a claim about a quantity by driving one of the several
   paths that reach it.
+- An exit that always works when somebody asks for it, offered as the account
+  of every way out of a loop.
 
 ## Scope
 

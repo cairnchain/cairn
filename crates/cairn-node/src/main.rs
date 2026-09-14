@@ -12,7 +12,7 @@ use cairn_chain::Outdated;
 use cairn_net::node::{
     Behind, Probation, Stranded, Unjudged, Unread, Unweighable, Unwritten, MAX_BEHIND,
 };
-use cairn_net::{Filling, Joined, Node, NodeError, Restored};
+use cairn_net::{Filling, Joined, Node, NodeError, Restored, Unanswered};
 
 const TICK: Duration = Duration::from_millis(100);
 
@@ -287,6 +287,13 @@ fn say_what_the_numbers_do_not(node: &Node, directory: &str) {
     }
     // And a node the network has left behind shows nothing but a height that
     // has stopped moving.
+    // And a node nobody can get into. It follows the chain from the peers it
+    // dialled itself, keeps its height, and prints every line a healthy node
+    // prints; what it has stopped being is somewhere anybody else can reach,
+    // which is the one thing about itself a node cannot see from the inside.
+    if let Some(unanswered) = node.unanswered() {
+        say(&nobody_can_get_in(&unanswered, node.turned_away()));
+    }
     if let Some(unjudged) = node.unjudged() {
         say(&too_old(&unjudged));
     }
@@ -522,6 +529,29 @@ fn as_far_as(unwritten: &Unwritten) -> String {
             unwritten.reached, unwritten.blocks
         ),
     }
+}
+
+/// What an operator is told while nobody can get in.
+///
+/// The one failure here with no symptom at all. A node refusing connections
+/// climbs in height, keeps every peer it dialled itself, and prints the line a
+/// working node prints, so the first anybody hears of it is that a seed
+/// address stopped answering. The cause is almost never the socket: it is the
+/// process or the machine having no file descriptor left to take a connection
+/// with, which is why the reason is quoted rather than summarised.
+fn nobody_can_get_in(unanswered: &Unanswered, turned_away: u64) -> String {
+    format!(
+        "nobody can get in: the last {} attempts to take a connection were refused, and the \
+         answer was: {}. Nothing is wrong with the chain, and the peers this node dialled \
+         itself are unaffected, which is why no other line here says anything. What has gone \
+         is the way in for everybody else, and a node nobody can reach hands the chain on to \
+         nobody. {turned_away} have been turned away since it started. It is almost always \
+         this process or this machine having run out of file descriptors, which clears by \
+         itself as soon as something closes one: the node goes on asking, and this line goes \
+         away when somebody gets in. If it stays, raise the limit on open files for whatever \
+         starts this node.",
+        unanswered.refusals, unanswered.because,
+    )
 }
 
 /// What an operator is told while a disk that has stopped taking writes can

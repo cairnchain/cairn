@@ -18,7 +18,7 @@ pub use book::AddressBook;
 pub use joining::Joined;
 pub use message::{Handshake, Keeps, Message, PeerAddress, Placed, MAX_PROVEN, PROTOCOL_VERSION};
 pub use node::{
-    Filling, Node, NodeError, Recovered, Restored, KEEP_BLOCK_BYTES, NAME_LOOKUP_PERIOD,
+    Filling, Node, NodeError, Recovered, Restored, Unanswered, KEEP_BLOCK_BYTES, NAME_LOOKUP_PERIOD,
 };
 pub use seeds::start_from;
 pub use sync::{on_message, DropReason, Local, PeerState, Reaction};

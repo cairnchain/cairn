@@ -820,6 +820,19 @@ impl std::fmt::Display for Writing {
     }
 }
 
+/// Why this node is not taking connections, if it is not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unanswered {
+    /// What the listener said, in its own words: too many open files, out of
+    /// memory. It is the difference between an operator who has to raise a
+    /// limit and one whose machine is in trouble, and this node is in no
+    /// position to tell them which.
+    pub because: String,
+    /// Visitors turned away in a row. It goes back to nothing the moment one
+    /// is let in, so a figure here is a door that is still shut.
+    pub refusals: u64,
+}
+
 /// What this node has taken on and not managed to put on its disk.
 ///
 /// A node whose disk has stopped taking writes goes on doing everything else.
@@ -1325,6 +1338,22 @@ struct Shared {
     /// that hold the log, so anything it took would be taken under the log and
     /// there is no order that survives that. It takes nothing.
     unread: Mutex<Option<Unread>>,
+    /// Why this node is not taking connections, if it is not.
+    ///
+    /// A leaf, like [`Shared::unwritten`]: it is written from the accept loop,
+    /// which holds nothing else while it writes it.
+    ///
+    /// The loop used to leave on any error it did not recognise, and the listener
+    /// went with the thread, so the port closed for the life of the process.
+    /// Every other part of the node went on working and saying so, which is how a
+    /// seed address goes dark while its operator reads a healthy status line.
+    unanswered: Mutex<Option<Unanswered>>,
+    /// Visitors this node could not take, over its whole life.
+    ///
+    /// Counted rather than only reported, because [`Shared::unanswered`] is
+    /// cleared the moment one is let in, and a node refusing one visitor in ten
+    /// would otherwise never show it.
+    turned_away: AtomicU64,
     /// Why the address book could not be written down, if it could not.
     ///
     /// A leaf as well, and it is written from upkeep and from the shutdown.
@@ -2259,6 +2288,12 @@ impl Shared {
     /// Why this node cannot get on from where it stands, if it cannot.
     fn stranded(&self) -> MutexGuard<'_, Option<Stranded>> {
         self.stranded.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn unanswered(&self) -> MutexGuard<'_, Option<Unanswered>> {
+        self.unanswered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Writes down what the last pass at the disk left behind, and stops the
@@ -3337,6 +3372,8 @@ impl Node {
             outdated: Mutex::new(None),
             unwritten: Mutex::new(None),
             unread: Mutex::new(unread),
+            unanswered: Mutex::new(None),
+            turned_away: AtomicU64::new(0),
             unsaved_book: Mutex::new(None),
             unjudged: Mutex::new(Unreadable::default()),
             unweighed: Mutex::new(Unweighed::default()),
@@ -4051,6 +4088,21 @@ impl Node {
     /// answering from a chain the network has left.
     pub fn outdated(&self) -> Option<Outdated> {
         *self.shared.outdated()
+    }
+
+    /// Why this node is not taking connections, if it is not.
+    ///
+    /// Cleared the moment a visitor is let in, so what this holds is a door
+    /// that is still shut rather than one that was. A node in this state is
+    /// still following the chain and still dialling out: what it has stopped
+    /// being is reachable, which is the one thing about itself it cannot see.
+    pub fn unanswered(&self) -> Option<Unanswered> {
+        self.shared.unanswered().clone()
+    }
+
+    /// Visitors this node could not take, over its whole life.
+    pub fn turned_away(&self) -> u64 {
+        self.shared.turned_away.load(Ordering::Relaxed)
     }
 
     /// Closes every connection, stops the listener, and saves what is worth
@@ -5824,9 +5876,14 @@ fn save_book(shared: &Arc<Shared>) {
 /// visitor. Fifty milliseconds of idle polling buys an exit that always works.
 fn accept_loop(shared: &Arc<Shared>, listener: &TcpListener) {
     let polling = listener.set_nonblocking(true).is_ok();
+    let mut refusals: u64 = 0;
     while shared.running.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, from)) => {
+                if refusals > 0 {
+                    refusals = 0;
+                    *shared.unanswered() = None;
+                }
                 // A socket accepted from a non-blocking listener inherits that
                 // mode on some platforms. Left alone, every read on it would
                 // return immediately and be taken for a deadline passing.
@@ -5846,7 +5903,27 @@ fn accept_loop(shared: &Arc<Shared>, listener: &TcpListener) {
                 thread::sleep(ACCEPT_POLL);
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(_) => break,
+            Err(error) => {
+                // Leaving here ended the thread, and the thread owned the
+                // listener, so the port closed for the life of the process
+                // while everything else about the node went on working and
+                // saying so. What reaches this arm is almost never the socket
+                // being gone. It is the process or the machine being out of
+                // descriptors, which is a fact about this moment rather than
+                // about any peer, and it clears the instant somebody hangs up:
+                // exactly the moment a node most needs to still be listening.
+                //
+                // So the loop waits and asks again, and counts what it was
+                // refused with rather than going quiet. Nothing here can spin:
+                // every turn through it sleeps the same poll the idle path does.
+                refusals = refusals.saturating_add(1);
+                shared.turned_away.fetch_add(1, Ordering::Relaxed);
+                *shared.unanswered() = Some(Unanswered {
+                    because: error.to_string(),
+                    refusals,
+                });
+                thread::sleep(ACCEPT_POLL);
+            }
         }
     }
 }
