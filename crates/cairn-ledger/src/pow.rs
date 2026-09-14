@@ -318,18 +318,31 @@ mod tests {
     }
 
     #[test]
-    fn one_retarget_cannot_move_the_difficulty_more_than_fourfold() {
+    fn a_window_whose_timeline_stood_still_rises_by_exactly_the_cap() {
         let mut recent = steady(91, 60, 1_000);
         for entry in &mut recent {
             entry.timestamp = 0;
         }
-        assert!(next_difficulty(&recent, 60) <= 4_000);
+        assert_eq!(next_difficulty(&recent, 60), 4_000);
+    }
 
+    #[test]
+    fn one_retarget_cannot_raise_the_difficulty_more_than_fourfold() {
+        // Sixty times too fast, so the rise asked for is sixtyfold and the
+        // answer has to come from the clamp. The window above this one stands
+        // still and leaves through the branch that answers a measured zero,
+        // which reaches the same number without reading the cap at all.
+        let recent = steady(91, 1, 1_000);
+        assert_eq!(next_difficulty(&recent, 60), 4_000);
+    }
+
+    #[test]
+    fn one_retarget_cannot_lower_the_difficulty_more_than_fourfold() {
         let mut recent = steady(91, 60, 1_000);
         for (index, entry) in recent.iter_mut().enumerate() {
             entry.timestamp = index as u64 * 100_000;
         }
-        assert!(next_difficulty(&recent, 60) >= 250);
+        assert_eq!(next_difficulty(&recent, 60), 250);
     }
 
     #[test]
