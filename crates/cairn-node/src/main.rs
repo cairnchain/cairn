@@ -33,6 +33,28 @@ enum Ending {
     Fault,
 }
 
+/// Why this program is stopping, when it is not stopping because it was asked
+/// to.
+///
+/// Two different things, and they used to be one. A command line this node
+/// cannot read is the operator's to fix and the usage text is what fixes it.
+/// A node that could not start had a command line that was right: the
+/// directory is held by another node, or the port is taken, or the disk will
+/// not have it. Printing the usage text at somebody in that position tells
+/// them to look for a mistake that is not there, and exiting on the same code
+/// leaves whatever started this node unable to tell the two apart at all.
+///
+/// The reasoning is the one already written on [`Ending::Fault`], which says
+/// no usage text because nothing on the command line was wrong. It was true of
+/// that case and of this one, and only applied to that one.
+enum Stopping {
+    /// The command line, which the usage text is the answer to.
+    Misread(String),
+    /// Everything else, where the message is the answer and there is no
+    /// second thing to say.
+    CouldNotStart(String),
+}
+
 fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     match run(&arguments) {
@@ -40,7 +62,11 @@ fn main() {
         // No usage text: nothing on the command line was wrong, and the
         // paragraph the node printed before stopping is the thing to read.
         Ok(Ending::Fault) => std::process::exit(1),
-        Err(message) => {
+        Err(Stopping::CouldNotStart(message)) => {
+            eprintln!("cairnd: {message}");
+            std::process::exit(1);
+        }
+        Err(Stopping::Misread(message)) => {
             eprintln!("cairnd: {message}");
             eprintln!();
             eprintln!("{}", options::HELP);
@@ -49,8 +75,8 @@ fn main() {
     }
 }
 
-fn run(arguments: &[String]) -> Result<Ending, String> {
-    let Some(options) = options::resolve_options(arguments)? else {
+fn run(arguments: &[String]) -> Result<Ending, Stopping> {
+    let Some(options) = options::resolve_options(arguments).map_err(Stopping::Misread)? else {
         println!("{}", options::HELP);
         return Ok(Ending::AsAsked);
     };
@@ -77,7 +103,7 @@ fn run(arguments: &[String]) -> Result<Ending, String> {
         Node::open
     };
     let (node, restored) = started(options.params, options.listen, &options.data)
-        .map_err(|error| format!("could not start: {error}"))?;
+        .map_err(|error| Stopping::CouldNotStart(format!("could not start: {error}")))?;
     node.keep_blocks(options.keep);
     let node = Arc::new(node);
 

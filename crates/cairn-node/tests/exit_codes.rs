@@ -198,3 +198,100 @@ fn what_dropping_a_block_costs_a_newcomer_is_printed_beside_the_budget() {
     let said = String::from_utf8_lossy(&output.stdout);
     assert!(!said.contains("what is dropped"), "{said}");
 }
+
+/// **A node that could not start is not a command line that was wrong.**
+///
+/// Both used to print the usage text and exit 2, so whatever started this node
+/// could not tell "you typed something I cannot read" from "the directory is
+/// held by another node". The first is the operator's to fix and the usage
+/// text is what fixes it; the second has a command line that is right, and
+/// telling that operator to go and look for a mistake sends them somewhere
+/// there is nothing to find.
+///
+/// The reasoning is the one already written on `Ending::Fault`: no usage text,
+/// because nothing on the command line was wrong. It was true of that case and
+/// of this one, and applied only to that one.
+#[test]
+fn a_node_that_could_not_start_says_so_without_the_usage_text() {
+    let directory = scratch("held");
+
+    // One node holding the directory, for as long as the second one tries.
+    let mut holding = Command::new(env!("CARGO_BIN_EXE_cairnd"))
+        .args([
+            "--data",
+            &directory.to_string_lossy(),
+            "--network",
+            "devnet",
+            "--listen",
+            "127.0.0.1:0",
+            "--run-for",
+            "30",
+        ])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("cairnd runs");
+
+    // Waited for, not asserted on: what is asserted is what the second node
+    // says, and a first node that never took the lock makes this test fail
+    // rather than pass.
+    let giving_up = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut refused = None;
+    while std::time::Instant::now() < giving_up {
+        let output = cairnd(&[
+            "--data",
+            &directory.to_string_lossy(),
+            "--network",
+            "devnet",
+            "--listen",
+            "127.0.0.1:0",
+            "--run-for",
+            "1",
+        ]);
+        if output.status.code() != Some(0) {
+            refused = Some(output);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = holding.kill();
+    let _ = holding.wait();
+
+    let output = refused.expect("a second node on a held directory is refused");
+    let complained = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        complained.contains("could not start"),
+        "it did not say it could not start: {complained}"
+    );
+    assert!(
+        !complained.contains("--data <directory>"),
+        "it printed the usage text at an operator whose command line was right: {complained}"
+    );
+    assert_ne!(
+        output.status.code(),
+        Some(2),
+        "a node that could not start exits on the code a wrong command line exits on, so nothing \
+         that starts this node can tell the two apart"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "it stopped without running, which is the code for that"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// And a command line that really is wrong still gets the usage text and the
+/// code that goes with it, which is what says the change above is a
+/// distinction and not a removal.
+#[test]
+fn a_command_line_that_cannot_be_read_still_gets_the_usage_text() {
+    let output = cairnd(&["--nonsense", "3"]);
+    let complained = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(2), "{complained}");
+    assert!(
+        complained.contains("--data <directory>"),
+        "an operator who typed something unreadable was not shown what to type: {complained}"
+    );
+}
