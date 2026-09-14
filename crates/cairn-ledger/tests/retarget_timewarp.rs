@@ -306,7 +306,21 @@ fn both_clamps_hold_in_both_directions() {
         "past the ceiling a longer gap buys nothing"
     );
 
-    // One step down is at most a quarter, one step up at most fourfold.
+    // One step down is at most a quarter, one step up at most fourfold. The
+    // rise is read off a window that ran sixty times too fast rather than one
+    // standing still: a standstill leaves through the branch that answers a
+    // measured zero, which returns the same fourfold number without consulting
+    // the cap, so it cannot tell whether the cap is there.
+    let mut too_fast = Window::new();
+    for height in 0..91u64 {
+        too_fast.push(height, 1_000_000 + height, 1_000_000);
+    }
+    assert_eq!(
+        too_fast.next(TARGET),
+        1_000_000 * RETARGET_FACTOR,
+        "capped at fourfold"
+    );
+
     let mut flat = Window::new();
     for height in 0..91u64 {
         flat.push(height, 1_000_000, 1_000_000);
@@ -314,7 +328,7 @@ fn both_clamps_hold_in_both_directions() {
     assert_eq!(
         flat.next(TARGET),
         1_000_000 * RETARGET_FACTOR,
-        "capped at fourfold"
+        "a timeline that measured no time at all rises by the same fourfold"
     );
 
     let mut stretched = Window::new();
