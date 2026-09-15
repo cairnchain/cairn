@@ -1354,6 +1354,14 @@ struct Shared {
     /// cleared the moment one is let in, and a node refusing one visitor in ten
     /// would otherwise never show it.
     turned_away: AtomicU64,
+    /// Forest nodes built again from the leaves beneath them, over this
+    /// node's whole life.
+    ///
+    /// A figure here is a disk that dropped something this node wrote and
+    /// went on running, which is worth an operator knowing even though the
+    /// node put it right by itself: a disk that lost one node has not
+    /// finished.
+    mended_nodes: AtomicU64,
     /// Why the address book could not be written down, if it could not.
     ///
     /// A leaf as well, and it is written from upkeep and from the shutdown.
@@ -3374,6 +3382,7 @@ impl Node {
             unread: Mutex::new(unread),
             unanswered: Mutex::new(None),
             turned_away: AtomicU64::new(0),
+            mended_nodes: AtomicU64::new(0),
             unsaved_book: Mutex::new(None),
             unjudged: Mutex::new(Unreadable::default()),
             unweighed: Mutex::new(Unweighed::default()),
@@ -4103,6 +4112,16 @@ impl Node {
     /// Visitors this node could not take, over its whole life.
     pub fn turned_away(&self) -> u64 {
         self.shared.turned_away.load(Ordering::Relaxed)
+    }
+
+    /// Forest nodes this node found torn and built again from the leaves.
+    ///
+    /// Zero on a disk that has kept what it was given. Anything else is a
+    /// disk that dropped a write and a node that carried on: put right,
+    /// and worth saying, because a disk that lost one node has not
+    /// finished.
+    pub fn mended_nodes(&self) -> u64 {
+        self.shared.mended_nodes.load(Ordering::Relaxed)
     }
 
     /// Closes every connection, stops the listener, and saves what is worth
@@ -4965,8 +4984,38 @@ impl Shared {
 
     /// Where a header sits in the forest a chain of `leaves` committed to.
     fn proof_off_disk(&self, height: u64, leaves: u64) -> Option<ForestProof> {
-        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-        match log.as_ref()?.forest.prove_in(height, leaves) {
+        let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        let error = match log.as_ref()?.forest.prove_in(height, leaves) {
+            Ok(proof) => return proof,
+            Err(error) => error,
+        };
+
+        // A node that will not fold is the one refusal here that is this
+        // node's own disk and not a question it was asked. The forest writes
+        // without waiting, so a level whose length landed before its bytes did
+        // leaves a node of the right length holding the wrong ones, and the
+        // repair that runs at every start puts a level right by its length and
+        // walks straight past it.
+        //
+        // Nothing wrote it again. A node at height `k` sits on the path of the
+        // `2^k` leaves beneath it and is the sibling of the `2^k` beside it,
+        // so leaving it there refused `2^(k + 1)` leaves for the life of this
+        // node: a wallet asking where one of its fallen notes sits was told
+        // no, every time, for ever, by a node that was otherwise well.
+        //
+        // So it is built again from the leaves, which is the only thing here
+        // derived from nothing, and the question is asked once more.
+        let StoreError::Unfolded { height: at, start } = error else {
+            self.could_not_read(Reading::Headers, height, &error);
+            return None;
+        };
+        let store = log.as_mut()?;
+        if let Err(error) = store.forest.mend_below(at, start) {
+            self.could_not_read(Reading::Headers, height, &error);
+            return None;
+        }
+        self.mended_nodes.fetch_add(1, Ordering::Relaxed);
+        match store.forest.prove_in(height, leaves) {
             Ok(proof) => proof,
             Err(error) => {
                 self.could_not_read(Reading::Headers, height, &error);

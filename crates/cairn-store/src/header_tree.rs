@@ -224,6 +224,59 @@ impl HeaderTree {
         Ok(Some(ForestProof { siblings }))
     }
 
+    /// Builds every node over the leaves beneath one that would not fold, from
+    /// the leaves upward.
+    ///
+    /// `mend_levels` puts a level right by its length: a node that is there is
+    /// kept and a node that is missing is built. A node of the right length
+    /// holding the wrong bytes is neither, and the forest writes without
+    /// waiting for the disk, so a level whose length landed before its bytes
+    /// did is exactly that. Nothing wrote it again, and a node at height `k`
+    /// is on the path of the `2^k` leaves beneath it and the sibling of the
+    /// `2^k` beside it, so one of them refused `2^(k + 1)` leaves for the life
+    /// of the node.
+    ///
+    /// Built from the leaves and not from the two nodes beneath, which is the
+    /// repair that looks obvious and is wrong. A walk that folds upward checks
+    /// the child on its own path and reads the sibling on trust, so when the
+    /// two disagree either the node above them or that sibling is the liar.
+    /// Writing the fold of the pair over the node above cements the corruption
+    /// in the half of the cases where the sibling is the one that tore. Only
+    /// the leaves are not derived from anything, so only they settle it, and
+    /// the cost of asking them is the subtree and never the chain.
+    ///
+    /// Idempotent, and safe on a forest that was never damaged: every node it
+    /// writes is the one that was already there.
+    pub fn mend_below(&mut self, height: usize, start: u64) -> Result<(), StoreError> {
+        let Some(span) = 1u64.checked_shl(u32::try_from(height).unwrap_or(u32::MAX)) else {
+            return Err(StoreError::MissingNode { height, start });
+        };
+        let Some(covered) = start.checked_div(span).and_then(|at| at.checked_mul(span)) else {
+            return Err(StoreError::MissingNode { height, start });
+        };
+        for level in 1..=height {
+            let Some(reach) = 1u64.checked_shl(u32::try_from(level).unwrap_or(u32::MAX)) else {
+                return Err(StoreError::MissingNode { height, start });
+            };
+            let Some(first) = covered.checked_div(reach) else {
+                return Err(StoreError::MissingNode { height, start });
+            };
+            let Some(past) = span
+                .checked_div(reach)
+                .and_then(|many| first.checked_add(many))
+            else {
+                return Err(StoreError::MissingNode { height, start });
+            };
+            for index in first..past.max(first.saturating_add(1)) {
+                if index >= self.filled(level) {
+                    break;
+                }
+                self.rebuild(level, index)?;
+            }
+        }
+        Ok(())
+    }
+
     /// The leaf at `position`, if it is held.
     ///
     /// For telling where this forest and the log it follows part company.
