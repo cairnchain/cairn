@@ -227,36 +227,54 @@ fn a_node_that_could_not_start_says_so_without_the_usage_text() {
             "--run-for",
             "30",
         ])
-        .stdout(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .spawn()
         .expect("cairnd runs");
 
-    // Waited for, not asserted on: what is asserted is what the second node
-    // says, and a first node that never took the lock makes this test fail
-    // rather than pass.
-    let giving_up = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let mut refused = None;
-    while std::time::Instant::now() < giving_up {
-        let output = cairnd(&[
-            "--data",
-            &directory.to_string_lossy(),
-            "--network",
-            "devnet",
-            "--listen",
-            "127.0.0.1:0",
-            "--run-for",
-            "1",
-        ]);
-        if output.status.code() != Some(0) {
-            refused = Some(output);
-            break;
+    // Read until the first node says it is listening, which is the moment it
+    // holds the lock. This used to try the second node over and over for
+    // thirty seconds and take the first refusal, which is a race dressed as a
+    // deadline: under a loaded runner every attempt found a directory nobody
+    // held yet and exited nought, and the test failed for the machine's
+    // reasons rather than the node's.
+    {
+        use std::io::BufRead as _;
+        let stdout = holding
+            .stdout
+            .take()
+            .expect("cairnd was started with a pipe");
+        let mut lines = std::io::BufReader::new(stdout);
+        let mut said = String::new();
+        loop {
+            said.clear();
+            let read = lines.read_line(&mut said);
+            match read {
+                Ok(0) | Err(_) => {
+                    let _ = holding.kill();
+                    let _ = holding.wait();
+                    panic!("the first node stopped before it took the directory");
+                }
+                Ok(_) => {
+                    if said.trim().starts_with("listening") {
+                        break;
+                    }
+                }
+            }
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
     }
+
+    let output = cairnd(&[
+        "--data",
+        &directory.to_string_lossy(),
+        "--network",
+        "devnet",
+        "--listen",
+        "127.0.0.1:0",
+        "--run-for",
+        "1",
+    ]);
     let _ = holding.kill();
     let _ = holding.wait();
-
-    let output = refused.expect("a second node on a held directory is refused");
     let complained = String::from_utf8_lossy(&output.stderr);
 
     assert!(
