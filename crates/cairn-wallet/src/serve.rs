@@ -221,6 +221,37 @@ fn turned_away(opened: &Opened, request: &Request) -> Option<Response> {
 }
 
 /// Compares without letting the time taken say how much matched.
+///
+/// Whoever holds this secret holds the page, and the page spends money. A
+/// comparison that stops at the first byte that differs tells anybody who can
+/// time it how much of their guess was right, which turns finding the secret
+/// from one guess in an enormous number into thirty two guesses in two hundred
+/// and fifty six.
+///
+/// What the property rests on is that every byte is looked at whatever the
+/// answer turns out to be, which is what the fold below is: no early return,
+/// and the difference accumulated rather than tested. It is that shape in the
+/// source and it is not that shape by any rule, so this is the one claim in
+/// this file resting on a reading of the code.
+///
+/// `subtle` would carry it instead, with barriers a compiler is not allowed to
+/// see through, and it is in this tree already under `ed25519-dalek` so it
+/// would cost nothing anybody downloads. It is not taken, because the count of
+/// outside dependencies this project publishes counts the ones its manifests
+/// name, and that number is small on purpose and checked by a test. A sixth
+/// name for a barrier against something no compiler has been seen to do here
+/// is not the trade.
+///
+/// The length is compared separately and in the ordinary way, which leaks it.
+/// That is deliberate: the length of this secret is fixed and printed by the
+/// wallet, so it is not a thing anybody has to guess.
+///
+/// **No test in this file measures any of the above**, and the one that used
+/// to be named as though it did is the reason this note is here. What a test
+/// can hold is that the comparison answers what a comparison should, which is
+/// what [`the_comparison_answers_what_a_comparison_should`] holds. Timing it
+/// would be reading this machine at two moments and calling the difference a
+/// property of the code.
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
@@ -590,12 +621,29 @@ mod tests {
         );
     }
 
+    /// What a test here can hold, and it is not what the name used to claim.
+    ///
+    /// The name was `comparing_the_secret_says_nothing_by_how_long_it_takes`,
+    /// and what it asserts is four equalities. Replace the comparison with
+    /// `==` and every one of them still holds, because the two answer the same
+    /// thing and differ only in what they do on the way. So the name stated a
+    /// property the test could not fail on, which is the shape this repository
+    /// looks for everywhere else.
+    ///
+    /// What holds the timing property is the note on `constant_time_eq`, and
+    /// it is a reading of the code rather than anything here.
     #[test]
-    fn comparing_the_secret_says_nothing_by_how_long_it_takes() {
+    fn the_comparison_answers_what_a_comparison_should() {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"ab"));
         assert!(constant_time_eq(b"", b""));
+
+        // A difference at either end, because a comparison that stopped early
+        // would still answer both of these correctly and this is where
+        // somebody reading the test should notice that it cannot tell.
+        assert!(!constant_time_eq(b"Xbc", b"abc"), "the first byte");
+        assert!(!constant_time_eq(b"abX", b"abc"), "the last byte");
     }
 
     #[test]
