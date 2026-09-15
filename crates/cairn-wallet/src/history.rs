@@ -1120,14 +1120,10 @@ mod tests {
             MAX_UNDONE,
             "the account kept every movement of a branch that lost"
         );
-        let oldest = history
-            .undone()
-            .map(|held| held.height)
-            .min()
-            .expect("there are movements");
+        let oldest = history.undone().map(|held| held.height).min();
         assert_eq!(
             oldest,
-            (over - MAX_UNDONE) as u64,
+            Some((over - MAX_UNDONE) as u64),
             "the ones dropped were meant to be the oldest, and what is left \
              begins at the height after them"
         );
