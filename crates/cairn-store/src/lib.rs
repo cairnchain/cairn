@@ -582,6 +582,22 @@ impl BlockLog {
         if let Ok(Some(next)) = self.header_of(index.saturating_add(1)) {
             return next.previous == header.id();
         }
+        // The index entry for the record after this one would not read, which
+        // is a fault in a derived file and not in the log. The record is still
+        // there, and it begins where this one ends: a number this record's own
+        // length prefix already agreed to, since that is what `read_at`
+        // checked the record against before asking this. So what was lost is
+        // the way of finding the neighbour and not the neighbour, and the
+        // check that names every byte of this header is still available.
+        //
+        // Without this the answer fell through to the record before, which
+        // names only this one's `previous` field: forty bytes of a header that
+        // is hundreds, with the state root among the rest served as truth. Two
+        // faults reach that state, one in the index and one in the log, which
+        // is why a sweep that flips one byte at a time never found it.
+        if let Ok(Some(next)) = self.header_after(index) {
+            return next.previous == header.id();
+        }
         let Some(before) = index.checked_sub(1) else {
             return true;
         };
@@ -600,6 +616,45 @@ impl BlockLog {
         let Some((start, end)) = self.bounds(index)? else {
             return Ok(None);
         };
+        self.header_between(start, end, index)
+    }
+
+    /// The header at the front of the record that begins where record `index`
+    /// ends, found through the log rather than through the index.
+    ///
+    /// For the one case the index is no use in and the log still is: an entry
+    /// that will not read, with the record it names sitting where it always
+    /// was. The end of this record is the start of that one, and how far it
+    /// runs is its own length prefix, which is the same thing every other
+    /// record here is read by.
+    fn header_after(&self, index: usize) -> Result<Option<BlockHeader>, StoreError> {
+        let after = index.saturating_add(1);
+        if after >= self.count {
+            return Ok(None);
+        }
+        let Some((_, start)) = self.bounds(index)? else {
+            return Ok(None);
+        };
+        let mut file = &self.file;
+        file.seek(SeekFrom::Start(start))?;
+        let mut length = [0u8; 4];
+        file.read_exact(&mut length)?;
+        let end = start
+            .saturating_add(4)
+            .saturating_add(u64::from(u32::from_le_bytes(length)));
+        if end > self.end || end.saturating_sub(start) > max_record_on_disk() {
+            return Ok(None);
+        }
+        self.header_between(start, end, after)
+    }
+
+    /// The header at the front of the record between these two offsets.
+    fn header_between(
+        &self,
+        start: u64,
+        end: u64,
+        index: usize,
+    ) -> Result<Option<BlockHeader>, StoreError> {
         let body = usize::try_from(end.saturating_sub(start).saturating_sub(4)).unwrap_or(0);
         let want = body.min(HEADER_BYTES);
         let mut file = &self.file;
