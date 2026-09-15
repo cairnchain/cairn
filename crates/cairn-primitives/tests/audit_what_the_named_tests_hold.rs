@@ -177,6 +177,11 @@ fn a_zero_width_element_lets_a_count_outrun_its_frame() {
 /// its over-long frame by hand "since encoding it is what a debug build now
 /// stops on". With the `debug_assert!` deleted, all fifty nine tests passed.
 /// This is the one that stops passing.
+/// Only in a debug build, which is where the assertion it is about exists at
+/// all: `debug_assert!` compiles to nothing otherwise, so in release there is
+/// no panic to expect and a `should_panic` test fails for the right reason in
+/// the wrong place. CI runs the suite both ways, and said so.
+#[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "past what the decoder will read back")]
 fn encoding_a_sequence_past_the_ceiling_stops_a_debug_build() {
