@@ -826,7 +826,11 @@ const RECOVERY_PAUSE: Duration = Duration::from_secs(15);
 /// A wallet catching up on a long absence reads them in batches rather than
 /// holding the chain while it walks the lot, so the page stays answerable and
 /// the next block still arrives.
-const CATCH_UP_BATCH: u64 = 512;
+///
+/// Public so that the test which holds it can count against the number rather
+/// than against a copy of it: a copy is a second place the same fact lives,
+/// and the one that moves is never the copy.
+pub const CATCH_UP_BATCH: u64 = 512;
 
 /// How long the chain has to sit still, with somebody to ask, before catching
 /// up counts as done.
