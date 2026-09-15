@@ -1086,6 +1086,53 @@ mod tests {
         );
     }
 
+    /// What the account keeps of a branch that lost, and what it drops.
+    ///
+    /// `MAX_UNDONE` is the bound, and nothing could fail on it: the tests
+    /// around forgetting hold that what was undone is kept, at counts far
+    /// under it, so the number could be five or five million and they would
+    /// pass either way. It is the oldest that go, which is the half that
+    /// decides whether a person reading their own account sees the payment
+    /// they are looking for or the one before it.
+    #[test]
+    fn the_account_keeps_the_newest_undone_movements_and_no_more() {
+        let mine = key(1);
+        let mut history = History::new();
+        // A literal, and not the constant plus something. Written in terms of
+        // the constant this test moves with it, which is the defect it is here
+        // to close: at five it would pass as readily as at two hundred and
+        // fifty six, and five is not a record of a branch that lost.
+        let over = 300usize;
+        assert!(
+            over > MAX_UNDONE,
+            "this test reads {over} movements to watch {MAX_UNDONE} of them kept, and has to \
+             read more than are kept"
+        );
+        for height in 0..over as u64 {
+            history.take(&block(height, mine, Vec::new()), mine);
+        }
+        assert_eq!(history.len(), over, "every block paid this key");
+
+        history.forget(None);
+
+        assert_eq!(
+            history.undone().count(),
+            MAX_UNDONE,
+            "the account kept every movement of a branch that lost"
+        );
+        let oldest = history
+            .undone()
+            .map(|held| held.height)
+            .min()
+            .expect("there are movements");
+        assert_eq!(
+            oldest,
+            (over - MAX_UNDONE) as u64,
+            "the ones dropped were meant to be the oldest, and what is left \
+             begins at the height after them"
+        );
+    }
+
     /// Forgetting keeps the place of a note no reorganisation can reach, and
     /// throws away the place of one it can.
     ///
