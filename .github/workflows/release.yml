@@ -21,6 +21,25 @@
 # a tag naming one version over programs that report another. The tag is made
 # here, from the number, so the two cannot disagree.
 #
+# What that left was the remembering. Nobody changed the number for a hundred
+# commits and two weeks, and among them were fixes to money: a wallet that
+# lost where its fallen notes sat, an account file anybody with a login could
+# read, a node whose listening port closed in silence. None of it was
+# downloadable, because a release waited on somebody thinking of it.
+#
+# So the number is worked out here too, once a day, from the one thing that
+# decides whether a release is worth making: whether what people download
+# would be different. That is a fact about files, and it is checked against
+# the crates the three programs are actually built from, so a change to the
+# documents or the fuzzing harness moves nothing.
+#
+# Deliberately not from the words in commit messages. `fix:` and `feat:` say
+# what an author meant, and a signed artifact anybody can download should turn
+# on what changed rather than on how it was labelled: a source change written
+# up as `test:` would publish nothing and nobody would notice. The labels
+# decide the size of the step and never whether to take it, because the size
+# is a judgement and the taking is a fact.
+#
 # The tag message is the commit that changed the number, which is where the
 # reason for a release is already written.
 
@@ -29,6 +48,12 @@ name: release
 on:
   push:
     branches: [main]
+  # Once a day, rather than on every merge. A release is a thing people
+  # download: one carrying a day's work is worth more than six carrying one
+  # change each, and a version bump in every pull request would have them all
+  # fighting over the same line of Cargo.toml.
+  schedule:
+    - cron: "0 6 * * *"
   workflow_dispatch:
     inputs:
       version:
@@ -58,6 +83,7 @@ jobs:
     outputs:
       release: ${{ steps.look.outputs.release }}
       version: ${{ steps.look.outputs.version }}
+      bump: ${{ steps.look.outputs.bump }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -75,19 +101,90 @@ jobs:
             echo "no version under [workspace.package] in Cargo.toml" >&2
             exit 1
           fi
+          # The number as it stands. A scheduled run that decides to move it
+          # writes the new one over this below.
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "bump=false" >> "$GITHUB_OUTPUT"
             echo "release=false" >> "$GITHUB_OUTPUT"
             echo "a dry run of ${{ inputs.version }}, publishing nothing"
             exit 0
           fi
-          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+          if ! git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            # Somebody set the number by hand. Publishing it is what this file
+            # has always done and is left exactly as it was.
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "v$version has no release yet, so this push is one"
+            exit 0
+          fi
+
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "bump=false" >> "$GITHUB_OUTPUT"
             echo "release=false" >> "$GITHUB_OUTPUT"
             echo "v$version is already released; nothing to do"
             exit 0
           fi
+
+          # A scheduled run, and the number it found is already published. So
+          # the question is whether anything people download would differ.
+          #
+          # Asked of the crates the three programs are built from, worked out
+          # rather than written down: a list here would be a second place the
+          # membership lives, and a crate added to the workspace with the
+          # others would not be in it. `cairn-docs` and the fuzzing harness are
+          # in the workspace and in no binary, so nothing they do is a reason
+          # to publish.
+          built=$(
+            cargo tree -p cairn-node -p cairn-wallet -p cairn-explorer \
+              --prefix none --no-dedupe --edges normal 2>/dev/null \
+              | awk '{print $1}' | grep '^cairn-' | sort -u
+          )
+          if [ -z "$built" ]; then
+            echo "could not work out which crates a release is built from" >&2
+            exit 1
+          fi
+          paths=""
+          for crate in $built; do
+            paths="$paths crates/$crate"
+          done
+          # The lock file and the toolchain as well: neither is a crate of ours
+          # and a change to either changes the programs.
+          paths="$paths Cargo.lock rust-toolchain.toml"
+          echo "built from:" $built
+
+          # Unquoted on purpose: this is a list of paths and not one path.
+          # shellcheck disable=SC2086
+          if git diff --quiet "v$version" HEAD -- $paths; then
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "nothing a release is built from has changed since v$version"
+            exit 0
+          fi
+
+          # Something did. How far the number moves is the one thing the
+          # commit messages decide, because it is a judgement rather than a
+          # fact, and it is the author who made it.
+          step=patch
+          if git log "v$version"..HEAD --no-merges --format=%s \
+            | grep -qE '^feat(\(|!|:)'; then
+            step=minor
+          fi
+          major=${version%%.*}
+          rest=${version#*.}
+          minor=${rest%%.*}
+          patch=${rest#*.}
+          if [ "$step" = minor ]; then
+            minor=$((minor + 1))
+            patch=0
+          else
+            patch=$((patch + 1))
+          fi
+          next="$major.$minor.$patch"
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "bump=true" >> "$GITHUB_OUTPUT"
           echo "release=true" >> "$GITHUB_OUTPUT"
-          echo "v$version has no release yet, so this push is one"
+          echo "v$version is released and the programs have changed since, so this is v$next"
 
   # The checks, before anything is built for people to download.
   #
@@ -108,11 +205,97 @@ jobs:
       contents: read
     uses: ./.github/workflows/check.yml
 
-  build:
+  # The number, written down once the checks it will be attested against have
+  # passed.
+  #
+  # After `verify` and not before it, so that what reaches the branch is a
+  # version whose tree was green. And the commit it makes is what the release
+  # notes and the tag message are read from further down, which is why its
+  # message is the account of what changed rather than the word "bump": for a
+  # release carrying a day's work the reason is plural, and the reason is what
+  # somebody deciding whether to take a download is looking for.
+  #
+  # A push, not a pull request. A pull request opened with this token has no
+  # checks run against it, because a token given to a workflow deliberately
+  # cannot start another one, and a release proposal nobody can verify is
+  # worse than none. That same rule is why this job lives here rather than in
+  # a file of its own: a push made there would never reach this one.
+  bump:
     needs: [decide, verify]
+    if: needs.decide.outputs.bump == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.write.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - id: write
+        shell: bash
+        run: |
+          set -euo pipefail
+          was=$(awk '/^\[workspace\.package\]/{s=1;next} /^\[/{s=0} s && /^version[[:space:]]*=/{split($0,a,"\"");print a[2];exit}' Cargo.toml)
+          next="${{ needs.decide.outputs.version }}"
+
+          # Inside [workspace.package] and nowhere else, which is the same
+          # place and the same reason the number is read from above.
+          # `to` and not `next`, which is a word awk keeps for itself and which
+          # this used until a dry run said so.
+          awk -v to="$next" '
+            /^\[workspace\.package\]/{s=1}
+            /^\[/{ if ($0 != "[workspace.package]") s=0 }
+            s && /^version[[:space:]]*=/ && !done { print "version = \"" to "\""; done=1; next }
+            { print }
+          ' Cargo.toml > Cargo.toml.next
+          mv Cargo.toml.next Cargo.toml
+          grep -q "version = \"$next\"" Cargo.toml
+
+          # The lock carries every one of our crates at that number too.
+          cargo metadata --format-version 1 --quiet > /dev/null
+
+          {
+            echo "chore: $next, for what changed since v$was"
+            echo
+            printf '%s commits since v%s:\n' \
+              "$(git log "v$was"..HEAD --no-merges --oneline | wc -l | tr -d ' ')" "$was"
+            echo
+            git log "v$was"..HEAD --no-merges --format=%s \
+              | sed 's/[(:].*//' | sort | uniq -c | sort -rn \
+              | awk '{printf "  %s %s\n", $1, $2}'
+            echo
+            echo "What is different in the programs:"
+            echo
+            git log "v$was"..HEAD --no-merges --format=%s \
+              | grep -E '^(feat|fix|perf)(\(|!|:)' \
+              | sed 's/^/  /'
+          } > message.txt
+          cat message.txt
+
+          git -c user.name="cairn releases" \
+              -c user.email="releases@cairnchain.org" \
+              commit -q -a -F message.txt
+          # Guarded, because this script is worth running by hand before it is
+          # trusted and a script that pushes when it is read is not. A dry run
+          # sets CAIRN_DRY_RUN and gets everything but the branch moving. The
+          # first dry run of it pushed a version bump onto a clone's origin,
+          # which was somebody's working copy.
+          if [ -n "${CAIRN_DRY_RUN:-}" ]; then
+            echo "a dry run: the branch is left where it was"
+          else
+            git push origin HEAD:main
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [decide, verify, bump]
     # An ordinary push builds nothing here. The checks that run on every commit
     # are a different file; this one exists to make what people download.
-    if: needs.decide.outputs.release == 'true' || github.event_name == 'workflow_dispatch'
+    if: |
+      !cancelled() && !failure()
+      && (needs.decide.outputs.release == 'true' || github.event_name == 'workflow_dispatch')
     permissions:
       contents: read
     strategy:
@@ -139,7 +322,14 @@ jobs:
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
+      # The commit the number was written in, when one was. An empty ref is the
+      # branch this run started from, which is every other case. Named rather
+      # than left to the default, because the default is whatever the branch
+      # holds at the moment each of these five machines gets round to asking,
+      # and a release has to be one commit built five times.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.bump.outputs.sha }}
 
       - name: Install the toolchain this repository pins
         run: rustup show
@@ -197,7 +387,15 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [decide, build]
+    needs: [decide, bump, build]
+    # The same condition `build` carries, and for the same reason it grew one:
+    # `bump` does not run on a push, and a job whose dependency was skipped is
+    # skipped with it unless it says otherwise. Saying otherwise without saying
+    # this as well would have run the publishing on every ordinary push, with
+    # nothing built to publish.
+    if: |
+      !cancelled() && !failure()
+      && (needs.decide.outputs.release == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     # The only job that writes anything: the release, and the attestation that
     # says which build produced it.
@@ -209,7 +407,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # The commit that changed the version becomes the release notes and
-          # the tag's message, so the whole history has to be here.
+          # the tag's message, so the whole history has to be here, and so does
+          # that commit itself when this run is what made it.
+          ref: ${{ needs.bump.outputs.sha }}
           fetch-depth: 0
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
