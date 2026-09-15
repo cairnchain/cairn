@@ -144,9 +144,20 @@ jobs:
             echo "could not work out which crates a release is built from" >&2
             exit 1
           fi
+          # The sources and the manifest, and not the whole crate directory.
+          # A crate's tests, benchmarks and examples sit beside its sources and
+          # are in none of the three binaries, so a day of nothing but tests
+          # changes nothing anybody downloads. Counting them would have made
+          # this file decide on whether the repository changed, which is a
+          # different question from the one written above it, and the last
+          # merge before this was written was tests and nothing else.
+          #
+          # `build.rs` is named although no crate here has one: a crate that
+          # grows one is running code at build time, which is exactly the kind
+          # of change this has to see.
           paths=""
           for crate in $built; do
-            paths="$paths crates/$crate"
+            paths="$paths crates/$crate/src crates/$crate/Cargo.toml crates/$crate/build.rs"
           done
           # The lock file and the toolchain as well: neither is a crate of ours
           # and a change to either changes the programs.
