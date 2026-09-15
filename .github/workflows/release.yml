@@ -322,14 +322,33 @@ jobs:
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
-      # The commit the number was written in, when one was. An empty ref is the
-      # branch this run started from, which is every other case. Named rather
-      # than left to the default, because the default is whatever the branch
-      # holds at the moment each of these five machines gets round to asking,
-      # and a release has to be one commit built five times.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ needs.bump.outputs.sha }}
+
+      # A release has to be one commit built five times, and the default ref is
+      # whatever the branch holds at the moment each of these five machines
+      # gets round to asking. So the commit the number was written in is
+      # checked rather than asked for: anything else stops this machine instead
+      # of shipping a binary built from a tree nobody else built.
+      #
+      # Checked rather than named, because naming a commit worked out while the
+      # run is going and then building it is a checkout of code this file
+      # cannot vouch for, and building is running it. The value here is one
+      # this workflow made a minute ago out of its own branch, so the risk is
+      # not real, but the shape is, and a shape like that on the thing that
+      # signs downloads is not worth keeping for the convenience.
+      - name: The commit this release is
+        if: needs.bump.outputs.sha != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          here=$(git rev-parse HEAD)
+          want="${{ needs.bump.outputs.sha }}"
+          if [ "$here" != "$want" ]; then
+            echo "this machine has $here and the release is $want" >&2
+            echo "something else reached the branch between the two; nothing is built" >&2
+            exit 1
+          fi
+          echo "building $here"
 
       - name: Install the toolchain this repository pins
         run: rustup show
@@ -407,10 +426,22 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # The commit that changed the version becomes the release notes and
-          # the tag's message, so the whole history has to be here, and so does
-          # that commit itself when this run is what made it.
-          ref: ${{ needs.bump.outputs.sha }}
+          # the tag's message, so the whole history has to be here.
           fetch-depth: 0
+
+      # And the same check the machines that built it made, for the same
+      # reason: what is tagged and published has to be what was built.
+      - name: The commit this release is
+        if: needs.bump.outputs.sha != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          here=$(git rev-parse HEAD)
+          want="${{ needs.bump.outputs.sha }}"
+          if [ "$here" != "$want" ]; then
+            echo "the branch holds $here and the release is $want" >&2
+            exit 1
+          fi
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
