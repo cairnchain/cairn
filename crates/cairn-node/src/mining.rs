@@ -289,6 +289,31 @@ mod tests {
         );
     }
 
+    /// What the number is, and not only where the boundary it draws falls.
+    ///
+    /// Every test around this one is written in terms of
+    /// `CANDIDATE_PATIENCE`, so the boundary moves with it and they hold the
+    /// mechanism whatever it is set to. At ten hours they all pass, and at ten
+    /// hours the thing they are about is gone: the candidate is never dated
+    /// again inside any stall worth reporting.
+    ///
+    /// What the note on the constant argues is a relation to the spacing the
+    /// network aims for, and this is that relation. Its other half, that the
+    /// patience is long enough for rebuilding to cost nothing measurable, is
+    /// not held here and could not be: measurable is a reading of whatever
+    /// machine is asked.
+    #[test]
+    fn the_patience_is_shorter_than_the_block_it_is_dated_within() {
+        let aimed_at = cairn_ledger::validation::ConsensusParams::testnet().target_block_time;
+        assert!(
+            CANDIDATE_PATIENCE < aimed_at,
+            "a candidate is searched {CANDIDATE_PATIENCE} seconds before it is dated again, on a \
+             network aiming for a block every {aimed_at}. A stalled chain would then report a gap \
+             more than a whole block short of the one it took, and the retarget that exists to \
+             bring the difficulty back down is shown nothing to bring it down for"
+        );
+    }
+
     /// The case that used to be the whole of the mechanism: hours pass, and
     /// what the miner publishes still says a minute.
     #[test]
