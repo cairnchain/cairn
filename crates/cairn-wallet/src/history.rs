@@ -908,10 +908,21 @@ impl Decode for History {
         };
         // Notes the account stopped answering for. A file written before this
         // wallet learned to say so ends here, and is read rather than thrown
-        // away: an account that has never been moved past a block has nothing
-        // to put here, and one that has will say so again the next time it is,
-        // which costs a balance that is too high until then rather than a file
-        // that will not open.
+        // away.
+        //
+        // What that costs is worth stating exactly, because the obvious
+        // sentence is wrong. It is not that such a wallet says so again the
+        // next time it is moved past a block: `skip_to` is the only writer of
+        // this set and it is reached only when the node's log begins above
+        // where the account has read to, and an account caught up to the tip
+        // is never below that again. There is no next time. A wallet that
+        // carried the gap before this release goes on counting what it paid
+        // away in it, for good, and nothing in the file records where the gap
+        // was to rebuild the marks from.
+        //
+        // Read anyway, because the account of what this key was paid is the
+        // expensive half and refusing the file would throw that away as well,
+        // to fix nothing.
         let unaccounted = if reader.remaining() > 0 {
             Vec::<NoteId>::decode_from(reader)?
         } else {
