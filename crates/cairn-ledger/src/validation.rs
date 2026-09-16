@@ -489,6 +489,21 @@ impl ConsensusParams {
         self
     }
 
+    /// The same, for how much a block carries. For tests, which would
+    /// otherwise have to give a wallet a hundred and twenty eight kilobytes of
+    /// notes to reach the rule that a spend can be too large for any block.
+    ///
+    /// The cap on a transfer's inputs and the cap on a block's bytes are not
+    /// the same cap, and which one bites depends on what the notes carry: a
+    /// hot input is bytes and a fallen one brings its own proof, which is
+    /// kilobytes. Lowering this is how a test gets to ask about the second
+    /// without building the first.
+    #[must_use]
+    pub const fn with_max_block_bytes(mut self, bytes: usize) -> Self {
+        self.max_block_bytes = bytes;
+        self
+    }
+
     /// A public network's shape, opened at a difficulty a test can mine.
     ///
     /// [`Self::testnet`] opens at [`MIN_DIFFICULTY`], which is the floor, so a
