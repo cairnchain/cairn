@@ -2036,30 +2036,37 @@ impl ChainStore {
 
     /// Offers the transfers of undone blocks back to the pool.
     ///
-    /// Bounded by the pool's own limits rather than by the depth of the
-    /// reorganisation: past them nothing more can be taken, so there is no
-    /// reason to go on validating. What is dropped this way is the oldest of
-    /// what was undone, which is the part most likely to have been replaced
-    /// on the branch that won.
+    /// Bounded on what the pool takes, and on nothing else. Two readings stood
+    /// here before and both were true sentences answering a question nobody
+    /// asked.
+    ///
+    /// The first was "is the pool full". A full pool is not a pool that
+    /// refuses: `accept_transfer` makes room for whoever pays a better rate
+    /// than the least it holds. So a pool filled with transfers paying the
+    /// floor cancelled every payment a reorganisation undid, whatever they
+    /// paid, and it was answered for the whole rewind rather than for the one
+    /// transfer.
+    ///
+    /// The second was "have `MAX_POOLED` transfers been offered". Also true,
+    /// and it counts refusals. Two miners drawing on one public pool build
+    /// branches carrying mostly the same transfers, so on an ordinary
+    /// reorganisation most of what is offered back is refused for spending
+    /// notes the winning branch has already spent, which is right and takes
+    /// nothing. Four thousand of those spent the whole budget, and the
+    /// orphaned payment in the oldest undone block was never reached. The
+    /// give-away is that the pool came out of it empty: there was no pressure
+    /// on the pool at all, only a spent count.
+    ///
+    /// So the budget counts the times the pool is actually asked, and the
+    /// answers that can be settled without asking it are settled first and
+    /// cost nothing. That is what makes the count mean something: everything
+    /// offered here sat in a block this node validated, so its signatures were
+    /// checked then, and [`check_transfer_again`] decides most of these
+    /// without asking again.
     fn repool(&mut self, undone: &[Hash32]) {
-        // Bounded on how many transfers are offered, not on how full the pool
-        // looks. A full pool is not a pool that refuses: `accept_transfer`
-        // makes room for whoever pays a better rate than the least it already
-        // holds. Reading `pool.len()` answered whether the pool was full,
-        // which is true and is a different question from whether this transfer
-        // would be turned away, and it answered it for the whole rewind rather
-        // than for the one transfer. A pool filled with transfers paying the
-        // floor therefore cancelled every payment a reorganisation undid,
-        // however much they paid, and filling a pool with those is the
-        // cheapest thing an attacker can do here.
-        //
-        // What the reading was there for is the bound, and the bound belongs
-        // on the offers. Past `MAX_POOLED` of them the pool has been offered
-        // more than it can hold, all of it newer than whatever is left, so
-        // there is nothing further to learn by asking.
-        let mut offers = 0usize;
+        let mut asked = 0usize;
         for id in undone {
-            if offers >= MAX_POOLED {
+            if asked >= MAX_POOLED {
                 return;
             }
             // Read through the disk, not out of memory. A body is let go of
@@ -2074,10 +2081,41 @@ impl ChainStore {
                 continue;
             };
             for transfer in block.transfers {
-                if offers >= MAX_POOLED {
+                if asked >= MAX_POOLED {
                     return;
                 }
-                offers = offers.saturating_add(1);
+                // Asked the cheap way first, so that a refusal costs a walk of
+                // the note set rather than a curve verification an input. This
+                // decides every transfer the winning branch also carries,
+                // which is most of them, and it is the same question
+                // `accept_transfer` will ask again for the few that get past
+                // it: this settles nothing, it only declines to pay for the
+                // answer twice.
+                let Ok(outcome) = check_transfer_again(
+                    &transfer,
+                    &self.state,
+                    &BTreeSet::new(),
+                    &BTreeMap::new(),
+                    &self.params,
+                ) else {
+                    continue;
+                };
+                // And a full pool that this cannot outbid is the other cheap
+                // refusal. `accept_transfer` decides it properly, on conflicts
+                // and on what it would displace; this only turns away the ones
+                // it could not possibly take, so that a rewind deeper than the
+                // pool is wide does not pay for the full check on every one of
+                // them.
+                let bytes = transfer.encode().len();
+                let weight = transfer_weight(&transfer, bytes, outcome.spent_hot.len());
+                if self.pool.len() >= MAX_POOLED {
+                    let offered = rate(outcome.fee, weight);
+                    let cheapest = self.pool_by_rate.iter().next().map(|(at, _)| *at);
+                    if cheapest.is_some_and(|least| offered <= least) {
+                        continue;
+                    }
+                }
+                asked = asked.saturating_add(1);
                 let _ = self.accept_transfer(transfer);
             }
         }
