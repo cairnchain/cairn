@@ -237,7 +237,13 @@ fn a_node_that_could_not_start_says_so_without_the_usage_text() {
     // deadline: under a loaded runner every attempt found a directory nobody
     // held yet and exited nought, and the test failed for the machine's
     // reasons rather than the node's.
-    {
+    // Kept alive past the read, and not let go of at the end of a block. A
+    // dropped reader closes the pipe, the node writing into it meets a broken
+    // pipe on its next line and stops, and the directory it was holding is
+    // free by the time the second node asks for it. That is what this met on
+    // one platform and not the other two: an empty refusal, because there was
+    // nothing left to refuse it.
+    let _held_open = {
         use std::io::BufRead as _;
         let stdout = holding
             .stdout
@@ -261,7 +267,8 @@ fn a_node_that_could_not_start_says_so_without_the_usage_text() {
                 }
             }
         }
-    }
+        lines
+    };
 
     let output = cairnd(&[
         "--data",
