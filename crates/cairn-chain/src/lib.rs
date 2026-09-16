@@ -757,6 +757,18 @@ pub struct ChainStore {
     /// costs a lookup and not a pass over the pool: a peer sending transfers
     /// as fast as it can would otherwise decide how much work each one causes.
     pool_by_rate: BTreeSet<(u128, Hash32)>,
+    /// Which pooled transfer spends each note the pool has spoken for.
+    ///
+    /// Kept alongside for the same reason as `pool_by_rate` and against the
+    /// same peer: every arrival asks whether anything already here spends a
+    /// note it spends, and deriving that answer is a pass over every input of
+    /// every pooled transfer. The pass grows with what the pool already
+    /// holds, so filling a pool cost the square of its ceiling, and a peer
+    /// sending transfers as fast as it can decided how much work each one
+    /// caused. A note is spent by at most one pooled transfer, which is what
+    /// makes this a map and not a multimap: a second one spending the same
+    /// note displaces the first or is refused, in `displaced_by`.
+    pool_spenders: BTreeMap<NoteId, Hash32>,
 }
 
 impl ChainStore {
@@ -789,6 +801,7 @@ impl ChainStore {
             pool: BTreeMap::new(),
             pool_bytes: 0,
             pool_by_rate: BTreeSet::new(),
+            pool_spenders: BTreeMap::new(),
         }
     }
 
@@ -1149,6 +1162,14 @@ impl ChainStore {
         };
         self.pool_by_rate
             .remove(&(rate(held.fee, held.weight), *id));
+        for input in &held.transfer.inputs {
+            // Only if it is still this transfer's place. A replacement is put
+            // in before the transfer it displaces is taken out nowhere, but
+            // saying so here costs a comparison and removes the question.
+            if self.pool_spenders.get(&input.note_id) == Some(id) {
+                self.pool_spenders.remove(&input.note_id);
+            }
+        }
         self.pool_bytes = self.pool_bytes.saturating_sub(held.bytes);
     }
 
@@ -1259,6 +1280,9 @@ impl ChainStore {
         }
 
         self.pool_bytes = self.pool_bytes.saturating_add(bytes);
+        for input in &transfer.inputs {
+            self.pool_spenders.insert(input.note_id, id);
+        }
         self.pool.insert(
             id,
             Pooled {
@@ -1388,7 +1412,7 @@ impl ChainStore {
         offered: u128,
         floor: Amount,
     ) -> Result<(BTreeSet<Hash32>, usize), TransferError> {
-        let spenders = self.pooled_spenders();
+        let spenders = &self.pool_spenders;
         let mut conflicts: BTreeSet<Hash32> = BTreeSet::new();
         for input in &transfer.inputs {
             if let Some(holder) = spenders.get(&input.note_id) {
@@ -1426,14 +1450,13 @@ impl ChainStore {
     }
 
     /// Which pooled transfer spends each note the pool has spoken for.
-    fn pooled_spenders(&self) -> BTreeMap<NoteId, Hash32> {
-        let mut spenders = BTreeMap::new();
-        for (id, held) in &self.pool {
-            for input in &held.transfer.inputs {
-                spenders.insert(input.note_id, *id);
-            }
-        }
-        spenders
+    ///
+    /// The pool speaks for a note from the moment it takes a transfer spending
+    /// it until that transfer leaves, and at most one pooled transfer spends a
+    /// given note: a second one displaces the first or is refused, which
+    /// `displaced_by` decides.
+    pub fn pooled_spenders(&self) -> impl Iterator<Item = (&NoteId, &Hash32)> {
+        self.pool_spenders.iter()
     }
 
     /// Drops every pooled transfer the current state no longer accepts.
@@ -1445,6 +1468,7 @@ impl ChainStore {
         let params = self.params;
         let state = &self.state;
         let mut kept: BTreeSet<(u128, Hash32)> = BTreeSet::new();
+        let mut spenders: BTreeMap<NoteId, Hash32> = BTreeMap::new();
         let mut bytes = 0usize;
         self.pool.retain(|id, held| {
             // Asked again without the signatures, which are the one thing here
@@ -1484,6 +1508,9 @@ impl ChainStore {
                     held.fee = outcome.fee;
                     held.weight = weight;
                     kept.insert((rate(outcome.fee, weight), *id));
+                    for input in &held.transfer.inputs {
+                        spenders.insert(input.note_id, *id);
+                    }
                     bytes = bytes.saturating_add(held.bytes);
                     true
                 }
@@ -1491,6 +1518,7 @@ impl ChainStore {
             }
         });
         self.pool_by_rate = kept;
+        self.pool_spenders = spenders;
         self.pool_bytes = bytes;
     }
 
