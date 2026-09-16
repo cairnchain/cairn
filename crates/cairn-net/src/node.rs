@@ -5040,14 +5040,23 @@ impl Shared {
         // node: a wallet asking where one of its fallen notes sits was told
         // no, every time, for ever, by a node that was otherwise well.
         //
-        // So it is built again from the leaves, which is the only thing here
-        // derived from nothing, and the question is asked once more.
+        // So it is built again from the leaves, and the leaves themselves are
+        // put back from the header log, which is the one thing here the forest
+        // is not derived from. Reading them off the forest and folding upward
+        // on trust wrote one torn leaf into every node above it, until the
+        // forest agreed with itself and served everybody a root nobody has.
         let StoreError::Unfolded { height: at, start } = error else {
             self.could_not_read(Reading::Headers, height, &error);
             return None;
         };
         let store = log.as_mut()?;
-        if let Err(error) = store.forest.mend_below(at, start) {
+        let leaf_of = |position: u64| -> Result<Option<Hash32>, StoreError> {
+            Ok(store
+                .headers
+                .read_at(position)?
+                .map(|header| header_leaf(&header.id())))
+        };
+        if let Err(error) = store.forest.mend_below(at, start, &leaf_of) {
             self.could_not_read(Reading::Headers, height, &error);
             return None;
         }
@@ -6856,13 +6865,24 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
         let _ = stream.shutdown(Shutdown::Both);
         return false;
     }
+    // Counted here as well as in `accept_loop`. A machine out of descriptors
+    // runs out at whichever call asks next, and that is the accept on one run
+    // and one of these on the next; a visitor counted only when it was the
+    // accept is a count that means "turned away at one particular step" while
+    // saying "visitors this node could not take". The figure an operator reads
+    // went up or stayed flat on the same exhaustion depending on timing, and
+    // the test that holds the door open measured nothing on the runs where it
+    // stayed flat.
     let Ok(writing_end) = stream.try_clone() else {
+        shared.turned_away.fetch_add(1, Ordering::Relaxed);
         return false;
     };
     let Ok(shutdown_end) = stream.try_clone() else {
+        shared.turned_away.fetch_add(1, Ordering::Relaxed);
         return false;
     };
     let Ok(closing_end) = stream.try_clone() else {
+        shared.turned_away.fetch_add(1, Ordering::Relaxed);
         return false;
     };
     let remote = stream.peer_addr().ok().map(|address| address.ip());
