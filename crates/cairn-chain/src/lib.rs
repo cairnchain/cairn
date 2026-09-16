@@ -1934,10 +1934,16 @@ impl ChainStore {
         // rewind produces. Anything the winning branch already carries is
         // refused here for spending notes that are spent, which is the same
         // answer by a shorter road than checking for it.
-        self.repool(&rolled_back);
-
-        // The state moved, so what the pool holds has to be reconsidered.
+        // The state moved, so what the pool holds has to be reconsidered, and
+        // that happens before anything is offered back rather than after. The
+        // pool a rewind finds is the one the state it has just replaced filled:
+        // it holds transfers the winning branch has since carried, which are
+        // impossible now and which this drops. Offering first meant `repool`
+        // measured a pool that was about to empty, and every transfer it does
+        // offer would be checked here a second time for an answer
+        // `accept_transfer` had just given.
         self.prune_pool();
+        self.repool(&rolled_back);
         self.forget_what_cannot_change();
         self.forget_unreachable_branches();
 
@@ -2036,8 +2042,24 @@ impl ChainStore {
     /// what was undone, which is the part most likely to have been replaced
     /// on the branch that won.
     fn repool(&mut self, undone: &[Hash32]) {
+        // Bounded on how many transfers are offered, not on how full the pool
+        // looks. A full pool is not a pool that refuses: `accept_transfer`
+        // makes room for whoever pays a better rate than the least it already
+        // holds. Reading `pool.len()` answered whether the pool was full,
+        // which is true and is a different question from whether this transfer
+        // would be turned away, and it answered it for the whole rewind rather
+        // than for the one transfer. A pool filled with transfers paying the
+        // floor therefore cancelled every payment a reorganisation undid,
+        // however much they paid, and filling a pool with those is the
+        // cheapest thing an attacker can do here.
+        //
+        // What the reading was there for is the bound, and the bound belongs
+        // on the offers. Past `MAX_POOLED` of them the pool has been offered
+        // more than it can hold, all of it newer than whatever is left, so
+        // there is nothing further to learn by asking.
+        let mut offers = 0usize;
         for id in undone {
-            if self.pool.len() >= MAX_POOLED || self.pool_bytes >= MAX_POOL_BYTES {
+            if offers >= MAX_POOLED {
                 return;
             }
             // Read through the disk, not out of memory. A body is let go of
@@ -2052,9 +2074,10 @@ impl ChainStore {
                 continue;
             };
             for transfer in block.transfers {
-                if self.pool.len() >= MAX_POOLED || self.pool_bytes >= MAX_POOL_BYTES {
+                if offers >= MAX_POOLED {
                     return;
                 }
+                offers = offers.saturating_add(1);
                 let _ = self.accept_transfer(transfer);
             }
         }
