@@ -336,7 +336,13 @@ impl Holdings {
             format!("{count} notes")
         };
         Some(format!(
-            "This wallet's account still names {notes}, worth {worth} if they are all              still yours, that it has stopped answering for. The node had let go of              blocks this wallet had not read yet, so what became of them over that              range was never read, and on a wallet that has paid anybody most of them              are notes that were paid away. They are left out of the balance rather              than counted into it, and out of what any archivist is asked about, since              the places on that list would be places this key no longer owns."
+            "This wallet's account still names {notes}, worth {worth} if they are all still \
+             yours, that it has stopped answering for. The node had let go of blocks \
+             this wallet had not read yet, so what became of them over that range was \
+             never read, and on a wallet that has paid anybody most of them are notes \
+             that were paid away. They are left out of the balance rather than counted \
+             into it, and out of what any archivist is asked about, since the places on \
+             that list would be places this key no longer owns."
         ))
     }
 
