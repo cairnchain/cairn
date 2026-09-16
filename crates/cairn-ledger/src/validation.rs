@@ -927,7 +927,7 @@ pub fn check_transfer(
         spent_hot,
         spent_cold,
         params,
-        &mut pending,
+        Some(&mut pending),
     )?;
     if let Some(failed) = first_failure(&pending) {
         return Err(TransferError::InvalidSignature {
@@ -935,6 +935,39 @@ pub fn check_transfer(
         });
     }
     Ok(outcome)
+}
+
+/// Everything [`check_transfer`] decides except the signatures.
+///
+/// Only for a transfer whose signatures this node has already checked and
+/// which it is asking about again because the chain moved. Anything arriving
+/// from anywhere goes through [`check_transfer`].
+///
+/// What a signature covers is the network, the version, the transfer's own
+/// identifier, the position of the input, and the value and owner of the note
+/// being spent. Every one of those is settled by the transfer and by the
+/// identifier of the note it names: a note identifier is the identifier of the
+/// transaction that made the note together with a position in it, and that
+/// identifier commits to the note. So the message a signature covers cannot be
+/// moved by the chain, and one that held once holds for as long as the transfer
+/// names the same notes.
+///
+/// What the chain does move is everything else: whether a note is still there,
+/// whether it has been spent, which of the two sets it sits in, and what the
+/// transfer is therefore worth. That is what this asks, and it is what a pool
+/// has to ask again each time the branch it follows does.
+///
+/// The saving is not only the signature checks. Building the message costs an
+/// encoding of the whole body and a hash of it, once, plus a hash an input, and
+/// none of that is built here either.
+pub fn check_transfer_again(
+    transfer: &Transfer,
+    state: &LedgerState,
+    spent_hot: &BTreeSet<NoteId>,
+    spent_cold: &BTreeMap<NoteId, ColdSpend>,
+    params: &ConsensusParams,
+) -> Result<TransferOutcome, TransferError> {
+    resolve_transfer(transfer, 0, state, spent_hot, spent_cold, params, None)
 }
 
 /// The same, with the signatures written down instead of checked.
@@ -950,7 +983,7 @@ fn resolve_transfer(
     spent_hot: &BTreeSet<NoteId>,
     spent_cold: &BTreeMap<NoteId, ColdSpend>,
     params: &ConsensusParams,
-    pending: &mut Vec<Pending>,
+    mut pending: Option<&mut Vec<Pending>>,
 ) -> Result<TransferOutcome, TransferError> {
     check_transfer_shape(transfer, params)?;
 
@@ -960,7 +993,11 @@ fn resolve_transfer(
     // full one was five megabytes hashed for thirty six kilobytes received,
     // and every byte of that was spent before the first signature was looked
     // at, so a transfer whose first signature is nonsense cost all of it.
-    let signing = transfer.signing(params.network);
+    //
+    // Not built at all when nobody is going to check a signature, which is a
+    // transfer this node has already checked and is resolving again because
+    // the state moved. That is the one cost here the state cannot change.
+    let signing = pending.is_some().then(|| transfer.signing(params.network));
 
     let mut available = Amount::ZERO;
     let mut from_hot = Vec::new();
@@ -970,13 +1007,15 @@ fn resolve_transfer(
         let (spent, fallen) = resolve_input(state, input, spent_hot, spent_cold)?;
 
         let position = u32::try_from(index).unwrap_or(u32::MAX);
-        pending.push(Pending {
-            owner: spent.owner,
-            message: signing.message(position, &spent),
-            signature: input.signature,
-            transfer: position_in_block,
-            input: index,
-        });
+        if let (Some(collected), Some(signing)) = (pending.as_deref_mut(), signing.as_ref()) {
+            collected.push(Pending {
+                owner: spent.owner,
+                message: signing.message(position, &spent),
+                signature: input.signature,
+                transfer: position_in_block,
+                input: index,
+            });
+        }
 
         available = available
             .checked_add(spent.value)
@@ -1074,7 +1113,7 @@ pub fn evaluate_block_body(
             &spent_hot,
             &spent_cold,
             params,
-            &mut pending,
+            Some(&mut pending),
         )
         .map_err(|source| BlockError::InvalidTransfer { index, source })?;
 

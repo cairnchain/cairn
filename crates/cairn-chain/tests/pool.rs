@@ -838,3 +838,55 @@ fn a_transfer_that_cannot_be_valid_is_refused_before_a_byte_is_hashed() {
         "refusing it hashed {hashed} bytes, and it should have hashed none"
     );
 }
+
+/// AUDIT: what the pool never holds, which is what lets a block stop asking.
+///
+/// `prune_pool` asks the whole pool again whenever the branch moves, and it
+/// stopped asking about the signatures: a signature covers the transfer's own
+/// identifier, the position of the input, and the value and owner of the note
+/// being spent, and a note identifier commits to the note, so the state cannot
+/// move the answer.
+///
+/// What that rests on is that nothing reaches the pool unchecked. There is one
+/// way in, `accept_transfer`, and this is what it does with a signature that
+/// does not hold. If a second way in is ever added, this test says nothing
+/// about it, and the note on `prune_pool` is the thing to read before adding
+/// one.
+#[test]
+fn a_transfer_whose_signature_does_not_hold_never_reaches_the_pool() {
+    let params = params();
+    let miner = wallet(1);
+    let (mut store, notes) = funded(2, &miner);
+
+    // Signed by somebody who does not own the note.
+    let stranger = wallet(9);
+    let mut forged = Transfer::new(
+        vec![Input::hot(notes[0].0)],
+        vec![Note::new(
+            notes[0].1.value.checked_sub(pebbles(PLAIN_FEE)).unwrap(),
+            wallet(2).public_key(),
+        )],
+    );
+    forged.sign_input(params.network, 0, &notes[0].1, &stranger);
+
+    assert!(
+        matches!(
+            store.accept_transfer(forged),
+            Err(TransferError::InvalidSignature { input_index: 0 })
+        ),
+        "a transfer signed by the wrong key was taken into the pool"
+    );
+    assert_eq!(store.pool_len(), 0, "and nothing was kept of it");
+
+    // And one that does hold goes in, so this is a check and not a wall.
+    let good = spend(
+        &params,
+        notes[1].0,
+        notes[1].1,
+        &miner,
+        &wallet(2),
+        pebbles(PLAIN_FEE),
+    );
+    assert_eq!(store.accept_transfer(good), Ok(true));
+    assert_eq!(store.pool_len(), 1);
+}

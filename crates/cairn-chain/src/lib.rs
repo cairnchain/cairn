@@ -19,8 +19,8 @@ use cairn_ledger::note::NoteId;
 use cairn_ledger::pow::{meets_target, work_of};
 use cairn_ledger::transaction::Transfer;
 use cairn_ledger::validation::{
-    check_transfer, check_transfer_shape, connect_block, disconnect_block, BlockError,
-    ConnectedBlock, ConsensusParams, TransferError,
+    check_transfer, check_transfer_again, check_transfer_shape, connect_block, disconnect_block,
+    BlockError, ConnectedBlock, ConsensusParams, TransferError,
 };
 use cairn_ledger::ColdSpend;
 use cairn_ledger::LedgerState;
@@ -1447,7 +1447,15 @@ impl ChainStore {
         let mut kept: BTreeSet<(u128, Hash32)> = BTreeSet::new();
         let mut bytes = 0usize;
         self.pool.retain(|id, held| {
-            match check_transfer(
+            // Asked again without the signatures, which are the one thing here
+            // the state cannot move: a signature covers the transfer's own
+            // identifier, the position of the input, and the value and owner of
+            // the note being spent, and a note identifier commits to the note.
+            // Everything in this pool came in through `accept_transfer`, which
+            // checked them, and every block after that re-checked them all, at
+            // an encoding and a hash of each body plus a hash and a curve
+            // verification an input, for an answer that could not have changed.
+            match check_transfer_again(
                 &held.transfer,
                 state,
                 &BTreeSet::new(),
