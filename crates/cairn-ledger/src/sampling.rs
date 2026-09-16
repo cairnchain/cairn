@@ -85,11 +85,23 @@ use crate::validation::ConsensusParams;
 /// (1 - ln(1/(1-lie))/levels)^count <= 2^-128
 /// ```
 ///
-/// At 4096 draws over a thirty year chain that holds against every forger up
-/// to at least **42.96%** of the world's work, measured against this very
-/// function and against forgeries built and put through [`check_start`]. The
-/// papers claim **40%**, which leaves the rest as margin for the difference
-/// between a staircase of halvings and the smooth density it stands for.
+/// That inequality is a floor under what the draw actually delivers, not an
+/// equality with it, and the difference is worth naming because two figures
+/// sit beside each other here and only one of them comes out of it. Written
+/// as it stands, 4096 draws clear 2^-128 against a forger at **40%** — the
+/// share the papers claim — with 2^-161.9 to spare. What they do not clear is
+/// 2^-128 at 42.96%, where the same inequality gives 2^-112.7.
+///
+/// **42.96% is measured, not derived.** It is what the shipped draw holds to
+/// against forgeries built and put through [`check_start`], and the shipped
+/// draw is a staircase of halvings which is worth more per question than the
+/// smooth density the inequality stands for. So the inequality is what a
+/// reader can check by hand and 40% is the claim it supports; the measurement
+/// is what says how much room there is above that claim.
+///
+/// The bound is loose in the safe direction, `x - 1 >= ln x`, and stating
+/// which of the two numbers each sentence rests on is the whole of the care
+/// this needs: a figure printed beside an inequality reads as its output.
 ///
 /// **"At least" is exact, and the estimator is why.** The figure is a maximum
 /// over hundreds of placements, each a hit rate taken over a finite number of
@@ -115,7 +127,7 @@ use crate::validation::ConsensusParams;
 /// [`MIN_DIFFICULTY`] apiece. So a chain whose blocks averaged difficulty `d`
 /// could state a height `d` times the one it had, buy `log2(d)` halvings with
 /// it, and take that many slices off what every draw was worth. At a real
-/// chain's numbers that is fifty-odd halvings against the fourteen the count
+/// chain's numbers that is fifty-odd halvings against the fifteen the count
 /// was set for, bought in work the forger was already inventing. Measured on
 /// this very function, a forger at 40% went from missing all 4096 draws with
 /// 2^-207 to missing them with 2^-58, against a figure published as 2^-128,
@@ -129,8 +141,8 @@ use crate::validation::ConsensusParams;
 ///
 /// What that costs is about three megabytes to weigh a thirty-year chain,
 /// against the three gigabytes of headers it replaces reading. What it buys
-/// back is [`SHALLOWEST`]: the draw stops resolving 1024 blocks from the tip,
-/// which cuts `levels` from twenty-four to fourteen and the count with it.
+/// back is [`SHALLOWEST`]: the draw stops resolving 512 blocks from the tip,
+/// which cuts `levels` from twenty-four to fifteen and the count with it.
 ///
 /// The three megabytes are derived rather than guessed, in [`sample_bytes`]:
 /// a header per draw plus the path beside it, and a path is as long as the
@@ -142,21 +154,27 @@ use crate::validation::ConsensusParams;
 /// figure was an upper bound on a chain nobody will live to see, quoted as the
 /// cost of joining this one.
 ///
-/// **The guarantee is a depth, and it is worth stating as one.** A forger at
-/// 40% cannot put a newcomer on a branch differing from the real one by more
-/// than about 1240 blocks. Inside that, it can, and so can a slow peer: it is
-/// where any node sits for its first blocks after connecting.
+/// **The guarantee is a depth, and it is worth stating as one.** A newcomer
+/// cannot be put on a branch differing from the real one by more than about
+/// 633 blocks. Inside that, it can be, and so can a slow peer: that is where
+/// any node sits for its first blocks after connecting.
 ///
-/// That depth is deeper than what a node will undo. This paragraph used to end
-/// by saying it was shallower than the reorganisation this node would accept,
-/// which its own two numbers refute: `MAX_REORG_DEPTH` is 1024 and the
-/// effective limit is the lesser of that and the network's burial. So a
-/// newcomer put at the far end of the guarantee cannot be carried back onto the
-/// real chain by the ordinary rule, and the whitepaper's limitations section
-/// states the gap and the three ways of closing it. None is chosen here,
-/// because each changes a rule.
+/// The depth is not a function of the forger's share, and saying it was is
+/// the mistake this paragraph made twice. It is set by [`SHALLOWEST`], which
+/// is where the draw stops resolving, and `examples/adversarial_placement`
+/// prints the same 633 at five per cent as at forty-three.
 ///
-/// Twenty hours at a block a minute, and the depth is the part that is
+/// That depth is inside what a node will undo, which is the whole point of it
+/// and was not always true. It read 1240 blocks here, against a
+/// `MAX_REORG_DEPTH` of 1024, so a newcomer put at the far end of the
+/// guarantee could not be carried back onto the real chain by the ordinary
+/// rule; halving `SHALLOWEST` is what closed that, and the whitepaper's
+/// limitations section says so. This paragraph was left behind by that change
+/// and went on stating the gap as open, which is the worse direction for a
+/// sentence to be wrong in: a reader checking the derivation was told the
+/// thing the code had stopped doing.
+///
+/// Ten hours at a block a minute, and the depth is the part that is
 /// guaranteed. A branch sitting at the difficulty floor may state the same
 /// depth in half that time, since the retarget stops asking for more once the
 /// gaps pass half the target, so any argument that wants a duration has to say
@@ -638,8 +656,8 @@ pub fn levels_for(blocks: u64) -> u32 {
 /// first time two nodes disagree about the hour. What the clock does is decide
 /// whether the tip is looked at at all, in [`check_start`], before this is
 /// called. A node whose clock runs fast raises its own ceiling by exactly the
-/// error: a year fast on a thirty year chain moves the count from fourteen to
-/// fourteen, which is the scale of the dependency.
+/// error: a year fast on a thirty year chain moves the count from fifteen to
+/// fifteen, which is the scale of the dependency.
 #[must_use]
 pub fn levels_of(tip: &BlockHeader, params: &ConsensusParams) -> u32 {
     let since_opening = tip.timestamp.saturating_sub(params.opens_at);
@@ -1577,7 +1595,7 @@ mod tests {
         // as a depth rather than hidden, and what it buys is the count: the
         // draw is worth `1/levels` per question, so resolving to one block in
         // thirty years would take twenty-four levels where this takes
-        // fourteen, and the same guarantee would cost seven thousand draws
+        // fifteen, and the same guarantee would cost seven thousand draws
         // instead of four.
         let bands = levels_for(100_000);
         let unresolved = total >> bands;
