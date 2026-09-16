@@ -1362,6 +1362,13 @@ struct Shared {
     /// node put it right by itself: a disk that lost one node has not
     /// finished.
     mended_nodes: AtomicU64,
+    /// Questions this node has put to the network about where fallen notes
+    /// sit, over its whole life.
+    ///
+    /// Counted because the wallet above it waits between two of them, and a
+    /// wait is held by whether the count stops going up rather than by how
+    /// long anything took.
+    proofs_asked_for: AtomicU64,
     /// Why the address book could not be written down, if it could not.
     ///
     /// A leaf as well, and it is written from upkeep and from the shutdown.
@@ -3383,6 +3390,7 @@ impl Node {
             unanswered: Mutex::new(None),
             turned_away: AtomicU64::new(0),
             mended_nodes: AtomicU64::new(0),
+            proofs_asked_for: AtomicU64::new(0),
             unsaved_book: Mutex::new(None),
             unjudged: Mutex::new(Unreadable::default()),
             unweighed: Mutex::new(Unweighed::default()),
@@ -4011,6 +4019,7 @@ impl Node {
         if wanted.is_empty() {
             return Recovered::default();
         }
+        self.shared.proofs_asked_for.fetch_add(1, Ordering::Relaxed);
         // Capped here as well as on the wire, so a caller that asks about more
         // than one message carries is answered about what fits rather than
         // having its question silently truncated by a peer.
@@ -4122,6 +4131,16 @@ impl Node {
     /// finished.
     pub fn mended_nodes(&self) -> u64 {
         self.shared.mended_nodes.load(Ordering::Relaxed)
+    }
+
+    /// Questions this node has put to the network about where fallen notes
+    /// sit.
+    ///
+    /// For whoever waits between two of them: a wait that holds is a count
+    /// that stops going up, which is a thing two machines agree about where
+    /// the length of the wait is not.
+    pub fn proofs_asked_for(&self) -> u64 {
+        self.shared.proofs_asked_for.load(Ordering::Relaxed)
     }
 
     /// Closes every connection, stops the listener, and saves what is worth

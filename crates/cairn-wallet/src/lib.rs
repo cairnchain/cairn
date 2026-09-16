@@ -1381,7 +1381,6 @@ impl Wallet {
                 ))
             })
             .collect();
-        let places: BTreeSet<u64> = wanted.iter().map(|(at, _)| *at).collect();
         {
             let last = self
                 .last_recovery
@@ -1397,7 +1396,21 @@ impl Wallet {
             // of what an empty-handed wallet was waiting for. And a wallet
             // that had nobody at all to ask has a fresh question the moment it
             // has anybody.
-            let same_question = places.is_subset(&last.unresolved);
+            // The half a question actually carries, on both sides of the
+            // comparison. `unresolved` holds the places that were asked about
+            // and not answered for, which `still_outstanding` was repaired to
+            // mean: at most one message's worth of them. Reading it against
+            // every place this wallet holds compares a set of any size with a
+            // set of at most sixty four, so past that many the inclusion is
+            // false whatever has happened and the wait never holds.
+            //
+            // A wallet with more than sixty four notes it cannot place is
+            // exactly the one that needs the wait: it asked, got nothing, and
+            // would put the same question to the same strangers on every
+            // redraw of whatever is showing the balance.
+            let asking_about: BTreeSet<u64> =
+                one_question(&wanted).iter().map(|(at, _)| *at).collect();
+            let same_question = asking_about.is_subset(&last.unresolved);
             let better_now = self.node.archiving_peers() > last.report.archivists
                 || (last.report.asked == 0 && self.node.peer_count() > 0);
             if paused && same_question && !better_now {
