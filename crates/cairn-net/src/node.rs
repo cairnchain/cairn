@@ -3421,10 +3421,28 @@ impl Node {
             }
         }
 
+        // Asked for, for the reason set out in `attach_peer`: a machine that
+        // will not make a thread is answered rather than panicked on. Here it
+        // is a node that does not start, which the caller can say out loud.
         let accepting = Arc::clone(&shared);
-        let accept = thread::spawn(move || accept_loop(&accepting, &listener));
+        let accept = thread::Builder::new()
+            .name("cairn-accept".to_owned())
+            .spawn(move || accept_loop(&accepting, &listener))?;
         let keeping = Arc::clone(&shared);
-        let maintain = thread::spawn(move || maintenance_loop(&keeping));
+        let maintain = match thread::Builder::new()
+            .name("cairn-upkeep".to_owned())
+            .spawn(move || maintenance_loop(&keeping))
+        {
+            Ok(maintain) => maintain,
+            Err(error) => {
+                // The one above is already running and owns the listener, so
+                // it is told to stop and waited for rather than left behind a
+                // node that never came into being.
+                shared.running.store(false, Ordering::SeqCst);
+                let _ = accept.join();
+                return Err(error.into());
+            }
+        };
         {
             let mut threads = shared.threads();
             threads.push(accept);
@@ -6796,6 +6814,39 @@ fn loses_the_tie(ours: SocketAddr, theirs: SocketAddr, initiator: bool) -> bool 
 /// it. Nobody read that before, because there was nothing to read: the three
 /// ways out below all looked like the way through, and [`Node::connect`]
 /// reported every one of them to the operator as a peer reached.
+/// Starts the thread that writes everything this node sends to one peer.
+///
+/// Asked for rather than taken. `thread::spawn` panics when the machine will
+/// not make a thread, and the caller runs on the thread that owns the
+/// listener, so the panic closed the port for the life of the process. That is
+/// the outcome the `Err` arm in `accept_loop` was written to avoid, and it is
+/// reached from here by a different road: there the machine is out of
+/// descriptors, here it is out of threads, and both are facts about this
+/// moment rather than about any visitor.
+fn start_writing(
+    id: PeerId,
+    mut writing_end: TcpStream,
+    inbox: mpsc::Receiver<(Message, usize)>,
+    network: NetworkId,
+    written: Arc<AtomicUsize>,
+) -> io::Result<thread::JoinHandle<()>> {
+    thread::Builder::new()
+        .name(format!("cairn-write-{id}"))
+        .spawn(move || {
+            while let Ok((message, weight)) = inbox.recv() {
+                let outcome = write_message(&mut writing_end, network, &message);
+                // Off the count whether or not it reached the far end. What is
+                // being counted is what this node is holding, and once the write
+                // has returned it is holding nothing.
+                written.fetch_sub(weight, Ordering::SeqCst);
+                if outcome.is_err() {
+                    break;
+                }
+            }
+            let _ = writing_end.shutdown(Shutdown::Both);
+        })
+}
+
 fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAddr>) -> bool {
     let initiator = dialled.is_some();
     // Nothing is attached to a node that has stopped. Checked here and again
@@ -6844,20 +6895,16 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
 
     let network = shared.network();
     let written = Arc::clone(&outbound.waiting);
-    let writer = thread::spawn(move || {
-        let mut writing_end = writing_end;
-        while let Ok((message, weight)) = inbox.recv() {
-            let outcome = write_message(&mut writing_end, network, &message);
-            // Off the count whether or not it reached the far end. What is
-            // being counted is what this node is holding, and once the write
-            // has returned it is holding nothing.
-            written.fetch_sub(weight, Ordering::SeqCst);
-            if outcome.is_err() {
-                break;
-            }
-        }
-        let _ = writing_end.shutdown(Shutdown::Both);
-    });
+    let Ok(writer) = start_writing(id, writing_end, inbox, network, written) else {
+        // The closure went with the error, and the socket half it held with
+        // it. What is left is the table entry, which nothing would ever come
+        // back to remove: the thread that does that is the one below, and it
+        // is not going to be started either.
+        shared.peers().remove(&id);
+        shared.turned_away.fetch_add(1, Ordering::Relaxed);
+        let _ = closing_end.shutdown(Shutdown::Both);
+        return false;
+    };
 
     if initiator {
         let hello = {
@@ -6877,25 +6924,57 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
         let _ = outbound.try_send(hello);
     }
 
+    // Held where both this thread and the reader can reach it. The reader
+    // joins it, because the connection is given up only once both threads are
+    // finished with it; but if the reader is never started the closure holding
+    // it goes with the error, and a thread nobody joins is the one thing the
+    // table below exists to prevent. So whichever of the two gets there takes
+    // it, and the other finds it gone.
+    let writer = Arc::new(Mutex::new(Some(writer)));
+    let joining = Arc::clone(&writer);
+
     let reading = Arc::clone(shared);
-    let handle = thread::spawn(move || {
-        read_loop(&reading, stream, id, &outbound, remote, dialled);
-        drop(outbound);
-        // The writer waits on the channel closing, and the channel cannot
-        // close while the peer table still holds a sender for it. So the
-        // table's sender is swapped for one nobody reads: the slot stays
-        // counted, which is what it is for, and what was queued behind it is
-        // let go of. The connection is given up only once both threads are
-        // finished with it, so nothing this node still holds for a peer sits
-        // outside its own accounting: before this, the slot went first, the
-        // same host could take another, and up to a queue's worth of answers
-        // and two threads went on living for a peer already given up on.
-        if let Some(peer) = reading.peers().get_mut(&id) {
-            peer.outbound = Outbound::nowhere();
+    // The same, and with one more thing to undo: the writer is already running.
+    let handle = thread::Builder::new()
+        .name(format!("cairn-read-{id}"))
+        .spawn(move || {
+            read_loop(&reading, stream, id, &outbound, remote, dialled);
+            drop(outbound);
+            // The writer waits on the channel closing, and the channel cannot
+            // close while the peer table still holds a sender for it. So the
+            // table's sender is swapped for one nobody reads: the slot stays
+            // counted, which is what it is for, and what was queued behind it is
+            // let go of. The connection is given up only once both threads are
+            // finished with it, so nothing this node still holds for a peer sits
+            // outside its own accounting: before this, the slot went first, the
+            // same host could take another, and up to a queue's worth of answers
+            // and two threads went on living for a peer already given up on.
+            if let Some(peer) = reading.peers().get_mut(&id) {
+                peer.outbound = Outbound::nowhere();
+            }
+            if let Some(writer) = joining
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+            {
+                let _ = writer.join();
+            }
+            reading.peers().remove(&id);
+        });
+    let Ok(handle) = handle else {
+        // Taking the entry out drops the table's sender, and the closure went
+        // with the error and took the other one, so nothing holds the channel
+        // open and the writer's `recv` returns. Shut the socket first, because
+        // the writer may be part way through a message and a deadline is not
+        // what this should wait out.
+        let _ = closing_end.shutdown(Shutdown::Both);
+        shared.peers().remove(&id);
+        shared.turned_away.fetch_add(1, Ordering::Relaxed);
+        if let Some(writer) = writer.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            let _ = writer.join();
         }
-        let _ = writer.join();
-        reading.peers().remove(&id);
-    });
+        return false;
+    };
     // Under the thread table, so a connection taken while a shutdown is
     // emptying it is not left with a thread nobody joins. A shutdown that got
     // here first has already cleared `running`, and the socket is shut so the
