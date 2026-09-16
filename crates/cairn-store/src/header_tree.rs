@@ -241,19 +241,71 @@ impl HeaderTree {
     /// the child on its own path and reads the sibling on trust, so when the
     /// two disagree either the node above them or that sibling is the liar.
     /// Writing the fold of the pair over the node above cements the corruption
-    /// in the half of the cases where the sibling is the one that tore. Only
-    /// the leaves are not derived from anything, so only they settle it, and
-    /// the cost of asking them is the subtree and never the chain.
+    /// in the half of the cases where the sibling is the one that tore.
+    ///
+    /// "Only the leaves are not derived from anything, so only they settle it"
+    /// is what stood here, and it is true, and it answers which of the nodes
+    /// above to trust. It does not answer what happens when the leaf is the
+    /// one that tore, and a leaf is a file on the same disk, written last by
+    /// `append`, so it is the likeliest of the lot to be in flight at a power
+    /// cut. Folded upward on trust, one bad leaf was written into every node
+    /// over it: after a few rounds the forest agreed with itself, `Unfolded`
+    /// stopped being raised, the disagreement that was the only evidence was
+    /// gone, and the node served every asker a root nobody else has, for
+    /// positions nobody had touched, across restarts. That is the outcome
+    /// [`Self::prove_in`] refuses to cause, reached through the repair written
+    /// to avoid it.
+    ///
+    /// So the leaves are not trusted either. `leaf_of` answers what each one
+    /// should be, from the header log, which is the only thing in this node
+    /// that the forest is not derived from; a leaf that disagrees is put back
+    /// before anything is folded over it, and a leaf nothing can vouch for
+    /// stops the repair rather than being built upon.
+    ///
+    /// That is also the whole of why the refusals doubled with every pass: the
+    /// node written over the torn leaf was itself wrong, so the next proof got
+    /// past the level just mended and refused one above it, over twice as many
+    /// leaves. It was never the stopping height. Levels over the one that
+    /// refused were written when the forest grew, from leaves that were right
+    /// then, so this stops where the refusal was and a second tear higher up
+    /// is refused and mended on its own.
     ///
     /// Idempotent, and safe on a forest that was never damaged: every node it
     /// writes is the one that was already there.
-    pub fn mend_below(&mut self, height: usize, start: u64) -> Result<(), StoreError> {
+    pub fn mend_below(
+        &mut self,
+        height: usize,
+        start: u64,
+        leaf_of: &dyn Fn(u64) -> Result<Option<Hash32>, StoreError>,
+    ) -> Result<(), StoreError> {
         let Some(span) = 1u64.checked_shl(u32::try_from(height).unwrap_or(u32::MAX)) else {
             return Err(StoreError::MissingNode { height, start });
         };
         let Some(covered) = start.checked_div(span).and_then(|at| at.checked_mul(span)) else {
             return Err(StoreError::MissingNode { height, start });
         };
+        // The leaves first, and from outside this forest.
+        let past = covered.saturating_add(span).min(self.leaves);
+        for position in covered..past {
+            let Some(truth) = leaf_of(position)? else {
+                // Nothing can say what this leaf should be, so nothing here
+                // may write over it and nothing may be folded from it. The
+                // refusal stands and is what the caller reports.
+                return Err(StoreError::MissingNode {
+                    height: 0,
+                    start: position,
+                });
+            };
+            if self.read(0, position)? != Some(truth) {
+                self.write(0, position, truth)?;
+            }
+        }
+
+        // Then the levels over them, up to the one that refused and no further.
+        // Every level above that was written when the forest grew, from leaves
+        // that were right at the time, so there is nothing there to put right:
+        // a second tear higher up is refused by `prove_in` on its own and
+        // mended on its own, which is one more round and not a silence.
         for level in 1..=height {
             let Some(reach) = 1u64.checked_shl(u32::try_from(level).unwrap_or(u32::MAX)) else {
                 return Err(StoreError::MissingNode { height, start });
