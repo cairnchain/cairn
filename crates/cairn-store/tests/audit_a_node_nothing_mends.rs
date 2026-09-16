@@ -179,7 +179,13 @@ fn a_torn_node_mended_from_the_leaves_answers_again() {
         Err(StoreError::Unfolded { height, start }) => (height, start),
         other => panic!("expected a node that would not fold, got {other:?}"),
     };
-    tree.mend_below(height, start).unwrap();
+    // The leaves here were never touched, so what the header log would say
+    // about them is what the forest already holds. `mend_below` asks anyway,
+    // because a repair that reads its own leaves on trust is how one torn leaf
+    // becomes a root nobody else has: see `audit_a_leaf_that_tore`.
+    let honestly =
+        |position: u64| -> Result<Option<Hash32>, StoreError> { Ok(Some(leaf(position))) };
+    tree.mend_below(height, start, &honestly).unwrap();
 
     let after = refused(&tree, 16);
     assert!(
