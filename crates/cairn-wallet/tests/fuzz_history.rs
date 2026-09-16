@@ -94,6 +94,12 @@ fn written_with(held: &[(u8, u32, u64)], fell: &[(u8, u64)], paid_at: &[(u8, u64
         bytes.extend_from_slice(&0u32.encode());
         bytes.extend_from_slice(&height.encode());
     }
+
+    // The notes the account has stopped answering for, empty. This is the
+    // format a wallet writes today, and the round trip below is written on
+    // that: a file that ends before this one is read and is what an older
+    // wallet left, but it is not what this one would write back.
+    bytes.extend_from_slice(&0u32.encode());
     bytes
 }
 
@@ -147,18 +153,29 @@ fn arbitrary_bytes_are_refused_or_read_and_settle() {
 
 /// The documented exception, stated, once for each time this file has grown.
 ///
-/// Two lists have been added to the end of it since wallets started writing
+/// Three lists have been added to the end of it since wallets started writing
 /// one, each read as absent when the bytes end before it: the places fallen
-/// notes landed at, and the heights those notes were paid at. So a file from
-/// two versions ago is four bytes shorter than one from one version ago, which
-/// is four bytes shorter than one written now, and all three are accounts.
+/// notes landed at, the heights those notes were paid at, and the notes the
+/// account has stopped answering for. So a file from three versions ago is
+/// four bytes shorter than one from two versions ago, and so on down to one
+/// written now, and every one of them is an account.
+///
+/// Counted from the end, which is where a list is added, so every offset here
+/// moves when one is. Adding the third and leaving the offsets alone left this
+/// passing and measuring the wrong two lists, and the name is what has to be
+/// read against the numbers each time.
 #[test]
-fn a_history_from_before_either_list_reads_and_grows_by_one_empty_list_each() {
+fn a_history_from_before_any_of_the_lists_reads_and_grows_by_one_empty_list_each() {
     let full = History::new().encode();
-    let before_the_heights = &full[..full.len() - 4];
-    let before_the_places = &full[..full.len() - 8];
+    let before_the_unanswered = &full[..full.len() - 4];
+    let before_the_heights = &full[..full.len() - 8];
+    let before_the_places = &full[..full.len() - 12];
 
     for (older, what) in [
+        (
+            before_the_unanswered,
+            "before what the account gave up on was kept",
+        ),
         (before_the_heights, "before heights were kept"),
         (before_the_places, "before places were kept"),
     ] {
@@ -174,10 +191,15 @@ fn a_history_from_before_either_list_reads_and_grows_by_one_empty_list_each() {
             "reading a file {what} and writing it back does not produce the current shape"
         );
     }
-    assert_eq!(
-        full.len() - before_the_places.len(),
-        8,
-        "the difference is two empty lists and nothing else"
+    // The offsets above are the claim, and nothing so far can fail on them:
+    // subtracting twelve and then asserting the difference is twelve says
+    // nothing, and a wrong offset lands on another list's boundary and reads
+    // just as well. What pins them is the byte before the oldest shape this
+    // still reads, which is not an account and must not be taken for one.
+    assert!(
+        History::decode(&full[..full.len() - 13]).is_err(),
+        "one byte further back than the oldest account this reads is being read as one, \
+         so the three lists are not where this test says they are"
     );
 
     // Which is the whole reason this type may not be nested inside another:
@@ -194,6 +216,12 @@ fn a_history_from_before_either_list_reads_and_grows_by_one_empty_list_each() {
     assert!(
         History::decode(&with_more).is_err(),
         "a height list of one with no height behind it has to be refused"
+    );
+    let mut with_more = before_the_unanswered.to_vec();
+    with_more.extend_from_slice(&1u32.encode());
+    assert!(
+        History::decode(&with_more).is_err(),
+        "a list of one note given up on with no note behind it has to be refused"
     );
 }
 
