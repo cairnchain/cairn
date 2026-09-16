@@ -91,6 +91,11 @@ fn all_proofs(tree: &HeaderTree) -> Vec<Option<Vec<Hash32>>> {
 }
 
 /// The truth about a leaf, as the header log would answer it.
+///
+/// Always answers, which is the shape a header log has for a height it holds.
+/// The `Result` is not this function's choice: it is the shape `mend_below`
+/// asks for, because the real source of this reads a file.
+#[allow(clippy::unnecessary_wraps)]
 fn honestly(position: u64) -> Result<Option<Hash32>, StoreError> {
     Ok(Some(leaf(position)))
 }
