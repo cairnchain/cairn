@@ -14,7 +14,7 @@
 //! has no way to know what happened before that, and says so rather than
 //! showing a history that starts nowhere in particular.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 use std::path::Path;
 
@@ -232,6 +232,33 @@ pub struct History {
     /// it came out of the window a handover carried, which sits below the
     /// anchor, so it is settled for the same reason.
     paid_at: BTreeMap<NoteId, u64>,
+    /// Notes this account held when it had to move past a block it could not
+    /// read, and has therefore stopped answering for.
+    ///
+    /// A note leaves `held` when this account reads the block that spent it.
+    /// When the node has let go of a block this account still needed, that
+    /// reading never happens: the account moves to where the log now begins,
+    /// and everything that became of this key in between is not in it. A note
+    /// spent in that range stays in `held` for the life of the file, and what
+    /// reads `held` reads it as what this key holds now.
+    ///
+    /// The account cannot work out which. A note that was spent and a note
+    /// that fell out of the hot set are both simply gone from what the node
+    /// can show, and the hot set is capped by size rather than by age, so
+    /// there is no height at which either was due. What it can do is know
+    /// that it does not know, which is what this is.
+    ///
+    /// Marked here a whole account at a time, because a gap is a fact about a
+    /// range and not about a note. What is done with the mark is narrower, and
+    /// `Wallet::reckon` decides it: a note this account watched fall has a
+    /// place written down, and a place is evidence and is the only handle by
+    /// which anyone could be asked about it, so that one is still counted. It
+    /// is the notes with nothing to point at that stop being called this key's
+    /// money.
+    ///
+    /// An entry leaves when the question is settled: the node still holds the
+    /// note, or a block spends it, or the file is started over.
+    unaccounted: BTreeSet<NoteId>,
     /// Newest last.
     movements: Vec<Movement>,
     /// What the account said before the chain changed under it, less whatever
@@ -408,6 +435,7 @@ impl History {
             if let Some(value) = self.held.remove(&input.note_id) {
                 self.fell.remove(&input.note_id);
                 self.paid_at.remove(&input.note_id);
+                self.unaccounted.remove(&input.note_id);
                 gave = gave.checked_add(value).unwrap_or(gave);
             }
         }
@@ -462,6 +490,17 @@ impl History {
     /// quietly leaves a balance is the worst way to be told anything.
     pub fn held(&self) -> impl Iterator<Item = (NoteId, Amount)> + '_ {
         self.held.iter().map(|(id, value)| (*id, *value))
+    }
+
+    /// Notes this account holds in name only, because it was moved past the
+    /// blocks that would have said what became of them.
+    pub fn unaccounted(&self) -> impl Iterator<Item = NoteId> + '_ {
+        self.unaccounted.iter().copied()
+    }
+
+    /// Says the node still holds this note, which settles it.
+    pub fn accounted_for(&mut self, id: &NoteId) -> bool {
+        self.unaccounted.remove(id)
     }
 
     /// Writes down where a note landed, saying whether that was news.
@@ -531,6 +570,11 @@ impl History {
         if height <= self.next {
             return;
         }
+        // Everything this account holds now was held as of a block it will
+        // never read, so from here it answers for none of it. Added to rather
+        // than replaced: an account can be moved past a second gap before the
+        // first one is settled.
+        self.unaccounted.extend(self.held.keys().copied());
         self.next = height;
         // Nothing read is adjacent to what comes next, so there is no block to
         // compare against any more.
@@ -810,6 +854,8 @@ impl Encode for History {
             })
             .collect();
         paid_at.encode_to(out);
+        let unaccounted: Vec<NoteId> = self.unaccounted.iter().copied().collect();
+        unaccounted.encode_to(out);
     }
 }
 
@@ -860,9 +906,21 @@ impl Decode for History {
         } else {
             Vec::new()
         };
+        // Notes the account stopped answering for. A file written before this
+        // wallet learned to say so ends here, and is read rather than thrown
+        // away: an account that has never been moved past a block has nothing
+        // to put here, and one that has will say so again the next time it is,
+        // which costs a balance that is too high until then rather than a file
+        // that will not open.
+        let unaccounted = if reader.remaining() > 0 {
+            Vec::<NoteId>::decode_from(reader)?
+        } else {
+            Vec::new()
+        };
         if !each_note_once(&held, |owned| owned.id)
             || !each_note_once(&fell, |fell| fell.id)
             || !each_note_once(&paid_at, |paid| paid.id)
+            || !each_note_once(&unaccounted, |id| *id)
         {
             return Err(CodecError::InvalidValue {
                 type_name: "History",
@@ -878,6 +936,7 @@ impl Decode for History {
                 .into_iter()
                 .map(|paid| (paid.id, paid.height))
                 .collect(),
+            unaccounted: unaccounted.into_iter().collect(),
             movements,
             next,
             from: (from != u64::MAX).then_some(from),
@@ -926,6 +985,45 @@ mod tests {
             coinbase: CoinbaseTransaction::new(height, vec![Note::new(amount("50"), to)]),
             transfers,
         }
+    }
+
+    /// What an account gives up on when it is moved past a block, and what it
+    /// takes back when the note turns up again.
+    #[test]
+    fn moving_past_a_block_gives_up_on_what_was_held() {
+        let mine = key(1);
+        let mut history = History::new();
+        history.take(&block(0, mine, Vec::new()), mine);
+        history.take(&block(1, mine, Vec::new()), mine);
+        let held: Vec<NoteId> = history.held().map(|(id, _)| id).collect();
+        assert_eq!(held.len(), 2);
+        assert_eq!(history.unaccounted().count(), 0, "nothing has been missed");
+
+        history.skip_to(40);
+        let given_up: Vec<NoteId> = history.unaccounted().collect();
+        assert_eq!(
+            given_up, held,
+            "every note this account held was held as of a block it will never \
+             read, so it answers for none of them"
+        );
+
+        // Found again, one at a time. The whole account is given up on at once
+        // because a gap is a fact about a range; it is taken back a note at a
+        // time because being found again is a fact about a note.
+        assert!(history.accounted_for(&held[0]));
+        assert!(!history.accounted_for(&held[0]), "and only once");
+        assert_eq!(history.unaccounted().count(), 1);
+
+        // And it survives the file, which is the whole point of writing it
+        // down: the account is read back on a wallet that has been restarted,
+        // and a gap it forgot would be a balance that came back wrong.
+        let bytes = history.encode();
+        let read = History::decode_from(&mut Reader::new(&bytes)).unwrap();
+        assert_eq!(
+            read.unaccounted().collect::<Vec<_>>(),
+            vec![held[1]],
+            "the file did not carry what the account had given up on"
+        );
     }
 
     #[test]

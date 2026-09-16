@@ -171,6 +171,14 @@ fn show_address(arguments: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Prints a paragraph on its own, wrapped to the width the rest of this uses.
+fn say(text: &str) {
+    println!();
+    for line in wrapped(text) {
+        println!("{line}");
+    }
+}
+
 fn show_balance(arguments: &[String]) -> Result<(), String> {
     let flags = Flags::parse(arguments)?;
     let wallet = join(&flags)?;
@@ -226,6 +234,10 @@ fn show_balance(arguments: &[String]) -> Result<(), String> {
         }
         println!("A reward is the one kind of money whose existence depends on its");
         println!("block surviving, so the rules hold it still until nothing can undo it.");
+    }
+
+    if let Some(note) = holdings.unaccounted_note() {
+        say(&note);
     }
 
     if let Some(words) = recovery.words() {
@@ -528,6 +540,7 @@ fn join(flags: &Flags) -> Result<Wallet, String> {
     let data = data_directory(flags);
     let (wallet, blocks) =
         Wallet::open(&flags.key_file()?, params, &data).map_err(|error| error.to_string())?;
+
 
     // As a node does: the names are kept, so a wallet opened on a machine
     // whose name server is not answering yet still joins once it is.
