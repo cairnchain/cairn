@@ -157,12 +157,48 @@ fn run(arguments: &[String]) -> Result<Ending, Stopping> {
     }
 
     let running = Arc::new(AtomicBool::new(true));
-    let miner = options.mine_to.map(|key| {
-        let node = Arc::clone(&node);
-        let running = Arc::clone(&running);
+    let miner = start_mining(&node, &options, &running);
+
+    let ending = watch(&node, &options, &running);
+
+    running.store(false, Ordering::SeqCst);
+    node.shutdown();
+    if let Some(miner) = miner {
+        let _ = miner.join();
+    }
+    match ending {
+        Ending::AsAsked => println!("stopped"),
+        Ending::Fault => println!("stopped on the fault above"),
+    }
+    Ok(ending)
+}
+
+/// Prints where the node stands, until it is asked to stop or stops itself.
+///
+/// Everything worth keeping is written as it happens, so a node killed at any
+/// moment loses nothing but the blocks it was in the middle of receiving.
+///
+/// The three ways out that print a paragraph and stop answer [`Ending::Fault`],
+/// which is what the exit code is made of.
+/// Starts the thread that mines, when this node was asked to.
+///
+/// Asked for rather than taken, for the reason set out on `attach_peer` in
+/// `cairn-net`: a machine that will not make a thread panicked the process.
+/// Here the node is already up and following the chain, which is the thing it
+/// is for, so what a refusal costs is the mining, and it is said out loud
+/// rather than taking the node down with it.
+fn start_mining(
+    node: &Arc<Node>,
+    options: &options::Options,
+    running: &Arc<AtomicBool>,
+) -> Option<thread::JoinHandle<()>> {
+    options.mine_to.and_then(|key| {
+        let node = Arc::clone(node);
+        let running = Arc::clone(running);
         let params = options.params;
         let started = Instant::now();
-        thread::spawn(move || {
+        let asked = thread::Builder::new().name("cairn-mine".to_owned()).spawn(
+            move || {
             // A node on probation would have every block it made refused, and
             // would spend every core it has finding them. Waiting here is the
             // same rule stated where it costs nothing: what the node will not
@@ -192,30 +228,20 @@ fn run(arguments: &[String]) -> Result<Ending, Stopping> {
                     short(&block.id().to_string()),
                 );
             });
-        })
-    });
-
-    let ending = watch(&node, &options, &running);
-
-    running.store(false, Ordering::SeqCst);
-    node.shutdown();
-    if let Some(miner) = miner {
-        let _ = miner.join();
-    }
-    match ending {
-        Ending::AsAsked => println!("stopped"),
-        Ending::Fault => println!("stopped on the fault above"),
-    }
-    Ok(ending)
+            },
+        );
+        match asked {
+            Ok(mining) => Some(mining),
+            Err(error) => {
+                println!(
+                    "not mining  this machine would not start the thread for it ({error}).                      The node is running and following the chain"
+                );
+                None
+            }
+        }
+    })
 }
 
-/// Prints where the node stands, until it is asked to stop or stops itself.
-///
-/// Everything worth keeping is written as it happens, so a node killed at any
-/// moment loses nothing but the blocks it was in the middle of receiving.
-///
-/// The three ways out that print a paragraph and stop answer [`Ending::Fault`],
-/// which is what the exit code is made of.
 fn watch(node: &Node, options: &options::Options, running: &AtomicBool) -> Ending {
     let started = Instant::now();
     // Named once. Every line below that has anything to say about the disk

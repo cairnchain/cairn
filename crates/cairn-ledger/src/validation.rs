@@ -729,6 +729,14 @@ const SPLIT_ABOVE: usize = 64;
 /// Threads worth asking for. A validator is not the only thing on the machine.
 const MOST_THREADS: usize = 8;
 
+/// The one validation reached first, of two that do not hold.
+fn earlier<'a>(held: Option<&'a Pending>, found: &'a Pending) -> &'a Pending {
+    match held {
+        Some(held) if (held.transfer, held.input) <= (found.transfer, found.input) => held,
+        _ => found,
+    }
+}
+
 /// Checks every signature collected, and names the first that does not hold.
 ///
 /// First in the order validation reached them, whichever thread got there.
@@ -746,12 +754,29 @@ fn first_failure(pending: &[Pending]) -> Option<&Pending> {
     let each = pending.len().div_ceil(threads).max(1);
 
     std::thread::scope(|scope| {
-        let running: Vec<_> = pending
-            .chunks(each)
-            .map(|slice| scope.spawn(move || slice.iter().find(|found| !found.holds())))
-            .collect();
-
+        let mut running = Vec::new();
         let mut worst: Option<&Pending> = None;
+        for slice in pending.chunks(each) {
+            // Asked for rather than taken. `Scope::spawn` panics when the
+            // machine will not make a thread, and this is on the path that
+            // decides whether a block is valid: a node that cannot have a
+            // second thread would have stopped checking blocks altogether,
+            // which is the one job it has, over a saving that is only ever
+            // about how long the checking takes. Refused, the slice is checked
+            // here instead, and the answer is the same answer.
+            match std::thread::Builder::new()
+                .name("cairn-verify".to_owned())
+                .spawn_scoped(scope, move || slice.iter().find(|found| !found.holds()))
+            {
+                Ok(handle) => running.push(handle),
+                Err(_) => {
+                    if let Some(found) = slice.iter().find(|found| !found.holds()) {
+                        worst = Some(earlier(worst, found));
+                    }
+                }
+            }
+        }
+
         for handle in running {
             // A thread that died took its answer with it, and the answer it
             // was carrying may have been "this block is invalid". Refusing the
@@ -761,11 +786,7 @@ fn first_failure(pending: &[Pending]) -> Option<&Pending> {
                 return pending.first();
             };
             if let Some(found) = found {
-                let better = worst
-                    .is_none_or(|held| (found.transfer, found.input) < (held.transfer, held.input));
-                if better {
-                    worst = Some(found);
-                }
+                worst = Some(earlier(worst, found));
             }
         }
         worst
