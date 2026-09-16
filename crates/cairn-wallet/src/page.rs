@@ -43,6 +43,7 @@ pub const HTML: &str = r#"<!doctype html>
     <div class="stranded" id="waiting" hidden></div>
     <div class="stranded" id="ripening" hidden></div>
     <div class="stranded" id="stranded" hidden></div>
+<div class="stranded" id="unaccounted" hidden></div>
     <div class="stranded" id="undone" hidden></div>
   </section>
 
@@ -323,6 +324,12 @@ async function refresh() {
     const zero = state.stranded.startsWith("0.00000000");
     stranded.innerHTML = (zero ? "" : "<b>" + state.stranded + "</b> is in " +
       "notes that cannot move yet. ") + state.strandedNote;
+  }
+
+  const unaccounted = $("unaccounted");
+  unaccounted.hidden = state.unaccountedNote === null;
+  if (state.unaccountedNote !== null) {
+    unaccounted.textContent = state.unaccountedNote;
   }
 
   const rows = $("rows");

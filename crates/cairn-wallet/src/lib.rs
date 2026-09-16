@@ -263,6 +263,31 @@ pub struct Holdings {
     /// says which notes have it and where each one landed, which is everything
     /// somebody who kept the whole record needs to be asked.
     pub unprovable: Vec<Unprovable>,
+    /// Notes this wallet's own account still names, and has stopped answering
+    /// for, because it was moved past the blocks that would have said.
+    ///
+    /// Not counted into anything. A note leaves the account when this wallet
+    /// reads the block that spent it, and when the node has let go of a block
+    /// this wallet still needed, that reading never happens: what became of
+    /// this key over that range is simply not in the account. So every note it
+    /// held at that moment is one it can no longer stand behind, and on an
+    /// ordinary wallet most of them turn out to have been spent.
+    ///
+    /// Kept apart from [`Holdings::unprovable`] rather than folded into it,
+    /// because the two say opposite things. A note there is money, and what it
+    /// needs is somebody who kept the set to rebuild a path to it. A note here
+    /// may be money and may be a payment this key made, and the wallet cannot
+    /// say which. So they are named here, to whoever holds the wallet, and to
+    /// nobody else.
+    ///
+    /// Only notes with nothing to point at reach this. One the account watched
+    /// fall carries a place, and a place is both evidence that this key held it
+    /// and the only handle by which anyone could be asked about it, so that one
+    /// stays counted. A node restarted from its own written ledger walks past
+    /// blocks it no longer holds as a matter of course, and a rule that did not
+    /// narrow here would stop every wallet on one from counting its stranded
+    /// money at all.
+    pub unaccounted: Vec<Unprovable>,
     /// The notes a spend can reach for, so a face can show where the money
     /// sits.
     ///
@@ -285,6 +310,34 @@ impl Holdings {
             .into_iter()
             .try_fold(self.spendable, Amount::checked_add)
             .unwrap_or(self.spendable)
+    }
+
+    /// What to say about notes this account has stopped answering for, if any.
+    ///
+    /// Said rather than shown as a figure, because a figure invites addition.
+    /// These are not money this wallet is standing behind: they are notes it
+    /// has lost track of, and the honest thing to do with a number it cannot
+    /// vouch for is to name it and say why.
+    #[must_use]
+    pub fn unaccounted_note(&self) -> Option<String> {
+        let count = self.unaccounted.len();
+        if count == 0 {
+            return None;
+        }
+        let worth = self
+            .unaccounted
+            .iter()
+            .map(|one| one.note.value)
+            .try_fold(Amount::ZERO, Amount::checked_add)
+            .unwrap_or(Amount::ZERO);
+        let notes = if count == 1 {
+            "one note".to_owned()
+        } else {
+            format!("{count} notes")
+        };
+        Some(format!(
+            "This wallet's account still names {notes}, worth {worth} if they are all              still yours, that it has stopped answering for. The node had let go of              blocks this wallet had not read yet, so what became of them over that              range was never read, and on a wallet that has paid anybody most of them              are notes that were paid away. They are left out of the balance rather              than counted into it, and out of what any archivist is asked about, since              the places on that list would be places this key no longer owns."
+        ))
     }
 
     /// Whether this key holds nothing at all.
@@ -1521,7 +1574,11 @@ impl Wallet {
         // This wallet's own account of what it has been paid, which is what
         // lets it notice a note the node has stopped following, and where each
         // one landed, which is what lets it ask about one.
-        let (recorded, landed): (BTreeMap<NoteId, Amount>, BTreeMap<NoteId, u64>) = self
+        let (recorded, landed, unanswered): (
+            BTreeMap<NoteId, Amount>,
+            BTreeMap<NoteId, u64>,
+            BTreeSet<NoteId>,
+        ) = self
             .history
             .lock()
             .map(|history| {
@@ -1530,7 +1587,8 @@ impl Wallet {
                     .keys()
                     .filter_map(|id| Some((*id, history.where_it_fell(id)?)))
                     .collect();
-                (held, landed)
+                let unanswered: BTreeSet<NoteId> = history.unaccounted().collect();
+                (held, landed, unanswered)
             })
             .unwrap_or_default();
         // Paths somebody else rebuilt for this wallet. Each is checked below
@@ -1542,7 +1600,7 @@ impl Wallet {
             .lock()
             .map(|held| held.clone())
             .unwrap_or_default();
-        self.node.with_chain(|chain| {
+        let (holdings, waiting, answered) = self.node.with_chain(|chain| {
             let state = chain.state();
             let mut held: Vec<Held> = state
                 .hot_notes()
@@ -1613,6 +1671,7 @@ impl Wallet {
                 .map(|one| one.id)
                 .chain(unprovable.iter().map(|one| one.id))
                 .collect();
+            let mut unanswered_for: Vec<Unprovable> = Vec::new();
             for (id, value) in &recorded {
                 if seen.contains(id) {
                     continue;
@@ -1620,6 +1679,29 @@ impl Wallet {
                 let note = Note::new(*value, mine);
                 match place(*id, note, None) {
                     Ok(one) => held.push(one),
+                    // A note the account stopped answering for, that the node
+                    // cannot place, and that this wallet has no place for
+                    // either. Then there is nothing at all to point at: it was
+                    // spent while the account was not reading, or it fell while
+                    // the account was not reading, and from here those look the
+                    // same. Counting it makes the balance too high by
+                    // everything this key paid away in that range.
+                    //
+                    // The place is what narrows it, and the narrowing is the
+                    // whole of the care this needs. A note this account watched
+                    // fall is one it read a block for: that reading is from
+                    // below the gap and says nothing about the gap, but it is
+                    // evidence, and it is what makes the note askable at all. A
+                    // node restarted from a written ledger walks past blocks it
+                    // no longer holds as a matter of course, so every wallet on
+                    // one would otherwise stop counting all of its stranded
+                    // money at once. Between over-counting a note that may have
+                    // been spent and a balance that quietly goes down, this
+                    // project has already said which is worse, and
+                    // `audit_what_forgetting_throws_away` holds it to that.
+                    Err(one) if unanswered.contains(id) && one.fell_at.is_none() => {
+                        unanswered_for.push(one);
+                    }
                     Err(one) => unprovable.push(one),
                 }
             }
@@ -1629,6 +1711,17 @@ impl Wallet {
                 .map(|one| (one.id, one.note.value))
                 .chain(unprovable.iter().map(|one| (one.id, one.note.value)))
                 .collect();
+
+            // Every note the node had something to say about, which settles
+            // the question for any of them the account had stopped answering
+            // for. Marking is done a whole account at a time, because a gap is
+            // a fact about a range and not about a note; unmarking is done one
+            // note at a time, as each is found again. Without it a note that
+            // was merely still in the hot set when the gap opened would stay
+            // marked, and the day it fell out of reach for real it would be
+            // left out of the balance instead of counted as stranded, which is
+            // a balance going quietly down.
+            let answered_after_all: Vec<NoteId> = values.keys().copied().collect();
 
             // An input names a note and not its owner, so which pooled
             // transfers are ours is decided by which notes they reach for.
@@ -1716,11 +1809,30 @@ impl Wallet {
                     ripe_at,
                     stranded,
                     unprovable: out_of_reach,
+                    unaccounted: unanswered_for,
                     notes,
                 },
                 waiting,
+                answered_after_all,
             )
-        })
+        });
+
+        // Outside the chain, on purpose. Everything that takes both of these
+        // takes the account first and the chain second, and taking them the
+        // other way round here is how two threads end up each holding what the
+        // other is waiting for.
+        if !answered.is_empty() {
+            if let Ok(mut history) = self.history.lock() {
+                let mut changed = false;
+                for id in &answered {
+                    changed |= history.accounted_for(id);
+                }
+                if changed {
+                    self.write_history(&history);
+                }
+            }
+        }
+        (holdings, waiting)
     }
 
     /// Builds, signs and hands over a transfer.

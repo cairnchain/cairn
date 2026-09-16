@@ -301,6 +301,13 @@ fn state(wallet: &Wallet) -> Response {
         Some(words) => json.field_str("strandedNote", &words),
         None => json.field_null("strandedNote"),
     }
+    // Notes the account has stopped answering for, in words rather than as a
+    // figure. A figure beside a balance invites adding it back on, and adding
+    // it back on is the thing this exists to stop.
+    match holdings.unaccounted_note() {
+        Some(note) => json.field_str("unaccountedNote", &note),
+        None => json.field_null("unaccountedNote"),
+    }
     // Whether this key holds anything at all, which is not the same question
     // as whether a spend has anything to reach for. The page used to answer
     // the second and print the first.
