@@ -113,6 +113,36 @@ fn guard_the_mode(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// What this platform could not be asked about a key file, if anything.
+///
+/// On Unix there is nothing to say: [`read`] refuses a key file other accounts
+/// can read, so either it is private or the wallet did not open. Everywhere
+/// else there is no mode to read, and the reasoning about that was written on
+/// `create_private`, in a doc comment, which is the one place the person whose
+/// money it is will never look. A guard that answers `Ok(())` where it means
+/// "not checked" is the same sentence said to the compiler instead of to them.
+///
+/// So this is that sentence, addressed to them, and it is a statement rather
+/// than a refusal because refusing would be a claim as well: nothing here
+/// knows that the directory is shared, only that nothing asked.
+#[must_use]
+pub const fn what_was_not_checked() -> Option<&'static str> {
+    #[cfg(unix)]
+    {
+        None
+    }
+    #[cfg(not(unix))]
+    {
+        Some(
+            "This platform has no file mode for this wallet to check, so it has not checked \
+             one. A key file here is exactly as private as the folder it sits in: under your \
+             own user profile that means you, the system and the administrators, which is the \
+             intent. In a folder several accounts share it means whoever that folder lets in, \
+             and anyone who can read the file holds the money. Keep it under your own profile.",
+        )
+    }
+}
+
 /// Writes a key file, refusing to overwrite one that already exists.
 ///
 /// Overwriting a key file destroys the only copy of whatever it held, so it is
@@ -299,6 +329,31 @@ fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    /// A platform this wallet cannot ask has to say that it did not ask.
+    ///
+    /// Held on every platform rather than on the one it is about, because the
+    /// shape is the claim: on Unix `read` refuses outright, so there is
+    /// nothing left to say, and anywhere else the silence was the defect.
+    #[test]
+    fn a_platform_with_no_mode_to_read_says_so() {
+        let said = what_was_not_checked();
+        if cfg!(unix) {
+            assert!(
+                said.is_none(),
+                "on Unix a key file other accounts can read is refused, so there is \
+                 nothing left for this to warn about: {said:?}"
+            );
+        } else {
+            let said =
+                said.expect("this platform checked no mode and told nobody it had not checked");
+            assert!(
+                said.contains("as private as the folder"),
+                "the one thing the person has to know is what the file's privacy \
+                 actually rests on here: {said}"
+            );
+        }
+    }
+
     use super::*;
 
     fn scratch(name: &str) -> std::path::PathBuf {

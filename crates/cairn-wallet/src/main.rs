@@ -161,6 +161,9 @@ fn make_key(arguments: &[String]) -> Result<(), String> {
     println!("address        {}", secret.public_key());
     println!();
     println!("That file is the only copy. Anyone holding it holds the money.");
+    if let Some(note) = keyfile::what_was_not_checked() {
+        say(note);
+    }
     Ok(())
 }
 
@@ -541,6 +544,12 @@ fn join(flags: &Flags) -> Result<Wallet, String> {
     let (wallet, blocks) =
         Wallet::open(&flags.key_file()?, params, &data).map_err(|error| error.to_string())?;
 
+    // Said here as well as where a key is made, because the machine a key file
+    // is copied onto is not the one it was made on, and the one being warned
+    // is whoever is about to use it.
+    if let Some(note) = keyfile::what_was_not_checked() {
+        say(note);
+    }
 
     // As a node does: the names are kept, so a wallet opened on a machine
     // whose name server is not answering yet still joins once it is.
