@@ -134,6 +134,37 @@ fn a_chain(ours: &SecretKey, stranger: &SecretKey) -> (Vec<Block>, NoteId, Amoun
     (blocks, id, note.value)
 }
 
+/// The list of movements has a hole in it, and nothing about the list gives it
+/// away.
+///
+/// The blocks on both sides were read and their movements are here; the ones
+/// in between read as a stretch in which nothing happened to this key. That is
+/// what the note on `History::from` says must never be allowed to happen, and
+/// it was answered where movements are dropped for age and nowhere else.
+fn the_hole_in_the_list_is_named(wallet: &Wallet) {
+    let covers = wallet.history_covers();
+    assert_eq!(
+        covers.from,
+        Some(0),
+        "the account did read from the first block, and saying otherwise would be the same \
+         untruth the other way round"
+    );
+    assert_eq!(
+        covers.behind(),
+        0,
+        "and it is up to date, which is what makes the hole invisible"
+    );
+    let missed = covers.missed_below.expect(
+        "a wallet moved past seventy blocks says its list covers everything from block zero \
+         to the tip, and a miner reading it sees rewards, then nothing, then rewards, with \
+         no line saying which blocks it could not read",
+    );
+    assert!(
+        missed > OURS as u64,
+        "and the height it names has to reach past the blocks it skipped: it says {missed}"
+    );
+}
+
 /// An account cannot count as its own the notes it paid away while it was not
 /// reading.
 #[test]
@@ -243,6 +274,8 @@ fn a_note_spent_in_a_block_the_account_skipped_is_not_this_key_s_money() {
         vec![spent],
         "the account is still giving up on notes the node has just shown it"
     );
+
+    the_hole_in_the_list_is_named(&wallet);
 
     let _ = std::fs::remove_dir_all(&directory);
 }

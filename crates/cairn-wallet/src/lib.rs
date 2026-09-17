@@ -792,6 +792,14 @@ pub struct Covered {
     pub from: Option<u64>,
     /// The newest height it has read.
     pub through: Option<u64>,
+    /// The height below which the list of movements may be missing entries,
+    /// because the node had let go of blocks this account still needed.
+    ///
+    /// Apart from `from`, which says where the account starts. A gap in the
+    /// middle is a third thing: the blocks below it were read and their
+    /// movements are listed, and moving `from` past them would be as untrue as
+    /// leaving it where it was.
+    pub missed_below: Option<u64>,
     /// Where the chain itself has got to.
     pub tip: Option<u64>,
 }
@@ -1377,6 +1385,7 @@ impl Wallet {
         Covered {
             from,
             through: from.and(history.next().checked_sub(1)),
+            missed_below: history.missed_below(),
             tip,
         }
     }

@@ -380,6 +380,15 @@ async function refresh() {
   } else if (state.history_from > 0) {
     said.push("As far back as block " + state.history_from + ": this wallet did not read what came before.");
   }
+  // A gap in the middle, which nothing about the list gives away: the blocks
+  // below it were read and are here, and the ones inside it look from here
+  // like a stretch in which nothing happened.
+  if (state.history_missed_below !== null) {
+    said.push("Could not read every block up to " + state.history_missed_below +
+      ": the node had let go of them. Anything that happened to this key in the " +
+      "ones it missed is not listed. The balance is counted from the chain, not " +
+      "from this list.");
+  }
   if (state.movements_held > state.movements.length) {
     said.push("Showing the newest " + state.movements.length + " of " + state.movements_held + ".");
   }

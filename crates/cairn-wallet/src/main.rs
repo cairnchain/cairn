@@ -16,7 +16,7 @@ use cairn_crypto::{PublicKey, SecretKey};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_net::seeds;
 use cairn_primitives::Amount;
-use cairn_wallet::{keyfile, serve, Wallet, WalletError};
+use cairn_wallet::{keyfile, serve, Covered, Wallet, WalletError};
 
 const HELP: &str = "\
 cairn-wallet, a Cairn wallet that is itself a node
@@ -174,6 +174,28 @@ fn show_address(arguments: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// What the list of movements does not cover, said under it.
+///
+/// Two different things, and the second is the one a reader cannot see for
+/// themselves. Where the list begins is visible from the list. A gap in the
+/// middle is not: the movements on both sides of it are there, and the blocks
+/// inside it read as a stretch in which nothing happened to this key.
+fn say_what_was_not_read(covered: &Covered) {
+    if let Some(from) = covered.from {
+        if from > 0 {
+            println!("As far back as block {from}: this wallet did not read what came before.");
+        }
+    }
+    if let Some(missed) = covered.missed_below {
+        say(&format!(
+            "This wallet could not read every block up to {missed}, because the node had let \
+             go of them by the time it looked. Anything that happened to this key in the ones \
+             it missed is not in the list above. The balance is counted from the chain rather \
+             than from the list, so it is right whatever the list is missing."
+        ));
+    }
+}
+
 /// Prints a paragraph on its own, wrapped to the width the rest of this uses.
 fn say(text: &str) {
     println!();
@@ -297,11 +319,7 @@ fn show_balance(arguments: &[String]) -> Result<(), String> {
             );
         }
         let covered = wallet.history_covers();
-        if let Some(from) = covered.from {
-            if from > 0 {
-                println!("As far back as block {from}: this wallet did not read what came before.");
-            }
-        }
+        say_what_was_not_read(&covered);
         let behind = covered.behind();
         if behind > 0 {
             println!("Still reading: {behind} block(s) of the chain are not in this list yet.");
