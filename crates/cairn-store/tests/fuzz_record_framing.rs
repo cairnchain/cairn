@@ -909,16 +909,28 @@ fn the_edges_of_a_record_are_where_they_say_they_are() {
     assert_eq!(recovered.discarded_bytes, 3);
     drop(log);
 
-    // A length past the ceiling with the bytes behind it missing is a torn
-    // tail and not a refusal, which is what stops an oversized length in the
-    // last record from refusing a start for ever.
+    // A length past the ceiling is damage whether or not the bytes behind it
+    // are there, and the start is not refused either way, which is what that
+    // ceiling was put here for.
+    //
+    // Whether the file is long enough to hold what a length claims used to
+    // decide this, and it decided it wrongly: the same four bytes are what one
+    // bad byte leaves in the first record of a full log, where reading them as
+    // a torn tail deleted every whole record behind them. So the length of the
+    // file no longer decides it, and these four are left where a reader can
+    // still see them rather than cut.
     let over = u32::try_from(MAX_RECORD_BYTES)
         .unwrap_or(u32::MAX)
         .saturating_add(1);
     let (log, recovered) = open_with(&directory, &over.to_le_bytes(), &[]).expect("it opens");
-    assert!(log.is_empty());
-    assert_eq!(recovered.unreadable, None);
-    assert_eq!(recovered.discarded_bytes, 4);
+    assert!(log.is_empty(), "nothing was reserved and the node starts");
+    assert_eq!(
+        recovered.unreadable,
+        Some(0),
+        "a length nothing wrote is damage"
+    );
+    assert_eq!(recovered.discarded_bytes, 0, "and damage is never cut");
+    assert_eq!(recovered.left_in_place, 4);
     drop(log);
 
     let _ = std::fs::remove_dir_all(&directory);

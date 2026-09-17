@@ -1272,19 +1272,29 @@ impl BlockLog {
             }
             let declared = usize::try_from(u32::from_le_bytes(header)).unwrap_or(usize::MAX);
             let left = total.saturating_sub(walk.offset).saturating_sub(4);
-            if u64::try_from(declared).unwrap_or(u64::MAX) > left {
-                // The file ends inside this record, so it is not one whatever
-                // its length says. A write cut short is exactly this shape,
-                // and so is a length prefix a bad byte made enormous: an
-                // oversized length in the last record used to refuse the
-                // start for ever instead of being read as the torn tail it is.
+            if declared > MAX_RECORD_BYTES {
+                // Longer than any block the rules allow, so this is not a
+                // length this process wrote, wherever in the file it sits.
+                // Nothing is reserved for it and nothing is cut for it.
+                //
+                // Asked before the one below, and the order is the whole of
+                // it. That one reads a length overshooting the end of the file
+                // as a write cut short, which is true of the last record and
+                // was standing in for every record: for any earlier one the
+                // bytes after it are whole records, and `settle` deletes all
+                // of them because nothing set `unreadable`. One flipped bit in
+                // the first record's length prefix emptied a six block log,
+                // synced, and the operator read that some bytes of an
+                // unfinished write had been dropped. Twenty one of the
+                // prefix's thirty two bits do it.
+                walk.unreadable = Some(index);
                 break;
             }
-            if declared > MAX_RECORD_BYTES {
-                // The bytes are all there and there are more of them than any
-                // block the rules allow, so this is not a length this process
-                // wrote. Nothing is reserved for it.
-                walk.unreadable = Some(index);
+            if u64::try_from(declared).unwrap_or(u64::MAX) > left {
+                // A length this process could have written, reaching past the
+                // end of the file. That is a write cut short, which is the one
+                // shape the tail is allowed to have, and it is the only shape
+                // anything here is cut for.
                 break;
             }
             let mut body = vec![0u8; declared];
