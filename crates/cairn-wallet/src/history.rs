@@ -232,6 +232,25 @@ pub struct History {
     /// it came out of the window a handover carried, which sits below the
     /// anchor, so it is settled for the same reason.
     paid_at: BTreeMap<NoteId, u64>,
+    /// The height below which this account's list of movements may be missing
+    /// entries, because it was moved past blocks it could not read.
+    ///
+    /// `from` cannot carry this. It says the first height the account can
+    /// answer for, and the note on it names exactly this failure: blocks that
+    /// are not in the list "read as a stretch in which nothing happened to
+    /// this key, which for a miner is plausible and false". That was answered
+    /// where movements are dropped for age and nowhere else, so an account
+    /// moved past a block kept the `from` it already had and went on saying it
+    /// covered everything from there.
+    ///
+    /// Moving `from` forward instead would be the same lie the other way
+    /// round: the blocks below the gap were read, and their movements are in
+    /// the list. A gap is a third thing and needs a third number.
+    ///
+    /// The highest one, when there have been several. Everything below it may
+    /// be short, which is the only claim one number can carry and is the
+    /// conservative half of it.
+    missed_below: Option<u64>,
     /// Notes this account held when it had to move past a block it could not
     /// read, and has therefore stopped answering for.
     ///
@@ -492,6 +511,12 @@ impl History {
         self.held.iter().map(|(id, value)| (*id, *value))
     }
 
+    /// The height below which the list of movements may be missing entries.
+    #[must_use]
+    pub const fn missed_below(&self) -> Option<u64> {
+        self.missed_below
+    }
+
     /// Notes this account holds in name only, because it was moved past the
     /// blocks that would have said what became of them.
     pub fn unaccounted(&self) -> impl Iterator<Item = NoteId> + '_ {
@@ -575,6 +600,12 @@ impl History {
         // than replaced: an account can be moved past a second gap before the
         // first one is settled.
         self.unaccounted.extend(self.held.keys().copied());
+        // And the list below here may be short by whatever happened to this
+        // key in the blocks being stepped over.
+        self.missed_below = Some(
+            self.missed_below
+                .map_or(height, |already| already.max(height)),
+        );
         self.next = height;
         // Nothing read is adjacent to what comes next, so there is no block to
         // compare against any more.
@@ -856,6 +887,9 @@ impl Encode for History {
         paid_at.encode_to(out);
         let unaccounted: Vec<NoteId> = self.unaccounted.iter().copied().collect();
         unaccounted.encode_to(out);
+        // `u64::MAX` for "no gap", the way `from` is written above, so the
+        // field is one fixed width whatever it holds.
+        self.missed_below.unwrap_or(u64::MAX).encode_to(out);
     }
 }
 
@@ -928,6 +962,17 @@ impl Decode for History {
         } else {
             Vec::new()
         };
+        // The height below which the list may be short. A file written before
+        // this wallet learned to say so ends here, and is read: an account
+        // that has never been moved past a block has nothing to put here, and
+        // one that has cannot be told from it, which is a list that reads as
+        // complete until the next gap opens. That is the same cost the
+        // `unaccounted` list above carries and it is named there.
+        let missed_below = if reader.remaining() > 0 {
+            u64::decode_from(reader)?
+        } else {
+            u64::MAX
+        };
         if !each_note_once(&held, |owned| owned.id)
             || !each_note_once(&fell, |fell| fell.id)
             || !each_note_once(&paid_at, |paid| paid.id)
@@ -948,6 +993,7 @@ impl Decode for History {
                 .map(|paid| (paid.id, paid.height))
                 .collect(),
             unaccounted: unaccounted.into_iter().collect(),
+            missed_below: (missed_below != u64::MAX).then_some(missed_below),
             movements,
             next,
             from: (from != u64::MAX).then_some(from),
@@ -1025,15 +1071,21 @@ mod tests {
         assert!(!history.accounted_for(&held[0]), "and only once");
         assert_eq!(history.unaccounted().count(), 1);
 
-        // And it survives the file, which is the whole point of writing it
+        // And both survive the file, which is the whole point of writing them
         // down: the account is read back on a wallet that has been restarted,
-        // and a gap it forgot would be a balance that came back wrong.
+        // and a gap it forgot would be a balance that came back wrong and a
+        // list that came back looking complete.
         let bytes = history.encode();
         let read = History::decode_from(&mut Reader::new(&bytes)).unwrap();
         assert_eq!(
             read.unaccounted().collect::<Vec<_>>(),
             vec![held[1]],
             "the file did not carry what the account had given up on"
+        );
+        assert_eq!(
+            read.missed_below(),
+            Some(40),
+            "nor where its list stops being complete"
         );
     }
 

@@ -377,6 +377,13 @@ fn state(wallet: &Wallet) -> Response {
         Some(from) => json.field_u64("history_from", from),
         None => json.field_null("history_from"),
     }
+    // Where the list may be short, which is apart from where it begins: a gap
+    // in the middle is a stretch the account read nothing of, and the
+    // movements on both sides of it are here.
+    match covered.missed_below {
+        Some(missed) => json.field_u64("history_missed_below", missed),
+        None => json.field_null("history_missed_below"),
+    }
     json.field_u64("history_behind", covered.behind());
     json.end_object();
     json_response(200, json)

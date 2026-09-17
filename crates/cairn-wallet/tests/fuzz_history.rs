@@ -95,11 +95,13 @@ fn written_with(held: &[(u8, u32, u64)], fell: &[(u8, u64)], paid_at: &[(u8, u64
         bytes.extend_from_slice(&height.encode());
     }
 
-    // The notes the account has stopped answering for, empty. This is the
-    // format a wallet writes today, and the round trip below is written on
-    // that: a file that ends before this one is read and is what an older
-    // wallet left, but it is not what this one would write back.
+    // The notes the account has stopped answering for, empty, and the height
+    // below which its list may be short, absent. This is the format a wallet
+    // writes today, and the round trip below is written on that: a file that
+    // ends before either is read and is what an older wallet left, but it is
+    // not what this one would write back.
     bytes.extend_from_slice(&0u32.encode());
+    bytes.extend_from_slice(&u64::MAX.encode());
     bytes
 }
 
@@ -153,25 +155,34 @@ fn arbitrary_bytes_are_refused_or_read_and_settle() {
 
 /// The documented exception, stated, once for each time this file has grown.
 ///
-/// Three lists have been added to the end of it since wallets started writing
+/// Four fields have been added to the end of it since wallets started writing
 /// one, each read as absent when the bytes end before it: the places fallen
-/// notes landed at, the heights those notes were paid at, and the notes the
-/// account has stopped answering for. So a file from three versions ago is
-/// four bytes shorter than one from two versions ago, and so on down to one
-/// written now, and every one of them is an account.
+/// notes landed at, the heights those notes were paid at, the notes the
+/// account has stopped answering for, and the height below which its list of
+/// movements may be short. Every one of those older shapes is still an
+/// account.
 ///
-/// Counted from the end, which is where a list is added, so every offset here
+/// Counted from the end, which is where a field is added, so every offset here
 /// moves when one is. Adding the third and leaving the offsets alone left this
-/// passing and measuring the wrong two lists, and the name is what has to be
-/// read against the numbers each time.
+/// passing while reading one field less than it said, so the widths are named
+/// now and the offsets are built from them: adding a field means changing a
+/// number that says what it is.
 #[test]
-fn a_history_from_before_any_of_the_lists_reads_and_grows_by_one_empty_list_each() {
+fn a_history_from_before_any_of_the_fields_reads_and_grows_by_one_empty_field_each() {
+    // Each field's own width, named so that adding one means changing a number
+    // that says what it is rather than an offset that says nothing. A list is
+    // a four byte count; a height is eight bytes.
+    const LIST: usize = 4;
+    const HEIGHT: usize = 8;
+
     let full = History::new().encode();
-    let before_the_unanswered = &full[..full.len() - 4];
-    let before_the_heights = &full[..full.len() - 8];
-    let before_the_places = &full[..full.len() - 12];
+    let before_the_gap = &full[..full.len() - HEIGHT];
+    let before_the_unanswered = &full[..full.len() - HEIGHT - LIST];
+    let before_the_heights = &full[..full.len() - HEIGHT - LIST * 2];
+    let before_the_places = &full[..full.len() - HEIGHT - LIST * 3];
 
     for (older, what) in [
+        (before_the_gap, "before a gap in the list was written down"),
         (
             before_the_unanswered,
             "before what the account gave up on was kept",
@@ -197,9 +208,9 @@ fn a_history_from_before_any_of_the_lists_reads_and_grows_by_one_empty_list_each
     // just as well. What pins them is the byte before the oldest shape this
     // still reads, which is not an account and must not be taken for one.
     assert!(
-        History::decode(&full[..full.len() - 13]).is_err(),
+        History::decode(&full[..before_the_places.len() - 1]).is_err(),
         "one byte further back than the oldest account this reads is being read as one, \
-         so the three lists are not where this test says they are"
+         so the fields are not where this test says they are"
     );
 
     // Which is the whole reason this type may not be nested inside another:
@@ -222,6 +233,12 @@ fn a_history_from_before_any_of_the_lists_reads_and_grows_by_one_empty_list_each
     assert!(
         History::decode(&with_more).is_err(),
         "a list of one note given up on with no note behind it has to be refused"
+    );
+    let mut with_more = before_the_gap.to_vec();
+    with_more.extend_from_slice(&[0u8; HEIGHT - 1]);
+    assert!(
+        History::decode(&with_more).is_err(),
+        "a height one byte short of a height has to be refused"
     );
 }
 
