@@ -1752,6 +1752,22 @@ impl ChainStore {
             return Err(ChainError::NoWork { id });
         }
 
+        // A block this node has already judged and refused. The set of bad
+        // identifiers is kept so that one is not judged twice, and the saving
+        // was the judging alone: the body was taken into memory again anyway,
+        // and on the path where the block claims to extend the tip, `follow`
+        // refuses it at its first step and no sweep runs on the way out. So a
+        // stranger re-sending a block it had already been refused paid nothing
+        // for it and this node kept the body. Measured: twelve thousand of
+        // them, offered twice each at no proof of work, left a node holding
+        // 207 449 992 bytes against a published ceiling of 167 903 232.
+        //
+        // Refused here, beside the other two things that can never become
+        // valid, and for the reason written over them.
+        if self.invalid.contains(&id) {
+            return Err(ChainError::KnownBad { id });
+        }
+
         // A block this far below the tip cannot be followed whatever is built
         // on it, because reaching it would mean undoing more than this node
         // allows. Refusing it here costs one comparison; storing it costs
