@@ -207,6 +207,15 @@ pub enum HandoverError {
     #[error("the maturity window holds {held} coinbases, more than the {limit} allowed")]
     MaturityWindowTooLarge { held: usize, limit: u64 },
     #[error(
+        "the maturity window says a coinbase matures at {matures_at}, which a ledger at \
+         height {height} under a maturity of {limit} could not hold"
+    )]
+    MaturityOutsideTheWindow {
+        matures_at: u64,
+        height: u64,
+        limit: u64,
+    },
+    #[error(
         "this ledger holds {supply} at height {height}, and the schedule has paid at most \
          {ceiling} by then"
     )]
@@ -352,6 +361,89 @@ impl LedgerState {
 /// named in both tiers at once, and a hot set worth more than the total the
 /// same message declares. The grace window's own places are checked in
 /// `take_grace_proofs`, where the leaves are already in hand.
+/// Whether the maturity window is one this chain could have produced.
+///
+/// Two questions, and for a long time only the first was asked. A window
+/// longer than the maturity depth is not one this network ever made, which is
+/// true; what it was standing in for is whether the heights inside it are ones
+/// this window could hold.
+///
+/// They have to be, and the reason is in `advance_maturing`: it empties the
+/// window from the front and stops at the first entry that has not matured,
+/// because in a window a node built from its own blocks the heights only ever
+/// rise. An entry that never matures therefore never leaves, and nothing
+/// behind it leaves either.
+///
+/// What that costs a node that took one: the window and the index beside it
+/// gain an entry a block for the life of the node, `compose_state_root` walks
+/// the whole of it for every candidate block, and what the note on
+/// `LedgerState::maturing` calls "constant like everything else a node holds"
+/// grows with the chain. Measured at three thousand blocks: three thousand and
+/// four entries, and twenty times the per-block cost of a node handed an
+/// honest one, still climbing. The coinbase at the head also pays notes that
+/// can never be spent, because nothing will reach the height it names. And
+/// once the window is longer than the depth, the first check here refuses it
+/// on the far side, so the node quietly stops being able to hand its ledger to
+/// anybody, which is the one exchange this file exists for.
+///
+/// Asked before the state root is, so that it catches a sender who recomputed
+/// one. That sender is the reachable case: out-mining the network for the
+/// burial buys every commitment in a handover together, and what it does not
+/// buy is agreement between them and the rules that would have made them.
+fn the_window_this_chain_would_have(
+    handover: &Handover,
+    params: &ConsensusParams,
+) -> Result<(), HandoverError> {
+    // Against the rule this chain runs under rather than against the ceiling
+    // the wire enforces: a window holding more than
+    // the maturity depth is not a window this network ever produced.
+    if u64::try_from(handover.maturing.len()).unwrap_or(u64::MAX) > params.coinbase_maturity {
+        return Err(HandoverError::MaturityWindowTooLarge {
+            held: handover.maturing.len(),
+            limit: params.coinbase_maturity,
+        });
+    }
+    // And every height in it has to be one this window could hold, which is
+    // the question the length was standing in for.
+    //
+    // `advance_maturing` empties this window from the front and stops at the
+    // first entry that has not matured, because in a window a node built from
+    // its own blocks the heights only ever rise. An entry that never matures
+    // therefore never leaves, and nothing behind it leaves either: the window
+    // and the index beside it gain one entry a block for the life of the node,
+    // `compose_state_root` walks the whole of it for every candidate block,
+    // and what the note on `LedgerState::maturing` calls "constant like
+    // everything else a node holds" grows with the chain. Measured at three
+    // thousand blocks: three thousand and four entries, and twenty times the
+    // per-block cost of a node that was handed an honest one.
+    //
+    // Two more things go with it. The coinbase at the head pays notes that can
+    // never be spent, because nothing will ever reach the height it names. And
+    // once the window is longer than the depth, this very check refuses it on
+    // the far side, so the node stops being able to hand its ledger to anybody
+    // — quietly, and it is the one exchange this file exists for.
+    //
+    // One comparison an entry, over at most `coinbase_maturity` of them, and
+    // both numbers are already here. It belongs with the others in
+    // `against_each_other`: a sender that out-mined the network for the burial
+    // chose this window and the state root over it together, and what it could
+    // not choose is whether the two agree with the rules that would have made
+    // them.
+    let ceiling = handover.at.height.saturating_add(params.coinbase_maturity);
+    if let Some((matures_at, _)) = handover
+        .maturing
+        .iter()
+        .find(|(matures_at, _)| *matures_at <= handover.at.height || *matures_at > ceiling)
+    {
+        return Err(HandoverError::MaturityOutsideTheWindow {
+            matures_at: *matures_at,
+            height: handover.at.height,
+            limit: params.coinbase_maturity,
+        });
+    }
+    Ok(())
+}
+
 fn against_each_other(handover: &Handover, declared: Amount) -> Result<(), HandoverError> {
     // Each note once, which the state root cannot ask. The hot set
     // is committed to as a tree keyed by note identifier, so a list naming a
@@ -589,15 +681,8 @@ pub fn accept(handover: &Handover, params: &ConsensusParams) -> Result<LedgerSta
             limit: GRACE_BLOCKS,
         });
     }
-    // For the same reason, and against the rule this chain runs under rather
-    // than against the ceiling the wire enforces: a window holding more than
-    // the maturity depth is not a window this network ever produced.
-    if u64::try_from(handover.maturing.len()).unwrap_or(u64::MAX) > params.coinbase_maturity {
-        return Err(HandoverError::MaturityWindowTooLarge {
-            held: handover.maturing.len(),
-            limit: params.coinbase_maturity,
-        });
-    }
+    the_window_this_chain_would_have(handover, params)?;
+
     // The one thing in a handover that follows from the rules rather than from
     // a commitment whoever sent it wrote.
     //
