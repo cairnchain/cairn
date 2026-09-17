@@ -380,6 +380,82 @@ fn a_maturity_window_past_the_depth_is_refused_before_it_is_built() {
     );
 }
 
+/// A window the right length, holding a height it could not hold.
+///
+/// The length was the only rule this window had, and the sentence beside it —
+/// "a window holding more than the maturity depth is not a window this network
+/// ever produced" — is true and is not the question the window is on the hook
+/// for. `advance_maturing` empties it from the front and stops at the first
+/// entry that has not matured, so one entry that never matures never leaves
+/// and nothing behind it leaves either: the window grows by an entry a block
+/// for the life of the node, and `compose_state_root` walks all of it for
+/// every candidate block. A node handed one of these had twenty times the
+/// per-block cost of a node handed an honest one after three thousand blocks,
+/// and was still climbing.
+///
+/// The window is taken from an honest handover and one height in it is moved,
+/// so the fixture is a window this network did produce, altered in the one way
+/// nothing asked about.
+///
+/// The state root over it is deliberately not recomputed, and that is enough:
+/// this check runs before the root is compared, so it catches the sender who
+/// did recompute one as well. That sender is the reachable attack and the
+/// reason the check has to be here rather than in the root — a sender who
+/// out-mined the network for the burial chose the window and the root over it
+/// together, and `against_each_other` is named for exactly that reader.
+#[test]
+fn a_maturity_window_holding_a_height_it_could_not_hold_is_refused() {
+    let params = params();
+    let miner = wallet(1);
+    let mut node = Node::new();
+    node.mine_empty(&miner, RECENT_HEADERS + 8);
+
+    let honest = node.handover();
+    assert!(
+        accept(&honest, &params).is_ok(),
+        "this test needs a handover the rules take, so that what it refuses below is the \
+         one thing it changed"
+    );
+    assert!(
+        !honest.maturing.is_empty(),
+        "and it needs a window with something in it"
+    );
+
+    // Past any height this chain will reach, which is what makes it an entry
+    // that never matures. The length is untouched, so the only rule the window
+    // had is satisfied exactly as before.
+    let mut forged = honest.clone();
+    forged.maturing[0].0 = u64::MAX;
+    assert_eq!(
+        forged.maturing.len(),
+        honest.maturing.len(),
+        "the length is the same, which is the whole point"
+    );
+    assert!(
+        matches!(
+            accept(&forged, &params).err(),
+            Some(HandoverError::MaturityOutsideTheWindow { .. })
+        ),
+        "a coinbase that never matures was taken, so this node's window grows by an entry \
+         a block for ever, its per-block cost grows with the chain, the notes that coinbase \
+         paid can never be spent, and once the window passes the depth it stops being able \
+         to hand its ledger to anybody"
+    );
+
+    // And the other end: a height at or below the anchor is one that has
+    // already matured, so it would leave on the first block and never have
+    // been in a window this chain produced either.
+    let mut early = honest.clone();
+    early.maturing[0].0 = honest.at.height;
+    assert!(
+        matches!(
+            accept(&early, &params).err(),
+            Some(HandoverError::MaturityOutsideTheWindow { .. })
+        ),
+        "a window holding a coinbase that has already matured is not one this network made"
+    );
+}
+
 /// What the chain has issued travels too, and cannot be made up.
 ///
 /// A supply is only worth having if it is the chain's rather than the sender's.
