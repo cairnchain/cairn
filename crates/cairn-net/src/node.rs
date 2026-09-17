@@ -2043,6 +2043,40 @@ impl Shared {
         self.chain.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Writes down that a visitor was turned away, and what said so.
+    ///
+    /// Both halves together, because they are one fact. Counting without
+    /// saying is what this had for a while: `turned_away` moved on every
+    /// refusal and `unanswered` was set only by the accept, so a node refusing
+    /// everybody three descriptors short of the line had a rising count and an
+    /// operator who was told nothing. "Turned away and counted" is true and is
+    /// not the answer to whether anyone will learn the door is shut.
+    ///
+    /// The run is the figure that matters and it is kept here rather than in a
+    /// caller's local, because there are six callers now and one of them used
+    /// to own it.
+    fn could_not_take_a_visitor(&self, because: &str) {
+        self.turned_away.fetch_add(1, Ordering::Relaxed);
+        let mut said = self.unanswered();
+        let refusals = said
+            .as_ref()
+            .map_or(0, |held| held.refusals)
+            .saturating_add(1);
+        *said = Some(Unanswered {
+            because: because.to_owned(),
+            refusals,
+        });
+    }
+
+    /// Says a visitor was let in, so what is written down is a door that is
+    /// still shut rather than one that was.
+    fn took_a_visitor(&self) {
+        let mut said = self.unanswered();
+        if said.is_some() {
+            *said = None;
+        }
+    }
+
     fn peers(&self) -> MutexGuard<'_, HashMap<PeerId, Peer>> {
         self.peers.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -5971,14 +6005,10 @@ fn save_book(shared: &Arc<Shared>) {
 /// visitor. Fifty milliseconds of idle polling buys an exit that always works.
 fn accept_loop(shared: &Arc<Shared>, listener: &TcpListener) {
     let polling = listener.set_nonblocking(true).is_ok();
-    let mut refusals: u64 = 0;
     while shared.running.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, from)) => {
-                if refusals > 0 {
-                    refusals = 0;
-                    *shared.unanswered() = None;
-                }
+                shared.took_a_visitor();
                 // A socket accepted from a non-blocking listener inherits that
                 // mode on some platforms. Left alone, every read on it would
                 // return immediately and be taken for a deadline passing.
@@ -6011,12 +6041,7 @@ fn accept_loop(shared: &Arc<Shared>, listener: &TcpListener) {
                 // So the loop waits and asks again, and counts what it was
                 // refused with rather than going quiet. Nothing here can spin:
                 // every turn through it sleeps the same poll the idle path does.
-                refusals = refusals.saturating_add(1);
-                shared.turned_away.fetch_add(1, Ordering::Relaxed);
-                *shared.unanswered() = Some(Unanswered {
-                    because: error.to_string(),
-                    refusals,
-                });
+                shared.could_not_take_a_visitor(&error.to_string());
                 thread::sleep(ACCEPT_POLL);
             }
         }
@@ -6873,16 +6898,15 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
     // went up or stayed flat on the same exhaustion depending on timing, and
     // the test that holds the door open measured nothing on the runs where it
     // stayed flat.
-    let Ok(writing_end) = stream.try_clone() else {
-        shared.turned_away.fetch_add(1, Ordering::Relaxed);
-        return false;
+    let clone = || match stream.try_clone() {
+        Ok(end) => Some(end),
+        Err(error) => {
+            shared.could_not_take_a_visitor(&error.to_string());
+            None
+        }
     };
-    let Ok(shutdown_end) = stream.try_clone() else {
-        shared.turned_away.fetch_add(1, Ordering::Relaxed);
-        return false;
-    };
-    let Ok(closing_end) = stream.try_clone() else {
-        shared.turned_away.fetch_add(1, Ordering::Relaxed);
+    let (Some(writing_end), Some(shutdown_end), Some(closing_end)) = (clone(), clone(), clone())
+    else {
         return false;
     };
     let remote = stream.peer_addr().ok().map(|address| address.ip());
@@ -6921,7 +6945,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
         // back to remove: the thread that does that is the one below, and it
         // is not going to be started either.
         shared.peers().remove(&id);
-        shared.turned_away.fetch_add(1, Ordering::Relaxed);
+        shared.could_not_take_a_visitor("this machine would not start a thread to write to it");
         let _ = closing_end.shutdown(Shutdown::Both);
         return false;
     };
@@ -6989,7 +7013,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
         // what this should wait out.
         let _ = closing_end.shutdown(Shutdown::Both);
         shared.peers().remove(&id);
-        shared.turned_away.fetch_add(1, Ordering::Relaxed);
+        shared.could_not_take_a_visitor("this machine would not start a thread to read from it");
         if let Some(writer) = writer.lock().unwrap_or_else(PoisonError::into_inner).take() {
             let _ = writer.join();
         }
