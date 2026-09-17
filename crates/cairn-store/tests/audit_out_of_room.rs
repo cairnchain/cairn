@@ -336,13 +336,28 @@ fn a_corrupt_record_with_no_index_comes_back_on_the_prefix() {
 /// reserved for it.
 ///
 /// It was, on the rebuild path, and the check refused the start for ever. An
-/// oversized length prefix in the *last* record is exactly what a torn write
+/// oversized length prefix in the *last* record is one thing a torn write
 /// leaves: the four bytes that say how long a record is landed and the record
-/// did not, so the file ends inside it. That is a torn tail whatever the
-/// number says, and it is read as one now. Nothing is reserved either way,
-/// which is what the ceiling is for.
+/// did not. This used to cut it for that reason, and that is the assertion
+/// that changed.
+///
+/// It cannot be told from the prefix alone. The same bytes are what one bad
+/// byte leaves in *any* record, and reading them as a torn tail there deleted
+/// every whole record after them — a flipped bit in the first prefix emptied a
+/// six block log and called it an unfinished write. `audit_a_prefix_a_bad_byte
+/// _made_enormous` holds that.
+///
+/// So an implausible length is damage wherever it sits, and what that costs
+/// here is the wording: a power cut that tore a length prefix is now reported
+/// as bytes left in place rather than as bytes dropped. Nothing is lost by it.
+/// `append` truncates to the last whole record before it writes, so the next
+/// block removes them, and until then they are readable, which is the side to
+/// be wrong on. The other side deletes an archive.
+///
+/// Nothing is reserved either way, which is what the ceiling is for, and that
+/// is what this test was written for.
 #[test]
-fn an_oversized_length_prefix_in_the_last_record_is_a_torn_tail() {
+fn an_oversized_length_prefix_in_the_last_record_is_left_in_place() {
     let blocks = chain(3);
     let directory = scratch("huge-length");
     built(&directory, &blocks);
@@ -361,19 +376,32 @@ fn an_oversized_length_prefix_in_the_last_record_is_a_torn_tail() {
 
     let (log, recovered) = BlockLog::open(&directory)
         .unwrap_or_else(|error| panic!("a log claiming a 4 GiB record would not start: {error}"));
-    assert_eq!(log.len(), blocks.len() - 1, "the tail went, and only it");
-    assert_eq!(recovered.discarded_bytes, last);
     assert_eq!(
-        recovered.unreadable, None,
-        "a record the file ends inside is a torn write, not damage"
+        log.len(),
+        blocks.len() - 1,
+        "every whole record before it is read, which is what starting means"
+    );
+    assert_eq!(
+        recovered.discarded_bytes, 0,
+        "a length no process here wrote is not a length anything may act on, and cutting \
+         is acting on it"
+    );
+    assert_eq!(
+        recovered.left_in_place, last,
+        "they are left where they are, and `append` writes over them"
+    );
+    assert!(
+        recovered.unreadable.is_some(),
+        "and it is said to be damage, because from the prefix alone it cannot be told \
+         from damage"
     );
     assert_eq!(log.read(1).unwrap().unwrap().id(), blocks[1].id());
     drop(log);
 
     assert_eq!(
         std::fs::metadata(directory.join(BLOCK_LOG)).unwrap().len(),
-        last_start,
-        "bytes a record ends inside can never become one, so they go"
+        whole,
+        "nothing was deleted for a number nothing here wrote"
     );
     let _ = std::fs::remove_dir_all(&directory);
 }

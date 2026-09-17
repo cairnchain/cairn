@@ -323,14 +323,24 @@ fn a_partial_offset_is_cut_back() {
 /// whether the bytes it claims are there.
 ///
 /// Four bytes of length and nothing after them is a write that stopped between
-/// the two, which is what a crash mid append leaves: it is cut, and the node
-/// starts. This used to refuse the start instead, and go on refusing it, which
-/// on an unattended node means a node that never comes back over a torn tail.
+/// the two, which is what a crash mid append leaves. The node starts, which is
+/// the thing this was written for: it used to refuse the start instead, and go
+/// on refusing it, which on an unattended node means a node that never comes
+/// back over a torn tail.
 ///
-/// A length that is longer than any block the rules allow but short enough
-/// that the file really does hold it is not a torn write. Nothing is reserved
-/// for it either, and the bytes are left alone rather than cut, because that
-/// is damage and a start that misread it once may read it back.
+/// Whether those four bytes are then cut turns on the number in them, and one
+/// rule decides it wherever the record sits: a length longer than any block
+/// the rules allow is not one this process wrote, so nothing is reserved for
+/// it and nothing is cut for it. It is reported as damage, and the bytes are
+/// left where they are, which a start that misread them once can read back.
+///
+/// That used to depend on whether the file was long enough to hold what the
+/// length claimed — the file ending inside a record was read as a write cut
+/// short. True of a tail and true of one bad byte in the first record of a
+/// full log, where it deleted every whole record behind it. So the file's
+/// length no longer decides it, and what that costs is here: four bytes of a
+/// torn write are left in place rather than cut. `append` truncates to the
+/// last whole record before it writes, so the next block removes them.
 #[test]
 fn an_absurd_record_length_is_never_reserved() {
     let torn = scratch("absurd-torn");
@@ -338,15 +348,17 @@ fn an_absurd_record_length_is_never_reserved() {
     std::fs::write(torn.join(BLOCK_LOG), [0xff, 0xff, 0xff, 0xff]).unwrap();
 
     let (log, recovered) = BlockLog::open(&torn).unwrap();
-    assert!(log.is_empty());
-    assert_eq!(recovered.discarded_bytes, 4);
-    assert_eq!(recovered.unreadable, None, "the file ended inside it");
-    drop(log);
+    assert!(log.is_empty(), "nothing was reserved and the node starts");
     assert_eq!(
-        std::fs::metadata(torn.join(BLOCK_LOG)).unwrap().len(),
-        0,
-        "bytes a record ends inside can never become one"
+        recovered.discarded_bytes, 0,
+        "nothing is cut for a length nothing here wrote"
     );
+    assert_eq!(recovered.unreadable, Some(0), "reported as damage");
+    assert_eq!(
+        recovered.left_in_place, 4,
+        "and left where a reader can see it"
+    );
+    drop(log);
 
     // One byte over the ceiling, in a file long enough to hold what it claims.
     // Sparse, so this costs no disk: what matters is the length.
