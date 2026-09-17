@@ -170,13 +170,23 @@ fn held_off_for(failures: u32) -> u64 {
 /// keeping it there decides the length of. One IPv6 range supplies the
 /// addresses.
 ///
-/// So there is a ceiling, and past it nothing further is written down, the
-/// same shape and the same number as [`crate::refusal::MAX_REFUSED`]. What
-/// filling it buys is the ability to make a fresh claim look fresh, which is
-/// what a fresh address buys anyway; what it no longer buys is deciding how
-/// much memory this node spends. The whole lot is dropped the moment the
-/// choice is made, which is the only thing it was ever for.
-const MAX_UNBACKED_HOSTS: usize = 1_024;
+/// So there is a ceiling, the same shape and the same number as
+/// [`crate::refusal::MAX_REFUSED`], and past it the oldest entry goes to make
+/// room rather than the new one being dropped.
+///
+/// That was the other way round, and the sentence excusing it is worth keeping
+/// because of how nearly it works: filling the list "buys the ability to make
+/// a fresh claim look fresh, which is what a fresh address buys anyway". True.
+/// It is not the answer to whether a full list still pauses anybody, and it
+/// did not: an address that is not written down is an address nothing pauses,
+/// so a thousand addresses spent one turn each bought unlimited free turns
+/// from one address afterwards, and a node sitting beside an honest peer never
+/// reached the honest chain.
+///
+/// Dropping the oldest keeps the ceiling, which is about memory, and keeps the
+/// pause, which is what the list is for. The whole lot is dropped the moment
+/// the choice is made, which is the only thing it was ever for.
+pub const MAX_UNBACKED_HOSTS: usize = 1_024;
 
 /// What one address has spent, in claims it was asked to show and could not.
 #[derive(Clone, Copy, Debug)]
@@ -267,10 +277,14 @@ pub struct Chooser {
     /// one costs has to grow with how often an address has spent one: see
     /// [`held_off_for`].
     unbacked_hosts: HashMap<IpAddr, Unshown>,
-    /// When the first claim long enough to be final arrived. Until one has,
-    /// there is no choice to make: a short chain is never past the
-    /// reorganisation limit, so following the wrong one is undone by the
-    /// fork choice like any other branch.
+    /// When the first claim long enough to be final arrived, while there is
+    /// still one to settle. Without one there is no choice to make: a short
+    /// chain is never past the reorganisation limit, so following the wrong
+    /// one is undone by the fork choice like any other branch.
+    ///
+    /// Cleared again when the last claim goes, because this is what decides
+    /// whether every peer is held off and "a long claim arrived once" is not
+    /// the same fact as "a choice is open". `step` is where that is done.
     first_claim_at: Option<u64>,
     /// The peer currently asked to show its claim, how, and since when.
     asked: Option<(u64, Approach, u64)>,
@@ -471,14 +485,39 @@ impl Chooser {
             claim.unbacked = true;
             claim.tried = Some(now);
             if let Some(host) = claim.host.filter(|_| blame) {
-                let room = self.unbacked_hosts.len() < MAX_UNBACKED_HOSTS;
                 // An address already on the list costs nothing further to hold,
                 // and counting against it is what makes its next pause longer
                 // than its last.
                 if let Some(spent) = self.unbacked_hosts.get_mut(&host) {
                     spent.at = now;
                     spent.failures = spent.failures.saturating_add(1);
-                } else if room {
+                } else {
+                    // A full list used to mean the address was not written
+                    // down at all, and an address nothing wrote down is an
+                    // address nothing pauses. The note on this table asks
+                    // whether it grows without bound and answers that filling
+                    // it "buys the ability to make a fresh claim look fresh,
+                    // which is what a fresh address buys anyway" — true, and
+                    // not the answer to whether a full table still pauses
+                    // anybody. It stopped pausing everybody: a thousand
+                    // addresses spent one turn each bought unlimited free
+                    // turns from one address after that, and a node with an
+                    // honest peer beside it never reached the honest chain.
+                    //
+                    // So the oldest goes instead. The ceiling is on memory and
+                    // is kept; what it must not cost is the pause, and the
+                    // entry worth the least is the one that has waited
+                    // longest since its last failure.
+                    if self.unbacked_hosts.len() >= MAX_UNBACKED_HOSTS {
+                        let oldest = self
+                            .unbacked_hosts
+                            .iter()
+                            .min_by_key(|(address, spent)| (spent.at, **address))
+                            .map(|(address, _)| *address);
+                        if let Some(oldest) = oldest {
+                            self.unbacked_hosts.remove(&oldest);
+                        }
+                    }
                     self.unbacked_hosts.insert(
                         host,
                         Unshown {
@@ -524,6 +563,25 @@ impl Chooser {
         // The rest leave with their claims and nothing held against them: a
         // claim that was never tested is only gone, not broken.
         self.claims.retain(|peer, _| connected.contains(peer));
+
+        // And a choice with nothing left in it is not a choice. The note on
+        // `first_claim_at` says that until a long claim arrives "there is no
+        // choice to make", which is true of the time before the first one and
+        // was standing in for whether one is open now. `holds_off` asks it the
+        // second question, and with this set and nobody being asked it holds
+        // every peer off: a node whose claimants have all gone dropped every
+        // block, announcement and chain from everybody, in silence.
+        //
+        // Nothing reopened it either. A claim is taken from the introduction
+        // and a second greeting is refused, so peers already here could never
+        // acquire one however much chain they went on to gain. On a network
+        // where nobody has a long chain yet, one `Hello` from a stranger that
+        // then hung up shut a node to everyone for the life of the process,
+        // for the price of one connection and one message.
+        if self.claims.is_empty() && self.asked.is_none() {
+            self.first_claim_at = None;
+            return Step::Quiet;
+        }
 
         if now.saturating_sub(first) < SETTLING {
             return Step::Quiet;
