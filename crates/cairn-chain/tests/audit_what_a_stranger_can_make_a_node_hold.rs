@@ -127,6 +127,74 @@ fn side_block(height: u64, previous: Hash32, bytes: usize, nonce: u64, owner: &S
     }
 }
 
+/// A block already judged and refused is not taken into memory again.
+///
+/// The sweep that bounds what this node holds runs when a block joins the
+/// followed branch. A block that loses the fork choice is swept where it
+/// lands, which is the repair above. Neither reaches the third road: a block
+/// claiming to extend the tip goes to `follow`, and when its identifier is
+/// already in the set of bad ones `follow` refuses it at its first step and
+/// returns before any sweep.
+///
+/// The body was held on the way in either way, and on that road nothing took
+/// it out again. Difficulty one accepts every hash, so re-sending costs a
+/// stranger nothing at all.
+#[test]
+fn a_block_already_refused_is_not_taken_into_memory_again() {
+    let rules = params();
+    let miner = wallet(1);
+    let mut shared = Chain::new(rules);
+    let chain = shared.mine_empty(&miner, 4);
+
+    let mut store = ChainStore::new(rules);
+    for block in &chain {
+        store.add_block(block.clone(), NOW).unwrap();
+    }
+    let settled = store.held_bytes();
+    let tip = chain[chain.len() - 1].id();
+    let next = store.height().unwrap() + 1;
+
+    // Each claims to build straight on the tip, so each is weighed heavier
+    // than the branch and taken to `follow`, and none of them can apply.
+    let refused: Vec<Block> = (0..64u64)
+        .map(|nonce| side_block(next, tip, 16 * 1024, nonce, &miner))
+        .collect();
+
+    for block in &refused {
+        assert!(
+            store.add_block(block.clone(), NOW).is_err(),
+            "this test needs blocks the node refuses"
+        );
+    }
+    let after_the_first_offer = store.held_bytes();
+
+    // The same blocks again, which is the whole of the attack.
+    for block in &refused {
+        assert!(
+            matches!(
+                store.add_block(block.clone(), NOW),
+                Err(cairn_chain::ChainError::KnownBad { .. })
+            ),
+            "a block refused once is refused again for having been refused, which is what \
+             the set of bad identifiers is for"
+        );
+    }
+
+    assert_eq!(
+        store.held_bytes(),
+        after_the_first_offer,
+        "offering refused blocks again put {} more bytes into this node, at no proof of \
+         work and for as long as it cares to keep offering. The set of bad identifiers \
+         saved the judging and not the holding",
+        store.held_bytes().saturating_sub(after_the_first_offer)
+    );
+    assert_eq!(
+        store.held_bytes(),
+        settled,
+        "and a block that could not apply is not worth keeping at all"
+    );
+}
+
 /// Offers `count` losing blocks and reports what the node then holds, without
 /// letting its own branch move.
 fn offer_side_blocks(rules: ConsensusParams, bytes: usize, count: u64) -> (usize, usize) {
