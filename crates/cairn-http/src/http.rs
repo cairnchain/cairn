@@ -135,8 +135,15 @@ const DRAIN_CHUNK: usize = 2 * 1024;
 /// Reads [`drain`] makes before it stops.
 ///
 /// Eight of those chunks is sixteen kilobytes, which is past the head cap and
-/// the body cap together, so an honest caller is cleared whole and a caller
-/// still sending is left to its own reset.
+/// the body cap together. That arithmetic is true and it is not what stops the
+/// loop: the socket is non-blocking by the time [`drain`] runs, so the first
+/// read with nothing in the buffer comes back `WouldBlock` and the loop ends
+/// there, having cleared whatever happened to have arrived at that instant.
+/// A caller whose body is still on its way is cleared of nothing.
+///
+/// What that costs is measured and written on [`drain`]. The obvious repair,
+/// waiting for the bytes, is wrong for the reason written there too, so this
+/// is left as it is and named rather than quietly improved.
 const DRAIN_READS: usize = 8;
 /// How long to wait after an accept that failed, so a failure that persists is
 /// a wait rather than a spin.
@@ -357,6 +364,28 @@ struct Counts {
     from_host: HashMap<IpAddr, usize>,
 }
 
+/// One address for one machine, whichever way it arrived.
+///
+/// A listener bound to `[::]` reports every IPv4 caller as `::ffff:a.b.c.d`;
+/// one bound to `0.0.0.0` reports the same caller as `a.b.c.d`. They are the
+/// same machine, and this makes them the same key.
+///
+/// It is also what makes the loopback exemption work. `IpAddr::is_loopback`
+/// answers for `127.0.0.0/8` and for `::1`, and says no to
+/// `::ffff:127.0.0.1`. As this server is deployed it sits behind a proxy on
+/// the same machine, and that proxy is an IPv4 caller, so on a dual stack
+/// listener the exemption applied to nobody: the whole public site arrived
+/// under one address that was meant to be uncounted and was counted, and was
+/// capped at [`MAX_PER_HOST`] readers at a time. The note above that constant
+/// calls the exemption "the whole reason this number can stay this low", and
+/// the one deployment it was written for is the one it never reached.
+fn one_machine(host: IpAddr) -> IpAddr {
+    match host {
+        IpAddr::V6(within) => within.to_ipv4_mapped().map_or(host, IpAddr::V4),
+        IpAddr::V4(already) => IpAddr::V4(already),
+    }
+}
+
 impl Slots {
     /// Takes a slot for a connection from `host`, unless there is no room for
     /// it, on the server or for that address.
@@ -374,7 +403,9 @@ impl Slots {
         // one address, or the operator. Neither is a flood worth counting, and
         // treating the proxy as one visitor was capping the site rather than
         // the attack.
-        let counted = host.filter(|host| !host.is_loopback());
+        // Through `one_machine`, because the exemption below did not recognise
+        // the shape the proxy actually arrives in.
+        let counted = host.map(one_machine).filter(|host| !host.is_loopback());
         if let Some(host) = counted {
             let held = counts.from_host.get(&host).copied().unwrap_or(0);
             if held >= MAX_PER_HOST {
@@ -483,6 +514,31 @@ where
 /// stop every other caller. What it has to clear is a request head and at most
 /// a body, both of which are already capped, and a caller that goes on sending
 /// past that is one this is right to stop reading.
+///
+/// **It clears what has arrived, not what was sent, and the difference is the
+/// refusal itself.** Measured against this server with its slots full, a
+/// caller posting a head inside the cap and a body of exactly
+/// [`MAX_BODY_BYTES`]: sent in one piece with no gap, twelve of twelve
+/// callers read the whole 503; sent thirty milliseconds after the head, seven
+/// of twelve; sent in eight pieces twenty milliseconds apart, none of twelve.
+/// Every loss is the same, a reset after the six hundred and ten bytes of
+/// response head and none of its body, which reaches a reader as a transport
+/// error rather than as the refusal this server meant to give. On a real link
+/// it is not intermittent at all: the refusal is written the moment `accept`
+/// returns, a round trip before the caller's body can arrive.
+///
+/// The two tests that pin this write their whole request in one call on the
+/// loopback before `accept` returns, so they hold with the drain and without
+/// it alike.
+///
+/// The obvious repair is to wait for the bytes, and it is wrong. This runs in
+/// the accept loop, so every millisecond of patience here is a millisecond no
+/// other caller is accepted, and it runs exactly when the server is at its
+/// ceiling and every caller is being refused. That trades a lost error message
+/// for a stalled listener. The repair that would work is to move the refusal
+/// off the accept loop, on to one thread with a bounded queue, and that is a
+/// change to how this server is shaped rather than a line here. Left as it is,
+/// and said, rather than made worse quietly.
 fn drain(stream: &TcpStream) {
     let mut sink = [0u8; DRAIN_CHUNK];
     let mut source = stream;
@@ -927,7 +983,8 @@ pub fn bind(address: SocketAddr) -> io::Result<TcpListener> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        answering, percent_decode, Request, Slots, ANSWER_DEADLINE, MAX_CONNECTIONS, MAX_PER_HOST,
+        answering, one_machine, percent_decode, Request, Slots, ANSWER_DEADLINE, MAX_CONNECTIONS,
+        MAX_PER_HOST,
     };
     use std::fmt::Write as _;
     use std::net::{IpAddr, Ipv4Addr};
@@ -1148,5 +1205,62 @@ mod tests {
             slots.take(host).is_some(),
             "and the slots come back when the connections do"
         );
+    }
+
+    /// And the proxy is still the proxy when it arrives mapped.
+    ///
+    /// A listener bound to `[::]` reports every IPv4 caller as
+    /// `::ffff:a.b.c.d`, which is what `peer_addr` hands this code for the
+    /// proxy in front of it. `is_loopback` says no to that, so the exemption
+    /// above applied to a shape the deployment never produces and the whole
+    /// public site was capped at sixteen readers at a time.
+    ///
+    /// Held here rather than over a socket. A dual stack listener accepts
+    /// IPv4 callers on Linux and refuses them on macOS and Windows, where the
+    /// default is `IPV6_V6ONLY`, so a test driven through a socket would pass
+    /// for want of a caller on two of the three platforms this is built for.
+    /// A test that cannot fail on most of the machines that run it is worse
+    /// than the one below.
+    #[test]
+    fn the_proxy_is_the_proxy_when_it_arrives_mapped() {
+        let mapped = IpAddr::V6(Ipv4Addr::LOCALHOST.to_ipv6_mapped());
+        assert!(
+            !mapped.is_loopback(),
+            "this test is about the address that is the loopback and does not say so; if \
+             it starts saying so, the code under it can go"
+        );
+        assert!(one_machine(mapped).is_loopback());
+
+        let slots = Arc::new(Slots::default());
+        let held: Vec<_> = (0..MAX_CONNECTIONS)
+            .filter_map(|_| slots.take(Some(mapped)))
+            .collect();
+        assert_eq!(
+            held.len(),
+            MAX_CONNECTIONS,
+            "the proxy was counted as one visitor and the site was capped at \
+             {MAX_PER_HOST} readers"
+        );
+    }
+
+    /// One machine is one share of the ceiling, arriving either way.
+    #[test]
+    fn a_caller_does_not_get_two_shares_by_arriving_twice_over() {
+        let plain = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5));
+        let mapped = IpAddr::V6(Ipv4Addr::new(203, 0, 113, 5).to_ipv6_mapped());
+        assert_ne!(plain, mapped, "they are different addresses to begin with");
+
+        let slots = Arc::new(Slots::default());
+        let mut held = Vec::new();
+        for turn in 0..MAX_PER_HOST {
+            let host = if turn % 2 == 0 { plain } else { mapped };
+            held.push(slots.take(Some(host)).expect("inside the share"));
+        }
+        assert!(
+            slots.take(Some(plain)).is_none(),
+            "one machine took {} slots by alternating the way it arrived",
+            held.len().saturating_add(1)
+        );
+        assert!(slots.take(Some(mapped)).is_none(), "either way round");
     }
 }
