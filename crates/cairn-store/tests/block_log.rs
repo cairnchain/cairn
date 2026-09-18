@@ -113,6 +113,20 @@ fn appending_after_reopening_continues_the_log() {
     assert_eq!(read_back(&log), blocks);
 }
 
+/// A write cut short costs the block it was writing and nothing else.
+///
+/// It is left where it is rather than cut, which is the trade this log makes
+/// everywhere a length is involved. The bytes after a length prefix are not a
+/// record, and cutting them is right — for a tail. One flipped bit produces
+/// the same shape in a prefix anywhere in the file, and there the bytes after
+/// it are whole records, so cutting deleted six blocks and told the operator a
+/// write had been interrupted. Eleven bits of a prefix still did it after the
+/// first repair.
+///
+/// So nothing is cut for a length. What it costs is here: these seven bytes
+/// are reported as left in place on every start until the node appends a
+/// block, which on a node following a chain is the next one. What the other
+/// side costs is an archive.
 #[test]
 fn a_write_cut_short_costs_only_the_block_it_was_writing() {
     let directory = scratch("torn");
@@ -134,17 +148,33 @@ fn a_write_cut_short_costs_only_the_block_it_was_writing() {
         .unwrap();
     drop(file);
 
-    let (log, recovered) = BlockLog::open(&directory).unwrap();
+    let (mut log, recovered) = BlockLog::open(&directory).unwrap();
     assert_eq!(recovered.blocks, 5, "everything complete survived");
     assert_eq!(read_back(&log), blocks);
-    assert_eq!(recovered.discarded_bytes, 7);
+    assert_eq!(
+        recovered.discarded_bytes, 0,
+        "and nothing was deleted for it"
+    );
+    assert_eq!(
+        recovered.left_in_place, 7,
+        "the seven bytes are still there"
+    );
     assert_eq!(log.len(), 5);
 
-    // The file was cut back, so the next open finds nothing left over.
+    // And the next block written writes over them, which is the one thing
+    // that makes them stop being reachable by anything.
+    let sixth = chain(6).pop().unwrap();
+    log.append(&sixth).unwrap();
+    drop(log);
+
     let (again_log, again) = BlockLog::open(&directory).unwrap();
     assert_eq!(again.discarded_bytes, 0);
-    assert_eq!(again.blocks, 5);
-    assert_eq!(read_back(&again_log), blocks);
+    assert_eq!(
+        again.left_in_place, 0,
+        "the torn write is gone, written over"
+    );
+    assert_eq!(again.blocks, 6);
+    assert_eq!(again_log.len(), 6);
 }
 
 /// A record that is not a block is reported when it is read.

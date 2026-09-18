@@ -1292,9 +1292,29 @@ impl BlockLog {
             }
             if u64::try_from(declared).unwrap_or(u64::MAX) > left {
                 // A length this process could have written, reaching past the
-                // end of the file. That is a write cut short, which is the one
-                // shape the tail is allowed to have, and it is the only shape
-                // anything here is cut for.
+                // end of the file. That reads as a write cut short, and it is
+                // what one leaves — and it is also what one flipped bit leaves
+                // in a prefix anywhere in the file, which is the same sentence
+                // that was wrong above and is wrong here for the same reason.
+                //
+                // Moving the ceiling was not enough. `MAX_RECORD_BYTES` is four
+                // megabytes against a block ceiling of a hundred and twenty
+                // eight kilobytes, so a flip landing anywhere between the bytes
+                // that remain and four megabytes was still read as a tail:
+                // eleven of the prefix's thirty two bits went on emptying a six
+                // block log after the ceiling was asked first.
+                //
+                // So neither branch cuts. A length is a number off a disk, and
+                // whether it looks like one this process wrote says nothing
+                // about whether a record follows it. The log does not delete
+                // bytes it cannot account for: it says so, leaves them, and
+                // `append` writes over them from the last whole record.
+                //
+                // What is still cut is the one thing that is not a length at
+                // all: a file ending inside the four bytes that say how long a
+                // record is, which is at most three bytes and cannot be hiding
+                // a record.
+                walk.unreadable = Some(index);
                 break;
             }
             let mut body = vec![0u8; declared];
