@@ -13,6 +13,7 @@ use cairn_chain::{Accepted, ChainError, ChainStore, Located, Outdated, MAX_LOCAT
 use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::note::NetworkId;
 use cairn_ledger::validation::BlockError;
+use cairn_primitives::codec::Encode;
 use cairn_primitives::Hash32;
 
 use crate::book::worth_hearing_about;
@@ -314,6 +315,10 @@ const COST_CHAIN: u32 = 8;
 /// twelfth of one window whatever shape they are in, where under the flat
 /// price that fraction was decided by the shape.
 const COST_PER_INPUT: u32 = 4;
+/// What a block this node did not ask for costs, on top of its bytes.
+///
+/// The bytes are the price and this is the floor under them, so the smallest
+/// block still costs what it used to and nothing arrives for nothing.
 const COST_BLOCK: u32 = 8;
 /// What reaching the disk for one block costs.
 ///
@@ -1217,11 +1222,31 @@ fn cost_of(message: &Message, peer: &PeerState) -> u32 {
         // peer joining gets through in a handful of windows and one asking
         // over and over gets nowhere.
         Message::GetJoin { .. } => COST_JOIN,
+        // Priced by what it carries, for the reason every list here is priced
+        // that way, and at the rate this file already fixed for the largest
+        // things on the wire. [`BYTES_PER_UNIT`] says why five hundred and
+        // twelve bytes is the unit: "the two largest answers a stranger can
+        // draw cost the same per byte". A block arriving is the largest thing
+        // a stranger can send, and it was the one message left at a flat
+        // price: eight units for anything up to a hundred and twenty eight
+        // kilobytes, which is sixteen kilobytes to the unit against five
+        // hundred and twelve for the same bytes going out. Thirty two times
+        // cheaper to push at this node than to draw from it.
+        //
+        // Measuring it means encoding it again, and that is a constant factor
+        // on work already done: the decode that produced this block read every
+        // one of those bytes off the wire first. What it buys is the one
+        // number that says what arrived, where the ask cannot.
+        //
+        // A block this node asked for is still charged as an answer to
+        // something already paid for, which is what `awaiting` is. That set is
+        // filled by `request_announced`, from what this node decided to ask
+        // about, and what an announcement can arm is its own question.
         Message::Block(block) => {
             if peer.awaiting.contains(&block.header.height) {
                 COST_TRIVIAL
             } else {
-                COST_BLOCK
+                COST_BLOCK.saturating_add(what_the_wire_costs(block.encode().len()))
             }
         }
         // Priced by the inputs it presents, for the reason every list here is
@@ -1461,8 +1486,41 @@ mod what_an_ask_costs {
         Message, PeerAddress, JOIN_PART_BYTES, MAX_HEADERS, MAX_REQUESTED, MAX_SHARED_ADDRESSES,
     };
     use cairn_chain::{Located, MAX_LOCATOR};
-    use cairn_primitives::Hash32;
+    use cairn_crypto::SecretKey;
+    use cairn_ledger::block::{Block, BlockHeader, BLOCK_VERSION};
+    use cairn_ledger::note::{NetworkId, Note};
+    use cairn_ledger::transaction::CoinbaseTransaction;
+    use cairn_primitives::codec::Encode;
+    use cairn_primitives::{Amount, Hash32};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    /// A block carrying `outputs` coinbase notes, so its size is chosen and
+    /// nothing else about it matters: pricing never looks at whether a block
+    /// is valid, which is the whole of why a peer can send one for nothing.
+    fn block_of(outputs: usize) -> Block {
+        let owner = SecretKey::from_bytes(&[7; 32]).public_key();
+        let value = Amount::from_pebbles(1).unwrap();
+        Block {
+            header: BlockHeader {
+                version: BLOCK_VERSION,
+                network: NetworkId::TESTNET,
+                height: 1,
+                previous: Hash32::ZERO,
+                transactions_root: Hash32::ZERO,
+                state_root: Hash32::ZERO,
+                history: Hash32::ZERO,
+                timestamp: 1_000,
+                difficulty: 1,
+                total_work: 0,
+                nonce: 0,
+            },
+            coinbase: CoinbaseTransaction::new(
+                1,
+                (0..outputs).map(|_| Note::new(value, owner)).collect(),
+            ),
+            transfers: Vec::new(),
+        }
+    }
 
     fn asks_a_window_pays_for(message: &Message) -> u32 {
         let mut peer = PeerState::new(None);
@@ -1504,6 +1562,58 @@ mod what_an_ask_costs {
             ALLOWANCE / each,
             "and one carrying {MAX_LOCATOR} entries costs {each}, which is the ask plus one \
              block read for each of them, in the same currency `GetBlocks` pays in"
+        );
+        // Both numbers above are worked out from the same constants the code
+        // uses, so both hold at any price including none: set
+        // `COST_PER_BLOCK_SERVED` to zero, which is the flat price this test
+        // is named for, and they go on passing. The claim is that entries
+        // cost, and the claim is a comparison.
+        assert!(
+            carrying_a_full_one < carrying_nothing,
+            "a window pays for {carrying_a_full_one} asks carrying {MAX_LOCATOR} entries and \
+             {carrying_nothing} carrying none, so the entries are free and the flat price \
+             this test exists to refuse is back"
+        );
+    }
+
+    /// What a block costs the peer that sends it, against what the same bytes
+    /// cost the node that serves them.
+    ///
+    /// `BYTES_PER_UNIT` says why five hundred and twelve bytes is the unit:
+    /// "the two largest answers a stranger can draw cost the same per byte".
+    /// A block arriving is the largest thing a stranger can send, and it was
+    /// the one message priced flat, at eight units for anything up to the
+    /// block ceiling. That is sixteen kilobytes to the unit against five
+    /// hundred and twelve for the same bytes going out: thirty two times
+    /// cheaper to push at this node than to draw from it.
+    #[test]
+    fn a_block_sent_costs_what_its_bytes_cost() {
+        let small = block_of(1);
+        let large = block_of(400);
+        let small_bytes = small.encode().len();
+        let large_bytes = large.encode().len();
+        assert!(
+            large_bytes > small_bytes * 8,
+            "this test needs two blocks of very different sizes, and they are \
+             {small_bytes} and {large_bytes}"
+        );
+
+        let sending_small = cost_of(&Message::Block(Box::new(small)), &PeerState::new(None));
+        let sending_large = cost_of(&Message::Block(Box::new(large)), &PeerState::new(None));
+
+        assert!(
+            sending_large > sending_small,
+            "a block of {large_bytes} bytes costs {sending_large} to send at this node and \
+             one of {small_bytes} costs {sending_small}, so the bytes are free and a peer \
+             pushes a block for what a peer pushes an empty one"
+        );
+        // And at the rate the file already fixed, rather than at some other
+        // one: what the bytes cost going in is what they cost going out.
+        assert_eq!(
+            sending_large - sending_small,
+            what_the_wire_costs(large_bytes) - what_the_wire_costs(small_bytes),
+            "the difference between them is the difference in what the wire costs, which is \
+             the rate `BYTES_PER_UNIT` fixes for everything else this size"
         );
     }
 
