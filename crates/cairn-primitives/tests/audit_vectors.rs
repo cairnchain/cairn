@@ -184,6 +184,31 @@ fn every_domain_the_crate_declares_is_pinned_here() {
     );
 }
 
+/// And no two of them are the same vector.
+///
+/// The table holds twenty one hex strings and every guard over it compares a
+/// row against itself: this one against the digest it pins, the one above
+/// against membership and a count. None of them compares a row against another
+/// row, so a domain added with the string of the row above it arrives here
+/// with the hex a developer would paste out of the failing assertion, and the
+/// table then pins two names to one hash function and says nothing.
+///
+/// This is the vector half of `domains_are_independent`. It is held twice on
+/// purpose: a table of constants that agrees with the code is worth nothing if
+/// the code and the table are wrong together.
+#[test]
+fn no_two_vectors_are_the_same_digest() {
+    for (index, (one, left)) in DOMAIN_VECTORS.iter().enumerate() {
+        for (other, right) in DOMAIN_VECTORS.iter().skip(index.saturating_add(1)) {
+            assert_ne!(
+                left, right,
+                "{one:?} and {other:?} are pinned to the same digest, so they are one hash \
+                 function under two names"
+            );
+        }
+    }
+}
+
 #[test]
 fn every_domain_still_hashes_the_way_it_did() {
     for (domain, expected) in DOMAIN_VECTORS {

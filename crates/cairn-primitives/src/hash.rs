@@ -223,17 +223,43 @@ pub fn hash(domain: Domain, bytes: &[u8]) -> Hash32 {
 mod tests {
     use super::*;
 
+    /// Every pair, not two of them.
+    ///
+    /// The doc above the enum says each variant selects an independent hash
+    /// function and that adding one is safe. That is true of a variant whose
+    /// context string is new, and nothing held anybody to writing a new one.
+    /// The guards around this list check that no string has changed and that
+    /// none is missing, which is the completeness half; distinctness is the
+    /// half the independence claim actually rests on, and it was checked for
+    /// two pairs out of two hundred and ten. A twenty second domain copied
+    /// from the row above it builds, passes every test in the workspace and
+    /// passes clippy under `-D warnings`, and hashes identically to the domain
+    /// it was copied from.
+    ///
+    /// Two written safety arguments rest on this and on nothing else.
+    /// `merkle.rs` buys back the injectivity that promoting an odd node costs
+    /// by saying a leaf can never equal an interior node, and `forest.rs`
+    /// keeps a proof from crossing between the cold set and the header history
+    /// by saying their leaves are in domains of their own. Both are one
+    /// copied string away from being false.
     #[test]
     fn domains_are_independent() {
         let message = b"same bytes";
-        assert_ne!(
-            hash(Domain::TransferId, message),
-            hash(Domain::CoinbaseId, message)
-        );
-        assert_ne!(
-            hash(Domain::MerkleLeaf, message),
-            hash(Domain::MerkleNode, message)
-        );
+        for (index, one) in Domain::ALL.iter().enumerate() {
+            for other in Domain::ALL.iter().skip(index.saturating_add(1)) {
+                assert_ne!(
+                    one.context(),
+                    other.context(),
+                    "{one:?} and {other:?} are one hash function under two names"
+                );
+                assert_ne!(
+                    hash(*one, message),
+                    hash(*other, message),
+                    "{one:?} and {other:?} give the same digest for the same bytes, so a \
+                     value of one kind can be read as a value of the other"
+                );
+            }
+        }
     }
 
     #[test]
