@@ -270,7 +270,12 @@ fn keys_used() -> (BTreeSet<String>, BTreeSet<String>) {
     let mut whole = BTreeSet::new();
     let mut prefixes = BTreeSet::new();
 
-    for name in ["t", "prose", "paragraphs", "explainer"] {
+    // Every function in the script that reaches the strings. `plural` was
+    // added without being added here, and a key reached only through it was
+    // checked by nothing: this list is the whole of what this test can see,
+    // so a function missing from it is a section of the site nobody holds the
+    // translations to.
+    for name in ["t", "prose", "paragraphs", "explainer", "plural"] {
         let opening = format!("{name}('");
         let mut from = 0usize;
         while let Some(found) = SCRIPT[from..].find(&opening) {

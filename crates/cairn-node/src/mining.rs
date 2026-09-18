@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use cairn_chain::ChainStore;
+use cairn_chain::{Accepted, ChainStore};
 use cairn_crypto::PublicKey;
 use cairn_ledger::block::Block;
 use cairn_ledger::note::Note;
@@ -104,13 +104,20 @@ fn unix_now() -> u64 {
         .unwrap_or_default()
 }
 
-/// Mines until `running` is cleared, announcing each block it finds.
+/// Mines until `running` is cleared, announcing each block it finds and what
+/// the chain did with it.
+///
+/// Both halves, because finding a block and adding one to this chain are not
+/// the same event. A block found a moment after somebody else's for the same
+/// height is recorded on a branch lighter than the one this node follows, and
+/// `is_ok()` cannot tell that from extending the chain. Everything the caller
+/// can honestly say about the work it just spent is in the variant.
 pub(crate) fn run(
     node: &Node,
     params: &ConsensusParams,
     reward_to: PublicKey,
     running: &AtomicBool,
-    mut found: impl FnMut(&Block),
+    mut found: impl FnMut(&Block, &Accepted),
 ) {
     while running.load(Ordering::SeqCst) {
         let Some((candidate, extending)) = build(node, params, reward_to) else {
@@ -118,8 +125,8 @@ pub(crate) fn run(
             continue;
         };
         if let Some(block) = search(node, &candidate, extending, running) {
-            if node.submit_block(block.clone()).is_ok() {
-                found(&block);
+            if let Ok(landed) = node.submit_block(block.clone()) {
+                found(&block, &landed);
             }
         }
     }
