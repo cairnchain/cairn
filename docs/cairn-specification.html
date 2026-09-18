@@ -243,9 +243,23 @@
 
     <p>
       A public key is 32 bytes and is an Ed25519 verifying key. A decoder MUST refuse
-      bytes that are not a canonical encoding of a point on the curve, and MUST
-      refuse a key of small order. Both refusals happen at decode, so a structure
-      that decoded holds no unusable key.
+      bytes that are not a canonical encoding of a point on the curve, MUST refuse a
+      key of small order, and MUST refuse a key that is not in the prime order
+      subgroup. All three refusals happen at decode, so a structure that decoded
+      holds no unusable key.
+    </p>
+
+    <p>
+      The third is the one that carries the sentence after it. Ed25519's group has a
+      cofactor of eight, so a point may be <code>A + T</code> for a prime order point <code>A</code> and a
+      non-identity point <code>T</code> of order dividing eight. Such a point is canonically
+      encoded, decodes cleanly, and is not of small order, so the first two refusals
+      pass it. No signer can produce a signature that verifies under it: Ed25519
+      clamping clears the low three bits of the scalar, so a public key is always a
+      multiple of eight times the basepoint and therefore always lies in the prime
+      order subgroup. Seven of every eight byte strings that pass the first two
+      refusals are addresses nobody holds a secret for, and a note paid to one is
+      unspendable.
     </p>
   </div>
 </section>

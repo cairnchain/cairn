@@ -17,4 +17,5 @@ getrandom.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+curve25519-dalek.workspace = true
 hex.workspace = true
