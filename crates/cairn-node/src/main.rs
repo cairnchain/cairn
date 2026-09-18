@@ -47,7 +47,19 @@ enum Ending {
 /// The reasoning is the one already written on [`Ending::Fault`], which says
 /// no usage text because nothing on the command line was wrong. It was true of
 /// that case and of this one, and only applied to that one.
-enum Stopping {
+///
+/// And then it was applied here and not one layer further in. Everything
+/// `resolve_options` refused came back as a misread command line, including
+/// three things that are not one: a `cairn.conf` that is there and will not be
+/// read, a `--listen` address whose name the resolver could not answer for,
+/// and a seed the operator named whose name did not resolve at that instant.
+/// A machine that boots `cairnd` ahead of its resolver burned all five starts
+/// the unit allows in twenty five seconds and stayed down, while whoever read
+/// the journal was shown the usage text and told to look for a typo. The two
+/// failures that are about a moment rather than about a mistake are the ones
+/// a supervisor most needs to be able to retry.
+#[derive(Debug)]
+pub(crate) enum Stopping {
     /// The command line, which the usage text is the answer to.
     Misread(String),
     /// Everything else, where the message is the answer and there is no
@@ -76,7 +88,7 @@ fn main() {
 }
 
 fn run(arguments: &[String]) -> Result<Ending, Stopping> {
-    let Some(options) = options::resolve_options(arguments).map_err(Stopping::Misread)? else {
+    let Some(options) = options::resolve_options(arguments)? else {
         println!("{}", options::HELP);
         return Ok(Ending::AsAsked);
     };
