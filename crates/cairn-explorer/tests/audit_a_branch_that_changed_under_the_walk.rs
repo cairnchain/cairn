@@ -154,6 +154,10 @@ impl Branch {
         self.at.get(&height).map(Block::id)
     }
 
+    fn block_at(&self, height: u64) -> Option<Block> {
+        self.at.get(&height).cloned()
+    }
+
     fn held(&self, height: u64) -> Held {
         match self.at.get(&height) {
             Some(block) => Held::Block(Box::new(block.clone())),
@@ -166,11 +170,33 @@ impl Branch {
 /// the head is two questions asked of the chain in one go, and the reader
 /// goes back to the chain for every height on its own.
 fn a_turn(index: &mut Index, chain: &Branch, block_at: impl Fn(u64) -> Held) -> Reading {
+    a_turn_across(index, chain, chain, block_at)
+}
+
+/// The same, with the head taken from one chain and the reading done against
+/// another.
+///
+/// `read_a_batch` takes the head, gives the chain back, and only then reads,
+/// so the two can differ and a switch landing in that window is what this file
+/// is about. Splitting them is what lets a turn be driven across one.
+fn a_turn_across(
+    index: &mut Index,
+    head_from: &Branch,
+    then: &Branch,
+    block_at: impl Fn(u64) -> Held,
+) -> Reading {
     let head = Head {
-        tip: chain.tip(),
-        at_last_read: index.covers().and_then(|(_, through)| chain.id_at(through)),
+        tip: head_from.tip(),
+        at_last_read: index
+            .covers()
+            .and_then(|(_, through)| head_from.id_at(through)),
     };
-    index.refresh(&head, block_at, |height| chain.id_at(height))
+    index.refresh(
+        &head,
+        block_at,
+        |height| then.id_at(height),
+        || Some(then.tip()),
+    )
 }
 
 /// A switch that lands inside a turn is never noticed, and the index keeps
@@ -258,6 +284,7 @@ fn a_switch_inside_one_turn_leaves_the_index_on_the_branch_that_lost() {
             }
         },
         |height| branch_b.id_at(height),
+        || Some(branch_b.tip()),
     );
     assert_eq!(switched.get(), 3, "heights eight, nine and ten came off B");
     // The turn ran to the tip it was given, so it says so. What it does not
@@ -380,6 +407,7 @@ fn a_switch_between_the_head_and_the_first_height_is_never_noticed() {
         &head,
         |height| branch_b.held(height),
         |height| branch_b.id_at(height),
+        || Some(branch_b.tip()),
     ) == Reading::More
     {}
     while a_turn(&mut walk, &branch_b, |height| branch_b.held(height)) == Reading::More {}
@@ -393,4 +421,66 @@ fn a_switch_between_the_head_and_the_first_height_is_never_noticed() {
          what a switch this shallow costs is a comparison made one instant too \
          early."
     );
+}
+
+/// A branch that got **shorter** inside a turn was agreed with at every height.
+///
+/// The check at the end of a turn asks the chain, for every height the turn
+/// relied on, whether it still carries the identifier the walk read there.
+/// `None` back from the chain means it holds no identifier that deep, and
+/// that answer covers two different things: a height too deep to have changed,
+/// which agrees, and a height past the end of a branch that shrank, which does
+/// not. It was told the two apart by the tip, and the tip it was given was the
+/// one the turn *began* with.
+///
+/// So every height above the new end is under the old one, and all of them
+/// read as agreeing. The index settles holding blocks off a branch nobody
+/// follows, and the coverage it publishes is worse than useless: `behind_of`
+/// takes the distance from a tip below where the index thinks it has read,
+/// which saturates to nothing, so the site says it has read the whole chain
+/// while `/api/address`, `/api/tx` and `/api/note` answer out of abandoned
+/// blocks.
+///
+/// Reachable on a real chain only through a reorganisation to a branch that is
+/// shorter and heavier, which retargeting allows and this harness does not
+/// have to reproduce: what is held here is the check, at the point where it
+/// decides.
+#[test]
+fn a_branch_that_got_shorter_inside_a_turn_is_not_agreed_with() {
+    let miner = wallet(1);
+    let mut forge = Forge::new(params());
+    let long = forge.mine_many(&miner, 11);
+    let long = Branch::of(&[&long]);
+    let short = Branch::of(&[&up_to(&long, 7)]);
+
+    let mut walk = Index::new();
+    while a_turn(&mut walk, &long, |height| long.held(height)) == Reading::More {}
+    assert_eq!(
+        walk.covers(),
+        Some((0, 10)),
+        "the walk has to have read the long branch whole, or this test asks nothing"
+    );
+    assert_eq!(long.tip(), 10);
+    assert_eq!(short.tip(), 7, "and the branch under it has to be shorter");
+
+    // The head is taken while the chain is still long, the chain is given
+    // back, and the turn reads against a chain that has since shrunk. That is
+    // the window `read_a_batch` opens on every single turn.
+    a_turn_across(&mut walk, &long, &short, |height| short.held(height));
+
+    assert_eq!(
+        walk.covers(),
+        None,
+        "the index kept heights eight, nine and ten off a branch the chain no longer \
+         reaches, and every one of them read as agreeing because it sat under the tip \
+         the turn started with"
+    );
+    assert_eq!(walk.blocks_read(), 0, "and it starts again from nothing");
+}
+
+/// A branch's blocks from its first up to and including `tip`.
+fn up_to(branch: &Branch, tip: u64) -> Vec<Block> {
+    (0..=tip)
+        .filter_map(|height| branch.block_at(height))
+        .collect()
 }

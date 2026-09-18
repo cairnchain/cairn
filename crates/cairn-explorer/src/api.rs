@@ -241,6 +241,7 @@ impl Explorer {
             &head,
             |height| self.held_at(height),
             |height| self.node.with_chain(|chain| chain.id_at(height)),
+            || self.node.with_chain(cairn_chain::ChainStore::height),
         )
     }
 

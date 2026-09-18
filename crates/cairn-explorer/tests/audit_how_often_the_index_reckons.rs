@@ -111,6 +111,7 @@ fn the_distribution_is_reckoned_on_a_block_in_sixteen_and_not_on_every_one() {
             &head,
             |height| at(&blocks, height),
             |height| id_at(&blocks, height),
+            || Some(head.tip),
         ) == Reading::More
         {}
         if walk.stock_at() != last {
@@ -152,6 +153,7 @@ fn the_distribution_says_the_height_it_was_worked_out_at() {
         &head,
         |height| at(&blocks, height),
         |height| id_at(&blocks, height),
+        || Some(head.tip),
     ) == Reading::More
     {}
 
