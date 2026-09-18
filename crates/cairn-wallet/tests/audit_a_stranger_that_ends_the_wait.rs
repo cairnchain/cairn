@@ -194,9 +194,7 @@ fn a_peer_that_introduced_itself_ends_the_wait() {
     peer.connect(reachable(wallet.node().address())).unwrap();
 
     assert!(
-        until(Duration::from_secs(10), || wallet
-            .node()
-            .peers_introduced()
+        until(Duration::from_secs(10), || wallet.node().peers_introduced()
             == 1),
         "the peer never introduced itself, so this test asks nothing"
     );

@@ -109,18 +109,21 @@ fn address_of(name: &str) -> String {
 fn a_fee_given_twice_is_refused_rather_than_charged() {
     let key = a_key("fee");
     let (somebody, _) = two_addresses("fee");
-    let output = wallet_under("fee-home", &[
-        "send",
-        key.to_str().unwrap(),
-        "--to",
-        &somebody,
-        "--amount",
-        "100",
-        "--fee",
-        "5",
-        "--fee",
-        "0.00005",
-    ]);
+    let output = wallet_under(
+        "fee-home",
+        &[
+            "send",
+            key.to_str().unwrap(),
+            "--to",
+            &somebody,
+            "--amount",
+            "100",
+            "--fee",
+            "5",
+            "--fee",
+            "0.00005",
+        ],
+    );
     let told = said(&output);
 
     assert!(!output.status.success(), "it went through: {told}");
@@ -139,16 +142,19 @@ fn a_fee_given_twice_is_refused_rather_than_charged() {
 fn an_address_given_twice_is_refused_rather_than_paid() {
     let key = a_key("to");
     let (somebody, somebody_else) = two_addresses("to");
-    let output = wallet_under("to-home", &[
-        "send",
-        key.to_str().unwrap(),
-        "--to",
-        &somebody,
-        "--to",
-        &somebody_else,
-        "--amount",
-        "1",
-    ]);
+    let output = wallet_under(
+        "to-home",
+        &[
+            "send",
+            key.to_str().unwrap(),
+            "--to",
+            &somebody,
+            "--to",
+            &somebody_else,
+            "--amount",
+            "1",
+        ],
+    );
     let told = said(&output);
 
     assert!(!output.status.success(), "it went through: {told}");
@@ -163,16 +169,19 @@ fn an_address_given_twice_is_refused_rather_than_paid() {
 fn an_amount_given_twice_is_refused_rather_than_sent() {
     let key = a_key("amount");
     let (somebody, _) = two_addresses("amount");
-    let output = wallet_under("amount-home", &[
-        "send",
-        key.to_str().unwrap(),
-        "--to",
-        &somebody,
-        "--amount",
-        "1",
-        "--amount",
-        "1000",
-    ]);
+    let output = wallet_under(
+        "amount-home",
+        &[
+            "send",
+            key.to_str().unwrap(),
+            "--to",
+            &somebody,
+            "--amount",
+            "1",
+            "--amount",
+            "1000",
+        ],
+    );
     let told = said(&output);
 
     assert!(!output.status.success(), "it went through: {told}");
@@ -184,28 +193,31 @@ fn an_amount_given_twice_is_refused_rather_than_sent() {
 fn the_same_value_twice_is_not_a_collision() {
     let key = a_key("same");
     let (somebody, _) = two_addresses("same");
-    let output = wallet_under("same-home", &[
-        "send",
-        key.to_str().unwrap(),
-        "--to",
-        &somebody,
-        "--to",
-        &somebody,
-        "--amount",
-        "1",
-        "--amount",
-        "1",
-        "--network",
-        "devnet",
-        "--network",
-        "devnet",
-        // Somewhere that refuses at once, so this test waits on nothing: what
-        // it is about is what was said before any of that was reached.
-        "--seed",
-        "127.0.0.1:9",
-        "--wait",
-        "0",
-    ]);
+    let output = wallet_under(
+        "same-home",
+        &[
+            "send",
+            key.to_str().unwrap(),
+            "--to",
+            &somebody,
+            "--to",
+            &somebody,
+            "--amount",
+            "1",
+            "--amount",
+            "1",
+            "--network",
+            "devnet",
+            "--network",
+            "devnet",
+            // Somewhere that refuses at once, so this test waits on nothing: what
+            // it is about is what was said before any of that was reached.
+            "--seed",
+            "127.0.0.1:9",
+            "--wait",
+            "0",
+        ],
+    );
     let told = said(&output);
 
     assert!(
@@ -218,18 +230,21 @@ fn the_same_value_twice_is_not_a_collision() {
 #[test]
 fn a_second_seed_is_another_peer_and_not_a_second_answer() {
     let key = a_key("seed");
-    let output = wallet_under("seed-home", &[
-        "balance",
-        key.to_str().unwrap(),
-        "--network",
-        "devnet",
-        "--seed",
-        "127.0.0.1:9",
-        "--seed",
-        "127.0.0.1:10",
-        "--wait",
-        "0",
-    ]);
+    let output = wallet_under(
+        "seed-home",
+        &[
+            "balance",
+            key.to_str().unwrap(),
+            "--network",
+            "devnet",
+            "--seed",
+            "127.0.0.1:9",
+            "--seed",
+            "127.0.0.1:10",
+            "--wait",
+            "0",
+        ],
+    );
     let told = said(&output);
 
     assert!(
