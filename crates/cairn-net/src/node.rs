@@ -53,7 +53,7 @@ use crate::refusal::{can_be_refused, Refusals};
 use crate::sync::{
     a_window_has_turned, local_handshake, on_message, Allowance, Local, PeerState, Reaction, Window,
 };
-use crate::wire::{read_message, write_message, Incoming, WireError};
+use crate::wire::{most_from, read_message, write_message, Incoming, WireError};
 
 /// Connections a node dials for itself.
 pub const TARGET_PEERS: usize = 8;
@@ -7204,7 +7204,15 @@ fn read_loop(
     // writing thread stayed inside a write nobody was taking, holding
     // everything queued behind it.
     'reading: while shared.running.load(Ordering::SeqCst) {
-        let message = match read_message(&mut stream, network) {
+        // A small cap until this peer has said who it is. The frame cap is what
+        // the protocol allows between nodes that know each other; this is what
+        // a stranger gets, and a handshake is a fixed set of fields a few
+        // hundred bytes long. Before it arrives, a megabyte of notes bought
+        // one and a third seconds of this node's processor, because decoding
+        // one decompresses a curve point for every owner in it. The budget
+        // that would have charged for that is `held_off`, twenty lines below,
+        // and by then the work is done.
+        let message = match read_message(&mut stream, network, most_from(announced)) {
             Ok(Incoming::Message(message)) => {
                 last_heard = unix_now();
                 if window_is_over(window_start, last_heard) {

@@ -42,7 +42,7 @@ use cairn_ledger::validation::{assemble_block, connect_block, mine_block, Consen
 use cairn_ledger::LedgerState;
 use cairn_net::message::{Handshake, Joining, Message, PeerAddress, PROTOCOL_VERSION};
 use cairn_net::node::MAX_PEERS;
-use cairn_net::wire::{read_message, write_message, Incoming};
+use cairn_net::wire::{read_message, write_message, Incoming, MAX_FRAME_BYTES};
 use cairn_net::Keeps;
 use cairn_net::Node;
 use cairn_primitives::codec::Encode;
@@ -641,7 +641,7 @@ fn what_it_cost(peer: &mut TcpStream, what: Joining, part: u32, nonce: u64) -> D
     let started = Instant::now();
     let deadline = started + Duration::from_secs(60);
     while Instant::now() < deadline {
-        match read_message(peer, params().network) {
+        match read_message(peer, params().network, MAX_FRAME_BYTES) {
             Ok(Incoming::Message(Message::Pong(seen))) if seen == nonce => {
                 return started.elapsed()
             }
@@ -794,7 +794,7 @@ fn rounds_seen(peer: &mut TcpStream, over: Duration) -> usize {
     let mut rounds = 0usize;
     let deadline = Instant::now() + over;
     while Instant::now() < deadline {
-        match read_message(peer, params().network) {
+        match read_message(peer, params().network, MAX_FRAME_BYTES) {
             Ok(Incoming::Message(Message::GetPeers)) => rounds += 1,
             Ok(_) => {}
             Err(_) => return rounds,
@@ -986,12 +986,25 @@ fn a_node_that_stopped_itself_lets_go_of_its_directory() {
 /// frames. What that did to a healthy node's connection slots is asserted in
 /// `transport_audit.rs`; what it did to a node that had stopped itself is
 /// below.
+///
+/// It introduces itself before opening the frame, which it did not have to
+/// until a node stopped letting a stranger name nine hundred kilobytes. That
+/// makes it the adversary worth testing rather than a weaker one: a peer that
+/// has handshaked is entitled to a frame that size, so this holds the property
+/// against somebody the node cannot simply refuse.
 fn dribbler(address: SocketAddr, stop: &Arc<AtomicBool>) -> thread::JoinHandle<()> {
     let stop = Arc::clone(stop);
     thread::spawn(move || {
         let Ok(mut stream) = TcpStream::connect(address) else {
             return;
         };
+        if write_message(&mut stream, params().network, &hello(0xd21b)).is_err() {
+            return;
+        }
+        // Long enough for the handshake to be read and answered, which is what
+        // moves this connection from a stranger to a peer.
+        thread::sleep(Duration::from_millis(400));
+
         let mut header = Vec::new();
         params().network.as_u32().encode_to(&mut header);
         // A frame this node is willing to wait for, and will be waiting for
@@ -1151,17 +1164,20 @@ fn a_node_with_nobody_to_ask_does_not_tell_its_operator_to_wipe_the_disk() {
     node.wait_for_the_burial(0);
     drop(handover);
 
-    let stop = Arc::new(AtomicBool::new(false));
-    let hand = dribbler(node.address(), &stop);
+    // A socket that connects and never speaks, which is the whole of the
+    // condition this test is about. `dribbler` used to stand in for it,
+    // because a dribbler said nothing either; it introduces itself now, so it
+    // is a peer with something to say and the wrong stand-in for nobody.
+    let stranger = TcpStream::connect(node.address()).unwrap();
     wait_for(
-        "the node to take the dribbling connection",
+        "the node to take the silent connection",
         Duration::from_secs(10),
         || node.peer_count() == 1,
     );
     assert_eq!(
         node.peers_introduced(),
         0,
-        "the dribbler has said nothing, so there is nobody here to ask"
+        "the socket has said nothing, so there is nobody here to ask"
     );
 
     // Five rounds of upkeep with the patience at nought. Every one of them
@@ -1188,8 +1204,7 @@ fn a_node_with_nobody_to_ask_does_not_tell_its_operator_to_wipe_the_disk() {
     drop(witness);
     node.shutdown();
     drop(node);
-    stop.store(true, Ordering::SeqCst);
-    let _ = hand.join();
+    drop(stranger);
     let _ = std::fs::remove_dir_all(&directory);
 }
 

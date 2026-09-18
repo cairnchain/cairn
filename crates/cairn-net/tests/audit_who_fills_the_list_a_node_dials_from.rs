@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_net::message::Message;
 use cairn_net::node::{MAX_PEERS, TARGET_PEERS};
-use cairn_net::wire::{read_message, write_message, Incoming};
+use cairn_net::wire::{read_message, write_message, Incoming, MAX_FRAME_BYTES};
 use cairn_net::Node;
 
 fn params() -> ConsensusParams {
@@ -97,7 +97,7 @@ fn greet_and_leave(at: SocketAddr, nonce: u64, listen: u16) -> bool {
         return false;
     }
     let welcomed = matches!(
-        read_message(&mut socket, params().network),
+        read_message(&mut socket, params().network, MAX_FRAME_BYTES),
         Ok(Incoming::Message(Message::Welcome(_)))
     );
     let _ = socket.shutdown(Shutdown::Both);
@@ -272,7 +272,7 @@ fn a_table_strangers_filled_still_leaves_a_node_a_way_out_of_it() {
             for socket in &mut held {
                 let _ = write_message(socket, params().network, &Message::Ping(tick));
                 while matches!(
-                    read_message(socket, params().network),
+                    read_message(socket, params().network, MAX_FRAME_BYTES),
                     Ok(Incoming::Message(_))
                 ) {}
             }

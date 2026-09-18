@@ -45,6 +45,36 @@ use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
 /// without this having to move in step.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
+/// What a peer may send before it has introduced itself.
+///
+/// A handshake is a fixed set of fields, a few hundred bytes, and it is the
+/// only thing a node has any business sending before one. Everything else is
+/// refused as unannounced a moment later anyway, so the only question this
+/// answers is how much the refusal costs.
+///
+/// It used to cost whatever [`MAX_FRAME_BYTES`] allowed. The comment on that
+/// cap reasoned about the allocation, which is a megabyte and is bounded by
+/// the number of connections a node accepts at once. Decoding what is in it is
+/// the other half: a megabyte of note owners is about twenty six thousand
+/// public keys, and each one is a point decompressed off the curve and checked
+/// for its subgroup. A sixth of a second of somebody else's processor before
+/// that subgroup check existed, and one and a third seconds after, from a
+/// socket that had not said who it was.
+pub const MOST_BEFORE_A_NAME: usize = 4 * 1024;
+
+/// How much this node will read from a peer, by whether it knows who it is.
+///
+/// Named rather than written inline at the one call site, because it is the
+/// whole of the policy and the place a reader will come looking for it.
+#[must_use]
+pub const fn most_from(announced: bool) -> usize {
+    if announced {
+        MAX_FRAME_BYTES
+    } else {
+        MOST_BEFORE_A_NAME
+    }
+}
+
 /// A block this wire carries has to fit in the log that stores it.
 ///
 /// The paragraph above ties this ceiling to the one end of a block's journey,
@@ -297,7 +327,11 @@ pub fn write_message<W: Write>(
 ///
 /// Returns [`Incoming::Quiet`] when the deadline passes before a frame starts,
 /// so a caller can tell an idle peer from one holding a frame open.
-pub fn read_message<R: Read>(reader: &mut R, network: NetworkId) -> Result<Incoming, WireError> {
+pub fn read_message<R: Read>(
+    reader: &mut R,
+    network: NetworkId,
+    most: usize,
+) -> Result<Incoming, WireError> {
     // The frame's own deadline. Started here rather than at the first byte,
     // which costs a peer that dawdles before speaking at most one read
     // deadline out of the twenty seconds; a peer with nothing to say at all
@@ -318,13 +352,20 @@ pub fn read_message<R: Read>(reader: &mut R, network: NetworkId) -> Result<Incom
         });
     }
     let declared = usize::try_from(u32::decode_from(&mut cursor)?).unwrap_or(usize::MAX);
-    if declared > MAX_FRAME_BYTES {
+    if declared > most.min(MAX_FRAME_BYTES) {
         return Err(WireError::FrameTooLarge { declared });
     }
 
-    // The one allocation an anonymous peer gets to ask for, which is why the
-    // cap above is checked first and why a node accepts a bounded number of
-    // connections at once.
+    // What this caller will let this peer ask for, which is not the same
+    // question as what the protocol allows. The cap used to be the protocol's
+    // alone, and the comment here reasoned about the allocation: one megabyte,
+    // bounded connections, fine. The allocation is the cheap half. The line
+    // below decodes the frame, and decoding a frame full of notes decompresses
+    // a point off the curve for every owner in it, so a megabyte from somebody
+    // who had not yet said who they were bought a second and a third of this
+    // node's processor. The cap is the caller's to state now, and the caller
+    // that reads from a peer states a small one until the peer has introduced
+    // itself.
     let mut body = vec![0u8; declared];
     if fill(reader, &mut body, &mut patience)? == Filled::Nothing {
         return Err(WireError::Stalled {

@@ -220,7 +220,7 @@ fn a_message_roundtrips_through_the_wire_format() {
         write_message(&mut framed, NetworkId::TESTNET, &message).unwrap();
         let mut cursor = framed.as_slice();
         assert_eq!(
-            read_message(&mut cursor, NetworkId::TESTNET).unwrap(),
+            read_message(&mut cursor, NetworkId::TESTNET, MAX_FRAME_BYTES).unwrap(),
             Incoming::Message(message)
         );
     }
@@ -232,7 +232,7 @@ fn a_frame_from_another_network_is_refused_on_its_first_bytes() {
     write_message(&mut framed, NetworkId::MAINNET, &Message::Ping(1)).unwrap();
 
     let mut cursor = framed.as_slice();
-    let outcome = read_message(&mut cursor, NetworkId::TESTNET);
+    let outcome = read_message(&mut cursor, NetworkId::TESTNET, MAX_FRAME_BYTES);
     assert!(
         matches!(outcome, Err(WireError::WrongNetwork { .. })),
         "got {outcome:?}"
@@ -246,7 +246,7 @@ fn an_oversized_frame_is_refused_before_anything_is_reserved() {
     u32::MAX.encode_to(&mut framed);
 
     let mut cursor = framed.as_slice();
-    let outcome = read_message(&mut cursor, NetworkId::TESTNET);
+    let outcome = read_message(&mut cursor, NetworkId::TESTNET, MAX_FRAME_BYTES);
     match outcome {
         Err(WireError::FrameTooLarge { declared }) => {
             assert!(declared > MAX_FRAME_BYTES);
@@ -262,7 +262,7 @@ fn a_truncated_frame_is_refused() {
     framed.truncate(framed.len() - 1);
 
     let mut cursor = framed.as_slice();
-    assert!(read_message(&mut cursor, NetworkId::TESTNET).is_err());
+    assert!(read_message(&mut cursor, NetworkId::TESTNET, MAX_FRAME_BYTES).is_err());
 }
 
 #[test]
@@ -834,7 +834,7 @@ impl std::io::Read for Stalling {
 fn a_peer_with_nothing_to_say_is_not_a_failure() {
     let mut quiet = Stalling::new(Vec::new());
     assert_eq!(
-        read_message(&mut quiet, NetworkId::TESTNET).unwrap(),
+        read_message(&mut quiet, NetworkId::TESTNET, MAX_FRAME_BYTES).unwrap(),
         Incoming::Quiet,
         "an idle peer must not be mistaken for a broken one"
     );
@@ -849,7 +849,7 @@ fn a_peer_that_opens_a_frame_and_stops_is_refused() {
     // the reading thread would wait for as long as the peer kept the socket.
     let mut stalled = Stalling::new(framed);
 
-    match read_message(&mut stalled, NetworkId::TESTNET) {
+    match read_message(&mut stalled, NetworkId::TESTNET, MAX_FRAME_BYTES) {
         Err(WireError::Stalled { had, wanted }) => {
             assert_eq!(had, 0);
             assert_eq!(wanted, 1_000_000);
@@ -866,7 +866,7 @@ fn a_peer_that_stops_partway_through_a_frame_is_refused() {
     framed.truncate(full - 1);
     let mut stalled = Stalling::new(framed);
 
-    match read_message(&mut stalled, NetworkId::TESTNET) {
+    match read_message(&mut stalled, NetworkId::TESTNET, MAX_FRAME_BYTES) {
         Err(WireError::Stalled { had, .. }) => assert!(had > 0),
         other => panic!("expected a refusal, got {other:?}"),
     }
@@ -879,7 +879,7 @@ fn a_peer_that_stops_partway_through_a_header_is_refused() {
     framed.push(0);
     let mut stalled = Stalling::new(framed);
 
-    match read_message(&mut stalled, NetworkId::TESTNET) {
+    match read_message(&mut stalled, NetworkId::TESTNET, MAX_FRAME_BYTES) {
         Err(WireError::Stalled { had, wanted }) => {
             assert_eq!(had, 5);
             assert_eq!(wanted, 8);

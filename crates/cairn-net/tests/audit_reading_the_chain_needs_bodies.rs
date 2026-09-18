@@ -42,7 +42,7 @@ use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
 use cairn_net::message::{Handshake, Joining, Message, PROTOCOL_VERSION};
-use cairn_net::wire::{read_message, write_message, Incoming};
+use cairn_net::wire::{read_message, write_message, Incoming, MAX_FRAME_BYTES};
 use cairn_net::{Keeps, Node};
 use cairn_primitives::Hash32;
 
@@ -199,7 +199,7 @@ fn a_newcomer_at(address: SocketAddr, listen: u16, nonce: u64) -> TcpStream {
         .unwrap();
     write_message(&mut peer, params().network, &a_handshake(listen, nonce)).unwrap();
     loop {
-        match read_message(&mut peer, params().network) {
+        match read_message(&mut peer, params().network, MAX_FRAME_BYTES) {
             Ok(Incoming::Message(Message::Welcome(_))) => break,
             Ok(_) => {}
             Err(error) => panic!("no welcome came back: {error}"),
@@ -244,7 +244,7 @@ fn a_node_says_where_the_chain_it_can_hand_over_starts() {
     )
     .unwrap();
     let (from, count) = loop {
-        match read_message(&mut peer, params().network) {
+        match read_message(&mut peer, params().network, MAX_FRAME_BYTES) {
             Ok(Incoming::Message(Message::Chain { from, count })) => break (from, count),
             Ok(_) => {}
             Err(error) => panic!("nothing came back about where to start: {error}"),
@@ -275,7 +275,7 @@ fn a_node_says_where_the_chain_it_can_hand_over_starts() {
     let mut lowest_offered: Option<Block> = None;
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline && !arrived.contains(&trimmed.top) {
-        match read_message(&mut peer, params().network) {
+        match read_message(&mut peer, params().network, MAX_FRAME_BYTES) {
             Ok(Incoming::Message(Message::Block(block))) => {
                 arrived.insert(block.header.height);
                 if block.header.height == trimmed.holds_from {
@@ -341,7 +341,7 @@ fn a_node_that_dropped_its_bodies_still_keeps_the_headers_and_the_ledger() {
     let mut carried = 0usize;
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline && carried == 0 {
-        match read_message(&mut peer, params().network) {
+        match read_message(&mut peer, params().network, MAX_FRAME_BYTES) {
             Ok(Incoming::Message(Message::JoinPart { what, bytes, .. })) => {
                 assert_eq!(what, Joining::Weight);
                 carried = bytes.len();
@@ -364,7 +364,7 @@ fn a_node_that_dropped_its_bodies_still_keeps_the_headers_and_the_ledger() {
         .unwrap();
     write_message(&mut again, params().network, &a_handshake(41_303, 0x9103)).unwrap();
     let said = loop {
-        match read_message(&mut again, params().network) {
+        match read_message(&mut again, params().network, MAX_FRAME_BYTES) {
             Ok(Incoming::Message(Message::Welcome(handshake))) => break handshake,
             Ok(_) => {}
             Err(error) => panic!("no welcome came back: {error}"),

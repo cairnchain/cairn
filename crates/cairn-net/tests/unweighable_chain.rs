@@ -40,7 +40,7 @@ use cairn_ledger::validation::{assemble_block, connect_block, mine_block, Consen
 use cairn_ledger::LedgerState;
 use cairn_net::message::{Handshake, Keeps, Message, PROTOCOL_VERSION};
 use cairn_net::sync::JOIN_RATHER_THAN_READ;
-use cairn_net::wire::{read_message, write_message, Incoming};
+use cairn_net::wire::{read_message, write_message, Incoming, MAX_FRAME_BYTES};
 use cairn_net::Node;
 use cairn_primitives::Hash32;
 
@@ -152,7 +152,7 @@ impl CannotShowIt {
                     .set_read_timeout(Some(Duration::from_millis(200)))
                     .ok();
                 while running.load(Ordering::SeqCst) {
-                    let message = match read_message(&mut stream, network) {
+                    let message = match read_message(&mut stream, network, MAX_FRAME_BYTES) {
                         Ok(Incoming::Message(message)) => message,
                         Ok(Incoming::Quiet) => continue,
                         Err(_) => break,
