@@ -578,7 +578,22 @@ impl Chooser {
         // where nobody has a long chain yet, one `Hello` from a stranger that
         // then hung up shut a node to everyone for the life of the process,
         // for the price of one connection and one message.
-        if self.claims.is_empty() && self.asked.is_none() {
+        //
+        // Asked of the claims worth choosing between and not of the claims.
+        // `noted` writes one down for every peer that says it has any work at
+        // all, and this mark is armed only by a claim long enough to be past
+        // the reorganisation limit — the note on it says why, and a short
+        // chain followed wrongly is undone by the fork choice like any other
+        // branch. So `claims.is_empty()` asks "has every peer that ever spoke
+        // gone", where the question is the one that arms it: "is there still a
+        // claim worth settling". One peer connected and claiming a single
+        // block kept the door shut on everybody, which is one connection more
+        // than the stranger already had to make.
+        let worth_settling = self
+            .claims
+            .values()
+            .any(|claim| claim.height >= JOIN_RATHER_THAN_READ);
+        if !worth_settling && self.asked.is_none() {
             self.first_claim_at = None;
             return Step::Quiet;
         }

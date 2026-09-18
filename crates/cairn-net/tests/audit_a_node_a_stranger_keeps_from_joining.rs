@@ -84,6 +84,45 @@ fn a_claim_that_left_does_not_shut_the_door_behind_it() {
     }
 }
 
+/// And one peer still connected does not hold the door shut either.
+///
+/// The mark that a choice opened is armed by a claim long enough to be past
+/// the reorganisation limit, and it was cleared when the *claims* ran out. A
+/// claim is written down for every peer that says it has any work at all, so
+/// one peer connected and claiming a single block kept the mark set and the
+/// door shut on everybody. That is one connection more than the stranger had
+/// to make already, and on a network in its first hours the peers with short
+/// chains are all of them.
+#[test]
+fn one_peer_with_a_short_chain_does_not_hold_the_door_shut() {
+    let mut chooser = Chooser::new();
+    let start = 100u64;
+
+    // The stranger: a long claim, then gone.
+    chooser.noted(9, Some(host(9)), 1, LONG, true, start);
+
+    // An ordinary peer of a young network: a block or two, and it stays.
+    let short = 3u64;
+    chooser.noted(short, Some(host(short)), 1, 1, true, start);
+
+    let honest = vec![1u64, 2, short];
+    let mut now = start;
+    for _ in 0..8 {
+        now += 60;
+        let _ = chooser.step(now, true, 0, JoinProgress::NothingYet, &honest);
+    }
+
+    for peer in [1u64, 2] {
+        assert!(
+            !chooser.holds_off(peer),
+            "a stranger sent one message and hung up, and one peer claiming a single block \
+             is enough to keep this node dropping every block from peer {peer}. The mark \
+             that a choice opened is armed by a long claim and was being cleared on the \
+             absence of any claim at all"
+        );
+    }
+}
+
 /// A full list of paused addresses still pauses the address that just failed.
 ///
 /// The list exists so that a peer cannot wash a broken claim clean by
