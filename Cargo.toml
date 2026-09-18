@@ -83,12 +83,22 @@ must_use_candidate = "allow"
 # here.
 [profile.dev]
 opt-level = 1
+# Enough to say where a panic happened and not enough to inspect a variable in
+# a debugger, which is a trade this project can make: nothing here is debugged
+# that way, and what a failing test prints is a file and a line.
+#
+# Full debug information for every test binary in ten crates came to twenty
+# eight gigabytes of `target/debug`, against forty three megabytes for the
+# whole of the source, the history, the site and the papers put together.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
 
 [profile.test]
 opt-level = 2
+debug = "line-tables-only"
 
 [profile.test.package."*"]
 opt-level = 3

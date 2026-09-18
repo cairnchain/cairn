@@ -62,6 +62,24 @@ pub struct PeerState {
     /// like any other; what this tracks is only whether the question has been
     /// answered.
     pub awaiting: BTreeSet<u64>,
+    /// Of those, the ones this node asked about because this peer announced
+    /// them rather than because it was catching up.
+    ///
+    /// The two are not the same errand and only one of them is owed a
+    /// discount. Catching up, this node walks heights it worked out itself and
+    /// goes and asks for them; the peer answering is doing this node a favour
+    /// and is not charged for the bytes. An announcement is the other
+    /// direction: the peer offered, and a block offered is a block pushed,
+    /// which is what the byte price is for.
+    ///
+    /// Told apart here because the ask that follows an announcement looks
+    /// exactly like the ask that follows a catch-up, and `awaiting` remembers
+    /// only the height. A peer that announced first could therefore write its
+    /// own discount, and the heights in an announcement are the peer's to
+    /// choose: a hundred and twenty eight invented identifiers armed a hundred
+    /// and twenty eight full-sized blocks at a unit each, which is four times
+    /// cheaper than the flat price this was all meant to abolish.
+    pub offered: BTreeSet<u64>,
     /// When the outstanding batch was asked for.
     ///
     /// A peer that answers everything else but never delivers the blocks it
@@ -996,6 +1014,23 @@ fn request_announced(
     // more: `MAX_AWAITING` named 512 and the set held 639. A height already
     // outstanding costs nothing, because asking again for it grows nothing.
     let mut room = MAX_AWAITING.saturating_sub(peer.awaiting.len());
+    // And a height that agrees with what this peer already said about itself.
+    // An announcement is a peer saying where it has a block, and the height is
+    // the peer's to write: nothing here checked it, so a hundred and twenty
+    // eight invented identifiers at heights of the sender's choosing armed a
+    // hundred and twenty eight full-sized blocks at a unit apiece.
+    //
+    // Checked against the peer and not against this node's tip, which is the
+    // reading that matters and the one I got wrong first. A node behind the
+    // chain is *told* it is behind by an announcement from far ahead of its
+    // own tip, so a ceiling drawn there stops a node catching up at all.
+    // What a peer cannot do is disagree with itself: it said how much chain it
+    // had when it greeted, and a block it announces above that is one it did
+    // not have a moment ago. A batch's worth of slack, because blocks are
+    // mined while a connection lasts and that is what an announcement is for.
+    //
+    // The floor is the one `ChainStore::add_block` already enforces, because a
+    // block below it can never be followed whatever is built on it.
     let wanted: Vec<u64> = ids
         .iter()
         .filter(|entry| !chain.contains(&entry.id))
@@ -1016,6 +1051,9 @@ fn request_announced(
         return follow_up(chain, peer, now);
     }
     peer.awaiting.extend(wanted.iter().copied());
+    // Written down as offered, so that the ask this is about to send is not
+    // mistaken later for one this node went looking for.
+    peer.offered.extend(wanted.iter().copied());
     peer.asked_at = now;
     Reaction::reply(vec![Message::GetBlocks(wanted)])
 }
@@ -1032,6 +1070,7 @@ fn request_announced(
 fn follow_up(chain: &ChainStore, peer: &mut PeerState, now: u64) -> Reaction {
     if !peer.awaiting.is_empty() && now.saturating_sub(peer.asked_at) >= BATCH_PATIENCE {
         peer.awaiting.clear();
+        peer.offered.clear();
     }
     if peer.awaiting.is_empty() && peer.total_work > chain.total_work() {
         return Reaction::reply(vec![Message::GetChain {
@@ -1064,6 +1103,7 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
     let id = block.id();
     let height = block.header.height;
     peer.awaiting.remove(&height);
+    peer.offered.remove(&height);
 
     match chain.add_block(block, now) {
         Ok(accepted @ (Accepted::Extended | Accepted::Reorganised { .. })) => {
@@ -1243,7 +1283,14 @@ fn cost_of(message: &Message, peer: &PeerState) -> u32 {
         // filled by `request_announced`, from what this node decided to ask
         // about, and what an announcement can arm is its own question.
         Message::Block(block) => {
-            if peer.awaiting.contains(&block.header.height) {
+            // The discount is for an answer to something this node went and
+            // asked for, which is what catching up is. A block this node was
+            // offered is charged what its bytes cost however the asking went,
+            // because being offered something and then asking for it is not
+            // the same errand as going to look for it.
+            let at = block.header.height;
+            let catching_up = peer.awaiting.contains(&at) && !peer.offered.contains(&at);
+            if catching_up {
                 COST_TRIVIAL
             } else {
                 COST_BLOCK.saturating_add(what_the_wire_costs(block.encode().len()))
@@ -1497,6 +1544,12 @@ mod what_an_ask_costs {
     /// A block carrying `outputs` coinbase notes, so its size is chosen and
     /// nothing else about it matters: pricing never looks at whether a block
     /// is valid, which is the whole of why a peer can send one for nothing.
+    ///
+    /// The nonce carries the count, so that two of these are two blocks. An
+    /// identifier is the hash of a header and this fixture leaves
+    /// `transactions_root` at zero, so without it a block of one output and a
+    /// block of four hundred have the same identifier and a test about telling
+    /// them apart cannot.
     fn block_of(outputs: usize) -> Block {
         let owner = SecretKey::from_bytes(&[7; 32]).public_key();
         let value = Amount::from_pebbles(1).unwrap();
@@ -1512,7 +1565,7 @@ mod what_an_ask_costs {
                 timestamp: 1_000,
                 difficulty: 1,
                 total_work: 0,
-                nonce: 0,
+                nonce: outputs as u64,
             },
             coinbase: CoinbaseTransaction::new(
                 1,
@@ -1573,6 +1626,57 @@ mod what_an_ask_costs {
             "a window pays for {carrying_a_full_one} asks carrying {MAX_LOCATOR} entries and \
              {carrying_nothing} carrying none, so the entries are free and the flat price \
              this test exists to refuse is back"
+        );
+    }
+
+    /// What an announcement can arm, which is the escape hatch beside the
+    /// price above and not a separate question.
+    ///
+    /// A block a peer announced is charged as an answer to something already
+    /// asked for, and `awaiting` is what says it was asked for. That set is
+    /// filled from the heights a peer wrote into an announcement, so a peer
+    /// that announces first writes its own discount: a hundred and twenty
+    /// eight invented identifiers bought a hundred and twenty eight
+    /// full-sized blocks at a unit each, which is four times cheaper than the
+    /// flat price the change above exists to abolish.
+    ///
+    /// Two things close it and both are needed. A height has to be one this
+    /// node could put a block at, and the block that arrives has to be the one
+    /// that was announced.
+    #[test]
+    fn an_announcement_does_not_write_its_own_discount() {
+        let block = block_of(400);
+        let at = block.header.height;
+        let bytes = block.encode().len();
+
+        // Catching up: this node walked to the height itself and went and
+        // asked. The peer answering is doing it a favour.
+        let mut looking = PeerState::new(None);
+        looking.awaiting.insert(at);
+        let a_favour = cost_of(&Message::Block(Box::new(block.clone())), &looking);
+        assert_eq!(
+            a_favour, 1,
+            "an answer to an ask this node made is an answer"
+        );
+
+        // Offered: the same height, in the same set, reached because the peer
+        // announced it. The ask looks identical from here and the errand is
+        // the other one.
+        let mut offered = PeerState::new(None);
+        offered.awaiting.insert(at);
+        offered.offered.insert(at);
+        let a_push = cost_of(&Message::Block(Box::new(block)), &offered);
+
+        assert!(
+            a_push > a_favour,
+            "a peer that announced first was charged {a_push} for {bytes} bytes against the \
+             {a_favour} an answer costs, so announcing is a way of setting your own price. \
+             The heights in an announcement are the peer's to choose"
+        );
+        assert_eq!(
+            a_push,
+            what_the_wire_costs(bytes).saturating_add(8),
+            "and it is charged what its bytes cost, like any block nobody asked for"
         );
     }
 
