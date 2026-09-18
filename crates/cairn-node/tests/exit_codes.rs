@@ -199,6 +199,56 @@ fn what_dropping_a_block_costs_a_newcomer_is_printed_beside_the_budget() {
     assert!(!said.contains("what is dropped"), "{said}");
 }
 
+/// A name the resolver could not answer for is not a command line that was
+/// wrong either.
+///
+/// The distinction above was drawn one layer too far out: everything
+/// `resolve_options` refused came back as a misread command line, and three of
+/// the things it refuses are not one. Two of those are about a moment rather
+/// than about a mistake — a name that did not resolve at this instant, and a
+/// `cairn.conf` the disk would not give back — and they are the two a
+/// supervisor most needs to be able to retry.
+///
+/// What it cost: `deploy/cairnd.service` carries `Restart=always` with five
+/// starts allowed in five minutes. A machine that boots this node ahead of its
+/// resolver spent all five in twenty five seconds and stayed down until a
+/// person came, while the journal showed forty five lines of usage text
+/// telling them to look for a typo that was not there.
+#[test]
+fn a_name_that_did_not_resolve_says_so_without_the_usage_text() {
+    let directory = scratch("unresolved");
+    let output = cairnd(&[
+        "--data",
+        &directory.to_string_lossy(),
+        "--network",
+        "devnet",
+        "--listen",
+        "127.0.0.1:0",
+        "--seed",
+        "a-name-nothing-answers-for.invalid:9944",
+    ]);
+
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a resolver that was not answering yet is not a mistake to be fixed, and exiting \
+         on the code that means one leaves whatever started this node unable to tell them \
+         apart. It said: {said}"
+    );
+    assert!(
+        !said.contains("--archive"),
+        "and the usage text was printed at somebody whose command line is right, which \
+         sends them looking for a mistake that is not there: {said}"
+    );
+    assert!(
+        said.contains("cairnd:"),
+        "the message is still the thing to read: {said}"
+    );
+
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 /// **A node that could not start is not a command line that was wrong.**
 ///
 /// Both used to print the usage text and exit 2, so whatever started this node

@@ -8,6 +8,7 @@
 //! settings, and a node people are asked to audit is better off without an
 //! argument parser in its dependency tree.
 
+use crate::Stopping;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::net::SocketAddr;
@@ -287,18 +288,26 @@ fn read_config(path: &std::path::Path) -> Result<String, String> {
 
 /// Reads the command line, then the configuration file the command line points
 /// at, and settles every setting.
-pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, String> {
-    let command_line = parse_arguments(arguments)?;
+pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, Stopping> {
+    let misread = Stopping::Misread;
+    let command_line = parse_arguments(arguments).map_err(misread)?;
     if command_line.has("help") {
         return Ok(None);
     }
 
-    command_line.one_value_each("on the command line")?;
+    command_line
+        .one_value_each("on the command line")
+        .map_err(misread)?;
 
     let data = PathBuf::from(command_line.first("data").unwrap_or(DEFAULT_DATA));
-    let file = read_config(&data.join(CONFIG_FILE))?;
-    let config = parse_config(&file)?;
-    config.one_value_each(&format!("in {CONFIG_FILE}"))?;
+    // Not a misreading. The file is there and the disk will not give it back,
+    // which is the one thing the two arms of `read_config` exist to tell
+    // apart, and it is about this moment rather than about anything typed.
+    let file = read_config(&data.join(CONFIG_FILE)).map_err(Stopping::CouldNotStart)?;
+    let config = parse_config(&file).map_err(misread)?;
+    config
+        .one_value_each(&format!("in {CONFIG_FILE}"))
+        .map_err(misread)?;
 
     let setting = |name: &str| -> Option<String> {
         command_line
@@ -307,20 +316,26 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
             .map(str::to_owned)
     };
 
+    // Nor is this. A name that did not resolve at this instant is a resolver
+    // that was not answering yet, which clears by itself, and telling an
+    // operator to check what they typed sends them looking for nothing.
     let listen =
-        seeds::resolve_one(&setting("listen").unwrap_or_else(|| DEFAULT_LISTEN.to_owned()))?;
+        seeds::resolve_one(&setting("listen").unwrap_or_else(|| DEFAULT_LISTEN.to_owned()))
+            .map_err(Stopping::CouldNotStart)?;
 
     let name = setting("network").unwrap_or_else(|| "testnet".to_owned());
     // Every consensus rule comes from the name, and none of them can be set
     // one at a time. Two nodes that differ on any of them would build
     // different chains while believing they were on the same network.
-    let params = ConsensusParams::for_network(&name).ok_or_else(|| {
-        if name == "mainnet" {
-            "mainnet does not exist yet: its first block has not been mined".to_owned()
-        } else {
-            format!("unknown network `{name}`, try testnet-6 or devnet")
-        }
-    })?;
+    let params = ConsensusParams::for_network(&name)
+        .ok_or_else(|| {
+            if name == "mainnet" {
+                "mainnet does not exist yet: its first block has not been mined".to_owned()
+            } else {
+                format!("unknown network `{name}`, try testnet-6 or devnet")
+            }
+        })
+        .map_err(misread)?;
 
     // After the network is settled, because a node given no seed starts from
     // the ones written into the program for the network it is on.
@@ -332,25 +347,29 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         .collect();
     let seeds_asked_for = !asked.is_empty();
     let seed_names = seeds::names_for(&asked, params.network);
-    let seeds = seeds::start_from(&asked, params.network)?;
+    // And nor is a seed the operator named whose name did not resolve. This is
+    // the one a machine booting ahead of its resolver meets: without it the
+    // node retries by itself, and with it the unit spends its five starts in
+    // twenty five seconds and stays down.
+    let seeds = seeds::start_from(&asked, params.network).map_err(Stopping::CouldNotStart)?;
 
     let mine_to = match setting("mine") {
         None => None,
-        Some(text) => Some(parse_key(&text)?),
+        Some(text) => Some(parse_key(&text).map_err(misread)?),
     };
 
     let status_period = match setting("status") {
         None => 10,
         Some(text) => text
             .parse()
-            .map_err(|_| format!("`{text}` is not a number of seconds"))?,
+            .map_err(|_| misread(format!("`{text}` is not a number of seconds")))?,
     };
 
     let run_for = match setting("run-for") {
         None => None,
         Some(text) => Some(
             text.parse()
-                .map_err(|_| format!("`{text}` is not a number of seconds"))?,
+                .map_err(|_| misread(format!("`{text}` is not a number of seconds")))?,
         ),
     };
 
@@ -358,7 +377,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
 
     let keep = match setting("keep") {
         None => KEEP_BLOCK_BYTES,
-        Some(text) => parse_size(&text)?,
+        Some(text) => parse_size(&text).map_err(misread)?,
     };
 
     Ok(Some(Options {
@@ -673,10 +692,20 @@ mod tests {
         std::fs::create_dir_all(directory.join(CONFIG_FILE)).unwrap();
         let data = directory.to_string_lossy().to_string();
 
+        // And it is a node that could not start rather than a command line
+        // that was misread, which is what decides whether whoever started this
+        // node is shown the usage text and told to look for a typo. The file
+        // being there and unreadable is about this disk at this moment.
         let error = resolve_options(&args(&["--data", &data])).unwrap_err();
+        let said = match error {
+            Stopping::CouldNotStart(said) => said,
+            Stopping::Misread(said) => unreachable!(
+                "a file the disk will not give back is not a misread command line: {said}"
+            ),
+        };
         assert!(
-            error.contains(CONFIG_FILE),
-            "the operator is told which file: {error}"
+            said.contains(CONFIG_FILE),
+            "the operator is told which file: {said}"
         );
 
         // Nothing there at all is the ordinary case, and carries on.
