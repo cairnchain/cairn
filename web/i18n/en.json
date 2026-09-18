@@ -52,11 +52,11 @@
   },
 
   "unit": {
-    "seconds": "{n} seconds",
-    "minutes": "{n} minutes",
-    "hours": "{n} hours",
-    "days": "{n} days",
-    "years": "{n} years"
+    "seconds": { "one": "{n} second", "other": "{n} seconds" },
+    "minutes": { "one": "{n} minute", "other": "{n} minutes" },
+    "hours": { "one": "{n} hour", "other": "{n} hours" },
+    "days": { "one": "{n} day", "other": "{n} days" },
+    "years": { "one": "{n} year", "other": "{n} years" }
   },
 
   "error": {
@@ -147,6 +147,46 @@
     "recent": { "title": "Latest blocks" }
   },
 
+  "chart": {
+    "title": {
+      "plain": "What is happening right now",
+      "curious": "The last blocks, as they land",
+      "technical": "Difficulty, spacing and work rate over the last {n} blocks"
+    },
+    "modes": "What to draw",
+    "reading": {
+      "difficulty": "Difficulty",
+      "spacing": "Spacing",
+      "rate": "Work rate"
+    },
+    "label": {
+      "difficulty": "Difficulty now",
+      "spacing": "Last gap",
+      "rate": "Work rate"
+    },
+    "note": {
+      "difficulty": {
+        "plain": "Difficulty is how much work it takes to add a block. It moves on its own: when more machines join, it rises, and blocks keep arriving at roughly the rate they did before. Nobody sets it by hand.",
+        "curious": "Difficulty is the expected number of attempts a block costs. It is recalculated for every block from a sliding window of recent ones, so it follows the miners continuously rather than waiting for a fixed epoch to end.",
+        "technical": "Expected hash count for a block, recomputed per block over a sliding window and clamped against a sudden move in either direction. The figure above is parsed exactly; the line is plotted as a double, which is far beneath the resolution of two hundred units of height."
+      },
+      "spacing": {
+        "plain": "How long each block took after the one before it. These times are written by the miners themselves, not measured here, and a block only has to come after the middle of the recent ones. So a bar can sit at zero, or below it.",
+        "curious": "The gap between one header's timestamp and the previous one's. Timestamps are claimed by whoever mined the block, and the rule is that a block must be later than the median of the recent ones rather than later than its parent, so a gap can be zero or negative. Those are drawn below the line.",
+        "technical": "Consecutive header timestamp differences, as bars measured from zero rather than from the window minimum. A claim is bounded by the median time of the recent window and by the drift allowed ahead, not by the parent, so negative gaps are valid and are drawn as such."
+      },
+      "rate": {
+        "plain": "A guess at how much computing power is pointed at the chain, worked out from how much work the blocks cost and how long they say they took. It is a guess because the second half of that comes from the miners.",
+        "curious": "Work claimed divided by time claimed, over a trailing window of blocks. Both halves come from the headers, so this is an estimate and not a measurement: it is exactly as trustworthy as the timestamps under it.",
+        "technical": "Sum of difficulty over a trailing window divided by the timestamp span of that window, in hashes per second. Undefined where the span is not positive, and those points are left out of the line rather than interpolated across."
+      }
+    },
+    "middle": "median {value} over {n}",
+    "since": "last block {gap} ago",
+    "target": "aims at {value}",
+    "alt": "{reading} over the last {n} blocks, between {low} and {high}.",
+    "none": "Not enough blocks read to draw this yet."
+  },
   "stat": {
     "height": "Height",
     "difficulty": "Difficulty",

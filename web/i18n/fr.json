@@ -52,11 +52,11 @@
   },
 
   "unit": {
-    "seconds": "{n} secondes",
-    "minutes": "{n} minutes",
-    "hours": "{n} heures",
-    "days": "{n} jours",
-    "years": "{n} ans"
+    "seconds": { "one": "{n} seconde", "other": "{n} secondes" },
+    "minutes": { "one": "{n} minute", "other": "{n} minutes" },
+    "hours": { "one": "{n} heure", "other": "{n} heures" },
+    "days": { "one": "{n} jour", "other": "{n} jours" },
+    "years": { "one": "{n} an", "other": "{n} ans" }
   },
 
   "error": {
@@ -147,6 +147,46 @@
     "recent": { "title": "Derniers blocs" }
   },
 
+  "chart": {
+    "title": {
+      "plain": "Ce qui se passe en ce moment",
+      "curious": "Les derniers blocs, à mesure qu'ils arrivent",
+      "technical": "Difficulté, espacement et puissance sur les {n} derniers blocs"
+    },
+    "modes": "Ce qui est tracé",
+    "reading": {
+      "difficulty": "Difficulté",
+      "spacing": "Espacement",
+      "rate": "Puissance"
+    },
+    "label": {
+      "difficulty": "Difficulté actuelle",
+      "spacing": "Dernier écart",
+      "rate": "Puissance"
+    },
+    "note": {
+      "difficulty": {
+        "plain": "La difficulté, c'est le travail qu'il faut fournir pour ajouter un bloc. Elle bouge toute seule : quand des machines arrivent, elle monte, et les blocs continuent d'arriver à peu près au même rythme qu'avant. Personne ne la règle à la main.",
+        "curious": "La difficulté est le nombre de tentatives qu'un bloc coûte en moyenne. Elle est recalculée à chaque bloc sur une fenêtre glissante des blocs récents, donc elle suit les mineurs en continu au lieu d'attendre la fin d'une période fixe.",
+        "technical": "Nombre de hachages attendu pour un bloc, recalculé bloc par bloc sur une fenêtre glissante et borné contre un saut brutal dans un sens comme dans l'autre. Le chiffre au-dessus est lu exactement ; la courbe est tracée en flottant double, ce qui reste très en deçà de la résolution de deux cents unités de hauteur."
+      },
+      "spacing": {
+        "plain": "Le temps qu'a mis chaque bloc après le précédent. Ces heures sont écrites par les mineurs eux-mêmes, elles ne sont pas mesurées ici, et un bloc doit seulement venir après le milieu des blocs récents. Une barre peut donc valoir zéro, ou passer en dessous.",
+        "curious": "L'écart entre l'horodatage d'un en-tête et celui du précédent. Les horodatages sont déclarés par celui qui a miné le bloc, et la règle est qu'un bloc doit être postérieur à la médiane des blocs récents, pas à son parent : un écart peut donc être nul ou négatif. Ceux-là sont tracés sous la ligne.",
+        "technical": "Différences d'horodatage entre en-têtes consécutifs, en barres mesurées depuis zéro et non depuis le minimum de la fenêtre. Une déclaration est bornée par le temps médian de la fenêtre récente et par la dérive permise vers l'avant, pas par le parent : les écarts négatifs sont donc valides et sont tracés comme tels."
+      },
+      "rate": {
+        "plain": "Une estimation de la puissance de calcul braquée sur la chaîne, déduite du travail qu'ont coûté les blocs et du temps qu'ils disent avoir mis. C'est une estimation parce que la seconde moitié vient des mineurs.",
+        "curious": "Le travail déclaré divisé par le temps déclaré, sur une fenêtre glissante de blocs. Les deux moitiés viennent des en-têtes : c'est donc une estimation et non une mesure, et elle vaut exactement ce que valent les horodatages en dessous.",
+        "technical": "Somme des difficultés sur une fenêtre glissante divisée par l'amplitude des horodatages de cette fenêtre, en hachages par seconde. Non définie quand l'amplitude n'est pas positive, et ces points sont laissés de côté plutôt qu'interpolés."
+      }
+    },
+    "middle": "médiane {value} sur {n}",
+    "since": "dernier bloc il y a {gap}",
+    "target": "vise {value}",
+    "alt": "{reading} sur les {n} derniers blocs, entre {low} et {high}.",
+    "none": "Pas encore assez de blocs lus pour tracer ceci."
+  },
   "stat": {
     "height": "Hauteur",
     "difficulty": "Difficulté",

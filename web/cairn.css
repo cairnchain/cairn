@@ -518,6 +518,178 @@ main {
 .tier.cold .tier-name::before { background: var(--cold); }
 .tier-figure { font-family: var(--mono); color: var(--ink-2); }
 
+/* ---- the chain, drawn ---- */
+
+/*
+  The one drawing on this site, and the only place it spends a second colour
+  on something other than the hot and cold halves of the chain.
+
+  Green stays what it is everywhere else: a reading this node took for itself.
+  The target line is cold because it is not a reading at all, it is the number
+  the rules aim at, and the distance between the two is the whole reason the
+  chart is here. Red is kept for the one thing a reader should stop at: a
+  block whose header claims a time earlier than the block it was built on.
+
+  The drawing stretches to the width it is given, so nothing inside it is text
+  and every stroke asks not to be scaled. The labels around it are HTML, where
+  they can be read out and selected.
+*/
+
+.chart-panel .panel-head { flex-wrap: wrap; }
+
+.chart-modes {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+
+.chart-modes .mode {
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-3);
+  font: inherit;
+  font-size: 0.74rem;
+  padding: 0.3rem 0.75rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.18s ease, background-color 0.18s ease;
+}
+.chart-modes .mode:hover { color: var(--ink); }
+.chart-modes .mode[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+.chart-modes .mode:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.chart-readout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.5rem 1.4rem;
+  margin-bottom: 0.75rem;
+}
+
+.chart-label {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.chart-figure {
+  font-family: var(--mono);
+  font-size: clamp(1.45rem, 4.2vw, 2rem);
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.chart-aside {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  text-align: right;
+  margin-left: auto;
+}
+.chart-middle,
+.chart-since { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.chart-since { color: var(--accent-ink); }
+
+.chart-frame {
+  position: relative;
+  border: 1px solid var(--rule);
+  border-radius: calc(var(--radius) - 4px);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.spark {
+  display: block;
+  width: 100%;
+  height: clamp(140px, 21vw, 200px);
+}
+
+.spark-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.7;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+.spark-area { fill: var(--accent-soft); stroke: none; }
+.spark-bar { fill: var(--accent); opacity: 0.7; }
+.spark-bar.back { fill: var(--bad); opacity: 0.92; }
+.spark-grid { stroke: var(--rule); vector-effect: non-scaling-stroke; }
+.spark-floor { stroke: var(--rule-strong); vector-effect: non-scaling-stroke; }
+.spark-target {
+  stroke: var(--cold);
+  stroke-dasharray: 5 4;
+  vector-effect: non-scaling-stroke;
+}
+
+/*
+  The newest block, as a dot rather than a marker inside the drawing.
+
+  The drawing is stretched to the width of the page and a circle stretched
+  with it is an ellipse, so this one sits above it in HTML and stays round.
+*/
+.chart-dot {
+  position: absolute;
+  left: var(--x);
+  top: var(--y);
+  width: 9px;
+  height: 9px;
+  margin: -4.5px 0 0 -4.5px;
+  border-radius: 50%;
+  background: var(--accent-ink);
+  box-shadow: 0 0 0 2px var(--surface-2);
+  pointer-events: none;
+}
+.chart-dot.arrived::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border: 1px solid var(--accent);
+  border-radius: 50%;
+  animation: arrive 1.2s ease-out 1;
+}
+
+@keyframes arrive {
+  from { transform: scale(0.5); opacity: 0.9; }
+  to { transform: scale(3); opacity: 0; }
+}
+
+.chart-bound,
+.chart-mark {
+  position: absolute;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  padding: 0 0.3rem;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--surface-2) 84%, transparent);
+  pointer-events: none;
+}
+.chart-bound { right: 0.45rem; color: var(--ink-3); }
+.chart-bound.high { top: 0.4rem; }
+.chart-bound.low { bottom: 0.4rem; }
+/* At the top, where nothing else is: at the foot it sat on the line it names. */
+.chart-mark { left: 0.45rem; top: 0.4rem; color: var(--cold); }
+.chart-mark::before {
+  content: "";
+  display: inline-block;
+  width: 14px;
+  border-top: 1px dashed var(--cold);
+  vertical-align: middle;
+  margin-right: 0.4rem;
+}
+
 /* ---- tables ---- */
 
 .scroller { overflow-x: auto; }
@@ -826,6 +998,13 @@ a.hash:hover { color: var(--accent-ink); }
   main { padding-top: 1.2rem; }
 }
 
+/*
+  Motion off means motion off.
+
+  This said transition and meant every moving thing, which was true of the
+  page until the chart arrived with a keyframe on it: a reader who has asked
+  their system for stillness would have got a pulse on every new block.
+*/
 @media (prefers-reduced-motion: reduce) {
-  * { transition: none !important; }
+  * { transition: none !important; animation: none !important; }
 }
