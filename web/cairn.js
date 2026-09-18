@@ -25,6 +25,7 @@ const state = {
   fallback: {},
   languages: [{ code: 'en', name: 'English' }],
   status: null,
+  params: null,
   timers: [],
 };
 
@@ -202,14 +203,36 @@ function ago(seconds) {
   return '';
 }
 
+/*
+  A quantity with its unit, in the form the language uses for that number.
+
+  French counts zero as singular and English does not, so the form comes from
+  the locale rather than from a comparison against one written here. The site
+  said `1 secondes` in French and `1 seconds` in English for as long as there
+  has been a page with a five second block time on it.
+*/
+function plural(name, value, shown) {
+  const rule = new Intl.PluralRules(locale()).select(Math.abs(Number(value)));
+  return t('unit.' + name + '.' + rule, { n: shown === undefined ? count(value) : shown });
+}
+
+/*
+  A span of time in the largest unit that keeps it readable.
+
+  The size is measured without its sign, so a gap that runs backwards is named
+  in the same unit as the same gap forwards rather than falling through every
+  bound into seconds.
+*/
 function duration(seconds) {
   const value = Number(seconds);
   if (!Number.isFinite(value)) return '-';
-  if (value < 120) return t('unit.seconds', { n: count(value) });
-  if (value < 7200) return t('unit.minutes', { n: count(Math.round(value / 60)) });
-  if (value < 172800) return t('unit.hours', { n: count(Math.round(value / 3600)) });
-  if (value < 63072000) return t('unit.days', { n: count(Math.round(value / 86400)) });
-  return t('unit.years', { n: (value / 31536000).toFixed(1) });
+  const size = Math.abs(value);
+  if (size < 120) return plural('seconds', value);
+  if (size < 7200) return plural('minutes', Math.round(value / 60));
+  if (size < 172800) return plural('hours', Math.round(value / 3600));
+  if (size < 63072000) return plural('days', Math.round(value / 86400));
+  const years = value / 31536000;
+  return plural('years', years, years.toFixed(1));
 }
 
 function shorten(text, head = 10, tail = 6) {
@@ -228,7 +251,8 @@ function el(tag, attributes, ...children) {
       else if (name === 'text') node.textContent = value;
       else if (name === 'html') throw new Error('markup is never built from data');
       else if (name.startsWith('on')) node.addEventListener(name.slice(2), value);
-      else if (name === 'variable') node.style.setProperty(value[0], value[1]);
+      else if (name === 'variable')
+        for (const [property, setting] of Array.isArray(value[0]) ? value : [value]) node.style.setProperty(property, setting);
       else node.setAttribute(name, value === true ? '' : value);
     }
   }
@@ -241,6 +265,28 @@ function el(tag, attributes, ...children) {
 
 function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
+}
+
+/*
+  The same builder, in the namespace createElement cannot reach.
+
+  An SVG element made with createElement is an unknown HTML element that
+  happens to be spelled `path`: it parses, it appears in the tree, and it
+  draws nothing at all.
+*/
+function svg(tag, attributes, ...children) {
+  const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  if (attributes) {
+    for (const [name, value] of Object.entries(attributes)) {
+      if (value === null || value === undefined || value === false) continue;
+      node.setAttribute(name, value === true ? '' : String(value));
+    }
+  }
+  for (const child of children.flat(4)) {
+    if (child === null || child === undefined || child === false) continue;
+    node.append(child);
+  }
+  return node;
 }
 
 /*
@@ -412,9 +458,15 @@ function showError(error) {
 }
 
 async function home() {
-  const status = await api('status');
+  // One read of the window serves the chart and the table under it, and the
+  // three go out together rather than one after another: the page is not
+  // waiting on the rules to know what a block is.
+  const [status, recent, rules] = await Promise.all([
+    api('status'),
+    api('blocks?limit=' + CHART_WINDOW),
+    chainRules(),
+  ]);
   state.status = status;
-  const recent = await api('blocks?limit=10');
 
   clear(view);
   const hotShare = status.hot.capacity ? Math.min(100, (status.hot.notes / status.hot.capacity) * 100) : 0;
@@ -448,6 +500,8 @@ async function home() {
         stat(t('stat.peers'), count(status.peers))
       )
       ),
+
+      chartPanel(recent.blocks, rules),
 
       panel(
         t('home.cost.title'),
@@ -493,7 +547,7 @@ async function home() {
       panel(
         t('home.recent.title'),
         explainer('explain.blocks'),
-        blocksTable(recent.blocks),
+        blocksTable(recent.blocks.slice(0, 10)),
         el('div', { class: 'more' }, el('a', { class: 'action', href: '/blocks', 'data-link': true, text: t('common.seeAll') }))
       ),
     ])
@@ -576,6 +630,464 @@ function blocksTable(blocks) {
       )
     )
   );
+}
+
+/* ---------- the chain, drawn ---------- */
+
+/*
+  One window of blocks, read three ways.
+
+  Difficulty is what the rules demanded of the miners; spacing is what the
+  miners then claimed; the work rate is the first divided by the second, which
+  is why it is an estimate and the other two are not. Keeping them as three
+  readings of one window rather than three charts is the point: they disagree,
+  and the disagreement is the interesting part.
+
+  The window is a fixed number of blocks, not a stretch of time. A site whose
+  front page cost grew with the chain would be arguing against the thing the
+  chain is for.
+*/
+const CHART_WINDOW = 128;
+const CHART_WIDTH = 720;
+const CHART_HEIGHT = 200;
+
+/*
+  A margin at both ends of the drawing.
+
+  The newest block sits at the right edge and is marked with a dot, and a
+  dot centred on the edge of a box that clips is half a dot.
+*/
+const CHART_INSET = 6;
+
+/* How many blocks a single work rate reading is measured over. */
+const RATE_SPAN = 12;
+
+const STORE_READING = 'cairn.reading';
+const READINGS = ['difficulty', 'spacing', 'rate'];
+
+const chart = {
+  panel: null,
+  body: null,
+  buttons: new Map(),
+  heading: null,
+  reading: 'difficulty',
+  blocks: [],
+  at: null,
+};
+
+function median(values) {
+  const sorted = values.filter((value) => value !== null && Number.isFinite(value)).sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+/*
+  A rate of hashing, in the prefixes the quantity is usually spoken in.
+
+  Not translated, for the same reason kB is not: these are symbols, and a
+  reader who knows what a terahash is knows it under that spelling in every
+  language this site is written in.
+*/
+function hashes(rate) {
+  if (rate === null || !Number.isFinite(rate) || rate <= 0) return '-';
+  const steps = ['H/s', 'kH/s', 'MH/s', 'GH/s', 'TH/s', 'PH/s', 'EH/s'];
+  let value = rate;
+  let step = 0;
+  while (value >= 1000 && step < steps.length - 1) {
+    value /= 1000;
+    step += 1;
+  }
+  const places = value < 10 ? 2 : value < 100 ? 1 : 0;
+  return value.toFixed(places) + ' ' + steps[step];
+}
+
+/*
+  The three series, oldest first.
+
+  Difficulty arrives as a decimal string because it is a sixty four bit number
+  and JSON has no such thing. Drawing it as a double loses the low bits of a
+  value that would need a quintillion hashes to reach, which is beyond what a
+  chart two hundred units tall could show; the figure printed beside the chart
+  is parsed exactly, so no reader is ever shown a rounded number as an exact
+  one.
+*/
+function chartSeries(blocks) {
+  const order = blocks.slice().reverse();
+  const times = order.map((block) => Number(block.timestamp));
+  const work = order.map((block) => Number(block.difficulty));
+
+  const spacing = times.map((at, index) => (index === 0 ? null : at - times[index - 1]));
+
+  const rate = work.map((_, index) => {
+    const start = index - RATE_SPAN;
+    if (start < 0) return null;
+    const span = times[index] - times[start];
+    if (span <= 0) return null;
+    let sum = 0;
+    for (let step = start + 1; step <= index; step += 1) sum += work[step];
+    return sum / span;
+  });
+
+  return { blocks: order, times, work, spacing, rate };
+}
+
+/*
+  The band the drawing covers, which is exactly what the readings did.
+
+  It was widened by a margin at first, and the margin was printed: the figures
+  at the top and bottom of the frame are read as the highest and lowest values
+  in the window, and eight per cent under the lowest difficulty on a young
+  chain is a negative difficulty, which is not a number this chain can hold.
+  The room a stroke needs in order not to be clipped is taken in pixels inside
+  the drawing instead, where it costs nothing true.
+
+  `anchor` is a value the band must reach whatever the readings did: zero for
+  the bars, because a bar measured from anywhere else draws a difference and
+  calls it a quantity.
+*/
+function band(values, anchor) {
+  const present = values.filter((value) => value !== null && Number.isFinite(value));
+  if (!present.length) return null;
+  let low = Math.min(...present);
+  let high = Math.max(...present);
+  if (anchor !== null && anchor !== undefined && Number.isFinite(anchor)) {
+    low = Math.min(low, anchor);
+    high = Math.max(high, anchor);
+  }
+  return { low, high };
+}
+
+/* A reading that never moved sits in the middle, rather than dividing by nothing. */
+function heightOf(value, scale) {
+  const reach = scale.high - scale.low;
+  const floor = CHART_HEIGHT - CHART_INSET;
+  if (reach <= 0) return CHART_HEIGHT / 2;
+  return floor - ((value - scale.low) / reach) * (floor - CHART_INSET);
+}
+
+function place(values, scale) {
+  const span = CHART_WIDTH - CHART_INSET * 2;
+  const step = values.length > 1 ? span / (values.length - 1) : 0;
+  return values.map((value, index) =>
+    value === null || !Number.isFinite(value) ? null : [CHART_INSET + index * step, heightOf(value, scale)]
+  );
+}
+
+/* Unbroken stretches, so a gap in the readings is a gap in the drawing. */
+function runs(points) {
+  const found = [];
+  let run = [];
+  for (const point of points) {
+    if (point) {
+      run.push(point);
+    } else if (run.length) {
+      found.push(run);
+      run = [];
+    }
+  }
+  if (run.length) found.push(run);
+  return found;
+}
+
+function snap(value) {
+  return Math.round(value * 100) / 100;
+}
+
+function linePath(run) {
+  return run.map((point, index) => (index ? 'L' : 'M') + snap(point[0]) + ' ' + snap(point[1])).join('');
+}
+
+function areaPath(run, floor) {
+  const first = run[0];
+  const last = run[run.length - 1];
+  return linePath(run) + 'L' + snap(last[0]) + ' ' + snap(floor) + 'L' + snap(first[0]) + ' ' + snap(floor) + 'Z';
+}
+
+function lineShape(points, floor) {
+  return runs(points).map((run) => [
+    run.length > 1 ? svg('path', { class: 'spark-area', d: areaPath(run, floor) }) : null,
+    svg('path', { class: 'spark-line', d: linePath(run) }),
+  ]);
+}
+
+/*
+  One bar per block, measured from zero rather than from the lowest reading.
+
+  A gap that runs backwards is drawn below the line and in the one colour this
+  palette keeps for something wrong, because that is what it is: a miner that
+  put an earlier time in its header than the block it builds on. The rules
+  allow it, so the chart has to be able to show it.
+*/
+function barShape(points, values, floor) {
+  const span = CHART_WIDTH - CHART_INSET * 2;
+  const width = points.length ? span / points.length : span;
+  const bar = Math.max(1, width - Math.min(2, width * 0.3));
+  return points.map((point, index) => {
+    if (!point) return null;
+    const top = Math.min(point[1], floor);
+    const tall = Math.max(1, Math.abs(floor - point[1]));
+    return svg('rect', {
+      class: values[index] < 0 ? 'spark-bar back' : 'spark-bar',
+      x: snap(CHART_INSET + index * width + (width - bar) / 2),
+      y: snap(top),
+      width: snap(bar),
+      height: snap(tall),
+    });
+  });
+}
+
+function gridLines(scale, floor, target, ruled) {
+  const lines = ruled
+    ? [svg('line', { class: 'spark-grid', x1: 0, x2: CHART_WIDTH, y1: CHART_HEIGHT / 2, y2: CHART_HEIGHT / 2 })]
+    : [];
+  if (target !== null && target > scale.low && target < scale.high) {
+    const y = snap(heightOf(target, scale));
+    lines.push(svg('line', { class: 'spark-target', x1: 0, x2: CHART_WIDTH, y1: y, y2: y }));
+  }
+  if (floor > 0 && floor < CHART_HEIGHT) {
+    lines.push(svg('line', { class: 'spark-floor', x1: 0, x2: CHART_WIDTH, y1: snap(floor), y2: snap(floor) }));
+  }
+  return lines;
+}
+
+/*
+  What each reading is, in one place.
+
+  `anchor` says which value the band must contain: zero for the bars, because
+  a bar not measured from zero is a drawing of a difference pretending to be a
+  drawing of a quantity, and nothing for the lines, which carry their own low
+  and high printed beside them.
+*/
+const READING = {
+  difficulty: {
+    pick: (series) => series.work,
+    shape: 'line',
+    anchor: null,
+    target: () => null,
+    latest: (series) => {
+      const block = series.blocks[series.blocks.length - 1];
+      return block ? count(BigInt(block.difficulty)) : '-';
+    },
+    format: (value) => count(Math.round(value)),
+  },
+  spacing: {
+    pick: (series) => series.spacing,
+    shape: 'bars',
+    anchor: 0,
+    target: (rules) => (rules && Number.isFinite(Number(rules.targetBlockTime)) ? Number(rules.targetBlockTime) : null),
+    latest: (series) => {
+      const last = series.spacing[series.spacing.length - 1];
+      return last === null ? '-' : duration(last);
+    },
+    format: (value) => duration(Math.round(value)),
+  },
+  rate: {
+    pick: (series) => series.rate,
+    shape: 'line',
+    anchor: null,
+    target: () => null,
+    latest: (series) => hashes(series.rate[series.rate.length - 1]),
+    format: hashes,
+  },
+};
+
+function readingNow() {
+  const kept = recall(STORE_READING);
+  return READINGS.includes(kept) ? kept : 'difficulty';
+}
+
+function chartFigure(reading, series, values, scale) {
+  const middle = median(values);
+  return el(
+    'div',
+    { class: 'chart-readout' },
+    el(
+      'div',
+      null,
+      el('div', { class: 'chart-label', text: t('chart.label.' + reading) }),
+      el('div', { class: 'chart-figure', text: READING[reading].latest(series) })
+    ),
+    el(
+      'div',
+      { class: 'chart-aside' },
+      el('div', {
+        class: 'chart-middle',
+        text: middle === null ? '' : t('chart.middle', { value: READING[reading].format(middle), n: count(values.filter((v) => v !== null).length) }),
+      }),
+      series.blocks.length ? sinceNode(series.times[series.times.length - 1]) : null
+    ),
+  );
+}
+
+function chartFrame(reading, series, values, scale, rules, fresh) {
+  const points = place(values, scale);
+  const anchored = READING[reading].anchor;
+  const floor = anchored === null ? CHART_HEIGHT : Math.min(CHART_HEIGHT, Math.max(0, heightOf(0, scale)));
+  const target = READING[reading].target(rules);
+  const drawn = READING[reading].shape === 'bars' ? barShape(points, values, floor) : lineShape(points, floor);
+  const last = points.filter(Boolean).pop();
+
+  const face = svg(
+    'svg',
+    {
+      class: 'spark',
+      viewBox: '0 0 ' + CHART_WIDTH + ' ' + CHART_HEIGHT,
+      preserveAspectRatio: 'none',
+      role: 'img',
+      'aria-label': t('chart.alt', {
+        reading: t('chart.reading.' + reading),
+        n: count(values.filter((value) => value !== null).length),
+        low: READING[reading].format(scale.low),
+        high: READING[reading].format(scale.high),
+      }),
+    },
+    gridLines(scale, floor, target, READING[reading].shape !== 'bars'),
+    drawn
+  );
+
+  return el(
+    'div',
+    { class: 'chart-frame' },
+    face,
+    last
+      ? el('span', {
+          class: fresh ? 'chart-dot arrived' : 'chart-dot',
+          variable: [
+            ['--x', ((last[0] / CHART_WIDTH) * 100).toFixed(3) + '%'],
+            ['--y', ((last[1] / CHART_HEIGHT) * 100).toFixed(3) + '%'],
+          ],
+        })
+      : null,
+    el('span', { class: 'chart-bound high', text: READING[reading].format(scale.high) }),
+    el('span', { class: 'chart-bound low', text: READING[reading].format(scale.low) }),
+    target === null ? null : el('span', { class: 'chart-mark', text: t('chart.target', { value: duration(target) }) })
+  );
+}
+
+function drawChart(fresh) {
+  if (!chart.body) return;
+  const rules = state.params;
+  const series = chartSeries(chart.blocks.slice(0, CHART_WINDOW));
+  const reading = chart.reading;
+  const values = READING[reading].pick(series);
+  const scale = band(values, READING[reading].anchor);
+
+  for (const [key, button] of chart.buttons) {
+    button.setAttribute('aria-pressed', key === reading ? 'true' : 'false');
+  }
+
+  if (chart.heading) {
+    chart.heading.textContent = t('chart.title', { n: count(Math.min(CHART_WINDOW, chart.blocks.length)) });
+  }
+
+  clear(chart.body);
+  chart.body.append(
+    chartFigure(reading, series, values, scale),
+    scale ? chartFrame(reading, series, values, scale, rules, fresh) : el('div', { class: 'empty', text: t('chart.none') }),
+    el('p', { class: 'small dim', text: t('chart.note.' + reading) })
+  );
+}
+
+function chooseReading(reading) {
+  if (!READINGS.includes(reading) || reading === chart.reading) return;
+  chart.reading = reading;
+  remember(STORE_READING, reading);
+  drawChart();
+}
+
+function chartPanel(blocks, rules) {
+  chart.reading = readingNow();
+  chart.blocks = blocks;
+  chart.at = blocks.length ? Number(blocks[0].height) : null;
+  state.params = rules || state.params;
+
+  chart.buttons = new Map();
+  const modes = el(
+    'div',
+    { class: 'chart-modes', role: 'group', 'aria-label': t('chart.modes') },
+    READINGS.map((reading) => {
+      const button = el('button', {
+        type: 'button',
+        class: 'mode',
+        'aria-pressed': reading === chart.reading ? 'true' : 'false',
+        text: t('chart.reading.' + reading),
+        onclick: () => chooseReading(reading),
+      });
+      chart.buttons.set(reading, button);
+      return button;
+    })
+  );
+
+  chart.body = el('div', { class: 'chart-body' });
+  chart.heading = el('h2');
+  chart.panel = el(
+    'section',
+    { class: 'panel chart-panel' },
+    el('div', { class: 'panel-head' }, chart.heading, modes),
+    chart.body
+  );
+  drawChart();
+  return chart.panel;
+}
+
+/*
+  The chain moved, so the drawing does.
+
+  Asked only when the tip is not the block the chart was built from, which is
+  once a block rather than once every ticker beat: the window is a hundred and
+  twenty eight blocks and re-reading it every five seconds to redraw the same
+  line would be work nobody asked for.
+*/
+async function refreshChart(height) {
+  if (!chart.panel || !chart.panel.isConnected) return;
+  if (height === null || height === undefined || height === chart.at) return;
+  // Taken before the read rather than after it, so a read that fails is not
+  // retried on every beat of the ticker until the next block happens to land.
+  chart.at = height;
+  let page;
+  try {
+    page = await api('blocks?limit=' + CHART_WINDOW);
+  } catch (error) {
+    return;
+  }
+  chart.blocks = page.blocks;
+  drawChart(true);
+}
+
+/*
+  The one number on the page that moves without being asked.
+
+  It is our clock against a time the miner wrote in its own header, so it
+  measures the gap between the two and not the age of anything. A miner is
+  allowed to be a little ahead of us, and then this counts up from zero rather
+  than down from a claim.
+*/
+function sinceSaid(written) {
+  if (!Number.isFinite(written) || written <= 0) return '';
+  return t('chart.since', { gap: duration(Math.max(0, Math.round(Date.now() / 1000) - written)) });
+}
+
+/* Written once when the node is made, so it is never blank for a second. */
+function sinceNode(written) {
+  return el('div', { class: 'chart-since', 'data-since': String(written), text: sinceSaid(written) });
+}
+
+function tickLive() {
+  for (const node of document.querySelectorAll('[data-since]')) {
+    node.textContent = sinceSaid(Number(node.getAttribute('data-since')));
+  }
+}
+
+/* The rules, read once: they cannot change while this page is open. */
+async function chainRules() {
+  if (state.params) return state.params;
+  try {
+    state.params = await api('params');
+  } catch (error) {
+    return null;
+  }
+  return state.params;
 }
 
 async function blocks(parameters) {
@@ -1506,6 +2018,8 @@ async function refreshTicker() {
     height: count(status.tip ? status.tip.height + 1 : 0),
     genesis: shorten(status.network.genesis || '-', 12, 8),
   });
+
+  await refreshChart(status.tip ? status.tip.height : null);
 }
 
 /* ---------- level and language ---------- */
@@ -1607,6 +2121,7 @@ async function start() {
   await render();
   await refreshTicker();
   state.timers.push(window.setInterval(refreshTicker, TICKER_PERIOD));
+  state.timers.push(window.setInterval(tickLive, 1000));
 }
 
 start();
