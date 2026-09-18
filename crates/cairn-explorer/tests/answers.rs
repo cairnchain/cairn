@@ -1422,3 +1422,147 @@ fn the_pages_that_quote_the_hot_set_quote_what_this_program_serves() {
     );
     explorer.node().shutdown();
 }
+
+/// A block the chain has abandoned is not served as a block of the chain.
+///
+/// `ChainStore::block` answers whether a body is held under an identifier, on
+/// whatever branch. `height_of` and `id_at` are the branch questions. The
+/// block route asked the first and published the answer as the second, so a
+/// block a reorganisation had left behind came back with a 200, its height,
+/// its transfers, a count of confirmations for a block nothing is built on,
+/// and a `next` naming a block whose parent is somebody else.
+///
+/// `/api/tx` and `/api/note` were both given the branch check, each under a
+/// comment explaining why. `/api/block` was not, and the check was already
+/// written one line below the line that returned early.
+///
+/// What it costs: a payment undone by the reorganisation is correctly reported
+/// by `/api/tx` as back in the pool and unmined, while at the same moment the
+/// block route writes it out in full as settled two blocks deep. The wrong
+/// answer lasts as long as the body stays in memory, which is the held window
+/// and not an instant.
+#[test]
+fn a_block_from_an_abandoned_branch_is_not_served_as_one_of_the_chain() {
+    let params = params();
+    let miner = wallet(1);
+    let rival = wallet(9);
+
+    let mut base = Forge::new(params);
+    let common = base.mine_many(&miner, 3);
+    let mut good = base.fork();
+    let good_blocks = good.mine_many(&miner, 1);
+    let mut bad = base.fork();
+    let bad_blocks = bad.mine_many(&rival, 3);
+
+    let explorer = explorer(params);
+    feed(&explorer, &common);
+    feed(&explorer, &good_blocks);
+    explorer.refresh();
+
+    let doomed = good_blocks[0].id();
+    let at = good_blocks[0].header.height;
+    let answer = ask(&explorer, &format!("block/{doomed}"));
+    assert_eq!(
+        answer.status, 200,
+        "while it is the chain's block at that height it is served, which is what makes \
+         the assertion below mean anything: {}",
+        body(&answer)
+    );
+
+    // The rival branch is longer, so the chain leaves the one above.
+    feed(&explorer, &bad_blocks);
+    explorer.refresh();
+
+    let standing = ask(&explorer, &format!("block/{at}"));
+    assert_eq!(standing.status, 200);
+    assert!(
+        !says(&standing, "id", &format!("\"{doomed}\"")),
+        "the chain did not move off the branch, so this test asks nothing: {}",
+        body(&standing)
+    );
+
+    let answer = ask(&explorer, &format!("block/{doomed}"));
+    assert_eq!(
+        answer.status,
+        404,
+        "a block this chain has left was written out as a block of it, with a height, a \
+         confirmation count and everything it carried: {}",
+        body(&answer)
+    );
+
+    // And whoever typed that identifier is not handed a different block under
+    // it, which is the one answer worse than not finding it.
+    let found = ask(&explorer, &format!("search?q={doomed}"));
+    assert!(
+        !body(&found).contains(&format!("/block/{at}")),
+        "the search sent the reader to the block that now sits at that height, under the \
+         identifier of the one that does not: {}",
+        body(&found)
+    );
+}
+
+/// The second page of notes an address holds is the notes the first left.
+///
+/// The comment above `ADDRESS_PAGE` says both lists on this answer are paged.
+/// Only the movements were. `from` never reached the note list, so an address
+/// holding more than one page answered `moreNotes: true` and then handed back
+/// the same page to every request that asked, whatever it asked for, while its
+/// oldest unspent notes could not be named at all. The one cursor on the
+/// answer pointed into the other list.
+#[test]
+fn the_notes_an_address_holds_are_paged_and_not_repeated() {
+    let params = params();
+    let miner = wallet(1);
+
+    let mut forge = Forge::new(params);
+    // One reward note per block, and more of them than a page carries.
+    let blocks = forge.mine_many(&miner, 130);
+
+    let explorer = explorer(params);
+    feed(&explorer, &blocks);
+    explorer.refresh();
+
+    let owner = miner.public_key();
+    let first = ask(&explorer, &format!("address/{owner}"));
+    assert_eq!(first.status, 200, "{}", body(&first));
+    assert!(
+        says(&first, "moreNotes", "true"),
+        "this test asks nothing unless the address holds more than one page: {}",
+        body(&first)
+    );
+
+    let second = ask(&explorer, &format!("address/{owner}?notes=100"));
+    assert_eq!(second.status, 200, "{}", body(&second));
+
+    let mine = |answer: &Response| -> Vec<String> {
+        let text = body(answer);
+        let Some(start) = text.find("\"unspent\":[") else {
+            return Vec::new();
+        };
+        let rest = text.get(start..).unwrap_or_default();
+        let end = rest.find(']').unwrap_or(rest.len());
+        rest.get(..end)
+            .unwrap_or_default()
+            .split("\"note\":\"")
+            .skip(1)
+            .filter_map(|piece| piece.split('"').next().map(str::to_owned))
+            .collect()
+    };
+
+    let early = mine(&first);
+    let later = mine(&second);
+    assert_eq!(early.len(), 100, "a page: {}", body(&first));
+    assert!(!later.is_empty(), "the second page was empty: {}", body(&second));
+    assert!(
+        later.iter().all(|note| !early.contains(note)),
+        "the second page handed back notes the first page had already named, which is what \
+         a cursor that names a place in a different list does"
+    );
+
+    let together: std::collections::BTreeSet<&String> = early.iter().chain(later.iter()).collect();
+    assert_eq!(
+        together.len(),
+        early.len() + later.len(),
+        "and it named none of them twice"
+    );
+}

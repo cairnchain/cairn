@@ -541,11 +541,30 @@ impl Context<'_> {
     }
 
     /// The same, found by identifier.
+    ///
+    /// The branch is asked first, and it used to be asked second. Holding a
+    /// body under an identifier and carrying that identifier on this chain are
+    /// two questions: the store keeps every block it has been handed, on
+    /// whatever branch, for as long as the window holds it, so a reorganisation
+    /// leaves the loser sitting there answerable. Asked for one of those, this
+    /// answered with the block: its height, its transfers, and a count of
+    /// confirmations for a block nothing is built on. A payment undone by that
+    /// reorganisation, which `/api/tx` correctly reports as back in the pool,
+    /// was written out on the same breath as settled two blocks deep.
+    ///
+    /// `/api/search` had it worse. Handed an abandoned identifier it sent the
+    /// reader to the height that block claimed, where a different block now
+    /// sits: the one thing worse than not finding what somebody typed is
+    /// showing them something else under it.
+    ///
+    /// `height_of` was already written one line below, for the case where the
+    /// body has been let go of. It was the branch question the whole time.
     fn block(&self, id: &Hash32) -> Option<Block> {
+        let height = self.chain.height_of(id)?;
         if let Some(block) = self.chain.block(id) {
             return Some(block.clone());
         }
-        self.block_at(self.chain.height_of(id)?)
+        self.block_at(height)
     }
 
     fn height(&self) -> Option<u64> {
@@ -1070,8 +1089,24 @@ fn limit_of(request: &Request) -> usize {
 
 /// Where a page starts, counted from the first entry.
 fn offset_of(request: &Request) -> usize {
+    at_parameter(request, "from")
+}
+
+/// Where the list of notes an address holds starts, counted in unspent notes.
+///
+/// A cursor of its own rather than the one `from` carries. The two lists on an
+/// address answer are different lengths and reach different distances back, so
+/// one number cannot name a place in both, and for a while one number was all
+/// there was: `from` paged the movements, the notes ignored it, and asking for
+/// the second page of notes handed back the first page again, byte for byte,
+/// under a `moreNotes` that said there were more.
+fn note_offset_of(request: &Request) -> usize {
+    at_parameter(request, "notes")
+}
+
+fn at_parameter(request: &Request, name: &str) -> usize {
     request
-        .parameter("from")
+        .parameter(name)
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0)
 }
@@ -1609,7 +1644,11 @@ struct Holdings {
 /// What that costs is exactness past the ceiling, where the count becomes a
 /// floor. The answer carries which of the two it is rather than leaving a reader
 /// to assume the wrong one.
-fn holdings(notes: &[NoteId], record: impl Fn(&NoteId) -> Option<NoteRecord>) -> Holdings {
+fn holdings(
+    notes: &[NoteId],
+    from: usize,
+    record: impl Fn(&NoteId) -> Option<NoteRecord>,
+) -> Holdings {
     let mut listed = Vec::new();
     let mut unspent = 0usize;
     for id in notes.iter().rev().take(ADDRESS_SCAN) {
@@ -1619,8 +1658,12 @@ fn holdings(notes: &[NoteId], record: impl Fn(&NoteId) -> Option<NoteRecord>) ->
         if !note.is_unspent() {
             continue;
         }
+        // Where this note sits in the list of unspent ones, which is the list
+        // the caller is paging through. Counted before the page is filled, so
+        // a page past the first skips rather than starting over.
+        let place = unspent;
         unspent = unspent.saturating_add(1);
-        if listed.len() < ADDRESS_PAGE {
+        if place >= from && listed.len() < ADDRESS_PAGE {
             listed.push((*id, note));
         }
     }
@@ -1648,6 +1691,7 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
         json.field_usize("notes", 0);
         json.field_usize("unspentNotes", 0);
         json.field_bool("moreNotes", false);
+        json.field_null("notesNext");
         // Never an unqualified yes for an address nothing is known about. An
         // index that does not reach the first block has never seen most of
         // this chain, and answering "nought, and that is exact" about every
@@ -1672,7 +1716,8 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
     json.field_str("spent", &record.spent.as_pebbles().to_string());
     json.field_usize("notes", record.notes.len());
 
-    let held = holdings(&record.notes, |id| context.index.note(id));
+    let notes_from = note_offset_of(request);
+    let held = holdings(&record.notes, notes_from, |id| context.index.note(id));
     json.key("unspent");
     json.begin_array();
     for (id, note) in &held.listed {
@@ -1685,7 +1730,15 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
     }
     json.end_array();
     json.field_usize("unspentNotes", held.unspent);
-    json.field_bool("moreNotes", held.unspent > held.listed.len());
+    let shown_through = notes_from.saturating_add(held.listed.len());
+    json.field_bool("moreNotes", held.unspent > shown_through);
+    // And where they are. `moreNotes` said there were more for as long as this
+    // route existed, and there was nowhere to ask: the only cursor on the
+    // answer named a place in the movements.
+    match next_after(notes_from, held.listed.len(), held.unspent) {
+        Some(next) => json.field_usize("notesNext", next),
+        None => json.field_null("notesNext"),
+    }
     // Whether that count is the whole of it, or the floor the walk stopped at.
     // A reader is owed the difference: a figure that quietly means "at least"
     // is the kind of wrong nobody notices until it matters.
@@ -2031,7 +2084,7 @@ mod tests {
         let notes: Vec<NoteId> = (0..400usize).map(note_id).collect();
         // Every other note spent, so a page is filled from a list twice as
         // long as itself.
-        let held = holdings(&notes, |id| {
+        let held = holdings(&notes, 0, |id| {
             Some(if id.index % 2 == 0 { spent } else { unspent })
         });
 
@@ -2052,7 +2105,7 @@ mod tests {
         let (unspent, _) = records();
 
         let notes: Vec<NoteId> = (0..=ADDRESS_SCAN).map(note_id).collect();
-        let held = holdings(&notes, |_| Some(unspent));
+        let held = holdings(&notes, 0, |_| Some(unspent));
         assert_eq!(held.listed.len(), ADDRESS_PAGE);
         assert_eq!(
             held.unspent, ADDRESS_SCAN,
@@ -2061,8 +2114,52 @@ mod tests {
         assert!(!held.whole, "and does not call where it stopped a total");
 
         let notes: Vec<NoteId> = (0..ADDRESS_SCAN).map(note_id).collect();
-        let held = holdings(&notes, |_| Some(unspent));
+        let held = holdings(&notes, 0, |_| Some(unspent));
         assert_eq!(held.unspent, ADDRESS_SCAN);
         assert!(held.whole, "one note under the ceiling and it is exact");
+    }
+
+    /// A second page of notes is the notes the first page did not carry.
+    ///
+    /// The doc above `ADDRESS_PAGE` says both lists on this answer are paged.
+    /// Only the movements were: `from` never reached the notes, so an address
+    /// holding a hundred and fifty unspent notes answered `moreNotes: true`
+    /// and then handed back the same hundred notes to every request that
+    /// asked, whatever it asked for. The fifty oldest could not be named at
+    /// all.
+    #[test]
+    fn a_second_page_of_notes_is_not_the_first_one_again() {
+        let (unspent, _) = records();
+        let notes: Vec<NoteId> = (0..150usize).map(note_id).collect();
+
+        let first = holdings(&notes, 0, |_| Some(unspent));
+        let second = holdings(&notes, ADDRESS_PAGE, |_| Some(unspent));
+
+        assert_eq!(first.listed.len(), ADDRESS_PAGE);
+        assert_eq!(second.listed.len(), 50, "what the first page left");
+        assert_eq!(
+            first.unspent, second.unspent,
+            "the count is of the address and not of the page"
+        );
+
+        let shown: Vec<u32> = first
+            .listed
+            .iter()
+            .chain(second.listed.iter())
+            .map(|(id, _)| id.index)
+            .collect();
+        let mut once = shown.clone();
+        once.sort_unstable();
+        once.dedup();
+        assert_eq!(
+            once.len(),
+            150,
+            "the two pages together name every note the address holds, each once"
+        );
+        assert_eq!(
+            next_after(ADDRESS_PAGE, second.listed.len(), second.unspent),
+            None,
+            "and the second page is the last"
+        );
     }
 }
