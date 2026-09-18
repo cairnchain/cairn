@@ -1304,6 +1304,21 @@ impl ChainStore {
     /// limit checked exactly elsewhere.
     const BLOCK_OVERHEAD_BYTES: usize = 4096;
 
+    /// What a block has left for transfers once the rest of it is allowed for.
+    ///
+    /// Public, and named, because it had been a subtraction written out in one
+    /// place and nowhere else, and the wallet did the wrong one: it refused a
+    /// spend only once it passed `max_block_bytes`, while a block never
+    /// carries more than this. Every gather between the two was accepted by
+    /// the wallet, had its notes committed, was told a block would take a few
+    /// minutes, and was then passed over by every miner that read the pool.
+    /// The gap is four kilobytes and one more note adds about a hundred bytes,
+    /// so the first gather that crosses what a block carries is always inside
+    /// it: the refusal could not fire on the spend it exists for.
+    pub const fn room_for_transfers(max_block_bytes: usize) -> usize {
+        max_block_bytes.saturating_sub(Self::BLOCK_OVERHEAD_BYTES)
+    }
+
     /// Transfers a miner can put in the next block, and the fees they carry.
     ///
     /// Walked from the best rate down, and within the same rate in identifier
@@ -1333,10 +1348,7 @@ impl ChainStore {
             .map(|held| &held.transfer);
 
         // What is left for transfers once the rest of the block is allowed for.
-        let mut room = self
-            .params
-            .max_block_bytes
-            .saturating_sub(Self::BLOCK_OVERHEAD_BYTES);
+        let mut room = Self::room_for_transfers(self.params.max_block_bytes);
 
         // How many notes the block may still add to the hot set before it
         // would push out more than the rules let one block push. Room the tier

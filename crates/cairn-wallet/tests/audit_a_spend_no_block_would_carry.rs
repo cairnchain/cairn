@@ -15,6 +15,22 @@
 //! rules takes a wallet holding a hundred and twenty eight kilobytes of notes.
 //! `with_max_block_bytes` brings it within reach, the way `with_burial` and
 //! `with_coinbase_maturity` bring their own rules within reach.
+//!
+//! Then it was held by the wrong test. It asked whether the refusal named the
+//! block's byte limit, which was the constant the guard was written against,
+//! so the assertion and the code it checked were the same sentence twice. What
+//! it never asked was the question the guard exists for: whether a miner would
+//! carry the largest spend the wallet lets through. It would not. A block sets
+//! aside four kilobytes for its header and its coinbase, so what it carries in
+//! transfers is that much less than how big it is, and every gather between
+//! the two was accepted here, had its notes committed, was answered with "a
+//! block will take a few minutes", and was then passed over by every miner
+//! that read the pool. One more note adds about a hundred bytes and the gap is
+//! four thousand, so the first gather to cross what a block carries is always
+//! inside a whole block: the refusal could not fire on the spend it was
+//! written for.
+//!
+//! The question is asked of the pool now, by the same call a miner makes.
 
 #![allow(
     clippy::unwrap_used,
@@ -26,6 +42,7 @@
 
 use std::path::PathBuf;
 
+use cairn_chain::ChainStore;
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::Block;
 use cairn_ledger::note::Note;
@@ -38,9 +55,11 @@ use cairn_wallet::{Wallet, WalletError};
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
 
-/// Small enough that a spend gathering a few dozen ordinary notes passes it,
-/// and comfortably larger than the blocks this test mines.
-const BLOCK_BYTES: usize = 4096;
+/// Small enough that a spend gathering a few dozen ordinary notes passes what
+/// a block of this size carries, and comfortably larger than the blocks this
+/// test mines. It has to clear the room a block sets aside for everything that
+/// is not a transfer, or there would be nothing a block could carry at all.
+const BLOCK_BYTES: usize = 12_288;
 
 /// Blocks paying this key, several notes to a block.
 const BLOCKS: usize = 6;
@@ -144,7 +163,16 @@ fn a_spend_that_no_block_could_carry_is_refused_by_the_wallet() {
                 bytes > limit,
                 "refused for being too large at {bytes} bytes against a limit of {limit}"
             );
-            assert_eq!(limit, BLOCK_BYTES, "the limit named is the block's own");
+            assert_eq!(
+                limit,
+                ChainStore::room_for_transfers(BLOCK_BYTES),
+                "the limit named is what a block carries"
+            );
+            assert!(
+                limit < BLOCK_BYTES,
+                "this test proves nothing unless the two limits differ: a block of \
+                 {BLOCK_BYTES} bytes carries {limit} of transfers"
+            );
             assert!(
                 notes > 1,
                 "a refusal that names one note does not tell anybody why"
@@ -170,4 +198,83 @@ fn a_spend_that_no_block_could_carry_is_refused_by_the_wallet() {
     }
 
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// How many amounts the sweep below asks for, across everything the key holds.
+const STEPS: usize = 10;
+
+/// A fresh wallet holding an already mined chain.
+fn a_wallet_holding(chain: &[Block], mine: &SecretKey, name: &str) -> (Wallet, PathBuf) {
+    let directory = scratch(name);
+    std::fs::create_dir_all(&directory).unwrap();
+    let key_file = directory.join("key");
+    cairn_wallet::keyfile::write(&key_file, mine).unwrap();
+    let (wallet, _) = Wallet::open(&key_file, params(), &directory.join("data")).unwrap();
+    for block in chain {
+        wallet.node().submit_block(block.clone()).unwrap();
+    }
+    while wallet.follow() > 0 {}
+    (wallet, directory)
+}
+
+/// Every spend this wallet accepts is one a miner would carry.
+///
+/// Asked of the pool by the same call a miner makes, rather than of a
+/// constant. The defect was a band and not a point: spends under what a block
+/// carries were accepted and carried, spends over a whole block were refused,
+/// and everything between the two was accepted, had its notes committed, and
+/// was never chosen by anybody. One reading taken anywhere outside that band
+/// says nothing at all about it, which is why this sweeps.
+#[test]
+fn every_spend_the_wallet_accepts_is_one_a_block_would_carry() {
+    let rules = params();
+    let mine = SecretKey::from_bytes(&[3; 32]);
+    let payee = SecretKey::from_bytes(&[9; 32]);
+    let (chain, paid) = a_chain(&mine);
+
+    let fee = Amount::from_pebbles(100_000).unwrap();
+    let most = paid.checked_sub(fee).unwrap().as_pebbles();
+
+    let mut accepted = 0usize;
+    let mut refused = 0usize;
+    let mut widest = 0usize;
+
+    for step in 1..=STEPS {
+        let asking = Amount::from_pebbles(most / STEPS as u64 * step as u64).unwrap();
+        let (wallet, directory) = a_wallet_holding(&chain, &mine, &format!("carry-{step}"));
+
+        let outcome = wallet.send(payee.public_key(), asking, fee);
+        let chosen = wallet
+            .node()
+            .with_chain(|held| held.selection(rules.max_transfers_per_block).0);
+        let _ = std::fs::remove_dir_all(&directory);
+
+        match outcome {
+            Ok(sent) => {
+                accepted = accepted.saturating_add(1);
+                widest = widest.max(sent.notes);
+                assert!(
+                    chosen.iter().any(|transfer| transfer.id() == sent.id),
+                    "the wallet accepted a spend gathering {} notes, committed them, and told \
+                     whoever sent it that a block would take a few minutes. No miner reading \
+                     this pool chooses it: a block of {BLOCK_BYTES} bytes carries {} of \
+                     transfers.",
+                    sent.notes,
+                    ChainStore::room_for_transfers(BLOCK_BYTES)
+                );
+            }
+            Err(WalletError::TooBulky { .. }) => refused = refused.saturating_add(1),
+            Err(other) => panic!("refused for the wrong reason: {other}"),
+        }
+    }
+
+    assert!(
+        accepted > 0,
+        "the sweep never got a spend past the wallet, so it held nothing to a miner"
+    );
+    assert!(
+        refused > 0,
+        "the sweep never reached a spend too large to carry, so the guard under test was \
+         never asked anything: the largest gather was {widest} notes"
+    );
 }

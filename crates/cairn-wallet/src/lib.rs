@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use crate::history::{Discarded, History, Movement};
 use cairn_accumulator::ForestProof;
-use cairn_chain::Outdated;
+use cairn_chain::{ChainStore, Outdated};
 use cairn_crypto::{random_bytes, PublicKey, SecretKey};
 use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::transaction::{Input, Transfer};
@@ -1195,7 +1195,12 @@ impl Wallet {
             if height.is_none() {
                 continue;
             }
-            if self.node.peer_count() > 0 && still_since.elapsed() > SETTLED_FOR {
+            // Peers that have introduced themselves, not sockets. A stranger
+            // that connects to this wallet's listener and says nothing is not
+            // somebody who could have sent the blocks it is waiting for, and
+            // counting it cut every `--wait` short: the wallet then answered
+            // `balance` and built `send` from whatever chain was on disk.
+            if self.node.peers_introduced() > 0 && still_since.elapsed() > SETTLED_FOR {
                 return;
             }
         }
@@ -1480,7 +1485,7 @@ impl Wallet {
                 one_question(&wanted).iter().map(|(at, _)| *at).collect();
             let same_question = asking_about.is_subset(&last.unresolved);
             let better_now = self.node.archiving_peers() > last.report.archivists
-                || (last.report.asked == 0 && self.node.peer_count() > 0);
+                || (last.report.asked == 0 && self.node.peers_introduced() > 0);
             if paused && same_question && !better_now {
                 return last.report;
             }
@@ -1935,11 +1940,22 @@ impl Wallet {
         // rule nobody outside the protocol has heard of. It happens when a
         // wallet holds its money in many small fallen notes, each of which
         // travels with its own proof.
-        if draft.bytes > self.params.max_block_bytes {
+        //
+        // Measured against what a block carries rather than against how big a
+        // block is. Those differ by the room a block sets aside for its header
+        // and its coinbase, and asking the second question let every gather
+        // between the two through: the pool took it, the notes were committed,
+        // the sender was told to wait a few minutes, and no miner ever chose
+        // it. One note adds about a hundred bytes and the two limits are four
+        // thousand apart, so the first gather to cross what a block carries is
+        // always inside a whole block: this refusal could not fire on the very
+        // spend it was written for.
+        let carried = ChainStore::room_for_transfers(self.params.max_block_bytes);
+        if draft.bytes > carried {
             return Err(WalletError::TooBulky {
                 notes: draft.spending.len(),
                 bytes: draft.bytes,
-                limit: self.params.max_block_bytes,
+                limit: carried,
             });
         }
 

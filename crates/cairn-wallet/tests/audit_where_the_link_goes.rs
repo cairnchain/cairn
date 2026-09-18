@@ -140,3 +140,55 @@ fn a_link_that_cannot_be_written_is_said_rather_than_swallowed() {
         "the refusal carries the secret, which puts it back in the stream"
     );
 }
+
+/// A link file already there and already widened does not keep the mode it was
+/// widened to.
+///
+/// The mode handed to `open` applies to a file being created and not to one
+/// that is already there, so a file left from an earlier run took whatever it
+/// had been widened to since, and the token went back into it at that mode.
+/// The test above cannot see it: it clears the directory first, so the file is
+/// always created new and the only mode it can ever read back is the one set
+/// on creation.
+///
+/// Not an exotic state. Nothing clears `running`, so `let_the_link_go` never
+/// runs on a wallet that is stopped the way wallets are stopped, and the file
+/// survives every real run. A restore, a copy off a stick, or a `chmod -R`
+/// over the data directory is what widens it.
+///
+/// The account file learned this and had the reasoning written down beside it.
+/// The link file, which is the one holding something that spends the wallet,
+/// did not.
+#[cfg(unix)]
+#[test]
+fn a_link_file_left_widened_is_narrowed_again_before_the_token_goes_back_in() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let data = scratch("widened");
+    let path = data.join("open-this-page");
+
+    // An earlier run's file, since widened by something outside the wallet.
+    std::fs::write(&path, "http://127.0.0.1:1/?k=older").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o644,
+        "this test proves nothing unless the file starts readable by everybody"
+    );
+
+    opened().hand_over(&data, false).unwrap();
+
+    let held = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        held.contains(SECRET),
+        "the file holds the token that spends this wallet: {held}"
+    );
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600,
+        "a spending token was written into a file anybody with an account on this machine \
+         can read"
+    );
+
+    let _ = std::fs::remove_dir_all(&data);
+}
