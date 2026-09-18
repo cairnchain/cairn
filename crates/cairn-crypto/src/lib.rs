@@ -2,9 +2,22 @@
 //!
 //! Cairn signs with Ed25519, with two restrictions over the bare scheme.
 //!
-//! Small order public keys are refused at construction, so a note can never be
-//! locked to a key that has no usable secret. The reference implementation only
-//! rejects them at verification time, which is late: by then the note exists.
+//! Public keys outside the prime order subgroup are refused at construction, so
+//! a note can never be locked to a key that has no usable secret. The reference
+//! implementation only rejects the small order ones, and only at verification
+//! time, which is late: by then the note exists.
+//!
+//! That sentence used to say "small order public keys are refused", and drew
+//! the same conclusion from it. Refusing small order keys is true and the
+//! conclusion does not follow. Ed25519's group has a cofactor of eight, so a
+//! point can be `A + T` for a real key `A` and a non-identity point `T` of
+//! order dividing eight: canonically encoded, decodes cleanly, not of small
+//! order, through every check there was. Nothing here can ever sign under one,
+//! because clamping clears the low three bits of the scalar and a public key is
+//! therefore always eight times something, which lands in the prime order
+//! subgroup. Seven of every eight byte strings this parser accepted were
+//! addresses nobody held, and a note paid to one was invisible to the wallet it
+//! was meant for and unspendable by every program here.
 //!
 //! Public keys must also be canonically encoded. The reference implementation
 //! keeps the bytes it was given rather than re encoding the point, so two
@@ -33,6 +46,8 @@ pub enum CryptoError {
     MalformedPublicKey,
     #[error("public key has small order and no usable secret")]
     WeakPublicKey,
+    #[error("public key is outside the prime order subgroup and has no usable secret")]
+    UnusablePublicKey,
     #[error("public key is not canonically encoded")]
     NonCanonicalPublicKey,
     #[error("signature does not verify against this key and message")]
@@ -167,6 +182,16 @@ impl PublicKey {
         let key = VerifyingKey::from_bytes(bytes).map_err(|_| CryptoError::MalformedPublicKey)?;
         if key.is_weak() {
             return Err(CryptoError::WeakPublicKey);
+        }
+        // And the rest of the keys nobody holds. `is_weak` is exactly
+        // `is_small_order`, so it catches the eight torsion points themselves
+        // and nothing else: a real key with one of them added is not small
+        // order, and no signer can reach it. Kept as its own refusal rather
+        // than folded into the one above, because the two are different
+        // sentences and whoever reads the error is looking for a different
+        // thing.
+        if !key.to_edwards().is_torsion_free() {
+            return Err(CryptoError::UnusablePublicKey);
         }
         Ok(Self(*bytes))
     }

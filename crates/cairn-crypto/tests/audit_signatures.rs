@@ -203,9 +203,19 @@ fn a_public_key_has_exactly_one_encoding() {
             }
         }
     }
-    // Roughly half of random strings decompress to a point; a run that
-    // accepted nothing would mean the fuzz never exercised the accepting path.
-    assert!(accepted > 10_000, "only {accepted} accepted");
+    // A coverage floor and not a measurement. Roughly half of random strings
+    // decompress to a point and roughly one in eight of those is free of
+    // torsion, so a run of forty thousand accepts a couple of thousand. The
+    // floor sits far under that on purpose: what it is for is a run that
+    // accepted nothing, which would mean the fuzz never exercised the
+    // accepting path at all.
+    //
+    // It read ten thousand, which was half of forty thousand, which was the
+    // rate of a parser that took every point on the curve. So this line was an
+    // assertion that the subgroup check was absent: correcting the parser made
+    // it fail, and a test that fails when the code is fixed is a test holding
+    // the defect in place.
+    assert!(accepted > 500, "only {accepted} accepted");
 }
 
 #[test]

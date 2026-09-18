@@ -41,6 +41,9 @@ cairn-store = { path = "crates/cairn-store" }
 cairn-primitives = { path = "crates/cairn-primitives" }
 blake3 = { version = "1", default-features = false, features = ["std"] }
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc", "fast", "zeroize"] }
+# Only for the test that builds a key with a torsion component: the adversarial
+# input has to be derived rather than pinned, and deriving it is curve arithmetic.
+curve25519-dalek = { version = "5", default-features = false }
 getrandom = "0.3"
 thiserror = "2"
 zeroize = { version = "1", features = ["zeroize_derive"] }

@@ -660,13 +660,35 @@ mod tests {
         assert!(!constant_time_eq(b"abX", b"abc"), "the last byte");
     }
 
+    /// An address, written out of a key rather than typed.
+    ///
+    /// The accepting half of this used to be `"11".repeat(32)`, a string of
+    /// bytes that happened to decompress to a point on the curve. It is not an
+    /// address and never was: it carries a torsion component, so no secret
+    /// reaches it and nothing could ever be spent from it. The parser took it
+    /// until the subgroup check went in, and then this test was asserting that
+    /// the parser accepted a thing nobody holds.
+    fn an_address() -> String {
+        cairn_crypto::SecretKey::from_bytes(&[5; 32])
+            .public_key()
+            .to_string()
+    }
+
     #[test]
     fn an_address_is_read_only_when_it_is_one() {
-        assert!(parse_key(&"11".repeat(32)).is_ok());
-        assert!(parse_key(&format!("  {}  ", "11".repeat(32))).is_ok());
+        let real = an_address();
+        assert!(parse_key(&real).is_ok());
+        assert!(parse_key(&format!("  {real}  ")).is_ok());
         assert!(parse_key("").is_err());
-        assert!(parse_key(&"11".repeat(31)).is_err(), "too short");
+        assert!(parse_key(&real[..62]).is_err(), "too short");
         assert!(parse_key(&"zz".repeat(32)).is_err(), "not hexadecimal");
         assert!(parse_key(&"00".repeat(32)).is_err(), "not a usable key");
+        // And the whole reason the line above says "usable" rather than
+        // "decodable": a string can be a point on the curve and still be an
+        // address nobody holds.
+        assert!(
+            parse_key(&"11".repeat(32)).is_err(),
+            "a point outside the prime order subgroup is not an address"
+        );
     }
 }

@@ -67,6 +67,7 @@ name = "cairn-crypto"
 version = "0.7.1"
 dependencies = [
  "cairn-primitives",
+ "curve25519-dalek",
  "ed25519-dalek",
  "getrandom",
  "hex",
