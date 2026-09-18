@@ -1463,7 +1463,8 @@ fn a_block_from_an_abandoned_branch_is_not_served_as_one_of_the_chain() {
     let at = good_blocks[0].header.height;
     let answer = ask(&explorer, &format!("block/{doomed}"));
     assert_eq!(
-        answer.status, 200,
+        answer.status,
+        200,
         "while it is the chain's block at that height it is served, which is what makes \
          the assertion below mean anything: {}",
         body(&answer)
@@ -1552,7 +1553,11 @@ fn the_notes_an_address_holds_are_paged_and_not_repeated() {
     let early = mine(&first);
     let later = mine(&second);
     assert_eq!(early.len(), 100, "a page: {}", body(&first));
-    assert!(!later.is_empty(), "the second page was empty: {}", body(&second));
+    assert!(
+        !later.is_empty(),
+        "the second page was empty: {}",
+        body(&second)
+    );
     assert!(
         later.iter().all(|note| !early.contains(note)),
         "the second page handed back notes the first page had already named, which is what \
