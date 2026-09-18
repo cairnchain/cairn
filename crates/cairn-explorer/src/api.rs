@@ -451,6 +451,16 @@ struct Health {
     filling: Option<Filling>,
     /// The height its disk actually holds, against the tip it is serving.
     written_through: Option<u64>,
+    /// Places in its header history this node found torn and built again.
+    ///
+    /// Zero on a disk that kept what it was given. Anything else is a disk
+    /// that dropped a write, and `Node::mended_nodes` has carried that number
+    /// since the mending was written, under a doc comment saying a disk that
+    /// lost one node has not finished. Nothing anywhere read it: not this
+    /// page, which reports every other way a disk can be failing, and not the
+    /// node's own status line. So the one machine that most needed a new disk
+    /// was shown a clean bill of health by both of the things that look.
+    mended: u64,
 }
 
 impl Health {
@@ -468,6 +478,7 @@ impl Health {
             unread: node.unread(),
             unjudged: node.unjudged(),
             unweighable: node.unweighable(),
+            mended: node.mended_nodes(),
             filling: node.filling(),
             written_through: node.written_through(),
         }
@@ -892,6 +903,29 @@ fn unweighable_field(json: &mut Writer, unweighable: Option<&Unweighable>) {
 /// and never asked, so it went on serving a tip that had stopped moving with
 /// nothing anywhere to say so. The wallet has a sentence for every one of
 /// them; this is where the site gets the same.
+/// The headers from before this node arrived that it is still collecting.
+fn filling_field(json: &mut Writer, filling: Option<&Filling>) {
+    let Some(filling) = filling else {
+        json.field_null("filling");
+        return;
+    };
+    json.key("filling");
+    json.begin_object();
+    json.field_u64("from", filling.from);
+    json.field_u64("through", filling.through);
+    json.field_u64("proved", filling.proved);
+    json.field_u64("reaches", filling.reaches);
+    json.field_u64("bytes", filling.bytes);
+    // Beside the bytes, because the pair is the news and half of it is not. A
+    // node in this state cannot write the summary that lets it drop old
+    // blocks, so its disk grows with the chain, which is the one thing this
+    // design exists to prevent. The page served the bytes on their own and
+    // there was nothing to read them against.
+    json.field_u64("keep", filling.keep);
+    json.field_bool("overTheKeep", filling.over_the_keep());
+    json.end_object();
+}
+
 fn node_object(json: &mut Writer, context: &Context<'_>) {
     let node = context.health;
     json.begin_object();
@@ -988,31 +1022,15 @@ fn node_object(json: &mut Writer, context: &Context<'_>) {
 
     unweighable_field(json, node.unweighable.as_ref());
 
-    match &node.filling {
-        Some(filling) => {
-            json.key("filling");
-            json.begin_object();
-            json.field_u64("from", filling.from);
-            json.field_u64("through", filling.through);
-            json.field_u64("proved", filling.proved);
-            json.field_u64("reaches", filling.reaches);
-            json.field_u64("bytes", filling.bytes);
-            // Beside the bytes, because the pair is the news and half of it is
-            // not. A node in this state cannot write the summary that lets it
-            // drop old blocks, so its disk grows with the chain, which is the
-            // one thing this design exists to prevent. The page served the
-            // bytes on their own and there was nothing to read them against.
-            json.field_u64("keep", filling.keep);
-            json.field_bool("overTheKeep", filling.over_the_keep());
-            json.end_object();
-        }
-        None => json.field_null("filling"),
-    }
+    filling_field(json, node.filling.as_ref());
 
     match node.written_through {
         Some(height) => json.field_u64("writtenThrough", height),
         None => json.field_null("writtenThrough"),
     }
+    // Beside the other ways a disk can be failing, because it is one of them
+    // and it was the only one nothing anywhere reported.
+    json.field_u64("mended", node.mended);
     json.end_object();
 }
 

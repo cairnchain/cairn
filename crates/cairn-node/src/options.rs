@@ -44,7 +44,7 @@ const KNOWN: [&str; 11] = [
 /// cannot be one: it says where the file this line is in was looked for.
 /// `help` and `check` are questions put to the program, answered once and not
 /// carried from one run to the next.
-const ONLY_ON_THE_COMMAND_LINE: [(&str, &str); 3] = [
+const ONLY_ON_THE_COMMAND_LINE: [(&str, &str); 4] = [
     (
         "data",
         "names the directory this file was found in, so setting it here cannot \
@@ -59,6 +59,14 @@ const ONLY_ON_THE_COMMAND_LINE: [(&str, &str); 3] = [
         "check",
         "asks what this node would do without starting one, which is a question \
          about a single run. Pass --check on the command line.",
+    ),
+    (
+        "run-for",
+        "stops the node after a while, which is a question about a single run \
+         and not a setting a machine should carry across reboots. In a file it \
+         is a node that goes down on its own and comes back under whatever \
+         restarts it, for ever, and exits nought on the way out so nothing \
+         reports a fault. Pass --run-for on the command line.",
     ),
 ];
 const DEFAULT_DATA: &str = "cairn-data";
@@ -106,11 +114,15 @@ cairnd, a Cairn node
                          asked for. `--check` prints what that floor comes to
                          on the chosen network
   --status <seconds>     how often to print a status line (default: 10)
-  --run-for <seconds>    stop after this long, for tests and demonstrations
+  --run-for <seconds>    stop after this long, for tests and demonstrations.
+                         The command line only: a node that stops itself on
+                         every start is not a setting a machine should carry
+                         across reboots
   --help                 print this and stop
 
-The same names work in <data>/cairn.conf as `key = value`. The command line
-wins over the file.";
+The same names work in <data>/cairn.conf as `key = value`, apart from the four
+that are questions about one run rather than settings: data, help, check and
+run-for. The command line wins over the file.";
 
 /// Everything a node needs to start.
 #[derive(Clone, Debug)]
@@ -170,6 +182,33 @@ impl Given {
 
     fn has(&self, name: &str) -> bool {
         self.values.contains_key(name)
+    }
+
+    /// A yes or a no written in the file, or nothing where the setting is not
+    /// there at all.
+    ///
+    /// On a command line `--archive` is the whole of what it says, so its
+    /// presence is the answer. A file does not work that way: a file says
+    /// `name = value`, and the value is the answer. Asking `has` of a file
+    /// asks whether the word appeared, so `archive = no` turned archiving on
+    /// and said nothing about it, which costs the operator a set that grows
+    /// with every note ever spent for the rest of the node's life.
+    ///
+    /// Anything that is neither refuses the start rather than being guessed
+    /// at, under the rule this file states above [`KNOWN`]: a setting silently
+    /// ignored is how an operator ends up running rules they did not choose.
+    fn says_yes(&self, name: &str, where_from: &str) -> Result<bool, String> {
+        let Some(value) = self.first(name) else {
+            return Ok(false);
+        };
+        match value.trim().to_ascii_lowercase().as_str() {
+            "yes" | "true" | "on" | "1" => Ok(true),
+            "no" | "false" | "off" | "0" => Ok(false),
+            other => Err(format!(
+                "`{name} = {other}` {where_from} is neither yes nor no. Write `{name} = yes` \
+                 or `{name} = no`."
+            )),
+        }
     }
 
     /// Refuses a setting given twice with two different values.
@@ -373,7 +412,13 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         ),
     };
 
-    let archive = command_line.has("archive") || config.has("archive");
+    // The command line carries the word alone and the file carries a value, so
+    // the two are asked different questions. Asking the file whether the word
+    // appeared made `archive = no` an instruction to archive.
+    let archive = command_line.has("archive")
+        || config
+            .says_yes("archive", &format!("in {CONFIG_FILE}"))
+            .map_err(misread)?;
 
     let keep = match setting("keep") {
         None => KEEP_BLOCK_BYTES,
@@ -550,6 +595,22 @@ pub(crate) fn describe(options: &Options) -> String {
             let _ = writeln!(text, "mining       off");
         }
     }
+    let _ = writeln!(text, "status       every {}s", options.status_period);
+    // The one setting on this list that ends the run, and the summary went to
+    // the end without mentioning it. An operator checking what their node
+    // would do was shown everything except the thing that stops it.
+    match options.run_for {
+        Some(seconds) => {
+            let _ = writeln!(
+                text,
+                "run-for      stops after {seconds}s and exits nought, which is not a fault \
+                 anything downstream will report"
+            );
+        }
+        None => {
+            let _ = writeln!(text, "run-for      not set: runs until it is stopped");
+        }
+    }
     text
 }
 
@@ -635,6 +696,90 @@ mod tests {
         assert!(
             resolve_options(&args(&["listen", "x"])).is_err(),
             "options start with --"
+        );
+    }
+
+    /// A file writes `key = value`, so the value is the answer.
+    ///
+    /// `has` asks whether the word appeared, which is the right question for a
+    /// command line where `--archive` is the whole of what it says and the
+    /// wrong one for a file. `archive = no` turned archiving on and said
+    /// nothing, which costs the operator a set that grows with every note ever
+    /// spent, for the life of the node.
+    #[test]
+    fn a_no_in_the_file_is_a_no() {
+        let said = |line: &str| -> Result<bool, ()> {
+            let directory = std::env::temp_dir().join(format!(
+                "cairn-archive-{}-{}",
+                std::process::id(),
+                line.replace(['=', ' ', '\n'], "")
+            ));
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join(CONFIG_FILE), line).unwrap();
+            let data = directory.to_string_lossy().to_string();
+            let answer = resolve_options(&args(&["--data", &data]));
+            let _ = std::fs::remove_dir_all(&directory);
+            match answer {
+                Ok(Some(options)) => Ok(options.archive),
+                _ => Err(()),
+            }
+        };
+
+        assert_eq!(said("archive = no\n"), Ok(false), "a no is a no");
+        assert_eq!(said("archive = yes\n"), Ok(true));
+        assert_eq!(said("archive = off\n"), Ok(false));
+        assert_eq!(said("archive = true\n"), Ok(true));
+        assert_eq!(said("\n"), Ok(false), "and unwritten is a no");
+        assert_eq!(
+            said("archive = maybe\n"),
+            Err(()),
+            "anything else refuses the start rather than being guessed at"
+        );
+    }
+
+    /// `run-for` stops the node, so it is a question about one run.
+    ///
+    /// Left in the file it is a node that goes down on its own and comes back
+    /// under whatever restarts it, for ever, exiting nought on the way out so
+    /// nothing downstream reports a fault. `--check` never mentioned it
+    /// either, so an operator asking what their node would do was shown
+    /// everything except the thing that stops it.
+    #[test]
+    fn a_run_for_in_the_file_is_refused_and_a_summary_says_what_stops_the_node() {
+        let directory = std::env::temp_dir().join(format!("cairn-runfor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join(CONFIG_FILE), "run-for = 300\n").unwrap();
+        let data = directory.to_string_lossy().to_string();
+
+        let error = resolve_options(&args(&["--data", &data])).unwrap_err();
+        let said = format!("{error:?}");
+        assert!(
+            said.contains("run-for"),
+            "a node that stops itself every five minutes started without a word: {said}"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+
+        let options = resolve_options(&args(&["--run-for", "300", "--status", "7"]))
+            .unwrap()
+            .unwrap();
+        let summary = describe(&options);
+        assert!(
+            summary.contains("300"),
+            "the summary went to the end without mentioning what stops the node: {summary}"
+        );
+        assert!(
+            summary.contains("every 7s"),
+            "nor how often it speaks: {summary}"
+        );
+
+        let quiet = resolve_options(&args(&[])).unwrap().unwrap();
+        let summary = describe(&quiet);
+        assert!(
+            summary.contains("runs until it is stopped"),
+            "and a node with no deadline says so, rather than leaving a reader to \
+             notice a missing line: {summary}"
         );
     }
 

@@ -211,9 +211,9 @@ function ago(seconds) {
   said `1 secondes` in French and `1 seconds` in English for as long as there
   has been a page with a five second block time on it.
 */
-function plural(name, value, shown) {
+function plural(key, value, shown) {
   const rule = new Intl.PluralRules(locale()).select(Math.abs(Number(value)));
-  return t('unit.' + name + '.' + rule, { n: shown === undefined ? count(value) : shown });
+  return t(key + '.' + rule, { n: shown === undefined ? count(value) : shown });
 }
 
 /*
@@ -227,12 +227,12 @@ function duration(seconds) {
   const value = Number(seconds);
   if (!Number.isFinite(value)) return '-';
   const size = Math.abs(value);
-  if (size < 120) return plural('seconds', value);
-  if (size < 7200) return plural('minutes', Math.round(value / 60));
-  if (size < 172800) return plural('hours', Math.round(value / 3600));
-  if (size < 63072000) return plural('days', Math.round(value / 86400));
+  if (size < 120) return plural('unit.seconds', value);
+  if (size < 7200) return plural('unit.minutes', Math.round(value / 60));
+  if (size < 172800) return plural('unit.hours', Math.round(value / 3600));
+  if (size < 63072000) return plural('unit.days', Math.round(value / 86400));
   const years = value / 31536000;
-  return plural('years', years, years.toFixed(1));
+  return plural('unit.years', years, years.toFixed(1));
 }
 
 function shorten(text, head = 10, tail = 6) {
@@ -559,16 +559,20 @@ async function home() {
 
   The site named the cold set as the explorer's growing cost, and the cold set
   is the smaller half of it by nearly nine times: a node that keeps the whole
-  cave carries seventy two bytes for each note that has fallen, a node that
-  keeps none carries nothing at all, and the index above both of them carries
-  five hundred and sixty five bytes for every note that has ever existed. None
-  of that was written down anywhere, so nobody thinking of running one of
-  these could find out what they were taking on.
+  cave carries a fixed handful of bytes for each note that has fallen, a node
+  that keeps none carries nothing at all, and the index above both of them
+  carries that whole ratio again for every note that has ever existed. None of
+  that was written down anywhere, so nobody thinking of running one of these
+  could find out what they were taking on.
 
-  Both figures reach the page from `/api/status` rather than from here, so
-  neither can go stale the way this paragraph did: it said five hundred and
-  seven times, which were the readings before the index was weighed again on
-  the shape of traffic people actually send.
+  Both figures reach the page from `/api/status`, which is why the panel below
+  cannot go stale. This paragraph could, and did, twice: it named five hundred
+  and seven bytes a note, was corrected to five hundred and sixty five, and
+  stayed at five hundred and sixty five for as long as the constant said six
+  hundred and twenty seven. So it names no byte count at all now. The ratio
+  stays, because `the_ratio_the_site_calls_nine_is_the_one_this_program_serves`
+  holds this sentence against both constants and fails when either moves; the
+  byte counts were held by nothing, which is the whole difference.
 */
 function indexPanel(status) {
   const index = status.index;
@@ -1936,6 +1940,13 @@ function trouble(status) {
   }
   if (node.outOfReach > 0) {
     return t('warn.outOfReach', { blocks: count(node.outOfReach) });
+  }
+  // A disk that gave back something other than what was written to it. The
+  // chain is not in doubt and the mending is exact, which is why this is worth
+  // a line rather than a silence: every answer on this site comes off that
+  // disk, and nothing anywhere reported the one number that says it is failing.
+  if (node.mended > 0) {
+    return plural('warn.mended', node.mended);
   }
   // Only once there is a chain to have read. A node that holds no chain at
   // all has not fallen behind one; it has not been given one, and the lines

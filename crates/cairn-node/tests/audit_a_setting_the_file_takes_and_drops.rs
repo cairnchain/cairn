@@ -12,6 +12,13 @@
 //! without a word. An unknown name stopped the node loudly; a known name that
 //! did nothing was accepted in silence; and nothing in the refusal, in the
 //! startup summary or in `--check` told the two apart.
+//!
+//! `run-for` is the fourth, and it is not of that kind: the file honoured it,
+//! and honouring it is the problem. It stops the node after a while and exits
+//! nought, so a deadline written into a file is a machine that goes down on
+//! its own and comes back under whatever restarts it, for ever, with nothing
+//! downstream reporting a fault. A deadline is a question about one run, like
+//! the other three, and this test is where that is held.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -39,11 +46,11 @@ fn cairnd(arguments: &[&str]) -> Output {
 
 /// **A setting the file takes is a setting the node reads.**
 ///
-/// Each of the three is asked for in a file and the node has to say it will
-/// not take it there. Refused rather than honoured, because none of the three
-/// is a setting: `data` names the directory the file itself was found in, so
-/// setting it there cannot mean anything, and `help` and `check` are questions
-/// put to the program and answered once.
+/// Each of the four is asked for in a file and the node has to say it will not
+/// take it there. Refused rather than honoured, because none of the four is a
+/// setting: `data` names the directory the file itself was found in, so setting
+/// it there cannot mean anything; `help` and `check` are questions put to the
+/// program and answered once; and `run-for` ends the run it is in.
 ///
 /// `check` is the sharp one. `--check` exists so a script can ask what a node
 /// would do without starting one, and `check = yes` in the file started a
@@ -51,7 +58,12 @@ fn cairnd(arguments: &[&str]) -> Output {
 /// to avoid, reached by writing the flag down.
 #[test]
 fn a_name_the_file_may_carry_is_a_name_the_node_reads() {
-    for (name, value) in [("data", "/mnt/chain"), ("check", "yes"), ("help", "yes")] {
+    for (name, value) in [
+        ("data", "/mnt/chain"),
+        ("check", "yes"),
+        ("help", "yes"),
+        ("run-for", "300"),
+    ] {
         let directory = scratch(name);
         with_config(&directory, &format!("{name} = {value}\n"));
         let output = cairnd(&[
@@ -89,10 +101,13 @@ fn a_file_of_settings_the_node_does_read_starts_a_node() {
         "# what an operator would actually write\n\
          network = devnet\n\
          listen = 127.0.0.1:0\n\
-         run-for = 1\n\
+         archive = no\n\
          status = 1\n",
     );
-    let output = cairnd(&["--data", &directory.to_string_lossy()]);
+    // The deadline comes from the command line, which is the only place it is
+    // taken: a file that carries one is a node that stops itself on every
+    // start, which is what the test above holds.
+    let output = cairnd(&["--data", &directory.to_string_lossy(), "--run-for", "1"]);
     assert_eq!(
         output.status.code(),
         Some(0),

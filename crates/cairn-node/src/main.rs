@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cairn_chain::Outdated;
+use cairn_chain::{Accepted, Outdated};
 use cairn_net::node::{
     Behind, Probation, Stranded, Unjudged, Unread, Unweighable, Unwritten, MAX_BEHIND,
 };
@@ -231,13 +231,16 @@ fn start_mining(
             if !running.load(Ordering::SeqCst) {
                 return;
             }
-            mining::run(&node, &params, key, &running, |block| {
+            mining::run(&node, &params, key, &running, |block, landed| {
+                let (verdict, aside) = what_the_chain_did(landed);
                 println!(
-                    "[{:>8}] mined  height {:<6} difficulty {:<10} {}",
+                    "[{:>8}] {:<6} height {:<6} difficulty {:<10} {}{}",
                     stamp(started),
+                    verdict,
                     block.header.height,
                     block.header.difficulty,
                     short(&block.id().to_string()),
+                    aside,
                 );
             });
             },
@@ -360,6 +363,16 @@ fn say_what_the_numbers_do_not(node: &Node, directory: &str) {
     }
     if let Some(unjudged) = node.unjudged() {
         say(&too_old(&unjudged));
+    }
+    // A disk that dropped a write and was put right. Nothing is wrong now,
+    // which is exactly why it has to be said: `Node::mended_nodes` has been
+    // there since the mending was written, with a doc comment saying a disk
+    // that lost one node has not finished, and nothing anywhere ever read it.
+    // So the one machine in the world that most needed a new disk was shown
+    // every line a healthy node prints and nothing else.
+    let mended = node.mended_nodes();
+    if mended > 0 {
+        say(&dropped_a_write(mended));
     }
     // And a node with no chain that nobody can show one to. Every showing it
     // is offered fails, it falls back to reading block by block, and what an
@@ -857,6 +870,42 @@ fn wrapped(text: &str) -> Vec<String> {
     lines
 }
 
+/// What to call a block this node has just mined, in the chain's own terms.
+///
+/// Four outcomes and two of them are not a block on this chain. `is_ok()`
+/// could not tell them apart, so every one of them printed `mined`, and the
+/// one it gets wrong is the one a miner loses a race to: a block found a
+/// moment after somebody else's for the same height is recorded on a branch
+/// this node does not follow, and nobody will ever pay a reward for it. An
+/// operator counting their own blocks was counting those too.
+/// A disk that gave back something other than what was written to it.
+///
+/// The mending itself is complete and costs nothing: the leaves are what the
+/// chain says and every place above them is worked out from those, so a torn
+/// interior node is rebuilt exactly. What is not complete is the disk.
+fn dropped_a_write(mended: u64) -> String {
+    let found = if mended == 1 {
+        "a torn place in its header history and built it again".to_owned()
+    } else {
+        format!("{mended} torn places in its header history and built them again")
+    };
+    format!(
+        "This node found {found} from the leaves under it. Nothing was lost, and nothing \
+         about the chain is in doubt: the leaves are what the chain says, and every place \
+         above them is worked out from those. What it means is that this disk gave back \
+         something other than what was written to it, and a disk that has done that once \
+         has not finished doing it. Copy what matters off it."
+    )
+}
+
+fn what_the_chain_did(landed: &Accepted) -> (&'static str, &'static str) {
+    match landed {
+        Accepted::Extended | Accepted::Reorganised { .. } => ("mined", ""),
+        Accepted::SideBranch => ("lost", "  another block reached this height first"),
+        Accepted::Duplicate => ("known", "  this chain already held it"),
+    }
+}
+
 fn stamp(since: Instant) -> String {
     let seconds = since.elapsed().as_secs();
     format!(
@@ -880,10 +929,74 @@ fn short(text: &str) -> &str {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod said_out_loud {
     use super::{
-        cannot_weigh, clock_is_slow, falling_behind, lost_the_disk, still_filling, too_old, wrapped,
+        cannot_weigh, clock_is_slow, dropped_a_write, falling_behind, lost_the_disk, still_filling,
+        too_old, what_the_chain_did, wrapped, Accepted,
     };
     use cairn_net::node::{Behind, Unjudged, Unweighable, Unwritten, Writing};
     use cairn_net::Filling;
+
+    /// A disk that dropped a write says so, in the number it dropped.
+    ///
+    /// `Node::mended_nodes` has existed since the mending was written, with a
+    /// doc comment saying a disk that lost one node has not finished. Nothing
+    /// anywhere read it, so the one machine that most needed a new disk was
+    /// shown every line a healthy node prints and nothing else.
+    #[test]
+    fn a_disk_that_dropped_a_write_is_said_to_have_dropped_one() {
+        let one = dropped_a_write(1);
+        assert!(one.contains("a torn place"), "{one}");
+        assert!(
+            !one.contains(" 1 "),
+            "one of a thing is named, not counted: {one}"
+        );
+
+        let several = dropped_a_write(7);
+        assert!(several.contains("7 torn places"), "{several}");
+        for said in [&one, &several] {
+            assert!(
+                said.contains("Nothing was lost"),
+                "an operator who reads this and panics about their chain has been told \
+                 the wrong thing: {said}"
+            );
+            assert!(
+                said.contains("has not finished"),
+                "and one who reads it and does nothing has been told nothing: {said}"
+            );
+        }
+    }
+
+    /// A block this node mined is only mined if this chain carries it.
+    ///
+    /// `submit_block` says which of four things happened and the caller read
+    /// `is_ok()`, which cannot tell extending this chain from being recorded
+    /// on a branch it does not follow. Both printed `mined`, and the second is
+    /// what losing a race looks like: an operator counting their own blocks
+    /// was counting rewards nobody will ever pay them.
+    #[test]
+    fn a_block_on_a_branch_this_node_left_is_not_a_block_it_mined() {
+        assert_eq!(what_the_chain_did(&Accepted::Extended).0, "mined");
+        assert_eq!(
+            what_the_chain_did(&Accepted::Reorganised {
+                removed: Vec::new(),
+                added: Vec::new(),
+            })
+            .0,
+            "mined",
+            "a block that won the branch is on the chain"
+        );
+
+        let (what, note) = what_the_chain_did(&Accepted::SideBranch);
+        assert_ne!(what, "mined", "this one is a race this node lost");
+        assert!(
+            !note.is_empty(),
+            "and a word on its own does not tell anybody why: {what}"
+        );
+        assert_ne!(
+            what_the_chain_did(&Accepted::Duplicate).0,
+            "mined",
+            "nor is a block this chain already held"
+        );
+    }
 
     fn behind(blocks: u64, within_reach: bool) -> Unwritten {
         Unwritten {
