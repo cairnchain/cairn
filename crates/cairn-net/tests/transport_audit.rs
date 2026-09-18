@@ -275,20 +275,26 @@ fn dripping_peers_cannot_take_every_connection_slot() {
     // attack this test describes is now one only introduced peers can mount,
     // and that is who it is held against.
     let drips: Vec<TcpStream> = (0..cairn_net::node::MAX_PEERS)
-        .map(|index| {
-            let mut socket = TcpStream::connect(node.address()).unwrap();
-            let at = u16::try_from(20_000 + index).unwrap();
-            write_message(&mut socket, params().network, &hello(u64::from(at), at)).unwrap();
-            socket.flush().unwrap();
-            socket
+        .filter_map(|index| {
+            let mut socket = TcpStream::connect(node.address()).ok()?;
+            let at = u16::try_from(20_000 + index).ok()?;
+            write_message(&mut socket, params().network, &hello(u64::from(at), at)).ok()?;
+            socket.flush().ok()?;
+            Some(socket)
         })
         .collect();
     // Long enough for every handshake to be read and answered.
     std::thread::sleep(Duration::from_secs(2));
+    // Not asserted on, because the node is entitled to have closed some of
+    // these already: it holds back the slots it needs to reach peers of its
+    // own, so eight of these forty eight are refused on purpose and the count
+    // below is written against `MOST_FROM_OUTSIDE` for that reason. Insisting
+    // every write lands would be this test asserting that the node does not
+    // hold anything back.
     let mut drips = drips;
     for socket in &mut drips {
-        socket.write_all(&header).unwrap();
-        socket.flush().unwrap();
+        let _ = socket.write_all(&header);
+        let _ = socket.flush();
     }
     let drips = drips;
 
