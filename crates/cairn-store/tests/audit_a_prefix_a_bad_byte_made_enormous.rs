@@ -154,13 +154,18 @@ fn a_prefix_no_process_wrote_is_damage_and_not_a_tail() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
-/// And the tail this was written for is still read as a tail.
+/// A write cut short is left where it is, like every other length the log
+/// cannot account for.
 ///
-/// A write cut short leaves a plausible length reaching past the end of the
-/// file. That is the one shape anything here is cut for, and it has to go on
-/// being cut or a node that lost power mid-append never starts clean again.
+/// This used to be cut, on the reasoning that the bytes after the last whole
+/// record are not a record. True of a tail. Also true of nothing, because one
+/// flipped bit produces the same shape in a prefix anywhere in the file, and
+/// there the bytes after it are whole records. Neither branch cuts now, and
+/// what that costs is the word: an interrupted append is reported as bytes
+/// left in place rather than as bytes dropped. Nothing is lost by it, because
+/// `append` truncates to the last whole record before it writes.
 #[test]
-fn a_write_cut_short_is_still_read_as_one() {
+fn a_write_cut_short_is_left_where_it_is() {
     let (directory, starts, size) = a_log_that_must_be_walked("tail");
 
     // Half of the last record, which is what an interrupted append leaves.
@@ -178,18 +183,66 @@ fn a_write_cut_short_is_still_read_as_one() {
     assert_eq!(
         recovered.blocks,
         BLOCKS - 1,
-        "every whole record before the torn one is kept"
+        "every whole record before the torn one is kept, which is what starting means"
+    );
+    assert_eq!(
+        recovered.discarded_bytes, 0,
+        "and nothing is deleted for a number this log cannot account for"
     );
     assert!(
-        recovered.unreadable.is_none(),
-        "a write cut short is not damage and must not be reported as it"
-    );
-    assert!(
-        recovered.discarded_bytes > 0,
-        "and the part of a record that is not a record is cut, or a node that lost power \
-         mid-append never starts clean again"
+        recovered.left_in_place > 0,
+        "the bytes are left where a reader can still see them"
     );
     drop(log);
 
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Every single bit of every length prefix, and none of them empties the log.
+///
+/// The first test here flips one bit, and the bit it flips is the top one,
+/// which is inside the range the first repair caught. That repair asked the
+/// ceiling before the overshoot, and `MAX_RECORD_BYTES` is four megabytes
+/// against a block ceiling of a hundred and twenty eight kilobytes, so eleven
+/// of the thirty two bits still produced a length that looked like one this
+/// process wrote and reached past the end of the file. All eleven went on
+/// deleting every whole record behind them.
+///
+/// A test that flips one bit measures one bit. This is what the audit that
+/// found it did, and what it should have been in the first place.
+#[test]
+fn no_single_flipped_bit_in_any_prefix_deletes_a_whole_record() {
+    for record in 0..BLOCKS {
+        for bit in 0..32u32 {
+            let name = format!("sweep-{record}-{bit}");
+            let (directory, starts, size) = a_log_that_must_be_walked(&name);
+            let at = starts[record] as u64 + u64::from(bit / 8);
+            let mut byte = [0u8; 1];
+            {
+                use std::io::{Read, Seek, SeekFrom};
+                let mut file = std::fs::File::open(directory.join(BLOCK_LOG)).unwrap();
+                file.seek(SeekFrom::Start(at)).unwrap();
+                file.read_exact(&mut byte).unwrap();
+            }
+            byte[0] ^= 1 << (bit % 8);
+            put(&directory.join(BLOCK_LOG), at, &byte);
+
+            let (log, recovered) = BlockLog::open(&directory).unwrap();
+            assert_eq!(
+                recovered.discarded_bytes, 0,
+                "record {record}, bit {bit}: {} of the {size} bytes in this log were deleted \
+                 and synced. Every record after the damaged prefix was a whole one, and the \
+                 operator is told that bytes of an unfinished write were dropped",
+                recovered.discarded_bytes
+            );
+            drop(log);
+
+            let still_there = std::fs::metadata(directory.join(BLOCK_LOG)).unwrap().len();
+            assert_eq!(
+                still_there, size,
+                "record {record}, bit {bit}: the file is {still_there} bytes and was {size}"
+            );
+            let _ = std::fs::remove_dir_all(&directory);
+        }
+    }
 }
