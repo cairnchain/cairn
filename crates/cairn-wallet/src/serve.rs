@@ -106,8 +106,18 @@ impl Opened {
 
 /// Writes a file the owner can read and nobody else can.
 ///
-/// The mode is set as the file is created rather than afterwards, so there is
-/// no moment where the bytes are on disk under whatever the umask allowed.
+/// The mode is asked for on the way in and set again afterwards, because a
+/// mode given to `open` applies to a file being created and not to one that is
+/// already there. This said the opposite, and it was wrong in the one way that
+/// matters here: the file it writes holds the address the page is served at,
+/// and that address carries the token that spends the wallet. A link file left
+/// from an earlier run and widened since, by a restore, a copy off a stick, or
+/// a `chmod -R` over the data directory, kept whatever it had been widened to
+/// and the token went back into it at that mode.
+///
+/// The account file learned this and had the reasoning written down beside it;
+/// the link file, which is the one holding a spending token, did not.
+///
 /// Windows has no mode to set and the file takes the directory's own access
 /// control, which is where the wallet already keeps its keys.
 fn write_for_the_owner(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -120,7 +130,13 @@ fn write_for_the_owner(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    options.open(path)?.write_all(bytes)
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(bytes)
 }
 
 /// Serves the wallet until `running` is cleared.

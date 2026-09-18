@@ -93,6 +93,9 @@ fn run(arguments: &[String]) -> Result<(), String> {
 /// Options that are the whole of what they say, with nothing after them.
 const BARE: [&str; 1] = ["fee-anyway"];
 
+/// Options that are a list rather than a setting, where every value is used.
+const REPEATED: [&str; 1] = ["seed"];
+
 /// A command line split into what came before the options and what came after.
 #[derive(Debug, Default)]
 struct Flags {
@@ -124,11 +127,48 @@ impl Flags {
                 .or_default()
                 .push(value.clone());
         }
+        flags.one_value_each()?;
         Ok(flags)
     }
 
     fn given(&self, name: &str) -> bool {
         self.named.contains_key(name)
+    }
+
+    /// Refuses a setting given twice with two different values.
+    ///
+    /// Only the first was ever used and the rest were dropped without a word,
+    /// which on this program means dropping money: `--fee 5 --fee 0.00005`
+    /// paid five CAIRN to carry a payment its sender had priced at five
+    /// thousandths of one, and neither the proportion guard nor `--fee-anyway`
+    /// stands in the way, because both compare the fee against the amount and
+    /// the amount was never the thing that changed. `--to` given twice pays
+    /// the first address the same way.
+    ///
+    /// `cairnd` has refused this since the day it was written, under a comment
+    /// saying that a setting silently ignored is how an operator ends up
+    /// running rules they did not choose. The wallet, where what is dropped is
+    /// somebody's money rather than a rule, did not.
+    ///
+    /// Given twice with the same value nothing is dropped, so nothing is said.
+    /// `seed` is a list rather than a setting and every one of them is used.
+    fn one_value_each(&self) -> Result<(), String> {
+        for (name, values) in &self.named {
+            if REPEATED.contains(&name.as_str()) {
+                continue;
+            }
+            let Some(first) = values.first() else {
+                continue;
+            };
+            let Some(other) = values.iter().find(|value| *value != first) else {
+                continue;
+            };
+            return Err(format!(
+                "`--{name}` is given twice, as `{first}` and as `{other}`, and only the first \
+                 would ever be used. Say which one you mean."
+            ));
+        }
+        Ok(())
     }
 
     fn value(&self, name: &str) -> Option<&str> {
@@ -180,11 +220,19 @@ fn show_address(arguments: &[String]) -> Result<(), String> {
 /// themselves. Where the list begins is visible from the list. A gap in the
 /// middle is not: the movements on both sides of it are there, and the blocks
 /// inside it read as a stretch in which nothing happened to this key.
-fn say_what_was_not_read(covered: &Covered) {
-    if let Some(from) = covered.from {
-        if from > 0 {
+fn say_what_was_not_read(covered: &Covered, listed: usize) {
+    // An empty list needs the same fact said the other way round. "As far back
+    // as block N" beside no rows at all reads as a list, and what it is is the
+    // absence of one over a stretch of chain this wallet never looked at.
+    match (listed, covered.from) {
+        (0, Some(from)) if from > 0 => {
+            println!("Nothing since block {from}, which is as far back as this wallet read.");
+        }
+        (0, _) => println!("Nothing yet."),
+        (_, Some(from)) if from > 0 => {
             println!("As far back as block {from}: this wallet did not read what came before.");
         }
+        _ => {}
     }
     if let Some(missed) = covered.missed_below {
         say(&format!(
@@ -289,44 +337,64 @@ fn show_balance(arguments: &[String]) -> Result<(), String> {
         println!("wallet reached a peer and caught up to the height you expect.");
     }
 
-    let movements = wallet.history();
-    if !movements.is_empty() {
-        println!();
-        println!("What happened, newest first:");
-        println!();
-        for movement in movements.iter().take(MOVEMENTS_SHOWN) {
-            println!(
-                "  {:<9} {}{:<22} block {}",
-                movement.direction.as_str(),
-                if movement.direction == cairn_wallet::history::Direction::Sent {
-                    "-"
-                } else {
-                    "+"
-                },
-                movement.amount.to_string(),
-                movement.height,
-            );
-        }
-        // A list that stops short and does not say where it stopped is a list
-        // that has told somebody something untrue about their own money. It
-        // stops at both ends: at the top when the wallet has not finished
-        // reading the chain, and here when there is more than fits a screen.
-        println!();
-        if movements.len() > MOVEMENTS_SHOWN {
-            println!(
-                "Showing the newest {MOVEMENTS_SHOWN} of {}.",
-                movements.len()
-            );
-        }
-        let covered = wallet.history_covers();
-        say_what_was_not_read(&covered);
-        let behind = covered.behind();
-        if behind > 0 {
-            println!("Still reading: {behind} block(s) of the chain are not in this list yet.");
-        }
-    }
+    say_what_happened(&wallet);
     wallet.shutdown();
     Ok(())
+}
+
+/// The list of movements, and everything true about what is not in it.
+///
+/// All of this sat inside a test for the list being non-empty, so a wallet
+/// whose list was empty said none of it: not that it had read only the top of
+/// the chain, not that there was a hole in the middle of what it read, not
+/// that it was still reading. What a person saw was four lines and no account
+/// of anything, and the conclusion they draw from that is that nothing has
+/// ever happened to this key. A fresh account against a node restored from a
+/// written ledger is the ordinary way to arrive there: the wallet then knows
+/// it read the last eight blocks of ninety and says nothing about the other
+/// eighty two.
+///
+/// The web face says all of it, from the same `Covered`, and said so before
+/// this did.
+fn say_what_happened(wallet: &Wallet) {
+    let movements = wallet.history();
+    let covered = wallet.history_covers();
+
+    println!();
+    println!("What happened, newest first:");
+    println!();
+    for movement in movements.iter().take(MOVEMENTS_SHOWN) {
+        println!(
+            "  {:<9} {}{:<22} block {}",
+            movement.direction.as_str(),
+            if movement.direction == cairn_wallet::history::Direction::Sent {
+                "-"
+            } else {
+                "+"
+            },
+            movement.amount.to_string(),
+            movement.height,
+        );
+    }
+    if !movements.is_empty() {
+        println!();
+    }
+
+    // A list that stops short and does not say where it stopped is a list that
+    // has told somebody something untrue about their own money. It stops at
+    // both ends: at the top when the wallet has not finished reading the
+    // chain, and at the bottom when there is more than fits a screen.
+    say_what_was_not_read(&covered, movements.len());
+    if movements.len() > MOVEMENTS_SHOWN {
+        println!(
+            "Showing the newest {MOVEMENTS_SHOWN} of {}.",
+            movements.len()
+        );
+    }
+    let behind = covered.behind();
+    if behind > 0 {
+        println!("Still reading: {behind} block(s) of the chain are not in this list yet.");
+    }
 }
 
 /// Movements printed. Past this a terminal is being filled rather than read,
