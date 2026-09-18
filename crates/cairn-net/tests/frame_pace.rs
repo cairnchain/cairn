@@ -89,7 +89,7 @@ fn an_honest_slow_link_carries_a_join_piece_to_the_end() {
         delivered: 0,
     };
     let started = Instant::now();
-    let outcome = read_message(&mut slow, network);
+    let outcome = read_message(&mut slow, network, MAX_FRAME_BYTES);
     let took = started.elapsed();
     let delivered = slow.delivered;
     // The bytes are zeros rather than a message, so what comes back is a
@@ -187,7 +187,7 @@ fn a_dribbling_sender_still_loses_the_frame() {
         delivered: 0,
     };
     let started = Instant::now();
-    let outcome = read_message(&mut dribble, network);
+    let outcome = read_message(&mut dribble, network, MAX_FRAME_BYTES);
     let took = started.elapsed();
     assert!(outcome.is_err(), "the dribbler was tolerated");
     println!(

@@ -22,7 +22,7 @@ use std::time::Duration;
 use cairn_ledger::validation::ConsensusParams;
 use cairn_net::book::{realm_of, worth_hearing_about, Realm};
 use cairn_net::message::Message;
-use cairn_net::wire::{read_message, write_message};
+use cairn_net::wire::{read_message, write_message, MAX_FRAME_BYTES};
 
 fn params() -> ConsensusParams {
     ConsensusParams::testnet()
@@ -155,7 +155,9 @@ fn a_connection_opening_into_a_spent_window_waits_for_the_next_one() {
     hog.set_read_timeout(Some(Duration::from_millis(200)))
         .unwrap();
     let mut reading = hog.try_clone().unwrap();
-    thread::spawn(move || while read_message(&mut reading, params().network).is_ok() {});
+    thread::spawn(
+        move || while read_message(&mut reading, params().network, MAX_FRAME_BYTES).is_ok() {},
+    );
     write_message(&mut hog, params().network, &hello(9_001, 4_242)).unwrap();
     // 128 * COST_PER_ADDRESS_SERVED * MAX_SHARED_ADDRESSES == the whole window.
     for _ in 0..128 {
@@ -172,7 +174,7 @@ fn a_connection_opening_into_a_spent_window_waits_for_the_next_one() {
 
     let mut ponged = false;
     for _ in 0..12 {
-        match read_message(&mut fresh, params().network) {
+        match read_message(&mut fresh, params().network, MAX_FRAME_BYTES) {
             Ok(cairn_net::wire::Incoming::Message(Message::Pong(4_242))) => {
                 ponged = true;
                 break;
@@ -206,7 +208,7 @@ fn a_fresh_node_answers_the_same_ping() {
     write_message(&mut fresh, params().network, &Message::Ping(4_242)).unwrap();
     let mut ponged = false;
     for _ in 0..12 {
-        match read_message(&mut fresh, params().network) {
+        match read_message(&mut fresh, params().network, MAX_FRAME_BYTES) {
             Ok(cairn_net::wire::Incoming::Message(Message::Pong(4_242))) => {
                 ponged = true;
                 break;

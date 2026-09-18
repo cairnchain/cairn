@@ -28,7 +28,7 @@ use cairn_ledger::validation::{assemble_block, connect_block, mine_block, Consen
 use cairn_ledger::LedgerState;
 use cairn_net::message::{Handshake, Keeps, Message, Placed, MAX_PROVEN, PROTOCOL_VERSION};
 use cairn_net::sync::{on_message, Local, PeerState};
-use cairn_net::wire::{read_message, write_message, Incoming};
+use cairn_net::wire::{read_message, write_message, Incoming, MAX_FRAME_BYTES};
 use cairn_net::Node;
 use cairn_primitives::codec::{Decode, Encode};
 use cairn_primitives::Hash32;
@@ -286,7 +286,7 @@ fn the_two_things_a_node_may_have_kept_are_told_apart_on_the_wire() {
         )
         .unwrap();
         let said = loop {
-            match read_message(&mut peer, params().network) {
+            match read_message(&mut peer, params().network, MAX_FRAME_BYTES) {
                 Ok(Incoming::Message(Message::Welcome(handshake))) => break handshake,
                 Ok(_) => {}
                 Err(error) => panic!("no welcome came back: {error}"),
@@ -458,7 +458,7 @@ fn a_path_that_does_not_fold_is_thrown_away_and_the_peer_is_not() {
         .unwrap();
         let deadline = Instant::now() + PATIENCE;
         while Instant::now() < deadline {
-            match read_message(&mut peer, network) {
+            match read_message(&mut peer, network, MAX_FRAME_BYTES) {
                 Ok(Incoming::Message(Message::GetProofs(positions))) => {
                     let answer = Message::Proofs(
                         positions
@@ -575,7 +575,7 @@ fn an_answer_from_a_peer_that_was_not_asked_is_dropped() {
         .unwrap();
         let deadline = Instant::now() + PATIENCE;
         while Instant::now() < deadline {
-            match read_message(&mut peer, network) {
+            match read_message(&mut peer, network, MAX_FRAME_BYTES) {
                 Ok(Incoming::Message(Message::GetProofs(positions))) => {
                     let answer = Message::Proofs(
                         positions

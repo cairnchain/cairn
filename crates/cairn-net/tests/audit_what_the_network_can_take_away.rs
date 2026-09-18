@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use cairn_ledger::validation::ConsensusParams;
 use cairn_net::message::Message;
-use cairn_net::wire::{read_message, write_message, Incoming};
+use cairn_net::wire::{read_message, write_message, Incoming, MAX_FRAME_BYTES};
 use cairn_net::Node;
 
 fn params() -> ConsensusParams {
@@ -85,7 +85,7 @@ fn nonce_of(at: SocketAddr) -> Option<u64> {
     write_message(&mut socket, params().network, &hello(0xfeed, 40_001)).ok()?;
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
-        match read_message(&mut socket, params().network) {
+        match read_message(&mut socket, params().network, MAX_FRAME_BYTES) {
             Ok(Incoming::Message(Message::Welcome(theirs))) => {
                 let _ = socket.shutdown(Shutdown::Both);
                 return Some(theirs.nonce);

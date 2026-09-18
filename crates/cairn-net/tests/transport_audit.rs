@@ -181,7 +181,7 @@ fn a_frame_kept_open_by_a_slow_drip_is_given_up_on() {
         budget,
     };
 
-    let outcome = read_message(&mut drip, params().network);
+    let outcome = read_message(&mut drip, params().network, MAX_FRAME_BYTES);
     assert!(
         drip.periods < budget,
         "a peer opened a {MAX_FRAME_BYTES} byte frame and sent one byte per period of \
@@ -208,16 +208,23 @@ fn a_real_node_lets_go_of_a_dripping_peer() {
     let node = Node::bind(params(), loopback()).unwrap();
 
     let mut drip = TcpStream::connect(node.address()).unwrap();
+    // Introduced before the frame is opened. A stranger is refused a frame
+    // this size at its header now, so it never reaches the deadline this test
+    // is about; the peer that can still do this is one that has said who it
+    // is, and that is the one worth holding the deadline against.
+    write_message(&mut drip, params().network, &hello(31_337, 31_337)).unwrap();
+    drip.flush().unwrap();
+    assert!(
+        wait_until(Duration::from_secs(60), || node.peer_count() == 1),
+        "the node should take the connection",
+    );
+    std::thread::sleep(Duration::from_millis(500));
+
     let mut header = Vec::new();
     params().network.as_u32().encode_to(&mut header);
     (MAX_FRAME_BYTES as u32).encode_to(&mut header);
     drip.write_all(&header).unwrap();
     drip.flush().unwrap();
-
-    assert!(
-        wait_until(Duration::from_secs(60), || node.peer_count() == 1),
-        "the node should take the connection",
-    );
 
     // Kept dribbling for as long as the node keeps listening, so what ends
     // this is the node giving up and not the test running out of patience.
@@ -262,14 +269,34 @@ fn dripping_peers_cannot_take_every_connection_slot() {
     params().network.as_u32().encode_to(&mut header);
     (MAX_FRAME_BYTES as u32).encode_to(&mut header);
 
+    // Each one introduces itself before opening its frame, under a listening
+    // port of its own so the node does not read two of them as the same peer
+    // twice over. A stranger cannot open a frame this size any more, so the
+    // attack this test describes is now one only introduced peers can mount,
+    // and that is who it is held against.
     let drips: Vec<TcpStream> = (0..cairn_net::node::MAX_PEERS)
-        .map(|_| {
-            let mut socket = TcpStream::connect(node.address()).unwrap();
-            socket.write_all(&header).unwrap();
-            socket.flush().unwrap();
-            socket
+        .filter_map(|index| {
+            let mut socket = TcpStream::connect(node.address()).ok()?;
+            let at = u16::try_from(20_000 + index).ok()?;
+            write_message(&mut socket, params().network, &hello(u64::from(at), at)).ok()?;
+            socket.flush().ok()?;
+            Some(socket)
         })
         .collect();
+    // Long enough for every handshake to be read and answered.
+    std::thread::sleep(Duration::from_secs(2));
+    // Not asserted on, because the node is entitled to have closed some of
+    // these already: it holds back the slots it needs to reach peers of its
+    // own, so eight of these forty eight are refused on purpose and the count
+    // below is written against `MOST_FROM_OUTSIDE` for that reason. Insisting
+    // every write lands would be this test asserting that the node does not
+    // hold anything back.
+    let mut drips = drips;
+    for socket in &mut drips {
+        let _ = socket.write_all(&header);
+        let _ = socket.flush();
+    }
+    let drips = drips;
 
     // One byte to every open frame every two seconds, inside the node's five
     // second read deadline, for as long as this test runs.
@@ -314,7 +341,7 @@ fn dripping_peers_cannot_take_every_connection_slot() {
         let mut honest = TcpStream::connect(node.address()).ok()?;
         honest.set_read_timeout(Some(Duration::from_secs(8))).ok()?;
         write_message(&mut honest, params().network, &hello(9_876, 4_242)).ok()?;
-        match read_message(&mut honest, params().network) {
+        match read_message(&mut honest, params().network, MAX_FRAME_BYTES) {
             Ok(Incoming::Message(Message::Welcome(_))) => Some(true),
             other => {
                 println!("honest peer heard back: {other:?}");
@@ -383,7 +410,7 @@ fn asks_until_quiet(
         // measured on Chain answers rather than on the socket falling silent.
         let mut last = Instant::now();
         while last.elapsed() < Duration::from_millis(700) {
-            match read_message(&mut reading, params().network) {
+            match read_message(&mut reading, params().network, MAX_FRAME_BYTES) {
                 Ok(Incoming::Message(Message::Chain { .. })) => {
                     answered += 1;
                     last = Instant::now();
@@ -642,7 +669,7 @@ fn stuff_the_book(address: SocketAddr, nonce: u64, addresses: &[SocketAddr]) {
         .unwrap();
     let until = Instant::now() + Duration::from_secs(3);
     while Instant::now() < until {
-        if read_message(&mut reading, params().network).is_err() {
+        if read_message(&mut reading, params().network, MAX_FRAME_BYTES).is_err() {
             break;
         }
     }
@@ -667,7 +694,7 @@ fn ping_burst(address: SocketAddr, nonce: u64, count: usize) -> Duration {
     write_message(&mut writing, params().network, &hello(nonce, 4_242)).unwrap();
     // The welcome, which is the node saying the connection is up and this
     // peer is known to it.
-    let greeted = read_message(&mut reading, params().network);
+    let greeted = read_message(&mut reading, params().network, MAX_FRAME_BYTES);
     assert!(
         matches!(greeted, Ok(Incoming::Message(Message::Welcome(_)))),
         "the node did not answer the handshake: {greeted:?}"
@@ -676,7 +703,7 @@ fn ping_burst(address: SocketAddr, nonce: u64, count: usize) -> Duration {
     let counting = std::thread::spawn(move || {
         let mut seen = 0usize;
         while seen < count {
-            match read_message(&mut reading, params().network) {
+            match read_message(&mut reading, params().network, MAX_FRAME_BYTES) {
                 Ok(Incoming::Message(Message::Pong(_))) => seen += 1,
                 Ok(_) => {}
                 Err(_) => break,
@@ -910,7 +937,7 @@ fn a_round_that_changes_no_address_does_not_write_the_book_again() {
         .unwrap();
     write_message(&mut peer, params().network, &hello(777_777, 0)).unwrap();
     let mut rounds = || loop {
-        match read_message(&mut peer, params().network) {
+        match read_message(&mut peer, params().network, MAX_FRAME_BYTES) {
             Ok(Incoming::Message(Message::GetPeers)) => return true,
             Ok(_) => {}
             Err(_) => return false,
@@ -1035,7 +1062,7 @@ fn getpeers_costs_what_the_answer_costs() {
         let (mut answers, mut bytes) = (0usize, 0usize);
         let mut last = Instant::now();
         while last.elapsed() < Duration::from_millis(900) {
-            match read_message(&mut reading, params().network) {
+            match read_message(&mut reading, params().network, MAX_FRAME_BYTES) {
                 Ok(Incoming::Message(Message::Peers(addresses))) => {
                     let mut encoded = Vec::new();
                     Message::Peers(addresses).encode_to(&mut encoded);
@@ -1266,7 +1293,7 @@ fn a_node_lets_go_of_the_peer_and_its_queue_together() {
     let mut collected = 0usize;
     let mut ended = false;
     for _ in 0..5_000 {
-        match read_message(&mut socket, params().network) {
+        match read_message(&mut socket, params().network, MAX_FRAME_BYTES) {
             Ok(Incoming::Message(Message::Peers(_))) => collected += 1,
             Ok(_) => {}
             Err(_) => {
@@ -1370,7 +1397,7 @@ fn two_connections_to_one_peer_come_down_to_one() {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut ended = false;
     while Instant::now() < deadline {
-        match read_message(&mut first, params().network) {
+        match read_message(&mut first, params().network, MAX_FRAME_BYTES) {
             Ok(Incoming::Message(_) | Incoming::Quiet) => {}
             Err(_) => {
                 ended = true;

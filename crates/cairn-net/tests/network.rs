@@ -139,6 +139,24 @@ impl Forge {
     }
 }
 
+/// A handshake, which is what turns a socket into a peer.
+fn a_greeting(nonce: u64) -> Message {
+    Message::Hello(Handshake {
+        version: PROTOCOL_VERSION,
+        network: params().network,
+        genesis: Hash32::ZERO,
+        tip: Hash32::ZERO,
+        height: 0,
+        total_work: 0,
+        listen: 1,
+        nonce,
+        keeps: Keeps {
+            headers: false,
+            cold_set: false,
+        },
+    })
+}
+
 fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + PATIENCE;
     while Instant::now() < deadline {
@@ -371,18 +389,30 @@ fn a_node_reaches_a_peer_it_was_never_told_about() {
 /// Before deadlines existed, the thread reading from it waited for as long as
 /// the peer kept the socket open, and a handful of such peers was enough to
 /// leave a node unable to hear anything else.
+///
+/// The peer introduces itself before opening the frame, which it did not have
+/// to until a node stopped letting a stranger name a megabyte. That is the
+/// peer worth holding this against: a stranger is refused at the header now
+/// and never reaches the deadline this test is about, so leaving it a stranger
+/// would have turned this into a test of the refusal it already has one of.
 #[test]
 fn a_peer_that_opens_a_frame_and_goes_quiet_is_let_go() {
     let node = Node::bind(params(), loopback()).unwrap();
 
     let mut stalled = TcpStream::connect(node.address()).unwrap();
+    write_message(&mut stalled, params().network, &a_greeting(70_707)).unwrap();
+    stalled.flush().unwrap();
+    wait_for("the node to take the connection", || node.peer_count() == 1);
+    // Long enough for the handshake to be read and answered, which is what
+    // moves this connection from a stranger to a peer.
+    thread::sleep(Duration::from_millis(500));
+
     let mut header = Vec::new();
     params().network.as_u32().encode_to(&mut header);
     1_000_000u32.encode_to(&mut header);
     stalled.write_all(&header).unwrap();
     stalled.flush().unwrap();
 
-    wait_for("the node to take the connection", || node.peer_count() == 1);
     wait_for("the stalled peer to be let go", || node.peer_count() == 0);
 
     // And the node is still itself: a well behaved peer still gets in.
@@ -405,21 +435,7 @@ fn a_peer_that_sends_a_bad_block_is_dropped() {
     block.header.state_root = Hash32::ZERO;
 
     let mut rude = TcpStream::connect(node.address()).unwrap();
-    let hello = Message::Hello(Handshake {
-        version: PROTOCOL_VERSION,
-        network: params().network,
-        genesis: Hash32::ZERO,
-        tip: Hash32::ZERO,
-        height: 0,
-        total_work: 0,
-        listen: 1,
-        nonce: 424_242,
-        keeps: Keeps {
-            headers: false,
-            cold_set: false,
-        },
-    });
-    write_message(&mut rude, params().network, &hello).unwrap();
+    write_message(&mut rude, params().network, &a_greeting(424_242)).unwrap();
     write_message(
         &mut rude,
         params().network,

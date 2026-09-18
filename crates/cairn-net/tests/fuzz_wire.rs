@@ -355,7 +355,7 @@ fn a_framed_message_survives_the_round_trip_over_the_wire() {
             .expect("a message this node built fits its own frame");
 
         let mut source = Feeding::new(framed);
-        match read_message(&mut source, NetworkId::TESTNET) {
+        match read_message(&mut source, NetworkId::TESTNET, MAX_FRAME_BYTES) {
             Ok(Incoming::Message(back)) => assert_eq!(
                 back.encode(),
                 message.encode(),
@@ -400,7 +400,7 @@ fn the_frame_reader_refuses_anything_it_cannot_read() {
         };
 
         let mut source = Feeding::new(bytes);
-        match read_message(&mut source, NetworkId::TESTNET) {
+        match read_message(&mut source, NetworkId::TESTNET, MAX_FRAME_BYTES) {
             Ok(Incoming::Message(message)) => {
                 read += 1;
                 assert!(message.weight() > 0);
@@ -430,7 +430,7 @@ fn a_frame_longer_than_the_cap_is_refused_before_it_is_reserved() {
         // Nothing behind the header at all. A reader that reserved first would
         // have made a buffer of `declared` bytes before finding that out.
         let mut source = Feeding::new(frame);
-        match read_message(&mut source, NetworkId::TESTNET) {
+        match read_message(&mut source, NetworkId::TESTNET, MAX_FRAME_BYTES) {
             Err(WireError::FrameTooLarge { declared: found }) => {
                 assert_eq!(found, declared as usize);
             }

@@ -38,7 +38,7 @@ use cairn_net::joining::Joined;
 use cairn_net::message::{Handshake, Message, PROTOCOL_VERSION};
 use cairn_net::node::{Node, Refused};
 use cairn_net::sync::{local_handshake, on_message, Local, PeerState};
-use cairn_net::wire::{read_message, write_message, Incoming};
+use cairn_net::wire::{read_message, write_message, Incoming, MAX_FRAME_BYTES};
 use cairn_net::Keeps;
 use cairn_primitives::codec::Encode;
 use cairn_primitives::Hash32;
@@ -452,7 +452,7 @@ fn a_node_on_probation_asks_somebody_other_than_its_supplier() {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut asked = false;
     while !asked && Instant::now() < deadline {
-        match read_message(&mut peer, params().network) {
+        match read_message(&mut peer, params().network, MAX_FRAME_BYTES) {
             Ok(Incoming::Message(Message::GetChain { .. })) => asked = true,
             Ok(_) => {}
             Err(error) => panic!("the connection failed: {error}"),
@@ -546,7 +546,7 @@ fn a_bare_peer(node: &Node, nonce: u64) -> TcpStream {
 fn until_it_sends<T>(peer: &mut TcpStream, wanted: impl Fn(&Message) -> Option<T>) -> T {
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
-        match read_message(peer, params().network) {
+        match read_message(peer, params().network, MAX_FRAME_BYTES) {
             Ok(Incoming::Message(message)) => {
                 if let Some(found) = wanted(&message) {
                     return found;
@@ -831,7 +831,7 @@ fn a_peer_that_spoils_the_collection_does_not_get_the_turn_back() {
 fn headers_wanted(peer: &mut TcpStream) -> Vec<u64> {
     let mut wanted = Vec::new();
     loop {
-        match read_message(peer, params().network) {
+        match read_message(peer, params().network, MAX_FRAME_BYTES) {
             Ok(Incoming::Message(Message::GetHeaders { from, .. })) => wanted.push(from),
             Ok(Incoming::Message(_)) => {}
             Ok(Incoming::Quiet) | Err(_) => return wanted,
