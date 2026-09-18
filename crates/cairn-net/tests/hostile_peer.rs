@@ -202,6 +202,11 @@ fn a_peer_cannot_grow_the_awaiting_set_without_bound() {
 /// being measured is what one announcement adds to a nearly full set, and
 /// reaching that state through `request_range` would be measuring the path
 /// that already holds.
+///
+/// Filled with heights the announcement below does not name, so that every one
+/// of those is fresh and the ceiling is what stops them. A height already
+/// outstanding costs nothing by design, so a set filled with the same heights
+/// would measure that rule instead of this one.
 fn one_place_short(peer: &mut PeerState) {
     for height in 0..(MAX_AWAITING as u64 - 1) {
         peer.awaiting.insert(height);
@@ -248,6 +253,51 @@ fn an_announcement_cannot_push_the_awaiting_set_past_the_ceiling_either() {
         peer.awaiting.len(),
         MAX_AWAITING,
         "the room that was there should have been filled"
+    );
+}
+
+/// What an announcement arms is written down as offered, not as sought.
+///
+/// The heights in an announcement are the sending peer's to choose, and the
+/// ask this node sends in reply looks exactly like the ask it sends while
+/// catching up. Only one of those two errands is owed the discount: catching
+/// up, this node went and asked, and the peer answering is doing it a favour.
+/// An announcement is the peer offering, and a block offered is a block
+/// pushed. Told apart here, because told apart nowhere meant a peer that
+/// announced first wrote its own price.
+#[test]
+fn what_an_announcement_arms_is_marked_as_offered() {
+    let mut chain = ChainStore::new(params());
+    let mut peer = greeted();
+
+    let announced: Vec<Located> = (0..8u64)
+        .map(|step| {
+            let mut id = [0u8; 32];
+            id[..8].copy_from_slice(&step.to_le_bytes());
+            Located::new(4_000_000 + step, Hash32::from_bytes(id))
+        })
+        .collect();
+    let reaction = on_message(
+        &mut solo(&mut chain),
+        &mut peer,
+        Message::Announce(announced),
+        2_000_000_000,
+    );
+
+    assert!(
+        reaction.drop_peer.is_none(),
+        "an announcement is not misbehaviour, whatever it names"
+    );
+    assert!(
+        !peer.awaiting.is_empty(),
+        "this node still has to ask about what it was told, or it never learns it is behind"
+    );
+    assert_eq!(
+        peer.offered, peer.awaiting,
+        "every height this ask covers came from the announcement, so every one of them is \
+         a block offered rather than one this node went looking for. A height in the \
+         waiting set and not in this one is charged as an answer, and the heights here \
+         were the peer's to choose"
     );
 }
 
