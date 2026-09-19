@@ -187,7 +187,7 @@ fn a_write_cut_short_costs_only_the_block_it_was_writing() {
 #[test]
 fn a_record_that_is_not_a_block_is_reported_when_it_is_read() {
     let directory = scratch("garbage");
-    let blocks = chain(1);
+    let blocks = chain(2);
 
     let end = {
         let (mut log, _) = BlockLog::open(&directory).unwrap();
@@ -211,18 +211,57 @@ fn a_record_that_is_not_a_block_is_reported_when_it_is_read() {
     index.write_all(&(end + 8).to_le_bytes()).unwrap();
     drop(index);
 
+    // And a third record, whole, behind the bad one. Without it the walk stops
+    // at the second because there is nothing after it, and this test's own
+    // claim that it stops *there* could not fail. The record that will not
+    // decode has to have something behind it or the assertion is about the end
+    // of the file.
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(directory.join(BLOCK_LOG))
+        .unwrap();
+    let third = blocks[1].encode();
+    file.write_all(&u32::try_from(third.len()).unwrap().to_le_bytes())
+        .unwrap();
+    file.write_all(&third).unwrap();
+    drop(file);
+    // The index holds where each record ends, which is what the entry written
+    // above for the bad record is.
+    let ends_at = std::fs::metadata(directory.join(BLOCK_LOG)).unwrap().len();
+    let mut index = OpenOptions::new()
+        .append(true)
+        .open(directory.join(cairn_store::BLOCK_INDEX))
+        .unwrap();
+    index.write_all(&ends_at.to_le_bytes()).unwrap();
+    drop(index);
+
     let (log, recovered) = BlockLog::open(&directory).unwrap();
     assert_eq!(
-        recovered.blocks, 2,
-        "the index says two, and it is believed"
+        recovered.blocks, 3,
+        "the index says three, and it is believed"
     );
 
     assert!(
         matches!(log.read(1), Err(StoreError::Malformed { index: 1, .. })),
         "silence would be worse"
     );
-    // And a replay stops there rather than carrying on past a hole.
+    assert!(
+        log.read(2).is_ok(),
+        "the third record is whole, and asking for it by name still gives it"
+    );
+
+    // And a replay stops there rather than carrying on past a hole. A record
+    // that will not decode means the cursor is no longer where the next record
+    // begins, so everything after it would be read at an offset nothing
+    // vouches for. This walk used to hand back nought, the error, and then two
+    // and three: the chain with a hole in it that `Replay`'s own doc names as
+    // the thing it cannot produce.
     let replayed: Vec<_> = log.replay().collect();
+    assert_eq!(
+        replayed.len(),
+        2,
+        "the walk carried on past a record it could not read"
+    );
     assert!(replayed[0].is_ok());
     assert!(replayed[1].is_err(), "the walk reports it too");
 }

@@ -15,6 +15,13 @@
 //! landed is exactly a node of the right length holding the wrong bytes, and
 //! it is not rot. This measures what that costs across two restarts and a
 //! further sixteen leaves.
+//!
+//! `audit_a_torn_node_is_refused_for_life.rs` was this file's first hundred
+//! and forty seven lines, byte for byte, down to the same module doc and the
+//! same test function: two binaries compiled and linked to run one test. Any
+//! mutation one caught the other caught, so the second held nothing, and the
+//! suite paid a full link for it every run. It is gone, and this line is here
+//! so nobody writes it again.
 
 #![allow(
     clippy::unwrap_used,

@@ -668,6 +668,7 @@ impl BlockLog {
 
     /// Cuts the log back so that it holds nothing at `height` or past it.
     pub fn keep_below(&mut self, height: u64) -> Result<(), StoreError> {
+        self.still_on_its_files()?;
         let keep = height.saturating_sub(self.first).min(self.count as u64);
         self.keep_first(usize::try_from(keep).unwrap_or(usize::MAX))
     }
@@ -679,6 +680,7 @@ impl BlockLog {
     /// the front of the file and the index is written again, which is one pass
     /// over what is kept rather than over what is dropped.
     pub fn keep_from(&mut self, height: u64) -> Result<(), StoreError> {
+        self.still_on_its_files()?;
         if height <= self.first || self.count == 0 {
             return Ok(());
         }
@@ -848,6 +850,7 @@ impl BlockLog {
     /// crash between the two has to leave the index ahead of the log and not
     /// behind it, or the next start reads the whole log back.
     pub fn clear(&mut self) -> Result<(), StoreError> {
+        self.still_on_its_files()?;
         self.file.set_len(0)?;
         self.file.sync_data()?;
         self.index.set_len(0)?;
@@ -871,17 +874,41 @@ impl BlockLog {
     /// then cut back to match on the next start: the block is lost and asked
     /// for again, which is what a torn write has always cost here. The other
     /// order would leave an offset pointing at bytes that were never written.
+    /// Refuses where this log is no longer on the files it names.
+    ///
+    /// A compaction that could not put the log back on its own files leaves
+    /// the handles on a deleted scratch file. Writing there returns success
+    /// and reaches nobody, which is the one failure a node cannot see: it is
+    /// the writes that tell it the disk is keeping up.
+    ///
+    /// Asked by every mutator, which is four of them and used to be one.
+    /// `append` was guarded and `clear`, `keep_first`, `keep_from` and
+    /// `keep_below` were not, so on a log in that state a truncation reported
+    /// success having reached a scratch file while `blocks.log` on disk still
+    /// held everything; `keep_below` is the cut a reorganisation makes and
+    /// `keep_from` is the trim. The header log beside this one has always
+    /// asked the same question of all four of its own, under the same
+    /// reasoning, in a function of the same shape.
+    ///
+    /// It was harmless only because `count` is already nought in that state,
+    /// so "holds nothing" happened to be true of what the struct reports.
+    /// Nothing held it to staying harmless.
+    fn still_on_its_files(&self) -> Result<(), StoreError> {
+        if self.usable {
+            return Ok(());
+        }
+        Err(StoreError::Io(std::io::Error::other(
+            "this log is not on the files it names: a compaction could not \
+             open them again",
+        )))
+    }
+
     pub fn append(&mut self, block: &Block) -> Result<(), StoreError> {
         // A compaction that could not put this back on its own files leaves
         // the handles below on a deleted scratch file. Writing there returns
         // success and reaches nobody, which is the one failure a node cannot
         // see: it is the appends that tell it the disk is keeping up.
-        if !self.usable {
-            return Err(StoreError::Io(std::io::Error::other(
-                "this log is not on the files it names: a compaction could not \
-                 open them again",
-            )));
-        }
+        self.still_on_its_files()?;
 
         // A log whose positions do not line up with heights would serve the
         // wrong block to everyone catching up, confidently. The first block
@@ -1077,6 +1104,7 @@ impl BlockLog {
     /// Both cuts are waited for. A `set_len` that has not reached the disk is
     /// a file that comes back longer than this asked for.
     pub fn keep_first(&mut self, count: usize) -> Result<(), StoreError> {
+        self.still_on_its_files()?;
         if count >= self.count {
             return Ok(());
         }
@@ -1441,8 +1469,31 @@ impl Iterator for Replay<'_> {
             return Some(Err(error.into()));
         }
         let index = self.index;
-        self.index = self.index.saturating_add(1);
-        Some(Block::decode(&body).map_err(|source| StoreError::Malformed { index, source }))
+        match Block::decode(&body) {
+            Ok(block) => {
+                self.index = self.index.saturating_add(1);
+                Some(Ok(block))
+            }
+            Err(source) => {
+                // Stops, like the four above it. This one used to carry on,
+                // and it is the only error this walk exists to find: the
+                // others are a seek, a short read and a length past the
+                // ceiling, none of which is what a corrupted record looks
+                // like. Six records with the third one's body replaced
+                // replayed as heights nought, one, three, four and five,
+                // which is the chain with a hole in it that the doc on this
+                // type names as the thing it cannot produce.
+                //
+                // The reason is the same for all five. A record that will not
+                // decode means the cursor is no longer where the next record
+                // begins, so everything read after it is read at an offset
+                // nothing vouches for. A length prefix shortened by seven
+                // bytes gave three reservations of up to four megabytes each
+                // from a misaligned cursor before anything stopped.
+                self.index = self.total;
+                Some(Err(StoreError::Malformed { index, source }))
+            }
+        }
     }
 }
 

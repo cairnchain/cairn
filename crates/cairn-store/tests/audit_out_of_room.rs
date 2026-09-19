@@ -1221,6 +1221,30 @@ fn a_compaction_that_cannot_finish_leaves_a_log_that_says_so() {
     );
     assert_eq!(log.len(), 0, "and it did not count one either");
 
+    // So is every other way of writing to it. `append` was the only one
+    // guarded, and the other four reported success having reached a deleted
+    // scratch file while `blocks.log` on disk still held everything:
+    // `keep_below` is the cut a reorganisation makes and `keep_from` is the
+    // trim, so both are a node deciding what it keeps and being told it
+    // happened. The header log beside this one has always asked the same
+    // question of all four of its own.
+    //
+    // It was harmless only because `len()` is already nought here, so "holds
+    // nothing" happened to be true of what the struct reports. Nothing held it
+    // to staying harmless.
+    for (what, outcome) in [
+        ("clear", log.clear()),
+        ("keep_first", log.keep_first(0)),
+        ("keep_from", log.keep_from(5)),
+        ("keep_below", log.keep_below(3)),
+    ] {
+        assert!(
+            outcome.is_err(),
+            "`{what}` on a log that lost its files reported success, and what it reported \
+             reached a scratch file: {outcome:?}"
+        );
+    }
+
     // The blocks themselves are on the disk, where the compaction put them, so
     // a start that can open the file finds the compacted log waiting.
     drop(log);
