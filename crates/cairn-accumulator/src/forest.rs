@@ -1338,6 +1338,29 @@ impl Archive {
     /// were added since, and `restored` names the leaves that were emptied and
     /// what they held. All three are things a node already has: it computed
     /// the first, it decided the second, and the third travelled in the block.
+    ///
+    /// **`before` has to predate everything the other two undo.** The leaves
+    /// and the index are put back from `restored`, and the roots and the live
+    /// count are taken from `before` whole: `refresh_above` below rebuilds the
+    /// archive's own interior nodes from the leaves and never touches the
+    /// roots, because the point of taking a snapshot is not paying for a pass
+    /// over the whole archive once per block undone, which is what an
+    /// archivist on an old chain cannot afford.
+    ///
+    /// So a `before` taken *after* one of the places in `restored` was emptied
+    /// describes a forest that does not hold the leaf it is being asked to put
+    /// back, and nothing here reconciles the two. What comes out has a leaf
+    /// vector and an index saying one thing and roots saying another: measured
+    /// on such a call, `locate` answered "place five" and
+    /// `verify(5, leaf(5), prove(5))` was false, so a wallet was handed a place
+    /// and a path its own archive refuses.
+    ///
+    /// Not reachable from the ledger, which builds `restored` from the block
+    /// being undone and `before` from the snapshot taken before it, so the two
+    /// always agree; four hundred randomised rounds of correct use match a
+    /// model exactly. It was reachable from the test that held this function,
+    /// whose oracle read the leaves and the index beside them and never the
+    /// forest that commits to both. That oracle asks all three now.
     pub fn rewind(&mut self, before: &Forest, appended: usize, restored: &[(u64, Hash32)]) {
         let keep = self.leaves.len().saturating_sub(appended);
         for gone in self.leaves.split_off(keep.min(self.leaves.len())) {

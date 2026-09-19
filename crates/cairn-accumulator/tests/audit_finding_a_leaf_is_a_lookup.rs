@@ -69,6 +69,42 @@ fn agrees(archive: &Archive, after: &str) {
              place, or told there is none"
         );
     }
+    commits_to_what_it_holds(archive, after);
+}
+
+/// And the third structure, which neither of the two above reads.
+///
+/// `locate` answers out of the index beside the leaves and `by_walking` out of
+/// the leaves themselves, so the two can agree perfectly while the forest that
+/// commits to them says something else entirely. What a wallet is handed is a
+/// place **and** a path, and the path is checked against the roots: an archive
+/// whose first two structures agree and whose third does not answers "your
+/// note is at place five" with a path that fails, which is a worse answer than
+/// either being wrong on its own.
+///
+/// This is what `Archive::rewind` was driven into by the test below and what
+/// nothing here could see.
+#[track_caller]
+fn commits_to_what_it_holds(archive: &Archive, after: &str) {
+    let mut standing = 0u64;
+    for at in 0..places(archive) {
+        let held = archive.leaf_at(at).expect("a position the archive holds");
+        if held != empty_leaf() {
+            standing = standing.saturating_add(1);
+        }
+        let path = archive.prove(at).expect("a path for a place it holds");
+        assert!(
+            archive.forest().verify(at, held, &path),
+            "after {after}: the archive handed out a path for the leaf at {at} and its \
+             own roots refuse it"
+        );
+    }
+    assert_eq!(
+        archive.len(),
+        standing,
+        "after {after}: the archive commits to {} leaves standing and {standing} are",
+        archive.len()
+    );
 }
 
 /// A leaf nobody put there is nowhere, which a walk answers by finding nothing.
@@ -132,12 +168,22 @@ fn the_index_says_what_the_leaves_say_after_every_move() {
 
     // Rewound: leaves appended since are dropped and emptied places are put
     // back, which is what a reorganisation asks for.
+    //
+    // `before` is taken before **both**, because that is what it means: the
+    // forest as it stood before the changes this call undoes. It used to be
+    // taken after place five was emptied and then handed `(5, leaf(5))` to put
+    // back, which is a snapshot that does not account for the leaf it is being
+    // asked to restore. What came out had a leaf vector and an index saying
+    // one thing and roots saying another, and `agrees` read only the first
+    // two, so this test stood on it green: `locate` answered "place five" and
+    // the path that went with it failed against the archive's own roots.
     let before = archive.forest().clone();
+    assert!(archive.remove(7), "a place emptied inside the window");
     for n in 200..208u64 {
         archive.add(leaf(n)).expect("room for a leaf");
     }
     assert_eq!(archive.locate(leaf(203)), Some(35));
-    archive.rewind(&before, 8, &[(5, leaf(5))]);
+    archive.rewind(&before, 8, &[(7, leaf(7))]);
 
     assert_eq!(places(&archive), 32, "the appended leaves are gone");
     for n in 200..208u64 {
@@ -148,9 +194,15 @@ fn the_index_says_what_the_leaves_say_after_every_move() {
         );
     }
     assert_eq!(
-        archive.locate(leaf(5)),
-        Some(5),
+        archive.locate(leaf(7)),
+        Some(7),
         "and the place the rewind put back is somewhere to find its leaf again"
+    );
+    assert_eq!(
+        archive.locate(leaf(5)),
+        None,
+        "while the one emptied before the snapshot stays emptied, because undoing it \
+         was never what this call was asked to do"
     );
     agrees(&archive, "a rewind dropped eight leaves and put one back");
     finds_nothing_that_is_not_there(&archive, "a rewind");
