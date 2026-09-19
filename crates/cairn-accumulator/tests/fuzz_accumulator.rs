@@ -279,11 +279,40 @@ fn a_membership_proof_that_verifies_names_something_the_tree_holds() {
     let campaign = Campaign::named("accumulator: membership soundness");
     let mut verified = 0usize;
     let mut offered = 0usize;
+    let mut absent = 0usize;
 
     let ran = campaign.run(4_000, |case, rng| {
         let (tree, truth) = a_tree(rng);
         let root = tree.root();
         let keys: Vec<Key> = truth.keys().copied().collect();
+
+        // The shadow, asked. The doc at the top of this file says this
+        // campaign "holds a shadow copy of what is really in them", and until
+        // this line the tree half never put a question to it: both assertions
+        // below read `tree.get`, so the tree was compared with itself.
+        //
+        // Asked here rather than only through a proof, because a mutated proof
+        // that happens to verify for a key that was dropped on the way in is
+        // not something this campaign can produce: it mutates proofs taken
+        // from the tree, so it can never build a genuine absence proof for a
+        // named key. Simulated, a tree that silently dropped one entry fired
+        // nought of the campaign's assertions, and the absence proof for the
+        // dropped key verified.
+        assert_eq!(
+            tree.len(),
+            truth.len(),
+            "the tree holds {} of the {} keys that went into it (case {case})",
+            tree.len(),
+            truth.len()
+        );
+        for (key, value) in &truth {
+            assert_eq!(
+                tree.get(*key),
+                Some(*value),
+                "a key that went in is not in, or not at the value it went in at \
+                 (case {case})"
+            );
+        }
 
         // A proof for a key in the tree, for a key that is not, and one from a
         // different tree entirely.
@@ -325,10 +354,21 @@ fn a_membership_proof_that_verifies_names_something_the_tree_holds() {
                 a_hash(rng)
             };
 
+            // Against the shadow and not against the tree. Both of these
+            // used to read `tree.get(key)`, which is the accumulator's own
+            // lookup: the tree was checked against itself, and a structure
+            // that dropped an entry on the way in agreed with every proof it
+            // then made about it. Simulated, the campaign's own assertions
+            // fired nought times on a tree missing a key, and the absence
+            // proof for that key verified.
+            //
+            // The doc at the top of this file says the campaign "holds a
+            // shadow copy of what is really in them". The forest half does.
+            // This half did not.
             if proof.verify_membership(root, key, value) {
                 verified += 1;
                 assert_eq!(
-                    tree.get(key),
+                    truth.get(&key).copied(),
                     Some(value),
                     "a proof carried {key} to a value the tree does not hold (case {case}, \
                      proof {})",
@@ -336,8 +376,9 @@ fn a_membership_proof_that_verifies_names_something_the_tree_holds() {
                 );
             }
             if proof.verify_absence(root, key) {
+                absent += 1;
                 assert_eq!(
-                    tree.get(key),
+                    truth.get(&key).copied(),
                     None,
                     "a proof showed {key} absent from a tree that holds it (case {case}, \
                      proof {})",
@@ -354,6 +395,14 @@ fn a_membership_proof_that_verifies_names_something_the_tree_holds() {
     assert!(
         verified > 0,
         "not one of {offered} proofs verified, so the check was never exercised"
+    );
+    // And the same for the other half, which had no counter at all: a
+    // `verify_absence` changed to answer `false` every time left this campaign
+    // green, because a check that never passes has no assertion under it.
+    assert!(
+        absent > 0,
+        "not one of {offered} proofs showed anything absent, so that half of the \
+         check was never exercised"
     );
 }
 
@@ -452,7 +501,17 @@ fn a_refused_removal_leaves_the_forest_exactly_as_it_was() {
         }
 
         for _ in 0..6 {
-            let before = forest.encode();
+            // The forest itself, not what it puts on the wire. `encode` writes
+            // the leaves, the live count and the roots, and not the watched
+            // map, which is the largest thing this forest holds: `a_forest`
+            // watches every place it adds. So a refused removal that replaced
+            // every watched path left this assertion green, and the one
+            // campaign that mutates a forest was checking the half of it that
+            // cannot see the field it is full of.
+            //
+            // `Forest` implements `PartialEq` and it does compare `watched`,
+            // which is why `audit_rewind_delta.rs` uses it.
+            let before = forest.clone();
             let commitment = forest.commitment();
             let seed = rng.pick(&sources).cloned().unwrap_or_default();
             let bytes = mutate(rng, &seed, &sources);
@@ -489,7 +548,7 @@ fn a_refused_removal_leaves_the_forest_exactly_as_it_was() {
             } else {
                 refused += 1;
                 assert_eq!(
-                    forest.encode(),
+                    forest,
                     before,
                     "a refused removal changed the forest (case {case}, path {})",
                     hex::encode(&bytes)
