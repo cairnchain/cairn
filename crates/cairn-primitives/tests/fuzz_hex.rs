@@ -46,7 +46,40 @@ const DIGITS: &[u8] = b"0123456789abcdefABCDEF";
 
 /// Holds everything against one string, and says whether it was accepted.
 fn holds(text: &str, case: usize) -> bool {
-    let Some(bytes) = decode(text) else {
+    // The two parsers, both directions, before anything returns.
+    //
+    // This used to leave the moment `decode` refused, so the fixed parser was
+    // only ever asked about strings the general one had already taken. The
+    // drift this file is named for is the fixed parser taking something the
+    // general one refuses, and that was the half never asked. It matters more
+    // than the other one, because `decode` has a single production caller in
+    // this workspace, a compiled-in constant, and `decode_array` has every URL
+    // the explorer answers, every key file and every command line.
+    //
+    // Measured: `strip_prefix("0x")` added to `decode_array` alone, three
+    // lines, left all sixty tests green. One transaction then has two URLs and
+    // one key file two spellings.
+    let general = decode(text);
+    let wide = decode_array::<32>(text).map(|array| array.to_vec());
+    let narrow = decode_array::<4>(text).map(|array| array.to_vec());
+    for (width, fixed) in [(32usize, &wide), (4usize, &narrow)] {
+        match &general {
+            Some(bytes) if bytes.len() == width => assert_eq!(
+                fixed.as_ref(),
+                Some(bytes),
+                "the general parser read {text:?} as {width} bytes and the fixed one of \
+                 that width did not (case {case})"
+            ),
+            _ => assert_eq!(
+                fixed.as_ref(),
+                None,
+                "the fixed parser of {width} took {text:?}, which the general one does \
+                 not read as {width} bytes (case {case})"
+            ),
+        }
+    }
+
+    let Some(bytes) = general else {
         return false;
     };
 
@@ -70,34 +103,13 @@ fn holds(text: &str, case: usize) -> bool {
         "{text:?} is a second spelling of the same bytes (case {case})"
     );
 
-    // The two parsers are separate code for a reason `decode_array`'s own
-    // doc comment gives: a vector holding a secret key would be freed without
-    // being wiped. Separate code is code that can drift, and this is the
-    // assertion that would catch the drift. It fails the day one of them
-    // starts accepting a separator or a prefix the other does not.
-    match bytes.len() {
-        32 => assert_eq!(
-            decode_array::<32>(text).map(|array| array.to_vec()),
-            Some(bytes.clone()),
-            "the general parser and the fixed one disagree about {text:?} (case {case})"
-        ),
-        4 => assert_eq!(
-            decode_array::<4>(text).map(|array| array.to_vec()),
-            Some(bytes.clone()),
-            "the general parser and the fixed one disagree about {text:?} (case {case})"
-        ),
-        // A length the fixed parser was not asked for has to be refused by
-        // it, whatever the general one said.
-        other => {
-            if other != 32 {
-                assert_eq!(
-                    decode_array::<32>(text),
-                    None,
-                    "the fixed parser took {other} bytes where it wanted 32 (case {case})"
-                );
-            }
-        }
-    }
+    // The two parsers are separate code for a reason `decode_array`'s own doc
+    // comment gives: a vector holding a secret key would be freed without
+    // being wiped. Separate code is code that can drift, and the loop above is
+    // what catches the drift, in both directions and at both widths. The arm
+    // that stood here asked only one width and guarded it with `if other != 32`
+    // inside a match arm that had already excluded 32, which is a condition
+    // that cannot be false.
 
     true
 }

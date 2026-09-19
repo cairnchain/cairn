@@ -70,14 +70,22 @@
 //! three bytes of a real twelve kilobyte handover: 87 to 98 per cent of those
 //! decode, and they go on into `handover::accept` and `check_start`.
 //!
-//! **What has no target at all**, named so it is a gap and not an omission:
-//! `cairn-http`'s request reader, which is the most exposed parser here and
-//! sees every byte from every stranger before anything else does;
-//! `cairn-store`'s record framing, which is what a rebuild reads; the address
-//! book's file reader; and `cairn-primitives`'s hexadecimal parser, which is
-//! behind every identifier in a URL and the wallet's key file. There is no
-//! corpus on disk either: every campaign rebuilds its seeds in process, so a
-//! case found today is not a case tomorrow's run starts from.
+//! **What had no target at all** was named here so it would be a gap and not
+//! an omission, and all four are closed: `cairn-http`'s request reader, the
+//! most exposed parser here, by `fuzz_request`; `cairn-store`'s record
+//! framing, which is what a rebuild reads, by `fuzz_record_framing`; the
+//! address book's file reader by `fuzz_address_book`; and
+//! `cairn-primitives`'s hexadecimal parser, behind every identifier in a URL
+//! and the wallet's key file, by `fuzz_hex`. The list is kept as the record
+//! of how it closed rather than deleted, because it went on being read as a
+//! list of gaps for some time after it stopped being one, and a map of what
+//! is not covered is read to decide where to spend an afternoon: a stale one
+//! sends that afternoon to four places that already had campaigns, and away
+//! from wherever the gap moved to. Anything added here should be added as a
+//! gap and struck through the same way.
+//!
+//! There is still no corpus on disk: every campaign rebuilds its seeds in
+//! process, so a case found today is not a case tomorrow's run starts from.
 //!
 //! Each case gets its own generator, seeded from the run seed and the case
 //! number, so case 91 941 of a two-minute campaign is reachable in a
