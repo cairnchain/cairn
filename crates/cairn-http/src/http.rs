@@ -132,19 +132,35 @@ pub const MAX_BODY_BYTES: usize = 4096;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bytes one read of [`drain`] takes off the socket.
 const DRAIN_CHUNK: usize = 2 * 1024;
-/// Reads [`drain`] makes before it stops.
+/// Bytes [`drain`] clears before it stops.
 ///
-/// Eight of those chunks is sixteen kilobytes, which is past the head cap and
-/// the body cap together. That arithmetic is true and it is not what stops the
-/// loop: the socket is non-blocking by the time [`drain`] runs, so the first
-/// read with nothing in the buffer comes back `WouldBlock` and the loop ends
-/// there, having cleared whatever happened to have arrived at that instant.
-/// A caller whose body is still on its way is cleared of nothing.
+/// Past the head cap and the body cap together, so an honest caller is cleared
+/// whole and a caller still sending past that is one this is right to stop
+/// reading.
 ///
-/// What that costs is measured and written on [`drain`]. The obvious repair,
-/// waiting for the bytes, is wrong for the reason written there too, so this
-/// is left as it is and named rather than quietly improved.
-const DRAIN_READS: usize = 8;
+/// It was a count of reads, and the sixteen kilobytes was the arithmetic
+/// written beside it: eight chunks of two. A count of reads is not a count of
+/// bytes on a socket that answers `WouldBlock`, and the first one ended the
+/// loop, so a caller whose body was still in flight was cleared of nothing.
+/// The reasoning was always about bytes; the constant is now the thing the
+/// reasoning is about.
+const DRAIN_BYTES: usize = 16 * 1024;
+/// How often [`drain`] looks again while it is waiting for bytes.
+const DRAIN_POLL: Duration = Duration::from_millis(5);
+/// How long a refusal waits for the request it is answering.
+///
+/// The refusal is written the moment a connection is accepted, a round trip
+/// before the caller's body can arrive, so without this there is nothing on
+/// the socket to clear and closing over what turns up afterwards resets the
+/// connection, taking the answer with it. It is spent on the thread that
+/// writes refusals and never in the accept loop.
+const REFUSAL_PATIENCE: Duration = Duration::from_millis(250);
+/// Refusals waiting to be written at once.
+///
+/// A floor under how many sockets that thread holds open. Past it a connection
+/// is dropped without a refusal, which is what happened to every one of them
+/// before the thread existed.
+const REFUSALS_QUEUED: usize = 64;
 /// How long to wait after an accept that failed, so a failure that persists is
 /// a wait rather than a spin.
 const ACCEPT_PAUSE: Duration = Duration::from_millis(50);
@@ -281,6 +297,7 @@ where
 {
     let answer = Arc::new(answer);
     let slots = Arc::new(Slots::default());
+    let refusals = refusals();
     let _ = listener.set_nonblocking(false);
 
     for incoming in listener.incoming() {
@@ -309,28 +326,15 @@ where
 
         let host = stream.peer_addr().ok().map(|address| address.ip());
         let Some(slot) = slots.take(host) else {
-            let _ = stream.set_nonblocking(true);
-            // Body and all. This is written before a byte of the request has
-            // been read, so nothing here knows whether a HEAD was asked for,
-            // and it used to pass the flag that means "compute the body and do
-            // not send it". The caller then got a head declaring
-            // `content-length: 32` and no body: not a short answer but an
-            // incomplete message, which reaches a reader as a transport error
-            // rather than as a 503. The one answer this server gives under
-            // load was the one answer nobody could read.
+            // Handed over rather than written here. Writing a refusal means
+            // waiting for the request it answers, and this loop is the one
+            // place that cannot wait: it is the loop every other caller is
+            // queued behind, at the moment every caller is being refused.
             //
-            // Sending it is right for a GET, which is what almost every caller
-            // sends, and harmless for a HEAD: `connection: close` ends the
-            // exchange, so there is no next message to frame wrongly.
-            let _ = write_response(
-                &mut Timed {
-                    stream: &stream,
-                    until: deadline(accepted, Duration::ZERO),
-                },
-                &Response::error(503, "too many connections"),
-                false,
-            );
-            hang_up(&stream);
+            // A full queue drops the connection without a word, which is what
+            // happened to every refusal this server gave before the thread
+            // existed.
+            let _ = refusals.try_send((stream, accepted));
             continue;
         };
 
@@ -485,7 +489,61 @@ where
     // socket that refuses to block is what puts the deadline back in charge.
     let _ = stream.set_nonblocking(true);
     let _ = write_response(&mut Timed { stream, until }, &response.0, response.1);
-    hang_up(stream);
+    // No patience: this path read its request, so anything left came with it.
+    hang_up(stream, Duration::ZERO);
+}
+
+/// The thread that writes refusals, and the way to hand one to it.
+///
+/// A refusal is written before the caller's request has necessarily arrived,
+/// and a connection closed over bytes nobody read is reset, which takes the
+/// answer with it. Clearing them takes patience, and the accept loop is the
+/// one place in this server that cannot spend any: it is where every other
+/// caller is queued, at the moment every caller is being refused. So a refused
+/// connection is handed here, and the waiting happens on a thread of its own.
+///
+/// One thread and a queue with a floor under it. Past [`REFUSALS_QUEUED`] a
+/// connection is dropped without a refusal, which is what happened to every
+/// one of them before, so a full queue is this server's old behaviour rather
+/// than a new failure. If the thread cannot be started at all, the receiving
+/// end goes with the closure and every send fails at once, which is the same
+/// thing again.
+fn refusals() -> std::sync::mpsc::SyncSender<(TcpStream, Instant)> {
+    let (into, out) = std::sync::mpsc::sync_channel::<(TcpStream, Instant)>(REFUSALS_QUEUED);
+    let _ = thread::Builder::new()
+        .name("cairn-http-refuse".to_owned())
+        .spawn(move || {
+            for (stream, accepted) in out {
+                say_no(&stream, accepted);
+            }
+        });
+    into
+}
+
+/// The one answer a full server gives.
+///
+/// Body and all. This is written before a byte of the request has been read,
+/// so nothing here knows whether a HEAD was asked for, and it used to pass the
+/// flag that means "compute the body and do not send it". The caller then got
+/// a head declaring `content-length: 32` and no body: not a short answer but
+/// an incomplete message, which reaches a reader as a transport error rather
+/// than as a 503. The one answer this server gives under load was the one
+/// answer nobody could read.
+///
+/// Sending it is right for a GET, which is what almost every caller sends, and
+/// harmless for a HEAD: `connection: close` ends the exchange, so there is no
+/// next message to frame wrongly.
+fn say_no(stream: &TcpStream, accepted: Instant) {
+    let _ = stream.set_nonblocking(true);
+    let _ = write_response(
+        &mut Timed {
+            stream,
+            until: deadline(accepted, Duration::ZERO),
+        },
+        &Response::error(503, "too many connections"),
+        false,
+    );
+    hang_up(stream, REFUSAL_PATIENCE);
 }
 
 /// Bytes taken off the socket and dropped, before it is closed.
@@ -515,39 +573,57 @@ where
 /// a body, both of which are already capped, and a caller that goes on sending
 /// past that is one this is right to stop reading.
 ///
-/// **It clears what has arrived, not what was sent, and the difference is the
-/// refusal itself.** Measured against this server with its slots full, a
-/// caller posting a head inside the cap and a body of exactly
-/// [`MAX_BODY_BYTES`]: sent in one piece with no gap, twelve of twelve
-/// callers read the whole 503; sent thirty milliseconds after the head, seven
-/// of twelve; sent in eight pieces twenty milliseconds apart, none of twelve.
-/// Every loss is the same, a reset after the six hundred and ten bytes of
-/// response head and none of its body, which reaches a reader as a transport
-/// error rather than as the refusal this server meant to give. On a real link
-/// it is not intermittent at all: the refusal is written the moment `accept`
-/// returns, a round trip before the caller's body can arrive.
+/// `patience` is how long to wait for bytes that have not arrived yet, and it
+/// is the whole of what separates the two callers. The ordinary path has read
+/// the request already, so whatever is left came with it and is there to be
+/// taken now; waiting would add that wait to every connection this server
+/// closes, for nothing. The refusal path answers before the request has
+/// necessarily arrived at all, so the bytes it has to clear are usually still
+/// in flight, and not waiting for them is not clearing anything.
 ///
-/// The two tests that pin this write their whole request in one call on the
-/// loopback before `accept` returns, so they hold with the drain and without
-/// it alike.
+/// It used to wait for nobody, and what that cost was measured. Server full,
+/// an honest caller posting a head inside the cap and a body of exactly
+/// [`MAX_BODY_BYTES`]: sent in one piece with no gap, twelve of twelve read
+/// the whole 503; sent thirty milliseconds after the head, seven of twelve;
+/// sent in eight pieces twenty milliseconds apart, none of twelve. Every loss
+/// the same, a reset after the response head and none of its body, which
+/// reaches a reader as a transport error rather than as the refusal this
+/// server meant to give. On a real link it was not intermittent: the refusal
+/// is written the moment `accept` returns, a round trip before the caller's
+/// body can arrive.
 ///
-/// The obvious repair is to wait for the bytes, and it is wrong. This runs in
-/// the accept loop, so every millisecond of patience here is a millisecond no
-/// other caller is accepted, and it runs exactly when the server is at its
-/// ceiling and every caller is being refused. That trades a lost error message
-/// for a stalled listener. The repair that would work is to move the refusal
-/// off the accept loop, on to one thread with a bounded queue, and that is a
-/// change to how this server is shaped rather than a line here. Left as it is,
-/// and said, rather than made worse quietly.
-fn drain(stream: &TcpStream) {
+/// Waiting was impossible while this ran in the accept loop, where every
+/// millisecond of patience is a millisecond no other caller is accepted, at
+/// the one moment every caller is being refused. It does not run there any
+/// more: see [`refusals`].
+/// Returns what it cleared, which is what a test can ask it. Whether the
+/// answer survives the close after it depends on the host's own timing and
+/// cannot be asked here; how many of the caller's bytes were taken off the
+/// socket first is the whole of what this decides, and that is a number.
+fn drain(stream: &TcpStream, patience: Duration) -> usize {
     let mut sink = [0u8; DRAIN_CHUNK];
     let mut source = stream;
-    for _ in 0..DRAIN_READS {
+    let until = Instant::now().checked_add(patience);
+    let mut cleared = 0usize;
+    while cleared < DRAIN_BYTES {
         match source.read(&mut sink) {
-            Ok(0) | Err(_) => return,
-            Ok(_) => {}
+            Ok(0) => break,
+            Ok(taken) => cleared = cleared.saturating_add(taken),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                // Nothing there yet. With no patience this is the end, which
+                // is what every caller but one wants.
+                let Some(until) = until else {
+                    break;
+                };
+                if Instant::now() >= until {
+                    break;
+                }
+                thread::sleep(DRAIN_POLL);
+            }
+            Err(_) => break,
         }
     }
+    cleared
 }
 
 /// Ends a connection so that the answer just written survives it.
@@ -564,12 +640,12 @@ fn drain(stream: &TcpStream) {
 /// when this runs, and this used to shut the door in front of them.
 ///
 /// What is left is the close the drop does, which resets if bytes turn up
-/// unread after all. That window is what draining narrows and nothing here
-/// closes: closing it would mean waiting for a caller to finish sending, in
-/// the accept loop, while every other caller queues behind it.
-fn hang_up(stream: &TcpStream) {
+/// unread after all. That window is what draining narrows, and how far it
+/// narrows is `patience`: nothing on the path that has already read its
+/// request, and a moment on the path that answered before reading one.
+fn hang_up(stream: &TcpStream, patience: Duration) {
     let _ = stream.shutdown(Shutdown::Write);
-    drain(stream);
+    let _ = drain(stream, patience);
 }
 
 /// When a connection accepted at `accepted` is over, given `answering` to say
@@ -983,8 +1059,8 @@ pub fn bind(address: SocketAddr) -> io::Result<TcpListener> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        answering, one_machine, percent_decode, Request, Slots, ANSWER_DEADLINE, MAX_CONNECTIONS,
-        MAX_PER_HOST,
+        answering, drain, one_machine, percent_decode, Request, Slots, ANSWER_DEADLINE,
+        MAX_CONNECTIONS, MAX_PER_HOST,
     };
     use std::fmt::Write as _;
     use std::net::{IpAddr, Ipv4Addr};
@@ -1241,6 +1317,59 @@ mod tests {
             "the proxy was counted as one visitor and the site was capped at \
              {MAX_PER_HOST} readers"
         );
+    }
+
+    /// A drain with patience clears what was still on its way.
+    ///
+    /// The whole of what separates a refusal a caller can read from one it
+    /// cannot. A refusal is written the moment a connection is accepted, a
+    /// round trip before the caller's body can arrive, so the bytes it has to
+    /// clear are usually still in flight; a drain that gives up on the first
+    /// empty read clears none of them, and closing over what turns up
+    /// afterwards resets the connection and takes the answer with it.
+    ///
+    /// Held here rather than through the server. Whether the reset takes the
+    /// answer depends on the host: the loopback on the machine this was
+    /// written on delivers a caller's body fast enough that even the old drain
+    /// found it there, and the runner where this race was lost is a different
+    /// one. What the server does with the result is argued from this and from
+    /// the reset semantics written on `hang_up`; what `drain` does is a number
+    /// and is measured.
+    #[test]
+    fn a_drain_with_patience_clears_what_was_still_on_its_way() {
+        use std::net::{Ipv4Addr, TcpListener};
+
+        const LATE: usize = 512;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("a free port");
+        let at = listener.local_addr().expect("the port it took");
+        let sending = std::thread::spawn(move || {
+            let mut out = std::net::TcpStream::connect(at).expect("the listener is up");
+            std::thread::sleep(Duration::from_millis(60));
+            let _ = std::io::Write::write_all(&mut out, &[b'x'; LATE]);
+            let _ = std::io::Write::flush(&mut out);
+            // Held open, so nothing here is a close being read as an end.
+            std::thread::sleep(Duration::from_millis(600));
+        });
+        let (taken, _) = listener.accept().expect("the connection above");
+        taken
+            .set_nonblocking(true)
+            .expect("a socket that will not block");
+
+        assert_eq!(
+            drain(&taken, Duration::ZERO),
+            0,
+            "nothing has arrived yet, and without patience nothing is what is cleared"
+        );
+        assert_eq!(
+            drain(&taken, Duration::from_millis(500)),
+            LATE,
+            "the caller's bytes arrived after the refusal was written, which is what \
+             every caller on a link with a round trip in it does"
+        );
+
+        drop(taken);
+        let _ = sending.join();
     }
 
     /// One machine is one share of the ceiling, arriving either way.
