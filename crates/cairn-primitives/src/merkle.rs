@@ -75,6 +75,7 @@ pub fn merkle_root(leaves: &[Hash32]) -> Hash32 {
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn leaves(count: u8) -> Vec<Hash32> {
         (0..count).map(|index| merkle_leaf(&[index])).collect()
@@ -115,11 +116,41 @@ mod tests {
         assert_ne!(merkle_root(&[root]), merkle_root(&pair[..1]));
     }
 
+    /// A root changes with every leaf under it, and with how many there are.
+    ///
+    /// The test that stood here was `assert_eq!(merkle_root(&items),
+    /// merkle_root(&items))` on the same slice: a function compared with
+    /// itself, which can fail only on nondeterminism, and `merkle_root` has
+    /// none. It was also the **only** test in this crate that reached past six
+    /// leaves, so above six nothing was held at all. Truncating a seven leaf
+    /// fold to six left the whole suite green: an item silently removable from
+    /// a list without changing what the list commits to.
+    ///
+    /// Both halves of the name are asserted now. No two leaf counts fold to
+    /// one root, which is what a truncation would break; and every leaf under
+    /// a root is load bearing, which is what dropping one from the middle
+    /// would break.
     #[test]
     fn root_is_stable_across_sizes() {
+        let mut seen: BTreeMap<Hash32, u8> = BTreeMap::new();
         for count in 1..32u8 {
             let items = leaves(count);
-            assert_eq!(merkle_root(&items), merkle_root(&items));
+            let root = merkle_root(&items);
+            assert_eq!(
+                seen.insert(root, count),
+                None,
+                "another leaf count folds to the same root as {count}"
+            );
+            for at in 0..items.len() {
+                let mut bent = items.clone();
+                bent[at] = merkle_leaf(b"bent");
+                assert_ne!(
+                    merkle_root(&bent),
+                    root,
+                    "the leaf at {at} of {count} could be changed without changing the \
+                     root above it"
+                );
+            }
         }
     }
 }
