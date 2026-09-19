@@ -79,7 +79,7 @@ fn read_all(
         let Some(now) = head(index) else {
             return;
         };
-        if index.refresh(&now, &block_at, |_| None) == Reading::Done {
+        if index.refresh(&now, &block_at, |_| None, || Some(now.tip)) == Reading::Done {
             return;
         }
     }

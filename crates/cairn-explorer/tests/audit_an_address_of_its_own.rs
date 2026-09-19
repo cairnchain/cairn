@@ -174,7 +174,7 @@ fn rss_kb() -> u64 {
 
 /// Walks the index to the tip, the way `Explorer::refresh` does.
 fn read_all(index: &mut Index, head: &Head, block_at: impl Fn(u64) -> Held) {
-    while index.refresh(head, &block_at, |_| None) == Reading::More {}
+    while index.refresh(head, &block_at, |_| None, || Some(head.tip)) == Reading::More {}
 }
 
 /// Weighs one chain and says what a note cost on it.

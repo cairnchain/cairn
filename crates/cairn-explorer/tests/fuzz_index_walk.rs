@@ -215,7 +215,16 @@ fn turn(
             .covers()
             .and_then(|(_, through)| head_from.id_at(through)),
     };
-    walk.refresh(&head, read, |height| ends_on.id_at(height))
+    // The branch the turn ends on decides how far the chain reaches when the
+    // turn is over, which is not the `tip` the head was taken with. One number
+    // for both is why this campaign could not reach a branch that got shorter
+    // inside a turn: in the model the tip never shrank.
+    walk.refresh(
+        &head,
+        read,
+        |height| ends_on.id_at(height),
+        || Some(ends_on.tip()),
+    )
 }
 
 /// Nothing the index holds is off a branch this node has left.

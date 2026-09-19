@@ -190,18 +190,32 @@ pub(crate) struct Head {
 /// Whether the branch still carries `id` at `height`.
 ///
 /// `None` from the chain means the height is past what it still holds an
-/// identifier for. Nothing that deep can have changed, since a switch deeper
-/// than the undo window is refused, so it is taken as agreeing as long as the
-/// height is one the branch reaches at all.
+/// identifier for, and that is two different things. Below the tip it is too
+/// deep to have changed, since a switch deeper than the undo window is
+/// refused, so it is taken as agreeing. Above the tip it is not deep at all:
+/// it is past the end of a branch that got shorter, and every height the turn
+/// relied on up there answers `None` for that reason.
+///
+/// Which is why `reaches` has to be the tip as it is now and not the one the
+/// turn began with. Measured against the one it began with, a branch that
+/// shrank inside the turn agrees at every height above its new end, because
+/// every one of them is under the old one. The index then settles holding
+/// blocks off a branch nobody follows, and `behind_of` takes the distance
+/// from a tip below where it thinks it has read, which saturates to nothing:
+/// the site says it has read the whole chain while every answer comes off
+/// those blocks.
+///
+/// `None` for `reaches` is a chain with no tip at all, which agrees with
+/// nothing.
 fn still_the_branch(
     height: u64,
     id: Hash32,
-    tip: u64,
+    reaches: Option<u64>,
     id_at: &impl Fn(u64) -> Option<Hash32>,
 ) -> bool {
     match id_at(height) {
         Some(now) => now == id,
-        None => height <= tip,
+        None => reaches.is_some_and(|tip| height <= tip),
     }
 }
 
@@ -363,6 +377,7 @@ impl Index {
         head: &Head,
         block_at: impl Fn(u64) -> Held,
         id_at: impl Fn(u64) -> Option<Hash32>,
+        tip_now: impl Fn() -> Option<u64>,
     ) -> Reading {
         // Whether what was read last time is still on the branch. Only the
         // last block has to be checked: everything under it was checked when
@@ -485,9 +500,14 @@ impl Index {
         // else. There is no cheaper sufficient question than all of them, and
         // all of them is at most sixty five, against the sixty four blocks
         // the turn has just read off a disk.
+        // Asked after the walk rather than taken from the head, because the
+        // head is the tip this turn began with and the whole of this check is
+        // about what happened since. A branch that got shorter inside the turn
+        // is invisible to the head's own number.
+        let reaches = tip_now();
         let started_over = relies_on
             .iter()
-            .any(|(height, id)| !still_the_branch(*height, *id, head.tip, &id_at));
+            .any(|(height, id)| !still_the_branch(*height, *id, reaches, &id_at));
         if started_over {
             *self = Self::new();
             self.stock_due = true;
