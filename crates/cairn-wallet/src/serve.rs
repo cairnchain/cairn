@@ -507,19 +507,20 @@ fn send(wallet: &Wallet, request: &Request) -> Response {
     }
 }
 
+/// An address, read the way every other face of this program reads one.
+///
+/// This used to walk the string two characters at a time through
+/// `u8::from_str_radix(pair, 16)`, which takes a leading sign: `"+a"` is ten
+/// to it and nothing to `hex::decode_array`. So this endpoint accepted
+/// spellings of a key that the command line refuses, and one key had more than
+/// one spelling here, which is the thing the hex parser's own doc calls out as
+/// giving one identifier two URLs.
+///
+/// Third time this workspace has had two readers of the same thing disagreeing
+/// over a `+`. There is one reader of it now.
 fn parse_key(text: &str) -> Result<PublicKey, WalletError> {
-    let text = text.trim();
-    let mut bytes = [0u8; 32];
-    if text.len() != 64 {
-        return Err(WalletError::NothingToSend);
-    }
-    for (index, slot) in bytes.iter_mut().enumerate() {
-        let at = index.checked_mul(2).ok_or(WalletError::NothingToSend)?;
-        let pair = text
-            .get(at..at.saturating_add(2))
-            .ok_or(WalletError::NothingToSend)?;
-        *slot = u8::from_str_radix(pair, 16).map_err(|_| WalletError::NothingToSend)?;
-    }
+    let bytes =
+        cairn_primitives::hex::decode_array::<32>(text.trim()).ok_or(WalletError::NothingToSend)?;
     PublicKey::from_bytes(&bytes).map_err(|_| WalletError::NothingToSend)
 }
 
@@ -688,6 +689,44 @@ mod tests {
         cairn_crypto::SecretKey::from_bytes(&[5; 32])
             .public_key()
             .to_string()
+    }
+
+    /// And the spellings a sign makes, which one of the two readers took.
+    ///
+    /// `u8::from_str_radix("+a", 16)` is ten. Walking a key two characters at
+    /// a time through it read `"+a"` as the byte `0a`, so a key carrying that
+    /// byte had a second spelling at this endpoint, and the spelling the
+    /// command line refuses was the one accepted here.
+    ///
+    /// The bend has to land on a pair that already reads `0a`. Bend any other
+    /// pair and the bent string is a different key, the subgroup check refuses
+    /// it, and the test passes green on the parser it was written to catch.
+    #[test]
+    fn a_sign_is_not_a_hex_digit() {
+        let carrying = (0u8..=255).find_map(|seed| {
+            let text = cairn_crypto::SecretKey::from_bytes(&[seed; 32])
+                .public_key()
+                .to_string();
+            let at = (0..32)
+                .map(|pair: usize| pair.saturating_mul(2))
+                .find(|&at| text.get(at..at.saturating_add(2)) == Some("0a"))?;
+            Some((text, at))
+        });
+        assert!(
+            carrying.is_some(),
+            "no key in two hundred and fifty six seeds carries the byte 0a, so this \
+             test no longer reaches the parser at all"
+        );
+        let (real, at) = carrying.unwrap();
+
+        let mut bent = real.clone();
+        bent.replace_range(at..at.saturating_add(2), "+a");
+        assert_ne!(bent, real, "the bend has to change the string");
+        assert!(parse_key(&real).is_ok(), "the key itself");
+        assert!(
+            parse_key(&bent).is_err(),
+            "a sign was read as a digit at {at}, so this key has a second spelling"
+        );
     }
 
     #[test]
