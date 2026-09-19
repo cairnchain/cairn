@@ -14,7 +14,7 @@ use cairn_chain::{
 };
 use cairn_crypto::SecretKey;
 use cairn_ledger::note::{Note, NoteId};
-use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
+use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer, MAX_COINBASE_EXTRA};
 use cairn_ledger::validation::{
     assemble_block, connect_block, mine_block, BlockError, ConsensusParams, TransferError,
 };
@@ -561,7 +561,11 @@ fn a_transfer_too_large_for_a_block_is_refused_outright() {
     match tight.accept_transfer(wide) {
         Err(TransferError::TooLargeForABlock { bytes: got, limit }) => {
             assert_eq!(got, bytes);
-            assert_eq!(limit, params.max_block_bytes);
+            assert_eq!(
+                limit,
+                ChainStore::room_for_transfers(params.max_block_bytes),
+                "the refusal has to name the room a block has, not the block"
+            );
         }
         other => panic!("expected a refusal, got {other:?}"),
     }
@@ -889,4 +893,216 @@ fn a_transfer_whose_signature_does_not_hold_never_reaches_the_pool() {
     );
     assert_eq!(store.accept_transfer(good), Ok(true));
     assert_eq!(store.pool_len(), 1);
+}
+
+/// The largest coinbase any network's rules allow, claiming `fee` on top of
+/// the reward, because that is the coinbase the pool has to leave room for.
+///
+/// A miner may fill its own coinbase and the pool cannot know in advance
+/// whether this one will. Leaving room for a small one would put the pool back
+/// where it started, promising slots in blocks that cannot be built.
+fn fattest_coinbase(params: &ConsensusParams, height: u64, fee: Amount) -> CoinbaseTransaction {
+    let total = params.initial_reward.as_pebbles() + fee.as_pebbles();
+    let count = params.max_coinbase_outputs as u64;
+    let each = total / count;
+    let first = total - each * (count - 1);
+    let outputs: Vec<Note> = (0..params.max_coinbase_outputs)
+        .map(|index| {
+            let value = if index == 0 { first } else { each };
+            Note::new(pebbles(value), wallet(9).public_key())
+        })
+        .collect();
+    CoinbaseTransaction::with_extra(height, outputs, vec![0u8; MAX_COINBASE_EXTRA])
+}
+
+/// What the pool takes is what a block can carry, measured from both sides.
+///
+/// The pool's job is to hold what is waiting for a block. A transfer no block
+/// can carry is not waiting for one, and `a_transfer_too_large_for_a_block_is_
+/// refused_outright` says so. What it did not say is where the boundary is,
+/// and the boundary was in the wrong place by four kilobytes: `accept_transfer`
+/// measured against `max_block_bytes` whole while `selection` packs to
+/// `room_for_transfers`, so between the two lay a band the pool took and no
+/// miner could ever pick.
+///
+/// That band is not a leak, it is a blockade, and a free one. A transfer that
+/// is never mined never pays the fee it promised, so an attacker can promise
+/// any fee at all; eviction drops the cheapest first, so the promise buys the
+/// last place to be evicted. Four hundred and five of them fill the pool,
+/// declare a hundred and twenty six billion pebbles, pay nothing, and are
+/// still there after ten blocks with ordinary payments refused behind them.
+///
+/// So the boundary is measured here, from both sides, against the rule itself:
+/// `bytes > max_block_bytes` in `connect_block`, on a block carrying the
+/// largest coinbase the rules allow. Both directions matter. Too loose is the
+/// blockade. Too tight is a transfer every node would have accepted, refused
+/// by the pool and relayed by nobody, which is the harm
+/// `room_for_transfers` was named after in the first place.
+#[test]
+fn what_the_pool_takes_is_what_a_block_can_carry() {
+    let mut params = params();
+    // Small enough that the boundary is a few dozen notes away rather than a
+    // hundred and twenty kilobytes. The arithmetic is scale free.
+    params.max_block_bytes = 4096;
+    let owner = wallet(1);
+    let (wide, notes) = funded_widely(4, &owner);
+
+    // The same chain under the tighter limit, with a ledger beside it, so a
+    // candidate block can be judged and not only measured.
+    let mut tight = ChainStore::new(params);
+    let mut ledger = LedgerState::new();
+    for height in 0.. {
+        match wide.block_at(height) {
+            Some(block) => {
+                connect_block(&mut ledger, block, &params, NOW).unwrap();
+                tight.add_block(block.clone(), NOW).unwrap();
+            }
+            None => break,
+        }
+    }
+    let height = ledger.next_height().unwrap();
+
+    // The floor rises with the transfer, so the fee is worked out against the
+    // transfer rather than picked. Changing it moves no bytes: an amount is
+    // eight of them whatever it holds.
+    let built = |count: usize, at: usize| -> (Transfer, Amount) {
+        let (id, note) = notes[at];
+        let spend =
+            |fee: Amount| splitting_spend(&params, id, note, &owner, &wallet(2), count, fee);
+        let draft = spend(pebbles(PLAIN_FEE));
+        let floor = fee_floor(transfer_weight(&draft, draft.encode().len(), 1));
+        let fee = pebbles(floor.as_pebbles() * 2);
+        let paid = spend(fee);
+        assert_eq!(
+            paid.encode().len(),
+            draft.encode().len(),
+            "the fee moved bytes"
+        );
+        (paid, fee)
+    };
+
+    // A block carrying one such transfer and nothing else, under the largest
+    // coinbase the rules allow. `bytes > max_block_bytes` is the rule, read
+    // off `connect_block`.
+    let candidate = |count: usize, at: usize| {
+        let (transfer, fee) = built(count, at);
+        let coinbase = fattest_coinbase(&params, height, fee);
+        assemble_block(&ledger, coinbase, vec![transfer], &params, NOW - 600, 0).unwrap()
+    };
+    let carried =
+        |count: usize, at: usize| candidate(count, at).encode().len() <= params.max_block_bytes;
+
+    // The boundary, found rather than assumed.
+    let widest = (1..=params.max_outputs_per_transfer)
+        .take_while(|count| carried(*count, 0))
+        .last()
+        .expect("one note has to fit");
+    assert!(
+        widest < params.max_outputs_per_transfer,
+        "the limit has to bite before the rules do, or this test measures nothing"
+    );
+
+    // Both sides, through the real path, so the claim is about the rule and
+    // not about an encoding measured twice.
+    for (count, fits) in [(widest, true), (widest + 1, false)] {
+        let block = mine_block(candidate(count, 0), ATTEMPTS).unwrap();
+        let verdict = connect_block(&mut ledger.clone(), &block, &params, NOW);
+        assert_eq!(
+            verdict.is_ok(),
+            fits,
+            "a block carrying {count} outputs is {} bytes against a {} limit: {verdict:?}",
+            block.encode().len(),
+            params.max_block_bytes
+        );
+        if !fits {
+            assert!(
+                matches!(verdict, Err(BlockError::BlockTooLarge { .. })),
+                "and it has to be the size that refuses it, not something else: {verdict:?}"
+            );
+        }
+    }
+
+    // And the pool's answer is the same answer, on both sides.
+    assert!(
+        tight.accept_transfer(built(widest, 0).0).unwrap(),
+        "the widest transfer a block can carry has to reach the pool"
+    );
+    match tight.accept_transfer(built(widest + 1, 1).0) {
+        Err(TransferError::TooLargeForABlock { .. }) => {}
+        other => panic!(
+            "a transfer no block can carry was taken, or refused for the wrong reason: {other:?}"
+        ),
+    }
+
+    // Which is the whole of it: what the pool holds, a miner can pick.
+    let (chosen, _) = tight.selection(params.max_transfers_per_block);
+    assert_eq!(
+        chosen.len(),
+        tight.pool_len(),
+        "everything the pool took has to be selectable, or it is waiting for a block \
+         that cannot be built"
+    );
+}
+
+/// The reserve is what a block spends before its first transfer.
+///
+/// `room_for_transfers` subtracts a number, and the number is right only for
+/// as long as it equals what the encoders produce. Both ways of being wrong
+/// are live, and they are not symmetric in how they show:
+///
+/// Too small and the pool takes what no miner can pick, which is silent, free
+/// and permanent. Too large and it refuses a transfer every node would have
+/// accepted, which at least reaches whoever sent it as an error.
+///
+/// It was four kilobytes against a true cost of nine hundred and eight, which
+/// cost nothing while only `selection` read it, because packing a block two
+/// per cent loose is a miner's business. It became both kinds of wrong at once
+/// the moment the pool was made to read the same number, which is why the
+/// number is pinned here and not left to a comment.
+///
+/// A block with the largest coinbase the rules allow and no transfers in it is
+/// exactly that cost, so nothing here is counted by hand.
+#[test]
+fn the_reserve_is_what_a_block_spends_before_its_first_transfer() {
+    let params = params();
+    let reserved = params.max_block_bytes - ChainStore::room_for_transfers(params.max_block_bytes);
+
+    let ledger = LedgerState::new();
+    let empty = assemble_block(
+        &ledger,
+        fattest_coinbase(&params, 0, Amount::ZERO),
+        Vec::<Transfer>::new(),
+        &params,
+        1_000,
+        0,
+    )
+    .unwrap();
+    assert_eq!(
+        reserved,
+        empty.encode().len(),
+        "the reserve and a block's own head have parted company"
+    );
+
+    // And it is the largest coinbase that has to be allowed for. A miner may
+    // fill its own, and the pool answers before it knows whether this one
+    // will, so reserving for a typical coinbase is reserving for a block that
+    // may not be the one that gets built.
+    let typical = assemble_block(
+        &ledger,
+        CoinbaseTransaction::new(
+            0,
+            vec![Note::new(params.initial_reward, wallet(9).public_key())],
+        ),
+        Vec::<Transfer>::new(),
+        &params,
+        1_000,
+        0,
+    )
+    .unwrap();
+    assert!(
+        typical.encode().len() < reserved,
+        "a typical block head is {} bytes and the reserve is {reserved}, so the reserve \
+         is no longer the worst case",
+        typical.encode().len()
+    );
 }

@@ -1213,15 +1213,30 @@ impl ChainStore {
         // a block that can never be built, while whoever sent it believes it
         // is on its way. Refused here, so the refusal reaches them.
         //
-        // Measured against the whole block rather than against a block minus
-        // its header, because the exact margin belongs to whoever assembles
-        // one; what matters here is that the impossible is turned away.
+        // Against the room a block has for transfers, which is the number
+        // `selection` packs to. It was against `max_block_bytes` whole, and
+        // the gap between the two was a band the pool took and no miner could
+        // ever pick. That band is not a leak, it is a blockade, and a free
+        // one: a transfer that is never mined never pays the fee it promised,
+        // so any fee at all can be promised, and since eviction drops the
+        // cheapest first the promise buys the last place to be evicted.
+        // Measured on scaled rules: four hundred and five of them held 99.95
+        // per cent of the pool, declared a hundred and twenty six billion
+        // pebbles, paid nothing, and were still there ten blocks later with
+        // ordinary payments refused behind them.
+        //
+        // The suite's answer to that shape, `the_pool_defends_itself_by_
+        // arithmetic`, rests on the blockade draining because `selection`
+        // takes the best rate first and the attacker pays for every one. A
+        // transfer `selection` can never take never drains and never pays.
+        //
+        // `room_for_transfers` exists because this subtraction was written out
+        // in one place and the wallet did the other one; its doc says so. This
+        // was the caller the fix was not carried to.
         let bytes = transfer.encode().len();
-        if bytes > self.params.max_block_bytes {
-            return Err(TransferError::TooLargeForABlock {
-                bytes,
-                limit: self.params.max_block_bytes,
-            });
+        let room = Self::room_for_transfers(self.params.max_block_bytes);
+        if bytes > room {
+            return Err(TransferError::TooLargeForABlock { bytes, limit: room });
         }
 
         let weight = transfer_weight(&transfer, bytes, outcome.spent_hot.len());
@@ -1298,11 +1313,23 @@ impl ChainStore {
 
     /// Room set aside for everything in a block that is not a transfer.
     ///
-    /// The header is fixed and small, and the coinbase is at most sixteen
-    /// notes. Four kilobytes is several times either, which is the right
-    /// margin for a number whose only job is to keep the selection below a
-    /// limit checked exactly elsewhere.
-    const BLOCK_OVERHEAD_BYTES: usize = 4096;
+    /// A header, the largest coinbase any network's rules allow, and the count
+    /// in front of the transfers: 182 + 722 + 4. The coinbase is the miner's
+    /// and a miner may fill it, so the largest one is what has to be left
+    /// free; the pool cannot promise a slot in a block whose coinbase has not
+    /// been chosen yet, and `max_coinbase_outputs <= MOST_COINBASE_OUTPUTS` is
+    /// asserted at build time, so the worst case is a constant.
+    ///
+    /// It was four kilobytes, "several times either", which was true and cost
+    /// nothing while this number was one miner's private packing margin. It
+    /// stopped being free when `accept_transfer` was made to read it: a margin
+    /// larger than the thing it stands for is a band of transfers the pool
+    /// refuses that a block would have carried, which is the other half of the
+    /// harm and not a safe direction to err in.
+    ///
+    /// Held against the encoders by
+    /// `pool::the_reserve_is_what_a_block_spends_before_its_first_transfer`.
+    const BLOCK_OVERHEAD_BYTES: usize = 908;
 
     /// What a block has left for transfers once the rest of it is allowed for.
     ///
@@ -1312,9 +1339,14 @@ impl ChainStore {
     /// carries more than this. Every gather between the two was accepted by
     /// the wallet, had its notes committed, was told a block would take a few
     /// minutes, and was then passed over by every miner that read the pool.
-    /// The gap is four kilobytes and one more note adds about a hundred bytes,
-    /// so the first gather that crosses what a block carries is always inside
+    /// The gap was four kilobytes and one more note adds about a hundred bytes,
+    /// so the first gather that crossed what a block carries was always inside
     /// it: the refusal could not fire on the spend it exists for.
+    ///
+    /// Three callers now, and the third was found the same way: `selection`
+    /// packs to this, the wallet refuses at this, and `accept_transfer` was
+    /// still doing the subtraction the wallet had been corrected for. The
+    /// number is the same everywhere or the pool holds what no miner picks.
     pub const fn room_for_transfers(max_block_bytes: usize) -> usize {
         max_block_bytes.saturating_sub(Self::BLOCK_OVERHEAD_BYTES)
     }

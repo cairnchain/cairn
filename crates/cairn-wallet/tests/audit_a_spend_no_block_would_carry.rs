@@ -21,16 +21,24 @@
 //! so the assertion and the code it checked were the same sentence twice. What
 //! it never asked was the question the guard exists for: whether a miner would
 //! carry the largest spend the wallet lets through. It would not. A block sets
-//! aside four kilobytes for its header and its coinbase, so what it carries in
-//! transfers is that much less than how big it is, and every gather between
-//! the two was accepted here, had its notes committed, was answered with "a
-//! block will take a few minutes", and was then passed over by every miner
-//! that read the pool. One more note adds about a hundred bytes and the gap is
-//! four thousand, so the first gather to cross what a block carries is always
+//! aside room for its header and its coinbase, so what it carries in transfers
+//! is that much less than how big it is, and every gather between the two was
+//! accepted here, had its notes committed, was answered with "a block will
+//! take a few minutes", and was then passed over by every miner that read the
+//! pool. One more note adds about a hundred bytes and the gap was four
+//! thousand, so the first gather to cross what a block carries was always
 //! inside a whole block: the refusal could not fire on the spend it was
 //! written for.
 //!
 //! The question is asked of the pool now, by the same call a miner makes.
+//!
+//! The gap is nine hundred and eight bytes rather than four thousand since
+//! `accept_transfer` was made to read the same subtraction: a margin only a
+//! miner reads may be generous, and one the pool reads may not, because a
+//! margin larger than what it stands for is a band of transfers refused that
+//! a block would have carried. Both tests below found that out for themselves
+//! by saying their sweep no longer reached the guard, which is the whole
+//! reason the sweep counts what it refused.
 
 #![allow(
     clippy::unwrap_used,
@@ -59,7 +67,15 @@ const ATTEMPTS: u64 = 1 << 22;
 /// a block of this size carries, and comfortably larger than the blocks this
 /// test mines. It has to clear the room a block sets aside for everything that
 /// is not a transfer, or there would be nothing a block could carry at all.
-const BLOCK_BYTES: usize = 12_288;
+///
+/// It was twelve kilobytes, which put the boundary at about eighty gathered
+/// notes while this wallet holds ninety six. When the reserve went from four
+/// thousand and ninety six bytes to the nine hundred and eight a block
+/// actually spends, the boundary moved past everything the sweep could gather
+/// and both tests here said so rather than passing. Five kilobytes puts it
+/// back around forty, with the mined blocks of this chain at under nine
+/// hundred, so neither end is near it.
+const BLOCK_BYTES: usize = 5_120;
 
 /// Blocks paying this key, several notes to a block.
 const BLOCKS: usize = 6;
