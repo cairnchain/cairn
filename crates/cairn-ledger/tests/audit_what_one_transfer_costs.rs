@@ -45,7 +45,7 @@ use cairn_ledger::validation::{
     assemble_block, check_transfer, connect_block, mine_block, ConsensusParams, TransferError,
 };
 use cairn_ledger::LedgerState;
-use cairn_primitives::codec::{CodecError, Decode, Encode};
+use cairn_primitives::codec::{CodecError, Decode, Encode, MAX_SEQUENCE_LEN};
 use cairn_primitives::hash::{counting, Domain, Hasher};
 use cairn_primitives::{Amount, Hash32};
 
@@ -306,10 +306,20 @@ fn a_transfer_promising_outputs(outputs: u32) -> Vec<u8> {
 }
 
 /// A coinbase frame promising `outputs` outputs and carrying none of them.
+///
+/// It stops there, which is why the test below could not see `extra` for as
+/// long as it was the one field decoded the old way.
 fn a_coinbase_promising(outputs: u32) -> Vec<u8> {
     let mut frame = COINBASE_VERSION.encode();
     frame.extend(7u64.encode());
     frame.extend(outputs.encode());
+    frame
+}
+
+/// The same, past the outputs: none at all, then a promise of `extra` bytes.
+fn a_coinbase_promising_extra(extra: u32) -> Vec<u8> {
+    let mut frame = a_coinbase_promising(0);
+    frame.extend(extra.encode());
     frame
 }
 
@@ -374,6 +384,22 @@ fn a_frame_promising_more_than_the_rules_allow_is_refused_unread() {
         Block::decode(&a_block_promising(104_857)),
         Err(CodecError::InvalidValue {
             type_name: "block transfers"
+        }),
+    );
+
+    // And the fifth sequence a stranger's frame carries, which this test was
+    // named after the whole of and asked four fifths of. `extra` is bytes
+    // rather than notes, so nothing here is curve arithmetic and the cost is
+    // a megabyte of pushes against a rule that allows sixty four. The reason
+    // it is worth a line anyway is the error: an oversized promise answered
+    // `UnexpectedEnd`, which is what a link cut mid frame answers, so the two
+    // were one entry in an operator's log.
+    assert_eq!(
+        CoinbaseTransaction::decode(&a_coinbase_promising_extra(
+            u32::try_from(MAX_SEQUENCE_LEN).unwrap()
+        )),
+        Err(CodecError::InvalidValue {
+            type_name: "coinbase extra"
         }),
     );
 }
