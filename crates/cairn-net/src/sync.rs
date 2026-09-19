@@ -80,6 +80,23 @@ pub struct PeerState {
     /// and twenty eight full-sized blocks at a unit each, which is four times
     /// cheaper than the flat price this was all meant to abolish.
     pub offered: BTreeSet<u64>,
+    /// Whether this node has a `GetChain` outstanding to this peer.
+    ///
+    /// `awaiting` is filled from two places and [`Self::offered`] was written
+    /// at one of them. The other is the answer to a `GetChain`, whose `from`
+    /// and `count` the peer writes: a peer that sends a `Chain` nobody asked
+    /// for fills `awaiting` with heights of its own choosing, and every block
+    /// it then pushes at one of them is charged the catching-up price. Which
+    /// is the same defect `offered` was added for, through the door it was not
+    /// added to. Measured afterwards: a discount of one thousand two hundred
+    /// and eighty nine times, and a window of allowance buying four point nine
+    /// gigabytes by that road against three and three quarter megabytes by the
+    /// one that was closed.
+    ///
+    /// Set where a `GetChain` is sent, which is only ever this node's own
+    /// doing, and taken by the `Chain` that answers it. Nothing a peer says
+    /// sets it.
+    pub chain_asked: bool,
     /// When the outstanding batch was asked for.
     ///
     /// A peer that answers everything else but never delivers the blocks it
@@ -906,6 +923,7 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
         // any other branch, so it is simply asked for.
         let held_for_the_choice = local.chain.is_empty() && theirs.height >= JOIN_RATHER_THAN_READ;
         if !held_for_the_choice {
+            peer.chain_asked = true;
             reaction.reply.push(Message::GetChain {
                 locator: local.chain.locator(),
             });
@@ -971,12 +989,24 @@ pub const JOIN_RATHER_THAN_READ: u64 = 1_024;
 pub const MAX_AWAITING: usize = MAX_REQUESTED * 4;
 
 /// Asks for a stretch of a peer's branch, starting at `from`.
-fn request_range(peer: &mut PeerState, from: u64, count: u64, now: u64) -> Reaction {
+///
+/// `prompted` is whether this node had asked for a chain. It decides nothing
+/// about what is asked and everything about what the answers cost: the price
+/// of a block is discounted when this node went looking for it, and a `Chain`
+/// nobody asked for is the peer choosing the heights that discount applies to.
+fn request_range(
+    chain: &ChainStore,
+    peer: &mut PeerState,
+    from: u64,
+    count: u64,
+    now: u64,
+    prompted: bool,
+) -> Reaction {
     let wanted = usize::try_from(count)
         .unwrap_or(MAX_REQUESTED)
         .min(MAX_REQUESTED);
     if wanted == 0 {
-        return Reaction::idle();
+        return follow_up(chain, peer, now);
     }
     let batch: Vec<u64> = (0..wanted)
         .filter_map(|step| u64::try_from(step).ok())
@@ -992,9 +1022,19 @@ fn request_range(peer: &mut PeerState, from: u64, count: u64, now: u64) -> React
         .count()
         > room
     {
-        return Reaction::idle();
+        // Not a dead end. `BATCH_PATIENCE` is read in `follow_up` and nowhere
+        // else, so returning nothing here left a peer that had filled the set
+        // to its ceiling in a state the node never left: the patience was
+        // never evaluated and the chain was never asked for again. Its sibling
+        // `request_announced` has always ended this way; this one did not.
+        return follow_up(chain, peer, now);
     }
     peer.awaiting.extend(batch.iter().copied());
+    if !prompted {
+        // Nobody asked for this, so the heights in it are the peer's to
+        // choose and the blocks that follow pay the price of a push.
+        peer.offered.extend(batch.iter().copied());
+    }
     peer.asked_at = now;
     Reaction::reply(vec![Message::GetBlocks(batch)])
 }
@@ -1014,23 +1054,22 @@ fn request_announced(
     // more: `MAX_AWAITING` named 512 and the set held 639. A height already
     // outstanding costs nothing, because asking again for it grows nothing.
     let mut room = MAX_AWAITING.saturating_sub(peer.awaiting.len());
-    // And a height that agrees with what this peer already said about itself.
-    // An announcement is a peer saying where it has a block, and the height is
-    // the peer's to write: nothing here checked it, so a hundred and twenty
-    // eight invented identifiers at heights of the sender's choosing armed a
-    // hundred and twenty eight full-sized blocks at a unit apiece.
+    // **No height bound here, and this paragraph used to say there was one.**
+    // It described a ceiling drawn against what the peer claimed at the
+    // handshake, with a batch's worth of slack and a floor underneath. That
+    // bound was written, tried twice and taken out again: drawn against this
+    // node's own tip it stops a node catching up at all, because a node behind
+    // the chain is *told* it is behind by an announcement from far ahead of
+    // it; drawn against the peer's claimed height it broke the same fixture
+    // for the same reason. What closed the defect was telling the two errands
+    // apart instead, which is [`PeerState::offered`] below.
     //
-    // Checked against the peer and not against this node's tip, which is the
-    // reading that matters and the one I got wrong first. A node behind the
-    // chain is *told* it is behind by an announcement from far ahead of its
-    // own tip, so a ceiling drawn there stops a node catching up at all.
-    // What a peer cannot do is disagree with itself: it said how much chain it
-    // had when it greeted, and a block it announces above that is one it did
-    // not have a moment ago. A batch's worth of slack, because blocks are
-    // mined while a connection lasts and that is what an announcement is for.
-    //
-    // The floor is the one `ChainStore::add_block` already enforces, because a
-    // block below it can never be followed whatever is built on it.
+    // The comment stayed after the bound went, so a reader checking whether an
+    // announcement's heights are checked would have found a paragraph saying
+    // they are and a filter that only counts room. They are not checked. What
+    // stops an invented height buying a discount is that it is marked as
+    // offered, and what stops it buying anything else is that a block at a
+    // height this node cannot use is refused by `ChainStore::add_block`.
     let wanted: Vec<u64> = ids
         .iter()
         .filter(|entry| !chain.contains(&entry.id))
@@ -1073,6 +1112,7 @@ fn follow_up(chain: &ChainStore, peer: &mut PeerState, now: u64) -> Reaction {
         peer.offered.clear();
     }
     if peer.awaiting.is_empty() && peer.total_work > chain.total_work() {
+        peer.chain_asked = true;
         return Reaction::reply(vec![Message::GetChain {
             locator: chain.locator(),
         }]);
@@ -1436,10 +1476,20 @@ pub fn on_message(
             let have = local.chain.height().map_or(0, |tip| tip.saturating_add(1));
             let start = from.max(have);
             let end = from.saturating_add(count);
+            // Taken rather than read, so one `GetChain` pays for one answer
+            // and a peer that sends five gets the price of a push for four.
+            let prompted = std::mem::take(&mut peer.chain_asked);
             if start >= end {
                 follow_up(local.chain, peer, now)
             } else {
-                request_range(peer, start, end.saturating_sub(start), now)
+                request_range(
+                    local.chain,
+                    peer,
+                    start,
+                    end.saturating_sub(start),
+                    now,
+                    prompted,
+                )
             }
         }
         Message::Announce(ids) => {

@@ -358,3 +358,161 @@ fn inbound_connections_do_not_starve_outbound_peer_discovery() {
     honest.shutdown();
     victim.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// The other door into `awaiting`.
+//
+// `offered` was added because an announcement's heights are the peer's to
+// choose, and a block arriving at one of them was charged as an answer to
+// something this node had gone looking for. The fix marked what
+// `request_announced` puts into `awaiting`.
+//
+// `awaiting` has two fillers. The other is `request_range`, whose only caller
+// is the `Chain { from, count }` arm, and both of those fields are the peer's
+// to write. Nothing tracked whether this node had asked for a chain at all, so
+// a `Chain` nobody asked for armed heights of the sender's choosing and every
+// block pushed at one of them was charged the catching-up price. Measured
+// before the repair: a discount of one thousand two hundred and eighty nine
+// times, and one window of allowance buying four point nine gigabytes that way
+// against three and three quarter megabytes through the door that was closed.
+//
+// Which is why these reach `awaiting` through a message. The test inside
+// `sync.rs` sets `awaiting` and `offered` by hand, so it holds `cost_of` and
+// cannot see either door.
+// ---------------------------------------------------------------------------
+
+/// A block pushed at a height a peer chose costs what a push costs.
+#[test]
+fn a_chain_nobody_asked_for_does_not_write_its_own_discount() {
+    let mut chain = ChainStore::new(params());
+    let now = 2_000_000_000u64;
+    let from = 1u64;
+
+    // Nobody asked. The peer volunteers a stretch and this node asks for the
+    // blocks in it, which is right: what is under test is the price.
+    let mut pushing = greeted();
+    on_message(
+        &mut solo(&mut chain),
+        &mut pushing,
+        Message::Chain { from, count: 4 },
+        now,
+    );
+    assert!(
+        pushing.awaiting.contains(&from),
+        "the stretch has to have been asked for, or there is no price to compare"
+    );
+    assert!(
+        pushing.offered.contains(&from),
+        "a stretch nobody asked for is one the peer offered, and the heights in it are \
+         the peer's to choose"
+    );
+
+    // And the same stretch, after this node asked for a chain of its own
+    // accord. That is a catch-up, and a catch-up is what the discount is for.
+    let mut catching_up = greeted();
+    catching_up.chain_asked = true;
+    on_message(
+        &mut solo(&mut chain),
+        &mut catching_up,
+        Message::Chain { from, count: 4 },
+        now,
+    );
+    assert!(catching_up.awaiting.contains(&from));
+    assert!(
+        !catching_up.offered.contains(&from),
+        "an answer to a question this node asked is an answer, and paying a push price \
+         for it would stop a node catching up at all"
+    );
+
+    // One question, one answer. A peer that sends five `Chain` messages to one
+    // `GetChain` is offering four of them.
+    let mut again = greeted();
+    again.chain_asked = true;
+    for step in 0..2u64 {
+        on_message(
+            &mut solo(&mut chain),
+            &mut again,
+            Message::Chain {
+                from: 100 + step * 10,
+                count: 4,
+            },
+            now,
+        );
+    }
+    assert!(
+        !again.offered.contains(&100),
+        "the first answered the question"
+    );
+    assert!(
+        again.offered.contains(&110),
+        "and the second was nobody's question, so the mark is taken and not merely read"
+    );
+}
+
+/// A peer that fills `awaiting` is asked again once the patience has run.
+///
+/// `BATCH_PATIENCE` is read in `follow_up` and nowhere else. `request_range`
+/// answered `idle` when a batch did not fit, so it never reached it: a peer
+/// that filled the set to its ceiling and then kept talking left this node
+/// never asking it for a chain again, for as long as the connection lasted.
+/// Its sibling `request_announced` has always ended in `follow_up`.
+#[test]
+fn a_peer_that_filled_the_awaiting_set_is_asked_again_once_patience_runs() {
+    let mut chain = ChainStore::new(params());
+    let now = 2_000_000_000u64;
+
+    let mut peer = greeted();
+    // Full, through the door that fills it.
+    for step in 0..8u64 {
+        on_message(
+            &mut solo(&mut chain),
+            &mut peer,
+            Message::Chain {
+                from: 1 + step * u64::try_from(MAX_REQUESTED).unwrap(),
+                count: u64::try_from(MAX_REQUESTED).unwrap(),
+            },
+            now,
+        );
+    }
+    assert_eq!(
+        peer.awaiting.len(),
+        MAX_AWAITING,
+        "the set has to be at its ceiling, or this test asks nothing"
+    );
+
+    // Still full a moment later, and nothing is asked: the batch is not stale
+    // yet and there is no room for another.
+    let soon = on_message(
+        &mut solo(&mut chain),
+        &mut peer,
+        Message::Chain {
+            from: 9_000,
+            count: 4,
+        },
+        now + 1,
+    );
+    assert!(
+        soon.reply.is_empty(),
+        "nothing is owed while the batch is fresh"
+    );
+
+    // And once the patience has run, the set is let go of and the chain is
+    // asked for again.
+    let later = on_message(
+        &mut solo(&mut chain),
+        &mut peer,
+        Message::Chain {
+            from: 9_000,
+            count: 4,
+        },
+        now + 4_000,
+    );
+    assert!(
+        later
+            .reply
+            .iter()
+            .any(|said| matches!(said, Message::GetChain { .. })),
+        "a peer that filled the set was never asked for a chain again: {:?}",
+        later.reply
+    );
+}
