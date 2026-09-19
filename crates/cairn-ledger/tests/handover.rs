@@ -15,6 +15,7 @@ use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::handover::{accept, Handover, HandoverError};
 use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::pow::RECENT_HEADERS;
+use cairn_ledger::state::{GRACE_BLOCKS, GRACE_NOTES};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
 use cairn_ledger::LedgerState;
@@ -747,5 +748,83 @@ fn a_ledger_from_another_chain_is_refused() {
         accept(&borrowed, &params).err(),
         Some(HandoverError::NotOnTheWeighedChain),
         "a peer cannot weigh one chain and hand over another's ledger"
+    );
+}
+
+/// Both halves of the grace rule, because the rule has two.
+///
+/// `advance_grace` runs the window down while it holds more blocks than
+/// `GRACE_BLOCKS` **or** more notes than `GRACE_NOTES`. `accept` asked only
+/// the first, under a comment naming the very distinction it then failed to
+/// honour: "the decoder's ceiling is what a message carries; this is what the
+/// rules produce, and the two are not the same question."
+///
+/// So a window of exactly `GRACE_BLOCKS` blocks carrying more than
+/// `GRACE_NOTES` notes passed every size rule here and was stopped only by
+/// the state root rebuild at the end, after the window had been built,
+/// indexed, and its every proof taken. Its three siblings all refuse before
+/// anything is built, which the file says out loud is the point: the size of
+/// what follows is otherwise decided by whoever sent it.
+///
+/// `decode_grace` refuses this off the wire today, so this is not a hole a
+/// peer can reach. It is the one bound of the four living in the decoder
+/// alone, which is the opposite of the convention the rest of this file
+/// states, and a decoder is not where a consensus rule belongs.
+#[test]
+fn a_grace_window_holding_more_notes_than_the_rules_keep_is_refused() {
+    let params = params();
+    let miner = wallet(1);
+    let mut node = Node::new();
+    node.mine_empty(&miner, RECENT_HEADERS + 8);
+
+    let mut handover = node.handover();
+    assert!(
+        handover.grace.len() <= GRACE_BLOCKS,
+        "the honest window is inside the block bound, so what follows is about the \
+         other one"
+    );
+
+    // The same number of blocks, and more notes in them than the window keeps.
+    //
+    // Worth nothing each, so the money in the window is the money that was
+    // already there. A copy of a real note eight thousand times over is a
+    // ledger carrying forty one thousand CAIRN against a schedule that has
+    // issued four hundred and fifty five, and it is the schedule that would
+    // refuse it, which is a different sentence than the one under test.
+    let (which, fell_at, sample) = handover
+        .grace
+        .iter()
+        .flatten()
+        .next()
+        .copied()
+        .expect("a window this test can copy a note out of");
+    let fallen = (which, fell_at, Note::new(Amount::ZERO, sample.owner));
+    let mut stuffed = vec![Vec::new(); handover.grace.len().max(1)];
+    let mut left = GRACE_NOTES + 1;
+    for block in &mut stuffed {
+        let take = left.min(GRACE_NOTES / handover.grace.len().max(1) + 1);
+        block.extend(std::iter::repeat_n(fallen, take));
+        left = left.saturating_sub(take);
+        if left == 0 {
+            break;
+        }
+    }
+    let notes: usize = stuffed.iter().map(Vec::len).sum();
+    assert!(notes > GRACE_NOTES, "the window has to be over the bound");
+    assert!(
+        stuffed.len() <= GRACE_BLOCKS,
+        "and inside the other one, or the sibling check catches it instead"
+    );
+    handover.grace = stuffed;
+
+    assert_eq!(
+        accept(&handover, &params).err(),
+        Some(HandoverError::GraceWindowHoldsTooMuch {
+            held: notes,
+            limit: GRACE_NOTES,
+        }),
+        "a window holding more than the rules keep was carried all the way to the state \
+         root rebuild, which is three orders of magnitude of work past where its \
+         siblings refuse"
     );
 }

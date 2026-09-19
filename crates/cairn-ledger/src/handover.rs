@@ -235,6 +235,8 @@ pub enum HandoverError {
     },
     #[error("the grace window holds {held} blocks, more than the {limit} allowed")]
     GraceWindowTooLarge { held: usize, limit: usize },
+    #[error("the grace window holds {held} notes, more than the {limit} allowed")]
+    GraceWindowHoldsTooMuch { held: usize, limit: usize },
     #[error("the ledger rebuilt from this does not produce the header's state root")]
     StateRootMismatch,
     #[error("the headers handed over are not the ones the header commits to")]
@@ -679,6 +681,29 @@ pub fn accept(handover: &Handover, params: &ConsensusParams) -> Result<LedgerSta
         return Err(HandoverError::GraceWindowTooLarge {
             held: handover.grace.len(),
             limit: GRACE_BLOCKS,
+        });
+    }
+    // Both halves of the rule, because the rule has two. `advance_grace` runs
+    // the window down while it holds more blocks than `GRACE_BLOCKS` **or**
+    // more notes than `GRACE_NOTES`, and this asked only the first. A window
+    // of sixty four blocks carrying eight thousand seven hundred notes is not
+    // one this network ever made, and it went past every size rule here to be
+    // stopped by the state root rebuild at the end, after the window had been
+    // built, indexed, and its every proof taken through `take_grace_proofs`.
+    // Measured on a fixture: seven point seven milliseconds against the seven
+    // point eight microseconds its three siblings take, which is the whole
+    // reason those three are written before anything is built.
+    //
+    // `decode_grace` refuses this off the wire today, so nothing reaches here
+    // that this stops. That is the decoder doing the rules' work: the other
+    // wire ceilings in this file are deliberately generous, under a comment
+    // saying the rules a chain runs under decide the real cap and `accept`
+    // checks against that. This one is now checked against that.
+    let notes: usize = handover.grace.iter().map(Vec::len).sum();
+    if notes > GRACE_NOTES {
+        return Err(HandoverError::GraceWindowHoldsTooMuch {
+            held: notes,
+            limit: GRACE_NOTES,
         });
     }
     the_window_this_chain_would_have(handover, params)?;
