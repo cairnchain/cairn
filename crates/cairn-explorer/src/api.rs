@@ -607,17 +607,32 @@ fn field_size(json: &mut Writer, context: &Context<'_>, encode: impl FnOnce() ->
 
 /// Refuses an answer this server cannot deliver, whatever built it.
 ///
-/// Every list below stops on [`most_one_answer_carries`], so nothing honest
-/// reaches this. It is here because the ceiling is a property of the server
-/// and not of any one route: a route added later that forgets to page is a
-/// route whose answers are cut off mid body, and a body short of its own
-/// `content-length` reaches the reader as a transport error rather than as a
-/// short page. Refusing is the worse answer to give and the better one to
-/// receive, because it says what happened.
+/// The ceiling is a property of the server and not of any one route: a route
+/// added later that forgets to page is a route whose answers are cut off mid
+/// body, and a body short of its own `content-length` reaches the reader as a
+/// transport error rather than as a short page. Refusing is the worse answer
+/// to give and the better one to receive, because it says what happened.
 ///
-/// `one_answer_is_never_longer_than_a_connection_can_carry` holds every route
-/// against this, so it firing at all is a defect rather than a mode of
-/// operation.
+/// **One thing reaches this by design**, and it is the case [`too_much_now`]
+/// describes: a page never stops on its first row, so a single row larger
+/// than the ceiling is written out whole and this is what catches it. The two
+/// doc comments used to contradict each other outright, this one calling the
+/// refusal a defect and that one calling it the net it relies on. That one
+/// was right.
+///
+/// This used to say that `one_answer_is_never_longer_than_a_connection_can_carry`
+/// held every route against the ceiling. No such test exists, and never did:
+/// the only mention of that name in the repository was the sentence claiming
+/// it. What holds the ceiling today is
+/// `every_document_this_site_serves_fits_in_the_time_a_connection_is_given`
+/// for the compiled-in pages, `a_page_of_the_pool_is_a_ceiling_on_bytes_and_not_only_on_rows`
+/// for `/api/pool` and `/api/block`, and
+/// `the_routes_that_never_page_fit_what_a_connection_carries` for the two that
+/// have no [`too_much_now`] in them at all, which are the ones where the
+/// question is real. A transfer at both of the rules' ceilings comes to
+/// fifty five per cent of the budget. The rest of the routes are paged and
+/// are held by nothing here, which is worth knowing rather than worth
+/// claiming otherwise.
 fn deliverable(answer: Response) -> Response {
     if answer.body.len() <= most_one_answer_carries() {
         return answer;

@@ -402,3 +402,102 @@ fn one_block_is_never_written_out_larger_than_a_connection_can_carry() {
     assert_eq!(more.status, 200);
     assert!(more.body.len() <= budget);
 }
+
+/// The two routes that never page, at the worst the rules allow.
+///
+/// `deliverable` refuses an answer this server cannot get out, and its own
+/// doc said "`one_answer_is_never_longer_than_a_connection_can_carry` holds
+/// every route against this, so it firing at all is a defect rather than a
+/// mode of operation." That test does not exist. One grep hit in the whole
+/// repository: the sentence naming it.
+///
+/// What does exist holds the compiled-in documents, `/api/pool` and
+/// `/api/block`. Seven routes are held by nothing, and two of those have no
+/// `too_much_now` in them at all, by construction rather than by oversight: a
+/// transfer is one thing and is written out whole, and an address's answer
+/// carries its page of notes and its page of movements together. Those two are
+/// where the question is real, so those two are what this holds.
+///
+/// The worst a transfer can be is the rules' own ceiling at both ends: it
+/// spends `max_inputs_per_transfer` notes and makes `max_outputs_per_transfer`
+/// of them, and every output is written out as a reference, a value, an owner
+/// and four fields about where it stands.
+#[test]
+fn the_routes_that_never_page_fit_what_a_connection_carries() {
+    let params = params();
+    let miner = wallet(3);
+    let ins = params.max_inputs_per_transfer;
+    let outs = params.max_outputs_per_transfer;
+
+    let mut forge = Forge::new(params);
+    let first = forge.mine(&miner);
+    // One reward spread into as many notes as a transfer may later spend.
+    let spread = fan_out(
+        &params,
+        &miner,
+        NoteId::new(first.coinbase.id(), 0),
+        first.coinbase.outputs[0],
+        ins,
+    );
+    let spread_id = spread.id();
+    let carrying_spread = forge.carrying(&miner, vec![spread.clone()]);
+
+    // And the worst one the rules allow, spending every one of them.
+    let each = spread.outputs[0].value.as_pebbles() / 2;
+    let mut inputs = Vec::new();
+    for index in 0..ins {
+        inputs.push(Input::hot(NoteId::new(
+            spread_id,
+            u32::try_from(index).unwrap(),
+        )));
+    }
+    let outputs: Vec<Note> = (0..outs)
+        .map(|_| {
+            Note::new(
+                Amount::from_pebbles(each * ins as u64 / outs as u64).unwrap(),
+                miner.public_key(),
+            )
+        })
+        .collect();
+    let mut worst = Transfer::new(inputs, outputs);
+    for index in 0..ins {
+        worst.sign_input(
+            params.network,
+            u32::try_from(index).unwrap(),
+            &spread.outputs[index],
+            &miner,
+        );
+    }
+    let worst_id = worst.id();
+    let carrying_worst = forge.carrying(&miner, vec![worst]);
+
+    let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let explorer = Explorer::new(Node::bind(params, address).expect("a node on a free port"));
+    for block in [&first, &carrying_spread, &carrying_worst] {
+        explorer
+            .node()
+            .submit_block(block.clone())
+            .expect("a block this node built the ledger for");
+    }
+    explorer.refresh();
+
+    let budget = deliverable();
+    for (what, path) in [
+        ("a transfer at both ceilings", format!("/api/tx/{worst_id}")),
+        (
+            "an address holding a page of them",
+            format!("/api/address/{}", miner.public_key()),
+        ),
+    ] {
+        let request = asking(&path, "");
+        let answer: Response = explorer.answer(&request).expect("the route answered");
+        assert_eq!(answer.status, 200, "{what}: {path}");
+        let sent = answer.body.len();
+        assert!(
+            sent <= budget,
+            "{what} came to {sent} bytes against a budget of {budget}, so this server \
+             would refuse its own answer with a five hundred rather than write it"
+        );
+        println!("{what}: {sent} bytes of {budget}, {}%", sent * 100 / budget);
+    }
+}
