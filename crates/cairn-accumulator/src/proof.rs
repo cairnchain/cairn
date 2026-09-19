@@ -1,6 +1,6 @@
 //! Membership and absence proofs.
 
-use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
+use cairn_primitives::codec::{take_at_most, CodecError, Decode, Encode, Reader};
 use cairn_primitives::Hash32;
 
 use crate::key::{Key, MAX_DEPTH};
@@ -94,15 +94,43 @@ impl Encode for Proof {
 
 impl Decode for Proof {
     fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
-        let siblings: Vec<Hash32> = Vec::decode_from(reader)?;
-        if siblings.len() > MAX_DEPTH {
-            return Err(CodecError::InvalidValue { type_name: "Proof" });
-        }
+        let siblings: Vec<Hash32> = take_at_most(reader, MAX_DEPTH, "Proof")?;
         let occupant = match u8::decode_from(reader)? {
             0 => None,
             1 => Some((Key::decode_from(reader)?, Hash32::decode_from(reader)?)),
             _ => return Err(CodecError::InvalidValue { type_name: "Proof" }),
         };
         Ok(Self { siblings, occupant })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use cairn_primitives::codec::MAX_SEQUENCE_LEN;
+
+    /// A proof promising more siblings than a key has bits is refused at the
+    /// count.
+    ///
+    /// Same shape as the forest's, and said plainly: nothing in this workspace
+    /// decodes one of these off a wire. The impl is public and the crate is a
+    /// library, so it is somebody's decoder even if it is nobody's here, and
+    /// the cost of holding it to the same rule as its neighbour is one line.
+    /// It is listed as the weakest of the three on purpose.
+    #[test]
+    fn a_proof_promising_more_siblings_than_a_key_has_bits_is_refused_at_the_count() {
+        let promise = u32::try_from(MAX_SEQUENCE_LEN).unwrap().encode();
+        assert_eq!(
+            Proof::decode(&promise),
+            Err(CodecError::InvalidValue { type_name: "Proof" })
+        );
+
+        let deepest = Proof::new(vec![Hash32::ZERO; MAX_DEPTH], None);
+        assert_eq!(
+            Proof::decode(&deepest.encode()).as_ref(),
+            Ok(&deepest),
+            "the deepest path a key can take has to survive the wire"
+        );
     }
 }

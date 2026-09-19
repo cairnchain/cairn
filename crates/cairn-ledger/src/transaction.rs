@@ -45,8 +45,14 @@ pub const MOST_OUTPUTS: usize = 256;
 
 /// The most outputs a coinbase's decoder will build. See [`MOST_INPUTS`].
 ///
-/// A coinbase already refuses an oversized `extra` where it is read rather
-/// than where it is judged, for the same reason and by the same argument.
+/// A coinbase refuses an oversized `extra` where it is read rather than where
+/// it is judged, for the same reason and by the same argument.
+///
+/// That sentence stood here before it was true. `extra` was read as an
+/// ordinary sequence, held only to [`cairn_primitives::codec::MAX_SEQUENCE_LEN`]
+/// and measured against [`MAX_COINBASE_EXTRA`] once it was built, one line
+/// under a field that did it the other way. What gave it away was reading the
+/// two lines together rather than reading this comment.
 pub const MOST_COINBASE_OUTPUTS: usize = 16;
 
 /// The note and the proof a spender supplies for a note in the cold set.
@@ -400,15 +406,7 @@ impl Decode for CoinbaseTransaction {
             version: u16::decode_from(reader)?,
             height: u64::decode_from(reader)?,
             outputs: take_at_most(reader, MOST_COINBASE_OUTPUTS, "coinbase outputs")?,
-            extra: {
-                let extra = Vec::<u8>::decode_from(reader)?;
-                if extra.len() > MAX_COINBASE_EXTRA {
-                    return Err(CodecError::InvalidValue {
-                        type_name: "coinbase extra",
-                    });
-                }
-                extra
-            },
+            extra: take_at_most(reader, MAX_COINBASE_EXTRA, "coinbase extra")?,
         })
     }
 }

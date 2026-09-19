@@ -25,7 +25,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
-use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
+use cairn_primitives::codec::{take_at_most, CodecError, Decode, Encode, Reader};
 use cairn_primitives::hash::{hash, Domain, Hasher};
 use cairn_primitives::Hash32;
 
@@ -313,12 +313,7 @@ impl Encode for ForestProof {
 
 impl Decode for ForestProof {
     fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
-        let siblings = Vec::<Hash32>::decode_from(reader)?;
-        if siblings.len() > MAX_HEIGHT {
-            return Err(CodecError::InvalidValue {
-                type_name: "ForestProof",
-            });
-        }
+        let siblings = take_at_most(reader, MAX_HEIGHT, "ForestProof")?;
         Ok(Self { siblings })
     }
 }
@@ -1414,6 +1409,41 @@ impl Archive {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// A path promising more siblings than a forest has is refused at the
+    /// count, not after the frame runs out.
+    ///
+    /// A forest is [`MAX_HEIGHT`] deep at most, so a path longer than that is
+    /// not a path and nothing has to be built to know it. The decoder read the
+    /// count, built until the frame ended and answered `UnexpectedEnd`: a
+    /// megabyte of wire holds 32 768 hashes of thirty two bytes, five hundred
+    /// times the deepest real path, and the answer named the truncation rather
+    /// than the promise. A peer sending one and a link cut mid frame were the
+    /// same line in a log.
+    ///
+    /// Reachable from a stranger: `Placed` carries one of these, a cold input
+    /// carries one, and a handover carries an anchor and one per grace note.
+    #[test]
+    fn a_path_promising_more_siblings_than_a_forest_has_is_refused_at_the_count() {
+        let promise = u32::try_from(cairn_primitives::codec::MAX_SEQUENCE_LEN)
+            .unwrap()
+            .encode();
+        assert_eq!(
+            ForestProof::decode(&promise),
+            Err(CodecError::InvalidValue {
+                type_name: "ForestProof"
+            }),
+        );
+
+        let deepest = ForestProof {
+            siblings: vec![Hash32::ZERO; MAX_HEIGHT],
+        };
+        assert_eq!(
+            ForestProof::decode(&deepest.encode()).as_ref(),
+            Ok(&deepest),
+            "the deepest path a forest can hold has to survive the wire"
+        );
+    }
 
     /// In here rather than beside the other forest tests because it has to
     /// watch a place on an archive, and an archive offers no way to: the whole
