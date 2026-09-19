@@ -1,4 +1,4 @@
-//! An index kept alongside the pool rather than derived from it.
+//! Two indexes kept alongside the pool rather than derived from it.
 //!
 //! Every transfer arriving has to be asked whether anything already waiting
 //! spends a note it spends. That question used to be answered by walking every
@@ -8,6 +8,19 @@
 //! crate, beside `pool_by_rate`, and it is the same reason: a peer sending
 //! transfers as fast as it can would otherwise decide how much work each one
 //! causes.
+//!
+//! Which is why both are held here now. This file was written citing
+//! `pool_by_rate` as the precedent for the index it checks, and checked only
+//! the one it was written for. They are the same structure kept for the same
+//! reason, moved by the same four places, and deleting the removal of a
+//! `pool_by_rate` entry in `drop_pooled` left the whole suite green.
+//!
+//! What a stale entry there costs is worse than the one this file started
+//! with. `accept_transfer` walks the cheap end to make room and stops at
+//! `let Some(losing) = self.pool.get(victim) else { return Ok(false) }`, so
+//! one entry naming a transfer that has gone makes a full pool refuse
+//! everything that arrives after it. And the set grows under neither of the
+//! pool's two ceilings, because neither counts it.
 //!
 //! What the removal costs is that the index is now a thing that can be wrong.
 //! Derived, it could not disagree with the pool; kept, it agrees only for as
@@ -75,6 +88,25 @@ fn kept(store: &ChainStore) -> BTreeMap<NoteId, Hash32> {
         .collect()
 }
 
+/// The rate index as the pool itself would answer it.
+///
+/// A list and not a map, in both directions, because the kept side is a set of
+/// pairs and could hold one identifier twice at two different rates. Folded
+/// into a map that would be invisible, which is the shape of mistake this
+/// whole file is about.
+fn derived_rates(store: &ChainStore) -> Vec<(Hash32, u128)> {
+    let mut rates: Vec<(Hash32, u128)> = store.pooled_rates().map(|(id, at)| (*id, at)).collect();
+    rates.sort_unstable();
+    rates
+}
+
+/// The rate index as it is kept.
+fn kept_rates(store: &ChainStore) -> Vec<(Hash32, u128)> {
+    let mut rates: Vec<(Hash32, u128)> = store.pooled_by_rate().map(|(at, id)| (*id, at)).collect();
+    rates.sort_unstable();
+    rates
+}
+
 #[track_caller]
 fn agrees(store: &ChainStore, after: &str) {
     let kept = kept(store);
@@ -86,6 +118,15 @@ fn agrees(store: &ChainStore, after: &str) {
          spends of one note both wait; a note it names that the pool no longer \
          spends is quietly overwritten by the next spend of it, and until then \
          it is an entry under neither ceiling the pool has"
+    );
+    assert_eq!(
+        kept_rates(store),
+        derived_rates(store),
+        "after {after} the rate index kept beside the pool disagrees with the \
+         pool itself. An entry naming a transfer that has gone stops the walk \
+         `accept_transfer` makes to free room, so a full pool refuses \
+         everything; a transfer missing from it is one no miner reading this \
+         node ever picks; and neither of the pool's two ceilings counts either"
     );
 }
 
