@@ -1155,6 +1155,29 @@ impl ChainStore {
         self.pool.iter().map(|(id, held)| (id, &held.transfer))
     }
 
+    /// What each pooled transfer was worth when it was admitted.
+    ///
+    /// The pool's own answer, read off the pool. [`Self::pooled_by_rate`] is
+    /// the index kept beside it, which is a separate structure and can
+    /// therefore say something else. Both are public so that the two can be
+    /// compared: see `tests/audit_an_index_kept_beside_the_pool.rs`.
+    pub fn pooled_rates(&self) -> impl Iterator<Item = (&Hash32, u128)> {
+        self.pool
+            .iter()
+            .map(|(id, held)| (id, rate(held.fee, held.weight)))
+    }
+
+    /// The index kept beside the pool, cheapest first.
+    ///
+    /// Not derived. `selection` walks it from the dear end and `accept_transfer`
+    /// evicts from the cheap end, and both of those are on the path a peer can
+    /// drive as fast as it can send, which is why walking the pool for the
+    /// answer is not on offer. The cost of not deriving it is that it can be
+    /// wrong, and what it costs to be wrong is written where it is checked.
+    pub fn pooled_by_rate(&self) -> impl Iterator<Item = (u128, &Hash32)> {
+        self.pool_by_rate.iter().map(|(at, id)| (*at, id))
+    }
+
     /// Takes one transfer out of the pool and its indexes.
     fn drop_pooled(&mut self, id: &Hash32) {
         let Some(held) = self.pool.remove(id) else {

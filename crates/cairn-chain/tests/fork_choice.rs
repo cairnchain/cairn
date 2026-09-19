@@ -471,8 +471,17 @@ fn a_branch_forking_deeper_than_the_limit_is_refused_at_once() {
     let first = store.add_block(theirs_blocks[0].clone(), NOW);
     match first {
         Err(ChainError::TooOld { height, floor }) => {
-            assert_eq!(height, 1);
-            assert!(height < floor, "refused at height {height}, floor {floor}");
+            assert_eq!(height, theirs_blocks[0].header.height);
+            // `TooOld` is built under `height < floor`, so asserting it here
+            // is reading the condition back out of the error it produced: it
+            // holds wherever the floor is, including one block too deep.
+            // What the floor has to be is the deepest height a switch could
+            // still land on, which is where it is pinned.
+            assert_eq!(
+                floor,
+                store.height().unwrap() - store.undo_limit(),
+                "the floor is the deepest block a switch could still land on"
+            );
         }
         other => panic!("expected a refusal, got {other:?}"),
     }
@@ -857,4 +866,103 @@ fn a_block_from_rules_this_build_lacks_is_named_as_such_and_not_as_a_bad_block()
     // And every ordinary refusal still says nothing of the sort.
     assert!(ChainError::NotGenesis.outdated().is_none());
     assert!(ChainError::Corrupt.outdated().is_none());
+}
+
+/// The floor, from both sides of it, and what stands where it does not.
+///
+/// A block far enough below the tip can never be reached, because reaching it
+/// would mean undoing more than this node allows, so it is refused before it
+/// is stored rather than held for a branch that ends in the same refusal.
+///
+/// `a_branch_forking_deeper_than_the_limit_is_refused_at_once` asserted
+/// `height < floor` on the refusal, which is the condition `TooOld` is
+/// constructed under: it holds wherever the floor is. Nothing anywhere
+/// compared the floor with `tip - undo_limit()`, and moving it one block
+/// deeper leaves the whole suite green.
+///
+/// Both directions are harm and they are different harms. One block too
+/// shallow and a node refuses a fork it could have taken, deciding on its own
+/// that a branch the rest of the network switched to is too old to look at:
+/// it is off the chain and nothing tells it so. One block too deep and it
+/// stores and walks branches it can never reach the bottom of.
+///
+/// The floor is `tip - undo_limit()`, which is the block a switch lands on
+/// rather than the shallowest rival it could take. That is one block loose on
+/// purpose: a rival *at* the floor would have this node undo one more block
+/// than it may, and it is turned away, but by the held window rather than by
+/// this check. Three rivals, at the floor and on either side of it, so the
+/// looseness is written down rather than discovered by whoever tightens it.
+#[test]
+fn the_floor_is_the_deepest_block_a_switch_could_still_land_on() {
+    let miner = wallet(1);
+    let rival = wallet(2);
+    let undo = usize::try_from(ChainStore::new(params()).undo_limit()).unwrap();
+
+    // Heights: genesis is 0 and this node's branch runs to `undo + 60`, which
+    // puts the floor at 60.
+    let mut shared = Branch::new(params());
+    let genesis = shared.mine_empty(&miner, 1, 600);
+
+    let mut ours = shared.fork();
+    let mut blocks = ours.mine_empty(&miner, 58, 600);
+    let mut under = ours.fork();
+    blocks.extend(ours.mine_empty(&miner, 1, 600));
+    let mut level = ours.fork();
+    blocks.extend(ours.mine_empty(&miner, 1, 600));
+    let mut over = ours.fork();
+    blocks.extend(ours.mine_empty(&miner, undo, 600));
+
+    let mut store = ChainStore::new(params());
+    feed(&mut store, &genesis);
+    feed(&mut store, &blocks);
+
+    let tip = store.height().unwrap();
+    let floor = tip - store.undo_limit();
+    assert_eq!(
+        tip,
+        (undo + 60) as u64,
+        "the chain is not the length it was built to"
+    );
+    assert_eq!(
+        floor, 60,
+        "and so the rivals are not aimed where they were meant"
+    );
+
+    // One above the floor: the deepest fork this node will still take, because
+    // undoing onto it is exactly `undo_limit` blocks.
+    let deepest = over.mine_empty(&rival, 1, 600);
+    assert_eq!(deepest[0].header.height, floor + 1);
+    assert_eq!(
+        store.add_block(deepest[0].clone(), NOW).unwrap(),
+        Accepted::SideBranch,
+        "the deepest fork a switch could take was refused, so this node has decided \
+         on its own that a branch the network may switch to is not worth looking at"
+    );
+
+    // At the floor: one block more than may be undone. Not refused here, by
+    // design, and refused all the same: its parent is one below the window
+    // this node holds in full, which is the same verdict by another route.
+    let level = level.mine_empty(&rival, 1, 600);
+    assert_eq!(level[0].header.height, floor);
+    match store.add_block(level[0].clone(), NOW) {
+        Err(ChainError::UnknownParent(_)) => {}
+        other => panic!(
+            "a rival at the floor would undo one block past the limit; expected the \
+             held window to turn it away, got {other:?}"
+        ),
+    }
+
+    // Below it: unreachable whatever is built on top, and refused by name.
+    let gone = under.mine_empty(&rival, 1, 600);
+    assert_eq!(gone[0].header.height, floor - 1);
+    match store.add_block(gone[0].clone(), NOW) {
+        Err(ChainError::TooOld {
+            height,
+            floor: named,
+        }) => {
+            assert_eq!(height, floor - 1);
+            assert_eq!(named, floor);
+        }
+        other => panic!("expected the block under the floor to be refused, got {other:?}"),
+    }
 }
