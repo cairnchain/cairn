@@ -237,3 +237,94 @@ fn the_refusal_is_whole_for_a_caller_that_sent_more_than_it_reads() {
     );
     assert!(body.contains("too many connections"), "{body}");
 }
+
+/// A refusal reaches a caller whose request had not finished arriving.
+///
+/// The two tests above write their whole request in one call on the loopback,
+/// so every byte of it is in the receive buffer before `accept` returns and
+/// the drain clears it whatever its patience. They hold with the fix and
+/// without it alike. Replicated in two servers, one draining and one not, and
+/// run forty times against each: the assertion held forty out of forty on
+/// both.
+///
+/// This is the shape that tells them apart on a link with a round trip in it:
+/// the refusal is written the moment the connection is accepted, before the
+/// caller's body can arrive.
+///
+/// **It does not tell them apart here, and saying so beats implying it does.**
+/// Run against the server as it was before the drain was given patience, on
+/// the machine this was written on, it passes: the loopback delivers the body
+/// fast enough that even a drain which gives up on the first empty read finds
+/// it there. What `drain` itself does is held in `http.rs`, where it is a
+/// number rather than a race.
+///
+/// This is kept because the runner where this race was lost is not this
+/// machine, and it runs this.
+#[test]
+fn a_refusal_reaches_a_caller_that_had_not_finished_asking() {
+    // A head inside the cap and a body inside it, so nothing here is refused
+    // for its size. What is under test is when the bytes arrive, not how many.
+    const PIECES: usize = 8;
+    const PIECE: usize = 256;
+
+    let address = start();
+
+    let mut holding: Vec<TcpStream> = Vec::new();
+    for _ in 0..MAX_CONNECTIONS {
+        let Ok(stream) = TcpStream::connect(address) else {
+            break;
+        };
+        holding.push(stream);
+    }
+
+    let head = format!(
+        "POST /form HTTP/1.1\r\nhost: cairn\r\ncontent-length: {}\r\n\r\n",
+        PIECES * PIECE
+    );
+
+    let mut refused = String::new();
+    for _ in 0..8 {
+        let Ok(mut stream) = TcpStream::connect(address) else {
+            continue;
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        if stream.write_all(head.as_bytes()).is_err() {
+            continue;
+        }
+        let _ = stream.flush();
+        // The body, a piece at a time, starting after the refusal has already
+        // been written. This is the whole of the difference.
+        for _ in 0..PIECES {
+            thread::sleep(Duration::from_millis(20));
+            if stream.write_all(&[b'x'; PIECE]).is_err() {
+                break;
+            }
+            let _ = stream.flush();
+        }
+        let mut said = String::new();
+        let _ = stream.read_to_string(&mut said);
+        if said.starts_with("HTTP/1.1 503") {
+            refused = said;
+            break;
+        }
+    }
+    assert!(
+        !refused.is_empty(),
+        "the slots did not fill, so there is nothing here to measure"
+    );
+
+    let (head, body) = split(&refused);
+    assert_eq!(
+        body.len(),
+        declared(head),
+        "the head promised {} bytes and {} arrived. The caller was still sending when \
+         this server answered, which is what every caller on a real link is doing, and \
+         closing over what had not been read reset the connection and took the answer \
+         with it.",
+        declared(head),
+        body.len()
+    );
+    assert!(body.contains("too many connections"), "{body}");
+}
