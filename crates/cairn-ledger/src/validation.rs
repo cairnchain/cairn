@@ -418,6 +418,37 @@ impl ConsensusParams {
     ///
     /// The last activation at or below it, so a block is judged by the rules
     /// in force where it sits rather than by today's.
+    /// The first height these rules would be judged under a version `known`
+    /// cannot apply, and the version they would ask for.
+    ///
+    /// A node finds out it is too old by stopping: `version_at` reaches a
+    /// version its build does not implement, `SoftwareTooOld` comes back for
+    /// every block from that height on, and the node is off the chain. The
+    /// height is knowable long before, because a rule change is announced by
+    /// being put in this schedule; the only thing standing between an operator
+    /// and that date is somebody saying it out loud.
+    ///
+    /// Nothing is fetched to answer this. The schedule is in the rules the
+    /// node already runs, and a chain's own height is what turns it into a
+    /// date. There is no feed to poll, no key to trust, and no way for anybody
+    /// to bring the date forward by saying so. That is the whole reason this
+    /// is the shape the answer takes rather than a check against a published
+    /// list of releases: a release feed would put whoever serves it in a
+    /// position to tell every node when to change its rules.
+    ///
+    /// `None` while the schedule asks for nothing this build lacks, which is
+    /// every build up to date with the rules it ships under.
+    #[must_use]
+    pub fn leaves_behind(&self, known: u16) -> Option<Activation> {
+        // The first, and `schedule_is_sound` is why first is the right one: a
+        // schedule rises in both height and version, so the earliest entry
+        // asking for more than `known` is also the lowest height that does.
+        self.activations
+            .iter()
+            .find(|activation| activation.version > known)
+            .copied()
+    }
+
     pub fn version_at(&self, height: u64) -> u16 {
         self.activations
             .iter()
@@ -1581,6 +1612,60 @@ pub fn disconnect_block(state: &mut LedgerState, connected: &ConnectedBlock) {
 mod tests {
     use super::*;
     use cairn_crypto::SecretKey;
+
+    /// The schedule says when a build runs out, and both edges of that.
+    ///
+    /// `leaves_behind` is read by `cairnd` to tell an operator how long this
+    /// build has. It was tested there and only there, so `cargo mutants`
+    /// turned its `>` into `<` and into `>=` and this crate's own suite stayed
+    /// green both times: a function whose behaviour only a dependent holds is
+    /// a function relying on who happens to be built beside it, which is how
+    /// the one guard on the hash counter came to live under another crate's
+    /// feature flag.
+    ///
+    /// Both edges matter and they fail differently. Too eager and a build
+    /// level with its schedule announces a deadline it does not have, which
+    /// teaches an operator to ignore the line. Too slow and a build one
+    /// version short says nothing at all, which is the whole defect this
+    /// exists to close.
+    #[test]
+    fn the_schedule_says_when_a_build_runs_out_and_not_before() {
+        const OPENS: Activation = Activation {
+            height: 0,
+            version: 3,
+        };
+        const CHANGES: Activation = Activation {
+            height: 9_000,
+            version: 4,
+        };
+
+        let mut rules = ConsensusParams::testnet();
+        rules.activations = &[OPENS, CHANGES];
+
+        // A build that has the later rules is not behind anything.
+        assert_eq!(
+            rules.leaves_behind(4),
+            None,
+            "a build level with the schedule"
+        );
+        assert_eq!(rules.leaves_behind(5), None, "and one ahead of it");
+
+        // One short, and the answer is the entry that asks for more, not the
+        // one it already satisfies.
+        assert_eq!(
+            rules.leaves_behind(3),
+            Some(CHANGES),
+            "a build one version short is behind at the height the change lands"
+        );
+
+        // Two short, and it is still the first entry it cannot apply rather
+        // than the last one it can, because the first is where it stops.
+        assert_eq!(
+            rules.leaves_behind(2),
+            Some(OPENS),
+            "a build that cannot even open is behind from height nought"
+        );
+    }
 
     fn pending(seed: u8, transfer: usize, input: usize, good: bool) -> Pending {
         let key = SecretKey::from_bytes(&[seed | 1; 32]);

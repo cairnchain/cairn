@@ -9,6 +9,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use cairn_chain::{Accepted, Outdated};
+use cairn_ledger::block::BLOCK_VERSION;
+use cairn_ledger::validation::ConsensusParams;
 use cairn_net::node::{
     Behind, Probation, Stranded, Unjudged, Unread, Unweighable, Unwritten, MAX_BEHIND,
 };
@@ -143,6 +145,16 @@ fn run(arguments: &[String]) -> Result<Ending, Stopping> {
             "             it does not mine, does not take transfers, and does not \
              answer as a node on a chain until it has"
         );
+    }
+    // Before the first block arrives, because this is the one thing about a
+    // node's future that is already settled when it starts: the schedule is in
+    // the rules it runs. An operator who reads it here has the whole of the
+    // notice period; one who finds out from `too_old` has however long it
+    // takes them to notice the height has stopped.
+    if let Some(said) = rules_running_out(&options.params, node.height()) {
+        for line in wrapped(&said) {
+            println!("             {line}");
+        }
     }
     println!();
 
@@ -782,6 +794,67 @@ fn too_old(unjudged: &Unjudged) -> String {
     )
 }
 
+/// What an operator is told about the rules running out under this build.
+///
+/// The other half of [`too_old`], and the half that arrives in time to be
+/// acted on. That one is a reading of what strangers have sent: blocks under
+/// a version this build has no rules for, which is evidence a stranger can
+/// manufacture, so it hedges and says so. This one is a reading of the rules
+/// this node already runs. A rule change is announced by being put in the
+/// schedule, so the height is known the day the build ships, and nobody can
+/// say anything to bring it forward.
+///
+/// That is also why the answer is not a check against a list of releases
+/// somewhere. A node that asked a server whether it should update would be a
+/// node whose rules the server's owner decides, which in a currency is the
+/// whole of the thing. The schedule is already in the binary and the chain's
+/// own height is what turns it into a date.
+///
+/// Two shapes, because two situations want different words. A height ahead is
+/// something to plan around. A height already passed is a node that is not
+/// following this chain, whatever the line above it says.
+fn rules_running_out(params: &ConsensusParams, height: Option<u64>) -> Option<String> {
+    let leaving = params.leaves_behind(BLOCK_VERSION)?;
+    let reached = height.unwrap_or(0);
+
+    if leaving.height <= reached {
+        return Some(format!(
+            "this build cannot follow this chain any further. At height {} the rules              became version {}, and this build has the rules only for version {}, so              every block from there is refused. Nothing on the disk is lost by              installing a newer one: the chain here is picked up where it was left.",
+            leaving.height, leaving.version, BLOCK_VERSION,
+        ));
+    }
+
+    let blocks = leaving.height.saturating_sub(reached);
+    Some(format!(
+        "this build has {blocks} blocks left on this chain, about {}. At height {} the          rules become version {} and this build has the rules only for version {}, so          from there it stops following the chain. This is read off the schedule in this          node's own rules rather than asked of anybody, so the date does not move.",
+        roughly(blocks.saturating_mul(params.target_block_time)),
+        leaving.height,
+        leaving.version,
+        BLOCK_VERSION,
+    ))
+}
+
+/// A stretch of seconds, said the way somebody plans around it.
+///
+/// Rounded hard and openly: "about two months" is what a person acts on, and
+/// a figure to the minute over a stretch that long would be a precision the
+/// block rate does not have. Not a date either, and deliberately not offered
+/// as one: blocks come at the rate the network mines them, and the schedule
+/// is written in heights.
+fn roughly(seconds: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    const MONTH: u64 = 30 * DAY;
+    match seconds {
+        s if s >= 2 * MONTH => format!("{} months", s / MONTH),
+        s if s >= 2 * DAY => format!("{} days", s / DAY),
+        s if s >= 2 * HOUR => format!("{} hours", s / HOUR),
+        s if s >= 2 * MINUTE => format!("{} minutes", s / MINUTE),
+        s => format!("{s} seconds"),
+    }
+}
+
 /// What an operator is told when this machine's clock is behind the network's.
 ///
 /// The one line here that names something outside the program. Every other
@@ -929,8 +1002,9 @@ fn short(text: &str) -> &str {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod said_out_loud {
     use super::{
-        cannot_weigh, clock_is_slow, dropped_a_write, falling_behind, lost_the_disk, still_filling,
-        too_old, what_the_chain_did, wrapped, Accepted,
+        cannot_weigh, clock_is_slow, dropped_a_write, falling_behind, lost_the_disk, roughly,
+        rules_running_out, still_filling, too_old, what_the_chain_did, wrapped, Accepted,
+        ConsensusParams, BLOCK_VERSION,
     };
     use cairn_net::node::{Behind, Unjudged, Unweighable, Unwritten, Writing};
     use cairn_net::Filling;
@@ -1129,6 +1203,109 @@ mod said_out_loud {
     }
 
     /// A log holding nothing at all is the awkward case, and it has to be a
+    /// The notice period, from the schedule rather than from anybody.
+    ///
+    /// Three shapes and all three reachable, which is the half of this a test
+    /// like it usually misses. A build level with its schedule says nothing at
+    /// all; one with a change ahead of it says how far; one already past the
+    /// change says it has stopped. The middle one is the reason the whole
+    /// thing exists, and the last one is the one nothing else in this file
+    /// would ever say, because `too_old` only speaks when a stranger sends a
+    /// block and a node past its own schedule may be hearing nothing at all.
+    #[test]
+    fn the_notice_period_is_read_off_the_schedule_and_not_off_a_server() {
+        use cairn_ledger::block::Activation;
+
+        // Level with its schedule: there is nothing to say and it says
+        // nothing. A line here would be a warning a reader learns to skip.
+        let mut level = ConsensusParams::testnet();
+        level.activations = &[Activation {
+            height: 0,
+            version: BLOCK_VERSION,
+        }];
+        assert_eq!(rules_running_out(&level, Some(900)), None);
+
+        // A change ahead. The blocks and the stretch are both said, because a
+        // height is what the rule is written in and a stretch is what somebody
+        // plans around.
+        let mut ahead = ConsensusParams::testnet();
+        ahead.activations = &[
+            Activation {
+                height: 0,
+                version: BLOCK_VERSION,
+            },
+            Activation {
+                height: 9_000,
+                version: BLOCK_VERSION + 1,
+            },
+        ];
+        ahead.target_block_time = 600;
+        let Some(said) = rules_running_out(&ahead, Some(1_000)) else {
+            panic!("a change ahead has to be a notice");
+        };
+        eprintln!("{}", wrapped(&said).join("\n"));
+        assert!(said.contains("8000 blocks left"), "how many: {said}");
+        assert!(said.contains("55 days"), "and how long that is: {said}");
+        assert!(said.contains("height 9000"), "and where: {said}");
+        assert!(
+            said.contains("does not move"),
+            "and that nobody can bring it forward, which is the whole point: {said}"
+        );
+
+        // Already past it. A different sentence, because this is not a thing
+        // to plan around any more.
+        let Some(past) = rules_running_out(&ahead, Some(9_000)) else {
+            panic!("past the change is still a notice, and a different one");
+        };
+        eprintln!("{}", wrapped(&past).join("\n"));
+        assert!(
+            past.contains("cannot follow this chain"),
+            "a node past its schedule is off the chain, not warned: {past}"
+        );
+        assert!(
+            past.contains("picked up where it was left"),
+            "and what to do about it is worth saying: {past}"
+        );
+    }
+
+    /// Every stretch this can say, and the edge of each.
+    ///
+    /// `roughly` has five branches and the notice above exercised one. Two
+    /// mutants survived on that: the months guard turned to `false` changed
+    /// nothing any test could see, which means a chain a year from its rule
+    /// change would have been described in days and nobody would have known.
+    ///
+    /// The edges are what is asked, because a threshold is where a rounding
+    /// function is wrong if it is wrong anywhere. Each is checked at the
+    /// value that crosses it and at the value just under.
+    #[test]
+    fn every_stretch_this_can_say_is_said_at_its_own_edge() {
+        const MINUTE: u64 = 60;
+        const HOUR: u64 = 60 * MINUTE;
+        const DAY: u64 = 24 * HOUR;
+        const MONTH: u64 = 30 * DAY;
+
+        assert_eq!(roughly(0), "0 seconds");
+        assert_eq!(
+            roughly(2 * MINUTE - 1),
+            "119 seconds",
+            "just under a minute"
+        );
+        assert_eq!(roughly(2 * MINUTE), "2 minutes");
+        assert_eq!(roughly(2 * HOUR - 1), "119 minutes", "just under an hour");
+        assert_eq!(roughly(2 * HOUR), "2 hours");
+        assert_eq!(roughly(2 * DAY - 1), "47 hours", "just under a day");
+        assert_eq!(roughly(2 * DAY), "2 days");
+        assert_eq!(roughly(2 * MONTH - 1), "59 days", "just under a month");
+        assert_eq!(roughly(2 * MONTH), "2 months");
+        assert_eq!(
+            roughly(14 * MONTH),
+            "14 months",
+            "a year and more is still said in months, because a schedule is \
+             written in heights and a year of blocks is not a year"
+        );
+    }
+
     /// sentence rather than the word "none" in a gap.
     #[test]
     fn a_disk_with_no_blocks_on_it_is_still_a_sentence() {
