@@ -22,7 +22,7 @@
     clippy::arithmetic_side_effects
 )]
 
-use cairn_chain::{Accepted, ChainStore, HELD_WINDOW};
+use cairn_chain::{Accepted, ChainStore, HELD_WINDOW, MILESTONE};
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader, BLOCK_VERSION};
 use cairn_ledger::note::{NetworkId, Note, NoteId};
@@ -410,7 +410,12 @@ fn what_the_milestones_cost_is_what_the_block_rate_says_they_cost() {
     }
 
     let height = store.height().unwrap();
-    let milestones = store.held_ids().len() - HELD_WINDOW;
+    // Asked of the branch and not worked out from `held_ids`, whose list is
+    // what this node can still name rather than what it stores. The two differ
+    // by exactly one at every height past the window: the newest milestone is
+    // inside it, so it is in that list once and stored all the same, and
+    // subtracting the window from the list's length counted it as free.
+    let milestones = store.milestone_count();
     assert_eq!(
         milestones as u64,
         height / 1024 + 1,
@@ -451,5 +456,65 @@ fn what_the_milestones_cost_is_what_the_block_rate_says_they_cost() {
     assert!(
         !WINDOW.contains("none of it grows with the chain"),
         "the example is back to saying nothing grows with the chain"
+    );
+}
+
+/// Each identifier a node can name, named once, in the order it says.
+///
+/// `held_ids` promises the window a reorganisation may reach and one
+/// identifier every `MILESTONE` heights **before that**, oldest first. It used
+/// to hand back the whole milestone list followed by the whole window, and the
+/// window is `HELD_WINDOW` wide where the milestones are `MILESTONE` apart, so
+/// one milestone is always inside the window past the first thousand blocks.
+/// Measured at height 1536: 1 027 identifiers of which 1 026 are distinct, in
+/// the order 0, 1024, 512, 513 and on. Both halves of the promise were false,
+/// at every height past the window.
+///
+/// It had three readers, all tests, and one of them worked out what the branch
+/// costs in memory as `held_ids().len() - HELD_WINDOW`, which was right only
+/// because of the duplicate: the milestone inside the window is stored, and
+/// subtracting the window counted it as free. That reader asks
+/// `milestone_count` now, and the two numbers differ by one on purpose.
+#[test]
+fn the_identifiers_a_node_can_name_are_each_named_once_and_in_order() {
+    let rules = params();
+    let miner = wallet(1);
+    let mut shared = Chain::new(rules);
+    // Past the window and past three milestone boundaries, so there is both a
+    // milestone below the window and a milestone inside it.
+    let blocks = shared.mine_empty(&miner, 3 * 1024 + 8);
+
+    let mut store = ChainStore::new(rules);
+    for block in &blocks {
+        store.add_block(block.clone(), NOW).unwrap();
+    }
+
+    let oldest_held = blocks.len() - HELD_WINDOW;
+    let spacing = usize::try_from(MILESTONE).unwrap();
+    let mut expected: Vec<Hash32> = (0..oldest_held)
+        .step_by(spacing)
+        .map(|height| blocks[height].id())
+        .collect();
+    let below = expected.len();
+    expected.extend(blocks[oldest_held..].iter().map(Block::id));
+
+    assert!(
+        below > 0 && store.milestone_count() > below,
+        "the fixture needs a milestone below the window and one inside it, or \
+         neither half of this is being asked: {below} below, {} stored",
+        store.milestone_count()
+    );
+
+    let held = store.held_ids();
+    assert_eq!(
+        held, expected,
+        "the identifiers a node can name are not the window and the milestones \
+         before it, oldest first"
+    );
+    let distinct: std::collections::BTreeSet<Hash32> = held.iter().copied().collect();
+    assert_eq!(
+        distinct.len(),
+        held.len(),
+        "an identifier is named twice, so counting this list counts it twice"
     );
 }
