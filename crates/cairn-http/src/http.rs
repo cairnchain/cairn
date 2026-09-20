@@ -1,10 +1,21 @@
 //! A small HTTP server.
 //!
-//! It answers GET and HEAD, reads no request body, and serves nothing from the
-//! filesystem, so there is no upload path and no way to name a file outside
-//! what was compiled in. One thread per connection, the same choice the node
-//! makes for its peers and for the same reason: a reader can hold the whole
-//! thing in their head.
+//! It answers GET, HEAD and POST, and serves nothing from the filesystem, so
+//! there is no upload path and no way to name a file outside what was
+//! compiled in. A body is read only for a POST and only up to
+//! [`MAX_BODY_BYTES`]; anything larger is refused with a 413 before a byte of
+//! it is taken. One thread per connection, the same choice the node makes for
+//! its peers and for the same reason: a reader can hold the whole thing in
+//! their head.
+//!
+//! This said "answers GET and HEAD, reads no request body" for as long as it
+//! has answered POST and read bodies, which is since three minutes after the
+//! sentence was written. An attack surface is the one thing a header like
+//! this is read for, and the method it left out is the one that spends money:
+//! the wallet's send form is a POST. `the_header_names_every_method_this_
+//! answers` holds the sentence against the code now, so the next method is a
+//! decision somebody writes down rather than one the header quietly stops
+//! describing.
 //!
 //! A thread each is only affordable because a connection is bounded three
 //! ways: how many are served at once, how many come from one address, and how

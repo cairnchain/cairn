@@ -857,3 +857,67 @@ impl<R: Read> Read for Counting<R> {
         Ok(took)
     }
 }
+
+/// The header names every method this server answers.
+///
+/// A module header on an HTTP server is read for one thing: what a stranger
+/// can reach. This one said "answers GET and HEAD, reads no request body" from
+/// three minutes before POST landed until an enumeration of every checkable
+/// sentence in the repository turned it up, and the method it left out is the
+/// one that spends money, since the wallet's send form is a POST.
+///
+/// So the sentence is held against the code rather than against whoever
+/// remembers. The methods are read out of the `match` that decides them, and
+/// each has to appear in the header. A new one is then a decision somebody
+/// writes down, not one the header quietly stops describing.
+#[test]
+fn the_header_names_every_method_this_answers() {
+    const SOURCE: &str = include_str!("../src/http.rs");
+
+    // The sentence that enumerates them, and not the header at large. The
+    // first version of this asked whether each method appeared anywhere in
+    // the header; the paragraph below the summary mentions POST twice, so
+    // deleting POST from the enumerating sentence left it green. That is the
+    // same shape as the defect found in the specification table this morning,
+    // presence asked as though it were the claim, and mutating in both
+    // directions is what showed it.
+    let header: String = SOURCE
+        .lines()
+        .take_while(|line| line.starts_with("//!"))
+        .map(|line| line.trim_start_matches("//!").trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let (_, rest) = header
+        .split_once("It answers")
+        .expect("the header opens by saying what this answers");
+    let says = rest
+        .split_once(", and serves")
+        .expect("the enumerating sentence ends where the filesystem claim begins")
+        .0;
+
+    // The arms of the match that turns a method into what to do with it. Read
+    // out of the source so the list cannot be kept by hand either.
+    let answered: Vec<&str> = SOURCE
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let rest = line.strip_prefix('"')?;
+            let (method, tail) = rest.split_once('"')?;
+            tail.trim_start().starts_with("=> (").then_some(method)
+        })
+        .collect();
+
+    assert!(
+        answered.len() >= 3,
+        "the methods could not be read out of the source, so this test is \
+         asserting nothing: {answered:?}"
+    );
+    for method in &answered {
+        assert!(
+            says.contains(method),
+            "this server answers {method} and its header does not say so. The \
+             header is what somebody reads to know what a stranger can reach: \
+             {answered:?}"
+        );
+    }
+}
