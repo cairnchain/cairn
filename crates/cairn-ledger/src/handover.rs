@@ -251,6 +251,8 @@ pub enum HandoverError {
     RecentNotConsecutive,
     #[error("a recent header carries no work")]
     RecentWithoutWork,
+    #[error("the work at {at} in the recent run does not add up")]
+    RecentWorkDoesNotAddUp { at: u64 },
     #[error("too few recent headers: {given}, and a chain at height {height} has more")]
     TooFewRecent { given: usize, height: u64 },
     #[error("the proof for the note at {position} is not one the cold set gives")]
@@ -821,6 +823,54 @@ fn belongs_to_this_network(
 }
 
 /// Checks the run of recent headers hands over what it claims.
+///
+/// The run is the last [`RECENT_HEADERS`] headers of the chain, ending at the
+/// anchor. It is what seeds the difficulty window the buried run above it is
+/// then judged against, which is why what it is allowed to say matters more
+/// than its own length suggests.
+///
+/// **Why it cannot be forged, which is not the same as why it is checked.**
+/// Every field of a header is inside its identifier, and this walks the run
+/// demanding that each names the one below it. So the run is the hash
+/// ancestry of the anchor, and the anchor is pinned twice before this is
+/// called: it has to verify in the tip's forest at its own height, and the
+/// rebuild has to put the buried run back on top of it and come out at
+/// `tip.history`. Changing one field of one header means finding a second
+/// preimage. On the network path the tip is not the sender's either, since
+/// `take_the_ledger` refuses a handover whose tip is not the one the sampling
+/// weighed.
+///
+/// **So the version and the work below refuse nothing the chain would not
+/// already refuse, and they are here anyway.** Bending either changes the
+/// identifier the header above names, so the consecutive check catches the
+/// same tamper; what these buy is which sentence comes back. "The work at 812
+/// does not add up" is something somebody can act on, and "not consecutive" is
+/// the same fact with the reason removed. They are written before the chain
+/// check for that reason and no other, and both are free of any window.
+///
+/// The second thing they buy is that this run carries its own argument. A
+/// guard that holds only because another guard covers it becomes wrong the day
+/// the other one moves, and nothing says so. This run seeds the window the
+/// burial above it is judged against, which makes it the wrong place to leave
+/// an argument borrowed from the forest.
+///
+/// **What is not checked, and why not.** The median time past reads eleven
+/// headers, so it is the chain's own rule from the eleventh entry on and is
+/// *not* the rule below that: `median_time_past` silently shortens its window,
+/// and a shortened median over timestamps that are not monotone can exceed the
+/// full one and refuse an honest handover. It belongs here with a guard and a
+/// measurement, not without them.
+///
+/// The difficulty is worse than circular. The retarget reads ninety gaps, so
+/// judging a header needs ninety one below it, and the run carries ninety
+/// below the anchor. `check_buried` escapes that by starting one above the
+/// anchor, where the message does hold ninety one. No header inside this run
+/// can be judged however long the run is made, because each one added is
+/// itself unjudgeable; the anchor could be, at the price of carrying one more
+/// header on the wire. Measured, that is worth 1.38 times the cost of a
+/// burial, at most 1.90, and only against a sender free to choose the anchor,
+/// which the network path does not allow. A wire format is not changed for
+/// that.
 fn check_recent(handover: &Handover, params: &ConsensusParams) -> Result<(), HandoverError> {
     let at = &handover.at;
     let Some(last) = handover.recent.last() else {
@@ -840,11 +890,51 @@ fn check_recent(handover: &Handover, params: &ConsensusParams) -> Result<(), Han
         });
     }
 
+    let mut behind: Option<&BlockHeader> = None;
     for (index, header) in handover.recent.iter().enumerate() {
         belongs_to_this_network(header, params)?;
+
+        // A header carries exactly the version the rules require where it
+        // sits, so one carrying anything else is a header no chain accepted.
+        //
+        // Only that half. Whether this build can judge at all is settled once
+        // at the top of `accept`, against the tip, and the tip is the highest
+        // header a handover carries: a schedule rises in both height and
+        // version, which the build asserts, so `version_at` cannot demand more
+        // of a header in this run than it demands of the tip. An arm here for
+        // `SoftwareTooOld` was written and taken out again, because it could
+        // not fire — found by putting `>` for `<` and watching the suite stay
+        // green.
+        let wanted = params.version_at(header.height);
+        if header.version != wanted {
+            return Err(HandoverError::WrongVersion {
+                height: header.height,
+                found: header.version,
+                required: wanted,
+            });
+        }
+
         if !meets_target(&header.id(), header.difficulty) {
             return Err(HandoverError::RecentWithoutWork);
         }
+
+        // The work adds up across the run, which ties `at.total_work` to the
+        // headers below it where `check_buried` ties it to the tip from above.
+        // The first header has nothing behind it in the message, so it is the
+        // one this cannot ask about.
+        //
+        // Before the consecutive check on purpose. Both catch the same tamper,
+        // because changing a total changes the identifier the header above it
+        // names, and the one that runs first is the one that gets to say what
+        // was wrong. "The work at 812 does not add up" is a sentence somebody
+        // can act on; "not consecutive" is the same fact with the reason taken
+        // out.
+        if let Some(behind) = behind {
+            if header.total_work != behind.total_work.saturating_add(work_of(header.difficulty)) {
+                return Err(HandoverError::RecentWorkDoesNotAddUp { at: header.height });
+            }
+        }
+
         // Consecutive, so the run really is the tail of one chain rather than
         // headers gathered from wherever they suited. Each one names what it
         // was built on, and the last one is the header the sampling accepted,
@@ -855,6 +945,8 @@ fn check_recent(handover: &Handover, params: &ConsensusParams) -> Result<(), Han
                 return Err(HandoverError::RecentNotConsecutive);
             }
         }
+
+        behind = Some(header);
     }
     Ok(())
 }

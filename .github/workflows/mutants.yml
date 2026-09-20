@@ -81,9 +81,17 @@ jobs:
           # `--in-place` rather than a copy of the tree, so the build this
           # job already paid for is the one every mutant reuses. It cannot be
           # combined with `--jobs`: one tree cannot be built two ways at once.
+          #
+          # The test timeout is derived from the unmutated run rather than
+          # stated. It was stated, at three minutes, and `cairn-ledger`'s own
+          # suite takes longer than that on this machine, so the baseline
+          # timed out and the job reported that no mutants could be tested —
+          # a number written from the outside, against a suite whose length is
+          # not this file's to know. The floor is here only so a crate whose
+          # tests take a second does not get a one second budget.
           cargo mutants --in-diff pr.diff \
             --test-workspace=false \
-            --timeout 180 \
+            --minimum-test-timeout 120 \
             --in-place
       - name: The survivors, if any
         if: failure()
@@ -116,7 +124,7 @@ jobs:
           cargo mutants \
             --shard ${{ matrix.shard }}/8 \
             --test-workspace=false \
-            --timeout 180 \
+            --minimum-test-timeout 120 \
             -j 2
       - name: The survivors, which are the point of this run
         if: always()

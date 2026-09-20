@@ -828,3 +828,62 @@ fn a_grace_window_holding_more_notes_than_the_rules_keep_is_refused() {
          siblings refuse"
     );
 }
+
+/// The recent run has to carry its own argument, not borrow one.
+///
+/// It cannot be forged: every field of a header is inside its identifier, the
+/// run is chained by `previous` up to the anchor, and the anchor is pinned
+/// twice into the forest of a tip the sampling weighed. So **neither of these
+/// two refusals catches anything the chain would let through** — bending
+/// either field changes the identifier the header above names, and the
+/// consecutive check would refuse it.
+///
+/// Said plainly because the first version of this test did not know it. It
+/// bent the last entry of the run, which is the anchor, and got
+/// `RecentNotEndingAtTip`; bending any other entry gets `RecentNotConsecutive`
+/// unless the new check runs first. That is what nearly shipped here: two
+/// guards that could not fire, on a day spent removing them.
+///
+/// What they buy is the sentence. "The work at 812 does not add up" is
+/// something somebody can act on; "not consecutive" is the same fact with the
+/// reason removed. And they let `check_recent` carry its own argument rather
+/// than borrow one from the forest, which matters because this run seeds the
+/// window the burial above it is judged against.
+///
+/// Both are free of any window: the version is a function of the height alone
+/// and the work is an addition between neighbours. The two that are not free
+/// are written up on `check_recent`, along with why they are not here.
+#[test]
+fn a_recent_run_is_refused_when_its_version_or_its_work_does_not_hold() {
+    let params = params();
+    let miner = wallet(1);
+    let mut node = Node::new();
+    node.mine_empty(&miner, RECENT_HEADERS + 8);
+
+    let honest = node.handover();
+    accept(&honest, &params).expect("the run this chain really has");
+    let last = honest.recent.len() - 1;
+
+    // A version no schedule of this build asks for, on a header inside the
+    // run rather than on the anchor, which was the only one asked before.
+    let mut bent = honest.clone();
+    bent.recent[last - 1].version = bent.recent[last - 1].version.saturating_add(1);
+    match accept(&bent, &params).err() {
+        Some(HandoverError::WrongVersion { height, .. }) => {
+            assert_eq!(height, honest.recent[last - 1].height);
+        }
+        other => panic!("a recent header naming rules it was not mined under: {other:?}"),
+    }
+
+    // Work that does not add up across the run. This is what ties the
+    // anchor's total to the headers below it; `check_buried` ties it to the
+    // tip from above, and between the two there was nothing.
+    let mut bent = honest.clone();
+    bent.recent[last - 1].total_work = bent.recent[last - 1].total_work.saturating_add(1);
+    match accept(&bent, &params).err() {
+        Some(HandoverError::RecentWorkDoesNotAddUp { at }) => {
+            assert_eq!(at, honest.recent[last - 1].height);
+        }
+        other => panic!("a recent run whose work does not add up: {other:?}"),
+    }
+}
