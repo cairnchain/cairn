@@ -387,6 +387,15 @@ fn state(wallet: &Wallet) -> Response {
         json.end_object();
     }
     json.end_array();
+    // How many there were, for the same reason `movements_held` is written
+    // ten lines above and by the rule written beside the other face: a list
+    // that stops short and does not say where it stopped has told somebody
+    // something untrue about their own money. This list holds up to
+    // `MAX_UNDONE`, which is two hundred and fifty six, and shows a hundred,
+    // and the page renders what it shows as a finished sentence ending
+    // "Whoever you were paying has not been paid". A payment missing from it
+    // reads as a payment that went through.
+    json.field_usize("undone_held", undone.len());
 
     let covered = wallet.history_covers();
     match covered.from {
