@@ -78,11 +78,13 @@ jobs:
           wc -l pr.diff
       - name: Mutants on the lines this change touched
         run: |
+          # `--in-place` rather than a copy of the tree, so the build this
+          # job already paid for is the one every mutant reuses. It cannot be
+          # combined with `--jobs`: one tree cannot be built two ways at once.
           cargo mutants --in-diff pr.diff \
             --test-workspace=false \
             --timeout 180 \
-            --in-place \
-            -j 2
+            --in-place
       - name: The survivors, if any
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -108,11 +110,13 @@ jobs:
         run: cargo install --locked cargo-mutants
       - name: One eighth of the mutants
         run: |
+          # A copy per job here rather than `--in-place`, because this run is
+          # hundreds of mutants and two at a time is worth more than the build
+          # `--in-place` saves. The two flags are mutually exclusive.
           cargo mutants \
             --shard ${{ matrix.shard }}/8 \
             --test-workspace=false \
             --timeout 180 \
-            --in-place \
             -j 2
       - name: The survivors, which are the point of this run
         if: always()

@@ -28,6 +28,15 @@ exclude_re = [
     # whoever is spending it; both are answers rather than messages, and a
     # mutant surviving in either is worth having.
     "impl .*fmt::Debug",
+    # `|` and `^` between the two halves of a hexadecimal byte. The high
+    # nibble is shifted four places and the low one is at most fifteen, so the
+    # two operands never share a set bit and the two operators cannot disagree.
+    # No test can catch this because there is nothing to catch: it is an
+    # equivalent mutant, which is the one thing a survivor can honestly be
+    # besides a missing test. Narrow to these two functions on purpose — the
+    # same operators elsewhere are a real question.
+    "replace \\| with \\^ in decode",
+    "replace \\| with \\^ in decode_array",
 ]
 
 # A mutant that makes a loop run forever is one the suite would have caught if
