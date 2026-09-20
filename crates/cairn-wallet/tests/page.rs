@@ -365,3 +365,45 @@ fn a_page_showing_a_young_reward_does_not_say_the_wallet_is_empty() {
 
     running.stop();
 }
+
+/// Every list the account cuts short says how many there were.
+///
+/// The rule is written beside the other face, at `main.rs`: a list that stops
+/// short and does not say where it stopped is a list that has told somebody
+/// something untrue about their own money. Four places ask how much of a list
+/// to show. Three answered it and said so; the fourth showed a hundred of up
+/// to `MAX_UNDONE` = 256 undone payments and said nothing, and the page renders
+/// what it is given as a finished sentence ending "Whoever you were paying has
+/// not been paid". A payment missing from that list reads as a payment that
+/// went through.
+///
+/// Neither count had a test. `movements_held` was written correctly and was
+/// held by nothing, which is why its twin could be missing without anybody
+/// noticing: there was no test to extend.
+///
+/// This pins the fields and their values. It does not reach the truncating
+/// branch, which would need a reorganisation undoing more than a hundred
+/// payments; what it catches is the defect that was actually there, which is a
+/// count that is not written at all.
+#[test]
+fn every_list_the_account_cuts_short_says_how_many_there_were() {
+    let running = Running::start("counts", 6, 3);
+    let host = running.host();
+    let secret = running.secret().to_owned();
+
+    let (status, body) = running.get(&format!("/api/state?k={secret}"), &host, "");
+    assert_eq!(status, 200);
+
+    // Three blocks of rewards, so three movements and nothing undone.
+    assert!(
+        body.contains("\"movements_held\":3"),
+        "the account does not say how many movements it is holding: {body}"
+    );
+    assert!(
+        body.contains("\"undone_held\":0"),
+        "the account does not say how many undone payments it is holding, so a \
+         page that shows a hundred of them cannot say it showed a hundred: {body}"
+    );
+
+    running.stop();
+}
