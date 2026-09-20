@@ -102,6 +102,15 @@ pub struct PeerState {
     /// A peer that answers everything else but never delivers the blocks it
     /// was asked for would otherwise hold this node mid batch indefinitely,
     /// which is a way of stalling a sync without ever looking unresponsive.
+    ///
+    /// The only time this struct keeps, and deliberately. When a peer last
+    /// said anything is a different question with a different answer, and the
+    /// answer is `last_heard` in the connection loop, which is where the
+    /// decision that reads it is made: ninety seconds of quiet ends the
+    /// connection. A `last_message` was kept here as well, written on every
+    /// message from every peer and read by nothing, which is two records of
+    /// one fact where only one of them decides. Whoever wants a rule about a
+    /// quiet peer wants the one in the loop.
     pub asked_at: u64,
     /// Where the connection came from, filled in by whoever opened it.
     pub remote: Option<IpAddr>,
@@ -115,7 +124,6 @@ pub struct PeerState {
     /// Where this peer says it can be reached, which is its own port on the
     /// address the connection came from.
     pub advertised: Option<SocketAddr>,
-    pub last_message: u64,
     /// What answering this one connection has cost so far.
     ///
     /// Kept for the sake of being readable rather than because anything
@@ -1406,8 +1414,6 @@ pub fn on_message(
     message: Message,
     now: u64,
 ) -> Reaction {
-    peer.last_message = now;
-
     match &message {
         Message::Hello(theirs) => return greet(local, peer, *theirs, true),
         Message::Welcome(theirs) => return greet(local, peer, *theirs, false),

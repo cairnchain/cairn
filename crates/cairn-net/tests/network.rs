@@ -50,7 +50,25 @@ const ATTEMPTS: u64 = 1 << 22;
 /// it costs the wait once. What the old one cost was every run on a busy
 /// machine, which is how a suite teaches the person reading it to ignore a
 /// red result.
-const PATIENCE: Duration = Duration::from_secs(60);
+///
+/// It was raised from fifteen to sixty on that argument and sixty was still
+/// short. `an_ordinary_node_can_take_in_a_newcomer` mines a thousand and
+/// sixty four blocks, submits them all, waits for the host to let go of the
+/// bodies and then takes a whole ledger over a socket: measured five times at
+/// thirteen and a half seconds here, and it went past sixty on a shared
+/// runner carrying four other jobs. That is the machine, and this repository
+/// has the rule written twice already — `af77fe1` set a liveness deadline
+/// "far past the work rather than near it" at five times the slowest reading,
+/// and `4025e3f` corrected the one place that sweep applied it to the other
+/// kind of deadline. Sixty was under that five times, so this was the wrong
+/// side of a rule the repository had already argued out; the sweep reached
+/// `concurrency_audit.rs` and not here.
+///
+/// Three minutes, which is more than ten times the slowest reading. Nothing
+/// here is a bound this has to stay under: every one of the forty two waits
+/// in this file is a wait for something to happen, so there is no deadline
+/// for a thing that must *not* happen for this to be confused with.
+const PATIENCE: Duration = Duration::from_secs(180);
 
 /// Shallow, so a test does not have to mine a thousand blocks before a node
 /// has a ledger anyone would hand over. What the depth buys is argued in
