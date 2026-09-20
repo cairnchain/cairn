@@ -6407,10 +6407,24 @@ fn join_logs(log: &mut HeaderLog, front: &HeaderLog) -> Result<(), OwnDisk> {
 
 /// Reads back the ledger a node was handed, if it kept one.
 ///
-/// Checked again on the way in, exactly as it was when it arrived over the
-/// network. A node does not believe its own disk any more than it believes a
-/// stranger, and what this costs is one pass over a file it only has if it
-/// joined.
+/// Put through `accept` again on the way in, so a file that rotted, was
+/// truncated, or was written by a build with other rules is refused rather
+/// than believed. What that costs is one pass over a file this node only has
+/// if it joined.
+///
+/// Not *exactly* as it was when it arrived, which is what this said. The
+/// network path pins one more thing before `accept` runs: `take_the_ledger`
+/// refuses unless `handover.tip.id()` is the tip the sampling weighed. Nothing
+/// weighs a tip on the way off the disk, and `accept` takes neither a clock
+/// nor a tip to compare against, so a self-consistent handover mined at the
+/// floor satisfies every rule it does apply.
+///
+/// Which is not a hole so much as a sentence that promised more than the code
+/// keeps: whoever can write this file can rewrite the block log and the key
+/// beside it, and has not needed to forge anything. The claim worth making is
+/// the one made of replay in `Node::open`, where every block really is
+/// revalidated rather than taken on the file's word. Said here so that nobody
+/// reads this file as carrying that guarantee too.
 ///
 /// The undertaking comes back with it, because this file is where it is
 /// written down. `accept` says nothing about the blocks above the anchor;

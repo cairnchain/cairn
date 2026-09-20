@@ -4,9 +4,13 @@
 //! ever hold in blocks", and `examples/window.rs` publishes a figure computed
 //! from it under the sentence that none of it grows with the chain. Both are
 //! true of the node as it stands *after* a block joins the branch it follows,
-//! because that is where the sweeps run: `forget_unreachable_branches` and
+//! because that is where the sweeps run. `forget_unreachable_branches` and
 //! `forget_oldest_side_blocks` are reached from `ChainStore::follow` and from
-//! nowhere else.
+//! `add_block`, which is the side-branch path this file is about: a block
+//! that loses the fork choice is swept on the way out rather than waiting for
+//! the branch to move. This said `follow` and nowhere else, which was the gap
+//! the second call was added to close, and the commit that added it moved two
+//! other sentences to the past tense and left this one.
 //!
 //! A block that loses the fork choice never reaches `follow`. `add_block`
 //! stores it and returns `Accepted::SideBranch`, and between one block of the

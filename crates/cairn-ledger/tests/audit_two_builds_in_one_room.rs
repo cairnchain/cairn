@@ -243,7 +243,7 @@ fn pinned_transfer() -> Transfer {
 ///
 /// `cairn-primitives/tests/audit_vectors.rs` opens by saying it pins
 /// "everything a node has to agree with every other node about", and it pins
-/// the twenty hash domains and the Merkle tree. It does not pin a single
+/// every hash domain and the Merkle tree. It does not pin a single
 /// encoding, and the encodings are the other half: a domain says how bytes are
 /// hashed, an `Encode` says which bytes.
 ///
