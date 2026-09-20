@@ -2587,21 +2587,27 @@ impl ChainStore {
     /// there, because what this bounds is the map: an entry whose body has
     /// gone still holds a header, a work total and a slot, which is two
     /// hundred bytes that nothing was counting.
+    /// Both of these read the identifier off the map rather than out of the
+    /// header, which is what `retain` in `forget_unreachable_branches` already
+    /// does with the same question. `BlockHeader::id` hashes the whole header:
+    /// measured at 182 bytes an entry, so one walk of two thousand entries fed
+    /// 364 182 bytes to a hasher for an answer the map was holding as its own
+    /// key. At the entry count these ceilings allow that is about a megabyte a
+    /// walk, and the sweep below runs on every block a peer offers.
     fn side_blocks(&self) -> usize {
         let branch = &self.branch;
         self.blocks
-            .values()
-            .filter(|stored| branch.height_of(&stored.header.id()).is_none())
+            .keys()
+            .filter(|id| branch.height_of(id).is_none())
             .count()
     }
 
     fn side_bytes(&self) -> usize {
         let branch = &self.branch;
         self.blocks
-            .values()
-            .filter(|stored| stored.body.is_some())
-            .filter(|stored| branch.height_of(&stored.header.id()).is_none())
-            .map(|stored| stored.bytes)
+            .iter()
+            .filter(|(id, stored)| stored.body.is_some() && branch.height_of(id).is_none())
+            .map(|(_, stored)| stored.bytes)
             .fold(0usize, usize::saturating_add)
     }
 
@@ -2630,13 +2636,12 @@ impl ChainStore {
         let branch = &self.branch;
         let mut candidates: Vec<(u64, Hash32, usize)> = self
             .blocks
-            .values()
-            .filter_map(|stored| {
-                let id = stored.header.id();
+            .iter()
+            .filter_map(|(id, stored)| {
                 branch
-                    .height_of(&id)
+                    .height_of(id)
                     .is_none()
-                    .then_some((stored.header.height, id, stored.bytes))
+                    .then_some((stored.header.height, *id, stored.bytes))
             })
             .collect();
         candidates.sort_unstable_by_key(|(height, id, _)| (*height, *id));
@@ -2703,24 +2708,41 @@ impl ChainStore {
         let limit = MAX_REORG_DEPTH.saturating_add(MAX_SIDE_BLOCKS);
         let by_count = self.blocks.len() > limit;
         let by_bytes = self.held_bytes > Self::held_bytes_ceiling(&self.params);
-        if !by_count && !by_bytes {
-            return;
+        if by_count || by_bytes {
+            if let Some(cutoff) = self
+                .height()
+                .map(|tip| tip.saturating_sub(u64::try_from(MAX_REORG_DEPTH).unwrap_or(u64::MAX)))
+            {
+                let branch = &self.branch;
+                self.blocks.retain(|id, stored| {
+                    branch.height_of(id).is_some() || stored.header.height >= cutoff
+                });
+                self.invalid.retain(|id| branch.height_of(id).is_none());
+                self.recount();
+            }
         }
-        let Some(cutoff) = self
-            .height()
-            .map(|tip| tip.saturating_sub(u64::try_from(MAX_REORG_DEPTH).unwrap_or(u64::MAX)))
-        else {
-            return;
-        };
-        let branch = &self.branch;
-        self.blocks
-            .retain(|id, stored| branch.height_of(id).is_some() || stored.header.height >= cutoff);
-        self.invalid.retain(|id| branch.height_of(id).is_none());
-        self.recount();
 
         // What is left inside the window can still be more than the window is
         // worth holding, since a block inside it may be as large as the rules
         // allow. Dropping by age is what bounds that.
+        //
+        // Whatever the two numbers above said. They are about what this node
+        // holds in total and this is about what a peer can make it hold, and
+        // the gap between the two questions is the whole of the window's share
+        // of the ceiling: `HELD_WINDOW` times the largest block the rules
+        // allow, which is a hundred and thirty four megabytes, and which is
+        // full only on a node that has never let go of a body. No node with a
+        // disk is that node, so on a real one it is spare room that a peer's
+        // branches fill: measured at 167 843 760 bytes off the branch, five
+        // times what `MAX_SIDE_BYTES` says, before anything swept.
+        //
+        // The same early exit had already been found once, at the cutoff below
+        // it, and the comment above `forget_oldest_side_blocks` says what it
+        // cost. This is the other one.
+        //
+        // It costs a walk of the held blocks on every call, which is why both
+        // halves of that walk read the identifier off the map instead of
+        // hashing a header for it.
         self.forget_oldest_side_blocks();
     }
 
@@ -3422,6 +3444,86 @@ mod tests {
         store.forget_oldest_side_blocks();
         assert_eq!(store.len(), held);
         assert_eq!(store.held_bytes(), CHUNK * 9);
+    }
+
+    /// The sweep by size runs whatever the trigger above it decides.
+    ///
+    /// `forget_unreachable_branches` decides whether to look at all, on two
+    /// numbers about what this node holds in total: an entry count, and
+    /// `held_bytes` against [`ChainStore::held_bytes_ceiling`]. Neither is
+    /// about what a peer can make it hold.
+    ///
+    /// That ceiling is the window at its largest plus [`MAX_SIDE_BYTES`], and
+    /// the window is at its largest only on a node that has never let go of a
+    /// body, which is no node with a disk: `release_bodies` drops every body
+    /// more than [`WARM_BODIES`] below the tip. So on a real node the window's
+    /// share of the ceiling is spare room, and a peer's branches fill it.
+    ///
+    /// Measured before this: a hundred block chain with its bodies released
+    /// holds 55 640 bytes, and rival blocks of two megabytes reached
+    /// 167 843 760 bytes off the branch before anything swept. Five times what
+    /// the constant says, in a sawtooth between thirty one megabytes and a
+    /// hundred and sixty eight.
+    ///
+    /// The two tests below call `forget_oldest_side_blocks` by hand, so they
+    /// measure what the sweep does and never when it runs. The one end-to-end
+    /// test, `fork_choice::what_a_node_holds_is_bounded_on_a_chain_younger_
+    /// than_the_window`, lowers `max_block_bytes` to 4096 so the published
+    /// ceiling is in reach of a test, which collapses the window's share to
+    /// four megabytes and makes the trigger and the bound nearly the same
+    /// number. That is why this one asks the trigger directly, at the real
+    /// block size, with the node put exactly in the gap.
+    #[test]
+    fn what_a_peer_can_make_a_node_hold_does_not_wait_on_what_the_node_holds() {
+        const CHUNK: usize = 4 * 1024 * 1024;
+        let mut store = ChainStore::new(params());
+
+        // A branch that has let go of its bodies, which is every node with a
+        // disk past its first `WARM_BODIES` blocks.
+        let anchor = shelve(&mut store, 0, 0, 1_024);
+        store.branch.push(anchor);
+
+        for n in 1..=12u64 {
+            shelve(&mut store, n, n, CHUNK);
+        }
+
+        assert!(
+            store.side_bytes() > MAX_SIDE_BYTES,
+            "the rivals have to be past the constant, or this measures nothing"
+        );
+        assert!(
+            store.held_bytes() <= ChainStore::held_bytes_ceiling(&params()),
+            "and under the total ceiling, or the trigger fires and the gap is not \
+             the thing under test"
+        );
+        assert!(
+            store.blocks.len() <= MAX_REORG_DEPTH.saturating_add(MAX_SIDE_BLOCKS),
+            "and under the entry count, for the same reason"
+        );
+
+        // Both walks read the identifier off the map rather than hashing the
+        // header for it, which is only right for as long as the two are the
+        // same thing. Nothing else says so, and `hold` is where it is decided.
+        for (id, stored) in &store.blocks {
+            assert_eq!(
+                *id,
+                stored.header.id(),
+                "a block is filed under something other than its own identifier, so \
+                 the sweeps are asking about the wrong block"
+            );
+        }
+
+        store.forget_unreachable_branches();
+
+        assert!(
+            store.side_bytes() <= MAX_SIDE_BYTES,
+            "holding {} bytes off the branch, and the constant says {MAX_SIDE_BYTES}",
+            store.side_bytes()
+        );
+        assert!(
+            store.contains(&anchor),
+            "and never the branch a reorganisation has to undo"
+        );
     }
 
     /// The same ceiling, with the entries a deep reorganisation leaves behind.
