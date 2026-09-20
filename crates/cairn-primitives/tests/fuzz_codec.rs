@@ -428,13 +428,19 @@ fn the_ceiling_is_where_it_says_it_is() {
     );
 }
 
-/// A campaign the suite does not run, kept because the engine is only worth
-/// what its generator reaches.
+/// What the generator reaches, because the engine is only worth that.
 ///
 /// It walks every mutation operator over the corpus and counts how many
 /// distinct lengths and first bytes it produced. A generator that had quietly
 /// stopped bending anything would still pass every test above, because every
 /// test above is satisfied by refusing.
+///
+/// This said "a campaign the suite does not run", on a plain `#[test]` with
+/// nothing keeping it out: it runs on every `cargo test` and takes a fraction
+/// of a second. A sentence saying a check does not run is read by whoever is
+/// deciding what still needs running, so it sends them to look at something
+/// already looked at, and it invites the next person to delete a test nobody
+/// believes is running.
 #[test]
 fn the_generator_reaches_more_than_one_shape() {
     let corpus = corpus();

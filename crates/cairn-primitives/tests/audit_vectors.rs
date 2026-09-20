@@ -155,12 +155,42 @@ fn every_domain_key_is_the_published_string_derived() {
         if matches!(domain, Domain::WalletHistory) {
             continue;
         }
+
+        // The row, and not the string on its own. `contains` on the string
+        // asks only that it is published somewhere, and two strings swapped
+        // between two rows are each still published somewhere: the document
+        // would say the transfer identifier hashes under the coinbase's
+        // context and the coinbase under the transfer's, this test would pass,
+        // and a second implementer reading the document would derive both keys
+        // the wrong way round and agree with nobody about either.
+        //
+        // What has to hold is the pairing, and the document publishes it as a
+        // row: the name in one cell, the string in the next. The name is the
+        // string without what it says about the network and the version, so
+        // there is nothing here to keep in step by hand.
+        let name = context
+            .strip_prefix("cairn v1 ")
+            .expect("every context names the network and the version first");
+        let row = format!("<td>{name}</td><td><code>{context}</code></td>");
         assert!(
-            SPECIFICATION.contains(&format!("<code>{context}</code>")),
-            "{domain:?} hashes under {context:?}, which the specification does \
-             not publish, so nobody can reproduce a digest from the document"
+            SPECIFICATION.contains(&row),
+            "{domain:?} hashes under {context:?}, and the specification does not \
+             publish that string beside {name:?}. A digest reproduced from the \
+             document is then a digest of something else"
         );
     }
+
+    // And nothing published that no domain claims. A row for a context this
+    // crate does not have is a key a second implementer derives for a hash
+    // nobody takes, which shows up as a disagreement about a digest and not as
+    // a missing string.
+    let published = SPECIFICATION.matches("<code>cairn v1 ").count();
+    let expected = Domain::ALL.len() - 1;
+    assert_eq!(
+        published, expected,
+        "the specification publishes {published} context strings and this crate has \
+         {expected} to publish, counting out the one it leaves out on purpose"
+    );
 }
 
 /// [`Domain::ALL`] is the list this is checked against, and for a while that
