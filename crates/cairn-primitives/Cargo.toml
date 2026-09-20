@@ -20,6 +20,14 @@ blake3.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# This crate's own tests, with the counter on. The crates that audit what a
+# message costs turn it on through their dev-dependencies, and for a while
+# that was the only thing turning it on, so the one test holding the counter
+# itself existed only when somebody else happened to be in the build: a
+# `cargo test -p cairn-primitives` compiled it out and said nothing. The
+# guard for a number four audit files stand on should not depend on who else
+# is being built.
+cairn-primitives = { workspace = true, features = ["count-hashing"] }
 # The same BLAKE3 the crate hashes with, brought in again so a test can derive
 # a domain key from the context string the specification publishes and check
 # it against the one the crate uses. A vector pins what a constant hashes to;

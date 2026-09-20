@@ -11,3 +11,10 @@ cairn-*-data/
 # Worktrees this tool makes for isolated work. They are checkouts of this
 # same repository and belong to nobody but the machine they are on.
 .claude/worktrees/
+
+# What `cargo mutants` writes while it works: the broken copies of the tree it
+# tested and the log of each one. The list of survivors is the output worth
+# keeping, and the workflow uploads it as an artifact rather than committing
+# it, because it is a reading of one moment and not a fact about the code.
+mutants.out/
+mutants.out.old/

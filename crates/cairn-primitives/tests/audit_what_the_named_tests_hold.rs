@@ -221,4 +221,45 @@ fn a_thousand_digests_over_nothing_read_as_no_work_at_all() {
         0,
         "a thousand digests, and still nought"
     );
+
+    // And from the other side, which is the half this was missing.
+    //
+    // Both assertions above expect nought, so a counter that answered nought
+    // to everything passed this test, and passed it more easily. That counter
+    // is what four audit files in three crates stand their cost claims on, and
+    // those claims read `assert!(over < 256)` or `assert!(more >= some)`:
+    // every one of them holds when every count is nought. The claim this
+    // project rests on, that what a node costs does not grow, was resting on
+    // a number nothing required to be a number.
+    //
+    // Found by `cargo mutants`, which replaced `counting::hashed` with `0` and
+    // watched the suite stay green.
+    counting::reset();
+    let fed = [7u8; 64];
+    let _ = hash(Domain::SamplingSeed, &fed);
+    assert_eq!(
+        counting::hashed(),
+        fed.len() as u64,
+        "the counter has to see what is fed to a digest, or every cost this \
+         repository publishes is a count of nothing"
+    );
+
+    // And that it is a running total rather than a last-call figure, since
+    // every use of it sums a whole operation.
+    let _ = hash(Domain::SamplingSeed, &fed);
+    assert_eq!(
+        counting::hashed(),
+        2 * fed.len() as u64,
+        "the counter has to add up, or a cost measured over many digests is \
+         the cost of the last one"
+    );
+
+    // And that `reset` gives back what it cleared, which is what the callers
+    // that measure one call at a time read.
+    assert_eq!(
+        counting::reset(),
+        2 * fed.len() as u64,
+        "reset answers with what it held"
+    );
+    assert_eq!(counting::hashed(), 0, "and starts again from nothing");
 }

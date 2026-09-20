@@ -1,0 +1,45 @@
+# What `cargo mutants` is allowed to skip, and why each one is allowed.
+#
+# The tool breaks the code one edit at a time and reports every edit the suite
+# did not notice. An edit nobody notices is a test that would pass whether the
+# code were right or wrong, which is the defect this repository keeps finding
+# by hand: a guard whose expected value is the value a broken version also
+# produces.
+#
+# The first run of it found one in four minutes, on the smallest crate. The
+# only test holding the hash counter asserted that the counter read nought, so
+# a counter answering nought to everything passed it and passed it more
+# easily, and four audit files in three crates stand their cost claims on that
+# number. Every `assert!(cost < n)` in this repository holds when every count
+# is nought.
+#
+# Every entry below is a claim that a surviving mutant there says nothing.
+# An entry is not a way to quiet the tool; it is a sentence somebody has to be
+# willing to defend, and adding one is the same act as dismissing a security
+# alert with a reason.
+
+exclude_re = [
+    # `Debug` is for a failure message. A wrong one makes a worse message and
+    # never a wrong answer, and pinning it would pin the wording of every
+    # error in the workspace to a test, so every rewording becomes a failure.
+    #
+    # `Display` is deliberately NOT here. `Hash32`'s is how an identifier is
+    # written into a URL and `Amount`'s is how a sum of money is shown to
+    # whoever is spending it; both are answers rather than messages, and a
+    # mutant surviving in either is worth having.
+    "impl .*fmt::Debug",
+    # `|` and `^` between the two halves of a hexadecimal byte. The high
+    # nibble is shifted four places and the low one is at most fifteen, so the
+    # two operands never share a set bit and the two operators cannot disagree.
+    # No test can catch this because there is nothing to catch: it is an
+    # equivalent mutant, which is the one thing a survivor can honestly be
+    # besides a missing test. Narrow to these two functions on purpose — the
+    # same operators elsewhere are a real question.
+    "replace \\| with \\^ in decode",
+    "replace \\| with \\^ in decode_array",
+]
+
+# A mutant that makes a loop run forever is one the suite would have caught if
+# it had been allowed to finish, so a timeout is not a survivor. The bound is
+# passed on the command line by the workflow, since this file does not carry
+# it: `--timeout 180`, several times the longest honest test here.

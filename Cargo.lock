@@ -154,6 +154,7 @@ version = "0.8.1"
 dependencies = [
  "blake3",
  "cairn-fuzz",
+ "cairn-primitives",
  "hex",
  "thiserror",
 ]
