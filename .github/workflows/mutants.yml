@@ -1,0 +1,122 @@
+# Whether the tests would notice if the code were wrong.
+#
+# A green suite says nothing until you know what it can see. This repository
+# has spent weeks finding, by hand, tests that could not fail: a guard reading
+# its own condition back out of the error it produced, a fixture that topped
+# out before the boundary it was aimed at, a comparison of an empty list
+# against an empty list, an expected value that was the constant the code was
+# written against. Every one was found by putting the defect back and watching
+# the suite stay green, one at a time, by a person.
+#
+# `cargo mutants` does that by machine. It breaks the code one edit at a time
+# and reports every edit the suite did not notice, and there are 4 336 such
+# edits here. The first four minutes of it, on the smallest crate, found that
+# the only test holding the hash counter asserted the counter read nought — so
+# a counter answering nought to everything passed it, and every
+# `assert!(cost < n)` in four audit files across three crates holds when every
+# count is nought. That is the number this project's central claim is measured
+# in.
+#
+# Kept out of check.yml deliberately, as fuzz.yml and audit.yml are: a check
+# that runs on every push has to finish in the time somebody will wait for it,
+# and the full run here is hours.
+#
+# The tests are run per crate rather than across the workspace, which is the
+# one compromise in this file and is worth stating. Running the whole suite
+# against every mutant would be twenty minutes times four thousand. So a
+# mutant in a crate is put only to that crate's own tests, and one that only
+# a dependent crate would have caught reads here as a survivor. That is not
+# purely a false alarm: a crate that does not hold its own behaviour is
+# relying on whoever happens to be built alongside it, which is how the one
+# test guarding the hash counter came to exist only when another crate's
+# dev-dependencies turned its feature on.
+
+name: mutants
+
+on:
+  pull_request:
+  schedule:
+    # Sunday, so the week's findings are waiting on Monday rather than
+    # arriving in the middle of it.
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+
+# Nothing here writes anything.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # What this change would let through. Only the mutants that fall on lines
+  # the pull request touched, which is a handful, so this can block.
+  #
+  # This is the job that matters day to day. The weekly run below says what is
+  # already wrong; this one says the class of defect cannot be added again
+  # without somebody deciding to.
+  changed:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The whole history, because the diff this job mutates is against
+          # the branch being merged into.
+          fetch-depth: 0
+      - name: Install the toolchain this repository pins
+        run: rustup show
+      # Built from source rather than fetched by a third-party action, for the
+      # same reason audit.yml builds cargo-audit: a job about whether this
+      # repository's guards hold should not answer it by trusting one more
+      # thing nobody here has read.
+      - name: Install cargo-mutants
+        run: cargo install --locked cargo-mutants
+      - name: What this change touched
+        run: |
+          git diff "origin/${{ github.base_ref }}"...HEAD > pr.diff
+          wc -l pr.diff
+      - name: Mutants on the lines this change touched
+        run: |
+          cargo mutants --in-diff pr.diff \
+            --test-workspace=false \
+            --timeout 180 \
+            --in-place \
+            -j 2
+      - name: The survivors, if any
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mutants-in-diff
+          path: mutants.out/
+
+  # Everything, once a week, so the standing figure is a number and not a
+  # feeling. Sharded because one machine takes hours: the shards are
+  # round-robin, so each gets a spread of crates rather than one large one.
+  everything:
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the toolchain this repository pins
+        run: rustup show
+      - name: Install cargo-mutants
+        run: cargo install --locked cargo-mutants
+      - name: One eighth of the mutants
+        run: |
+          cargo mutants \
+            --shard ${{ matrix.shard }}/8 \
+            --test-workspace=false \
+            --timeout 180 \
+            --in-place \
+            -j 2
+      - name: The survivors, which are the point of this run
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants.out/
