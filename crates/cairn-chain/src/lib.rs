@@ -1452,8 +1452,24 @@ impl ChainStore {
             let Some(remaining) = room.checked_sub(size) else {
                 continue;
             };
+            // Without the signatures, for the reason `prune_pool` has beside
+            // it and `check_transfer_again`'s own doc sets out: a signature
+            // covers the network, the version, the transfer's identifier, the
+            // position of the input and the note being spent, and a note
+            // identifier commits to the note, so the chain cannot move the
+            // answer. Everything in this pool arrived through
+            // `accept_transfer`, which asked.
+            //
+            // The same defect was found at `prune_pool` and the file written
+            // for it, `audit_what_a_block_costs_a_full_pool.rs`, carries the
+            // argument in its header. This is the other reader of the same
+            // pool, which kept paying: measured at 168 bytes hashed a transfer
+            // plus one curve verification an input, and the pool holds
+            // `MAX_POOLED` of them. It is spent inside `Node::with_chain`, so
+            // it is spent holding the chain lock, on every tip change and
+            // every `CANDIDATE_PATIENCE` seconds besides.
             let Ok(outcome) =
-                check_transfer(transfer, &self.state, &spent_hot, &spent_cold, &self.params)
+                check_transfer_again(transfer, &self.state, &spent_hot, &spent_cold, &self.params)
             else {
                 continue;
             };

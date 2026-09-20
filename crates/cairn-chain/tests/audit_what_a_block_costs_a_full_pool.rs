@@ -15,6 +15,18 @@
 //! Counted in bytes fed to a hasher, which is a number two machines agree on,
 //! and not in how long a block took. The curve verifications saved with them
 //! do not show in this count at all and are the larger half.
+//!
+//! `selection` is the other reader of the same pool and was doing the same
+//! thing, which this file did not ask because it was written about the block
+//! rather than about the pool. Measured at 168 bytes hashed a transfer, which
+//! is the 169 named below to within the rounding, and spent inside
+//! `Node::with_chain`: holding the chain lock, on every tip change and every
+//! `CANDIDATE_PATIENCE` seconds besides.
+//!
+//! Nothing is taken on trust by dropping it. `selection` chooses; the
+//! signatures are checked where a block is built, by the batch verification in
+//! `evaluate_block_body`, which every path into a block goes through. They
+//! were being checked twice, and the second time was under the lock.
 
 #![allow(
     clippy::unwrap_used,
@@ -129,6 +141,49 @@ fn spend(params: &ConsensusParams, id: NoteId, note: Note, owner: &SecretKey) ->
     transfer
 }
 
+/// A node whose pool holds `pooled` valid one input transfers.
+fn a_node_with_a_pool_of(pooled: usize) -> Node {
+    let miner = wallet(1);
+    let rules = params();
+    let mut node = Node::new();
+    let per_block = rules.max_coinbase_outputs;
+
+    let each = rules.initial_reward.as_pebbles() / per_block as u64;
+    let first = rules.initial_reward.as_pebbles() - each * (per_block as u64 - 1);
+
+    let mut notes = Vec::new();
+    while notes.len() < pooled {
+        let outputs: Vec<Note> = (0..per_block)
+            .map(|index| {
+                let value = if index == 0 { first } else { each };
+                Note::new(Amount::from_pebbles(value).unwrap(), miner.public_key())
+            })
+            .collect();
+        notes.extend(node.mine_paying(&miner, outputs));
+    }
+
+    for (id, note) in notes.into_iter().take(pooled) {
+        let transfer = spend(&rules, id, note, &miner);
+        assert_eq!(node.store.accept_transfer(transfer), Ok(true));
+    }
+    node
+}
+
+/// What asking that pool for a block's worth of transfers costs, in bytes
+/// hashed. Nothing else is measured: the pool is already built.
+fn choosing_with_a_pool_of(pooled: usize) -> u64 {
+    let node = a_node_with_a_pool_of(pooled);
+    let rules = params();
+    counting::reset();
+    let (chosen, _) = node.store.selection(rules.max_transfers_per_block);
+    let spent = counting::reset();
+    assert!(
+        chosen.len() <= pooled,
+        "the selection cannot hold more than the pool did"
+    );
+    spent
+}
+
 /// Fills the pool with `pooled` valid one input transfers, then reports what
 /// one further block costs the node, in bytes hashed.
 fn cost_with_a_pool_of(pooled: usize) -> u64 {
@@ -184,4 +239,67 @@ fn a_block_costs_about_the_same_whatever_is_waiting_in_the_pool() {
         "the cost is meant to be read as growing with the pool or not at all: {empty}, {some}, \
          {more}"
     );
+}
+
+/// What choosing a block's worth of transfers costs, per transfer waiting.
+///
+/// The same claim as the test above and about the other reader of the pool.
+/// `prune_pool` runs when the branch moves; `selection` runs when a miner
+/// wants a template, which is every tip change and every `CANDIDATE_PATIENCE`
+/// seconds of searching besides, and it runs inside `Node::with_chain`, so
+/// whatever it costs is paid holding the chain lock.
+///
+/// Before this it was 43 008 bytes hashed for a pool of 256, which is 168 a
+/// transfer, plus one curve verification an input that this count does not
+/// show. `MAX_POOLED` is four thousand and ninety six.
+#[test]
+fn choosing_a_block_costs_about_the_same_whatever_is_waiting_in_the_pool() {
+    let empty = choosing_with_a_pool_of(0);
+    let some = choosing_with_a_pool_of(64);
+    let more = choosing_with_a_pool_of(256);
+
+    let over = more.saturating_sub(empty);
+    assert!(
+        over < 256,
+        "a pool of 256 transfers cost {over} bytes hashed to choose from, which is {} a \
+         transfer. Before the signatures stopped being checked again it was 168 a \
+         transfer, and the pool holds four thousand of them",
+        over / 256
+    );
+    assert!(
+        some >= empty && more >= some,
+        "the cost is meant to be read as growing with the pool or not at all: {empty}, \
+         {some}, {more}"
+    );
+}
+
+/// And it still chooses what it chose.
+///
+/// Dropping a check from a chooser is only free if the chooser still answers
+/// the same. What `check_transfer_again` keeps is everything the chain can
+/// move: whether a note is still there, whether it has been spent, which of
+/// the two sets it sits in and what the transfer is therefore worth. What it
+/// drops cannot be moved by the chain and was asked once already, by
+/// `accept_transfer`, on the way in.
+#[test]
+fn what_it_chooses_is_still_everything_the_pool_holds_that_fits() {
+    let node = a_node_with_a_pool_of(64);
+    let rules = params();
+
+    let pooled: std::collections::BTreeSet<_> =
+        node.store.pooled_transfers().map(|(id, _)| *id).collect();
+    assert_eq!(
+        pooled.len(),
+        64,
+        "the pool is not the size it was filled to"
+    );
+
+    let (chosen, fees) = node.store.selection(rules.max_transfers_per_block);
+    let picked: std::collections::BTreeSet<_> = chosen.iter().map(Transfer::id).collect();
+    assert_eq!(
+        picked, pooled,
+        "sixty four one input transfers all fit in a block and all pay the same rate, so \
+         a chooser that left one out is answering something other than what it holds"
+    );
+    assert!(fees > Amount::ZERO, "and they are carried for a fee");
 }

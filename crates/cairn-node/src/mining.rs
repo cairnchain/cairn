@@ -46,8 +46,17 @@ const NONCE_BATCH: u64 = 50_000;
 ///
 /// Half a minute, against a target spacing of minutes: short enough that the
 /// gap a stalled chain reports is close to the gap it took, long enough that
-/// rebuilding costs nothing measurable. Nothing is lost by rebuilding, because
+/// rebuilding is worth what it costs. Nothing is lost by rebuilding, because
 /// each hash is independent of the ones before it.
+///
+/// "Nothing measurable" is what stood here, and it was measurable: a rebuild
+/// asks `selection`, which asked the pool again with the signatures, at 168
+/// bytes hashed and one curve verification an input for every transfer
+/// waiting. At the pool's ceiling that is a hundred and twenty milliseconds,
+/// twice a minute, inside `Node::with_chain` and so holding the chain lock.
+/// `selection` leaves the signatures to the batch verification in
+/// `evaluate_block_body` now, which is where a block is judged and where they
+/// were being checked the second time.
 const CANDIDATE_PATIENCE: u64 = 30;
 
 /// Whether a candidate has been searched long enough that what it says about
