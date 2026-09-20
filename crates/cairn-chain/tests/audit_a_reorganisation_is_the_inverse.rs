@@ -127,7 +127,29 @@ fn feed(store: &mut ChainStore, blocks: &[Block]) -> Vec<Accepted> {
 ///
 /// Compared as text so a difference names itself rather than coming back as a
 /// pair of hashes.
+///
+/// The pool is in here and is not one of those things. It is right for a node
+/// compared with itself across a switch that failed, which is what the second
+/// test below does, and wrong for two nodes that reached the same tip by
+/// different routes: `repool` exists to put back the payments an undone branch
+/// was carrying, and a node that never saw that branch never had them. So the
+/// first test asks [`the_ledger_and_the_branch`] and settles the pool against
+/// an oracle instead.
 fn everything_it_can_be_asked(store: &ChainStore) -> Vec<String> {
+    let mut all = the_ledger_and_the_branch(store);
+    all.push(format!(
+        "pool {:?}",
+        store
+            .pooled_transfers()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>()
+    ));
+    all.push(format!("pool bytes {}", store.pool_bytes()));
+    all
+}
+
+/// The same, without what is waiting for a block.
+fn the_ledger_and_the_branch(store: &ChainStore) -> Vec<String> {
     let state = store.state();
     let mut watched: Vec<(NoteId, u64, Note)> = state.watched_notes().collect();
     watched.sort_by_key(|(id, _, _)| *id);
@@ -154,14 +176,6 @@ fn everything_it_can_be_asked(store: &ChainStore) -> Vec<String> {
         format!("branch start {:?}", store.branch_start()),
         format!("held identifiers {:?}", store.held_ids()),
         format!("locator {:?}", store.locator()),
-        format!(
-            "pool {:?}",
-            store
-                .pooled_transfers()
-                .map(|(id, _)| *id)
-                .collect::<Vec<_>>()
-        ),
-        format!("pool bytes {}", store.pool_bytes()),
     ]
 }
 
@@ -233,12 +247,71 @@ fn a_reorganisation_leaves_the_state_it_would_have_reached_without_one() {
         direct.state().cold_roots(),
         "the two branches leave the same accumulator, so undoing one proves nothing"
     );
-    for (was, should) in everything_it_can_be_asked(&reorganised)
+    for (was, should) in the_ledger_and_the_branch(&reorganised)
         .into_iter()
-        .zip(everything_it_can_be_asked(&direct))
+        .zip(the_ledger_and_the_branch(&direct))
     {
         assert_eq!(was, should, "a reorganised node differs from a direct one");
     }
+
+    // And the pool, which is the one thing they are allowed to differ about.
+    //
+    // This used to be two more lines of the comparison above, asserting the
+    // two pools identical. `repool` is the code that makes them differ, so
+    // that was a claim the crate denies, green only because nothing in this
+    // fixture can be put back: every undone payment spends a coinbase mined on
+    // the branch that was undone, and that coinbase is not on the branch the
+    // node switched to.
+    //
+    // Which is a trap rather than a gap. Anything that makes `repool` reach
+    // further fails the assertion, and the obvious repair is to weaken
+    // `repool`, which is the defect `reorg_repool.rs` and
+    // `audit_a_budget_spent_on_refusals.rs` exist to prevent.
+    //
+    // So the expectation is worked out rather than assumed, by asking a node
+    // that took the winning branch directly whether it would take each undone
+    // payment, which is the same call `repool` makes. Empty in this fixture,
+    // and it says why; the case where it is not empty is `reorg_repool.rs`.
+    let mut oracle = ChainStore::new(rules);
+    oracle.watch_owner(watched.public_key());
+    feed(&mut oracle, &common);
+    feed(&mut oracle, &theirs);
+
+    let mut carried = 0usize;
+    let mut expected: Vec<cairn_primitives::Hash32> = Vec::new();
+    for block in &ours {
+        for transfer in &block.transfers {
+            carried += 1;
+            if oracle.accept_transfer(transfer.clone()).unwrap_or(false) {
+                expected.push(transfer.id());
+            }
+        }
+    }
+    assert!(
+        carried > 0,
+        "the branch that was undone carried no payments, so there was never \
+         anything for a switch to offer back"
+    );
+    expected.sort_unstable();
+
+    let mut pooled: Vec<cairn_primitives::Hash32> =
+        reorganised.pooled_transfers().map(|(id, _)| *id).collect();
+    pooled.sort_unstable();
+    assert_eq!(
+        pooled, expected,
+        "a reorganised node holds something other than the payments the branch \
+         it left was carrying and the branch it took would still accept"
+    );
+    assert_eq!(
+        direct.pool_bytes(),
+        0,
+        "a node that never saw the losing branch has nothing of it to hold"
+    );
+    println!(
+        "the undone branch carried {carried} payments, of which {} could be put \
+         back on the branch that won",
+        expected.len()
+    );
 }
 
 /// And a switch that fails partway has to leave the node exactly where it

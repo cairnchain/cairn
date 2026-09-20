@@ -1016,10 +1016,43 @@ impl ChainStore {
     /// one identifier every [`MILESTONE`] heights before that. Everything else
     /// is on disk. Callers wanting the branch in order should walk heights and
     /// read a log, which is what an explorer does.
+    ///
+    /// "Before that" is load bearing and was not done. This used to hand back
+    /// the whole milestone list followed by the whole window, and the window
+    /// is [`HELD_WINDOW`] wide where the milestones are [`MILESTONE`] apart,
+    /// so one milestone is always inside it past the first thousand blocks:
+    /// measured at height 1536, 1 027 identifiers of which 1 026 are distinct,
+    /// in the order 0, 1024, 512, 513, and on, which is not oldest first
+    /// either. Both are true at every height past the window.
+    ///
+    /// Counting these is not how to count what the branch costs in memory:
+    /// the milestone inside the window is stored, and [`Self::milestone_count`]
+    /// is what says so.
     pub fn held_ids(&self) -> Vec<Hash32> {
-        let mut ids: Vec<Hash32> = self.branch.milestones.clone();
+        let window = u64::try_from(self.branch.recent.len()).unwrap_or(u64::MAX);
+        let first = self.branch.len().saturating_sub(window);
+        let before = usize::try_from(first.div_ceil(MILESTONE)).unwrap_or(usize::MAX);
+        let mut ids: Vec<Hash32> = self
+            .branch
+            .milestones
+            .iter()
+            .take(before)
+            .copied()
+            .collect();
         ids.extend(self.branch.recent.iter().copied());
         ids
+    }
+
+    /// Identifiers the branch keeps to stand behind heights below the window.
+    ///
+    /// What they cost is this number times thirty two bytes, and it is the
+    /// whole of what a node spends on history it can no longer reorganise
+    /// onto. One of them is inside the window and so is also in
+    /// [`Self::held_ids`]; it is stored all the same, which is why the cost is
+    /// asked here rather than counted off that list.
+    #[must_use]
+    pub fn milestone_count(&self) -> usize {
+        self.branch.milestones.len()
     }
 
     /// The block the followed branch carries at `height`, when this node still
@@ -1045,14 +1078,6 @@ impl ChainStore {
     /// The first block of the followed branch.
     pub fn genesis(&self) -> Option<Hash32> {
         self.branch.genesis()
-    }
-
-    /// Which of `ids` this node has never seen.
-    pub fn missing<'a>(&self, ids: impl IntoIterator<Item = &'a Hash32>) -> Vec<Hash32> {
-        ids.into_iter()
-            .filter(|id| !self.blocks.contains_key(id))
-            .copied()
-            .collect()
     }
 
     /// A sparse sample of the followed branch, tip first, thinning out with
