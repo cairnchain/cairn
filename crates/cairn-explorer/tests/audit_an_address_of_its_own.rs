@@ -1,12 +1,18 @@
 //! What one note costs the index when notes do not share an owner.
 //!
 //! [`index::BYTES_PER_NOTE`] is the figure `/api/status` multiplies by, and
-//! its own doc comment says where it comes from: "The dearest is the ordinary
-//! payment, one note to the payee and one back as change, which has the fewest
-//! notes to spread the rest over: 565 bytes a note." The comment also records
-//! why the figure before it was wrong, and the reason was the same one: "it
-//! was calibrated on the widest fan-out alone, which is the cheapest per note
-//! and which nobody sends."
+//! its own doc comment says where it comes from: the dearest shape is the
+//! ordinary payment, one note to the payee and one back as change, which has
+//! the fewest notes to spread the rest over, and the wide fan-outs come out
+//! cheaper. The comment also records why the figure before it was wrong, and
+//! the reason was the same one: it "was calibrated on the widest fan-out
+//! alone, which is the cheapest per note and which nobody sends".
+//!
+//! Said rather than quoted, and the number left to the constant. This carried
+//! that sentence verbatim, ending "565 bytes a note", and it was exact when it
+//! was written; the sentence in `index.rs` was rewritten and the number moved
+//! to 627. A quotation is a copy, and a copy of prose rots the way a copy of a
+//! number does.
 //!
 //! The shape is not the whole of what sets the cost. Every shape weighed in
 //! `audit_index_cost.rs` hands its outputs to a pool of three thousand

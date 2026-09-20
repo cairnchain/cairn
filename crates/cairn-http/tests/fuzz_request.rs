@@ -154,9 +154,16 @@ fn holds_about_a_request(request: &Request, consumed: usize, case: usize) {
     // and the one that would go if somebody made the head reader take a
     // continuation line, which is a thing HTTP once had.
     //
-    // The path is not in this list and the reason is the finding below. It
-    // is percent-decoded, so it holds whatever the escapes say, line endings
-    // included: `a_line_ending_reaches_a_path_and_a_header_value` pins that.
+    // The path is not in this list for a different reason. It is
+    // percent-decoded, so the escapes could say anything the frame does not,
+    // and a line ending is what that used to buy: this campaign's one
+    // finding. It is refused now, and
+    // `a_line_ending_reaches_no_path_and_no_header_value` is the rule.
+    //
+    // This named `a_line_ending_reaches_a_path_and_a_header_value`, which is
+    // the same name with the verdict reversed and does not exist. Line 20 of
+    // this file was corrected when the refusal went in and this was not, so
+    // one file said the path both does and does not carry a line ending.
     //
     // The body is not in the list either. It is read as bytes against a
     // declared length rather than line by line, so a form field holding a

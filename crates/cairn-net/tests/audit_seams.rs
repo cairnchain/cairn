@@ -210,9 +210,18 @@ fn a_joined_node_can_never_say_which_chain_it_is_on() {
 /// **The same node cannot refuse a peer on a different chain.**
 ///
 /// `accept_handshake` guards the comparison with `if let Some(ours) =
-/// chain.genesis()`. A joined node's is `None`, so the arm never runs: it
-/// will greet a peer whose first block is nothing like its own, on the same
-/// network identifier, and start syncing from it.
+/// first_block(chain)`, and `first_block` reads the rules before the branch.
+/// On any network that names itself the rules pin a first block, so the arm
+/// runs and the comparison happens: this is closed on testnet-6 and on
+/// devnet, which is everything that ships.
+///
+/// It is open on a rule set that pins nothing, which is `ConsensusParams::
+/// testnet()` and so every test in this file. That is the case `first_block`'s
+/// fallback exists for and it is what this test still measures, so the test
+/// stays; what changed is that the sentence above described it as a hole in
+/// the protocol. It said `chain.genesis()` for as long as the guard has read
+/// the rules first, and the commit that made that change corrected a sibling
+/// note in this same file and left this one.
 ///
 /// The control below is the same greeting offered to a node that read its
 /// chain from the first block, which refuses it.
@@ -452,9 +461,13 @@ fn a_ledger_file_the_disk_refuses_costs_the_node_nothing_it_holds() {
     };
     assert!(held > 0, "and the blocks are still on the disk: {held}");
 
-    // The disk gives back something that is not a handover. Any I/O failure,
-    // any change to the encoding, and any rule this build has no schedule for
-    // arrives here as the same `None`.
+    // The disk gives back something that is not a handover. Each of those
+    // arrives as an `Err` naming itself: a read that failed, an encoding this
+    // build cannot read, and a ledger `accept` refused are three sentences and
+    // not one. `Ok(None)` is left for the one case that means what the caller
+    // used to assume of all of them, which is a node that has not written a
+    // ledger yet. This said they were all the same `None`, which is what they
+    // were before `read_handed_ledger` was given the three messages.
     std::fs::write(directory.join(cairn_store::HANDED_LEDGER), b"not a ledger").unwrap();
 
     let refused = cairn_net::node::Node::open(params(), listen, &directory);

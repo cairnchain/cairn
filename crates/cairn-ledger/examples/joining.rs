@@ -73,8 +73,13 @@ fn main() {
     // tip. It does not depend on the ledger, so it is the same on every row.
     //
     // The run is what ties the top of a chain to a difficulty anybody can
-    // check, and it is about a thousand headers: the draw stops resolving that
-    // far from the tip, so that is exactly the stretch nothing else looks at.
+    // check, and it is `SHALLOWEST` plus `RECENT_HEADERS` of them: the draw
+    // stops resolving that far from the tip, so that is exactly the stretch
+    // nothing else looks at.
+    //
+    // Named rather than counted. This said "about a thousand", which it was
+    // when `SHALLOWEST` was a thousand and twenty four; it is six hundred and
+    // three now and the sentence did not follow.
     let sampling = sampled_start_bytes(AGES[AGES.len() - 1].1);
 
     let mut widest = Weighed::default();

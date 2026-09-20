@@ -923,9 +923,15 @@ fn weigh_shape(label: &str, fan_out: usize) -> index::Size {
 ///
 /// The dearest shape there is per note, and what almost every transfer on any
 /// chain actually is. It is where `BYTES_PER_NOTE` comes from, and it is why
-/// the figure is 565 and not the five hundred the site used to state: five
+/// the figure is `BYTES_PER_NOTE` and not the five hundred the site used to
+/// state: five
 /// hundred was calibrated on the widest fan-out alone, which is the cheapest
 /// per note and which nobody sends.
+///
+/// The number is named rather than written out. It said 565 while the
+/// constant said 627, which is the drift this same file documents happening
+/// twice before, a hundred and fifty lines above, under the sentence "this is
+/// what holds them together".
 ///
 /// A note is what the index counts, and a note is not the whole of what it
 /// keeps: there is an entry per transaction and a movement per side of every
