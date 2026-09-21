@@ -35,12 +35,85 @@ pub const MAX_POOLED: usize = 4_096;
 
 /// What every waiting transfer may take altogether.
 ///
-/// Half an hour of full blocks, which is as far ahead as a pool is any use:
-/// what waits longer than that is waiting because nobody will carry it.
-/// Counting bytes as well as transfers is what makes the ceiling mean
-/// something, since one transfer spending notes out of the cold set carries a
-/// proof for each and can run to half a megabyte on its own.
+/// A bound on memory, counted in [`pooled_cost`] and not in the wire form.
+/// Counting bytes as well as transfers is what makes it mean something, since
+/// one transfer spending notes out of the cold set carries a proof for each
+/// and can run to half a megabyte on its own.
+///
+/// It was counted in the wire form, which is the mistake the block table's
+/// ceiling made and had corrected by [`HELD_OVERHEAD`]: a bound on memory
+/// that measures what arrived is out by whatever the holding costs, and here
+/// that is the entry, the identifier it is filed under, its place in the rate
+/// index, and a row in `pool_spenders` for every note it speaks for.
+///
+/// Four megabytes is thirty two full blocks, and half an hour is as far ahead
+/// as a pool is any use: what waits longer than that is waiting because
+/// nobody will carry it. That sizing was in wire bytes, and it no longer
+/// holds, because a full pool now weighs less than the ceiling it fills by
+/// however much the bookkeeping adds. `audit_fee_market.rs` works out what a
+/// full pool weighs at the best price the rules allow anyone, and prints how
+/// many blocks that is.
+///
+/// The number was not raised to buy the half hour back, and this is the whole
+/// of the judgement here. What reads it is memory. Raising it so that a
+/// wire-side property survives is the confusion being corrected, and what it
+/// would hand over is real: the difference goes to whoever fills the pool,
+/// and the one filling it on purpose is the one picking the shape that gets
+/// the best price. Ordinary traffic never reaches this anyway: a pool of
+/// payments runs out of places long before it runs out of bytes, which is
+/// what [`MAX_POOLED`] is for.
 pub const MAX_POOL_BYTES: usize = 4 * 1024 * 1024;
+
+/// What holding one transfer in the pool costs, from the bytes it arrived as
+/// and the notes it spends.
+///
+/// The wire form, the entry it is filed as and the identifier it is filed
+/// under, its place in the rate index, a row in `pool_spenders` for each note
+/// it speaks for, and an eighth again for the spare slots the maps keep so
+/// they can answer without a pass. Taken from the types rather than written
+/// down, so it cannot drift from them, which is the same construction
+/// [`HELD_OVERHEAD`] is.
+///
+/// The inputs are a term of their own and not folded into a per-transfer
+/// figure, because they are the one part an arrival chooses: the ceiling is
+/// reached fastest by the transfer that speaks for the most notes per byte,
+/// and a fixed per-transfer allowance would charge that one the same as a
+/// payment.
+///
+/// A floor, like [`HELD_OVERHEAD`]. What an allocator rounds each vector up
+/// to is left out, and so is the difference between a decoded transfer and
+/// its wire form, both of which only make the real figure larger.
+#[must_use]
+pub const fn pooled_cost(bytes: usize, inputs: usize) -> usize {
+    // Saturating because nothing here is allowed to wrap: a cost that wrapped
+    // would be a small number, and a small number is room. `inputs` cannot
+    // reach anywhere near it, being bounded by `max_inputs_per_transfer`, but
+    // the bound is a rule in another crate and this is arithmetic on a figure
+    // an arrival chooses.
+    let entry = size_of::<Hash32>()
+        .saturating_add(size_of::<Pooled>())
+        .saturating_add(size_of::<(u128, Hash32)>());
+    let spoken_for = size_of::<NoteId>().saturating_add(size_of::<Hash32>());
+    let overhead = entry.saturating_add(spoken_for.saturating_mul(inputs));
+    bytes.saturating_add(overhead).saturating_add(overhead / 8)
+}
+
+/// Whether a pool has to drop something before it can take one more.
+///
+/// `count` is the pool without the newcomer and `taken` is the pool with it,
+/// so the two ceilings are asked differently and the difference is one place
+/// at the top of each. A pool already holding [`MAX_POOLED`] has to drop one
+/// to take another; a pool landing exactly on [`MAX_POOL_BYTES`] is full and
+/// not over, because that total already counts the arrival.
+///
+/// Named rather than written inline because a boundary nothing can call is a
+/// boundary nothing can hold: filling four megabytes to an exact total is not
+/// something a test can build, and the two operators here sitting side by side
+/// and differing is exactly the shape somebody tidies into an off-by-one.
+#[must_use]
+pub const fn must_make_room(count: usize, taken: usize) -> bool {
+    count >= MAX_POOLED || taken > MAX_POOL_BYTES
+}
 
 /// What one more note in the hot set adds to a transfer's weight, in bytes.
 ///
@@ -137,15 +210,26 @@ fn rate(fee: Amount, weight: usize) -> u128 {
 
 /// A transfer waiting for a block, with what it pays and what it takes.
 ///
-/// Only the bytes are settled by the transfer itself. The fee against the
-/// weight decides what it displaces and what a miner reaches for first, and
-/// both of those move with the state, so both are worked out again whenever
-/// the followed branch does: see `ChainStore::prune_pool`.
+/// Only the two sizes are settled by the transfer itself. The fee against
+/// the weight decides what it displaces and what a miner reaches for first,
+/// and both of those move with the state, so both are worked out again
+/// whenever the followed branch does: see `ChainStore::prune_pool`.
 #[derive(Clone, Debug)]
 struct Pooled {
     transfer: Transfer,
     fee: Amount,
+    /// The wire form, which is what the fee is measured against.
     bytes: usize,
+    /// What holding it costs, which is what `MAX_POOL_BYTES` bounds.
+    ///
+    /// Two names because there are two questions, and one field answered both
+    /// of them with the wire form. What a transfer pays is asked of what it
+    /// would take up in a block, and a block is the wire form; what a pool may
+    /// hold is asked of memory, and memory is [`pooled_cost`]. Charging the
+    /// fee on the larger figure would price the pool's own bookkeeping into
+    /// the rules, and bounding memory by the smaller one is a bound on the
+    /// wrong thing.
+    cost: usize,
     /// Bytes plus the hot set places taken, which is what the fee is measured
     /// against.
     ///
@@ -759,6 +843,12 @@ pub struct ChainStore {
     /// proof, which runs to half a megabyte; four thousand of those is two
     /// gigabytes of memory handed to whoever cared to send them, without a
     /// single rule being broken.
+    ///
+    /// The sum of [`pooled_cost`], not of the wire forms. Which is the whole
+    /// of the difference between a figure that bounds memory and a figure
+    /// that describes the traffic: the rows the pool keeps so that an arrival
+    /// costs a lookup rather than a pass are memory this node gave up too,
+    /// and they were the one part nobody was charged for.
     pool_bytes: usize,
     /// The same transfers by what they pay for what they take, cheapest first.
     ///
@@ -1187,7 +1277,8 @@ impl ChainStore {
         self.pool.len()
     }
 
-    /// What every transfer waiting for a block takes altogether.
+    /// What every transfer waiting for a block takes altogether, as
+    /// [`pooled_cost`] totals it and not as the wire would.
     pub fn pool_bytes(&self) -> usize {
         self.pool_bytes
     }
@@ -1250,7 +1341,7 @@ impl ChainStore {
                 self.pool_spenders.remove(&input.note_id);
             }
         }
-        self.pool_bytes = self.pool_bytes.saturating_sub(held.bytes);
+        self.pool_bytes = self.pool_bytes.saturating_sub(held.cost);
     }
 
     /// Takes a transfer that has been broadcast, returning whether it was new.
@@ -1319,6 +1410,12 @@ impl ChainStore {
             return Err(TransferError::TooLargeForABlock { bytes, limit: room });
         }
 
+        // What a block would carry is settled; what this node would carry is
+        // the other question, and the two part company here. `bytes` is the
+        // wire form from here on and answers the fee; `cost` answers the
+        // ceiling.
+        let cost = pooled_cost(bytes, transfer.inputs.len());
+
         let weight = transfer_weight(&transfer, bytes, outcome.spent_hot.len());
         let floor = fee_floor(weight);
         if outcome.fee < floor {
@@ -1344,12 +1441,12 @@ impl ChainStore {
         let mut victims: Vec<Hash32> = Vec::new();
         {
             let mut count = self.pool.len().saturating_sub(conflicts.len());
-            let mut held = self
+            let mut taken = self
                 .pool_bytes
                 .saturating_sub(conflict_bytes)
-                .saturating_add(bytes);
+                .saturating_add(cost);
             let mut cheapest_first = self.pool_by_rate.iter();
-            while count >= MAX_POOLED || held > MAX_POOL_BYTES {
+            while must_make_room(count, taken) {
                 let Some((cheapest, victim)) = cheapest_first.next() else {
                     return Ok(false);
                 };
@@ -1364,7 +1461,7 @@ impl ChainStore {
                 };
                 victims.push(*victim);
                 count = count.saturating_sub(1);
-                held = held.saturating_sub(losing.bytes);
+                taken = taken.saturating_sub(losing.cost);
             }
         }
         for gone in &conflicts {
@@ -1374,7 +1471,7 @@ impl ChainStore {
             self.drop_pooled(gone);
         }
 
-        self.pool_bytes = self.pool_bytes.saturating_add(bytes);
+        self.pool_bytes = self.pool_bytes.saturating_add(cost);
         for input in &transfer.inputs {
             self.pool_spenders.insert(input.note_id, id);
         }
@@ -1384,6 +1481,7 @@ impl ChainStore {
                 transfer,
                 fee: outcome.fee,
                 bytes,
+                cost,
                 weight,
             },
         );
@@ -1572,7 +1670,7 @@ impl ChainStore {
             };
             displaced = displaced.saturating_add(u128::from(held.fee.as_pebbles()));
             best = best.max(rate(held.fee, held.weight));
-            bytes = bytes.saturating_add(held.bytes);
+            bytes = bytes.saturating_add(held.cost);
         }
         let asked = displaced.saturating_add(u128::from(floor.as_pebbles()));
         if u128::from(fee.as_pebbles()) < asked || offered <= best {
@@ -1651,7 +1749,7 @@ impl ChainStore {
                     for input in &held.transfer.inputs {
                         spenders.insert(input.note_id, *id);
                     }
-                    bytes = bytes.saturating_add(held.bytes);
+                    bytes = bytes.saturating_add(held.cost);
                     true
                 }
                 Err(_) => false,
