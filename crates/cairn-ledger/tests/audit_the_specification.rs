@@ -22,11 +22,15 @@
 //! document, and the header vector still checks the document's own byte
 //! widths, which sum to the 182 it names.
 //!
-//! One thing the document does not contain at all, and which had to be taken
+//! One thing the document did not contain at all, and which had to be taken
 //! from the code because a vector cannot be written without it: how
-//! `transactions_root` is built. It is a header field and refusal nineteen,
-//! and the document never says which leaves go into it, in what order, or
-//! under what tree.
+//! `transactions_root` is built. It was a header field and refusal nineteen
+//! with the document never saying which leaves went into it, in what order, or
+//! under what tree. *What a block is* says all of it now, and
+//! `the_transactions_root_is_built_the_way_the_document_says` builds one from
+//! those words, so the last vector taken from the code is taken from the
+//! document instead. This note said the gap was open for as long as it had
+//! been closed.
 //!
 //! A second used to be listed here and is no longer true. It said the document
 //! published ten of the twenty context strings, and named nine domains whose
@@ -196,6 +200,49 @@ fn spec_block_bytes(block: &Block) -> Vec<u8> {
 /// Assumed, because the document says "the outputs" rather than spelling the
 /// count out a second time: the outputs are a sequence in the part 1 sense, so
 /// their own `u32` count is in the preimage.
+/// `transactions_root`, built from *What a block is* and from nothing else.
+///
+/// The document's words: one leaf per transaction, the coinbase first and then
+/// the transfers in the order they appear; each leaf the hash under the merkle
+/// leaf domain of that transaction's identifier; an interior node the hash
+/// under the merkle node domain of its two children in order; a level with an
+/// odd count carries the last node up unchanged rather than duplicating it;
+/// and the root of no leaves the hash under the merkle empty domain.
+///
+/// The last of those cannot arise for a block, which always has its coinbase,
+/// and is written here because the document states it and a helper that
+/// quietly left it out would be agreeing with the code about a case the
+/// document covers.
+fn spec_transactions_root(block: &Block) -> Hash32 {
+    let mut level: Vec<Hash32> = Vec::new();
+    for id in std::iter::once(block.coinbase.id()).chain(block.transfers.iter().map(Transfer::id)) {
+        level.push(hash(Domain::MerkleLeaf, id.as_bytes()));
+    }
+    if level.is_empty() {
+        return hash(Domain::MerkleEmpty, &[]);
+    }
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        for two in level.chunks(2) {
+            match two {
+                [left, right] => {
+                    let mut joined = Vec::with_capacity(64);
+                    joined.extend_from_slice(left.as_bytes());
+                    joined.extend_from_slice(right.as_bytes());
+                    next.push(hash(Domain::MerkleNode, &joined));
+                }
+                // "carries the last node up unchanged rather than duplicating
+                // it, which is what stops two different bodies producing one
+                // root".
+                [odd] => next.push(*odd),
+                _ => unreachable!("chunks(2) yields one or two"),
+            }
+        }
+        level = next;
+    }
+    level[0]
+}
+
 fn spec_transfer_id_preimage(transfer: &Transfer) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&transfer.version.to_le_bytes());
@@ -422,6 +469,53 @@ fn a_coinbase_identifier_is_its_encoding_hashed_under_the_coinbase_domain() {
     assert_eq!(
         coinbase.id(),
         hash(Domain::CoinbaseId, &spec_coinbase_bytes(&coinbase))
+    );
+}
+
+/// `transactions_root` is what the document now says it is.
+///
+/// This was the one thing a vector could not be written for. The header
+/// listed the field, refusal nineteen turned a block away for it, and the
+/// document never said which leaves went in, in what order, or under what
+/// tree, so the only way to check a block was to ask the code that built it.
+/// *What a block is* says all of it now, and this holds the code to those
+/// words rather than to itself.
+///
+/// Four shapes, because the rule that matters is the odd one. A level with an
+/// odd count carries its last node up unchanged rather than duplicating it,
+/// and duplicating is what most implementations do: with two bodies of three
+/// and four leaves, duplication gives them the same root. One transaction,
+/// two, three and four reach both the odd carry and the even pair, at the leaf
+/// level and above it.
+#[test]
+fn the_transactions_root_is_built_the_way_the_document_says() {
+    let mut roots = BTreeSet::new();
+    for transfers in 0..4u64 {
+        let mut block = Block {
+            header: sample_header(),
+            coinbase: CoinbaseTransaction::new(11, vec![note(42, 2)]),
+            transfers: Vec::new(),
+        };
+        // Distinct outputs, so the leaves differ: identical transfers would
+        // give identical leaves, and a tree that read a pair in the wrong
+        // order would still agree with one that read it in the right one.
+        for at in 0..transfers {
+            let mut transfer = sample_transfer();
+            transfer.outputs = vec![note(1_000 + at, 3)];
+            block.transfers.push(transfer);
+        }
+        assert_eq!(
+            block.transactions_root(),
+            spec_transactions_root(&block),
+            "a body of one coinbase and {transfers} transfers"
+        );
+        roots.insert(block.transactions_root());
+    }
+    assert_eq!(
+        roots.len(),
+        4,
+        "four different bodies gave four different roots, or this agreed about \
+         one value four times"
     );
 }
 
