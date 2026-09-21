@@ -17,8 +17,8 @@
 )]
 
 use cairn_chain::{
-    fee_floor, transfer_weight, ChainStore, MAX_POOLED, MAX_POOL_BYTES, MIN_FEE_PER_WEIGHT,
-    NOTE_WEIGHT,
+    fee_floor, pooled_cost, transfer_weight, ChainStore, MAX_POOLED, MAX_POOL_BYTES,
+    MIN_FEE_PER_WEIGHT, NOTE_WEIGHT,
 };
 use cairn_crypto::SecretKey;
 use cairn_ledger::note::{Note, NoteId};
@@ -328,10 +328,31 @@ fn the_pool_defends_itself_by_arithmetic() {
     );
     let victim_weight = transfer_weight(&payment, payment.encode().len(), 1);
 
-    // The blockade has to buy four megabytes of pool at the same rate. The
-    // cheapest weight per byte is a transfer that frees as many places as it
-    // takes, so bytes alone: four megabytes of weight.
-    let blockade_weight = MAX_POOL_BYTES;
+    // The blockade has to fill the pool at the same rate. The cheapest weight
+    // per byte is a transfer that frees as many places as it takes, so bytes
+    // alone.
+    //
+    // Not `MAX_POOL_BYTES` itself, which this used to say. The ceiling is
+    // measured in what holding costs and the attacker pays in what arrives,
+    // and the two part by whatever the bookkeeping adds. The best price
+    // anyone can get on that is the shape that drags in the most bookkeeping
+    // per byte, which is the one that is all inputs, since a note spoken for
+    // is a row of its own. Built here rather than counted, so the discount is
+    // read off the rules and not off a figure that moves when they do.
+    let lean = Transfer::new(
+        (0..params.max_inputs_per_transfer)
+            .map(|at| Input::hot(NoteId::new(cairn_primitives::Hash32::ZERO, at as u32)))
+            .collect(),
+        vec![Note::new(pebbles(1_000), owner)],
+    );
+    let lean_wire = lean.encode().len();
+    let lean_cost = pooled_cost(lean_wire, lean.inputs.len());
+    let blockade_weight = MAX_POOL_BYTES * lean_wire / lean_cost;
+    assert!(
+        blockade_weight < MAX_POOL_BYTES,
+        "a full pool weighs less than the ceiling it fills, because the \
+         ceiling counts what holding costs and this counts what arrives"
+    );
     let ratio = blockade_weight as f64 / victim_weight as f64;
 
     println!("\n  a payment weighs {victim_weight}; shutting the pool weighs at least");
@@ -341,7 +362,7 @@ fn the_pool_defends_itself_by_arithmetic() {
     println!(
         "  at {} bytes a block, so it is re-bought about every {} blocks\n",
         params.max_block_bytes,
-        MAX_POOL_BYTES / params.max_block_bytes
+        blockade_weight / params.max_block_bytes
     );
     assert!(ratio > 1_000.0);
 }

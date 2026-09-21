@@ -9,8 +9,8 @@
 )]
 
 use cairn_chain::{
-    fee_floor, transfer_weight, ChainStore, MAX_POOLED, MAX_POOL_BYTES, MIN_FEE_PER_WEIGHT,
-    NOTE_WEIGHT,
+    fee_floor, must_make_room, pooled_cost, transfer_weight, ChainStore, MAX_POOLED,
+    MAX_POOL_BYTES, MIN_FEE_PER_WEIGHT, NOTE_WEIGHT,
 };
 use cairn_crypto::SecretKey;
 use cairn_ledger::note::{Note, NoteId};
@@ -164,6 +164,26 @@ fn wide_spend(
         params.max_outputs_per_transfer,
         fee,
     )
+}
+
+/// Spends several notes into one, which is the shape that speaks for the most
+/// notes per byte and so fills the pool's bookkeeping fastest.
+fn gathering_spend(
+    params: &ConsensusParams,
+    notes: &[(NoteId, Note)],
+    owner: &SecretKey,
+    to: &SecretKey,
+    fee: Amount,
+) -> Transfer {
+    let total: u64 = notes.iter().map(|(_, note)| note.value.as_pebbles()).sum();
+    let paid = total - fee.as_pebbles();
+    let inputs: Vec<Input> = notes.iter().map(|(id, _)| Input::hot(*id)).collect();
+    let mut transfer = Transfer::new(inputs, vec![Note::new(pebbles(paid), to.public_key())]);
+    for (index, (_, note)) in notes.iter().enumerate() {
+        let at = u32::try_from(index).unwrap();
+        transfer.sign_input(params.network, at, note, owner);
+    }
+    transfer
 }
 
 /// Spends one note, paying `to` and leaving the rest as a fee.
@@ -522,6 +542,158 @@ fn the_pool_is_bounded_by_weight_as_well_as_by_count() {
     assert!(
         store.pool_len() < MAX_POOLED,
         "and it filled up on weight long before it filled up on count"
+    );
+}
+
+/// The ceiling counts what holding a transfer costs, not what arrived.
+///
+/// `MAX_POOL_BYTES` is a bound on memory: its own note says four thousand
+/// proof-carrying transfers is two gigabytes handed to whoever cared to send
+/// them. What was counted against it was the wire form, which is not what a
+/// pooled transfer takes. Three maps hold it, the pool itself and the rate
+/// index and a row in `pool_spenders` for every note it speaks for, and none
+/// of that was charged. It is the same mistake the block table's ceiling made
+/// before `HELD_OVERHEAD`, and `audit_fee_market.rs` measures what it came to:
+/// a full pool weighs a little over half the ceiling it fills.
+///
+/// Filled here with the shape that drags in the most bookkeeping per byte,
+/// which is the one that is all inputs, since a note spoken for is a row of
+/// its own.
+///
+/// The second half is the one that keeps the correction from going too far.
+/// The pool has two questions and they have two answers: what a transfer pays
+/// is asked of what it would take in a block, which is the wire form, and
+/// answering it with the holding cost would price this node's own bookkeeping
+/// into the rules. So the fee stays on the wire, and this holds a transfer
+/// that clears the floor on the wire form and would not clear it on the
+/// holding cost.
+#[test]
+fn the_ceiling_counts_what_holding_costs_and_not_what_arrived() {
+    let params = params();
+    let miner = wallet(1);
+    let (mut store, notes) = funded_widely(512, &miner);
+
+    let per_transfer = 16;
+    // One note held back from the filling, for the second half below.
+    let (fill, spare) = notes.split_at(notes.len() - 1);
+
+    let mut taken = 0usize;
+    for group in fill.chunks(per_transfer) {
+        if group.len() < per_transfer {
+            break;
+        }
+        // Comfortably past the floor of sixteen inputs, which is asked of
+        // their bytes and so rises with the count.
+        let fee = pebbles(PLAIN_FEE * per_transfer as u64 * 4);
+        let transfer = gathering_spend(&params, group, &miner, &wallet(2), fee);
+        match store.accept_transfer(transfer) {
+            Ok(true) => taken += 1,
+            other => {
+                println!("stopped after {taken}: {other:?}");
+                break;
+            }
+        }
+    }
+    assert!(taken > 0, "some were taken");
+
+    // What the pool says it holds is what `pooled_cost` says of everything in
+    // it. Every site that keeps this total has to agree, and each of them
+    // used to read the wire form.
+    let counted: usize = store
+        .pooled_transfers()
+        .map(|(_, transfer)| pooled_cost(transfer.encode().len(), transfer.inputs.len()))
+        .sum();
+    assert_eq!(
+        store.pool_bytes(),
+        counted,
+        "the pool's total is the sum of what each one costs to hold"
+    );
+
+    // And that total is strictly above the wire forms, by at least the rows
+    // the notes take. Without this the test above would still pass if
+    // `pooled_cost` handed its argument straight back.
+    let wire: usize = store
+        .pooled_transfers()
+        .map(|(_, transfer)| transfer.encode().len())
+        .sum();
+    let spoken_for: usize = store
+        .pooled_transfers()
+        .map(|(_, transfer)| transfer.inputs.len())
+        .sum();
+    assert!(
+        store.pool_bytes() > wire + spoken_for * size_of::<NoteId>(),
+        "holding {} costs more than the {wire} that arrived, by more than the \
+         {spoken_for} notes it speaks for",
+        store.pool_bytes()
+    );
+
+    // The fee is still asked of the wire form. This transfer clears the floor
+    // on what a block would carry and does not clear it on what this node
+    // pays to hold it, so it is accepted here and would be refused if the two
+    // questions were answered by one number again.
+    let (id, note) = spare[0];
+    let wire = spend(&params, id, note, &miner, &wallet(3), pebbles(PLAIN_FEE))
+        .encode()
+        .len();
+    let held = pooled_cost(wire, 1);
+    let on_the_wire = fee_floor(transfer_weight(
+        &spend(&params, id, note, &miner, &wallet(3), pebbles(PLAIN_FEE)),
+        wire,
+        1,
+    ));
+    let on_the_holding = fee_floor(transfer_weight(
+        &spend(&params, id, note, &miner, &wallet(3), pebbles(PLAIN_FEE)),
+        held,
+        1,
+    ));
+    assert!(
+        on_the_wire < on_the_holding,
+        "the two floors differ, or this case proves nothing"
+    );
+    let just_enough = pebbles(on_the_wire.as_pebbles());
+    let transfer = spend(&params, id, note, &miner, &wallet(3), just_enough);
+    assert_eq!(
+        store.accept_transfer(transfer),
+        Ok(true),
+        "a fee that clears the floor on the wire form is enough, and the \
+         holding cost is not what the floor is asked of"
+    );
+}
+
+/// Both ceilings are full at their own number, and the two differ by one.
+///
+/// `accept_transfer` counts the pool two ways before it decides what to drop.
+/// The count is the pool without the arrival, so a pool already holding
+/// `MAX_POOLED` has to drop one to take another. The bytes are the pool with
+/// the arrival already added, so a pool landing exactly on `MAX_POOL_BYTES` is
+/// full and not over. Two comparisons side by side, one `>=` and one `>`, and
+/// the reason they differ is not visible at the line.
+///
+/// Held here rather than through a filled pool because four megabytes cannot
+/// be landed on exactly by any pool a test can build: transfer sizes come in
+/// steps of forty bytes and up, so the total steps over the ceiling rather
+/// than onto it. The rule has a name so that the boundary can be asked
+/// directly, which is the only way it gets asked at all.
+#[test]
+fn a_pool_is_full_at_its_ceiling_and_not_one_short_of_it() {
+    assert!(
+        !must_make_room(0, MAX_POOL_BYTES),
+        "a pool landing exactly on the ceiling is full, not over: the total \
+         already counts the arrival"
+    );
+    assert!(
+        must_make_room(0, MAX_POOL_BYTES + 1),
+        "and one byte past it has to make room"
+    );
+
+    assert!(
+        !must_make_room(MAX_POOLED - 1, 0),
+        "a pool one short of the count has room for the arrival"
+    );
+    assert!(
+        must_make_room(MAX_POOLED, 0),
+        "and a pool at the count has to drop one first, because this figure \
+         does not count the arrival"
     );
 }
 
