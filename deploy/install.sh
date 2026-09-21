@@ -97,6 +97,11 @@ resolve() {
 }
 
 listen=$(carried listen)
+# A first guess only. Whatever this sets is put to `cairnd --check`
+# below and replaced by the name the build gives if it is refused, so a
+# retired name here costs a line of output and nothing else. It is not
+# asked from the build at this point because the build is not installed
+# yet.
 resolve NETWORK "$(carried network)" testnet-6
 resolve PORT "${listen##*:}" 9944
 resolve SEED "$(carried seed)" ""
@@ -233,9 +238,21 @@ say "Service"
 # only thing that knows which names this build has: a refusal here means the
 # name is gone, and the default is the current one.
 if [ -n "$NETWORK" ] && ! /usr/local/bin/cairnd --check --network "$NETWORK" >/dev/null 2>&1; then
-    echo "network  $NETWORK is not a network this build knows, so testnet-6 is used"
+    # Asked, not written down. This said `NETWORK=testnet-6`, which is the
+    # same shape of mistake the check above it exists to catch: the day
+    # testnet-6 is retired, the line that rescues a machine from a retired
+    # network hands it a retired network. The build is the only thing that
+    # knows which name is current, and it says so on the first line of
+    # `--check`.
+    fallback=$(/usr/local/bin/cairnd --check 2>/dev/null | awk '/^network/ {print $2; exit}')
+    if [ -z "$fallback" ]; then
+        echo "network  $NETWORK is not a network this build knows, and this build" >&2
+        echo "         would not say which one is. Nothing is installed." >&2
+        exit 1
+    fi
+    echo "network  $NETWORK is not a network this build knows, so $fallback is used"
     echo "         instead. Name one explicitly to choose another."
-    NETWORK=testnet-6
+    NETWORK=$fallback
 fi
 
 # Written from the settings above rather than copied, so the unit says in full

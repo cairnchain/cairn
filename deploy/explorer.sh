@@ -105,6 +105,11 @@ resolve() {
 }
 
 listen=$(carried listen)
+# A first guess only. Whatever this sets is put to `cairn-explorer --check`
+# below and replaced by the name the build gives if it is refused, so a
+# retired name here costs a line of output and nothing else. It is not
+# asked from the build at this point because the build is not installed
+# yet.
 resolve NETWORK "$(carried network)" testnet-6
 resolve PORT "${listen##*:}" 9945
 resolve HTTP "$(carried http)" 127.0.0.1:8080
@@ -164,9 +169,20 @@ say "Service"
 # a service that will not start. The explorer itself is asked, since it is the
 # only thing that knows which names this build has.
 if [ -n "$NETWORK" ] && ! /usr/local/bin/cairn-explorer --check --network "$NETWORK" >/dev/null 2>&1; then
-    echo "network  $NETWORK is not a network this build knows, so testnet-6 is used"
+    # Asked, not written down, for the reason `install.sh` carries beside the
+    # same lines: the day testnet-6 is retired, a rescue that hands back
+    # `testnet-6` hands back a retired network, which is what the check above
+    # exists to catch. The build says which name is current on the first line
+    # of `--check`.
+    fallback=$(/usr/local/bin/cairn-explorer --check 2>/dev/null | awk '/^network/ {print $2; exit}')
+    if [ -z "$fallback" ]; then
+        echo "network  $NETWORK is not a network this build knows, and this build" >&2
+        echo "         would not say which one is. Nothing is installed." >&2
+        exit 1
+    fi
+    echo "network  $NETWORK is not a network this build knows, so $fallback is used"
     echo "         instead. Name one explicitly to choose another."
-    NETWORK=testnet-6
+    NETWORK=$fallback
 fi
 
 # Written from the settings above rather than copied, so the unit says in full
