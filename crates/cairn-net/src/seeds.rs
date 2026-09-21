@@ -32,6 +32,14 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use cairn_ledger::note::NetworkId;
 
 /// The default port a node listens on, and so the one a seed is named with.
+///
+/// Both halves of that sentence were false. `cairnd` listened on
+/// `"0.0.0.0:9944"` written into its own options, and every seed below is
+/// named with the port written out again, so this constant was read by nothing
+/// but the test beside it: moving it moved nothing. It is what `cairnd` builds
+/// its default from now, and `every_written_in_seed_is_named_with_the_default_
+/// port` holds the names, which have to stay strings because a `const` array
+/// of them cannot be formatted.
 pub const DEFAULT_PORT: u16 = 9944;
 
 /// Where to start on the third test network.
@@ -125,6 +133,29 @@ pub fn start_from(asked: &[String], network: NetworkId) -> Result<Vec<SocketAddr
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    /// Every address written into the program is named with the default port.
+    ///
+    /// The names have to be literals: a `const [&str; N]` cannot be built by
+    /// formatting. So the port appears twice, here and in `DEFAULT_PORT`, and
+    /// this is what keeps the two agreed. Without it the constant was read by
+    /// nothing at all, which is how it came to describe a node that listened
+    /// somewhere else.
+    #[test]
+    fn every_written_in_seed_is_named_with_the_default_port() {
+        let suffix = format!(":{}", super::DEFAULT_PORT);
+        let mut seen = 0usize;
+        for network in [NetworkId::TESTNET_6] {
+            for name in super::written_in(network) {
+                assert!(
+                    name.ends_with(&suffix),
+                    "`{name}` is not named with the default port {suffix}"
+                );
+                seen += 1;
+            }
+        }
+        assert!(seen > 0, "or this walked an empty list and held nothing");
+    }
+
     use super::*;
 
     #[test]
