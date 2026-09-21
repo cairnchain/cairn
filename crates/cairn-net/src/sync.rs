@@ -1824,8 +1824,14 @@ mod what_an_ask_costs {
     /// large ones.
     #[test]
     fn a_window_buys_the_same_megabytes_whatever_a_block_weighs() {
-        // `ConsensusParams::mainnet` and `testnet` both cap a block here.
-        let at_the_consensus_limit = 128 * 1024;
+        // Read off the rules rather than written out. This said
+        // "`ConsensusParams::mainnet` and `testnet` both cap a block here"
+        // beside a literal, and there is no `mainnet`: `for_network` answers
+        // `None` for it, because the network is not made yet. So the sentence
+        // named a thing that does not exist to vouch for a number that was a
+        // copy of one that does.
+        let at_the_consensus_limit =
+            cairn_ledger::validation::ConsensusParams::testnet().max_block_bytes;
         let drawn = bytes_a_window_serves(at_the_consensus_limit);
         let ceiling = usize::try_from(ALLOWANCE).unwrap_or(0) * BYTES_PER_UNIT;
         assert!(

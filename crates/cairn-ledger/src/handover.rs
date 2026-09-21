@@ -471,7 +471,13 @@ fn against_each_other(handover: &Handover, declared: Amount) -> Result<(), Hando
     //
     // The eviction order is also written in one place now rather than two,
     // which is what makes this a second line rather than the only one: see
-    // `LedgerState::from_handover`.
+    // `LedgerState::rebuilt`, which `accept` hands the pieces to below.
+    //
+    // This said `LedgerState::from_handover`, which has never existed under
+    // that name in this repository. A cross reference to a function nobody can
+    // find is worse than none: it reads as though the second line has been
+    // checked, and the reader who goes looking concludes the note is stale and
+    // stops trusting the paragraph rather than the name.
     let mut once = BTreeSet::new();
     for (id, _) in &handover.hot {
         if !once.insert(*id) {
