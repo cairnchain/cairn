@@ -61,12 +61,21 @@ fn chain(blocks: usize) -> (Vec<Block>, Vec<BlockHeader>) {
 /// roots and the grace window, and nothing about who anybody is watching.
 ///
 /// What it costs is the whole of a wallet's recovery story. `cairn-net` names
-/// the owners once, at `node.rs:1598`, and then adopts a ledger in two places:
-/// at `node.rs:1621` from the `ledger.dat` on disk, and at `node.rs:2460` when
-/// a newcomer joins from a peer. Both run after the naming and neither names
-/// them again, so a node that joined rather than read follows nobody from the
-/// moment it joined, and `keep_ledger` at `node.rs:2475` writes the file that
-/// makes every later start do the same.
+/// the owners once, in `Node::open_with`, and then adopts a ledger in two
+/// places: in `open_with` itself, from the `ledger.dat` on disk, and in
+/// `take_the_ledger` when a newcomer joins from a peer. Both run after the
+/// naming and neither names them again, so a node that joined rather than read
+/// follows nobody from the moment it joined, and `keep_ledger`, which
+/// `take_the_ledger` calls next, writes the file that makes every later start
+/// do the same.
+///
+/// Named rather than numbered. This paragraph carried four `node.rs:NNNN`
+/// references and all four had gone stale, landing on an assertion, a doc
+/// comment about counting unreadable blocks, and two halves of an unrelated
+/// expression. They were the only hard coded line numbers in `crates/`, which
+/// is how a sweep found every one of them at once: a line number is a copy of
+/// a position, and a position is the one thing about a file guaranteed to
+/// move.
 ///
 /// A node that follows nobody records no position for any note of its owner's
 /// that falls. The wallet's own history keeps identifiers and values and no
