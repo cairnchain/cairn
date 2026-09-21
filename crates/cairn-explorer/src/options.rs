@@ -56,7 +56,7 @@ The explorer always keeps the cold set, because answering questions about
 notes that have fallen is the whole point of it. That is a cost which grows
 with the chain, which is exactly what a plain node refuses to carry. The
 index it builds on top grows faster still: 627 bytes for every note that has
-ever existed, against seventy two for every note that has fallen. Both are
+ever existed, against 72 for every note that has fallen. Both are
 reported live at /api/status.";
 
 /// Everything the explorer needs to start.
@@ -301,12 +301,26 @@ mod tests {
 
     /// The help text quotes what one note costs the index. An operator sizes a
     /// machine off that figure, so it is held to the one the program reports.
+    ///
+    /// Both figures, which is the half this was missing. The same sentence
+    /// names what a note that has ever existed costs the index and what a
+    /// fallen one costs the cold set, and only the first was held: the second
+    /// was spelled out in words, so no test could have found it and none
+    /// looked. A rule applied to one of two numbers in one sentence is the
+    /// shape this repository keeps finding, and it is worse here than usual,
+    /// because both numbers are what an operator sizes a machine on.
     #[test]
-    fn the_help_quotes_the_figure_the_index_uses() {
-        let figure = crate::index::BYTES_PER_NOTE.to_string();
+    fn the_help_quotes_both_figures_the_program_reports() {
+        let index = crate::index::BYTES_PER_NOTE.to_string();
         assert!(
-            HELP.contains(&figure),
-            "the help says something other than {figure} bytes a note"
+            HELP.contains(&index),
+            "the help says something other than {index} bytes a note for the index"
+        );
+
+        let cold = crate::api::COLD_BYTES_PER_NOTE.to_string();
+        assert!(
+            HELP.contains(&cold),
+            "the help says something other than {cold} bytes a note for the cold set"
         );
     }
 

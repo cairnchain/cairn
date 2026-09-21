@@ -125,7 +125,7 @@ const HOT_BYTES_PER_NOTE: u64 = 516;
 /// measurement on a node that keeps only the roots has no slope at all, which
 /// is the claim the protocol rests on and the reason this cost is an
 /// archivist's alone.
-const COLD_BYTES_PER_NOTE: u64 = 72;
+pub(crate) const COLD_BYTES_PER_NOTE: u64 = 72;
 
 /// Bytes one note that has ever existed costs the index.
 ///
