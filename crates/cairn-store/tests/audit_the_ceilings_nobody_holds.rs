@@ -13,6 +13,16 @@
 //! The first is held here. The second is recorded here as a guard with no
 //! consequence, so that whoever next reads `bounds` knows which of its three
 //! conditions is load bearing.
+//!
+//! And a third thing, found by reading those four places beside each other
+//! rather than one at a time. A length off a disk has two questions to
+//! answer: whether it is a length this process could have written, which is
+//! the ceiling, and whether a record can actually follow it, which is what is
+//! left. `read` asks the second against the index and `Walk` against the
+//! file; `Replay::next` asked only the ceiling and then reserved what the
+//! prefix said. `MAX_RECORD_BYTES` is four megabytes against a block ceiling
+//! of a hundred and twenty eight kilobytes, so the gap a flipped bit can land
+//! in and still clear the ceiling is most of the range. Held below.
 
 #![allow(
     clippy::unwrap_used,
@@ -173,6 +183,78 @@ fn a_span_past_the_ceiling_is_refused_by_bounds_and_would_be_refused_without_it(
     assert!(
         matches!(answer, Err(StoreError::Misindexed { index: 1, .. })),
         "refused by name, before the record's own prefix is read"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// The other guard on a length, which two of the three readers carry.
+///
+/// A length off a disk has two questions to answer, not one. The ceiling says
+/// whether it is a length this process could have written. What is left in
+/// the log says whether a record can actually follow it. `BlockLog::read`
+/// asks the second against the index and `Walk` asks it against the file,
+/// under twenty five lines saying why the ceiling alone is not enough:
+/// `MAX_RECORD_BYTES` is four megabytes against a block ceiling of a hundred
+/// and twenty eight kilobytes, so a flipped bit landing anywhere in that gap
+/// clears the ceiling.
+///
+/// `Replay::next` asked only the first, and then reserved what the prefix
+/// said. A megabyte here, four at the ceiling, on the one path a node walks
+/// at every start.
+///
+/// The assertion is the name and not the failure. Without the guard this
+/// still ends the replay, because the short read that follows fails, so a
+/// test asking only "does the replay stop" passes either way. What changes is
+/// whether the allocation was spent first and whether the answer says which
+/// of the two things went wrong.
+#[test]
+fn the_replay_refuses_a_length_reaching_past_the_end_by_name() {
+    // Under the ceiling and far past the log, which is the gap the ceiling
+    // cannot see: six small blocks are a few kilobytes all told.
+    const ENORMOUS: u32 = 1024 * 1024;
+
+    let blocks = chain(6);
+    let directory = scratch("past-the-end");
+    {
+        let (mut log, _) = BlockLog::open(&directory).unwrap();
+        for block in &blocks {
+            log.append(block).unwrap();
+        }
+    }
+
+    let index = std::fs::read(directory.join(BLOCK_INDEX)).unwrap();
+    let start_of_two = u64::from_le_bytes(index[8..16].try_into().unwrap());
+    put(
+        &directory.join(BLOCK_LOG),
+        start_of_two,
+        &ENORMOUS.to_le_bytes(),
+    );
+
+    let (log, recovered) = BlockLog::open(&directory).unwrap();
+    assert_eq!(recovered.blocks, 6, "the open never looks at record two");
+    assert!(
+        log.bytes() < u64::from(ENORMOUS),
+        "the fixture only means something while the log is smaller than the \
+         prefix it now carries: {} bytes",
+        log.bytes()
+    );
+
+    let replayed: Vec<Result<Block, StoreError>> = log.replay().collect();
+    assert_eq!(
+        replayed.len(),
+        3,
+        "two records, the refusal, and then nothing"
+    );
+    assert!(replayed[0].is_ok());
+    assert!(replayed[1].is_ok());
+    assert!(
+        matches!(
+            replayed[2],
+            Err(StoreError::RecordPastTheEnd { index: 2, declared, .. })
+                if declared == ENORMOUS as usize
+        ),
+        "the replay met a prefix reaching past the log and answered {:?}",
+        replayed[2].as_ref().err().map(ToString::to_string)
     );
     let _ = std::fs::remove_dir_all(&directory);
 }
