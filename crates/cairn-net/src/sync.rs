@@ -590,7 +590,7 @@ pub enum DropReason {
     RepeatedHandshake,
     #[error("peer speaks protocol version {theirs}, this node speaks {PROTOCOL_VERSION}")]
     WrongVersion { theirs: u32 },
-    #[error("peer follows network {theirs:?}")]
+    #[error("peer follows network {theirs}")]
     WrongNetwork { theirs: NetworkId },
     #[error("peer follows a chain starting at {theirs}, which is not this one")]
     ForeignChain { theirs: Hash32 },

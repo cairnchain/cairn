@@ -110,6 +110,49 @@ impl NetworkId {
     pub const fn as_u32(self) -> u32 {
         self.0
     }
+
+    /// The name this network is known by, when it has one.
+    ///
+    /// The retired ones are named too, and they are the reason this exists.
+    /// Every constant above says a node left behind "is then told plainly that
+    /// it is on another network, rather than failing somewhere confusing", and
+    /// what it was told was a thirty two bit marker: `peer speaks network
+    /// 0x43415258`. Five constants carried the translation and nothing read
+    /// them, so the one table that could make the telling plain was the one
+    /// piece of the promise nobody had wired up.
+    ///
+    /// `None` for a marker this build does not know, which is the honest
+    /// answer and not a fallback: a number nobody named is a number this node
+    /// has nothing to say about, and printing it raw is then right.
+    #[must_use]
+    pub const fn name(self) -> Option<&'static str> {
+        match self {
+            Self::MAINNET => Some("mainnet"),
+            Self::TESTNET_1 => Some("testnet-1"),
+            Self::TESTNET_2 => Some("testnet-2"),
+            Self::TESTNET_3 => Some("testnet-3"),
+            Self::TESTNET_4 => Some("testnet-4"),
+            Self::TESTNET_5 => Some("testnet-5"),
+            Self::TESTNET_6 => Some("testnet-6"),
+            Self::DEVNET => Some("devnet"),
+            _ => None,
+        }
+    }
+}
+
+/// The name, or the marker when there is no name.
+///
+/// Three errors print a network at somebody: a frame from the wrong one, a
+/// peer following another, and a block belonging elsewhere. All three printed
+/// either `{:#010x}` or the derived `Debug`, so an operator on a retired build
+/// read `0x43415258` or `NetworkId(1128416344)` and had nothing to look up.
+impl core::fmt::Display for NetworkId {
+    fn fmt(&self, out: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.name() {
+            Some(name) => out.write_str(name),
+            None => write!(out, "{:#010x}", self.0),
+        }
+    }
 }
 
 impl Encode for NetworkId {

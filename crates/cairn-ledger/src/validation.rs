@@ -372,13 +372,12 @@ impl ConsensusParams {
 
     /// The name [`Self::for_network`] would take to produce these rules.
     pub fn network_name(&self) -> &'static str {
-        match self.network {
-            NetworkId::DEVNET => "devnet",
-            NetworkId::TESTNET_6 => "testnet-6",
-            // Mainnet lands here too until it has a first block, which is the
-            // honest answer: it is not a network yet.
-            _ => "unnamed",
-        }
+        // One table, and it is `NetworkId::name`. This was a second copy
+        // knowing two of the eight, so a node on a retired network called it
+        // "unnamed" while the constant naming it sat unread two files away.
+        // Mainnet is named here and is still not a network until it has a
+        // first block; what says so is `for_network`, which refuses it.
+        self.network.name().unwrap_or("unnamed")
     }
 
     /// The rule set, with nothing tying it to a live network.
@@ -652,7 +651,7 @@ pub enum BlockError {
     },
     #[error("coinbase version {0} is not supported")]
     UnsupportedCoinbaseVersion(u16),
-    #[error("block belongs to network {found:?}, this node follows {expected:?}")]
+    #[error("block belongs to network {found}, this node follows {expected}")]
     WrongNetwork {
         expected: NetworkId,
         found: NetworkId,
