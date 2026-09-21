@@ -205,3 +205,116 @@ fn a_payment_under_a_branch_of_shared_transfers_still_comes_back() {
         store.pool_len()
     );
 }
+
+/// Transfers the losing branch carries and the winning one does not, past
+/// what the budget allows.
+///
+/// `ONLY_OURS` and not `SHARED`: the test above builds transfers both branches
+/// carry, which is the case the budget must not be spent on and which this
+/// file was written for. Those are turned away by `check_transfer_again`
+/// before `asked` moves, so however many of them there are the budget is never
+/// reached — which is why the fixture above crosses the number and still
+/// cannot show what the number does.
+const ONLY_OURS: usize = MAX_POOLED + 64;
+
+/// The budget bounds the asking, and nothing held that.
+///
+/// `repool` is the one thing standing between a deep switch and a full check
+/// of every transfer it undoes. `MAX_REORG_DEPTH` blocks of
+/// `max_transfers_per_block` is four million of them, each an encoding, a hash
+/// and an elliptic curve verification, and all of it under the chain lock.
+/// The bound is `if asked >= MAX_POOLED { return; }`, and deleting it left the
+/// whole suite green.
+///
+/// The pool's own size cannot show it: the pool is bounded on its own, so it
+/// ends full either way. What the budget bounds is how many were *asked*, and
+/// that is what `last_rewind_offered` reports.
+///
+/// So the losing branch here carries transfers the winning one does not, which
+/// is the case that costs: each one passes the cheap refusals and reaches
+/// `accept_transfer` in full. Past the budget by sixty four, so the stop is the
+/// budget and not the end of the list.
+#[test]
+fn a_rewind_stops_asking_at_the_budget_and_not_at_the_end_of_what_it_undid() {
+    let miner = wallet(1);
+    let payee = wallet(2);
+    let params = params();
+
+    let mut source = Source::new();
+    let mut store = ChainStore::new(params);
+
+    let mut notes: Vec<(NoteId, Note)> = Vec::new();
+    while notes.len() < ONLY_OURS {
+        let outputs = source.split_reward(&miner);
+        let block = source.mine(outputs.clone(), Vec::new());
+        store.add_block(block.clone(), NOW).unwrap();
+        for (index, note) in outputs.into_iter().enumerate() {
+            notes.push((
+                NoteId::new(block.coinbase.id(), u32::try_from(index).unwrap()),
+                note,
+            ));
+        }
+    }
+
+    // Both branches see every funding block and nothing after, so every note
+    // below exists on both and is spent on only one.
+    let mut rival = Source {
+        params,
+        state: source.state.clone(),
+        clock: source.clock,
+    };
+
+    // Rising fees, and that is the whole of what makes this measure the
+    // budget. At one fee they all rate the same, so once the pool is full the
+    // cheap refusal above `accept_transfer` turns every later one away without
+    // spending the budget, and `asked` stops at `MAX_POOLED` because the pool
+    // filled rather than because the bound bit. Deleting either half of the
+    // budget then changes nothing and the test says so anyway. Rising, each
+    // one outbids the pool's cheapest, so each is worth asking about and the
+    // only thing that can stop the asking is the bound.
+    let ours: Vec<Transfer> = notes
+        .iter()
+        .take(ONLY_OURS)
+        .enumerate()
+        .map(|(at, (id, note))| {
+            let fee = PLAIN_FEE.saturating_add(at as u64);
+            spend(&params, *id, *note, &miner, &payee, pebbles(fee))
+        })
+        .collect();
+
+    let per_block = params.max_block_bytes / 400;
+    let mut carried = 0usize;
+    for lot in ours.chunks(per_block) {
+        carried += lot.len();
+        let block = source.mine(source.split_reward(&miner), lot.to_vec());
+        store.add_block(block, NOW).unwrap();
+    }
+    assert_eq!(carried, ONLY_OURS, "the branch carries what it was given");
+
+    // The rival carries none of them and wins on length alone, so every one of
+    // the transfers above is undone and is still spendable.
+    let mut reorganised = false;
+    for _ in 0..(ours.len() / per_block + 4) {
+        let block = rival.mine(rival.split_reward(&miner), Vec::new());
+        if matches!(
+            store.add_block(block, NOW),
+            Ok(Accepted::Reorganised { .. })
+        ) {
+            reorganised = true;
+        }
+    }
+    assert!(reorganised, "the heavier branch was taken");
+
+    let offered = store.last_rewind_offered();
+    assert_eq!(
+        offered, MAX_POOLED,
+        "a rewind undoing {ONLY_OURS} transfers the winning branch does not \
+         carry asked about {offered} of them; the budget is {MAX_POOLED}"
+    );
+    assert!(
+        carried > MAX_POOLED,
+        "the branch that was undone carried {carried} transfers and the budget \
+         is {MAX_POOLED}: with fewer, the stop above is the end of the list \
+         rather than the bound"
+    );
+}
