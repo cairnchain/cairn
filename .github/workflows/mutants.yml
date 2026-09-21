@@ -54,7 +54,19 @@ env:
   # How many ways the weekly run is split. Written once: the shard numbers and
   # the coverage check below are both built from it, because they were written
   # out separately and disagreed.
-  SHARDS: 8
+  #
+  # Was eight, which is a number nobody had run. The first full run measured
+  # it: the quickest shard took two hours and forty four minutes and three of
+  # the eight were still going at five hours and six, against a platform limit
+  # of six, where a job is killed and takes its findings with it. A weekly run
+  # that cannot be relied on to finish is a weekly run that reports nothing,
+  # and it would have failed that way silently, since a killed shard and a
+  # shard full of survivors are both a red job.
+  #
+  # Twenty four puts the longest of those near a hundred minutes. The cost is
+  # runners, which this repository does not pay for, and the build each one
+  # repeats, which is a quarter of an hour against hours of testing.
+  SHARDS: 24
 
 jobs:
   # What this change would let through. Only the mutants that fall on lines
@@ -175,6 +187,11 @@ jobs:
   everything:
     needs: plan
     if: github.event_name != 'pull_request'
+    # Far past the work, because this is a deadline for something that has to
+    # happen: met, it costs nothing. What it buys is that a shard which will
+    # not finish says so as itself, rather than being killed at the platform's
+    # six hours in a way that looks the same as finding survivors.
+    timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
