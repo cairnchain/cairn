@@ -202,3 +202,52 @@ fn the_rules_a_test_can_mine_are_a_public_networks_rules() {
         assert!(settles_before_it_pays(&shaped));
     }
 }
+
+/// Every network this build knows answers to a name, retired ones included.
+///
+/// `every_network_answers_to_the_name_it_reports` covers the two that are
+/// still live, because `for_network` is where it starts and only live networks
+/// have rules. The retired ones are the reason the table exists: a node on an
+/// old build meets `testnet-5` on the wire and nowhere else, and every one of
+/// those constants says a node left behind "is then told plainly that it is on
+/// another network, rather than failing somewhere confusing".
+///
+/// What it was told was a thirty two bit marker. Three errors print a network
+/// at somebody — a frame from the wrong one, a peer following another, a block
+/// belonging elsewhere — and all three printed `{:#010x}` or the derived
+/// `Debug`, so the operator read `0x43415258` and had nothing to look up. The
+/// five constants that carry the translation were read by nothing at all.
+#[test]
+fn a_retired_network_is_named_and_not_written_out_in_hexadecimal() {
+    use cairn_ledger::note::NetworkId;
+
+    for (id, expected) in [
+        (NetworkId::MAINNET, "mainnet"),
+        (NetworkId::TESTNET_1, "testnet-1"),
+        (NetworkId::TESTNET_2, "testnet-2"),
+        (NetworkId::TESTNET_3, "testnet-3"),
+        (NetworkId::TESTNET_4, "testnet-4"),
+        (NetworkId::TESTNET_5, "testnet-5"),
+        (NetworkId::TESTNET_6, "testnet-6"),
+        (NetworkId::DEVNET, "devnet"),
+    ] {
+        assert_eq!(id.name(), Some(expected), "the table is short a network");
+        assert_eq!(
+            id.to_string(),
+            expected,
+            "a named network still came out as a number"
+        );
+    }
+
+    // A marker nobody named comes out as the marker, which is the honest
+    // answer rather than a fallback: there is nothing to say about it.
+    let stranger = NetworkId::new(0xdead_beef);
+    assert_eq!(stranger.name(), None);
+    assert_eq!(stranger.to_string(), "0xdeadbeef");
+
+    // And the rules read the same table rather than keeping a second one. It
+    // knew two of the eight, so a node on a retired network was told
+    // "unnamed" while the constant naming it sat unread two files away.
+    let live = ConsensusParams::for_network("testnet-6").unwrap();
+    assert_eq!(live.network_name(), NetworkId::TESTNET_6.name().unwrap());
+}

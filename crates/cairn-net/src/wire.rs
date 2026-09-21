@@ -152,8 +152,11 @@ pub const PROGRESS_BYTES: usize = 64 * 1024;
 pub enum WireError {
     #[error("connection failed: {0}")]
     Io(#[from] std::io::Error),
-    #[error("peer speaks network {found:#010x}, this node speaks {expected:#010x}")]
-    WrongNetwork { expected: u32, found: u32 },
+    #[error("peer speaks network {found}, this node speaks {expected}")]
+    WrongNetwork {
+        expected: NetworkId,
+        found: NetworkId,
+    },
     #[error("peer announced a {declared} byte frame, the limit is {MAX_FRAME_BYTES}")]
     FrameTooLarge { declared: usize },
     #[error("frame body is malformed: {0}")]
@@ -347,8 +350,8 @@ pub fn read_message<R: Read>(
     let marker = u32::decode_from(&mut cursor)?;
     if marker != network.as_u32() {
         return Err(WireError::WrongNetwork {
-            expected: network.as_u32(),
-            found: marker,
+            expected: network,
+            found: NetworkId::new(marker),
         });
     }
     let declared = usize::try_from(u32::decode_from(&mut cursor)?).unwrap_or(usize::MAX);
