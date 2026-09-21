@@ -55,12 +55,28 @@ jobs:
         # Named rather than `--workspace`: these are the targets that read
         # bytes from strangers, and running the whole suite under a time
         # budget would spend the budget on tests that ignore it.
+        #
+        # That rule was not applied inside the list it justifies.
+        # `cairn-net --test fuzz` was here and ignores the budget: it is a
+        # deterministic suite with its seeds written into the file and its
+        # case counts fixed, using none of `cairn_fuzz::Campaign`, which is
+        # what reads `CAIRN_FUZZ_SECONDS` and `CAIRN_FUZZ_SEED`. So a run here
+        # repeated, to the case, work `check.yml` had already done on the push
+        # that triggered it, and the fresh seed this job picks every week
+        # reached every other target and not that one.
+        #
+        # It is not lost by leaving: `cargo test --workspace` in `check.yml`
+        # runs it on every push, which is where a fixed suite belongs. What it
+        # is owed is a conversion to a campaign, since the wire decoders are
+        # the most exposed thing in this workspace and the one target the
+        # weekly run never varies. That is a change to a security test and not
+        # a line in a list, so it is not made here.
         run: |
           cargo test --release --locked \
             -p cairn-primitives --test fuzz_codec --test fuzz_hex \
             -p cairn-accumulator --test fuzz_accumulator \
             -p cairn-ledger --test fuzz_ledger_structures \
-            -p cairn-net --test fuzz --test fuzz_wire --test fuzz_address_book \
+            -p cairn-net --test fuzz_wire --test fuzz_address_book \
             -p cairn-store --test fuzz_record_framing \
             -p cairn-http --test fuzz_request \
             -p cairn-wallet --test fuzz_history \
