@@ -1341,9 +1341,3 @@ fn decode_recent(reader: &mut Reader<'_>) -> Result<Vec<BlockHeader>, CodecError
     }
     Ok(recent)
 }
-
-/// The identifier of the header a handover belongs to.
-#[must_use]
-pub fn belongs_to(handover: &Handover) -> Hash32 {
-    handover.at.id()
-}
