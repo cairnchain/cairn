@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cairn_crypto::{PublicKey, SecretKey};
+use cairn_crypto::SecretKey;
 use cairn_ledger::validation::ConsensusParams;
 use cairn_net::seeds;
 use cairn_primitives::Amount;
@@ -476,7 +476,10 @@ fn spend(arguments: &[String]) -> Result<(), String> {
     let recipient = flags
         .value("to")
         .ok_or_else(|| "who is being paid? use --to".to_owned())?;
-    let recipient = parse_key(recipient)?;
+    // The one reader, in the library, so this face and the web face answer the
+    // same question about the same string. They did not: this one refused a
+    // pasted address with a space on the end and the web face took it.
+    let recipient = cairn_wallet::parse_address(recipient).map_err(|error| error.to_string())?;
     let amount = flags
         .value("amount")
         .ok_or_else(|| "how much? use --amount".to_owned())?;
@@ -678,10 +681,4 @@ fn join(flags: &Flags) -> Result<Wallet, String> {
         }
     }
     Ok(wallet)
-}
-
-fn parse_key(text: &str) -> Result<PublicKey, String> {
-    let bytes = cairn_primitives::hex::decode_array::<32>(text)
-        .ok_or_else(|| format!("`{text}` is not 32 bytes of hexadecimal"))?;
-    PublicKey::from_bytes(&bytes).map_err(|error| format!("that key is unusable: {error}"))
 }

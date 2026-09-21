@@ -27,7 +27,7 @@ use cairn_crypto::{random_bytes, PublicKey};
 use cairn_http::{Request, Response, Writer};
 use cairn_primitives::Amount;
 
-use crate::{Wallet, WalletError};
+use crate::{parse_address, Wallet, WalletError};
 
 /// Bytes of secret in the address of the page.
 const SECRET_BYTES: usize = 24;
@@ -425,7 +425,7 @@ fn asked(wallet: &Wallet, request: &Request) -> Result<Asked, Response> {
     let Some(to) = request.field("to") else {
         return Err(refusal("who is being paid?"));
     };
-    let Ok(recipient) = parse_key(&to) else {
+    let Ok(recipient) = parse_address(&to) else {
         return Err(refusal(
             "that is not a public key: it is 64 hexadecimal characters",
         ));
@@ -516,23 +516,6 @@ fn send(wallet: &Wallet, request: &Request) -> Response {
     }
 }
 
-/// An address, read the way every other face of this program reads one.
-///
-/// This used to walk the string two characters at a time through
-/// `u8::from_str_radix(pair, 16)`, which takes a leading sign: `"+a"` is ten
-/// to it and nothing to `hex::decode_array`. So this endpoint accepted
-/// spellings of a key that the command line refuses, and one key had more than
-/// one spelling here, which is the thing the hex parser's own doc calls out as
-/// giving one identifier two URLs.
-///
-/// Third time this workspace has had two readers of the same thing disagreeing
-/// over a `+`. There is one reader of it now.
-fn parse_key(text: &str) -> Result<PublicKey, WalletError> {
-    let bytes =
-        cairn_primitives::hex::decode_array::<32>(text.trim()).ok_or(WalletError::NothingToSend)?;
-    PublicKey::from_bytes(&bytes).map_err(|_| WalletError::NothingToSend)
-}
-
 fn parse_amount(text: &str) -> Option<Amount> {
     Amount::from_cairn(text.trim())
 }
@@ -592,7 +575,7 @@ fn text(status: u16, message: &str) -> Response {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{constant_time_eq, parse_key, turned_away, Opened};
+    use super::{constant_time_eq, parse_address, turned_away, Opened};
     use cairn_http::Request;
 
     fn opened() -> Opened {
@@ -731,9 +714,9 @@ mod tests {
         let mut bent = real.clone();
         bent.replace_range(at..at.saturating_add(2), "+a");
         assert_ne!(bent, real, "the bend has to change the string");
-        assert!(parse_key(&real).is_ok(), "the key itself");
+        assert!(parse_address(&real).is_ok(), "the key itself");
         assert!(
-            parse_key(&bent).is_err(),
+            parse_address(&bent).is_err(),
             "a sign was read as a digit at {at}, so this key has a second spelling"
         );
     }
@@ -741,17 +724,17 @@ mod tests {
     #[test]
     fn an_address_is_read_only_when_it_is_one() {
         let real = an_address();
-        assert!(parse_key(&real).is_ok());
-        assert!(parse_key(&format!("  {real}  ")).is_ok());
-        assert!(parse_key("").is_err());
-        assert!(parse_key(&real[..62]).is_err(), "too short");
-        assert!(parse_key(&"zz".repeat(32)).is_err(), "not hexadecimal");
-        assert!(parse_key(&"00".repeat(32)).is_err(), "not a usable key");
+        assert!(parse_address(&real).is_ok());
+        assert!(parse_address(&format!("  {real}  ")).is_ok());
+        assert!(parse_address("").is_err());
+        assert!(parse_address(&real[..62]).is_err(), "too short");
+        assert!(parse_address(&"zz".repeat(32)).is_err(), "not hexadecimal");
+        assert!(parse_address(&"00".repeat(32)).is_err(), "not a usable key");
         // And the whole reason the line above says "usable" rather than
         // "decodable": a string can be a point on the curve and still be an
         // address nobody holds.
         assert!(
-            parse_key(&"11".repeat(32)).is_err(),
+            parse_address(&"11".repeat(32)).is_err(),
             "a point outside the prime order subgroup is not an address"
         );
     }
