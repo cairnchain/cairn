@@ -3265,6 +3265,14 @@ mod tests {
     /// unable to name the branch point it had just agreed to.
     #[test]
     fn the_window_outlasts_the_deepest_rewind_the_store_will_perform() {
+        // A pin on the definition, which is worth having and is not the
+        // property the name above claims. Change `HELD_WINDOW` to anything
+        // else and this fires; leave it alone and it says nothing about
+        // rewinds, because the deepest rewind is `undo_limit` and that
+        // follows the network rather than the constant. `audit_seams.rs` asks
+        // the property there, of a network that wants to undo the whole
+        // chain. What this test holds that nothing else does is below: the
+        // index itself, across the window.
         assert_eq!(HELD_WINDOW, MAX_REORG_DEPTH + 1);
 
         let mut branch = Branch::default();
