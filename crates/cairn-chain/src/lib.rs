@@ -200,6 +200,22 @@ pub fn fee_floor(weight: usize) -> Amount {
 
 /// What a transfer pays for each unit of what it takes, as a fixed point
 /// number every node computes identically.
+///
+/// Three fallbacks in four lines and none of them can be taken, which is
+/// worth saying because they do not all mean the same thing if they ever are.
+/// Every weight reaching here comes from [`transfer_weight`], which is bytes
+/// plus places, and a transfer that encodes to nothing is not a transfer: the
+/// `max` never substitutes. `usize` fits in `u128` on every target, so the
+/// conversion never fails. And a divisor the `max` has already put at one or
+/// more is never zero, so the division never declines.
+///
+/// The one to watch is the last. `unwrap_or(0)` would rank the transfer at
+/// nought, which is the cheapest thing in the pool and the first evicted, so
+/// a weight of zero would not be an error anywhere: it would quietly put the
+/// transfer at the bottom. That is why the `max` above it is load bearing
+/// rather than decoration, and why removing it as unreachable would be the
+/// wrong reading. The other two are the shapes clippy requires in place of a
+/// bare cast and a bare division.
 fn rate(fee: Amount, weight: usize) -> u128 {
     let weight = u128::try_from(weight.max(1)).unwrap_or(1);
     u128::from(fee.as_pebbles())
@@ -2393,6 +2409,21 @@ impl ChainStore {
             disconnect_block(&mut self.state, &connected);
             removed.push(id);
         }
+        // Cannot fire today, and the reason is a relationship between two
+        // constants rather than anything in this function. The cursor trails
+        // the tip by at most `HELD_WINDOW`, and a rewind is refused past
+        // `undo_limit`, which is `MAX_REORG_DEPTH` capped again by the
+        // network's own burial, so never more. `HELD_WINDOW` is
+        // `MAX_REORG_DEPTH + 1`, so the deepest rewind any network allows
+        // still leaves the branch one block longer than the cursor: the `min`
+        // returns its own argument every time.
+        //
+        // Kept, because that `+ 1` is the whole of it. Set `HELD_WINDOW` equal
+        // to `MAX_REORG_DEPTH` and this line becomes the only thing standing
+        // between a deep switch and a cursor pointing past the end of the
+        // branch, which `forget_what_cannot_change` would then walk off.
+        // `audit_seams.rs` holds the relationship so that changing it is a
+        // decision and not a side effect.
         self.undo_from = self.undo_from.min(self.branch.len());
         self.take_back_the_bodies_leaving(&removed);
         Ok(removed)
@@ -2855,7 +2886,20 @@ impl ChainStore {
                 self.blocks.retain(|id, stored| {
                     branch.height_of(id).is_some() || stored.header.height >= cutoff
                 });
-                self.invalid.retain(|id| branch.height_of(id).is_none());
+                // `self.invalid` was swept here too, keeping the identifiers
+                // the branch does not name. It could not remove anything: an
+                // identifier reaches that set from `switch_to`, when applying
+                // a candidate branch failed and the branch was rolled back, so
+                // it was never on `self.branch`; and `add_block` refuses
+                // anything already in it, so it never gets on afterwards. The
+                // predicate was true of every entry, on every call.
+                //
+                // Removed rather than corrected because what it looked like
+                // was a second bound on a set an anonymous peer fills one
+                // entry at a time, and the real bound is `MAX_INVALID`, which
+                // empties the set wholesale. A line that appears to bound
+                // something and does not is worse than no line, because the
+                // next reader counts it.
                 self.recount();
             }
         }

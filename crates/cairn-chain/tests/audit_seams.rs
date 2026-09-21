@@ -20,7 +20,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use cairn_chain::{Accepted, Bodies, ChainError, ChainStore, Located, MAX_REORG_DEPTH};
+use cairn_chain::{
+    Accepted, Bodies, ChainError, ChainStore, Located, HELD_WINDOW, MAX_REORG_DEPTH,
+};
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::Block;
 use cairn_ledger::note::{Note, NoteId};
@@ -447,6 +449,27 @@ fn the_assertions_guard_constants_and_the_network_runs_on_fields() {
         ConsensusParams::testnet().burial,
         cairn_ledger::handover::BURIAL,
         "the default agrees with the constant"
+    );
+
+    // And the one that keeps a line in `rewind_to` dead. The cursor trails
+    // the tip by at most `HELD_WINDOW` and a rewind is capped at
+    // `undo_limit`, which is `MAX_REORG_DEPTH` and the network's burial
+    // whichever is smaller. While the window is the deeper of the two, the
+    // deepest rewind leaves the branch longer than the cursor and the `min`
+    // there returns its own argument. Equal, and that line becomes the only
+    // thing between a deep switch and a cursor pointing past the end of the
+    // branch.
+    //
+    // Asked of `undo_limit` and not of the two constants: `HELD_WINDOW` is
+    // written as `MAX_REORG_DEPTH + 1`, so comparing them is a sentence the
+    // compiler settles and a test that cannot fail. What can move is the
+    // network, so this asks a network that wants to undo everything.
+    let greedy = ChainStore::new(ConsensusParams::testnet().with_burial(u64::MAX));
+    assert!(
+        u64::try_from(HELD_WINDOW).unwrap_or(u64::MAX) > greedy.undo_limit(),
+        "a network asking to undo the whole chain still cannot undo past the \
+         window, or the cursor in `rewind_to` is left past the end of the \
+         branch"
     );
 
     let devnet = ConsensusParams::for_network("devnet").unwrap();
