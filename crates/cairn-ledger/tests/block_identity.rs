@@ -11,9 +11,17 @@
 //! id as B (the header is untouched and the transfer id ignores the signature),
 //! passes the transactions_root check, and fails only at signature validation.
 //!
-//! `ChainStore` dedups and caches invalidity BY BLOCK ID
-//! (cairn-chain/src/lib.rs:1049 `blocks.contains_key(&id) -> Duplicate`, and
-//! :1168 `invalid.insert(id)` on a non-outdated failure, consulted at :1207).
+//! `ChainStore` dedups and caches invalidity BY BLOCK ID: `add_block` answers
+//! `Duplicate` for an identifier the followed branch already names, `follow`
+//! records the identifier in `invalid` when applying it failed on something
+//! this build can judge, and `add_block` consults that set before anything
+//! else.
+//!
+//! Named rather than numbered. This carried three `lib.rs` line numbers and
+//! all three had moved; the first was also stale in substance, since the
+//! duplicate answer is no longer a plain `contains_key` but a question about
+//! the followed branch, so a body held off the branch is not turned away as a
+//! duplicate any more.
 //! An attacker who delivers B' before the honest B therefore poisons those
 //! caches so the honest B is refused, which is a work-free, targeted relay DoS.
 //!
