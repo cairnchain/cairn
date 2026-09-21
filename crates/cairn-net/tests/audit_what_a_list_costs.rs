@@ -144,3 +144,59 @@ fn an_announcement_of_one_does_not_cost_what_an_announcement_of_many_does() {
          price says nothing about the length"
     );
 }
+
+/// What one more entry adds to a weight is what one more entry takes on the
+/// wire.
+///
+/// `weight` prices a list by a per-entry constant, and three of those were
+/// written out by hand: 182 for a header, 40 for a located identifier, 19 for
+/// an address. Five other places in this workspace derive the header size
+/// from `BlockHeader::ENCODED_BYTES`, and this one copied it. A field added to
+/// any of the three moves the real size and leaves the copy where it is,
+/// which under-counts the outbound queue silently and for every message
+/// carrying a run of them.
+///
+/// They are derived now, and this is what holds the derivation against the
+/// encoder — because a formula written out of `size_of` by hand is still
+/// written by hand. The difference between two weights is asked rather than
+/// the constants themselves, which are local to `weight` and are not the
+/// claim: what a caller can observe is that one more entry costs what one
+/// more entry is.
+#[test]
+fn one_more_entry_weighs_what_one_more_entry_encodes() {
+    use cairn_primitives::codec::Encode;
+
+    let one = an_announcement(1);
+    let two = an_announcement(2);
+    let located = cairn_chain::Located::new(7, cairn_primitives::Hash32::from_bytes([3; 32]));
+    assert_eq!(
+        two.weight() - one.weight(),
+        located.encode().len(),
+        "an identifier in an announcement is priced at what it encodes to"
+    );
+
+    let one = addresses(1);
+    let two = addresses(2);
+    let widest = PeerAddress(std::net::SocketAddr::new(
+        std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        9_944,
+    ));
+    assert_eq!(
+        two.weight() - one.weight(),
+        widest.encode().len(),
+        "an address is priced at the wider of the two shapes, which is the one \
+         the queue has to be able to hold"
+    );
+
+    // And the narrower shape is cheaper on the wire than it is priced, which
+    // is the direction this is allowed to be wrong in: a peer gets a slightly
+    // shorter queue and nothing else.
+    let narrow = PeerAddress(std::net::SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        9_944,
+    ));
+    assert!(
+        narrow.encode().len() < widest.encode().len(),
+        "the two shapes have to differ, or the paragraph above is about nothing"
+    );
+}

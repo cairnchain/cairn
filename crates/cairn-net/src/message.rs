@@ -495,12 +495,29 @@ impl Message {
         /// Enough for the tag, the lengths and the fixed fields of any of
         /// these.
         const OVERHEAD: usize = 128;
-        /// Height and identifier.
-        const LOCATED_BYTES: usize = 40;
+        /// Height and identifier, taken from the type that carries them.
+        const LOCATED_BYTES: usize = Located::ENCODED_BYTES;
         /// A tag, sixteen bytes of address and a port.
-        const ADDRESS_BYTES: usize = 19;
-        /// Stated by [`MAX_HEADERS`], which sizes its answer from it.
-        const HEADER_BYTES: usize = 182;
+        ///
+        /// The widest of the two shapes, since a message may carry either and
+        /// what this prices is what the queue has to hold. Written out of the
+        /// encoding above rather than counted off it.
+        const ADDRESS_BYTES: usize =
+            size_of::<u8>() + size_of::<std::net::Ipv6Addr>() + size_of::<u16>();
+        /// Taken from the header rather than written down again.
+        ///
+        /// This was 182, which is what `BlockHeader::ENCODED_BYTES` comes to,
+        /// and five other places in this workspace derive it. A field added to
+        /// a header moves that constant and every one of those follows;
+        /// `audit_the_specification` fails on the change, but it points at the
+        /// document, not here. Nothing pinned this copy, and the workspace
+        /// uses `const _: () = assert!(..)` for exactly that in four other
+        /// places, so the copy was the one shape of drift this codebase
+        /// already knows how to prevent and had not.
+        ///
+        /// Derived rather than asserted, because a derivation cannot drift at
+        /// all and an assertion only says when it has.
+        const HEADER_BYTES: usize = BlockHeader::ENCODED_BYTES;
 
         let carried = match self {
             Self::Block(_) | Self::Transaction(_) | Self::Proofs(_) => self.encode().len(),
