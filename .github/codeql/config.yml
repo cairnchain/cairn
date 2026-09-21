@@ -12,12 +12,34 @@
 # That ratio is the problem to fix, not the alerts. An alert list nobody reads
 # is worse than no alert list, and a check that turns red on every pull request
 # that adds a test teaches everyone to merge over it. So the analysis is pointed
-# at what ships.
+# away from the files that are only tests.
 #
-# What this gives up, said plainly: a real defect written into a test file will
-# not be found here. Test code is not shipped, is not reachable by a stranger,
-# and holds nothing worth taking, so that is a trade rather than a hole. The
-# rules themselves are untouched, so anything new in `src` is still read.
+# Only the files. This is the half of the problem `paths-ignore` can reach, and
+# it is not the larger half: `paths-ignore` matches paths, and a unit test in
+# this workspace lives inside the file it tests, behind `#[cfg(test)]`. Nearly
+# a third of the lines under `crates/*/src` sit after the first of those, and
+# `cairn-net/src/node.rs` is seven thousand lines of test module under fifteen
+# hundred lines of node. All of it is read here, fixture keys and counted seeds
+# and all.
+#
+# It is not theoretical. The two most recent alerts against this repository,
+# both `rust/hard-coded-cryptographic-value`, are at `cairn-chain/src/lib.rs`
+# lines 3 580 and 3 719, and that file's test module opens at 3 013. They are a
+# block identifier and a difficulty in a fixture, they were dismissed by hand,
+# and the next ones will be too.
+#
+# Nothing here fixes that, because there is nothing in this file that can:
+# an alert cannot be excluded for sitting inside a `cfg` module, and with
+# `build-mode: none` the extractor never evaluates one. Moving those tests out
+# is not the answer either, since what they reach is private. So the ratio is
+# better than it was and is not solved, and this is written down so the next
+# person tuning it starts from that rather than from the sentence above.
+#
+# What the exclusion gives up, said plainly: a real defect written into a test
+# file will not be found here. Test code is not shipped, is not reachable by a
+# stranger, and holds nothing worth taking, so that is a trade rather than a
+# hole. The rules themselves are untouched, so anything new in `src` is still
+# read, which is also why the test modules inside `src` still are.
 name: cairn
 
 paths-ignore:
