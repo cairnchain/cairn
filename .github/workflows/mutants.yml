@@ -9,8 +9,12 @@
 # the suite stay green, one at a time, by a person.
 #
 # `cargo mutants` does that by machine. It breaks the code one edit at a time
-# and reports every edit the suite did not notice, and there are 4 336 such
-# edits here. The first four minutes of it, on the smallest crate, found that
+# and reports every edit the suite did not notice, and there are thousands of
+# such edits here. The figure is not written down, because it moves with every
+# commit and a number written into a comment does not: the `plan` job below
+# prints it at the top of every weekly run. It said 4 336 here for one day and
+# was 4 398 by the end of it. The first four minutes of it, on the smallest
+# crate, found that
 # the only test holding the hash counter asserted the counter read nought — so
 # a counter answering nought to everything passed it, and every
 # `assert!(cost < n)` in four audit files across three crates holds when every
@@ -47,6 +51,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # How many ways the weekly run is split. Written once: the shard numbers and
+  # the coverage check below are both built from it, because they were written
+  # out separately and disagreed.
+  SHARDS: 8
 
 jobs:
   # What this change would let through. Only the mutants that fall on lines
@@ -75,7 +83,22 @@ jobs:
       - name: What this change touched
         run: |
           git diff "origin/${{ github.base_ref }}"...HEAD > pr.diff
-          wc -l pr.diff
+          # Held, not printed. `cargo mutants --in-diff` on a diff that names
+          # no file answers "Diff changes no Rust source files" and exits
+          # zero, so an empty or mangled diff is a green gate that tested
+          # nothing. That happened twice in a day locally, where a tool that
+          # summarises `git diff` into a table of counts was in the way, and
+          # the only thing that caught it was counting the `+++` lines by
+          # hand. A pull request that changes nothing at all does not exist,
+          # so nothing here is a fault of this step rather than the change.
+          lines=$(wc -l < pr.diff)
+          files=$(grep -c '^+++' pr.diff || true)
+          echo "$lines lines, $files files"
+          test "$lines" -gt 0 || {
+            echo "the diff is empty, so the gate below would pass having" \
+                 "tested nothing" >&2
+            exit 1
+          }
       - name: Mutants on the lines this change touched
         run: |
           # `--in-place` rather than a copy of the tree, so the build this
@@ -100,15 +123,62 @@ jobs:
           name: mutants-in-diff
           path: mutants.out/
 
+  # Which shards there are, and that together they are every mutant.
+  #
+  # `--shard k/n` takes k from zero. This file shipped with one to eight, so
+  # `8/8` was rejected outright and that job failed in no time at all on every
+  # run, while `0/8` was never asked for: an eighth of the mutants went
+  # untested, behind a red job that read like a finding. A sharding that
+  # silently drops a slice is the exact defect this workflow exists to catch,
+  # written into the workflow.
+  #
+  # So the numbers are built from `SHARDS` rather than typed out, and the step
+  # below holds that the shards add up to the whole list. Listing does not
+  # build or test anything, so this costs a minute and answers a question no
+  # amount of reading the matrix would.
+  plan:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.shards.outputs.list }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the toolchain this repository pins
+        run: rustup show
+      - name: Install cargo-mutants
+        run: cargo install --locked cargo-mutants
+      - name: The shard numbers
+        id: shards
+        run: |
+          list=$(seq 0 $((SHARDS - 1)) | jq -cRs 'split("\n")[:-1]')
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+          echo "$list"
+      - name: Every mutant is in exactly one shard
+        # Without colour, because this step is a comparison of two listings and
+        # escape codes are the sort of thing that makes two identical lines
+        # differ.
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          cargo mutants --list | sort > all.txt
+          : > covered.txt
+          for k in $(seq 0 $((SHARDS - 1))); do
+            cargo mutants --shard "$k/$SHARDS" --list >> covered.txt
+          done
+          sort -o covered.txt covered.txt
+          diff all.txt covered.txt
+          echo "$(wc -l < all.txt) mutants, all of them in a shard"
+
   # Everything, once a week, so the standing figure is a number and not a
   # feeling. Sharded because one machine takes hours: the shards are
   # round-robin, so each gets a spread of crates rather than one large one.
   everything:
+    needs: plan
     if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -116,13 +186,13 @@ jobs:
         run: rustup show
       - name: Install cargo-mutants
         run: cargo install --locked cargo-mutants
-      - name: One eighth of the mutants
+      - name: One shard of the mutants
         run: |
           # A copy per job here rather than `--in-place`, because this run is
           # hundreds of mutants and two at a time is worth more than the build
           # `--in-place` saves. The two flags are mutually exclusive.
           cargo mutants \
-            --shard ${{ matrix.shard }}/8 \
+            --shard "${{ matrix.shard }}/$SHARDS" \
             --test-workspace=false \
             --minimum-test-timeout 120 \
             -j 2
