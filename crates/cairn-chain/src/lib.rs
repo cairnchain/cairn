@@ -500,6 +500,15 @@ impl Located {
     pub const fn new(height: u64, id: Hash32) -> Self {
         Self { height, id }
     }
+
+    /// Bytes one of these takes on the wire.
+    ///
+    /// Beside the type rather than wherever somebody needs the number, for
+    /// the reason [`cairn_ledger::block::BlockHeader::ENCODED_BYTES`] is
+    /// beside its own: `cairn-net` prices a message by it, and a field added
+    /// here without a line there would under-count the outbound queue by the
+    /// difference, quietly, for every message carrying a run of them.
+    pub const ENCODED_BYTES: usize = size_of::<u64>() + cairn_primitives::hash::HASH_LEN;
 }
 
 impl Encode for Located {
@@ -2833,6 +2842,43 @@ mod tests {
     use cairn_ledger::transaction::CoinbaseTransaction;
 
     use super::*;
+
+    /// What `Located::ENCODED_BYTES` says, against what one encodes to.
+    ///
+    /// The constant is read by `cairn-net`, which prices a message by it, and
+    /// by nothing in this crate. A `const` no one in its own crate reads is
+    /// never evaluated there, so a formula that cannot be right compiles in
+    /// silence here and fails, if at all, wherever somebody uses it: `cargo
+    /// mutants` turned the `+` into a `-` and into a `*` and this crate's
+    /// suite stayed green under both, and one of those two is an arithmetic
+    /// underflow.
+    ///
+    /// Third time in a day that a crate was not holding its own behaviour. The
+    /// others were the hash counter, whose only guard lived under another
+    /// crate's feature flag, and `ConsensusParams::leaves_behind`, tested from
+    /// the binary that reads it.
+    ///
+    /// Asked of the encoder rather than of the arithmetic, because the
+    /// arithmetic is the thing that might be wrong.
+    #[test]
+    fn a_located_identifier_is_the_size_it_says_it_is() {
+        let located = Located::new(u64::MAX, Hash32::from_bytes([0xab; 32]));
+        assert_eq!(
+            located.encode().len(),
+            Located::ENCODED_BYTES,
+            "the size `cairn-net` prices a list by is not the size one takes"
+        );
+
+        // Fixed, not merely correct for this one: a height is eight bytes
+        // whatever it holds, which is what lets a list be priced by its
+        // length at all.
+        let small = Located::new(0, Hash32::ZERO);
+        assert_eq!(
+            small.encode().len(),
+            located.encode().len(),
+            "two of these differ in size, so a count of them is not a cost"
+        );
+    }
 
     fn params() -> ConsensusParams {
         ConsensusParams::testnet()
