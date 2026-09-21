@@ -73,17 +73,55 @@ jobs:
 
   # A node has to build for the machines people actually run servers on, and
   # those are not the machines this is developed on.
+  #
+  # What is shipped is what `release.yml` builds: two Apple targets, musl on
+  # x86_64 and on arm64, and Windows on msvc. This list and that one disagreed
+  # in both directions. `aarch64-unknown-linux-musl` is released and was
+  # checked nowhere before the release that builds it, so the first sign of it
+  # breaking would have been a failed release rather than a failed pull
+  # request, and an arm64 machine is exactly the cheap server the musl choice
+  # is made for. It is checked here now, on an arm64 runner rather than by
+  # cross-compiling, and with the musl toolchain installed as `release.yml`
+  # installs it: `blake3` reaches for a C compiler to build its assembly and a
+  # musl target wants a musl one, which a native runner does not have either.
+  #
+  # Two more released targets are covered by the `test` job above, which is
+  # stronger than a check: `windows-latest` is msvc and `macos-latest` is
+  # Apple silicon, so both are built and run rather than type-checked. The
+  # fifth, `x86_64-apple-darwin`, is checked here on the same macOS runner,
+  # since Apple's compiler cross-compiles to Intel without anything installed.
+  # Every target `release.yml` ships is now reached before a change lands
+  # rather than at the release that builds it.
+  #
+  # `x86_64-pc-windows-gnu` is not released and stays: it is the only thing
+  # anywhere that says whether this builds under the gnu toolchain, which is
+  # what somebody building it themselves on Windows is likely to have.
   cross:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-unknown-linux-musl
-          - x86_64-pc-windows-gnu
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-pc-windows-gnu
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the toolchain this repository pins
         run: rustup show
       - run: rustup target add ${{ matrix.target }}
+      # The same step `release.yml` runs for the same targets, and for the
+      # same reason: `blake3` reaches for a C compiler to build its assembly,
+      # and a musl target wants a musl one. A native arm64 runner has `gcc`
+      # and that is not it. Written here assuming the native runner would be
+      # enough, which it is not: the job said `failed to find tool
+      # "aarch64-linux-musl-gcc"` exactly as cross-compiling had.
+      - name: Install the musl linker
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
       - run: cargo check --workspace --target ${{ matrix.target }} --locked
