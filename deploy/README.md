@@ -113,9 +113,11 @@ journalctl -u cairnd -f
 A healthy node prints a line a minute:
 
 ```
-[00:04:00] height 41  peers 3  known 5  cold 0  work 5637144576
+[00:04:00] height 41  stored 41  peers 3  known 5  cold 0  work 5637144576
 ```
 
+`height` is how many blocks it has and `stored` is how many are on the disk:
+on a healthy node they are the same, and only the second survives a restart.
 `peers` is how many nodes it is talking to. `known` is how many addresses it
 has learned about. If `peers` stays at zero on a machine that was given a
 seed, the port is not open.

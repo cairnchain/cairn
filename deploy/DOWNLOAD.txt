@@ -24,9 +24,11 @@ That is the whole command. The addresses it starts from are written into
 the program, like the first block, so it finds the network by itself. It
 writes a status line every ten seconds:
 
-  [00:04:00] height 41  peers 3  known 5  cold 0  work 5637144576
+  [00:04:00] height 41  stored 41  peers 3  known 5  cold 0  work 5637144576
 
-height is how many blocks it has. peers is how many nodes it is talking to.
+height is how many blocks it has, and stored is how many are on the disk: on
+a healthy node they are the same, and only the second survives a restart.
+peers is how many nodes it is talking to.
 Stop it with Ctrl-C. Start it again and it picks up where it left off.
 
 To start somewhere else instead, name a peer: --seed <address>. That

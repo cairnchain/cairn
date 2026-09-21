@@ -311,17 +311,21 @@ fn watch(node: &Node, options: &options::Options, running: &AtomicBool) -> Endin
                 .written_through()
                 .map_or_else(|| "-".to_owned(), |height| height.to_string());
             println!(
-                "[{:>8}] height {height:<6} stored {stored:<6} peers {:<4} known {:<5} \
-                 cold {:<8} work {}",
-                stamp(started),
-                // Peers that have introduced themselves, not sockets held. A
-                // stranger that connects and says nothing cannot be asked
-                // anything, and counting it here put a number in front of an
-                // operator that no part of this node could act on.
-                node.peers_introduced(),
-                node.known_addresses().len(),
-                node.cold_len(),
-                node.total_work(),
+                "{}",
+                status_line(
+                    &stamp(started),
+                    &height,
+                    &stored,
+                    // Peers that have introduced themselves, not sockets held.
+                    // A stranger that connects and says nothing cannot be
+                    // asked anything, and counting it here put a number in
+                    // front of an operator that no part of this node could act
+                    // on.
+                    node.peers_introduced(),
+                    node.known_addresses().len(),
+                    node.cold_len(),
+                    node.total_work(),
+                )
             );
             say_what_the_numbers_do_not(node, &directory);
         }
@@ -978,6 +982,27 @@ fn what_the_chain_did(landed: &Accepted) -> (&'static str, &'static str) {
         Accepted::Duplicate => ("known", "  this chain already held it"),
     }
 }
+/// The line a running node writes, so that what it says can be asked of it.
+///
+/// A function rather than a `println!` because `deploy/DOWNLOAD.txt` shows one
+/// of these to somebody who has just unpacked the archive, and showed a line
+/// this program had stopped writing: the `stored` column was added and the
+/// text was not. Now `the_download_shows_the_line_this_node_writes` builds one
+/// here and holds the two together.
+fn status_line(
+    stamp: &str,
+    height: &str,
+    stored: &str,
+    peers: usize,
+    known: usize,
+    cold: u64,
+    work: u128,
+) -> String {
+    format!(
+        "[{stamp:>8}] height {height:<6} stored {stored:<6} peers {peers:<4} \
+         known {known:<5} cold {cold:<8} work {work}"
+    )
+}
 
 fn stamp(since: Instant) -> String {
     let seconds = since.elapsed().as_secs();
@@ -998,6 +1023,74 @@ fn short(text: &str) -> &str {
 /// The numbers matter more than the words and the words matter more than
 /// usual: these lines are the whole of what a person has to go on, and two of
 /// the three are printed by a node that looks healthy in every other respect.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod what_the_download_shows {
+    /// Every shipped text that shows a status line shows the one this node
+    /// writes.
+    ///
+    /// `DOWNLOAD.txt` goes into every archive as `README.txt`, so it is what
+    /// somebody sees first, and `README.md` is what an operator reads before
+    /// putting a node on a server. Both had lost a column: `stored` was added
+    /// beside `height`, because the chain and the disk are two numbers and
+    /// only one of them survives a restart, and both texts went on showing the
+    /// line from before.
+    ///
+    /// Both files, because the first repair of this reached one of them. A
+    /// test written against the file somebody happened to open is the same
+    /// defect as the one it was written for.
+    ///
+    /// Both directions too. Every label this node prints has to appear, or a
+    /// text shows less than the program says; and every word shown that is not
+    /// a number has to be a label this node prints, or a text shows something
+    /// that does not exist.
+    #[test]
+    fn every_shipped_text_shows_the_line_this_node_writes() {
+        const SHIPPED: [(&str, &str); 2] = [
+            (
+                "deploy/DOWNLOAD.txt",
+                include_str!("../../../deploy/DOWNLOAD.txt"),
+            ),
+            (
+                "deploy/README.md",
+                include_str!("../../../deploy/README.md"),
+            ),
+        ];
+
+        let line = super::status_line("00:04:00", "41", "41", 3, 5, 0, 5_637_144_576);
+        let labels: Vec<&str> = line
+            .split_whitespace()
+            .filter(|word| !word.starts_with('[') && word.parse::<u128>().is_err())
+            .collect();
+        assert!(labels.len() > 3, "the line has labels to check: {line}");
+
+        for (name, text) in SHIPPED {
+            let shown = text
+                .lines()
+                .find(|line| line.contains("height") && line.contains("peers"))
+                .unwrap_or_else(|| panic!("{name} shows a status line"));
+
+            for label in &labels {
+                assert!(
+                    shown.contains(label),
+                    "this node prints `{label}` and {name} does not show it:\n  \
+                     {shown}\n  {line}"
+                );
+            }
+            for word in shown.split_whitespace() {
+                if word.starts_with('[') || word.parse::<u128>().is_ok() {
+                    continue;
+                }
+                assert!(
+                    labels.contains(&word),
+                    "{name} shows `{word}` and this node does not print it:\n  \
+                     {shown}\n  {line}"
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod said_out_loud {
