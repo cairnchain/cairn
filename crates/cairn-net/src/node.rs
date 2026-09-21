@@ -3523,9 +3523,24 @@ impl Node {
     /// The address is remembered either way: it answered, which is more than
     /// most of the book can say, and the next round of upkeep can dial it when
     /// a slot comes free. What is not done is taking the connection past the
-    /// ceiling or onto a node that has stopped: this is the third way into the
-    /// peer table, after the accept loop and upkeep dialling, and it was the
-    /// one that consulted neither.
+    /// ceiling, onto a node that has stopped, or from a host this node is
+    /// refusing: this is the third way into the peer table, after the accept
+    /// loop and upkeep dialling, and it was the one that consulted none of
+    /// them.
+    ///
+    /// The refusal was the last of the three to be carried here, and the case
+    /// that shows why is `reach_for_an_archivist`, whose own doc calls itself
+    /// "an ordinary dial made a few seconds early rather than a second way of
+    /// choosing who this node talks to". The ordinary dial asks the refusal
+    /// table; without this, that one did not, so it was exactly the second way
+    /// it says it is not, for up to `REACH_FOR_ARCHIVISTS` hosts a round.
+    ///
+    /// An operator naming a seed on the command line loses nothing by it. The
+    /// address is written into the book before the dial, so it is tried again
+    /// by upkeep once the refusal lapses, and the refusal lapses on its own
+    /// after [`crate::refusal::REFUSAL_SECONDS`]. What the operator gets in
+    /// the meantime is the reason, which is more than a silent retry gave
+    /// them.
     ///
     /// `Ok(())` means this node holds the connection. It used to mean the
     /// three-way handshake completed, which is a different sentence: a socket
@@ -3533,12 +3548,36 @@ impl Node {
     /// and was printed as `reached`, and the wallet counted it as a seed it had
     /// got to. Everything that turns the connection away now says so.
     pub fn connect(&self, address: SocketAddr) -> Result<(), NodeError> {
+        // Before the dial, which is where both of the other two ask it: the
+        // accept loop asks before it takes the stream and the dial round
+        // filters its candidates. Asking after would spend a `DIAL_TIMEOUT`
+        // on a host that is turned away at the end of it, up to
+        // `REACH_FOR_ARCHIVISTS` times a round, and the round only happens
+        // when the node is already short of peers.
+        let refused = "this node is refusing that host for now, after it sent \
+                       something a peer should not send";
+        if self.shared.refuses(address.ip(), unix_now()) {
+            return Err(NodeError::NotKept {
+                address,
+                because: refused,
+            });
+        }
+
         let stream = TcpStream::connect_timeout(&address, DIAL_TIMEOUT)?;
         self.shared.book().insert(address);
-        if !self
-            .shared
-            .has_room_for(stream.peer_addr().ok().map(|at| at.ip()))
-        {
+        let host = stream.peer_addr().ok().map(|at| at.ip());
+        // And again on the host the socket actually reached. A refusal is
+        // about a machine and one machine answers on more than one address,
+        // so the address dialled and the host that answered are two questions
+        // and both are asked.
+        if host.is_some_and(|host| self.shared.refuses(host, unix_now())) {
+            let _ = stream.shutdown(Shutdown::Both);
+            return Err(NodeError::NotKept {
+                address,
+                because: refused,
+            });
+        }
+        if !self.shared.has_room_for(host) {
             let _ = stream.shutdown(Shutdown::Both);
             return Err(NodeError::NotKept {
                 address,
@@ -7967,6 +8006,63 @@ mod tests {
     /// without it, and one address may buy sixteen of those runs per allowance
     /// window.
     ///
+    /// A host this node is refusing is refused whichever door it comes to.
+    ///
+    /// Three ways reach the peer table: the accept loop, the dial round of
+    /// upkeep, and `Node::connect`. The first two ask the refusal table. The
+    /// third asked the ceiling and the running flag and not that, under a doc
+    /// saying it was "the one that consulted neither" — mended for two of the
+    /// three and left short on the one about a host's conduct.
+    ///
+    /// The case that makes it a defect rather than an omission is
+    /// `reach_for_an_archivist`, whose own doc calls itself "an ordinary dial
+    /// made a few seconds early rather than a second way of choosing who this
+    /// node talks to". The ordinary dial asks; without this it did not, so it
+    /// was the second way it says it is not, for up to `REACH_FOR_ARCHIVISTS`
+    /// hosts a round, and reached for exactly when a node is short of peers
+    /// and least able to afford a bad one.
+    ///
+    /// Both directions, because a refusal that turned everybody away would be
+    /// a node that cannot dial at all.
+    #[test]
+    fn a_refused_host_is_turned_away_at_every_door_into_the_peer_table() {
+        let params = ConsensusParams::testnet();
+        let listening = Node::bind(params, loopback()).unwrap();
+        let dialling = Node::bind(params, loopback()).unwrap();
+
+        // An ordinary dial first, so what follows is the refusal and not the
+        // fixture. The loopback is never refused and the reason is written
+        // beside `can_be_refused`, which is why the refused host below is a
+        // documentation address instead.
+        dialling
+            .connect(listening.address())
+            .expect("an ordinary host is dialled");
+
+        let elsewhere = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 9_944);
+        dialling.shared.refuse(elsewhere.ip(), unix_now());
+        assert!(
+            dialling.shared.refuses(elsewhere.ip(), unix_now()),
+            "the fixture has to have refused it, or the assertion below is empty"
+        );
+
+        // `NotKept` and not an I/O error is the whole assertion. Nothing is
+        // listening at a documentation address, so a dial would have come back
+        // as a connection failure; coming back named means the question was
+        // asked before the socket was spent.
+        let turned_away = dialling.connect(elsewhere);
+        assert!(
+            matches!(
+                &turned_away,
+                Err(NodeError::NotKept { because, .. }) if because.contains("refusing that host")
+            ),
+            "a host this node is refusing was let in through the third door, or was \
+             refused only after a dial was spent on it: {turned_away:?}"
+        );
+
+        listening.shutdown();
+        dialling.shutdown();
+    }
+
     /// Counted rather than timed, on purpose. Two wall clocks read at
     /// different moments is what four tests here have had to be repaired for,
     /// and the number that is the finding is how many reads one hold answers
