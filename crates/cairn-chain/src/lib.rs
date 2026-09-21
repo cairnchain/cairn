@@ -766,6 +766,17 @@ pub struct ChainStore {
     /// costs a lookup and not a pass over the pool: a peer sending transfers
     /// as fast as it can would otherwise decide how much work each one causes.
     pool_by_rate: BTreeSet<(u128, Hash32)>,
+    /// Transfers the last rewind put to `accept_transfer`.
+    ///
+    /// Only so the bound on that number can be measured. `repool`'s budget is
+    /// the one thing standing between a deep switch and a full check of every
+    /// transfer it undoes — `MAX_REORG_DEPTH` blocks of
+    /// `max_transfers_per_block` is four million of them, each an encoding, a
+    /// hash and a curve verification, under the chain lock — and deleting the
+    /// budget left the whole suite green. The pool's own size cannot show it,
+    /// because the pool is bounded either way; what the budget bounds is the
+    /// asking, and this is the asking.
+    last_rewind_offered: usize,
     /// Which pooled transfer spends each note the pool has spoken for.
     ///
     /// Kept alongside for the same reason as `pool_by_rate` and against the
@@ -810,6 +821,7 @@ impl ChainStore {
             pool: BTreeMap::new(),
             pool_bytes: 0,
             pool_by_rate: BTreeSet::new(),
+            last_rewind_offered: 0,
             pool_spenders: BTreeMap::new(),
         }
     }
@@ -1199,6 +1211,17 @@ impl ChainStore {
         self.pool
             .iter()
             .map(|(id, held)| (id, rate(held.fee, held.weight)))
+    }
+
+    /// Transfers the last rewind offered back to the pool.
+    ///
+    /// What `repool`'s budget bounds, and the only thing that shows it: a
+    /// switch that undoes more than `MAX_POOLED` transfers stops asking at
+    /// `MAX_POOLED`, and the pool's own size says nothing either way because
+    /// the pool is bounded on its own.
+    #[must_use]
+    pub fn last_rewind_offered(&self) -> usize {
+        self.last_rewind_offered
     }
 
     /// The index kept beside the pool, cheapest first.
@@ -2197,11 +2220,17 @@ impl ChainStore {
     /// checked then, and [`check_transfer_again`] decides most of these
     /// without asking again.
     fn repool(&mut self, undone: &[Hash32]) {
+        if undone.is_empty() {
+            return;
+        }
+        // One bound and not two. There was a second copy of this at the top of
+        // this loop, and it could not fire: the one below returns the moment
+        // the budget is reached, so control never comes round to a further
+        // block with `asked` at the bound. Deleting it left every test green,
+        // including the one written for the bound, while deleting the one
+        // below failed that test by name.
         let mut asked = 0usize;
         for id in undone {
-            if asked >= MAX_POOLED {
-                return;
-            }
             // Read through the disk, not out of memory. A body is let go of
             // once it is more than `WARM_BODIES` below the tip and written,
             // so reading only what is still in memory made this work for a
@@ -2215,6 +2244,7 @@ impl ChainStore {
             };
             for transfer in block.transfers {
                 if asked >= MAX_POOLED {
+                    self.last_rewind_offered = asked;
                     return;
                 }
                 // Asked the cheap way first, so that a refusal costs a walk of
@@ -2252,6 +2282,7 @@ impl ChainStore {
                 let _ = self.accept_transfer(transfer);
             }
         }
+        self.last_rewind_offered = asked;
     }
 
     /// Undoes every applied block above `position`, newest first.
