@@ -11,7 +11,7 @@
 use crate::Stopping;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 use cairn_crypto::PublicKey;
@@ -70,7 +70,6 @@ const ONLY_ON_THE_COMMAND_LINE: [(&str, &str); 4] = [
     ),
 ];
 const DEFAULT_DATA: &str = "cairn-data";
-const DEFAULT_LISTEN: &str = "0.0.0.0:9944";
 
 pub(crate) const HELP: &str = "\
 cairnd, a Cairn node
@@ -358,9 +357,15 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
     // Nor is this. A name that did not resolve at this instant is a resolver
     // that was not answering yet, which clears by itself, and telling an
     // operator to check what they typed sends them looking for nothing.
-    let listen =
-        seeds::resolve_one(&setting("listen").unwrap_or_else(|| DEFAULT_LISTEN.to_owned()))
-            .map_err(Stopping::CouldNotStart)?;
+    // The default is built from `seeds::DEFAULT_PORT` rather than resolved
+    // from a string. It was `"0.0.0.0:9944"` written here, which is a copy of
+    // that constant, and the constant's own doc calls itself "the default port
+    // a node listens on" while nothing read it: move it and this node went on
+    // listening where the literal said.
+    let listen = match setting("listen") {
+        Some(text) => seeds::resolve_one(&text).map_err(Stopping::CouldNotStart)?,
+        None => SocketAddr::from((Ipv4Addr::UNSPECIFIED, seeds::DEFAULT_PORT)),
+    };
 
     let name = setting("network").unwrap_or_else(|| "testnet".to_owned());
     // Every consensus rule comes from the name, and none of them can be set
@@ -653,6 +658,30 @@ mod tests {
     #[test]
     fn help_stops_before_anything_else() {
         assert!(resolve_options(&args(&["--help"])).unwrap().is_none());
+    }
+
+    /// The help quotes the address a node listens on without being told, and
+    /// it is the address a node listens on without being told.
+    ///
+    /// Two places the port is written: `seeds::DEFAULT_PORT`, which the
+    /// default is now built from, and this sentence, which has to be prose.
+    /// Held together here, because the sentence is what an operator reads
+    /// before deciding whether to open a firewall.
+    #[test]
+    fn the_help_quotes_the_address_a_node_actually_listens_on() {
+        let listen = resolve_options(&args(&[]))
+            .unwrap()
+            .expect("no arguments still gives a configuration")
+            .listen;
+        assert_eq!(
+            listen.port(),
+            cairn_net::seeds::DEFAULT_PORT,
+            "the default follows the constant"
+        );
+        assert!(
+            HELP.contains(&listen.to_string()),
+            "the help says something other than {listen}"
+        );
     }
 
     #[test]
