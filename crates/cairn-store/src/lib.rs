@@ -120,6 +120,12 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
     #[error("record {index} declares {declared} bytes, the limit is {MAX_RECORD_BYTES}")]
     RecordTooLarge { index: usize, declared: usize },
+    #[error("record {index} declares {declared} bytes and {left} are left in the log")]
+    RecordPastTheEnd {
+        index: usize,
+        declared: usize,
+        left: u64,
+    },
     #[error("block would not fit in one record")]
     BlockTooLarge,
     #[error(
@@ -1081,6 +1087,7 @@ impl BlockLog {
             index: 0,
             total: self.count,
             started: false,
+            left: self.end,
         }
     }
 
@@ -1435,6 +1442,16 @@ pub struct Replay<'a> {
     index: usize,
     total: usize,
     started: bool,
+    /// Bytes of records still ahead of the cursor.
+    ///
+    /// The second of the two questions a length off a disk has to answer, and
+    /// the one this walk was not asking. `BlockLog::read` asks it against the
+    /// index and `Walk` against what is left in the file, under twenty five
+    /// lines saying why a ceiling alone is not enough: `MAX_RECORD_BYTES` is
+    /// four megabytes against a block ceiling of a hundred and twenty eight
+    /// kilobytes, so a flipped bit landing anywhere in that gap passes the
+    /// ceiling. Here it passed the ceiling and was then reserved for.
+    left: u64,
 }
 
 impl Iterator for Replay<'_> {
@@ -1458,11 +1475,30 @@ impl Iterator for Replay<'_> {
             return Some(Err(error.into()));
         }
         let declared = usize::try_from(u32::from_le_bytes(header)).unwrap_or(usize::MAX);
+        self.left = self.left.saturating_sub(4);
         if declared > MAX_RECORD_BYTES {
             let index = self.index;
             self.index = self.total;
             return Some(Err(StoreError::RecordTooLarge { index, declared }));
         }
+        // And against what is left, which is the guard the other two readers
+        // of a record length carry and this one did not. Without it a prefix
+        // saying four megabytes was reserved for in full and the short read
+        // that followed reported a truncated file, so the walk paid the
+        // allocation to learn something the length had already said.
+        if u64::try_from(declared).unwrap_or(u64::MAX) > self.left {
+            let index = self.index;
+            let left = self.left;
+            self.index = self.total;
+            return Some(Err(StoreError::RecordPastTheEnd {
+                index,
+                declared,
+                left,
+            }));
+        }
+        self.left = self
+            .left
+            .saturating_sub(u64::try_from(declared).unwrap_or(u64::MAX));
         let mut body = vec![0u8; declared];
         if let Err(error) = self.reader.read_exact(&mut body) {
             self.index = self.total;
