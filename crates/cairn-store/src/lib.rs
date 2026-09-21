@@ -94,7 +94,7 @@ pub const LOCK_FILE: &str = "lock";
 /// service staying up for the rest of its life.
 pub const HANDED_LEDGER: &str = "ledger.dat";
 
-pub use header_tree::{HeaderTree, HEADER_TREE};
+pub use header_tree::{HeaderTree, HEADER_TREE, NODE_BYTES};
 pub use headers::{HeaderLog, JoinFailed, HEADER_BYTES, HEADER_LOG};
 
 /// Largest record the log will read or write.

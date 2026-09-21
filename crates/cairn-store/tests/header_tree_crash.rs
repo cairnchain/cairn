@@ -34,9 +34,7 @@ use std::path::{Path, PathBuf};
 use cairn_accumulator::forest::node_hash;
 use cairn_accumulator::Archive;
 use cairn_primitives::Hash32;
-use cairn_store::{HeaderTree, HEADER_TREE};
-
-const NODE_BYTES: u64 = 32;
+use cairn_store::{HeaderTree, HEADER_TREE, NODE_BYTES};
 
 fn leaf(n: u64) -> Hash32 {
     Hash32::from_bytes([u8::try_from(n % 251).unwrap() + 1; 32])

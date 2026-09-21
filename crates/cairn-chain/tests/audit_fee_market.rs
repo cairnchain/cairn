@@ -25,12 +25,12 @@ use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
+use cairn_primitives::amount::PEBBLES_PER_CAIRN;
 use cairn_primitives::codec::Encode;
 use cairn_primitives::Amount;
 
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 20;
-const PEBBLES_PER_CAIRN: u64 = 100_000_000;
 
 fn params() -> ConsensusParams {
     ConsensusParams::testnet().with_coinbase_maturity(0)

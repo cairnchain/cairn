@@ -46,6 +46,7 @@
 
 use cairn_crypto::{PublicKey, SecretKey};
 use cairn_ledger::note::{Note, NoteId};
+use cairn_ledger::state::{GRACE_NOTES, WATCHED_NOTES};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
 use cairn_ledger::{cold_leaf, ConnectedBlock, LedgerState};
@@ -53,11 +54,13 @@ use cairn_primitives::Amount;
 
 const NOW: u64 = 2_000_000_000;
 /// Undo records a node keeps, which is `cairn_chain::MAX_REORG_DEPTH`.
+///
+/// The one figure in this file that cannot be imported: `cairn-chain` depends
+/// on this crate, so this crate cannot read back from it. It is a copy, and a
+/// copy of a number in another crate goes stale in silence, so it is written
+/// here as the one place that has to be checked by hand when that constant
+/// moves.
 const RECORDS: usize = 1_024;
-/// The ledger's `GRACE_NOTES`, restated so a failure reads on its own.
-const GRACE_NOTES: usize = 8_192;
-/// The ledger's `WATCHED_NOTES`.
-const WATCHED_NOTES: usize = 8_192;
 /// Depth of a path in a mature cold set of about a billion notes.
 ///
 /// A chain a test can drive is far shallower than that, and every per path

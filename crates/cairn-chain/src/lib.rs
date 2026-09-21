@@ -310,7 +310,11 @@ const MAX_SIDE_BLOCKS: usize = 4_096;
 /// ordinary ones, which is far past any reorganisation a live network
 /// produces. A branch cut short by this is not lost, only forgotten: it is
 /// asked for again if it turns out to matter.
-const MAX_SIDE_BYTES: usize = 32 * 1024 * 1024;
+///
+/// Public for the reason [`WARM_BODIES`] is, and with the same file having
+/// already made the copy: `audit_what_a_stranger_can_make_a_node_hold.rs`
+/// restated it, saying in its own doc that it is private here.
+pub const MAX_SIDE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Blocks whose bodies stay in memory behind the tip.
 ///
@@ -332,7 +336,12 @@ pub const WARM_BODIES: u64 = 64;
 /// arrives. Remembering every bad block ever seen is a table an anonymous peer
 /// gets to fill, so past this many the set is emptied: the cost is revalidating
 /// a handful of blocks that will fail again, which is bounded, unlike the set.
-const MAX_INVALID: usize = 8_192;
+///
+/// Public for the reason [`WARM_BODIES`] is: the file that audits this bound,
+/// `audit_the_set_of_bad_blocks.rs`, restated it as a literal because it could
+/// not read it, so the one test of the bound would have gone on passing
+/// against eight thousand after this number moved.
+pub const MAX_INVALID: usize = 8_192;
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ChainError {
