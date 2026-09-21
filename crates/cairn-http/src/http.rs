@@ -140,6 +140,13 @@ pub fn most_one_answer_carries() -> usize {
 /// Bytes a form body may reach. A spend names an address, an amount and a
 /// fee; anything past this is not one.
 pub const MAX_BODY_BYTES: usize = 4096;
+
+/// What a 405 tells a stranger this server answers.
+///
+/// Beside the methods rather than beside the refusal, so the two are read
+/// together, and held to the `match` that decides them by
+/// `the_405_names_every_method_this_answers`.
+const ANSWERS: &str = "only GET, HEAD and POST are served";
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bytes one read of [`drain`] takes off the socket.
 const DRAIN_CHUNK: usize = 2 * 1024;
@@ -489,7 +496,12 @@ where
             let head_only = request.head_only;
             (answer(&request), head_only)
         }
-        Ok(None) => (Response::error(405, "only GET and HEAD are served"), false),
+        // [`ANSWERS`], not a sentence written here. This said "only GET and
+        // HEAD are served" for as long as this server has answered POST, which
+        // is the sentence the module header was corrected for: the correction
+        // reached the comment a maintainer reads and not the line a stranger
+        // is sent.
+        Ok(None) => (Response::error(405, ANSWERS), false),
         Err(status) => (Response::error(status, refusal(status)), false),
     };
     let sent = if response.1 { 0 } else { response.0.body.len() };

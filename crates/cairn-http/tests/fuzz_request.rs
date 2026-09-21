@@ -928,3 +928,59 @@ fn the_header_names_every_method_this_answers() {
         );
     }
 }
+
+/// And the sentence a stranger is sent, which is the other half.
+///
+/// The header was corrected once for saying this server answers GET and HEAD
+/// while it answered POST, and a test was written to hold it. The 405 body
+/// went on saying "only GET and HEAD are served" underneath, because the
+/// repair reached the comment a maintainer reads and not the line anybody
+/// else does. One of the two faces of the same claim was held and the other
+/// was the one with readers.
+#[test]
+fn the_405_names_every_method_this_answers() {
+    const SOURCE: &str = include_str!("../src/http.rs");
+
+    let answers = SOURCE
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("const ANSWERS: &str = \""))
+        .and_then(|rest| rest.split_once('"'))
+        .expect("the 405 sentence is a named constant")
+        .0;
+
+    let answered: Vec<&str> = SOURCE
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let rest = line.strip_prefix('"')?;
+            let (method, tail) = rest.split_once('"')?;
+            tail.trim_start().starts_with("=> (").then_some(method)
+        })
+        .collect();
+
+    assert!(
+        answered.len() >= 3,
+        "the methods could not be read out of the source, so this test is \
+         asserting nothing: {answered:?}"
+    );
+    for method in &answered {
+        assert!(
+            answers.contains(method),
+            "this server answers {method} and the 405 it sends a stranger does \
+             not say so: `{answers}` against {answered:?}"
+        );
+    }
+
+    // And nothing it does not answer, which is the direction that catches a
+    // method being taken away rather than added.
+    for named in answers
+        .split(|c: char| !c.is_ascii_uppercase())
+        .filter(|word| word.len() >= 3)
+    {
+        assert!(
+            answered.contains(&named),
+            "the 405 names {named} and this server does not answer it: \
+             `{answers}` against {answered:?}"
+        );
+    }
+}
