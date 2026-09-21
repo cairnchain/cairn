@@ -35,6 +35,39 @@ use cairn_net::{Joined, Node, MAX_PROVEN};
 use cairn_primitives::codec::Encode;
 use cairn_primitives::{Amount, Hash32};
 
+/// An address, read the one way this program reads one.
+///
+/// Every face takes an address as thirty two bytes of hexadecimal and has to
+/// answer the same question about the same string. There were two readers and
+/// they disagreed: the web face trimmed and the command line did not, so a
+/// pasted address with a space on the end was taken by the form and refused by
+/// `cairn-wallet send`. The web face's own doc said it read an address "the way
+/// every other face of this program reads one" and that "there is one reader of
+/// it now", and both sentences were false when they were written.
+///
+/// What comes back is [`WalletError::BadAddress`], which exists for this and
+/// was built nowhere. The web face answered `NothingToSend`, so somebody who
+/// mistyped an address was told "a transfer of nothing would only cost state",
+/// which is an answer about the amount to a fault in the recipient. The
+/// command line answered a bare `String`, which is what the note on
+/// [`WalletError`] forbids in its first sentence.
+///
+/// Trimming rather than refusing the space: an address arrives pasted, and
+/// what is on either side of it is not something the person typed on purpose.
+///
+/// # Errors
+///
+/// [`WalletError::BadAddress`] if the text is not thirty two bytes of
+/// hexadecimal, or is thirty two bytes that are not a key.
+pub fn parse_address(text: &str) -> Result<PublicKey, WalletError> {
+    let text = text.trim();
+    let bytes = cairn_primitives::hex::decode_array::<32>(text).ok_or_else(|| {
+        WalletError::BadAddress(text.to_owned(), "not 32 bytes of hexadecimal".to_owned())
+    })?;
+    PublicKey::from_bytes(&bytes)
+        .map_err(|error| WalletError::BadAddress(text.to_owned(), error.to_string()))
+}
+
 /// What can go wrong, said in terms a person can act on.
 ///
 /// Not strings: a face has to be able to tell "you asked for more than you
@@ -2249,6 +2282,68 @@ mod tests {
         ceiling, one_question, said_plainly, select, shuffle, still_outstanding,
         too_old_for_this_chain, Held, NoDraft, Outdated, Progress, Recovery, MAX_PROVEN,
     };
+
+    /// A bad address is answered as a bad address, in the same words by both
+    /// faces.
+    ///
+    /// It was not. `WalletError::BadAddress` exists for this and was built
+    /// nowhere: the web face answered `NothingToSend`, so somebody who
+    /// mistyped a recipient was told "a transfer of nothing would only cost
+    /// state", which is an answer about the amount to a fault in the address.
+    /// The command line answered a bare `String`, which the note on
+    /// `WalletError` forbids in its own first sentence. And the two parsers
+    /// disagreed on whitespace, so a pasted address with a space on the end
+    /// was taken by the form and refused by `send`.
+    #[test]
+    fn a_bad_address_is_answered_as_one_and_not_as_an_amount() {
+        let error = super::parse_address("not an address").expect_err("this is not an address");
+        assert!(
+            matches!(error, super::WalletError::BadAddress(_, _)),
+            "a fault in the address is answered as one, and this said {error}"
+        );
+        assert!(
+            error.to_string().contains("not an address"),
+            "and it quotes what was typed, so a person can see their own typo: {error}"
+        );
+
+        // The other way in, which the case above cannot reach: thirty two
+        // bytes of good hexadecimal that are not a key anybody holds. Two
+        // construction sites, and only one of them was covered until taking
+        // the quoted text out of this one left the test green.
+        let outside = "11".repeat(32);
+        let error = super::parse_address(&outside).expect_err("not a usable key");
+        assert!(
+            matches!(error, super::WalletError::BadAddress(_, _)),
+            "a point outside the prime order subgroup is a bad address, not \
+             something else: {error}"
+        );
+        assert!(
+            error.to_string().contains(&outside),
+            "and this way in quotes what was typed too: {error}"
+        );
+
+        // A real address, and not any thirty two bytes of hexadecimal. Written
+        // first with `"ab"` repeated, which is not a point anybody holds, so
+        // both sides of the comparison below were refusals and the comparison
+        // held whatever the trimming did. Caught by taking the trimming out
+        // and watching this stay green.
+        let real = cairn_primitives::hex::encode(
+            &cairn_crypto::SecretKey::from_bytes(&[7u8; 32])
+                .public_key()
+                .to_bytes(),
+        );
+        assert!(
+            super::parse_address(&real).is_ok(),
+            "the fixture has to be an address, or the next line compares two \
+             refusals"
+        );
+        assert!(
+            super::parse_address(&format!("  {real}  ")).is_ok(),
+            "what sits on either side of a pasted address is not something \
+             the person typed on purpose, and the command line used to refuse \
+             what the form took"
+        );
+    }
     use cairn_accumulator::ForestProof;
     use cairn_crypto::SecretKey;
     use cairn_ledger::note::{Note, NoteId};
