@@ -40,7 +40,11 @@ use crate::StoreError;
 pub const HEADER_TREE: &str = "headers.tree";
 
 /// Bytes one node takes.
-const NODE_BYTES: u64 = 32;
+///
+/// Public because `header_tree_crash.rs` works file lengths out from it and
+/// had restated it as a literal, so a test about what a half-written file
+/// looks like would have gone on measuring thirty two after this moved.
+pub const NODE_BYTES: u64 = 32;
 
 /// The forest of header leaves, one file per height.
 #[derive(Debug)]

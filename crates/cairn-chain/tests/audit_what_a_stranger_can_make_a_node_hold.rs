@@ -26,7 +26,7 @@
     clippy::arithmetic_side_effects
 )]
 
-use cairn_chain::{Accepted, ChainStore, HELD_WINDOW, MILESTONE};
+use cairn_chain::{Accepted, ChainStore, HELD_WINDOW, MAX_SIDE_BYTES, MILESTONE};
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader, BLOCK_VERSION};
 use cairn_ledger::note::{NetworkId, Note, NoteId};
@@ -38,9 +38,6 @@ use cairn_primitives::{Amount, Hash32};
 
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
-/// What `cairn-chain` allows itself to hold in blocks off the followed branch.
-/// Private there, restated here because it is what this ceiling is.
-const MAX_SIDE_BYTES: u64 = 32 * 1024 * 1024;
 
 fn wallet(seed: u8) -> SecretKey {
     SecretKey::from_bytes(&[seed; 32])
@@ -368,18 +365,22 @@ fn what_a_held_block_costs_is_near_what_the_count_says_it_costs() {
         + size_of::<Transfer>()
         + size_of::<Input>();
 
+    // Read from `cairn-chain` rather than restated. It was restated, as a
+    // `u64` literal beside a doc saying it is private there, so this file's
+    // whole claim was about a number the library could move without it.
+    let ceiling = MAX_SIDE_BYTES as u64;
+
     println!(
         "a block counted at {counted} bytes takes at least {floor} in memory, so the \
-         {} bytes allowed for rival branches is at least {} of memory",
-        MAX_SIDE_BYTES,
-        (MAX_SIDE_BYTES / counted) * floor as u64,
+         {ceiling} bytes allowed for rival branches is at least {} of memory",
+        (ceiling / counted) * floor as u64,
     );
     assert!(
         floor as u64 <= counted * 2,
         "a block counted at {counted} bytes takes at least {floor} in memory, so the \
-         {MAX_SIDE_BYTES} bytes this ceiling allows for rival branches is at least {} \
+         {ceiling} bytes this ceiling allows for rival branches is at least {} \
          of memory",
-        (MAX_SIDE_BYTES / counted) * floor as u64,
+        (ceiling / counted) * floor as u64,
     );
 }
 

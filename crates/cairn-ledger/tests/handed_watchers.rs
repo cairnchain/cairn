@@ -25,7 +25,7 @@ use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::handover::{accept, Handover};
 use cairn_ledger::note::Note;
 use cairn_ledger::pow::RECENT_HEADERS;
-use cairn_ledger::state::header_leaf;
+use cairn_ledger::state::{header_leaf, GRACE_BLOCKS};
 use cairn_ledger::transaction::CoinbaseTransaction;
 use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
 use cairn_ledger::LedgerState;
@@ -34,8 +34,6 @@ const NOW: u64 = 2_000_000_000;
 const HOT: usize = 8;
 const BURIAL: u64 = 8;
 const MATURITY: u64 = 4;
-/// `GRACE_BLOCKS` in `cairn-ledger::state`.
-const GRACE_BLOCKS: usize = 64;
 
 fn params() -> ConsensusParams {
     ConsensusParams::testnet()

@@ -18,7 +18,7 @@
     clippy::arithmetic_side_effects
 )]
 
-use cairn_chain::{ChainError, ChainStore};
+use cairn_chain::{ChainError, ChainStore, MAX_INVALID};
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader, BLOCK_VERSION};
 use cairn_ledger::note::{NetworkId, Note};
@@ -31,10 +31,6 @@ use cairn_primitives::Hash32;
 
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
-
-/// The most identifiers `cairn-chain` holds before emptying the set. Private
-/// there, restated here because it is the number this file is about.
-const MAX_INVALID: usize = 8_192;
 
 fn params() -> ConsensusParams {
     ConsensusParams::testnet().with_coinbase_maturity(0)
