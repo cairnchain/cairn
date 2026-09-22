@@ -235,6 +235,17 @@ pub struct Recovered {
     /// misread them once can read them back, and a person can still look at
     /// what is there.
     pub unreadable: Option<usize>,
+    /// Records set aside because the log does not know where it starts.
+    ///
+    /// Its own place. The bytes are still there, nothing is cut, and this is
+    /// neither a read fault nor an interrupted write: the records decode
+    /// perfectly and disagree with each other about the first one's height. An
+    /// operator told this looks at record zero, which is where the answer is.
+    ///
+    /// Before this existed the log took record zero's height on trust, so a
+    /// log that did not know where it started said it started somewhere else,
+    /// with every field of `Recovered` reading as a clean open.
+    pub blocks_set_aside: usize,
 }
 
 /// Says which file a recovery could not write, where the answer is the index.
@@ -1227,7 +1238,12 @@ impl BlockLog {
         // not read leaves the index with no meaning, so the log answers for
         // itself instead.
         match self.height_of_first() {
-            Ok(first) => self.first = first,
+            // A log that does not know where it starts is a log that holds
+            // nothing, which is what `HeaderLog::join` answers to the same
+            // question. Reporting a height its own records disagree with is
+            // the one answer that loses blocks.
+            Ok(None) => return Ok(self.forget_what_it_cannot_place()),
+            Ok(Some(first)) => self.first = first,
             Err(_) => return self.rebuild(),
         }
         Ok(Recovered {
@@ -1235,18 +1251,82 @@ impl BlockLog {
             discarded_bytes: 0,
             left_in_place: 0,
             unreadable: None,
+            blocks_set_aside: 0,
         })
     }
 
-    /// Reads back the height the log starts at.
+    /// Reads back the height the log starts at, if the log agrees with itself
+    /// about it.
     ///
     /// One record decoded when a node starts, which is what it costs not to
     /// keep this written down anywhere it could disagree with the log itself.
-    fn height_of_first(&self) -> Result<u64, StoreError> {
+    /// Two records, because one cannot be asked to confirm the number it is
+    /// the source of and its neighbour can: the record after it carries its
+    /// height and its identifier, so a byte changed anywhere in record zero
+    /// moves one of the two.
+    ///
+    /// `None` is the log saying it does not know where it starts. It was the
+    /// height of record zero and nothing else, so one bit of that field was
+    /// enough to move the whole log: a six block log whose first record
+    /// claimed height sixteen million opened reporting nothing wrong, denied
+    /// holding the block at zero it was holding, and answered `Unlinked` for
+    /// every height it claimed. `cairn-net`'s restart then read
+    /// `first_height() > start` as a node that had joined above its disk,
+    /// skipped the replay, and truncated the log: every block deleted, with
+    /// `refused` reporting nought.
+    ///
+    /// `HeaderLog::head` is this function in the sibling file and has asked
+    /// this since it was written. Its doc narrates the same failure about the
+    /// log it was written for. This is the one it was not carried to.
+    fn height_of_first(&self) -> Result<Option<u64>, StoreError> {
         if self.count == 0 {
-            return Ok(0);
+            return Ok(Some(0));
         }
-        Ok(self.read(0)?.map_or(0, |block| block.header.height))
+        let Some(head) = self.read(0)? else {
+            return Ok(Some(0));
+        };
+        // A record one that will not read says nothing about record zero, and
+        // is a different fault with its own answer: the index and the log
+        // disagreeing about a length is reported where the read happens, by
+        // `Mismatched`, and setting the whole log aside for it would take an
+        // index fault and make it look like damage to the chain. So the check
+        // is skipped rather than failed, and record zero is trusted as it was
+        // before. What that gives up is the case where record zero and record
+        // one are both damaged, which one flipped bit cannot produce.
+        let Ok(Some(next)) = self.read(1) else {
+            return Ok(Some(head.header.height));
+        };
+        if next.header.height == head.header.height.saturating_add(1)
+            && next.header.previous == head.id()
+        {
+            Ok(Some(head.header.height))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Answers holding nothing, for a log whose records disagree about where
+    /// it starts.
+    ///
+    /// Nothing is cut and nothing is written. The index is emptied in memory
+    /// so no height is answered from a first record the log does not trust,
+    /// and the bytes stay on the disk: a person can look at record zero, and a
+    /// node that fetches the chain again writes over them.
+    ///
+    /// The shape `HeaderLog::join` uses for the same answer, which sets its
+    /// count and first to nought and leaves the file alone.
+    fn forget_what_it_cannot_place(&mut self) -> Recovered {
+        let set_aside = self.count;
+        self.count = 0;
+        self.first = 0;
+        self.end = 0;
+        Recovered {
+            blocks: 0,
+            discarded_bytes: 0,
+            left_in_place: 0,
+            unreadable: None,
+            blocks_set_aside: set_aside,
+        }
     }
 
     /// Reads every record the log holds and writes the index out again from
@@ -1389,12 +1469,16 @@ impl BlockLog {
             self.trailing = beyond;
             0
         };
-        self.first = self.height_of_first()?;
+        let Some(first) = self.height_of_first()? else {
+            return Ok(self.forget_what_it_cannot_place());
+        };
+        self.first = first;
         Ok(Recovered {
             blocks: self.count,
             discarded_bytes: cut,
             left_in_place: beyond.saturating_sub(cut),
             unreadable,
+            blocks_set_aside: 0,
         })
     }
 

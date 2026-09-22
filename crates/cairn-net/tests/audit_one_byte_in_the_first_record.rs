@@ -20,6 +20,15 @@
 //!
 //! Measured here rather than argued, with the byte in the first record and in
 //! the seventh.
+//!
+//! What the first record costs has changed, and the change is why the numbers
+//! below moved. The store asks the second record whether the first is where it
+//! says it is, and when they disagree it stands behind neither and answers
+//! holding nothing, with the bytes left where they are. So the archivist still
+//! loses the use of its history and no longer loses the history: the whole log
+//! is on the disk to look at, and `Restored::blocks_set_aside` says how much
+//! of it. It was cut, silently, with every field of the report reading as a
+//! clean start.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -114,9 +123,22 @@ fn on_disk(directory: &Path) -> (usize, u64) {
     (log.len(), headers.len())
 }
 
+/// Bytes the block log file holds, whatever the log says it stands behind.
+///
+/// The two are different questions and the answer above is the log's. A log
+/// that declines to place its own first record reports holding nothing while
+/// every byte is still there, and telling those apart is the whole of what a
+/// person needs: bytes that are gone want a backup, bytes that are there want
+/// looking at.
+fn bytes_on_disk(directory: &Path) -> u64 {
+    std::fs::metadata(directory.join(BLOCK_LOG))
+        .map(|file| file.len())
+        .unwrap_or(0)
+}
+
 /// Builds an archivist holding twelve blocks and twelve headers, flips one
 /// bit of one record, starts it again, and reports what the start left.
-fn cost_of_a_byte_in(record: usize) -> (usize, usize, (usize, u64)) {
+fn cost_of_a_byte_in(record: usize) -> (usize, usize, (usize, u64), usize, u64, u64) {
     let directory = scratch(&format!("record-{record}"));
     let blocks = chain(12);
     let (node, _) = Node::open_archiving(params(), loopback(), &directory).unwrap();
@@ -130,6 +152,7 @@ fn cost_of_a_byte_in(record: usize) -> (usize, usize, (usize, u64)) {
         (12, 12),
         "twelve of each before the byte"
     );
+    let before_the_byte = bytes_on_disk(&directory);
 
     flip_one_byte_in(&directory, record);
 
@@ -138,15 +161,23 @@ fn cost_of_a_byte_in(record: usize) -> (usize, usize, (usize, u64)) {
     node.shutdown();
     drop(node);
     let left = on_disk(&directory);
+    let bytes = bytes_on_disk(&directory);
     let _ = std::fs::remove_dir_all(&directory);
-    (restored.blocks, restored.refused, left)
+    (
+        restored.blocks,
+        restored.refused,
+        left,
+        restored.blocks_set_aside,
+        bytes,
+        before_the_byte,
+    )
 }
 
 #[test]
 fn one_byte_in_the_first_record_costs_an_archivist_every_block_it_kept() {
     let seventh = cost_of_a_byte_in(6);
     let first = cost_of_a_byte_in(0);
-    println!("PROBE: (replayed, refused, (blocks left on disk, headers left on disk))");
+    println!("PROBE: (replayed, refused, (blocks on disk, headers on disk), set aside)");
     println!("PROBE: one bit in record 6 of 12: {seventh:?}");
     println!("PROBE: one bit in record 0 of 12: {first:?}");
 
@@ -156,15 +187,29 @@ fn one_byte_in_the_first_record_costs_an_archivist_every_block_it_kept() {
         "a byte in the seventh record costs the six records after it"
     );
     assert_eq!(
-        (first.0, first.1, first.2 .0),
-        (0, 12, 0),
-        "a byte in the first record costs every record: the archivist's whole \
-         block history is cut and asked for again"
+        (first.0, first.1, first.2 .0, first.3),
+        (0, 0, 0, 12),
+        "a byte in the first record costs the use of every record: the log \
+         declines to place any of them and says how many it set aside"
+    );
+    assert!(
+        first.4 > 0 && first.4 == first.5,
+        "and deletes none of them. The file is the same size it was, which is \
+         what an archivist needs: {} bytes against {}",
+        first.4,
+        first.5
     );
     assert_eq!(
         (seventh.2 .1, first.2 .1),
         (12, 12),
         "the headers survive either way, which is what names the block that \
          could have been fetched on its own"
+    );
+    assert_eq!(
+        (seventh.3, first.3),
+        (0, 12),
+        "and the two are told apart: a byte inside the log is a refusal from \
+         that record on, a byte in the first one is a log that does not know \
+         where it starts"
     );
 }
