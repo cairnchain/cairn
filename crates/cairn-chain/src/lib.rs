@@ -3033,6 +3033,28 @@ impl ChainStore {
     clippy::arithmetic_side_effects
 )]
 mod tests {
+    /// What one held block costs beyond its bytes is the entry plus a
+    /// fraction, never a multiple of it.
+    ///
+    /// It bounds what a node holds in memory, and it is derived from the types
+    /// rather than written down so it cannot drift from them. What nothing
+    /// said is that it is a small addition: `cargo mutants` turned the
+    /// arithmetic into a multiplication and into a remainder and the suite did
+    /// not notice, and the ceiling that rests on it would have been out by a
+    /// factor rather than by a fraction.
+    #[test]
+    fn what_a_held_block_costs_beyond_its_bytes_is_a_fraction_of_its_entry() {
+        let entry = size_of::<Hash32>() + size_of::<StoredBlock>();
+        assert!(
+            HELD_OVERHEAD >= entry,
+            "the entry itself is held, whatever the spare slots come to"
+        );
+        assert!(
+            HELD_OVERHEAD < entry * 2,
+            "and the spare slots are a fraction of it, not another entry"
+        );
+    }
+
     use cairn_ledger::block::BLOCK_VERSION;
     use cairn_ledger::note::NetworkId;
     use cairn_ledger::transaction::CoinbaseTransaction;
