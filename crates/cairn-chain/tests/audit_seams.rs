@@ -553,6 +553,52 @@ fn a_branch_read_from_the_first_block_knows_its_first_block() {
     assert!(!store.agrees_with(&Located::new(0, Hash32::ZERO)));
 }
 
+/// The locator's order is the sender's, and the answer follows it.
+///
+/// `chain_after` takes the first entry it agrees with. On a locator built from
+/// the tip down that is the highest agreement, which is what the protocol
+/// expects and what the sentence beside the function used to claim outright.
+/// A peer is free to send the entries in any order, and one that sends them
+/// from the bottom up is answered from the lowest position it named: more
+/// blocks for it to ask for, out of its own allowance, and never more than
+/// the `max` it is counted against.
+///
+/// Pinned because the reading of that sentence decides whether this is a
+/// choice the sender makes or a rule this node enforces. It is the first.
+#[test]
+fn a_locator_ordered_from_the_bottom_up_is_answered_from_the_bottom() {
+    let miner = wallet(1);
+    let mut source = Source::new();
+    let mut blocks = Vec::new();
+    source.run(&miner, 6, &mut blocks);
+
+    let mut store = ChainStore::new(params());
+    for block in &blocks {
+        store.add_block(block.clone(), NOW).unwrap();
+    }
+
+    let low = Located::new(1, blocks[1].id());
+    let high = Located::new(4, blocks[4].id());
+    assert!(store.agrees_with(&low) && store.agrees_with(&high));
+
+    assert_eq!(
+        store.chain_after(&[high, low], 64),
+        (5, 1),
+        "from the tip down, the answer starts above the highest agreement"
+    );
+    assert_eq!(
+        store.chain_after(&[low, high], 64),
+        (2, 4),
+        "the other way round, it starts above the lowest, which is the \
+         sender asking for more of its own allowance"
+    );
+    assert_eq!(
+        store.chain_after(&[low, high], 2),
+        (2, 2),
+        "and the count is what `max` allows either way"
+    );
+}
+
 /// **The floor a node trims its block log to is `params.burial`; the floor
 /// its chain still reads back from is `MAX_REORG_DEPTH`. They are the same
 /// number on exactly one shipped network.**

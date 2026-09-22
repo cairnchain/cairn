@@ -1274,8 +1274,18 @@ impl ChainStore {
         rounded.saturating_sub(MILESTONE)
     }
 
-    /// How far this node's branch runs past the last position in `locator` it
-    /// agrees with, as a first height and how many blocks follow it.
+    /// How far this node's branch runs past the first position in `locator`
+    /// this node agrees with, as a first height and how many blocks follow it.
+    ///
+    /// The first agreement rather than the highest, and the difference is the
+    /// sender's to make. A locator is built from the tip down, so on one built
+    /// that way the first agreement is the highest and the answer starts just
+    /// above what the peer already has. A peer that orders its locator the
+    /// other way is answered from the lower position it named, which is more
+    /// blocks for it to ask for out of its own allowance and no more than
+    /// `max` of them to count here either way. This used to say "the last
+    /// position it agrees with", which is the same sentence only for a peer
+    /// that ordered its locator the way the protocol expects.
     ///
     /// Heights rather than identifiers, because a node no longer holds an
     /// identifier for every height and reading them off a disk to answer this
