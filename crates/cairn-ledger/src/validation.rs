@@ -1642,20 +1642,16 @@ mod tests {
         let mut state = LedgerState::new();
         let coinbase =
             CoinbaseTransaction::new(0, vec![Note::new(params.reward_at(0), miner.public_key())]);
-        // The nonce is taken from the rules rather than written down: at the
-        // difficulty floor every identifier meets its target, so this is only
-        // where a search for one would start, and a literal in that argument
-        // is read by the security scan as a cryptographic value in the source.
-        let nonce = params.opens_at;
-        let block = assemble_block(
-            &state,
-            coinbase,
-            Vec::<Transfer>::new(),
-            &params,
-            1_000,
-            nonce,
-        )
-        .expect("a block this chain would make");
+        // The nonce is nought, which is where a miner's search starts: at the
+        // difficulty floor every identifier meets its target. The security
+        // scan reads a literal in that argument as a hard-coded cryptographic
+        // value, as `.github/codeql/config.yml` says it reads every fixture in
+        // a test module inside `src`, and as it says those are dismissed by
+        // hand. Taking the value from `params` instead was tried and is worse:
+        // the alert moved onto `opens_at: 0` in `ConsensusParams::testnet`,
+        // which is not a test at all.
+        let block = assemble_block(&state, coinbase, Vec::<Transfer>::new(), &params, 1_000, 0)
+            .expect("a block this chain would make");
         let bytes = block.encode().len();
 
         let exactly = params.with_max_block_bytes(bytes);
