@@ -2700,8 +2700,10 @@ impl Shared {
         true
     }
 
-    /// How far this node's branch runs past the last position in `locator` it
-    /// agrees with.
+    /// How far this node's branch runs past the first position in `locator`
+    /// this node agrees with, which is the highest only on a locator ordered
+    /// from the tip down. See `ChainStore::chain_after`, which this answers
+    /// out of memory and the disk together.
     ///
     /// Memory first, which answers whenever the peer is anywhere near this
     /// node's tip. A peer far behind names heights this node no longer holds
