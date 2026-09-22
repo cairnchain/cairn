@@ -421,6 +421,22 @@ struct Asked {
     fee: Amount,
 }
 
+/// The amount a spend asks for, or the sentence that says what is wrong
+/// with it.
+///
+/// Absent and malformed are two faults and get two sentences, the way the two
+/// fields beside it already do: `to` says "who is being paid?" when it is
+/// missing and names the shape of a key when it is wrong, and a blank fee means
+/// "work it out" rather than a fault. This one collapsed both, so a request
+/// that sent no amount at all was told "that is not an amount of CAIRN", which
+/// is a sentence about a value nobody typed.
+fn amount_of(field: Option<String>) -> Result<Amount, &'static str> {
+    let Some(text) = field.filter(|text| !text.trim().is_empty()) else {
+        return Err("how much is being sent?");
+    };
+    parse_amount(&text).ok_or("that is not an amount of CAIRN")
+}
+
 fn asked(wallet: &Wallet, request: &Request) -> Result<Asked, Response> {
     let Some(to) = request.field("to") else {
         return Err(refusal("who is being paid?"));
@@ -430,9 +446,7 @@ fn asked(wallet: &Wallet, request: &Request) -> Result<Asked, Response> {
             "that is not a public key: it is 64 hexadecimal characters",
         ));
     };
-    let Some(amount) = request.field("amount").and_then(|text| parse_amount(&text)) else {
-        return Err(refusal("that is not an amount of CAIRN"));
-    };
+    let amount = amount_of(request.field("amount")).map_err(refusal)?;
     // Left blank means what the network asks, worked out from the transfer
     // this would build. Nothing is no longer a fee anybody carries, and a page
     // that sent one would have the refusal come back from a pool the person
@@ -575,7 +589,7 @@ fn text(status: u16, message: &str) -> Response {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{constant_time_eq, parse_address, turned_away, Opened};
+    use super::{amount_of, constant_time_eq, parse_address, turned_away, Opened};
     use cairn_http::Request;
 
     fn opened() -> Opened {
@@ -718,6 +732,33 @@ mod tests {
         assert!(
             parse_address(&bent).is_err(),
             "a sign was read as a digit at {at}, so this key has a second spelling"
+        );
+    }
+
+    /// A missing amount and a wrong one are told apart.
+    ///
+    /// The two fields beside it already did this and this one did not: a
+    /// request with no amount at all was answered "that is not an amount of
+    /// CAIRN", a sentence about a value nobody typed.
+    #[test]
+    fn a_missing_amount_is_asked_for_and_a_wrong_one_is_named() {
+        let missing = amount_of(None).unwrap_err();
+        let blank = amount_of(Some("  ".to_owned())).unwrap_err();
+        let wrong = amount_of(Some("lots".to_owned())).unwrap_err();
+
+        assert_eq!(missing, blank, "blank is missing, not wrong");
+        assert_ne!(
+            missing, wrong,
+            "a missing amount and a malformed one get different sentences"
+        );
+        assert!(
+            !missing.contains("not an amount"),
+            "nothing was typed, so nothing was not an amount: {missing}"
+        );
+        assert!(wrong.contains("not an amount"), "{wrong}");
+        assert!(
+            amount_of(Some("1.5".to_owned())).is_ok(),
+            "and a real one reads"
         );
     }
 
