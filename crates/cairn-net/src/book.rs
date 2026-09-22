@@ -26,8 +26,12 @@ pub const PEER_FILE: &str = "peers.txt";
 /// Addresses held before new ones are ignored.
 ///
 /// The book is filled by strangers, so it needs a ceiling. Seeds are outside
-/// it: they come from the operator, and the ceiling is there against
-/// strangers.
+/// it, and the reason given here was that they come from the operator. The
+/// operator names a seed; the addresses behind a named one come from whoever
+/// answers for the name, and a seed is never removed, so a reply of thousands
+/// used to fill this book past its ceiling with entries nothing could
+/// displace. What keeps seeds from being a way around the ceiling is
+/// `seeds::MOST_PER_NAME`, where a name's answer is taken in.
 pub const MAX_ADDRESSES: usize = 4_096;
 
 /// Addresses kept from any one neighbourhood of the internet.
