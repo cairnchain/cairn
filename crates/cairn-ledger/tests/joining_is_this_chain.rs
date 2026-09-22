@@ -316,3 +316,79 @@ fn a_chain_of_one_block_is_compared_as_it_stands() {
         Err(StartError::NotThisNetworksGenesis)
     );
 }
+
+/// The opening moment is inside the network on this side of the join too.
+///
+/// The same boundary as the handover's, and the same reason: `opens_at` is the
+/// first moment a block may be dated, so the first honest block of a network
+/// is dated at it. A weighing that refused it would refuse every chain from
+/// the block that starts it.
+#[test]
+fn a_header_dated_at_the_opening_itself_is_weighed() {
+    let joined = honest_join();
+    let earliest = joined
+        .start
+        .tail
+        .iter()
+        .chain(joined.start.samples.iter().map(|sample| &sample.header))
+        .chain(joined.start.parent.iter().map(|parent| &parent.header))
+        .chain([&joined.start.tip])
+        .map(|header| header.timestamp)
+        .min()
+        .expect("the weighing carries headers");
+
+    let mut opening = mined_under();
+    opening.opens_at = earliest;
+    check_start(&joined.start, SAMPLES, NOW, &opening)
+        .expect("a chain whose earliest header opens the network");
+}
+
+/// A tip dated exactly as far ahead as the reader allows is read.
+///
+/// This is the one refusal in the weighing that two honest nodes can disagree
+/// about, and where the line sits is the whole of it: a tip at the drift is
+/// what a miner whose clock is that far ahead publishes, and it is valid to
+/// everybody whose clock is right. One second past it is not.
+#[test]
+fn a_tip_at_the_drift_is_read_and_one_second_past_it_is_not() {
+    let joined = honest_join();
+    let params = mined_under();
+    let tip = joined.start.tip.timestamp;
+
+    let at_the_edge = tip.saturating_sub(params.max_timestamp_drift);
+    check_start(&joined.start, SAMPLES, at_the_edge, &params)
+        .expect("a tip exactly as far ahead as the drift allows");
+
+    assert_eq!(
+        check_start(&joined.start, SAMPLES, at_the_edge - 1, &params),
+        Err(StartError::TipFromTheFuture { timestamp: tip })
+    );
+}
+
+/// The tip opened as one of its own samples is refused for where it sits, not
+/// for what it claims.
+///
+/// A header stating more work than the tip is past the tip and refused for
+/// that. A header stating exactly the tip's own total is the tip, which states
+/// no more than itself: what is wrong with it is that it does not cover the
+/// work drawn, and that the tip is not in its own history. Pinning which of
+/// the two refusals answers keeps the comparison a comparison rather than a
+/// direction.
+#[test]
+fn the_tip_opened_as_its_own_sample_is_refused_for_where_it_sits() {
+    let mut joined = honest_join();
+    let parent = joined
+        .start
+        .parent
+        .clone()
+        .expect("a chain this long has one");
+    joined.start.samples[0] = Sample {
+        header: joined.start.tip,
+        proof: parent.proof,
+    };
+
+    assert_eq!(
+        check_start(&joined.start, SAMPLES, NOW, &mined_under()),
+        Err(StartError::WrongPlace { index: 0 })
+    );
+}
