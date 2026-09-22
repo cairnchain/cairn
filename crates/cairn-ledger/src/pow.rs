@@ -50,11 +50,28 @@ const MAX_SOLVETIME_FACTOR: u64 = 6;
 pub const MAX_RETARGET_FACTOR: u128 = 4;
 
 /// How many recent headers a node has to keep to apply every rule here.
-pub const RECENT_HEADERS: usize = if DIFFICULTY_WINDOW > MEDIAN_TIME_WINDOW {
-    DIFFICULTY_WINDOW + 1
-} else {
-    MEDIAN_TIME_WINDOW
-};
+///
+/// The larger of what the two rules need: the retarget reads one more header
+/// than its window, since ninety gaps take ninety one headers, and the median
+/// reads its window. It was written as a branch on the two windows rather than
+/// on the two needs, `if DIFFICULTY_WINDOW > MEDIAN_TIME_WINDOW { DIFFICULTY_
+/// WINDOW + 1 } else { MEDIAN_TIME_WINDOW }`, which gives the same answer at
+/// every pair of values but one: equal windows, where the retarget wants one
+/// more header than the median and was given the median's count. A node would
+/// then have run the retarget on one gap fewer than its window, on every node
+/// alike and saying nothing. At ninety and eleven the two forms agree, so this
+/// changes no block.
+pub const RECENT_HEADERS: usize = headers_needed(DIFFICULTY_WINDOW, MEDIAN_TIME_WINDOW);
+
+/// What [`RECENT_HEADERS`] is worked out from, as a function of the two
+/// windows, so the one pair of values where the branch it replaced was wrong
+/// can be asked without changing a consensus constant.
+const fn headers_needed(difficulty_window: usize, median_window: usize) -> usize {
+    let retarget = difficulty_window.saturating_add(1);
+    // The larger of the two, without a comparison: at equal needs `>` and
+    // `>=` pick the same side, a change no test can see.
+    retarget.saturating_add(median_window.saturating_sub(retarget))
+}
 
 /// The largest block identifier that still satisfies `difficulty`.
 ///
@@ -231,6 +248,32 @@ pub fn next_difficulty(recent: &[HeaderSummary], target_block_time: u64) -> u64 
 )]
 mod tests {
     use super::*;
+
+    /// A node keeps enough headers for whichever rule needs more, including
+    /// when the two windows are the same length.
+    ///
+    /// The retarget over a window of `n` reads `n + 1` headers and the median
+    /// over a window of `n` reads `n`. The branch this replaced chose on the
+    /// windows rather than on those two needs, so at equal windows it gave the
+    /// median's count and the retarget ran one gap short. Every other pair of
+    /// values agreed, including the shipped ninety and eleven, which is why no
+    /// test had noticed.
+    #[test]
+    fn a_node_keeps_enough_headers_for_both_rules_at_every_pair_of_windows() {
+        assert_eq!(headers_needed(90, 11), 91, "the shipped pair");
+        assert_eq!(
+            headers_needed(90, 90),
+            91,
+            "equal windows: the retarget still wants one more than the median"
+        );
+        assert_eq!(headers_needed(10, 11), 11, "the median's is larger");
+        assert_eq!(headers_needed(10, 12), 12);
+        assert_eq!(
+            RECENT_HEADERS,
+            headers_needed(DIFFICULTY_WINDOW, MEDIAN_TIME_WINDOW),
+            "and the constant is the function at the shipped windows"
+        );
+    }
 
     fn summary(height: u64, timestamp: u64, difficulty: u64) -> HeaderSummary {
         HeaderSummary {

@@ -947,8 +947,17 @@ fn resolve_input(
                     .cold()
                     .proof_of(position)
                     .ok_or(TransferError::MissingProof { note_id: id })?;
-                // Still checked: a note that fell within the window and has
-                // since been spent is no longer there to find.
+                // Kept as a second line and not as the first. It said a note
+                // that fell within the window and has since been spent is no
+                // longer there to find, and that was the case it covered
+                // until spent notes started being lifted out of the window:
+                // `remember_grace` takes a spent note out of `grace_index` in
+                // the same step, so `within_grace` answers `None` for it and
+                // this arm is never entered with one. What it still guards is
+                // the index and the forest disagreeing about a place, which
+                // nothing is known to produce, and a verification that costs a
+                // hash per level is a cheap price for noticing if something
+                // ever does.
                 if !state.cold().verify(position, cold_leaf(&id, &note), &proof) {
                     return Err(TransferError::UnknownNote(id));
                 }
