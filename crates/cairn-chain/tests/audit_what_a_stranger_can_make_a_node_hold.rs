@@ -235,12 +235,13 @@ fn offer_side_blocks(rules: ConsensusParams, bytes: usize, count: u64) -> (usize
 /// deciding between its branch and nothing; one that kept them all would hold
 /// whatever a stranger cared to send.
 ///
-/// What this does **not** reach is `forget_unreachable_branches`, and that is
-/// worth writing down rather than implying. Its rule reads "the branch names
-/// it, or it sits inside the window", and joining those with "and", or moving
-/// either of its two thresholds, leaves this measurement unchanged: the count
-/// above is enforced somewhere else. A rule that looks like it bounds
-/// something and does not is what this file was opened for once already.
+/// Which sweep the count belongs to is worth saying, because the obvious
+/// answer is wrong. Joining the two halves of `forget_unreachable_branches`
+/// with "and", or moving either of its thresholds, leaves this measurement
+/// unchanged: what enforces both limits is `forget_oldest_side_blocks`, whose
+/// own note says `MAX_SIDE_BLOCKS` "was a trigger and never a bound" until it
+/// was made one. The first sweep drops what is out of reach; this is what the
+/// second one settles at.
 #[test]
 fn the_sweep_keeps_the_rivals_inside_the_window_and_counts_them() {
     let rules = params();
