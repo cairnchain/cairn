@@ -701,6 +701,19 @@
     </p>
 
     <p>
+      How much work stands behind a tip is not the only question a newcomer
+      has to ask. Which chain this is has three answers, and all three are
+      cheap: every header a weighing opens names this network, every one is
+      dated after the network opened, and the chain is shown to start from the
+      block the software pins, opened at position zero of the tip's own
+      commitment. A chain that starts anywhere else is refused whatever work
+      stands behind it. The audit that closed the last of those reads the
+      other way round: until it was closed, a chain started from another first
+      block, carrying the right network number and dated after the opening,
+      was weighed on its work alone and taken.
+    </p>
+
+    <p>
       That run is capped, at 8 282 headers, about 1.5 MB, and the cap is a
       real limit rather than a formality: past it a chain cannot be weighed at
       all, and a newcomer reads it block by block instead. The run is a band of
