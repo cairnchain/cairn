@@ -21,7 +21,7 @@
 //! ways: how many are served at once, how many come from one address, and how
 //! long any one of them may take to ask its question and take its answer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufReader, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -535,12 +535,129 @@ fn refusals() -> std::sync::mpsc::SyncSender<(TcpStream, Instant)> {
     let (into, out) = std::sync::mpsc::sync_channel::<(TcpStream, Instant)>(REFUSALS_QUEUED);
     let _ = thread::Builder::new()
         .name("cairn-http-refuse".to_owned())
-        .spawn(move || {
-            for (stream, accepted) in out {
-                say_no(&stream, accepted);
-            }
-        });
+        .spawn(move || refuse_them(&out));
     into
+}
+
+/// A refused connection whose refusal is written, waiting for what the caller
+/// is still sending so that closing over it does not reset the answer.
+struct Waiting {
+    stream: TcpStream,
+    until: Instant,
+    cleared: usize,
+}
+
+impl Waiting {
+    /// Everything the caller has sent by now, taken off the socket without
+    /// waiting for more. True once there is nothing left to clear, or no
+    /// patience left to clear it with, and the connection can be dropped.
+    fn done(&mut self) -> bool {
+        let mut sink = [0u8; DRAIN_CHUNK];
+        let mut source = &self.stream;
+        loop {
+            match source.read(&mut sink) {
+                Ok(0) => return true,
+                Ok(taken) => {
+                    self.cleared = self.cleared.saturating_add(taken);
+                    if self.cleared >= DRAIN_BYTES {
+                        return true;
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    return Instant::now() >= self.until;
+                }
+                Err(_) => return true,
+            }
+        }
+    }
+}
+
+/// Puts a refused connection among those being waited on, giving up the
+/// oldest first if that many are already held.
+///
+/// Its own function so the ceiling can be asked. `cargo mutants` found the
+/// comparison could be turned around without a test noticing: the test of
+/// refusals sends fewer callers than the ceiling, which asks whether they are
+/// answered and not whether the thread holding them stays bounded.
+fn wait_on(waiting: &mut VecDeque<Waiting>, stream: TcpStream, now: Instant) {
+    if waiting.len() >= REFUSALS_QUEUED {
+        waiting.pop_front();
+    }
+    waiting.push_back(Waiting {
+        stream,
+        until: now.checked_add(REFUSAL_PATIENCE).unwrap_or(now),
+        cleared: 0,
+    });
+}
+
+/// Drops every connection that has nothing more to clear or no more patience,
+/// and keeps the rest. Returns how many it let go, which is what a test can
+/// ask.
+fn let_go_of_the_done(waiting: &mut VecDeque<Waiting>) -> usize {
+    let before = waiting.len();
+    waiting.retain_mut(|each| !each.done());
+    before.saturating_sub(waiting.len())
+}
+
+/// Writes every refusal the moment it arrives, and waits on all of them
+/// together.
+///
+/// It took them one at a time: write the 503, then wait up to
+/// [`REFUSAL_PATIENCE`] for the caller to finish, then the next. A caller that
+/// holds its socket open, which is what a browser does, costs that whole wait,
+/// so refusals went out a quarter of a second apart, and each was judged
+/// against its own connection's deadline, which kept running while it queued.
+/// [`REQUEST_DEADLINE`] is forty quarters. Of forty eight callers refused
+/// together and holding their sockets, forty read a 503 and eight read
+/// nothing: the forty first was written after its deadline had passed and got
+/// a bare close, which is the failure this thread was written to end, forty
+/// places into the queue built to end it.
+///
+/// The write is what the caller needs and the wait only protects it, so the
+/// two are pulled apart. Every refusal is written as soon as it is taken, and
+/// the waiting is one look at each open socket per pass, none of them
+/// blocking the rest. What the patience costs is the same per caller and no
+/// longer adds up across them.
+///
+/// Holds at most [`REFUSALS_QUEUED`] waiting and that many again queued. Past
+/// the first, the oldest waiting connection is let go early: its refusal is
+/// already written, and letting it go risks the reset for that one caller,
+/// which is the lesser loss beside holding sockets without bound.
+fn refuse_them(out: &std::sync::mpsc::Receiver<(TcpStream, Instant)>) {
+    let mut waiting: VecDeque<Waiting> = VecDeque::new();
+    let mut closed = false;
+    loop {
+        // Everything that has arrived, each written as it is taken. Blocking
+        // only when there is nobody to wait on.
+        while !closed {
+            let next = if waiting.is_empty() {
+                match out.recv() {
+                    Ok(next) => next,
+                    Err(_) => return,
+                }
+            } else {
+                match out.try_recv() {
+                    Ok(next) => next,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        closed = true;
+                        break;
+                    }
+                }
+            };
+            let (stream, accepted) = next;
+            write_refusal(&stream, accepted);
+            wait_on(&mut waiting, stream, Instant::now());
+        }
+        let _ = let_go_of_the_done(&mut waiting);
+        if waiting.is_empty() {
+            if closed {
+                return;
+            }
+        } else {
+            thread::sleep(DRAIN_POLL);
+        }
+    }
 }
 
 /// The one answer a full server gives.
@@ -556,7 +673,11 @@ fn refusals() -> std::sync::mpsc::SyncSender<(TcpStream, Instant)> {
 /// Sending it is right for a GET, which is what almost every caller sends, and
 /// harmless for a HEAD: `connection: close` ends the exchange, so there is no
 /// next message to frame wrongly.
-fn say_no(stream: &TcpStream, accepted: Instant) {
+///
+/// Written and the write half shut, and nothing more: the waiting that keeps
+/// the answer from being reset happens in [`refuse_them`], across every
+/// refused caller at once.
+fn write_refusal(stream: &TcpStream, accepted: Instant) {
     let _ = stream.set_nonblocking(true);
     let _ = write_response(
         &mut Timed {
@@ -566,7 +687,7 @@ fn say_no(stream: &TcpStream, accepted: Instant) {
         &Response::error(503, "too many connections"),
         false,
     );
-    hang_up(stream, REFUSAL_PATIENCE);
+    let _ = stream.shutdown(Shutdown::Write);
 }
 
 /// Bytes taken off the socket and dropped, before it is closed.
@@ -664,8 +785,11 @@ fn drain(stream: &TcpStream, patience: Duration) -> usize {
 ///
 /// What is left is the close the drop does, which resets if bytes turn up
 /// unread after all. That window is what draining narrows, and how far it
-/// narrows is `patience`: nothing on the path that has already read its
-/// request, and a moment on the path that answered before reading one.
+/// narrows is `patience`, which is nothing here: this is the path that has
+/// already read its request, so whatever is left came with it. The path that
+/// answers before reading one no longer comes through here at all. It waited
+/// here, one caller after another, and [`refuse_them`] waits on every refused
+/// caller at once instead.
 fn hang_up(stream: &TcpStream, patience: Duration) {
     let _ = stream.shutdown(Shutdown::Write);
     let _ = drain(stream, patience);
@@ -1082,13 +1206,159 @@ pub fn bind(address: SocketAddr) -> io::Result<TcpListener> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        answering, drain, one_machine, percent_decode, Request, Slots, ANSWER_DEADLINE,
-        MAX_CONNECTIONS, MAX_PER_HOST,
+        answering, drain, let_go_of_the_done, one_machine, percent_decode, wait_on, Request, Slots,
+        Waiting, ANSWER_DEADLINE, DRAIN_BYTES, MAX_CONNECTIONS, MAX_PER_HOST, REFUSALS_QUEUED,
     };
+    use std::collections::VecDeque;
     use std::fmt::Write as _;
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::io::Write as _;
+    use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    /// Both ends of one loopback connection, the server end non-blocking as
+    /// the refusal thread holds it.
+    fn a_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let caller = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        server.set_nonblocking(true).unwrap();
+        (caller, server)
+    }
+
+    /// Long enough for bytes written on the loopback to be readable at the
+    /// other end. A liveness bound, set far past what it needs.
+    fn settle() {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    /// A refused connection is waited on while the caller may still be
+    /// sending, and let go the moment there is nothing left to wait for.
+    ///
+    /// `cargo mutants` found every line of `Waiting::done` could be changed
+    /// with nothing noticing: the refusal tests ask whether a 503 arrived, and
+    /// on the loopback it arrives whether or not anybody waited. Asked here of
+    /// the function, on a real socket, with no race in it.
+    #[test]
+    fn a_refused_caller_is_waited_on_while_it_may_still_be_sending() {
+        let far = Instant::now() + Duration::from_secs(60);
+
+        // Nothing sent and patience left: still waiting.
+        let (caller, server) = a_pair();
+        let mut waiting = Waiting {
+            stream: server,
+            until: far,
+            cleared: 0,
+        };
+        assert!(
+            !waiting.done(),
+            "nothing arrived yet and there is patience left"
+        );
+
+        // Bytes arrive: taken off the socket and counted, and still waiting,
+        // because more may follow.
+        let mut caller = caller;
+        caller.write_all(b"GET / HTTP/1.1\r\n\r\n").unwrap();
+        settle();
+        assert!(!waiting.done(), "bytes taken, and the caller may send more");
+        assert_eq!(waiting.cleared, 18, "every byte that arrived was taken");
+
+        // The caller closes: nothing more can come.
+        drop(caller);
+        settle();
+        assert!(
+            waiting.done(),
+            "a caller that has closed has sent everything"
+        );
+
+        // Patience spent with nothing arriving: let go.
+        let (_held, server) = a_pair();
+        let mut spent = Waiting {
+            stream: server,
+            until: Instant::now(),
+            cleared: 0,
+        };
+        assert!(spent.done(), "no patience left, so no reason to hold on");
+
+        // A caller that keeps sending past what a request can be: let go.
+        let (mut flooding, server) = a_pair();
+        let mut flooded = Waiting {
+            stream: server,
+            until: far,
+            cleared: 0,
+        };
+        flooding.write_all(&vec![b'x'; DRAIN_BYTES + 1]).unwrap();
+        settle();
+        assert!(
+            flooded.done(),
+            "past what a request can be, reading on is reading for a stranger"
+        );
+    }
+
+    /// The thread holding refused connections holds at most so many, and the
+    /// sweep lets go of exactly the ones that are done.
+    #[test]
+    fn the_refused_connections_held_are_bounded_and_swept() {
+        let now = Instant::now();
+        let mut waiting: VecDeque<Waiting> = VecDeque::new();
+        let mut callers = Vec::new();
+        for _ in 0..(REFUSALS_QUEUED + 3) {
+            let (caller, server) = a_pair();
+            callers.push(caller);
+            wait_on(&mut waiting, server, now);
+        }
+        assert_eq!(
+            waiting.len(),
+            REFUSALS_QUEUED,
+            "the oldest are given up past the ceiling, not held without bound"
+        );
+
+        // Some of the callers close, and not half of them. With exactly half,
+        // a sweep that let go of the open ones and kept the closed ones gave
+        // the same count, and this compared counts: `cargo mutants` turned the
+        // sweep around and it stayed green.
+        let closing = 10;
+        callers.drain(..closing + 3);
+        settle();
+        let gone = let_go_of_the_done(&mut waiting);
+        assert_eq!(
+            gone, closing,
+            "the connections whose callers closed are let go, and only those"
+        );
+        assert_eq!(waiting.len(), REFUSALS_QUEUED - closing);
+        assert!(
+            waiting.iter_mut().all(|each| !each.done()),
+            "and what is left is what is still worth waiting on"
+        );
+    }
+
+    /// A caller whose connection was reset is let go at once, rather than
+    /// held until patience runs out.
+    ///
+    /// A reset is the one answer from a read that is neither bytes, an end,
+    /// nor "nothing yet", and the waiting treated it as "nothing yet" if the
+    /// guard in front of `WouldBlock` was dropped: `cargo mutants` found no
+    /// test produced one. A caller closing while bytes it was sent sit unread
+    /// in its own buffer resets rather than closes, which is how one is made
+    /// here.
+    #[test]
+    fn a_reset_caller_is_let_go_at_once() {
+        let (caller, server) = a_pair();
+        let mut sent = &server;
+        let _ = sent.write_all(b"never read");
+        settle();
+        drop(caller);
+        settle();
+        let mut reset = Waiting {
+            stream: server,
+            until: Instant::now() + Duration::from_secs(60),
+            cleared: 0,
+        };
+        assert!(
+            reset.done(),
+            "a reset connection has nothing more to send and is not waited on"
+        );
+    }
 
     fn request(path: &str, query: &str) -> Request {
         Request {
