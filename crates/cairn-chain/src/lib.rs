@@ -417,7 +417,6 @@ pub struct Outdated {
 }
 
 impl ChainError {
-    /// The rules this node lacks, when that is why the block was refused.
     /// Whether this failure condemns the header itself.
     ///
     /// A block's identifier is taken over its header, and a header does not
@@ -439,24 +438,28 @@ impl ChainError {
     /// Two verdicts look as though the header settles them and do not, which
     /// is why they are named here rather than merely absent from the list.
     ///
-    /// A version this build does not accept is the second. It is measured
-    /// against the schedule this node happens to be carrying, so it is a
-    /// judgement about the reader and not about the header, and it changes
-    /// the moment the reader is updated. Remembering it made an un-updated
-    /// node condemn the real chain for good, and then refuse every honest
-    /// peer that offered it. Nothing here is remembered any more, and a
-    /// version above what this build knows is answered as being too old
-    /// rather than as a bad block, so the node stops and says so rather than
-    /// quietly mining a chain of its own.
-    /// A timestamp too far ahead is measured against the reading node's own
-    /// clock, so it is the one refusal in the whole set that two honest nodes
-    /// can disagree about, and that the same node reverses simply by waiting.
-    /// Remembering it turned a second of clock skew into a permanent exile: a
-    /// miner publishing a block dated at the edge of the allowed drift, which
-    /// costs nothing and is valid to everybody whose clock is right, put that
-    /// block on the blacklist of every node running slightly slow, and from
-    /// then on those nodes refused the whole chain through it and blamed every
-    /// honest peer that offered it.
+    /// The first is a timestamp too far ahead. It is measured against the
+    /// reading node's own clock, so it is the one refusal in the whole set
+    /// that two honest nodes can disagree about, and that the same node
+    /// reverses simply by waiting. Remembering it turned a second of clock
+    /// skew into a permanent exile: a miner publishing a block dated at the
+    /// edge of the allowed drift, which costs nothing and is valid to
+    /// everybody whose clock is right, put that block on the blacklist of
+    /// every node running slightly slow, and from then on those nodes refused
+    /// the whole chain through it and blamed every honest peer that offered
+    /// it.
+    ///
+    /// The second is a verdict on a version that this build cannot make: a
+    /// version above anything it knows (`UnsupportedVersion`), or rules it
+    /// lacks at the height (`SoftwareTooOld`). Either is a judgement about the
+    /// reader and not about the header, and an update reverses it. Remembering
+    /// the first made an un-updated node condemn the real chain for good, and
+    /// then refuse every honest peer that offered it.
+    ///
+    /// `WrongVersion` is the opposite case and is listed. The block carries a
+    /// version this build knows, at a height whose rules this build has, and
+    /// it is not the version those rules require, so it is the block that is
+    /// wrong and no update makes it right.
     fn settles_the_header(&self) -> bool {
         let Self::InvalidBlock { source, .. } = self else {
             return false;
@@ -477,6 +480,7 @@ impl ChainError {
         )
     }
 
+    /// The rules this node lacks, when that is why the block was refused.
     pub fn outdated(&self) -> Option<Outdated> {
         match self {
             Self::InvalidBlock {
