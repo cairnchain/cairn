@@ -60,11 +60,27 @@ pub fn written_in(network: NetworkId) -> &'static [&'static str] {
     }
 }
 
-/// Every address `text` names.
+/// The most addresses one name may put in front of a node.
 ///
-/// All of them, not the first. That is what carries the redundancy this list
-/// deliberately does not: one name answers with every machine behind it, and
-/// a node tries them all.
+/// Every address a name answers with goes into the address book as a seed,
+/// and a seed sits outside the book's ceiling and is never removed, because
+/// the book's own note says seeds "come from the operator". The operator names
+/// the name. What the name answers is the zone's, or whoever answers in its
+/// place, and it was taken whole: one reply of four thousand addresses filled
+/// the book with entries nothing learned from the network could displace, and
+/// the node dialled only the set that reply chose.
+///
+/// Sixty four keeps what a name is for. A seed service behind one name is a
+/// handful of machines, and sixty four of them is redundancy many times over,
+/// while leaving a single answer at a sixty fourth of the book.
+pub const MOST_PER_NAME: usize = 64;
+
+/// Every address `text` names, up to [`MOST_PER_NAME`].
+///
+/// All of them rather than the first, because that is what carries the
+/// redundancy this list deliberately does not: one name answers with every
+/// machine behind it, and a node tries them all. Not without bound, because
+/// what a name answers with is not the operator's to vouch for.
 pub fn resolve(text: &str) -> Result<Vec<SocketAddr>, String> {
     let found: Vec<SocketAddr> = text
         .to_socket_addrs()
@@ -73,7 +89,17 @@ pub fn resolve(text: &str) -> Result<Vec<SocketAddr>, String> {
     if found.is_empty() {
         return Err(format!("`{text}` resolved to nothing"));
     }
-    Ok(found)
+    Ok(what_a_name_is_worth(found))
+}
+
+/// The part of a name's answer a node takes: at most [`MOST_PER_NAME`], in the
+/// order it came.
+///
+/// Its own function so that the cap can be asked without a name that answers
+/// with thousands, which is not something a test can make a resolver do.
+pub fn what_a_name_is_worth(mut found: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    found.truncate(MOST_PER_NAME);
+    found
 }
 
 /// One address, for a setting that can only name one: what to listen on.
@@ -133,6 +159,69 @@ pub fn start_from(asked: &[String], network: NetworkId) -> Result<Vec<SocketAddr
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    /// A name's answer is taken up to a ceiling, and the book still has room
+    /// for what the network teaches afterwards.
+    ///
+    /// Before the ceiling, every address a name answered with became a seed,
+    /// and a seed is outside the book's ceiling and never removed. A reply of
+    /// five thousand filled the book, and `insert` then refused every address
+    /// learned from a peer for the life of the node: it dialled only what one
+    /// DNS answer chose. The book's own tests insert one seed.
+    #[test]
+    fn one_names_answer_cannot_fill_the_book() {
+        use crate::book::{AddressBook, MAX_ADDRESSES};
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        // An answer the size of an eclipse, spread over enough address groups
+        // that no per group ceiling is what stops it.
+        let answer: Vec<SocketAddr> = (0..(MAX_ADDRESSES + 1_000))
+            .map(|index| {
+                let index = u32::try_from(index).unwrap_or(0);
+                let [a, b, c, d] = (0x0B00_0000u32 + index * 257).to_be_bytes();
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(a, b, c, d)), DEFAULT_PORT)
+            })
+            .collect();
+
+        let taken = super::what_a_name_is_worth(answer);
+        assert_eq!(
+            taken.len(),
+            super::MOST_PER_NAME,
+            "a name's answer is taken up to the ceiling and no further"
+        );
+
+        let mut book = AddressBook::default();
+        for address in &taken {
+            book.insert_seed(*address);
+        }
+        let learned = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), DEFAULT_PORT);
+        assert!(
+            book.insert(learned),
+            "an address learned from a peer still finds room after a name has \
+             been answered"
+        );
+    }
+
+    /// And `resolve` takes a name's answer through that ceiling.
+    ///
+    /// The test above holds the ceiling and cannot hold that `resolve` uses
+    /// it: no resolver a test can reach answers with thousands, so a `resolve`
+    /// that returned what it found untouched stayed green there. So the one
+    /// call site is read instead, the way this repository reads the method
+    /// table the HTTP header describes.
+    #[test]
+    fn resolve_takes_a_names_answer_through_the_ceiling() {
+        const SOURCE: &str = include_str!("seeds.rs");
+        let body = SOURCE
+            .split_once("pub fn resolve(text: &str)")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .expect("resolve is written here")
+            .0;
+        assert!(
+            body.contains("what_a_name_is_worth("),
+            "resolve hands back a name's answer without the ceiling: {body}"
+        );
+    }
+
     /// Every address written into the program is named with the default port.
     ///
     /// The names have to be literals: a `const [&str; N]` cannot be built by
