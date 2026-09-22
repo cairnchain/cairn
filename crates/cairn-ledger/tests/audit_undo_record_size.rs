@@ -328,8 +328,12 @@ fn what_an_ordinary_block_writes_down() {
     // the figures would go on being printed: what it counts is the paths the
     // bytes beside it are made of, and a record with bytes in it has more
     // than one.
+    // A path is a length and its siblings, so it is at least four bytes and a
+    // hash, and a record holding several of them is at least that many times
+    // over. Both numbers are counted rather than bounded here, because every
+    // other figure in this file is a ceiling that nothing satisfies best.
     assert!(
-        worst_paths > 1 && worst > 0,
+        worst_paths > 1 && worst >= worst_paths * 36,
         "a record of {worst} B holding {worst_paths} paths"
     );
 }

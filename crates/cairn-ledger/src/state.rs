@@ -1971,6 +1971,40 @@ mod tests {
 
     use super::*;
 
+    /// Who a ledger follows is asked and answered, which nothing asked.
+    ///
+    /// Following is a fact about this node rather than about the chain, and it
+    /// is read where a ledger is replaced by one from somewhere else: a
+    /// newcomer that took a stranger's list would follow whoever the stranger
+    /// named, and one that lost its own would stop following its owner's
+    /// notes and start missing payments to them. `cargo mutants` could make
+    /// `is_watching` answer the same thing to every question and `watching`
+    /// answer nobody, with the suite green.
+    #[test]
+    fn who_a_ledger_follows_is_who_it_was_told_to_follow() {
+        let followed = cairn_crypto::SecretKey::from_bytes(&[11; 32]).public_key();
+        let stranger = cairn_crypto::SecretKey::from_bytes(&[12; 32]).public_key();
+        let mut state = LedgerState::new();
+
+        assert!(
+            !state.is_watching(&followed),
+            "a fresh ledger follows nobody"
+        );
+        assert_eq!(state.watching().count(), 0);
+
+        state.watch_owner(followed);
+        assert!(state.is_watching(&followed));
+        assert!(
+            !state.is_watching(&stranger),
+            "and not everybody, which is the other half of the same answer"
+        );
+        assert_eq!(
+            state.watching().collect::<Vec<_>>(),
+            vec![followed],
+            "the list is who was named and nobody else"
+        );
+    }
+
     /// A window holding exactly what the rules keep is kept, and one note more
     /// runs the oldest block out of it.
     ///
