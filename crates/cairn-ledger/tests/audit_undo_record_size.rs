@@ -322,6 +322,16 @@ fn what_an_ordinary_block_writes_down() {
          its size is decided by how much of the watched map sits in one tree rather \
          than by what the block did"
     );
+
+    // And the count is a count. Every bound in this file is one a record
+    // holding nothing satisfies, so `paths_held` could answer zero or one and
+    // the figures would go on being printed: what it counts is the paths the
+    // bytes beside it are made of, and a record with bytes in it has more
+    // than one.
+    assert!(
+        worst_paths > 1 && worst > 0,
+        "a record of {worst} B holding {worst_paths} paths"
+    );
 }
 
 /// Shape three: one spend with the window at its ceiling, all in one tree.
