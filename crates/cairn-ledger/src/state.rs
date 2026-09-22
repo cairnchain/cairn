@@ -1971,6 +1971,58 @@ mod tests {
 
     use super::*;
 
+    /// A window holding exactly what the rules keep is kept, and one note more
+    /// runs the oldest block out of it.
+    ///
+    /// The bound decides which notes a handover can still prove, so where it
+    /// sits is what a receiver finds out when a window arrives one note over.
+    /// Every fixture that reaches this function comes through a chain, where
+    /// the window is nowhere near its own ceiling: `cargo mutants` could make
+    /// the comparison `>=` and run a full window down by a block, with the
+    /// suite green.
+    #[test]
+    fn a_window_holding_exactly_what_the_rules_keep_is_kept() {
+        let owner = cairn_crypto::SecretKey::from_bytes(&[3; 32]).public_key();
+        let fell = |position: u64| {
+            (
+                NoteId::new(Hash32::from_bytes([7; 32]), 0),
+                position,
+                Note::new(Amount::ZERO, owner),
+            )
+        };
+        // Four blocks, well inside the bound on blocks, so what decides here
+        // is the bound on notes.
+        let per_block = GRACE_NOTES / 4;
+        let mut window: VecDeque<Vec<Fallen>> = (0..3)
+            .map(|block| {
+                (0..per_block)
+                    .map(|note| fell((block * per_block + note) as u64))
+                    .collect()
+            })
+            .collect();
+        let held: usize = window.iter().map(Vec::len).sum();
+        let landing: Vec<Fallen> = (0..GRACE_NOTES - held)
+            .map(|note| fell((held + note) as u64))
+            .collect();
+
+        let step = advance_grace(&window, &BTreeSet::new(), landing.clone());
+        assert_eq!(
+            step.kept.iter().map(Vec::len).sum::<usize>(),
+            GRACE_NOTES,
+            "a window of exactly what the rules keep is kept whole"
+        );
+        assert!(step.dropped.is_empty(), "and nothing falls out of it");
+
+        // One note more, and the oldest block goes.
+        window.push_back(landing);
+        let over = advance_grace(&window, &BTreeSet::new(), vec![fell(GRACE_NOTES as u64)]);
+        assert_eq!(
+            over.dropped.len(),
+            1,
+            "one note past the bound runs the oldest block out"
+        );
+    }
+
     fn leaf(index: u64) -> Hash32 {
         forest_leaf(&index.to_le_bytes())
     }
