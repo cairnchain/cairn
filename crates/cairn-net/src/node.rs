@@ -757,6 +757,25 @@ pub struct Restored {
     /// the node collects the run from before it arrived again, from a peer
     /// that kept it.
     pub headers_dropped: u64,
+    /// Block records set aside because the log does not know where it starts.
+    ///
+    /// The store reads where the log begins off its first record, and asks the
+    /// record after it whether that is right. When the two disagree the store
+    /// stands behind neither and answers holding nothing, leaving the bytes
+    /// alone.
+    ///
+    /// Told apart from `unreadable`, which is a record that would not decode.
+    /// These decode perfectly and disagree with each other, which is why the
+    /// count is the whole log rather than a position in it.
+    ///
+    /// Before the store asked, one bit of record zero's height field moved the
+    /// whole log: a node opened reporting nothing wrong, denied holding the
+    /// block at zero it was holding, and then read `first_height() > start` as
+    /// a node that had joined above its own disk. That skipped the replay and
+    /// truncated the log. Every block deleted, `refused` reporting nought, and
+    /// for an archivist the whole history, which is the one role that cannot
+    /// ask for it back.
+    pub blocks_set_aside: usize,
     /// Whether the log was set aside because it does not start at the first
     /// block of the chain.
     ///
@@ -3352,6 +3371,7 @@ impl Node {
             discarded_bytes: recovered.discarded_bytes,
             left_in_place: recovered.left_in_place,
             unreadable: recovered.unreadable,
+            blocks_set_aside: recovered.blocks_set_aside,
             rejoining,
             headers_set_aside,
             headers_dropped,

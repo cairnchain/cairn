@@ -122,7 +122,9 @@ fn run(arguments: &[String]) -> Result<Ending, Stopping> {
     let node = Arc::new(node);
 
     println!("listening    {}", node.address());
-    say_what_was_restored(&restored, &options.data.display().to_string());
+    for line in what_was_restored(&restored, &options.data.display().to_string()) {
+        println!("{line}");
+    }
     // Before the node has answered anybody, because filling the headers in
     // from the blocks is the first thing that reads them back, and a refusal
     // there used to come out of the open as a failure to start.
@@ -521,34 +523,40 @@ fn probation_line(probation: &Probation, out_of_reach: u64) -> String {
 /// The moment an operator finds out what they are starting, which is why the
 /// two ways a stored log can be short are told apart here rather than added
 /// together into a byte count.
-fn say_what_was_restored(restored: &Restored, directory: &str) {
-    println!(
+///
+/// Built rather than printed, so what it says can be asked of it. It printed,
+/// and `cargo mutants` answered that the whole function could be replaced by
+/// nothing without a test noticing: every sentence an operator reads at the
+/// one moment they find out what they are starting was held by nobody.
+fn what_was_restored(restored: &Restored, directory: &str) -> Vec<String> {
+    let mut said = vec![format!(
         "restored     {} blocks, {} addresses",
         restored.blocks, restored.addresses
-    );
+    )];
     if restored.rejoining {
-        println!(
+        said.push(
             "             the stored blocks start partway up the chain, so this \
              node joins again rather than reading its way back"
+                .to_owned(),
         );
     }
     if restored.refused > 0 {
-        println!(
+        said.push(format!(
             "             {} stored blocks were set aside; they will be asked for again",
             restored.refused
-        );
+        ));
     }
     if restored.discarded_bytes > 0 {
-        println!(
+        said.push(format!(
             "             {} bytes of an unfinished write were dropped",
             restored.discarded_bytes
-        );
+        ));
     }
     if restored.left_in_place > 0 {
-        println!(
+        said.push(format!(
             "             {} bytes past it are still on the disk, unread",
             restored.left_in_place
-        );
+        ));
     }
     // Told apart from the line above, because they mean opposite things. Bytes
     // at the end of the file are a machine that stopped mid write, and they
@@ -558,6 +566,20 @@ fn say_what_was_restored(restored: &Restored, directory: &str) {
     // Before the block log's version of the same news, because this one costs
     // more: a block set aside is asked for again in seconds, and headers the
     // blocks cannot replace are only ever given back by a peer that kept them.
+    if restored.blocks_set_aside > 0 {
+        for line in wrapped(&format!(
+            "{} stored blocks were set aside because the first of them could not be \
+             checked against the one after it, so this node does not know what height \
+             its own log begins at. Nothing was deleted and the bytes are still on the \
+             disk to look at. This node fetches the chain again from the network; an \
+             archivist should look at the first record before letting it, because that \
+             is the copy nobody else has. If this happens again after a clean restart, \
+             the disk under {directory} is the thing to check.",
+            restored.blocks_set_aside
+        )) {
+            said.push(format!("             {line}"));
+        }
+    }
     if restored.headers_set_aside > 0 {
         for line in wrapped(&format!(
             "{} stored headers were set aside because the first of them could not be \
@@ -568,7 +590,7 @@ fn say_what_was_restored(restored: &Restored, directory: &str) {
              a clean restart, the disk under {directory} is the thing to check.",
             restored.headers_set_aside
         )) {
-            println!("             {line}");
+            said.push(format!("             {line}"));
         }
     }
     // Said whether or not the line above was, because they are two different
@@ -585,7 +607,7 @@ fn say_what_was_restored(restored: &Restored, directory: &str) {
              check.",
             restored.headers_dropped
         )) {
-            println!("             {line}");
+            said.push(format!("             {line}"));
         }
     }
     if let Some(record) = restored.unreadable {
@@ -596,9 +618,10 @@ fn say_what_was_restored(restored: &Restored, directory: &str) {
              network for the rest. If it happens again after a clean restart, the disk under \
              {directory} is the thing to check."
         )) {
-            println!("             {line}");
+            said.push(format!("             {line}"));
         }
     }
+    said
 }
 
 /// The disk this node keeps and the block it has reached, said in one place.
@@ -1001,12 +1024,101 @@ fn short(text: &str) -> &str {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod said_out_loud {
+    /// Every way a start can be short says so, and a clean one says nothing
+    /// extra.
+    ///
+    /// `cargo mutants` asked for this: it replaced the whole of
+    /// `what_was_restored` with nothing and no test noticed, then moved the
+    /// comparison guarding the newest line three ways and no test noticed
+    /// either. Every sentence an operator reads at the one moment they find
+    /// out what they are starting was held by nobody.
+    ///
+    /// Each case names the field and a word only that case's sentence uses, so
+    /// a branch that stops firing is red and a branch that fires when it
+    /// should not is red too.
+    #[test]
+    fn every_way_a_start_is_short_says_so_and_a_clean_one_does_not() {
+        /// The field's name, how to set it, and a word only its own sentence
+        /// uses.
+        type Case = (&'static str, fn(&mut Restored), &'static str);
+
+        fn clean() -> Restored {
+            Restored {
+                blocks: 12,
+                refused: 0,
+                discarded_bytes: 0,
+                left_in_place: 0,
+                unreadable: None,
+                headers_set_aside: 0,
+                headers_dropped: 0,
+                blocks_set_aside: 0,
+                rejoining: false,
+                addresses: 3,
+            }
+        }
+
+        let said = what_was_restored(&clean(), "/var/lib/cairn").join("\n");
+        assert!(
+            said.contains("12 blocks") && said.contains("3 addresses"),
+            "a clean start says what it restored: {said}"
+        );
+        assert_eq!(
+            what_was_restored(&clean(), "/var/lib/cairn").len(),
+            1,
+            "and says nothing else at all: {said}"
+        );
+
+        let cases: [Case; 7] = [
+            ("rejoining", |r| r.rejoining = true, "partway"),
+            ("refused", |r| r.refused = 4, "asked for again"),
+            ("discarded_bytes", |r| r.discarded_bytes = 96, "unfinished"),
+            ("left_in_place", |r| r.left_in_place = 96, "unread"),
+            ("blocks_set_aside", |r| r.blocks_set_aside = 12, "archivist"),
+            (
+                "headers_set_aside",
+                |r| r.headers_set_aside = 12,
+                "stored headers",
+            ),
+            (
+                "headers_dropped",
+                |r| r.headers_dropped = 12,
+                "were deleted",
+            ),
+        ];
+        for (field, set, word) in cases {
+            let mut restored = clean();
+            set(&mut restored);
+            let said = what_was_restored(&restored, "/var/lib/cairn").join("\n");
+            assert!(
+                said.contains(word),
+                "`{field}` is set and nothing said `{word}`: {said}"
+            );
+            let quiet = what_was_restored(&clean(), "/var/lib/cairn").join("\n");
+            assert!(
+                !quiet.contains(word),
+                "`{word}` is said on a clean start too, so it does not name \
+                 `{field}`: {quiet}"
+            );
+        }
+
+        // And the record a walk stopped at, which is the one that is not a
+        // count.
+        let mut damaged = clean();
+        damaged.unreadable = Some(7);
+        let said = what_was_restored(&damaged, "/var/lib/cairn").join("\n");
+        assert!(
+            said.contains("block 7") && said.contains("/var/lib/cairn"),
+            "a record that will not read names itself and the disk to look at: \
+             {said}"
+        );
+    }
+
     use super::{
         cannot_weigh, clock_is_slow, dropped_a_write, falling_behind, lost_the_disk, roughly,
-        rules_running_out, still_filling, too_old, what_the_chain_did, wrapped, Accepted,
-        ConsensusParams, BLOCK_VERSION,
+        rules_running_out, still_filling, too_old, what_the_chain_did, what_was_restored, wrapped,
+        Accepted, ConsensusParams, BLOCK_VERSION,
     };
-    use cairn_net::node::{Behind, Unjudged, Unweighable, Unwritten, Writing};
+    use cairn_net::node::{Behind, Restored, Unjudged, Unweighable, Unwritten, Writing};
     use cairn_net::Filling;
 
     /// A disk that dropped a write says so, in the number it dropped.

@@ -483,6 +483,97 @@ fn a_record_and_the_index_have_to_agree_about_its_length() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// The first record says where the log starts, and it is taken on trust.
+///
+/// `height_of_first` reads record zero and adopts its height. Every position
+/// in the log is then a height derived from that one number, and nothing asks
+/// whether record one agrees. `HeaderLog::head`, in the sibling file, asks
+/// exactly that and its doc narrates this failure: "a node would say it began
+/// at height nine million and deny holding the header at zero it was holding,
+/// and nothing anywhere would object". The file it says that about is the one
+/// that was fixed.
+///
+/// The test beside this one damages record five and closes by saying a
+/// position must not be asked to confirm the number it is the source of. True,
+/// and record zero can still be asked whether record one names it.
+#[test]
+fn a_corrupted_first_record_no_longer_moves_the_block_log() {
+    let blocks = chain(6);
+    let directory = scratch("first-record-height");
+    built(&directory, &blocks);
+
+    // The same block at position zero, claiming a height sixteen million
+    // higher. One bit of the little-endian height field, and the same number
+    // of bytes, so the index still describes the record exactly.
+    let mut moved = blocks[0].clone();
+    moved.header.height = 1 << 24;
+    let body = moved.encode();
+    assert_eq!(body.len(), blocks[0].encode().len());
+    put(&directory.join(BLOCK_LOG), 4, &body);
+
+    let (log, recovered) = BlockLog::open(&directory).unwrap();
+    assert!(
+        recovered.unreadable.is_none(),
+        "the damage is not a read fault and is not reported as one"
+    );
+    assert_eq!(
+        log.first_height(),
+        0,
+        "the log starts where its records say it starts, not where one damaged \
+         record says"
+    );
+    assert!(
+        log.is_empty(),
+        "a first record its neighbour does not name leaves a log holding \
+         nothing, rather than a log that denies every block it has"
+    );
+    assert_eq!(
+        recovered.blocks_set_aside, 6,
+        "and says how many it set aside, so this is not read as an empty disk"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// The neighbour is asked two things and each catches damage the other does
+/// not.
+///
+/// Changing record zero's height changes its identifier too, because a header
+/// commits to its own height, so either half of the check on its own catches
+/// that one. It took damaging record *one* to tell the two apart, which is
+/// what mutating each half separately said: both survived the test above.
+#[test]
+fn the_neighbour_is_asked_its_height_and_its_parent() {
+    // Record one claiming a height that is not record zero's plus one, with
+    // its parent left correct. Only the height half sees this.
+    let blocks = chain(6);
+    let directory = scratch("neighbour-height");
+    built(&directory, &blocks);
+    let start = 4 + blocks[0].encode().len() as u64;
+    let mut moved = blocks[1].clone();
+    moved.header.height = 7;
+    put(&directory.join(BLOCK_LOG), start + 4, &moved.encode());
+    let (log, recovered) = BlockLog::open(&directory).unwrap();
+    assert!(
+        log.is_empty() && recovered.blocks_set_aside == 6,
+        "a neighbour at the wrong height does not confirm where the log starts"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+
+    // Record one naming some other block as its parent, at the right height.
+    // Only the parent half sees this.
+    let directory = scratch("neighbour-parent");
+    built(&directory, &blocks);
+    let mut moved = blocks[1].clone();
+    moved.header.previous = blocks[4].id();
+    put(&directory.join(BLOCK_LOG), start + 4, &moved.encode());
+    let (log, recovered) = BlockLog::open(&directory).unwrap();
+    assert!(
+        log.is_empty() && recovered.blocks_set_aside == 6,
+        "a neighbour naming another parent does not confirm where the log starts"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 /// The claim, from `read_at`: it "reads the block at `height`, rather than at
 /// a position".
 ///
