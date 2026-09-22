@@ -94,9 +94,31 @@ pub struct PeerState {
     /// one that was closed.
     ///
     /// Set where a `GetChain` is sent, which is only ever this node's own
-    /// doing, and taken by the `Chain` that answers it. Nothing a peer says
-    /// sets it.
+    /// doing, and taken by the `Chain` that answers it.
+    ///
+    /// This said "nothing a peer says sets it", which was true of the
+    /// assignment and false of what causes it. `follow_up` asks again whenever
+    /// nothing is outstanding and `total_work` says the peer is ahead, and
+    /// `total_work` is a number the peer wrote in its own greeting and nothing
+    /// ever revises. So a peer claiming the most work there is kept the gate
+    /// open for good, and emptied `awaiting` itself by sending a block at each
+    /// height it had named: every block it pushed, fully decoded and never
+    /// applied because its parent was invented, re-armed the discount for the
+    /// next hundred and twenty eight. One unit a block, against a frame
+    /// ceiling two thousand times larger than a unit pays for.
+    ///
+    /// Armed again only when the last round moved this node's own chain: see
+    /// [`Self::work_when_asked`].
     pub chain_asked: bool,
+    /// This node's own total work when it last asked this peer for the chain.
+    ///
+    /// The one number in this exchange the peer does not write. A round of
+    /// catching up that delivered blocks this node could apply raised it, and
+    /// only such a round earns the next one the catching up price. A round
+    /// whose blocks connected to nothing left it where it was, and the next
+    /// `GetChain` still goes out, because this node does want the chain from a
+    /// peer that says it has more, but its answer pays what any push pays.
+    pub work_when_asked: Option<u128>,
     /// When the outstanding batch was asked for.
     ///
     /// A peer that answers everything else but never delivers the blocks it
@@ -932,6 +954,7 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
         let held_for_the_choice = local.chain.is_empty() && theirs.height >= JOIN_RATHER_THAN_READ;
         if !held_for_the_choice {
             peer.chain_asked = true;
+            peer.work_when_asked = Some(local.chain.total_work());
             reaction.reply.push(Message::GetChain {
                 locator: local.chain.locator(),
             });
@@ -1120,7 +1143,12 @@ fn follow_up(chain: &ChainStore, peer: &mut PeerState, now: u64) -> Reaction {
         peer.offered.clear();
     }
     if peer.awaiting.is_empty() && peer.total_work > chain.total_work() {
-        peer.chain_asked = true;
+        let now_work = chain.total_work();
+        // The discount only for a peer whose last round moved this node's
+        // chain. `total_work` above is the peer's word and gates the asking;
+        // this is this node's own and gates the price.
+        peer.chain_asked = peer.work_when_asked.is_none_or(|before| now_work > before);
+        peer.work_when_asked = Some(now_work);
         return Reaction::reply(vec![Message::GetChain {
             locator: chain.locator(),
         }]);
