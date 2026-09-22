@@ -1524,8 +1524,11 @@ A sample is a header followed by a proof.
 
 The proof is the siblings from the leaf up to the root of the tree it sits in,
 nearest first, so `d` is the height of that tree and nothing else. A decoder
-MUST refuse a proof of more than 64 siblings, which is the most trees a forest
-can hold.
+MUST refuse a proof of more than 64 siblings. That is the most trees a forest
+can hold rather than the longest path in one: a leaf count is a `u64`, so the
+tallest tree has height 63, and a proof of 64 siblings decodes and is refused
+when it is verified, where its length has to equal the height of a tree that
+exists. The verdict is the same whichever check refuses it.
 
 A forest on the wire is its leaf count, the number of leaves still standing,
 and one root per tree.
