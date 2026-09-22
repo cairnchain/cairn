@@ -1108,11 +1108,42 @@ fn the_depth_a_newcomer_can_be_put_at_is_inside_the_depth_this_node_undoes() {
     );
     let undone = u64::try_from(cairn_chain::MAX_REORG_DEPTH).unwrap_or(u64::MAX);
     assert_eq!(undone, 1_024, "MAX_REORG_DEPTH moved");
+
+    // Asked of what a node on each network actually undoes, and not of the
+    // constant. The paper names the rule itself, "the effective undo limit is
+    // the lesser of that and the network's burial", and then concluded as
+    // though the lesser were always the constant. This asked the constant too,
+    // so it held for a limit no network is guaranteed to run.
+    let public = cairn_chain::ChainStore::new(
+        cairn_ledger::validation::ConsensusParams::for_network("testnet").unwrap(),
+    )
+    .undo_limit();
     assert!(
-        stated < undone,
-        "the guarantee is {stated} blocks and this node undoes {undone}, so a \
-         newcomer at the far end of it cannot be carried back by the ordinary \
-         rule and the paper has to say so"
+        stated < public,
+        "the guarantee is {stated} blocks and a node on the public test network \
+         undoes {public}, so a newcomer at the far end of it cannot be carried \
+         back by the ordinary rule and the paper has to say so"
+    );
+
+    // And the network it does not hold on, held as not holding. Devnet's burial
+    // is thirty two on purpose, so a throwaway chain matures in minutes, and a
+    // node there undoes thirty two blocks against a guarantee of six hundred.
+    // What makes that acceptable is that devnet names no seed, so a newcomer
+    // there joins nobody but its own operator's machines and there is no
+    // stranger to weigh it onto a branch. Both halves are asserted, so moving
+    // either the burial or the seeds is a decision somebody makes here rather
+    // than a guarantee that quietly starts or stops applying.
+    let devnet = cairn_ledger::validation::ConsensusParams::for_network("devnet").unwrap();
+    let local = cairn_chain::ChainStore::new(devnet).undo_limit();
+    assert!(
+        stated >= local,
+        "devnet now undoes {local} blocks, past the {stated} the guarantee \
+         needs: the paper's exception for it can go"
+    );
+    assert!(
+        cairn_net::seeds::written_in(devnet.network).is_empty(),
+        "devnet names a seed now, so a newcomer there can be weighed by a \
+         stranger onto a branch {stated} blocks off, and it undoes only {local}"
     );
 
     // And the depth is the band the draw stops at plus what the staircase costs

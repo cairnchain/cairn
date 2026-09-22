@@ -804,8 +804,15 @@
       <strong>That depth sits inside the node's own reorganisation limit, and getting
       the two to line up is what the 512 is for.</strong> <code>MAX_REORG_DEPTH</code> is 1 024
       and the effective undo limit is the lesser of that and the network's
-      burial, so a newcomer put on a branch at the far end of the guarantee is
-      somewhere the ordinary reorganisation rule can carry it back from. It was
+      burial, so on the public test network, whose burial is the full 1 024, a
+      newcomer put on a branch at the far end of the guarantee is somewhere the
+      ordinary reorganisation rule can carry it back from. Devnet is the
+      exception and is meant to be: its burial is 32 so a throwaway chain
+      matures in minutes, it undoes 32 blocks against a guarantee of 633, and
+      what makes that acceptable is that it names no seed, so a newcomer there
+      joins its own operator's machines and no stranger is placed to weigh it
+      onto a branch. This paragraph named the lesser-of rule and then concluded
+      as though the lesser were always the constant. It was
       not always so. The draw stopped at 1 024, the same number, which looked
       like the two rules agreeing and was not: the guarantee is not the band, it
       is the band plus what the staircase costs at its edges, and that measured
