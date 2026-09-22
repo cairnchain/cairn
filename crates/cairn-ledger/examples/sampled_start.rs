@@ -34,6 +34,7 @@
     clippy::print_stdout
 )]
 
+use cairn_accumulator::forest::ForestProof;
 use cairn_accumulator::Archive;
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::BlockHeader;
@@ -373,6 +374,7 @@ fn caught_out(honest: &[BlockHeader], claim: f64, count: usize, salt: u64, lie: 
     .collect();
 
     let start = SampledStart {
+        genesis: ForestProof::default(),
         tip: forged,
         // The best run it has up to its tip: the headers it is showing.
         tail: {

@@ -335,6 +335,21 @@ pub struct SampledStart {
     /// `None` only for a chain that is one block long, which has no parent to
     /// open.
     pub parent: Option<Sample>,
+    /// The path to the first block, opened in the tip's own history.
+    ///
+    /// The block itself is not sent, because the reader already has its
+    /// identifier: [`ConsensusParams::genesis`] pins it, and the leaf this
+    /// opens is that identifier. Without it nothing on the joining path read
+    /// the pin at all. `check_header` compares a block against it only at
+    /// height zero, and a newcomer that is weighed onto a chain and takes its
+    /// ledger never reads height zero, so a chain started from another first
+    /// block, on the same network number and dated after the opening, was
+    /// weighed on its work alone and adopted. The pin is documented as the
+    /// one piece of trust worth removing, and on this path it removed none.
+    ///
+    /// Empty at a chain one block long, whose tip is the first block and is
+    /// compared directly.
+    pub genesis: ForestProof,
     /// The header forest as it stood before the tip, roots only.
     ///
     /// Sixty four hashes, whatever the chain's age. The tip commits to their
@@ -367,6 +382,8 @@ pub enum StartError {
     HistoryMismatch,
     #[error("the history holds {held} headers, the tip sits at height {height}")]
     HistoryWrongLength { held: u64, height: u64 },
+    #[error("the chain does not start from the block this network pins")]
+    NotThisNetworksGenesis,
     #[error("expected {wanted} samples, got {given}")]
     WrongCount { wanted: usize, given: usize },
     #[error("the header opened at draw {index} carries no work")]
@@ -515,6 +532,7 @@ impl Encode for SampledStart {
                 parent.encode_to(out);
             }
         }
+        self.genesis.encode_to(out);
         u32::try_from(self.samples.len())
             .unwrap_or(u32::MAX)
             .encode_to(out);
@@ -544,6 +562,7 @@ impl Decode for SampledStart {
                 })
             }
         };
+        let genesis = ForestProof::decode_from(reader)?;
         let count = usize::try_from(u32::decode_from(reader)?).unwrap_or(usize::MAX);
         // Bounded before anything is reserved, since a sender picks it.
         if count > SAMPLES {
@@ -570,6 +589,7 @@ impl Decode for SampledStart {
             tip,
             tail,
             parent,
+            genesis,
             history,
             samples,
         })
@@ -914,6 +934,9 @@ pub fn check_start(
             height: tip.height,
         });
     }
+    // Before the draw, because a chain from another first block is refused
+    // whatever its answers, and this is one path against up to four thousand.
+    check_the_genesis(start, params)?;
 
     // Drawn against the work behind the tip rather than including it. The tip
     // is not in its own history, so there would be nothing to open for a draw
@@ -971,6 +994,32 @@ pub fn check_start(
         height: tip.height,
         total_work: tip.total_work,
     })
+}
+
+/// Whether the chain the tip ends starts from the block this network pins.
+///
+/// Nothing to do on a network that pins nothing, which is what tests and
+/// unnamed networks run. At height zero the tip is the first block, its
+/// history is empty and there is nothing to open, so the tip is compared
+/// itself; such a chain is refused further on for having nothing to weigh,
+/// and this says only whether it was this network's.
+fn check_the_genesis(start: &SampledStart, params: &ConsensusParams) -> Result<(), StartError> {
+    let Some(pinned) = params.genesis else {
+        return Ok(());
+    };
+    let tip = &start.tip;
+    let starts_there = if tip.height == 0 {
+        tip.id() == pinned
+    } else {
+        start
+            .history
+            .verify(0, header_leaf(&pinned), &start.genesis)
+    };
+    if starts_there {
+        Ok(())
+    } else {
+        Err(StartError::NotThisNetworksGenesis)
+    }
 }
 
 /// Walks the top of the chain, which the draw does not reach.
@@ -1276,10 +1325,16 @@ pub fn open_start(
             proof: prove(below)?,
         }),
     };
+    let genesis = if tip.height == 0 {
+        ForestProof::default()
+    } else {
+        prove(0)?
+    };
     Some(SampledStart {
         tip: *tip,
         tail,
         parent,
+        genesis,
         history,
         samples,
     })

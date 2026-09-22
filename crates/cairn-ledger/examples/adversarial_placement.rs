@@ -649,6 +649,7 @@ impl Forgery {
 
         let below = u64::try_from(last).unwrap().saturating_sub(1);
         SampledStart {
+            genesis: ForestProof::default(),
             tip,
             tail,
             parent: Some(Sample {
