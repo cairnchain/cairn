@@ -595,6 +595,32 @@ fn a_locator_names_the_tip_first_and_thins_as_it_goes_back() {
         "and there are never more than the wire allows"
     );
 
+    // The shape is the whole of what it is for: dense where branches usually
+    // part, thinning as agreement becomes certain. The first ten steps back
+    // are one block each, and after that each step is twice the one before it
+    // until the walk reaches the first block.
+    let gaps: Vec<u64> = heights.windows(2).map(|pair| pair[0] - pair[1]).collect();
+    assert!(
+        gaps.iter().take(10).all(|gap| *gap == 1),
+        "the recent end is sampled block by block: {gaps:?}"
+    );
+    let thinning: Vec<u64> = gaps.iter().copied().skip(10).collect();
+    assert_eq!(
+        thinning.first(),
+        Some(&2),
+        "the step doubles once the dense end is spent: {gaps:?}"
+    );
+    assert!(
+        thinning.windows(2).all(|pair| pair[1] <= pair[0] * 2),
+        "and never by more than twice, except where the walk lands on the \
+         first block: {gaps:?}"
+    );
+    assert!(
+        thinning.iter().any(|gap| *gap > 2),
+        "a locator that stopped thinning would name every block of a long \
+         chain: {gaps:?}"
+    );
+
     // Every height it names is one this node still holds, which is the whole
     // of what makes the comparison meaningful.
     for entry in &locator {
