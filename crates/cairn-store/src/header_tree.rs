@@ -323,7 +323,11 @@ impl HeaderTree {
             else {
                 return Err(StoreError::MissingNode { height, start });
             };
-            for index in first..past.max(first.saturating_add(1)) {
+            // `past` is at least one past `first`: `span` is two to the
+            // `height` and `reach` two to a `level` no higher, so `span /
+            // reach` is at least one. This read `past.max(first + 1)`, a
+            // floor the arithmetic above already guarantees.
+            for index in first..past {
                 if index >= self.filled(level) {
                     break;
                 }
