@@ -1612,6 +1612,48 @@ mod tests {
     use super::*;
     use cairn_crypto::SecretKey;
 
+    /// A schedule has to start at height zero and rise in both columns.
+    ///
+    /// The shipped schedules are put through this at build time, and that is
+    /// all that ever ran it: a build-time assertion over correct input passes
+    /// whatever the function says, so `cargo mutants` could replace the whole
+    /// of it with `true`, and turn either comparison around, with nothing
+    /// noticing. What it guards is a chain split produced by an ordinary edit,
+    /// which is the one kind of break no attacker has to arrange.
+    #[test]
+    fn a_schedule_starts_at_zero_and_rises_in_both_columns() {
+        let at = |height: u64, version: u16| Activation { height, version };
+
+        assert!(
+            schedule_is_sound(&[at(0, 1)]),
+            "one opening rule is a schedule"
+        );
+        assert!(schedule_is_sound(&[at(0, 1), at(5, 2), at(9, 3)]));
+        assert!(schedule_is_sound(OPENED), "and the one this build ships");
+
+        assert!(!schedule_is_sound(&[]), "a schedule with no opening rule");
+        assert!(
+            !schedule_is_sound(&[at(1, 1)]),
+            "a schedule that starts above the first block leaves it unruled"
+        );
+        assert!(
+            !schedule_is_sound(&[at(0, 1), at(0, 2)]),
+            "two rules at one height are two answers to one question"
+        );
+        assert!(
+            !schedule_is_sound(&[at(0, 1), at(5, 2), at(4, 3)]),
+            "heights that fall put a rule before the one it follows"
+        );
+        assert!(
+            !schedule_is_sound(&[at(0, 2), at(5, 2)]),
+            "a version that does not rise is an activation that activates nothing"
+        );
+        assert!(
+            !schedule_is_sound(&[at(0, 2), at(5, 1)]),
+            "a version that falls asks a build to forget rules it has"
+        );
+    }
+
     /// The schedule says when a build runs out, and both edges of that.
     ///
     /// `leaves_behind` is read by `cairnd` to tell an operator how long this
