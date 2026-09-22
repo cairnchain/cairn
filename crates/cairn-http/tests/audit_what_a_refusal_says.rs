@@ -328,3 +328,76 @@ fn a_refusal_reaches_a_caller_that_had_not_finished_asking() {
     );
     assert!(body.contains("too many connections"), "{body}");
 }
+
+/// **Every caller refused at once is told so, and not only the first forty.**
+///
+/// Refusals are handed to one thread so the accept loop never waits, and that
+/// thread used to take them one at a time: write the 503, then wait up to
+/// `REFUSAL_PATIENCE` for the caller to finish sending so closing does not
+/// reset over it. A caller that holds its socket open, which is what a browser
+/// does, costs the whole wait. So refusals went out a quarter of a second
+/// apart, each judged against its own connection's deadline, and ten seconds
+/// is forty quarters: the forty first was written after its deadline had
+/// passed, and got a bare close.
+///
+/// Measured before the change: of sixty four callers refused together and each
+/// holding its socket, the first forty read a 503 and the last twenty four
+/// read nothing. The tests above refuse one caller at a time, so the
+/// population "more than one refused at once" had nothing in it.
+#[test]
+fn every_caller_refused_at_once_is_told_so() {
+    const REFUSED: usize = 48;
+
+    let address = start();
+
+    let mut holding: Vec<TcpStream> = Vec::new();
+    for _ in 0..MAX_CONNECTIONS {
+        let Ok(stream) = TcpStream::connect(address) else {
+            break;
+        };
+        holding.push(stream);
+    }
+    // Long enough for the server to have taken every slot.
+    thread::sleep(Duration::from_millis(200));
+
+    // All of them at once, each sending a whole request and then holding the
+    // socket open rather than closing its half: a browser, and the one shape
+    // that costs the refusal thread its full patience.
+    // Each caller hands its socket back instead of dropping it, so none of
+    // them closes until every one has been answered. The first version of
+    // this let each thread end, and a thread ending closes its socket, which
+    // tells the refusal thread at once that there is nothing left to wait for:
+    // it passed against the server that loses the last twenty four, because
+    // it was not holding anything open.
+    let callers: Vec<_> = (0..REFUSED)
+        .map(|_| {
+            thread::spawn(move || {
+                let Ok(mut stream) = TcpStream::connect(address) else {
+                    return (String::new(), None);
+                };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+                let _ = stream.write_all(b"GET / HTTP/1.1\r\nhost: cairn\r\n\r\n");
+                let _ = stream.flush();
+                let mut said = String::new();
+                let _ = stream.read_to_string(&mut said);
+                (said, Some(stream))
+            })
+        })
+        .collect();
+
+    let answers: Vec<(String, Option<TcpStream>)> =
+        callers.into_iter().map(|c| c.join().unwrap()).collect();
+    let said: Vec<&String> = answers.iter().map(|(said, _)| said).collect();
+    let told = said
+        .iter()
+        .filter(|s| s.starts_with("HTTP/1.1 503"))
+        .count();
+    let nothing = said.iter().filter(|s| s.is_empty()).count();
+    assert_eq!(
+        told, REFUSED,
+        "{told} of {REFUSED} callers refused together read the refusal and \
+         {nothing} read nothing at all: refusals were written one after another \
+         with a wait between each, against deadlines that kept running"
+    );
+    drop(holding);
+}
