@@ -45,7 +45,7 @@ use cairn_accumulator::forest::Forest;
 use cairn_accumulator::Archive;
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::{BlockHeader, HeaderSummary, BLOCK_VERSION};
-use cairn_ledger::handover::{check_buried, HandoverError};
+use cairn_ledger::handover::{check_buried, HandoverError, MOST_BURIED};
 use cairn_ledger::note::Note;
 use cairn_ledger::pow::{
     median_time_past, meets_target, next_difficulty, MIN_DIFFICULTY, RECENT_HEADERS,
@@ -165,12 +165,28 @@ fn forge<F>(chain: &Chain, count: usize, gap: u64, difficulty_of: F) -> Vec<Bloc
 where
     F: Fn(&[HeaderSummary]) -> u64,
 {
+    forge_over(chain, ANCHOR, &recent(chain), count, gap, difficulty_of)
+}
+
+/// The same, on any anchor and any run of headers below it, which is what a
+/// chain younger than the window hands over.
+fn forge_over<F>(
+    chain: &Chain,
+    at: usize,
+    recent: &[BlockHeader],
+    count: usize,
+    gap: u64,
+    difficulty_of: F,
+) -> Vec<BlockHeader>
+where
+    F: Fn(&[HeaderSummary]) -> u64,
+{
     let params = params();
-    let anchor = chain.headers[ANCHOR];
-    let mut forest = chain.before(ANCHOR);
+    let anchor = chain.headers[at];
+    let mut forest = chain.before(at);
     forest.add(header_leaf(&anchor.id()));
 
-    let mut window = summaries(&recent(chain));
+    let mut window = summaries(recent);
     let mut previous = anchor;
     let mut run = Vec::with_capacity(count);
     let mut clock = anchor.timestamp;
@@ -300,6 +316,87 @@ fn a_burial_mined_at_the_floor_is_refused_by_the_difficulty_rule_and_not_by_the_
         "the difficulty rule was meant to be what stopped this, and it said \
          {refused:?}"
     );
+}
+
+/// A chain younger than the window the rules read hands over what it has, and
+/// the receiver judges the run on the window as it fills.
+///
+/// Every other fixture here anchors a hundred and seventy five blocks in, so
+/// the window is already full before the run starts and stays full: the slide
+/// that keeps it at `RECENT_HEADERS` takes one header off for every one it
+/// puts on, and trimming a header early or late is the same window. On a young
+/// chain it is not. The window starts short, grows as the run is walked, and
+/// what the retarget reads changes with it, so a slide that trims one header
+/// early answers a difficulty the miner was never asked for and refuses an
+/// honest run.
+///
+/// That is the shape of a newly opened network, where a newcomer arrives
+/// before the chain is as old as its own retarget window.
+#[test]
+fn a_chain_younger_than_the_window_is_judged_on_the_window_as_it_fills() {
+    let chain = honest();
+    // Young enough that the window is short, close enough that it fills while
+    // the run is walked.
+    let at = RECENT_HEADERS - 12;
+    let recent = chain.headers[..=at].to_vec();
+    assert!(
+        recent.len() < RECENT_HEADERS,
+        "a chain with fewer blocks than the window keeps"
+    );
+    let anchor = chain.headers[at];
+
+    // Dated at twice the target, so the retarget really moves and what the
+    // window holds decides by how much.
+    let run = forge_over(chain, at, &recent, 25, TARGET * 2, |window| {
+        next_difficulty(window, TARGET)
+    });
+    let tip = *run.last().unwrap();
+    assert!(
+        recent.len() + run.len() > RECENT_HEADERS,
+        "the window fills part way up the run, which is what this is about"
+    );
+
+    check_buried(&anchor, &tip, &chain.before(at), &run, &recent, &params())
+        .expect("an honest run above a young chain");
+}
+
+/// A run of exactly the most a handover may claim is not refused for its
+/// length, and one more is.
+///
+/// The ceiling is on what a receiver has to walk, and it is the sender that
+/// chooses the length, so where it sits is the whole of the rule. Both sides
+/// of the line are asked, because a ceiling measured from one side is a
+/// direction rather than a place.
+#[test]
+fn a_run_of_exactly_the_ceiling_is_not_refused_for_its_length() {
+    let chain = honest();
+    let anchor = chain.headers[ANCHOR];
+
+    for claimed in [MOST_BURIED, MOST_BURIED + 1] {
+        // Headers enough to state the length, and nothing more: what is under
+        // test is the length rule, which is asked before a header is read.
+        let run: Vec<BlockHeader> = (1..=claimed)
+            .map(|step| BlockHeader {
+                height: anchor.height + step,
+                ..anchor
+            })
+            .collect();
+        let tip = *run.last().unwrap();
+        let refused = check_buried(
+            &anchor,
+            &tip,
+            &chain.before(ANCHOR),
+            &run,
+            &recent(chain),
+            &params(),
+        );
+        let wrong_length = matches!(refused, Err(HandoverError::BuriedRunWrongLength { .. }));
+        assert_eq!(
+            wrong_length,
+            claimed > MOST_BURIED,
+            "a run of {claimed} against a ceiling of {MOST_BURIED} was answered {refused:?}"
+        );
+    }
 }
 
 /// And what the rule does not stop, measured rather than assumed.
