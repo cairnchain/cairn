@@ -1612,6 +1612,59 @@ mod tests {
     use super::*;
     use cairn_crypto::SecretKey;
 
+    /// A named network carries its own identity, and not the default's.
+    ///
+    /// The three fields that say which chain a node is on are written one
+    /// arm at a time beside a `..Self::testnet()`, so a field dropped from an
+    /// arm is not a compile error: it silently takes the default, which
+    /// carries the unnamed network's number, no pinned first block and an
+    /// opening moment of nought. `cargo mutants` dropped each of them in turn
+    /// and the suite stayed green. A node started with `--network testnet-6`
+    /// would then follow another network's number, take whatever first block
+    /// it was handed, and accept blocks dated before the network opened.
+    #[test]
+    fn a_named_network_carries_its_own_identity() {
+        let unnamed = ConsensusParams::testnet();
+        for (name, id) in [
+            ("testnet", NetworkId::TESTNET_6),
+            ("testnet-6", NetworkId::TESTNET_6),
+            ("devnet", NetworkId::DEVNET),
+        ] {
+            let params = ConsensusParams::for_network(name).expect("a network this build ships");
+            // The number rather than the alias: `NetworkId::TESTNET` is
+            // whichever test network is current, so an arm that took the
+            // default would be right today and wrong on the day the alias
+            // moves, which is the day a wrong number costs a chain.
+            assert_eq!(params.network, id, "{name} is not on its own number");
+            assert_eq!(
+                params.genesis,
+                crate::genesis::pinned(id),
+                "{name} does not pin its own first block"
+            );
+            assert_eq!(
+                params.genesis.is_some(),
+                crate::genesis::block(id).is_some(),
+                "{name} pins its first block exactly when it ships one"
+            );
+            assert_eq!(
+                params.opens_at,
+                crate::genesis::opens_at(id),
+                "{name} does not open when its first block is dated"
+            );
+            assert_eq!(
+                params.opens_at > unnamed.opens_at,
+                crate::genesis::block(id).is_some(),
+                "{name} opens when its first block is dated, and the unnamed \
+                 network opens at nought"
+            );
+        }
+        assert!(
+            ConsensusParams::for_network("mainnet").is_none(),
+            "a network exists once its first block does"
+        );
+        assert!(ConsensusParams::for_network("nowhere").is_none());
+    }
+
     /// A schedule has to start at height zero and rise in both columns.
     ///
     /// The shipped schedules are put through this at build time, and that is
