@@ -339,8 +339,14 @@ impl HeaderLog {
         for source in [front, self] {
             for height in source.first_height()..source.reaches() {
                 let body = source.one(height)?.encode();
+                // Cannot fire: every field of a header is a fixed width, and
+                // `open_named` has already refused a log whose headers are not
+                // this wide. Kept as the check it would be if a header ever
+                // grew a variable field, and answering the question it asks:
+                // this said `BlockTooLarge`, "block would not fit in one
+                // record", which is not true of a header in a fixed width log.
                 if body.len() != HEADER_BYTES {
-                    return Err(StoreError::BlockTooLarge.into());
+                    return Err(StoreError::HeaderSizeChanged { found: body.len() }.into());
                 }
                 out.write_all(&body).map_err(StoreError::from)?;
             }
@@ -407,8 +413,10 @@ impl HeaderLog {
             });
         }
         let body = header.encode();
+        // Cannot fire, for the reason given where a merge copies headers
+        // across, and the right error if it ever did.
         if body.len() != HEADER_BYTES {
-            return Err(StoreError::BlockTooLarge);
+            return Err(StoreError::HeaderSizeChanged { found: body.len() });
         }
         let at = self.count.saturating_mul(HEADER_BYTES as u64);
         self.file.seek(SeekFrom::Start(at))?;
@@ -445,10 +453,16 @@ impl HeaderLog {
     /// For a reorganisation, which takes headers off the branch this node was
     /// following. They are written again as the new branch is applied.
     pub fn keep_below(&mut self, height: u64) -> Result<(), StoreError> {
+        // Asked before anything else, as every other mutator here and all
+        // five in `BlockLog` ask it. It was asked after the early return, and
+        // the one place this log stops being on its file also empties it, so
+        // `reaches()` was nought and every height was at or past it: the
+        // refusal could not be reached, and a cut that never happened
+        // answered `Ok`.
+        self.still_on_its_file()?;
         if height >= self.reaches() {
             return Ok(());
         }
-        self.still_on_its_file()?;
         let keep = height.saturating_sub(self.first).min(self.count);
         self.file
             .set_len(keep.saturating_mul(HEADER_BYTES as u64))?;
@@ -586,4 +600,38 @@ pub enum JoinFailed {
     /// The merged log could not be put on the disk.
     #[error(transparent)]
     Write(#[from] StoreError),
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::HeaderLog;
+
+    /// A log no longer on its file refuses a cut rather than reporting one.
+    ///
+    /// `HeaderLog::join`'s failure arm is the one place a log stops being on
+    /// its file, and it empties the log as it does. `keep_below` asked whether
+    /// the log was on its file only after returning early for any height at
+    /// or past `reaches()`, which on an emptied log is every height. So the
+    /// refusal was unreachable, and a cut on a log that is not a log answered
+    /// `Ok(())` where its `BlockLog` sibling refuses.
+    #[test]
+    fn a_log_off_its_file_refuses_a_cut() {
+        let directory =
+            std::env::temp_dir().join(format!("cairn-headers-off-its-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut log = HeaderLog::open(&directory).unwrap();
+
+        // The state the failed merge leaves.
+        log.count = 0;
+        log.first = 0;
+        log.usable = false;
+
+        assert!(
+            log.keep_below(5).is_err(),
+            "a log that is not on its file said a cut had been made"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
 }
