@@ -1435,13 +1435,42 @@ mod tests {
             }),
         );
 
-        let deepest = ForestProof {
+        // The count allowed is the number of trees, and the deepest path is one
+        // shorter: a leaf count is a `u64`, so the tallest tree has height
+        // sixty three and a path in it has sixty three siblings. This said the
+        // sixty four sibling proof below was "the deepest path a forest can
+        // hold". It is not a path any forest holds, and it decodes because the
+        // bound is the specification's, which gives the same reason. A proof
+        // this long reaches `verify` and fails there, where the length has to
+        // equal the height of a tree that exists, so the verdict is the same
+        // whichever check refuses it.
+        let deepest_held = ForestProof {
+            siblings: vec![Hash32::ZERO; MAX_HEIGHT - 1],
+        };
+        assert_eq!(
+            ForestProof::decode(&deepest_held.encode()).as_ref(),
+            Ok(&deepest_held),
+            "the deepest path a forest can hold has to survive the wire"
+        );
+        let one_past = ForestProof {
             siblings: vec![Hash32::ZERO; MAX_HEIGHT],
         };
         assert_eq!(
-            ForestProof::decode(&deepest.encode()).as_ref(),
-            Ok(&deepest),
-            "the deepest path a forest can hold has to survive the wire"
+            ForestProof::decode(&one_past.encode()).as_ref(),
+            Ok(&one_past),
+            "and the specification's bound, one past it, decodes too"
+        );
+
+        // And is refused where it is checked, which is what makes the loose
+        // bound harmless and is the sentence the specification now says. Held
+        // rather than said: a forest with leaves in it, asked about a leaf it
+        // holds with a proof of sixty four siblings.
+        let mut forest = Forest::new();
+        let leaf = Hash32::from_bytes([9; 32]);
+        let (position, _) = forest.add(leaf).expect("a leaf fits in an empty forest");
+        assert!(
+            !forest.verify(position, leaf, &one_past),
+            "a proof longer than any tree a forest can hold verifies nothing"
         );
     }
 
