@@ -898,7 +898,7 @@ impl BlockLog {
     /// and reaches nobody, which is the one failure a node cannot see: it is
     /// the writes that tell it the disk is keeping up.
     ///
-    /// Asked by every mutator, which is four of them and used to be one.
+    /// Asked by every mutator, which is five of them and used to be one.
     /// `append` was guarded and `clear`, `keep_first`, `keep_from` and
     /// `keep_below` were not, so on a log in that state a truncation reported
     /// success having reached a scratch file while `blocks.log` on disk still
