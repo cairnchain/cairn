@@ -207,6 +207,62 @@ fn an_archivist_does_not_build_a_run_nobody_can_read() {
     );
 }
 
+/// The ceiling is a place, and both sides of it are asked.
+///
+/// The sibling below serves a run well inside the ceiling and takes it back
+/// through the decoder, which says the two agree about what can be carried. It
+/// does not say where either of them stops, and `cargo mutants` could turn
+/// this comparison into `>=`: a server refusing a run of exactly the ceiling
+/// refuses one its reader would have taken.
+///
+/// The two chain lengths are found rather than chosen. The draw is a hash of
+/// the tip, so the run a chain leaves unresolved is a function of its length,
+/// and these are the first lengths past sixteen thousand whose run is exactly
+/// the ceiling and exactly one header past it. The lengths are checked here by what
+/// they produce, so a change to the draw fails this rather than moving it
+/// quietly.
+#[test]
+fn a_run_of_exactly_the_ceiling_is_served_and_one_header_more_is_not() {
+    for (blocks, held, answered) in [
+        (19_110u64, MOST_TAIL, true),
+        (83_077u64, MOST_TAIL + 1, false),
+    ] {
+        // One block a minute at the floor, so a work value is a height and the
+        // run a draw leaves is the distance from the tip to where it landed.
+        let chain = move |height: u64| {
+            if height >= blocks {
+                return None;
+            }
+            let mut header = header_at(0).unwrap();
+            header.height = height;
+            header.timestamp = 1_000 + height * 60;
+            header.difficulty = 1;
+            header.total_work = u128::from(height) + 1;
+            header.nonce = height;
+            Some(header)
+        };
+        let tip = chain(blocks - 1).unwrap();
+        let prove = |_: u64| {
+            Some(ForestProof {
+                siblings: vec![Hash32::from_bytes([7; 32]); 17],
+            })
+        };
+
+        // One draw, because what is under test is the length of the run and
+        // not how many questions were asked.
+        let start = open_start(&tip, Forest::default(), 1, &params(), chain, prove);
+        assert_eq!(
+            start.is_some(),
+            answered,
+            "a chain of {blocks} blocks leaves a run of {held} against a ceiling \
+             of {MOST_TAIL}"
+        );
+        if let Some(start) = start {
+            assert_eq!(u64::try_from(start.tail.len()).unwrap(), held);
+        }
+    }
+}
+
 /// And the ceiling is the one the far end reads, not a second copy of it.
 ///
 /// A server that refused at some number of its own would be a server whose
