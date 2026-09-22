@@ -769,12 +769,26 @@ impl Pending {
 }
 
 /// Signatures below which splitting the work costs more than it saves.
+///
+/// Where this sits is a judgement about time and nothing else: both paths name
+/// the same signature, which is what the note on [`first_failure`] says and
+/// what makes moving this number safe. So a test cannot tell one side of it
+/// from the other, and a mutation of this comparison is a mutation of how long
+/// a block takes.
 const SPLIT_ABOVE: usize = 64;
 
 /// Threads worth asking for. A validator is not the only thing on the machine.
 const MOST_THREADS: usize = 8;
 
 /// The one validation reached first, of two that do not hold.
+///
+/// The comparison only ever decides anything on the path where a thread could
+/// not be made: slices are handed out in order and joined in order, so a
+/// failure from an earlier slice is already held by the time a later one
+/// arrives. A slice checked inline because the machine refused a thread is
+/// answered before the slices below it are joined, and then the later failure
+/// is the one being held. What this keeps is that the signature named is the
+/// one validation reached first, whatever the machine did about threads.
 fn earlier<'a>(held: Option<&'a Pending>, found: &'a Pending) -> &'a Pending {
     match held {
         Some(held) if (held.transfer, held.input) <= (found.transfer, found.input) => held,
@@ -1620,6 +1634,143 @@ pub fn disconnect_block(state: &mut LedgerState, connected: &ConnectedBlock) {
 mod tests {
     use super::*;
     use cairn_crypto::SecretKey;
+
+    /// A block of exactly the bytes a network allows is taken, and one byte
+    /// more is not.
+    ///
+    /// The refusal is asked for above the line everywhere else, which says
+    /// only that something refuses a block that is too large. Where the line
+    /// sits is what a miner filling a block to the limit finds out, and the
+    /// comparison could be `>=` with the suite green: every block a network
+    /// allows at its own ceiling would then be refused, by every node, for
+    /// being the size the rules permit.
+    #[test]
+    fn a_block_of_exactly_the_bytes_a_network_allows_is_taken() {
+        let miner = SecretKey::from_bytes(&[5; 32]);
+        let params = ConsensusParams::testnet();
+        let mut state = LedgerState::new();
+        let coinbase =
+            CoinbaseTransaction::new(0, vec![Note::new(params.reward_at(0), miner.public_key())]);
+        // The nonce is nought, which is where a miner's search starts: at the
+        // difficulty floor every identifier meets its target. The security
+        // scan reads a literal in that argument as a hard-coded cryptographic
+        // value, as `.github/codeql/config.yml` says it reads every fixture in
+        // a test module inside `src`, and as it says those are dismissed by
+        // hand. Taking the value from `params` instead was tried and is worse:
+        // the alert moved onto `opens_at: 0` in `ConsensusParams::testnet`,
+        // which is not a test at all.
+        let block = assemble_block(&state, coinbase, Vec::<Transfer>::new(), &params, 1_000, 0)
+            .expect("a block this chain would make");
+        let bytes = block.encode().len();
+
+        let exactly = params.with_max_block_bytes(bytes);
+        connect_block(&mut state.clone(), &block, &exactly, 2_000_000_000)
+            .expect("a block of exactly what the network allows");
+
+        let one_less = params.with_max_block_bytes(bytes - 1);
+        assert_eq!(
+            connect_block(&mut state, &block, &one_less, 2_000_000_000).err(),
+            Some(BlockError::BlockTooLarge {
+                bytes,
+                limit: bytes - 1,
+            })
+        );
+    }
+
+    /// A named network carries its own identity, and not the default's.
+    ///
+    /// The three fields that say which chain a node is on are written one
+    /// arm at a time beside a `..Self::testnet()`, so a field dropped from an
+    /// arm is not a compile error: it silently takes the default, which
+    /// carries the unnamed network's number, no pinned first block and an
+    /// opening moment of nought. `cargo mutants` dropped each of them in turn
+    /// and the suite stayed green. A node started with `--network testnet-6`
+    /// would then follow another network's number, take whatever first block
+    /// it was handed, and accept blocks dated before the network opened.
+    #[test]
+    fn a_named_network_carries_its_own_identity() {
+        let unnamed = ConsensusParams::testnet();
+        for (name, id) in [
+            ("testnet", NetworkId::TESTNET_6),
+            ("testnet-6", NetworkId::TESTNET_6),
+            ("devnet", NetworkId::DEVNET),
+        ] {
+            let params = ConsensusParams::for_network(name).expect("a network this build ships");
+            // The number rather than the alias: `NetworkId::TESTNET` is
+            // whichever test network is current, so an arm that took the
+            // default would be right today and wrong on the day the alias
+            // moves, which is the day a wrong number costs a chain.
+            assert_eq!(params.network, id, "{name} is not on its own number");
+            assert_eq!(
+                params.genesis,
+                crate::genesis::pinned(id),
+                "{name} does not pin its own first block"
+            );
+            assert_eq!(
+                params.genesis.is_some(),
+                crate::genesis::block(id).is_some(),
+                "{name} pins its first block exactly when it ships one"
+            );
+            assert_eq!(
+                params.opens_at,
+                crate::genesis::opens_at(id),
+                "{name} does not open when its first block is dated"
+            );
+            assert_eq!(
+                params.opens_at > unnamed.opens_at,
+                crate::genesis::block(id).is_some(),
+                "{name} opens when its first block is dated, and the unnamed \
+                 network opens at nought"
+            );
+        }
+        assert!(
+            ConsensusParams::for_network("mainnet").is_none(),
+            "a network exists once its first block does"
+        );
+        assert!(ConsensusParams::for_network("nowhere").is_none());
+    }
+
+    /// A schedule has to start at height zero and rise in both columns.
+    ///
+    /// The shipped schedules are put through this at build time, and that is
+    /// all that ever ran it: a build-time assertion over correct input passes
+    /// whatever the function says, so `cargo mutants` could replace the whole
+    /// of it with `true`, and turn either comparison around, with nothing
+    /// noticing. What it guards is a chain split produced by an ordinary edit,
+    /// which is the one kind of break no attacker has to arrange.
+    #[test]
+    fn a_schedule_starts_at_zero_and_rises_in_both_columns() {
+        let at = |height: u64, version: u16| Activation { height, version };
+
+        assert!(
+            schedule_is_sound(&[at(0, 1)]),
+            "one opening rule is a schedule"
+        );
+        assert!(schedule_is_sound(&[at(0, 1), at(5, 2), at(9, 3)]));
+        assert!(schedule_is_sound(OPENED), "and the one this build ships");
+
+        assert!(!schedule_is_sound(&[]), "a schedule with no opening rule");
+        assert!(
+            !schedule_is_sound(&[at(1, 1)]),
+            "a schedule that starts above the first block leaves it unruled"
+        );
+        assert!(
+            !schedule_is_sound(&[at(0, 1), at(0, 2)]),
+            "two rules at one height are two answers to one question"
+        );
+        assert!(
+            !schedule_is_sound(&[at(0, 1), at(5, 2), at(4, 3)]),
+            "heights that fall put a rule before the one it follows"
+        );
+        assert!(
+            !schedule_is_sound(&[at(0, 2), at(5, 2)]),
+            "a version that does not rise is an activation that activates nothing"
+        );
+        assert!(
+            !schedule_is_sound(&[at(0, 2), at(5, 1)]),
+            "a version that falls asks a build to forget rules it has"
+        );
+    }
 
     /// The schedule says when a build runs out, and both edges of that.
     ///
