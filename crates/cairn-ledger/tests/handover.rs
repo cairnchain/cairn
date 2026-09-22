@@ -1008,6 +1008,48 @@ fn every_way_a_grace_window_can_be_wrong_is_refused_by_name() {
     );
 }
 
+/// A rebuilt ledger arrives carrying what it was handed, not an empty set of
+/// it.
+///
+/// The pieces are unpacked into a state one field at a time, so a field left
+/// out is not a compile error: it takes the default, which is no recent
+/// headers and an empty forest. A node that rebuilt one of those follows a
+/// chain it cannot judge the next block of, since the difficulty and the
+/// timestamp rules read the run, and cannot prove where anything sits. `cargo
+/// mutants` dropped each in turn and the suite stayed green.
+#[test]
+fn a_rebuilt_ledger_carries_the_run_and_the_forest_it_was_handed() {
+    let params = params();
+    let miner = wallet(1);
+    let mut node = Node::new();
+    node.mine_empty(&miner, RECENT_HEADERS + 8);
+
+    let handover = node.handover();
+    let fresh = accept(&handover, &params).expect("the ledger this chain hands over");
+
+    assert_eq!(
+        fresh.recent_headers().len(),
+        handover.recent.len(),
+        "the run it was handed is the run it holds"
+    );
+    assert_eq!(
+        fresh.recent_headers().last().map(|summary| summary.height),
+        handover.recent.last().map(|header| header.height),
+        "and it ends where the handover's does"
+    );
+    assert_eq!(
+        fresh.headers_before_tip().commitment(),
+        node.past[usize::try_from(handover.at.height).unwrap()]
+            .headers_before_tip()
+            .commitment(),
+        "and the forest of headers is the one the giver had at that height"
+    );
+    assert!(
+        fresh.headers_before_tip().leaves() > 0,
+        "an empty forest is what a dropped field leaves, and it proves nothing"
+    );
+}
+
 /// The recent run has to carry its own argument, not borrow one.
 ///
 /// It cannot be forged: every field of a header is inside its identifier, the
