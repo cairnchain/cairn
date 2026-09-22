@@ -1414,6 +1414,99 @@ mod tests {
         }
     }
 
+    /// What a run of blocks is worth at its cheapest, counted block by block.
+    ///
+    /// The two bounds either side of it are what tie a claimed total to blocks
+    /// that were really made, and every test that reads them reads them
+    /// through a whole forged chain, where an answer one block out is absorbed
+    /// by the margins. Asked here of the function, at the sizes where one
+    /// block is the whole of the answer: `cargo mutants` could walk either
+    /// loop one block further and nothing said so.
+    #[test]
+    fn the_least_a_run_can_be_worth_is_the_descent_block_by_block() {
+        // The difficulty falls by `MAX_RETARGET_FACTOR` a block and stops at
+        // the floor, and each block is worth what it carries after the fall.
+        assert_eq!(least_work_over(64, 0), 0, "no blocks are worth nothing");
+        assert_eq!(least_work_over(64, 1), 16);
+        assert_eq!(least_work_over(64, 2), 16 + 4);
+        assert_eq!(least_work_over(64, 3), 16 + 4 + 1);
+        assert_eq!(
+            least_work_over(64, 5),
+            16 + 4 + 1 + 1 + 1,
+            "and past the floor every further block is worth the floor"
+        );
+        assert_eq!(
+            least_work_over(MIN_DIFFICULTY, 3),
+            3,
+            "a run starting at the floor is worth one a block"
+        );
+    }
+
+    /// And the mirror of it, the climb.
+    #[test]
+    fn the_most_a_run_can_be_worth_is_the_climb_block_by_block() {
+        assert_eq!(most_work_over(64, 0), 0, "no blocks are worth nothing");
+        assert_eq!(most_work_over(64, 1), 256);
+        assert_eq!(most_work_over(64, 2), 256 + 1_024);
+        assert_eq!(most_work_over(64, 3), 256 + 1_024 + 4_096);
+
+        // Past what a difficulty can be stated in, every further block is
+        // worth the ceiling and the loop stops climbing. The early return is
+        // what that costs, and turning its comparison around returns after the
+        // first block instead.
+        let ceiling = u128::from(u64::MAX);
+        let one_from_the_top = u64::MAX / 2;
+        assert_eq!(
+            most_work_over(one_from_the_top, 3),
+            ceiling * 3,
+            "a difficulty a single climb cannot be stated past is the ceiling \
+             for every block of the run"
+        );
+    }
+
+    /// The run up to the tip is bounded before a header is reserved for, and
+    /// the bound is a place rather than a direction.
+    ///
+    /// The decoder's other ceilings are asked at hostile counts, which says
+    /// only that something refuses them. Asked at its own value too, because
+    /// a decoder refusing a weighing of exactly `MOST_TAIL` headers refuses
+    /// one the rules allow, and `cargo mutants` could turn this comparison
+    /// into `>=` with the whole suite green.
+    #[test]
+    fn the_run_up_to_the_tip_is_read_at_its_ceiling_and_refused_one_past_it() {
+        let start = SampledStart {
+            tip: bare_header(),
+            tail: Vec::new(),
+            parent: None,
+            genesis: ForestProof::default(),
+            history: Forest::default(),
+            samples: Vec::new(),
+        };
+        let bytes = start.encode();
+        let at = bytes.len() - 4;
+        assert_eq!(
+            u32::from_le_bytes(bytes[at..].try_into().unwrap()),
+            0,
+            "an empty run is four zero bytes at the end"
+        );
+
+        for (held, refused_by_the_ceiling) in [(MOST_TAIL, false), (MOST_TAIL + 1, true)] {
+            let mut bent = bytes.clone();
+            bent[at..].copy_from_slice(&u32::try_from(held).unwrap().to_le_bytes());
+            let refused = SampledStart::decode(&bent).expect_err("no headers behind the count");
+            assert_eq!(
+                matches!(
+                    refused,
+                    CodecError::InvalidValue {
+                        type_name: "SampledStart"
+                    }
+                ),
+                refused_by_the_ceiling,
+                "a run of {held} against a ceiling of {MOST_TAIL} was answered `{refused}`"
+            );
+        }
+    }
+
     /// The price of one answer is the wire's price, not the compiler's.
     ///
     /// `size_of::<BlockHeader>()` is 192 and the encoding writes 182: the
