@@ -1363,7 +1363,15 @@ mod tests {
     /// sweep lets go of exactly the ones that are done.
     #[test]
     fn the_refused_connections_held_are_bounded_and_swept() {
-        let now = Instant::now();
+        // Far enough ahead that no patience runs out while the queue is being
+        // built. It used to be the clock, and a runner slow enough to spend
+        // `REFUSAL_PATIENCE` opening sixty seven socket pairs swept every one
+        // of them for being out of patience: the sweep then let go of sixty
+        // four where ten had closed, and the test that reads as being about
+        // which connections are done was deciding a race.
+        let now = Instant::now()
+            .checked_add(Duration::from_secs(3_600))
+            .expect("an hour from now");
         let mut waiting: VecDeque<Waiting> = VecDeque::new();
         let mut callers = Vec::new();
         for _ in 0..(REFUSALS_QUEUED + 3) {
