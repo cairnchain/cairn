@@ -84,7 +84,7 @@ pub const BLOCK_INDEX: &str = "blocks.idx";
 const OFFSET_BYTES: u64 = 8;
 
 /// The name of the file that marks a directory as in use.
-pub const LOCK_FILE: &str = "lock";
+const LOCK_FILE: &str = "lock";
 
 /// The ledger a node was handed, as it stood when it was handed over.
 ///
@@ -352,7 +352,7 @@ pub fn write_and_sync(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// The rename itself is what makes the replacement all or nothing: whoever
 /// reads `target` next sees the file that was there or the file this wrote,
 /// and never half of either.
-pub fn move_into_place(staged: &Path, target: &Path) -> std::io::Result<()> {
+fn move_into_place(staged: &Path, target: &Path) -> std::io::Result<()> {
     std::fs::rename(staged, target)?;
     sync_the_directory_of(target)
 }
