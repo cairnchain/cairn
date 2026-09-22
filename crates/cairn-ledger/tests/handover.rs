@@ -829,6 +829,90 @@ fn a_grace_window_holding_more_notes_than_the_rules_keep_is_refused() {
     );
 }
 
+/// A run shorter than the window the rules keep is refused, and says so.
+///
+/// Nothing asked this before: every fixture hands over the run its own chain
+/// produced, which is exactly the window, so the comparison could be turned
+/// around and a short run would have been taken. What the run seeds is the
+/// window the burial above it is judged against, so a run one header short is
+/// a burial judged on a window this chain never had.
+#[test]
+fn a_recent_run_shorter_than_the_window_is_refused_as_too_few() {
+    let params = params();
+    let miner = wallet(1);
+    let mut node = Node::new();
+    node.mine_empty(&miner, RECENT_HEADERS + 8);
+
+    let honest = node.handover();
+    accept(&honest, &params).expect("the run this chain really has");
+    let mut short = honest.clone();
+    short.recent.remove(0);
+
+    assert_eq!(
+        accept(&short, &params).err(),
+        Some(HandoverError::TooFewRecent {
+            given: honest.recent.len() - 1,
+            height: honest.at.height,
+        })
+    );
+}
+
+/// A run whose links do not match is refused, though every height does.
+///
+/// The two halves of the consecutive check are joined by "or", and the
+/// difference shows only where one of them holds on its own. Bending a height
+/// breaks both, since a height is inside its own identifier and the header
+/// above names it; bending what a header says it was built on breaks the link
+/// alone, and that is the case this pins. Asked of the run rather than of the
+/// anchor at its end, which is what the sibling test bends.
+#[test]
+fn a_recent_run_whose_links_do_not_match_is_refused_though_the_heights_do() {
+    let params = params();
+    let miner = wallet(1);
+    let mut node = Node::new();
+    node.mine_empty(&miner, RECENT_HEADERS + 8);
+
+    let honest = node.handover();
+    let last = honest.recent.len() - 1;
+    let mut bent = honest.clone();
+    bent.recent[last - 1].previous = Hash32::from_bytes([0xA5; 32]);
+    assert_eq!(
+        bent.recent[last - 1].height,
+        bent.recent[last - 2].height + 1,
+        "every height still follows the one below it"
+    );
+
+    assert_eq!(
+        accept(&bent, &params).err(),
+        Some(HandoverError::RecentNotConsecutive)
+    );
+}
+
+/// And the same for the buried run, where the answer is a height.
+///
+/// Bending the link alone leaves the run ending at the tip, so what catches it
+/// if this does not is the forest rebuilt at the end of the walk, which
+/// answers `NotOnTheWeighedChain`: true, and the wrong sentence. The run was
+/// not off another chain, it was not a run.
+#[test]
+fn a_buried_run_whose_links_do_not_match_is_refused_where_the_link_breaks() {
+    let params = params();
+    let miner = wallet(1);
+    let mut node = Node::new();
+    node.mine_empty(&miner, RECENT_HEADERS + 8);
+
+    let honest = node.handover();
+    let mut bent = honest.clone();
+    bent.buried[0].previous = Hash32::from_bytes([0xA5; 32]);
+
+    assert_eq!(
+        accept(&bent, &params).err(),
+        Some(HandoverError::BuriedRunNotConsecutive {
+            at: honest.buried[0].height
+        })
+    );
+}
+
 /// The recent run has to carry its own argument, not borrow one.
 ///
 /// It cannot be forged: every field of a header is inside its identifier, the
