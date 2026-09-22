@@ -90,22 +90,36 @@ fn asked_bytes(path: &str, query: &str) -> usize {
 fn every_document_this_site_serves_fits_in_the_time_a_connection_is_given() {
     let budget = deliverable();
     let mut over: Vec<(String, usize)> = Vec::new();
-    for path in [
-        "/",
-        "/cairn.css",
-        "/cairn.js",
-        "/languages.json",
-        "/i18n/en.json",
-        "/i18n/fr.json",
-        "/whitepaper",
-        "/specification",
-        "/design",
-        "/open-questions",
-        "/prior-art",
-        "/cairn-whitepaper.css",
-        "/cairn-design.css",
-        "/cairn-prior-art.css",
-    ] {
+    // Read from what the site is served out of, rather than written out. It
+    // was fourteen paths by hand beside five papers, three styles and two
+    // languages the server takes from arrays, so a sixth paper was served and
+    // never weighed. And a path gone from the arrays was no failure either,
+    // because the server answers anything it does not know with the index
+    // page and a 200: the hand list could not notice what it no longer
+    // described. The fixed routes are the arms of the `match` in
+    // `assets::answer` that name a path outright, read off its source.
+    let source = include_str!("../src/assets.rs");
+    let routing = &source[source.find("fn answer(").unwrap()..];
+    let mut paths: Vec<String> = routing
+        .lines()
+        .take_while(|line| !line.starts_with('}'))
+        .filter_map(|line| line.trim().strip_prefix('"')?.split_once("\" =>"))
+        .map(|(path, _)| path.to_owned())
+        .collect();
+    assert!(paths.contains(&"/".to_owned()), "{paths:?}");
+    paths.extend(
+        assets::LOCALES
+            .iter()
+            .map(|(code, _, _)| format!("/i18n/{code}.json")),
+    );
+    paths.extend(assets::PAPERS.iter().map(|(path, _)| (*path).to_owned()));
+    paths.extend(
+        assets::PAPER_STYLES
+            .iter()
+            .map(|(path, _)| (*path).to_owned()),
+    );
+    for path in &paths {
+        let path = path.as_str();
         let answer = assets::answer(&asking(path, ""));
         assert_eq!(answer.status, 200, "{path}");
         println!(

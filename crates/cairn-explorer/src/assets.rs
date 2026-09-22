@@ -50,7 +50,7 @@ macro_rules! paper {
     };
 }
 
-const PAPERS: [(&str, &str); 5] = [
+pub(crate) const PAPERS: [(&str, &str); 5] = [
     (
         "/whitepaper",
         paper!("en", "../../../docs/cairn-whitepaper.html"),
@@ -77,7 +77,7 @@ const PAPERS: [(&str, &str); 5] = [
 /// an injection carries too, and a rule that admits one admits both. The href
 /// in each paper is relative, so the same file works served from here and
 /// opened from a folder.
-const PAPER_STYLES: [(&str, &str); 3] = [
+pub(crate) const PAPER_STYLES: [(&str, &str); 3] = [
     (
         "/cairn-whitepaper.css",
         include_str!("../../../docs/cairn-whitepaper.css"),
