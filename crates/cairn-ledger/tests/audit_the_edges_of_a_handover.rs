@@ -13,7 +13,10 @@
 //!
 //! The chain here is mined at a difficulty where an identifier has to be
 //! found, because at the floor every identifier meets the target and the
-//! first of the four cannot be asked at all.
+//! first of the four cannot be asked at all. Which is also what the three
+//! refusals below the four are about: they are the ones an enumeration of
+//! every refusal in the workspace found no test had ever seen, and every one
+//! of them is about work on a header of a run.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -245,4 +248,65 @@ fn a_header_dated_at_the_opening_itself_is_taken() {
     let mut opening = params();
     opening.opens_at = earliest;
     accept(&handover, &opening).expect("a chain whose earliest header opens the network");
+}
+
+/// A header of the buried run without work of its own is refused, and named.
+///
+/// Found by enumeration rather than by reading: `BuriedWithoutWork` was a
+/// refusal no test in the workspace had ever seen. The run between the ledger
+/// and the tip is the one stretch a newcomer walks itself, and a header in it
+/// that was never mined is the cheapest thing a sender can offer.
+#[test]
+fn a_buried_header_without_work_is_refused_and_named() {
+    let node = Node::mined(RECENT_HEADERS + 8);
+    let mut handover = node.handover();
+    let at = handover.buried.len() / 2;
+    let height = handover.buried[at].height;
+    handover.buried[at] = without_work(handover.buried[at]);
+
+    assert_eq!(
+        accept(&handover, &params()).err(),
+        Some(HandoverError::BuriedWithoutWork { at: height })
+    );
+}
+
+/// And the same for the run below the anchor, which seeds the window the
+/// burial above it is judged against.
+#[test]
+fn a_recent_header_without_work_is_refused() {
+    let node = Node::mined(RECENT_HEADERS + 8);
+    let mut handover = node.handover();
+    let at = handover.recent.len() / 2;
+    handover.recent[at] = without_work(handover.recent[at]);
+
+    assert_eq!(
+        accept(&handover, &params()).err(),
+        Some(HandoverError::RecentWithoutWork)
+    );
+}
+
+/// A buried run that does not end at the tip is refused for that, whatever
+/// else is right about it.
+///
+/// The tip here is the same header mined again: every field but the nonce is
+/// what it was, it carries its own work, and the forest it commits to is the
+/// one that was handed over. What is wrong with it is that the run stops one
+/// header short of it, which is what this refusal is for and what no test had
+/// asked.
+#[test]
+fn a_buried_run_that_stops_short_of_the_tip_is_refused_for_that() {
+    let node = Node::mined(RECENT_HEADERS + 8);
+    let mut handover = node.handover();
+    let mut again = handover.tip;
+    again.nonce += 1;
+    while !meets_target(&again.id(), again.difficulty) {
+        again.nonce += 1;
+    }
+    assert_ne!(again.id(), handover.tip.id());
+    handover.tip = again;
+
+    assert_eq!(
+        accept(&handover, &params()).err(),
+        Some(HandoverError::BuriedRunNotEndingAtTheTip)
+    );
 }

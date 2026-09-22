@@ -282,3 +282,27 @@ fn a_tail_header_dated_before_the_median_of_its_window_is_refused() {
     // about the showing rather than about the chain.
     assert_eq!(weighing.headers.len(), HEIGHT);
 }
+
+/// A chain more than one block long has to open the header its tip was built
+/// on, and is refused by name when it does not.
+///
+/// Found by enumeration: `ParentNotOpened` was a refusal no test in the
+/// workspace had ever seen. Without the parent a weighing says only that a tip
+/// names a forest, which is not the same as saying it stands at the end of a
+/// chain: an attacker took the honest chain's headers, built a forest of them
+/// and mined one header at the floor to sit on top, and every draw was
+/// answered by a genuine header.
+#[test]
+fn a_tip_that_opens_no_parent_is_refused_by_name() {
+    let mut weighing = honest();
+    assert!(
+        weighing.start.tip.height > 0,
+        "a chain with a parent to open"
+    );
+    weighing.start.parent = None;
+
+    assert_eq!(
+        check_start(&weighing.start, SAMPLES, NOW, &params()),
+        Err(StartError::ParentNotOpened)
+    );
+}

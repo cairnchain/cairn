@@ -913,6 +913,33 @@ fn a_buried_run_whose_links_do_not_match_is_refused_where_the_link_breaks() {
     );
 }
 
+/// A window holding more blocks than the rules keep is refused before it is
+/// built.
+///
+/// The sibling beside this one asks about the notes in the window; this asks
+/// about the blocks, which is the other of the two bounds `advance_grace` runs
+/// the window down by. Found by enumeration: `GraceWindowTooLarge` was a
+/// refusal no test in the workspace had ever seen.
+#[test]
+fn a_grace_window_holding_more_blocks_than_the_rules_keep_is_refused() {
+    let params = params();
+    let miner = wallet(1);
+    let mut node = Node::new();
+    node.mine_empty(&miner, RECENT_HEADERS + 8);
+
+    let mut handover = node.handover();
+    let held = GRACE_BLOCKS + 1;
+    handover.grace = vec![Vec::new(); held];
+
+    assert_eq!(
+        accept(&handover, &params).err(),
+        Some(HandoverError::GraceWindowTooLarge {
+            held,
+            limit: GRACE_BLOCKS,
+        })
+    );
+}
+
 /// The recent run has to carry its own argument, not borrow one.
 ///
 /// It cannot be forged: every field of a header is inside its identifier, the
