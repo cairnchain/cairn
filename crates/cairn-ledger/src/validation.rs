@@ -1626,6 +1626,40 @@ mod tests {
     use super::*;
     use cairn_crypto::SecretKey;
 
+    /// A block of exactly the bytes a network allows is taken, and one byte
+    /// more is not.
+    ///
+    /// The refusal is asked for above the line everywhere else, which says
+    /// only that something refuses a block that is too large. Where the line
+    /// sits is what a miner filling a block to the limit finds out, and the
+    /// comparison could be `>=` with the suite green: every block a network
+    /// allows at its own ceiling would then be refused, by every node, for
+    /// being the size the rules permit.
+    #[test]
+    fn a_block_of_exactly_the_bytes_a_network_allows_is_taken() {
+        let miner = SecretKey::from_bytes(&[5; 32]);
+        let params = ConsensusParams::testnet();
+        let mut state = LedgerState::new();
+        let coinbase =
+            CoinbaseTransaction::new(0, vec![Note::new(params.reward_at(0), miner.public_key())]);
+        let block = assemble_block(&state, coinbase, Vec::<Transfer>::new(), &params, 1_000, 0)
+            .expect("a block this chain would make");
+        let bytes = block.encode().len();
+
+        let exactly = params.with_max_block_bytes(bytes);
+        connect_block(&mut state.clone(), &block, &exactly, 2_000_000_000)
+            .expect("a block of exactly what the network allows");
+
+        let one_less = params.with_max_block_bytes(bytes - 1);
+        assert_eq!(
+            connect_block(&mut state, &block, &one_less, 2_000_000_000).err(),
+            Some(BlockError::BlockTooLarge {
+                bytes,
+                limit: bytes - 1,
+            })
+        );
+    }
+
     /// A named network carries its own identity, and not the default's.
     ///
     /// The three fields that say which chain a node is on are written one
