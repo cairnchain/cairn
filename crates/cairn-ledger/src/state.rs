@@ -1971,6 +1971,40 @@ mod tests {
 
     use super::*;
 
+    /// What a ledger holds in full is asked by identifier, and an empty ledger
+    /// is one holding nothing in either tier.
+    ///
+    /// Two accessors a wallet and a miner read, and neither was ever asked to
+    /// be wrong: `hot_entry` could answer nothing to every question, which is
+    /// a wallet that owns nothing and a spend that cannot be assembled, and
+    /// `is_empty` could answer yes to a ledger with notes in it, which is what
+    /// decides whether a node starts from a chain or from nothing.
+    #[test]
+    fn what_a_ledger_holds_is_answered_by_identifier() {
+        let owner = cairn_crypto::SecretKey::from_bytes(&[13; 32]).public_key();
+        let mut state = LedgerState::new();
+        assert!(state.is_empty(), "a ledger with nothing in either tier");
+
+        let note = Note::new(Amount::ZERO, owner);
+        let id = NoteId::new(Hash32::from_bytes([3; 32]), 0);
+        state.hot.insert(id, HotEntry { note, height: 0 });
+
+        assert_eq!(
+            state.hot_entry(&id).map(|held| held.note.owner),
+            Some(owner),
+            "the note it was given, by its own identifier"
+        );
+        assert_eq!(
+            state.hot_entry(&NoteId::new(Hash32::from_bytes([4; 32]), 0)),
+            None,
+            "and nothing for one it was not"
+        );
+        assert!(
+            !state.is_empty(),
+            "a ledger holding a note in either tier is not empty"
+        );
+    }
+
     /// Who a ledger follows is asked and answered, which nothing asked.
     ///
     /// Following is a fact about this node rather than about the chain, and it
