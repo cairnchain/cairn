@@ -398,6 +398,7 @@ fn the_window_this_chain_would_have(
     handover: &Handover,
     params: &ConsensusParams,
 ) -> Result<(), HandoverError> {
+    no_position_twice(&handover.grace)?;
     // Against the rule this chain runs under rather than against the ceiling
     // the wire enforces: a window holding more than
     // the maturity depth is not a window this network ever produced.
@@ -561,6 +562,32 @@ fn against_each_other(handover: &Handover, declared: Amount) -> Result<(), Hando
             held: in_hand,
             ceiling: declared,
         });
+    }
+    Ok(())
+}
+
+/// Refuses a grace window naming one cold position twice, which is one leaf
+/// offered as two spendable notes.
+///
+/// Asked after the two bounds on the window's size, which are the cheaper
+/// facts and the ones a sender can act on, and before anything is built.
+///
+/// Asked here rather than left to the rebuild, where the same question is
+/// asked again and could not answer: the window is inside the state root, so
+/// a second entry moves the root and the rebuild says `StateRootMismatch`.
+/// True, and the wrong sentence. Nothing about a state root tells a sender
+/// which piece disagrees with itself, and every other piece that does is
+/// named before anything is built.
+fn no_position_twice(grace: &[Vec<Fallen>]) -> Result<(), HandoverError> {
+    let mut places: BTreeSet<u64> = BTreeSet::new();
+    for fell in grace {
+        for (_, position, _) in fell {
+            if !places.insert(*position) {
+                return Err(HandoverError::GracePositionTwice {
+                    position: *position,
+                });
+            }
+        }
     }
     Ok(())
 }

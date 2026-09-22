@@ -940,6 +940,74 @@ fn a_grace_window_holding_more_blocks_than_the_rules_keep_is_refused() {
     );
 }
 
+/// The four refusals about the grace window, which no test had ever seen.
+///
+/// The window is the one piece of a handover a receiver cannot rebuild: it
+/// names notes that have left the hot set and travels with a path for each,
+/// so every way it can be wrong is a way a sender can be wrong. Enumerated
+/// rather than searched for: `NoteInBothTiers`, `GracePositionTwice`,
+/// `MissingGraceProof` and `BadGraceProof` were four refusals nothing in the
+/// workspace had ever produced.
+#[test]
+fn every_way_a_grace_window_can_be_wrong_is_refused_by_name() {
+    let params = params();
+    let miner = wallet(1);
+    let mut node = Node::new();
+    node.mine_empty(&miner, RECENT_HEADERS + 4);
+
+    let honest = node.handover();
+    accept(&honest, &params).expect("the window this chain really has");
+    let (id, place, fallen) = honest
+        .grace
+        .iter()
+        .flatten()
+        .next()
+        .copied()
+        .expect("a window with something in it");
+
+    // A note in the hot set and in the window at once: two answers about
+    // where one note is, where the two tiers are meant to be disjoint. One
+    // hot note is renamed rather than another added, so the set stays inside
+    // its own cap and what is under test is the overlap.
+    let mut both = honest.clone();
+    let last = both.hot.len() - 1;
+    both.hot[last].0 = id;
+    assert_eq!(
+        accept(&both, &params).err(),
+        Some(HandoverError::NoteInBothTiers(id))
+    );
+
+    // One cold position named twice, which is one note offered as two.
+    let mut twice = honest.clone();
+    let last = twice.grace.len() - 1;
+    twice.grace[last].push((id, place, fallen));
+    assert_eq!(
+        accept(&twice, &params).err(),
+        Some(HandoverError::GracePositionTwice { position: place })
+    );
+
+    // A window whose note arrives with no path: spending it would take one,
+    // and the receiver has no way to build it.
+    let mut missing = honest.clone();
+    missing.grace_proofs.retain(|(at, _)| *at != place);
+    assert_eq!(
+        accept(&missing, &params).err(),
+        Some(HandoverError::MissingGraceProof { position: place })
+    );
+
+    // And a path that is not the one the cold set gives for that position.
+    let mut bad = honest.clone();
+    for (at, proof) in &mut bad.grace_proofs {
+        if *at == place {
+            proof.siblings.push(Hash32::from_bytes([0xA5; 32]));
+        }
+    }
+    assert_eq!(
+        accept(&bad, &params).err(),
+        Some(HandoverError::BadGraceProof { position: place })
+    );
+}
+
 /// The recent run has to carry its own argument, not borrow one.
 ///
 /// It cannot be forged: every field of a header is inside its identifier, the
