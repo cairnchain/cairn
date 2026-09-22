@@ -1431,7 +1431,27 @@ fn cost_of(message: &Message, peer: &PeerState) -> u32 {
             let carried = u32::try_from(headers.len().min(MAX_HEADERS)).unwrap_or(u32::MAX);
             carried.saturating_mul(COST_PER_HEADER_TAKEN)
         }
-        _ => COST_TRIVIAL,
+        // Named rather than left to a default, which is what this table had:
+        // `_ => COST_TRIVIAL` covered these six, so a message added later
+        // would have been priced at one unit by nobody's decision. The
+        // allowance's other table, `taken_before_the_allowance` in `node.rs`,
+        // is exhaustive for exactly that reason and says so, and this is the
+        // table the reason matters most for. `Chain` is the one worth reading:
+        // it opens a catch-up, and its price came from the default rather
+        // than from anybody weighing what a catch-up draws.
+        //
+        // The greeting pair never reaches here, since `on_message` answers
+        // them first, and a keepalive costs what it carries, which is
+        // nothing. A `Chain` is a count and a height, whatever it then asks
+        // for being priced as the blocks arrive. A `JoinPart` is taken before
+        // the allowance altogether, as a piece of an answer this node asked
+        // one named peer for.
+        Message::Hello(_)
+        | Message::Welcome(_)
+        | Message::Ping(_)
+        | Message::Pong(_)
+        | Message::Chain { .. }
+        | Message::JoinPart { .. } => COST_TRIVIAL,
     }
 }
 
