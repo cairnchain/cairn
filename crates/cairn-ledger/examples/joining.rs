@@ -250,6 +250,7 @@ fn sampled_start_bytes(blocks: u64) -> usize {
 
     let run = usize::try_from(SHALLOWEST).unwrap_or(0) + RECENT_HEADERS;
     SampledStart {
+        genesis: ForestProof::default(),
         tip: blank_header(),
         tail: vec![blank_header(); run],
         parent: Some(Sample {

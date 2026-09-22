@@ -20,6 +20,7 @@
     clippy::arithmetic_side_effects
 )]
 
+use cairn_accumulator::forest::ForestProof;
 use cairn_accumulator::Archive;
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::{BlockHeader, HeaderSummary, BLOCK_VERSION};
@@ -231,6 +232,7 @@ fn a_free_run_cannot_swallow_the_anchor_any_more() {
     let from = usize::try_from(deepest.saturating_sub(DIFFICULTY_WINDOW as u64)).unwrap();
     let tail = forged[from..].to_vec();
     let start = SampledStart {
+        genesis: ForestProof::default(),
         tip,
         parent: Some(Sample {
             header: forged[usize::try_from(below).unwrap()],

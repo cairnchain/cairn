@@ -16,7 +16,7 @@
     clippy::arithmetic_side_effects
 )]
 
-use cairn_accumulator::forest::Forest;
+use cairn_accumulator::forest::{Forest, ForestProof};
 use cairn_accumulator::Archive;
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader};
@@ -206,6 +206,7 @@ fn a_tip_on_no_chain_has_no_parent_to_open() {
     // at the height below and really is in the forest. It is not the header
     // its tip names, because its tip was mined on nothing.
     let start = SampledStart {
+        genesis: ForestProof::default(),
         tip: forged_tip,
         parent: Some(Sample {
             header: real_tip,
@@ -221,6 +222,24 @@ fn a_tip_on_no_chain_has_no_parent_to_open() {
         matches!(refused, Err(StartError::ParentNotTheTipsOwn)),
         "a tip standing on nothing has no parent to open, and it said {refused:?}"
     );
+}
+
+/// A tip over `forest` claiming one unit more work than `real_tip`, at the
+/// difficulty floor, so finding it is one hash that always succeeds.
+fn a_tip_one_unit_heavier(real_tip: &BlockHeader, forest: &Archive, height: u64) -> BlockHeader {
+    BlockHeader {
+        version: real_tip.version,
+        network: real_tip.network,
+        height,
+        previous: cairn_primitives::Hash32::from_bytes([0xAB; 32]),
+        transactions_root: cairn_primitives::Hash32::from_bytes([0xCD; 32]),
+        state_root: cairn_primitives::Hash32::from_bytes([0xEF; 32]),
+        history: forest.commitment(),
+        timestamp: real_tip.timestamp + 600,
+        difficulty: 1,
+        total_work: real_tip.total_work + 1,
+        nonce: 0,
+    }
 }
 
 /// **And the ledger hung off that tip could be anything.**
@@ -272,19 +291,7 @@ fn an_invented_ledger_cannot_borrow_a_weight_it_did_not_earn() {
         forest.add(header_leaf(&header.id())).unwrap();
     }
 
-    let forged_tip = BlockHeader {
-        version: real_tip.version,
-        network: real_tip.network,
-        height: leaves.len() as u64,
-        previous: cairn_primitives::Hash32::from_bytes([0xAB; 32]),
-        transactions_root: cairn_primitives::Hash32::from_bytes([0xCD; 32]),
-        state_root: cairn_primitives::Hash32::from_bytes([0xEF; 32]),
-        history: forest.commitment(),
-        timestamp: real_tip.timestamp + 600,
-        difficulty: 1,
-        total_work: real_tip.total_work + 1,
-        nonce: 0,
-    };
+    let forged_tip = a_tip_one_unit_heavier(&real_tip, &forest, leaves.len() as u64);
 
     // The weighing first, exactly as the victim runs it.
     let wanted = draw(
@@ -304,6 +311,7 @@ fn an_invented_ledger_cannot_borrow_a_weight_it_did_not_earn() {
         })
         .collect();
     let start = SampledStart {
+        genesis: ForestProof::default(),
         tip: forged_tip,
         parent: Some(Sample {
             header: leaves[leaves.len() - 1],
@@ -469,6 +477,7 @@ fn padding_a_forest_out_to_the_burial_depth_is_refused() {
         })
         .collect();
     let start = SampledStart {
+        genesis: ForestProof::default(),
         tip: forged_tip,
         parent: Some(Sample {
             header: stand_on,

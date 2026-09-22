@@ -1,8 +1,9 @@
-//! AUDIT: the two fields that are new on the wire.
+//! AUDIT: the fields that are new on the wire.
 //!
-//! `SampledStart.parent` and `Handover.buried` are bytes from a stranger. What
-//! has to hold: the tag and the count are bounded before anything is reserved,
-//! a hostile length is refused rather than turned into an allocation, and an
+//! `SampledStart.parent`, `SampledStart.genesis` and `Handover.buried` are
+//! bytes from a stranger. What has to hold: the tag and the count are bounded
+//! before anything is reserved, a hostile length is refused rather than turned
+//! into an allocation, and an
 //! encode-decode round trip is exact in both directions (two byte strings
 //! decoding to one value would give a message two identities).
 //!
@@ -69,6 +70,9 @@ fn sample(height: u64) -> Sample {
 
 fn start(parent: Option<Sample>, samples: usize) -> SampledStart {
     SampledStart {
+        genesis: ForestProof {
+            siblings: vec![Hash32::from_bytes([6; 32]); 5],
+        },
         tip: header(500),
         parent,
         tail: (400..=500).map(header).collect(),
@@ -86,6 +90,7 @@ fn a_sampled_start_round_trips_with_and_without_a_parent() {
             let back = SampledStart::decode(&bytes).expect("its own encoding");
             assert_eq!(back.encode(), bytes, "the encoding is not canonical");
             assert_eq!(back.parent, value.parent);
+            assert_eq!(back.genesis, value.genesis);
             assert_eq!(back.samples, value.samples);
             assert_eq!(back.tip, value.tip);
             assert_eq!(back.tail, value.tail);
@@ -121,7 +126,7 @@ fn a_hostile_count_is_refused_without_reserving_for_it() {
     let value = start(Some(sample(499)), 4);
     let bytes = value.encode();
     let tip_and_history = header(500).encode().len() + Forest::new().encode().len();
-    let count_at = tip_and_history + 1 + sample(499).encode().len();
+    let count_at = tip_and_history + 1 + sample(499).encode().len() + value.genesis.encode().len();
     assert_eq!(
         u32::from_le_bytes(bytes[count_at..count_at + 4].try_into().unwrap()),
         4,
