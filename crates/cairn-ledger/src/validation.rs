@@ -769,12 +769,26 @@ impl Pending {
 }
 
 /// Signatures below which splitting the work costs more than it saves.
+///
+/// Where this sits is a judgement about time and nothing else: both paths name
+/// the same signature, which is what the note on [`first_failure`] says and
+/// what makes moving this number safe. So a test cannot tell one side of it
+/// from the other, and a mutation of this comparison is a mutation of how long
+/// a block takes.
 const SPLIT_ABOVE: usize = 64;
 
 /// Threads worth asking for. A validator is not the only thing on the machine.
 const MOST_THREADS: usize = 8;
 
 /// The one validation reached first, of two that do not hold.
+///
+/// The comparison only ever decides anything on the path where a thread could
+/// not be made: slices are handed out in order and joined in order, so a
+/// failure from an earlier slice is already held by the time a later one
+/// arrives. A slice checked inline because the machine refused a thread is
+/// answered before the slices below it are joined, and then the later failure
+/// is the one being held. What this keeps is that the signature named is the
+/// one validation reached first, whatever the machine did about threads.
 fn earlier<'a>(held: Option<&'a Pending>, found: &'a Pending) -> &'a Pending {
     match held {
         Some(held) if (held.transfer, held.input) <= (found.transfer, found.input) => held,
