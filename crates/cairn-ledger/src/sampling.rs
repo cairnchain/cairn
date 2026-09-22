@@ -1061,6 +1061,13 @@ fn check_the_tail(start: &SampledStart, params: &ConsensusParams) -> Result<(), 
     };
     let wanted = span.saturating_add(1);
     let given = u64::try_from(start.tail.len()).unwrap_or(u64::MAX);
+    // The ceiling cannot decide anything a weighing off the wire reaches: the
+    // decoder refuses a run longer than [`MOST_TAIL`] before it reserves for
+    // one, so `given` is inside it and a `wanted` past it fails the first half
+    // of this. It stays because a weighing does not have to arrive off a wire
+    // to be checked here, and because the length this asks for is worked out
+    // rather than read: the day the draw's band changes, the ceiling is the
+    // sentence that says how long a run this will walk.
     if given != wanted || wanted > MOST_TAIL {
         return Err(StartError::TailWrongLength { given, wanted });
     }

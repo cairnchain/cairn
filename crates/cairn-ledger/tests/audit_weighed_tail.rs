@@ -37,6 +37,7 @@ use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
+use cairn_primitives::Hash32;
 
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 24;
@@ -281,4 +282,56 @@ fn a_tail_header_dated_before_the_median_of_its_window_is_refused() {
     // The headers themselves are untouched, which is what makes this a fact
     // about the showing rather than about the chain.
     assert_eq!(weighing.headers.len(), HEIGHT);
+}
+
+/// A run of the wrong length is refused, and says both numbers.
+///
+/// The length is worked out from the deepest header the draw landed on rather
+/// than taken from the sender, so the two numbers are what a reader has to
+/// compare. Nothing asked this: every fixture hands over the run its own draw
+/// demands, so the comparison could be dropped and a short run taken.
+#[test]
+fn a_run_of_the_wrong_length_is_refused_and_says_both_numbers() {
+    let mut weighing = honest();
+    let wanted = weighing.start.tail.len() as u64;
+    weighing.start.tail.remove(0);
+
+    assert_eq!(
+        check_start(&weighing.start, SAMPLES, NOW, &params()),
+        Err(StartError::TailWrongLength {
+            given: wanted - 1,
+            wanted
+        })
+    );
+}
+
+/// A run whose links do not match is refused where the link breaks, though
+/// every height follows the one below it.
+///
+/// The two halves of the check are joined by "or", and they part company on
+/// exactly this input: a height is inside its own identifier, so bending one
+/// breaks the link above it too, where bending what a header says it was built
+/// on breaks the link alone. Without this the run could be walked with the
+/// links unread, and a header from another chain at the right height would
+/// travel the rest of the way on its difficulty and its timestamp alone.
+#[test]
+fn a_run_whose_links_do_not_match_is_refused_though_the_heights_do() {
+    let mut weighing = honest();
+    let at = changeable(&weighing);
+    let height = weighing.start.tail[at].height;
+    let mut bent = weighing.start.tail[at];
+    bent.previous = Hash32::from_bytes([0xA5; 32]);
+    // Re-solved at the difficulty it already claims, so what refuses it is the
+    // link and not a nonce the bending threw away.
+    weighing.start.tail[at] = solve(bent);
+    assert_eq!(
+        weighing.start.tail[at].height,
+        weighing.start.tail[at - 1].height + 1,
+        "every height still follows the one below it"
+    );
+
+    assert_eq!(
+        check_start(&weighing.start, SAMPLES, NOW, &params()),
+        Err(StartError::TailNotConsecutive { at: height })
+    );
 }
