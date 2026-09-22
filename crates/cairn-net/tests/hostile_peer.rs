@@ -516,3 +516,194 @@ fn a_peer_that_filled_the_awaiting_set_is_asked_again_once_patience_runs() {
         later.reply
     );
 }
+
+/// A peer's own block does not re-arm its own discount.
+///
+/// The test above arms `chain_asked` by hand, and so never asks who arms it.
+/// `follow_up` does: whenever nothing is outstanding and the peer's
+/// `total_work` says it is ahead, it asks for the chain again and marks the
+/// answer as one this node wanted. `total_work` is what the peer wrote in its
+/// own greeting. A peer claiming the most work there is emptied `awaiting`
+/// itself, a block at each height it had named, each fully decoded and none
+/// applied because its parent was invented, and every such round armed the
+/// catching up price for the next.
+///
+/// Three cases, driven through `follow_up` rather than set: a first ask is a
+/// catch-up, a round that moved this node's chain earns the next one, and a
+/// round that moved nothing does not. In the last the chain is still asked
+/// for, because a peer that says it has more is worth asking; its answer pays
+/// what a push pays.
+#[test]
+fn a_round_that_moved_nothing_does_not_earn_the_next_one_a_discount() {
+    let mut chain = ChainStore::new(params());
+    let now = 2_000_000_000u64;
+
+    let ours = holding_work(&mut chain, now);
+
+    // Nothing outstanding, a peer claiming everything, and a `Chain` that
+    // offers nothing new, which is the shortest road into `follow_up`.
+    let ahead = |work_when_asked: Option<u128>| PeerState {
+        greeted: true,
+        height: 1_000,
+        total_work: u128::MAX,
+        work_when_asked,
+        ..PeerState::default()
+    };
+    let into_follow_up = Message::Chain { from: 0, count: 0 };
+
+    let mut first = ahead(None);
+    let reaction = on_message(
+        &mut solo(&mut chain),
+        &mut first,
+        into_follow_up.clone(),
+        now,
+    );
+    assert!(
+        reaction
+            .reply
+            .iter()
+            .any(|m| matches!(m, Message::GetChain { .. })),
+        "a peer that says it has more is asked for it"
+    );
+    assert!(first.chain_asked, "and a first ask is a catch-up");
+
+    // A round that moved this node's chain: the work recorded when it asked is
+    // below the work it holds now.
+    let mut moved = ahead(Some(ours - 1));
+    on_message(
+        &mut solo(&mut chain),
+        &mut moved,
+        into_follow_up.clone(),
+        now,
+    );
+    assert!(
+        moved.chain_asked,
+        "a round that delivered blocks this node applied earns the next one the \
+         catching up price, or an honest sync would stop getting it"
+    );
+
+    // And the same peer, one round later, having moved nothing since. This is
+    // the shape an attacker would use: one round that looks honest, then
+    // blocks that connect to nothing. It only fails if the work is written
+    // down at each ask, and deleting that line left every case above green,
+    // because each builds its peer fresh and none asks what the next round
+    // compares against.
+    moved.chain_asked = false;
+    on_message(
+        &mut solo(&mut chain),
+        &mut moved,
+        into_follow_up.clone(),
+        now,
+    );
+    assert!(
+        !moved.chain_asked,
+        "one round that moved the chain buys one discounted round, not every \
+         round after it"
+    );
+
+    // A round that moved nothing: the work is where it was when it asked.
+    let mut stalled = ahead(Some(ours));
+    let reaction = on_message(&mut solo(&mut chain), &mut stalled, into_follow_up, now);
+    assert!(
+        reaction
+            .reply
+            .iter()
+            .any(|m| matches!(m, Message::GetChain { .. })),
+        "the chain is still asked for"
+    );
+    assert!(
+        !stalled.chain_asked,
+        "and the answer is not armed as a catch-up: a round whose blocks \
+         connected to nothing does not buy the next hundred and twenty eight \
+         at a unit each"
+    );
+
+    // Which the price then says: the stretch it answers with is one the peer
+    // offered.
+    on_message(
+        &mut solo(&mut chain),
+        &mut stalled,
+        Message::Chain { from: 1, count: 4 },
+        now,
+    );
+    assert!(
+        stalled.offered.contains(&1),
+        "the blocks that follow pay what a push pays"
+    );
+}
+
+/// One real block added to `chain`, so there is work to compare against, and
+/// the work it now holds.
+///
+/// The first version of the test that uses this ran on an empty store, whose
+/// work is nought, and the case that says a round which moved the chain earns
+/// the next one sat behind `if ours > 0` and never ran: correct, and
+/// unreachable.
+fn holding_work(chain: &mut ChainStore, now: u64) -> u128 {
+    let miner = cairn_crypto::SecretKey::from_bytes(&[4; 32]);
+    let state = cairn_ledger::LedgerState::new();
+    let coinbase = cairn_ledger::transaction::CoinbaseTransaction::new(
+        0,
+        vec![cairn_ledger::note::Note::new(
+            params().initial_reward,
+            miner.public_key(),
+        )],
+    );
+    let block = cairn_ledger::validation::assemble_block(
+        &state,
+        coinbase,
+        Vec::<cairn_ledger::transaction::Transfer>::new(),
+        &params(),
+        1_600,
+        0,
+    )
+    .unwrap();
+    let block = cairn_ledger::validation::mine_block(block, 1 << 22).expect("a nonce exists");
+    chain.add_block(block, now).unwrap();
+    let ours = chain.total_work();
+    assert!(
+        ours > 0,
+        "the store holds work, or the comparisons prove nothing"
+    );
+    ours
+}
+
+/// The greeting that asks for the chain writes down the work it asked at.
+///
+/// Or the first `follow_up` after it takes itself for a first ask, and hands a
+/// peer whose opening round moved nothing one more discounted round. Bounded,
+/// unlike the loop the test above closes, and still a round a stranger did not
+/// earn. Deleting that line left the test above green, because each of its
+/// peers is built rather than greeted.
+#[test]
+fn the_greeting_that_asks_for_the_chain_writes_down_the_work_it_asked_at() {
+    let mut chain = ChainStore::new(params());
+    let now = 2_000_000_000u64;
+    let ours = holding_work(&mut chain, now);
+    let genesis = chain.genesis().unwrap_or(cairn_primitives::Hash32::ZERO);
+
+    let mut greeting = PeerState::default();
+    on_message(
+        &mut solo(&mut chain),
+        &mut greeting,
+        Message::Hello(cairn_net::message::Handshake {
+            version: cairn_net::message::PROTOCOL_VERSION,
+            network: params().network,
+            genesis,
+            tip: cairn_primitives::Hash32::ZERO,
+            height: 5,
+            total_work: u128::MAX,
+            listen: 0,
+            nonce: 7,
+            keeps: cairn_net::Keeps::default(),
+        }),
+        now,
+    );
+    assert!(greeting.greeted, "the greeting was taken");
+    assert!(greeting.chain_asked, "and asked for the chain");
+    assert_eq!(
+        greeting.work_when_asked,
+        Some(ours),
+        "at the work this node held when it asked"
+    );
+}
