@@ -68,11 +68,9 @@ pub const RECENT_HEADERS: usize = headers_needed(DIFFICULTY_WINDOW, MEDIAN_TIME_
 /// can be asked without changing a consensus constant.
 const fn headers_needed(difficulty_window: usize, median_window: usize) -> usize {
     let retarget = difficulty_window.saturating_add(1);
-    if retarget > median_window {
-        retarget
-    } else {
-        median_window
-    }
+    // The larger of the two, without a comparison: at equal needs `>` and
+    // `>=` pick the same side, a change no test can see.
+    retarget.saturating_add(median_window.saturating_sub(retarget))
 }
 
 /// The largest block identifier that still satisfies `difficulty`.
