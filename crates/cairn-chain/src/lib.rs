@@ -311,7 +311,7 @@ const _: () = assert!(cairn_ledger::validation::COINBASE_MATURITY == MAX_REORG_D
 ///
 /// A branch that lost by more than [`MAX_REORG_DEPTH`] can never be switched
 /// to, so holding its blocks is holding history nobody will ask for.
-const MAX_SIDE_BLOCKS: usize = 4_096;
+pub const MAX_SIDE_BLOCKS: usize = 4_096;
 
 /// Bytes of blocks off the followed branch kept before the oldest are dropped.
 ///
