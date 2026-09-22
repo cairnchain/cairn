@@ -1631,7 +1631,7 @@ pub fn on_message(
 mod what_an_ask_costs {
     use super::{
         cost_of, what_the_wire_costs, PeerState, ALLOWANCE, BYTES_PER_UNIT, COST_CHAIN, COST_JOIN,
-        COST_PER_BLOCK_SERVED, COST_PER_HEADER_SERVED,
+        COST_PER_BLOCK_SERVED, COST_PER_HEADER_SERVED, COST_TRIVIAL,
     };
     use crate::message::{
         Message, PeerAddress, JOIN_PART_BYTES, MAX_HEADERS, MAX_REQUESTED, MAX_SHARED_ADDRESSES,
@@ -1682,9 +1682,14 @@ mod what_an_ask_costs {
     fn asks_a_window_pays_for(message: &Message) -> u32 {
         let mut peer = PeerState::new(None);
         let cost = cost_of(message, &peer);
+        // Nothing costs less than the cheapest price, so a window that pays
+        // for more asks than this never runs out, and waiting for it would
+        // hang the suite rather than fail it.
+        let most = ALLOWANCE / COST_TRIVIAL;
         let mut asks = 0u32;
         while peer.afford(cost, 0) {
             asks = asks.saturating_add(1);
+            assert!(asks <= most, "a window paid for more asks than it holds");
         }
         asks
     }
