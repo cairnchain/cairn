@@ -1751,7 +1751,23 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
     json.field_usize("notes", record.notes.len());
 
     let notes_from = note_offset_of(request);
-    let held = holdings(&record.notes, notes_from, |id| context.index.note(id));
+    // Only in the pass whose answer is sent. The walk is up to `ADDRESS_SCAN`
+    // index lookups with the chain lock and the index lock both held, and the
+    // naming pass ran it too, for an answer it throws away: `holdings` reads
+    // the index and never a block, so it names no height and the naming pass
+    // has nothing to learn from it. `Pass`'s own note says the naming pass
+    // "does not do the two things a route spends its time on", and this was
+    // the largest thing any route spends its time on, done twice for a fifty
+    // byte anonymous GET while block validation waited behind the lock.
+    let held = if context.answering() {
+        holdings(&record.notes, notes_from, |id| context.index.note(id))
+    } else {
+        Holdings {
+            listed: Vec::new(),
+            unspent: 0,
+            whole: true,
+        }
+    };
     json.key("unspent");
     json.begin_array();
     for (id, note) in &held.listed {
@@ -2041,6 +2057,41 @@ mod tests {
     use cairn_http::Request;
     use cairn_ledger::note::NoteId;
     use cairn_primitives::{Amount, Hash32};
+
+    /// The naming pass does not walk an address's notes.
+    ///
+    /// The walk is the most any route spends: up to `ADDRESS_SCAN` index
+    /// lookups under both locks. It ran in the naming pass as well, whose
+    /// answer is never sent and which learns nothing from it, since `holdings`
+    /// reads the index and names no block. Wrapping the call left every test
+    /// green before this, because nothing counts the lookups a pass makes; so
+    /// the one call site is read, the way the HTTP server's header is held
+    /// against its method table.
+    #[test]
+    fn the_naming_pass_does_not_walk_an_address() {
+        const SOURCE: &str = include_str!("api.rs");
+        let signature = "fn address(context: &Context<'_>, reference: &str, request: &Request)";
+        assert!(
+            SOURCE.contains(signature),
+            "the address route is written here"
+        );
+        let rest = SOURCE.split_once(signature).unwrap().1;
+        let route = rest.split_once("\n}\n").unwrap().0;
+        assert!(
+            route.contains("holdings(&record.notes"),
+            "the address route walks the notes"
+        );
+        let before = route.split_once("holdings(&record.notes").unwrap().0;
+        let guard = before.rfind("if context.answering()");
+        assert!(guard.is_some(), "the walk is behind a guard");
+        let guard = guard.unwrap();
+        let between = &before[guard..];
+        assert!(
+            !between.contains(';'),
+            "the guard in front of the walk is the one that decides it, not an \
+             earlier statement: {between}"
+        );
+    }
 
     fn asking(query: &str) -> Request {
         Request {

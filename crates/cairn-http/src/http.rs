@@ -1124,10 +1124,19 @@ fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
         400 => "Bad Request",
+        // The wallet's two security refusals, the only two statuses in the
+        // workspace this table did not name, so they went out as
+        // `HTTP/1.1 403 Error` and `HTTP/1.1 421 Error`. The wallet's
+        // `turned_away` says who reads them: "an operator reading a log should
+        // be able to tell a mistyped address from a page trying its luck".
+        // Eleven statuses produced across three crates, nine named here, and
+        // the two missing were those.
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         408 => "Request Timeout",
         413 => "Content Too Large",
+        421 => "Misdirected Request",
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
@@ -1206,8 +1215,9 @@ pub fn bind(address: SocketAddr) -> io::Result<TcpListener> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        answering, drain, let_go_of_the_done, one_machine, percent_decode, wait_on, Request, Slots,
-        Waiting, ANSWER_DEADLINE, DRAIN_BYTES, MAX_CONNECTIONS, MAX_PER_HOST, REFUSALS_QUEUED,
+        answering, drain, let_go_of_the_done, one_machine, percent_decode, reason, wait_on,
+        Request, Slots, Waiting, ANSWER_DEADLINE, DRAIN_BYTES, MAX_CONNECTIONS, MAX_PER_HOST,
+        REFUSALS_QUEUED,
     };
     use std::collections::VecDeque;
     use std::fmt::Write as _;
@@ -1215,6 +1225,60 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    /// Every status any program in this workspace sends has a reason phrase of
+    /// its own.
+    ///
+    /// Enumerated from the sources that build responses rather than listed
+    /// by hand, since a hand list is where the two missing ones hid: the
+    /// wallet's 403 and 421, its only two security refusals, went out as
+    /// `Error` because this table was kept beside the statuses this crate
+    /// produces and not the ones the crates built on it produce.
+    #[test]
+    fn every_status_the_workspace_sends_has_its_own_reason() {
+        const SOURCES: [(&str, &str); 4] = [
+            ("cairn-http", include_str!("http.rs")),
+            (
+                "cairn-explorer api",
+                include_str!("../../cairn-explorer/src/api.rs"),
+            ),
+            (
+                "cairn-explorer assets",
+                include_str!("../../cairn-explorer/src/assets.rs"),
+            ),
+            (
+                "cairn-wallet serve",
+                include_str!("../../cairn-wallet/src/serve.rs"),
+            ),
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for (_, source) in SOURCES {
+            for opening in ["Response::error(", "text(", "status: ", "Err("] {
+                for (at, _) in source.match_indices(opening) {
+                    let digits: String = source[at + opening.len()..]
+                        .chars()
+                        .take_while(char::is_ascii_digit)
+                        .collect();
+                    if digits.len() == 3 {
+                        seen.insert(digits.parse::<u16>().unwrap());
+                    }
+                }
+            }
+        }
+        assert!(
+            seen.len() >= 9,
+            "the statuses could not be read out of the sources, so this asserts \
+             nothing: {seen:?}"
+        );
+        for status in &seen {
+            assert_ne!(
+                reason(*status),
+                "Error",
+                "status {status} is sent by this workspace and has no reason phrase \
+                 of its own: {seen:?}"
+            );
+        }
+    }
 
     /// Both ends of one loopback connection, the server end non-blocking as
     /// the refusal thread holds it.
