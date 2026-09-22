@@ -282,6 +282,7 @@ fn a_sample(rng: &mut Rng) -> Sample {
 
 fn a_sampled_start(rng: &mut Rng) -> SampledStart {
     SampledStart {
+        genesis: a_proof(rng, 6),
         tip: a_header(rng),
         tail: (0..rng.between(0, 4)).map(|_| a_header(rng)).collect(),
         parent: rng.bool().then(|| a_sample(rng)),

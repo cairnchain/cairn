@@ -1507,6 +1507,7 @@ the order they are most easily read in.
     <tr><td>tip</td><td>block header</td><td>the header everything else is measured against</td></tr>
     <tr><td>history</td><td>forest</td><td>the header forest as it stood before the tip, roots only</td></tr>
     <tr><td>parent</td><td>optional sample</td><td>the header the tip was built on, opened in the tip's own history</td></tr>
+    <tr><td>genesis</td><td>proof</td><td>the path to the first block, at position zero of the tip's own history; empty at a chain one block long</td></tr>
     <tr><td>samples</td><td>sequence of sample</td><td>one opened header per drawn position, in the order drawn</td></tr>
     <tr><td>tail</td><td>sequence of block header</td><td>a run of consecutive headers ending at the tip, oldest first</td></tr>
   </tbody>
@@ -1524,8 +1525,11 @@ A sample is a header followed by a proof.
 
 The proof is the siblings from the leaf up to the root of the tree it sits in,
 nearest first, so `d` is the height of that tree and nothing else. A decoder
-MUST refuse a proof of more than 64 siblings, which is the most trees a forest
-can hold.
+MUST refuse a proof of more than 64 siblings. That is the most trees a forest
+can hold rather than the longest path in one: a leaf count is a `u64`, so the
+tallest tree has height 63, and a proof of 64 siblings decodes and is refused
+when it is verified, where its length has to equal the height of a tree that
+exists. The verdict is the same whichever check refuses it.
 
 A forest on the wire is its leaf count, the number of leaves still standing,
 and one root per tree.
@@ -1703,6 +1707,21 @@ h.total_work - h.difficulty <= value[i]   and   h.total_work > value[i]
 Because work rises with height, the answering height is found by halving over
 the heights rather than by scanning them.
 
+### Where the chain starts
+
+On a network that pins its first block, a node MUST refuse a weighing whose
+genesis path does not verify, at position zero of the tip's history forest,
+against the leaf of the pinned identifier. At a chain one block long the history
+is empty and so is the path, and the tip itself MUST be the pinned block. A
+network that pins nothing skips this.
+
+It is the one check on the joining path that reads the pin. The block rules
+compare a block against it at height zero, and a newcomer that is weighed onto a
+chain and takes its ledger never reads height zero. Without it, a chain started
+from another first block, under the same network number and dated after the
+opening, is weighed on its work alone. The block is not sent, since the reader
+already holds its identifier; only the path is.
+
 ### What each sample must prove
 
 For each drawn value, in draw order, the header opened against it MUST satisfy
@@ -1789,35 +1808,36 @@ to the tip.
     <tr><td class="n">5</td><td>TipClaimsNothing</td><td>the tip states no cumulative work at all</td></tr>
     <tr><td class="n">6</td><td>HistoryMismatch</td><td>the forest is not the one the tip commits to</td></tr>
     <tr><td class="n">7</td><td>HistoryWrongLength</td><td>the forest holds a number of leaves other than the tip's height</td></tr>
-    <tr><td class="n">8</td><td>WrongCount</td><td>not as many samples as the draw asks for</td></tr>
-    <tr><td class="n">9</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>an opened header belongs elsewhere</td></tr>
-    <tr><td class="n">10</td><td>SampleWithoutWork</td><td>an opened header carries no proof of work</td></tr>
-    <tr><td class="n">11</td><td>PastTheTip</td><td>an opened header states more work than the tip</td></tr>
-    <tr><td class="n">12</td><td>WrongPlace</td><td>an opened header does not cover the work drawn</td></tr>
-    <tr><td class="n">13</td><td>NotInHistory</td><td>an opened header is not in the tip's history at its stated height</td></tr>
-    <tr><td class="n">14</td><td>ParentNotOpened</td><td>no parent was opened, on a chain more than one block long</td></tr>
-    <tr><td class="n">15</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>the parent belongs elsewhere</td></tr>
-    <tr><td class="n">16</td><td>ParentNotTheTipsOwn</td><td>the parent is not at the height below, or is not the header the tip names, or carries no work</td></tr>
-    <tr><td class="n">17</td><td>NotInHistory</td><td>the parent is not in the tip's history at the height below</td></tr>
-    <tr><td class="n">18</td><td>ParentNotTheTipsOwn</td><td>the parent's work plus the tip's own is not the tip's total</td></tr>
-    <tr><td class="n">19</td><td>OpeningWorthLessThanItCost</td><td>the chain below the lowest pinned point states less than one unit a block</td></tr>
-    <tr><td class="n">20</td><td>WorkRunsBackwards</td><td>work falls between two pinned points</td></tr>
-    <tr><td class="n">21</td><td>BlocksWorthLessThanTheyCost</td><td>a stretch states less than that many blocks can be worth</td></tr>
-    <tr><td class="n">22</td><td>BlocksWorthMoreThanTheyCould</td><td>a stretch states more than that many blocks can be worth</td></tr>
-    <tr><td class="n">23</td><td>NothingOpened</td><td>the draw opened nothing, so there is nothing to measure the tip against</td></tr>
-    <tr><td class="n">24</td><td>TailWrongLength</td><td>the run is not the length the pinned header and the tip demand, or that length is past the ceiling</td></tr>
-    <tr><td class="n">25</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a header in the run belongs elsewhere</td></tr>
-    <tr><td class="n">26</td><td>TailWithoutWork</td><td>a header in the run carries no proof of work</td></tr>
-    <tr><td class="n">27</td><td>TailNotConsecutive</td><td>a header in the run does not follow the one below it</td></tr>
-    <tr><td class="n">28</td><td>TailAtTheWrongDifficulty</td><td>above the pinned header, not the difficulty the retarget demands</td></tr>
-    <tr><td class="n">29</td><td>TailOutOfTime</td><td>above the pinned header, not later than the median of its window</td></tr>
-    <tr><td class="n">30</td><td>TailWorkDoesNotAddUp</td><td>above the pinned header, not the work below it plus its own</td></tr>
-    <tr><td class="n">31</td><td>TailMissesWhatWasOpened</td><td>the run does not carry the pinned header, or carries a different one at its height</td></tr>
-    <tr><td class="n">32</td><td>TailNotConsecutive</td><td>the run does not end at the tip</td></tr>
+    <tr><td class="n">8</td><td>NotThisNetworksGenesis</td><td>on a network that pins its first block, the chain does not start from it</td></tr>
+    <tr><td class="n">9</td><td>WrongCount</td><td>not as many samples as the draw asks for</td></tr>
+    <tr><td class="n">10</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>an opened header belongs elsewhere</td></tr>
+    <tr><td class="n">11</td><td>SampleWithoutWork</td><td>an opened header carries no proof of work</td></tr>
+    <tr><td class="n">12</td><td>PastTheTip</td><td>an opened header states more work than the tip</td></tr>
+    <tr><td class="n">13</td><td>WrongPlace</td><td>an opened header does not cover the work drawn</td></tr>
+    <tr><td class="n">14</td><td>NotInHistory</td><td>an opened header is not in the tip's history at its stated height</td></tr>
+    <tr><td class="n">15</td><td>ParentNotOpened</td><td>no parent was opened, on a chain more than one block long</td></tr>
+    <tr><td class="n">16</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>the parent belongs elsewhere</td></tr>
+    <tr><td class="n">17</td><td>ParentNotTheTipsOwn</td><td>the parent is not at the height below, or is not the header the tip names, or carries no work</td></tr>
+    <tr><td class="n">18</td><td>NotInHistory</td><td>the parent is not in the tip's history at the height below</td></tr>
+    <tr><td class="n">19</td><td>ParentNotTheTipsOwn</td><td>the parent's work plus the tip's own is not the tip's total</td></tr>
+    <tr><td class="n">20</td><td>OpeningWorthLessThanItCost</td><td>the chain below the lowest pinned point states less than one unit a block</td></tr>
+    <tr><td class="n">21</td><td>WorkRunsBackwards</td><td>work falls between two pinned points</td></tr>
+    <tr><td class="n">22</td><td>BlocksWorthLessThanTheyCost</td><td>a stretch states less than that many blocks can be worth</td></tr>
+    <tr><td class="n">23</td><td>BlocksWorthMoreThanTheyCould</td><td>a stretch states more than that many blocks can be worth</td></tr>
+    <tr><td class="n">24</td><td>NothingOpened</td><td>the draw opened nothing, so there is nothing to measure the tip against</td></tr>
+    <tr><td class="n">25</td><td>TailWrongLength</td><td>the run is not the length the pinned header and the tip demand, or that length is past the ceiling</td></tr>
+    <tr><td class="n">26</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a header in the run belongs elsewhere</td></tr>
+    <tr><td class="n">27</td><td>TailWithoutWork</td><td>a header in the run carries no proof of work</td></tr>
+    <tr><td class="n">28</td><td>TailNotConsecutive</td><td>a header in the run does not follow the one below it</td></tr>
+    <tr><td class="n">29</td><td>TailAtTheWrongDifficulty</td><td>above the pinned header, not the difficulty the retarget demands</td></tr>
+    <tr><td class="n">30</td><td>TailOutOfTime</td><td>above the pinned header, not later than the median of its window</td></tr>
+    <tr><td class="n">31</td><td>TailWorkDoesNotAddUp</td><td>above the pinned header, not the work below it plus its own</td></tr>
+    <tr><td class="n">32</td><td>TailMissesWhatWasOpened</td><td>the run does not carry the pinned header, or carries a different one at its height</td></tr>
+    <tr><td class="n">33</td><td>TailNotConsecutive</td><td>the run does not end at the tip</td></tr>
   </tbody>
 </table>
 
-Twenty-three follows from the draw being empty, which happens exactly when no
+Twenty-four follows from the draw being empty, which happens exactly when no
 work stands behind the tip. A chain one block long can therefore never be
 weighed, and is read instead.
 
@@ -2079,6 +2099,8 @@ the work, the header commitments, and nothing else. It has:
   from the retarget rather than from anyone's word;
 - the anchor's own place in the tip's header forest, rebuilt leaf by leaf from
   the run rather than taken from a proof;
+- on a network that pins its first block, that block's place at position zero
+  of the same forest, so the chain it holds is one that starts there;
 - the ledger reproducing the anchor's state root, and the anchor's supply at or
   below what the schedule has paid.
 
@@ -2281,9 +2303,9 @@ There are two version numbers in this protocol and they are compared
 differently.
 
 **The protocol version is compared for equality.** It is a `u32` in the
-handshake, it is 7 today, and a node MUST close the connection with a peer
-carrying anything else. What that costs is that a node on six and a node on
-seven turn each other away rather than talking; what it buys is that a message
+handshake, it is 9 today, and a node MUST close the connection with a peer
+carrying anything else. What that costs is that a node on one version and a node
+on the next turn each other away rather than talking; what it buys is that a message
 whose meaning changed is never read under the old meaning. The alternative,
 adding a question without saying so, is worse than it looks: a node on the older
 version meeting the new question cannot decode it, takes that for a peer that is

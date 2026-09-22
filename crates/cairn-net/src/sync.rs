@@ -1431,7 +1431,27 @@ fn cost_of(message: &Message, peer: &PeerState) -> u32 {
             let carried = u32::try_from(headers.len().min(MAX_HEADERS)).unwrap_or(u32::MAX);
             carried.saturating_mul(COST_PER_HEADER_TAKEN)
         }
-        _ => COST_TRIVIAL,
+        // Named rather than left to a default, which is what this table had:
+        // `_ => COST_TRIVIAL` covered these six, so a message added later
+        // would have been priced at one unit by nobody's decision. The
+        // allowance's other table, `taken_before_the_allowance` in `node.rs`,
+        // is exhaustive for exactly that reason and says so, and this is the
+        // table the reason matters most for. `Chain` is the one worth reading:
+        // it opens a catch-up, and its price came from the default rather
+        // than from anybody weighing what a catch-up draws.
+        //
+        // The greeting pair never reaches here, since `on_message` answers
+        // them first, and a keepalive costs what it carries, which is
+        // nothing. A `Chain` is a count and a height, whatever it then asks
+        // for being priced as the blocks arrive. A `JoinPart` is taken before
+        // the allowance altogether, as a piece of an answer this node asked
+        // one named peer for.
+        Message::Hello(_)
+        | Message::Welcome(_)
+        | Message::Ping(_)
+        | Message::Pong(_)
+        | Message::Chain { .. }
+        | Message::JoinPart { .. } => COST_TRIVIAL,
     }
 }
 
@@ -1611,7 +1631,7 @@ pub fn on_message(
 mod what_an_ask_costs {
     use super::{
         cost_of, what_the_wire_costs, PeerState, ALLOWANCE, BYTES_PER_UNIT, COST_CHAIN, COST_JOIN,
-        COST_PER_BLOCK_SERVED, COST_PER_HEADER_SERVED,
+        COST_PER_BLOCK_SERVED, COST_PER_HEADER_SERVED, COST_TRIVIAL,
     };
     use crate::message::{
         Message, PeerAddress, JOIN_PART_BYTES, MAX_HEADERS, MAX_REQUESTED, MAX_SHARED_ADDRESSES,
@@ -1662,9 +1682,14 @@ mod what_an_ask_costs {
     fn asks_a_window_pays_for(message: &Message) -> u32 {
         let mut peer = PeerState::new(None);
         let cost = cost_of(message, &peer);
+        // Nothing costs less than the cheapest price, so a window that pays
+        // for more asks than this never runs out, and waiting for it would
+        // hang the suite rather than fail it.
+        let most = ALLOWANCE / COST_TRIVIAL;
         let mut asks = 0u32;
         while peer.afford(cost, 0) {
             asks = asks.saturating_add(1);
+            assert!(asks <= most, "a window paid for more asks than it holds");
         }
         asks
     }

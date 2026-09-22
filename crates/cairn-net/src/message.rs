@@ -53,7 +53,15 @@ use cairn_primitives::Hash32;
 /// different list of positions. What it buys is that the depth a newcomer can
 /// be moved by falls to 633 blocks, inside the 1024 a node will undo, where it
 /// used to be 1240 and outside it.
-pub const PROTOCOL_VERSION: u32 = 8;
+///
+/// Nine carries the path to the first block. A weighing now opens position
+/// zero of the tip's history, and a newcomer on a network that pins its first
+/// block refuses a chain that does not start there. Nothing on the joining
+/// path read the pin before, so a chain from another first block, under the
+/// same network number and dated after the opening, was weighed on its work
+/// alone. The field changes the weighing's encoding, so a node on eight could
+/// not read a weighing from nine, and would take it for a peer that is broken.
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Identifiers one announcement may carry.
 pub const MAX_ANNOUNCED: usize = 512;

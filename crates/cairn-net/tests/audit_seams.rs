@@ -361,7 +361,9 @@ fn a_handover_at_the_rules_ceiling_against_what_the_wire_carries() {
     let most_buried = cairn_ledger::handover::MOST_BURIED as usize;
 
     // A cold set proof is one hash per level of the tree the note sits in.
-    // The forest allows sixty four; a chain with 2^36 notes ever spent gives
+    // The deepest tree a forest can hold has sixty three levels, since a leaf
+    // count is a `u64`; the decoder admits sixty four, which is the number of
+    // trees and not a path length. A chain with 2^36 notes ever spent gives
     // thirty six.
     let report = |depth: usize| -> usize {
         let proof = 8 + 4 + depth * 32;

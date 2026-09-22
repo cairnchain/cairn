@@ -25,6 +25,7 @@
     clippy::arithmetic_side_effects
 )]
 
+use cairn_accumulator::forest::ForestProof;
 use cairn_accumulator::Archive;
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::BlockHeader;
@@ -210,6 +211,7 @@ impl Forgery {
         tail.push(tip);
 
         SampledStart {
+            genesis: ForestProof::default(),
             tip,
             tail,
             parent: Some(Sample {

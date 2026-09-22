@@ -247,6 +247,7 @@ impl Padded {
         let tail = self.shown[from..].to_vec();
 
         SampledStart {
+            genesis: ForestProof::default(),
             tip,
             tail,
             parent: Some(open(tip.height - 1)),

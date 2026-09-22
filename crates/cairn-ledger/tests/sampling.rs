@@ -8,6 +8,7 @@
     clippy::arithmetic_side_effects
 )]
 
+use cairn_accumulator::forest::ForestProof;
 use cairn_accumulator::Archive;
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::BlockHeader;
@@ -127,6 +128,7 @@ impl Keeper {
         let from = usize::try_from(deepest.saturating_sub(DIFFICULTY_WINDOW as u64)).unwrap();
         let tail = self.headers[from..=usize::try_from(tip.height).unwrap()].to_vec();
         SampledStart {
+            genesis: ForestProof::default(),
             tip,
             tail,
             parent: Some(Sample {
@@ -206,6 +208,7 @@ fn a_tip_that_overstates_its_work_is_caught() {
     .collect();
 
     let start = SampledStart {
+        genesis: ForestProof::default(),
         tip: forged,
         parent: keeper.open(1).parent,
         tail: keeper.open(1).tail,
@@ -229,6 +232,7 @@ fn a_history_the_tip_does_not_commit_to_is_refused() {
     let other = Keeper::build(HEIGHT / 2);
 
     let start = SampledStart {
+        genesis: ForestProof::default(),
         history: other.before_tip.forest().roots_only(),
         ..keeper.open(16)
     };
@@ -420,7 +424,12 @@ fn a_keeper_answers_a_draw_it_did_not_choose() {
     .expect("a keeper can answer");
 
     assert_eq!(start.samples.len(), 64);
-    let weighed = check_start(&start, 64, NOW, &params()).expect("and the answer stands up");
+    // Weighed by a newcomer that pins the keeper's first block, so the path to
+    // it is asked for too. The draw does not read the pin, so the keeper
+    // answered the same questions.
+    let mut pinned = params();
+    pinned.genesis = Some(keeper.headers[0].id());
+    let weighed = check_start(&start, 64, NOW, &pinned).expect("and the answer stands up");
     assert_eq!(weighed.total_work, tip.total_work);
 
     // The heights it opened are the ones the draw asked about, found by
@@ -446,6 +455,32 @@ fn a_keeper_answers_a_draw_it_did_not_choose() {
             Some(sample.header.height),
         );
     }
+}
+
+/// A chain one block long has nothing before its tip, so the path to the first
+/// block is empty rather than a reason not to answer. The newcomer then refuses
+/// the chain for having nothing to weigh, and not for where it starts.
+#[test]
+fn a_keeper_of_one_block_opens_an_empty_path_to_it() {
+    let keeper = Keeper::build(1);
+    let tip = keeper.tip();
+    let start = open_start(
+        &tip,
+        keeper.before_tip.forest().roots_only(),
+        64,
+        &params(),
+        |height| keeper.headers.get(usize::try_from(height).ok()?).copied(),
+        |height| keeper.before_tip.prove(height),
+    )
+    .expect("a keeper of one block answers as it did before the path was asked for");
+    assert_eq!(start.genesis, ForestProof::default());
+
+    let mut pinned = params();
+    pinned.genesis = Some(tip.id());
+    assert_eq!(
+        check_start(&start, 64, NOW, &pinned).map(|weighed| weighed.height),
+        Err(StartError::NothingOpened)
+    );
 }
 
 /// A node that validates and nothing more says so rather than guessing.
@@ -548,6 +583,7 @@ fn a_chain_padded_out_with_weightless_blocks_is_refused() {
     // The forger mines a header of its own to sit under the tip, so that the
     // tip has a parent to open. At the floor every hash satisfies it.
     let start = SampledStart {
+        genesis: ForestProof::default(),
         tip: forged,
         parent: Some(Sample {
             header: stand_on,

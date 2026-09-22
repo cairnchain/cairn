@@ -29,6 +29,7 @@
     clippy::print_stdout
 )]
 
+use cairn_accumulator::forest::ForestProof;
 use cairn_accumulator::{Archive, Forest};
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader};
@@ -147,6 +148,7 @@ impl Keeper {
         tail.push(tip);
 
         SampledStart {
+            genesis: ForestProof::default(),
             tip,
             tail,
             parent: Some(Sample {
