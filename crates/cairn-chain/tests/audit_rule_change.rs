@@ -218,6 +218,43 @@ fn the_schedule_is_what_turns_a_bad_block_into_an_admission() {
     );
 }
 
+/// A block below the version the rules require is the other direction, and it
+/// is the block's fault rather than the reader's: this build knows the version
+/// it carries and the rules where it sits. So it is remembered, and offered
+/// again it is answered without being judged again.
+///
+/// Nothing else held this. `WrongVersion` could leave the list of verdicts a
+/// header settles and every test stayed green, the node judging the same bad
+/// block afresh for whoever sent it next.
+#[test]
+fn a_block_below_the_required_version_is_condemned_for_good() {
+    let miner = wallet(1);
+    let params = ConsensusParams::testnet();
+    let mut chain = Miner::new(params);
+    let before = chain.mine_empty(&miner, 2, 600);
+    let behind = chain.candidate(&miner, Some(BLOCK_VERSION - 1), 600);
+
+    let mut store = ChainStore::new(params);
+    feed(&mut store, &before);
+
+    let refused = store.add_block(behind.clone(), NOW).unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            ChainError::InvalidBlock {
+                source: BlockError::WrongVersion { .. },
+                ..
+            }
+        ),
+        "a version this build knows and the rules do not ask for: {refused:?}"
+    );
+    let again = store.add_block(behind, NOW).unwrap_err();
+    assert!(
+        matches!(again, ChainError::KnownBad { .. }),
+        "remembered, not judged again: {again:?}"
+    );
+}
+
 /// A branch that is heavier and crosses the change.
 ///
 /// The node rewinds onto the fork point, applies its way up, and meets the
