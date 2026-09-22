@@ -1225,7 +1225,7 @@ impl Decode for Handover {
 /// The rules a chain runs under decide the real depth, and `accept` checks
 /// against that. This is the ceiling on what will be read off a wire at all,
 /// so a sender cannot make a reader reserve for a window no network allows.
-const MAX_MATURING: usize = 1 << 16;
+pub const MAX_MATURING: usize = 1 << 16;
 
 fn decode_maturing(reader: &mut Reader<'_>) -> Result<Vec<Maturing>, CodecError> {
     let count = usize::try_from(u32::decode_from(reader)?).unwrap_or(usize::MAX);
@@ -1264,7 +1264,7 @@ fn decode_buried(reader: &mut Reader<'_>) -> Result<Vec<BlockHeader>, CodecError
 /// The rules a chain runs under decide the real cap, and `accept` checks
 /// against that. This is the ceiling on what will be read off a wire at all,
 /// so a sender cannot make a reader reserve for a hot set no network allows.
-const MAX_HOT: usize = 1 << 20;
+pub const MAX_HOT: usize = 1 << 20;
 
 fn decode_hot(reader: &mut Reader<'_>) -> Result<Vec<(NoteId, HotEntry)>, CodecError> {
     let count = usize::try_from(u32::decode_from(reader)?).unwrap_or(usize::MAX);

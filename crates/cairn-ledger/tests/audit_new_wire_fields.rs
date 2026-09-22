@@ -36,7 +36,7 @@
 
 use cairn_accumulator::forest::{Forest, ForestProof};
 use cairn_ledger::block::{BlockHeader, BLOCK_VERSION};
-use cairn_ledger::handover::{Handover, MOST_BURIED};
+use cairn_ledger::handover::{Handover, MAX_HOT, MAX_MATURING, MOST_BURIED};
 use cairn_ledger::note::NetworkId;
 use cairn_ledger::sampling::{Sample, SampledStart, SAMPLES};
 use cairn_primitives::codec::{CodecError, Decode, Encode};
@@ -249,5 +249,63 @@ fn minimal_handover() -> Handover {
         headers: Forest::new(),
         buried: Vec::new(),
         recent: Vec::new(),
+    }
+}
+
+/// Every count the handover's decoder bounds, asked at the value of its own
+/// bound and one past it.
+///
+/// The sibling above asks what a hostile count does. This asks where the line
+/// is, which is the other half: each of these three comparisons could be
+/// turned into `>=` with the whole suite green, and a decoder refusing a
+/// handover of exactly the ceiling refuses one the rules allow. `cargo
+/// mutants` found all three.
+///
+/// The offsets are worked out from the encoding rather than written down, and
+/// the last one is checked against the length of the whole value, so a field
+/// moving in the format moves these with it or fails here.
+#[test]
+fn every_bounded_count_is_read_at_its_own_ceiling_and_refused_one_past_it() {
+    let handover = minimal_handover();
+    let bytes = handover.encode();
+    let hot_at = handover.at.encode().len()
+        + handover.tip.encode().len()
+        + handover.tip_history.encode().len()
+        + handover.anchor.encode().len()
+        + handover.cold.encode().len()
+        + handover.headers.encode().len();
+    let grace_at = hot_at + 4;
+    let grace_proofs_at = grace_at + 4;
+    let maturing_at = grace_proofs_at + 4;
+    let recent_at = maturing_at + 4 + handover.supply.encode().len();
+    let buried_at = recent_at + 4;
+    assert_eq!(
+        bytes.len(),
+        buried_at + 4,
+        "the counts of an empty handover are where this says they are"
+    );
+
+    let bounded: [(usize, usize, &str); 3] = [
+        (hot_at, MAX_HOT, "Handover hot set"),
+        (maturing_at, MAX_MATURING, "Handover maturity window"),
+        (
+            buried_at,
+            usize::try_from(MOST_BURIED).unwrap(),
+            "Handover buried run",
+        ),
+    ];
+
+    for (at, ceiling, name) in bounded {
+        for (count, refused_by_the_ceiling) in [(ceiling, false), (ceiling + 1, true)] {
+            let mut bent = bytes.clone();
+            bent[at..at + 4].copy_from_slice(&u32::try_from(count).unwrap().to_le_bytes());
+            let refused = Handover::decode(&bent).expect_err("no bytes behind any of these counts");
+            assert_eq!(
+                matches!(refused, CodecError::InvalidValue { type_name } if type_name == name),
+                refused_by_the_ceiling,
+                "a count of {count} against a ceiling of {ceiling} for {name} was \
+                 answered `{refused}`"
+            );
+        }
     }
 }
