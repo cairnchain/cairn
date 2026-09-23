@@ -103,6 +103,55 @@ fn feed(store: &mut ChainStore, blocks: &[Block]) -> Vec<Accepted> {
         .collect()
 }
 
+/// Both halves of what a first block must be, not just the pair together.
+///
+/// A node holding nothing takes only a genesis, and a genesis is two things:
+/// height zero, and no parent. The test below offers a block that is neither,
+/// so the two conditions could be read as one without it noticing, and a
+/// first block claiming height five with no parent would have been taken and
+/// the node would have reported that height.
+///
+/// What the refusal is matters as much as that there is one. `NotGenesis` is
+/// read in `cairn-net` beside `UnknownParent`, as a signal to go and fetch
+/// what is missing. A block that slipped past this and was refused further in
+/// would come back as a verdict about the block instead, and the peer that
+/// offered it would be blamed for a chain this node has not started.
+#[test]
+fn a_first_block_missing_either_half_of_a_genesis_is_refused() {
+    let params = params();
+    let miner = wallet(1);
+    let mut branch = Branch::new(params);
+    let blocks = branch.mine_empty(&miner, 1, 600);
+    let genesis = &blocks[0];
+
+    // Height zero, and a parent all the same. Mined again, because bending a
+    // header gives it a new identifier and a node refuses one carrying no
+    // work before it asks anything else.
+    let mut orphan = genesis.clone();
+    orphan.header.previous = Hash32::from_bytes([7; 32]);
+    let orphan = mine_block(orphan, ATTEMPTS).expect("a nonce exists");
+
+    // No parent, and a height all the same. This is the one that would have
+    // been taken: a node holding nothing would have stood on it and answered
+    // that it was five blocks along.
+    let mut adrift = genesis.clone();
+    adrift.header.height = 5;
+    let adrift = mine_block(adrift, ATTEMPTS).expect("a nonce exists");
+
+    for (what, block) in [
+        ("a genesis with a parent", orphan),
+        ("a first block numbered elsewhere", adrift),
+    ] {
+        let mut store = ChainStore::new(params);
+        assert_eq!(
+            store.add_block(block, NOW),
+            Err(ChainError::NotGenesis),
+            "{what} is not a genesis, and the refusal has to say so"
+        );
+        assert!(store.is_empty(), "{what} left nothing behind");
+    }
+}
+
 #[test]
 fn the_first_block_must_be_a_genesis() {
     let params = params();
