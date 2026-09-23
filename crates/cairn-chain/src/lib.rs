@@ -559,6 +559,14 @@ struct StoredBlock {
 /// transfer against its wire form, both of which only make the real figure
 /// larger. What it buys is that the ceiling is now within a factor of two of
 /// what the smallest block really costs rather than a fifth of it.
+///
+/// A floor is also why one mutation of the line below lives. Turning `+` into
+/// `-` or `*`, or `/` into `*`, each changes the figure by enough that the
+/// count of what a node holds no longer matches what it was fed, and the
+/// suite says so. Turning `/` into `%` changes it by at most seven bytes in
+/// about a hundred and twenty, which no honest property distinguishes: both
+/// values are floors on the same real cost, and pinning this one to the byte
+/// would make the test a restatement of the line it guards.
 pub const HELD_OVERHEAD: usize = {
     let entry = size_of::<Hash32>() + size_of::<StoredBlock>();
     entry + entry / 8
@@ -800,10 +808,18 @@ impl Branch {
     /// bounded by what this node keeps off the one it follows.
     fn settle(&mut self) {
         while self.recent.len() > HELD_WINDOW {
-            if let Some(gone) = self.recent.pop_front() {
-                self.at.remove(&gone);
-                self.from = self.from.saturating_add(1);
-            }
+            // The branch that cannot happen ends the loop rather than taking
+            // an empty turn. A deque longer than the window has something to
+            // give, so this never fires; written the other way it spins for
+            // ever the moment the comparison above is wrong, which a mutation
+            // pass demonstrated by burning two hundred seconds on it. A
+            // condition that can stop being true and a body that can stop
+            // making progress belong to the same loop.
+            let Some(gone) = self.recent.pop_front() else {
+                break;
+            };
+            self.at.remove(&gone);
+            self.from = self.from.saturating_add(1);
         }
     }
 
