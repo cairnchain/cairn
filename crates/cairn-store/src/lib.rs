@@ -366,6 +366,29 @@ fn move_into_place(staged: &Path, target: &Path) -> std::io::Result<()> {
 /// happened. Reading the two as one failure means describing the file on the
 /// disk wrongly, which for a log whose positions are heights is the worst
 /// answer available.
+///
+/// Nothing in the suite measures any of this, and that is a fact about what a
+/// test can do rather than a gap to fill. A mutation pass over this file made
+/// this function answer `Ok(())` without doing anything, made
+/// [`sync_directory`] do the same, made [`write_beside_and_move`] do the same,
+/// and read the guard below as `true`, as `false` and with its `!` removed.
+/// Six mutations, six survivors, with the whole of `cairn-store` green.
+///
+/// They survive because what they change is only visible after a machine
+/// stops. `audit_a_compaction_stopped_at_each_step.rs` says the same thing
+/// from the other side and in as many words: the states it builds are
+/// "constructed rather than crashed into", and "whether the ordering actually
+/// leaves only those states is a claim about `fsync` that nothing here can
+/// reach". A test cannot cut the power, so a missing wait is a test that
+/// passes.
+///
+/// The guard below is the one part that is not about power at all. It is for
+/// a path with no directory in it, where the parent is the empty string and
+/// opening it would fail: a node given an empty data directory writes
+/// `blocks.log` and nothing else. Read the other way round, that write fails
+/// for a node whose disk is fine. Reaching it from a test means writing into
+/// whatever directory the test process happens to be in, which is the
+/// repository, so it is written down here instead.
 pub(crate) fn sync_the_directory_of(path: &Path) -> std::io::Result<()> {
     match path.parent() {
         Some(directory) if !directory.as_os_str().is_empty() => sync_directory(directory),
