@@ -2917,32 +2917,46 @@ impl ChainStore {
     /// blocks nothing sized left the node holding 42 MB, the sweep ran and
     /// dropped none of it, and each further block a peer offered was another
     /// two megabytes with nothing to take it back.
-    /// What measures this, measured rather than assumed: the last line of it,
-    /// and nothing else.
+    /// What measures this, measured rather than assumed: the count it looks
+    /// at, the join, and both halves of the `retain`. Not the bytes.
     ///
-    /// Deleting the whole function is caught, which reads like cover and is
-    /// not: what that deletes is the unconditional call to
-    /// [`Self::forget_oldest_side_blocks`] at the end. Everything the function
-    /// does for itself survives being read the other way round. Nine
-    /// mutations, nine survivors, with the chain suite and the network suite
-    /// both green: either threshold moved or inverted, the join between them
-    /// turned to `and`, and either half of the `retain` turned around, which
-    /// is the one that drops the node's own branch.
+    /// Deleting the whole function reads like cover for all of it and is not:
+    /// what that deletes is the unconditional call to
+    /// [`Self::forget_oldest_side_blocks`] at the end, so it was caught while
+    /// everything the function does for itself survived being read the other
+    /// way round. Nine mutations, nine survivors, with the chain suite and the
+    /// network suite both green. The reason is that the two sweeps overlap
+    /// almost exactly: what this one drops is what a rewind can no longer
+    /// reach, what the other drops is the oldest off the branch, and the
+    /// oldest is what falls out of reach first.
     ///
-    /// The reason is that the two sweeps overlap almost exactly. What this one
-    /// drops is what a rewind can no longer reach; what the other drops is the
-    /// oldest off the branch, and the oldest is what falls out of reach first.
-    /// The input that separates them is pressure coming from the branch rather
-    /// than from branches this node is not on: `held_bytes_ceiling` counts a
-    /// full window at the largest block the rules allow, and `hold` counts
-    /// [`HELD_OVERHEAD`] on top of each, so a window of near-maximum blocks
-    /// crosses the ceiling while what is held off the branch is well under
-    /// [`MAX_SIDE_BYTES`] and the second sweep does nothing. Building that
-    /// wants a thousand blocks at the size limit, which is why no fixture
-    /// here has one.
+    /// Five are measured now, by
+    /// `audit_what_a_stranger_can_make_a_node_hold.rs`
+    /// `::what_a_rewind_can_no_longer_reach_is_dropped_before_it_is_oldest`.
+    /// It fills to the one count that makes this sweep fire while the other
+    /// has nothing to do, then moves only the cutoff. That kills the count
+    /// read as `<` or `==`, the join read as `and`, and either half of the
+    /// `retain` turned around, which is the half that drops the node's own
+    /// rivals of its tip.
+    ///
+    /// Four still live, and they are not the same kind of gap.
+    ///
+    /// The count read as `>=` fires one entry earlier and is otherwise the
+    /// same sweep. Nothing here can call that a defect without pinning the
+    /// slack itself, which is a restatement of the line.
+    ///
+    /// The three readings of the byte threshold want pressure coming from the
+    /// branch rather than from branches this node is not on:
+    /// `held_bytes_ceiling` counts a full window at the largest block the
+    /// rules allow, and `hold` counts [`HELD_OVERHEAD`] on top of each, so a
+    /// window of near-maximum blocks crosses the ceiling while what is held
+    /// off the branch is under [`MAX_SIDE_BYTES`] and the second sweep does
+    /// nothing. That wants a thousand blocks at the size limit, which is why
+    /// no fixture here has one, and the margin it would stand on is the
+    /// window times [`HELD_OVERHEAD`]: about a hundred and twenty kilobytes.
     ///
     /// Written down rather than left to be assumed. The next reader counting
-    /// this as measured is the failure the note above
+    /// the byte half as measured is the failure the note above
     /// `forget_oldest_side_blocks` describes, from the other side.
     fn forget_unreachable_branches(&mut self) {
         let limit = MAX_REORG_DEPTH.saturating_add(MAX_SIDE_BLOCKS);

@@ -241,7 +241,8 @@ fn offer_side_blocks(rules: ConsensusParams, bytes: usize, count: u64) -> (usize
 /// unchanged: what enforces both limits is `forget_oldest_side_blocks`, whose
 /// own note says `MAX_SIDE_BLOCKS` "was a trigger and never a bound" until it
 /// was made one. The first sweep drops what is out of reach; this is what the
-/// second one settles at.
+/// second one settles at. What the first one does for itself is measured by
+/// the test at the end of this file, on the one input that separates them.
 #[test]
 fn the_sweep_keeps_the_rivals_inside_the_window_and_counts_them() {
     let rules = params();
@@ -586,5 +587,131 @@ fn the_identifiers_a_node_can_name_are_each_named_once_and_in_order() {
         distinct.len(),
         held.len(),
         "an identifier is named twice, so counting this list counts it twice"
+    );
+}
+
+/// What a rewind can no longer reach is dropped for being out of reach, and
+/// not for being the oldest thing off the branch.
+///
+/// `forget_unreachable_branches` and `forget_oldest_side_blocks` run one after
+/// the other and almost always want the same blocks gone, which is why the
+/// test above can say that moving either threshold of the first one changes
+/// nothing it measures. Everything the first one does for itself was measured
+/// by the second: nine mutations of it survived both this package's suite and
+/// `cairn-net`'s.
+///
+/// The input that separates them has to make the first sweep fire while the
+/// second has nothing to do, and there is exactly one shape of it. The second
+/// is inert while what is held off the branch is at most `MAX_SIDE_BLOCKS`,
+/// the branch itself settles at `HELD_WINDOW`, and the first fires above
+/// `MAX_REORG_DEPTH + MAX_SIDE_BLOCKS`. Those three numbers leave a single
+/// point: `HELD_WINDOW + MAX_SIDE_BLOCKS`, which is one over the trigger,
+/// because `HELD_WINDOW` is one more than `MAX_REORG_DEPTH`. So the fixture
+/// fills to exactly that and no other count would do.
+///
+/// Then the only thing that moves is the cutoff. The rivals sit one height
+/// above the oldest the branch still names, so two more blocks of the node's
+/// own carry the cutoff past them, with the population off the branch
+/// unchanged either side of it. Held before, gone after, and the second sweep
+/// could not have been what dropped them: it was handed the same count and
+/// the same bytes before, and dropped nothing.
+///
+/// The rival of the tip is the other half. It is off the branch too, and far
+/// inside the window, so it distinguishes the sweep that reads the branch
+/// *and* the height from one that reads the branch alone.
+#[test]
+fn what_a_rewind_can_no_longer_reach_is_dropped_before_it_is_oldest() {
+    let rules = params();
+    let miner = wallet(1);
+    let mut shared = Chain::new(rules);
+    let chain = shared.mine_empty(&miner, MAX_REORG_DEPTH + 60);
+
+    let mut store = ChainStore::new(rules);
+    for block in &chain {
+        store.add_block(block.clone(), NOW).unwrap();
+    }
+    let tip = store.height().expect("a chain to stand on");
+
+    // A rival of the tip: off the branch, and as far from the cutoff as this
+    // node holds. Nothing about reach can justify dropping it.
+    let under_tip = store.id_at(tip - 1).expect("the block below the tip");
+    let recent = side_block(tip, under_tip, 0, 1, &wallet(9));
+    let recent_id = recent.id();
+    assert_eq!(
+        store.add_block(recent, NOW).unwrap(),
+        Accepted::SideBranch,
+        "a rival of the tip was not held aside"
+    );
+
+    // One height above the oldest the branch still names, so their parent is
+    // on the branch and stays there however often the sweep runs: a rival
+    // hanging off a block the sweep is about to drop would be refused for an
+    // unknown parent rather than held.
+    let oldest = tip - MAX_REORG_DEPTH as u64;
+    let at = oldest + 1;
+    let parent = store
+        .id_at(oldest)
+        .expect("the oldest height the branch names");
+
+    let trigger = MAX_REORG_DEPTH + MAX_SIDE_BLOCKS;
+    let mut ancient = Vec::new();
+    for nonce in 0..MAX_SIDE_BLOCKS as u64 {
+        if store.len() > trigger {
+            break;
+        }
+        let block = side_block(at, parent, 0, nonce, &wallet(9));
+        let id = block.id();
+        assert_eq!(
+            store.add_block(block, NOW).unwrap(),
+            Accepted::SideBranch,
+            "a losing block was not held aside"
+        );
+        ancient.push(id);
+    }
+    assert!(
+        store.len() > trigger,
+        "{} rivals left the node holding {} entries, which is under the {trigger} the \
+         first sweep looks at, so this fixture no longer reaches it",
+        ancient.len(),
+        store.len()
+    );
+
+    // What says the second sweep is not the one under measurement. It is
+    // handed this population now and drops none of it, and it is handed the
+    // same population after the cutoff moves.
+    assert!(
+        ancient.iter().all(|id| store.contains(id)),
+        "the sweep by age has already run, so what the sweep by reach does is \
+         hidden behind it again and this fixture separates nothing"
+    );
+    assert!(
+        store.contains(&recent_id),
+        "the rival of the tip is already gone"
+    );
+    let before = store.len();
+
+    // Two, because the cutoff has to pass the height the rivals sit at, and it
+    // stands one below them.
+    for block in shared.mine_empty(&miner, 2) {
+        store.add_block(block, NOW).unwrap();
+    }
+
+    assert!(
+        ancient.iter().all(|id| !store.contains(id)),
+        "the node still holds blocks no rewind it allows can reach: {} entries against \
+         {before} before its branch moved by two",
+        store.len()
+    );
+    assert!(
+        store.contains(&recent_id),
+        "the sweep dropped a rival of the tip, which is inside the window and is what \
+         a fork choice would have to switch to"
+    );
+    assert!(
+        store.len() <= HELD_WINDOW + 1,
+        "the branch and the one rival still worth holding is {} entries, and the node \
+         holds {}",
+        HELD_WINDOW + 1,
+        store.len()
     );
 }
