@@ -200,3 +200,83 @@ fn a_changed_byte_is_refused_even_when_the_index_entry_beside_it_is_not() {
 }
 
 use cairn_primitives::codec::Encode;
+
+/// A third fault, and what asking the wrong field of it used to cost.
+///
+/// The test above stands on two faults: a byte of record two's state root,
+/// which only the full header check can see, and the index entry for record
+/// three, which is how that check used to be reached. `header_after` is what
+/// reaches it anyway, through the log.
+///
+/// This adds the third: record three's own length prefix. `header_after` read
+/// that length and gave up when it was past the end of the log or past the
+/// largest record there can be. Giving up is not neutral. The caller then
+/// falls back to the record *before*, which names only this one's `previous`
+/// field — forty bytes of a header that is hundreds — and the flipped state
+/// root is not among them. Measured: the node served a block nobody mined.
+///
+/// The length says how far the record runs and nothing about the header,
+/// which sits at a fixed offset and is a fixed width. So the length is no
+/// longer asked. The read is bounded by `HEADER_BYTES` whatever the length
+/// says, and a file too short to hold one fails the read, so nothing about
+/// the giving up was protecting anything.
+#[test]
+fn a_length_that_will_not_read_does_not_buy_the_record_beside_it_a_pass() {
+    let blocks = chain(6);
+    let directory = scratch("three-faults");
+    {
+        let (mut log, _) = BlockLog::open(&directory).unwrap();
+        for block in &blocks {
+            log.append(block).unwrap();
+        }
+    }
+    let index = std::fs::read(directory.join(BLOCK_INDEX)).unwrap();
+    let start_of_two = u64::from_le_bytes(index[8..16].try_into().unwrap());
+    let end_of_two = u64::from_le_bytes(index[16..24].try_into().unwrap());
+
+    // One: a byte of record two's state root, which the record's own
+    // transactions root does not cover and only its neighbour can see.
+    let at = start_of_two + STATE_ROOT_IN_RECORD as u64;
+    let before = std::fs::read(directory.join(BLOCK_LOG)).unwrap()[at as usize];
+    put(&directory.join(BLOCK_LOG), at, &[before ^ 0x01]);
+    // Two: the index entry that ends record three, so the neighbour cannot be
+    // found the ordinary way.
+    put(&directory.join(BLOCK_INDEX), 3 * 8, &u64::MAX.to_le_bytes());
+    // Three: record three's own length prefix.
+    put(
+        &directory.join(BLOCK_LOG),
+        end_of_two,
+        &u32::MAX.to_le_bytes(),
+    );
+
+    let (log, recovered) = BlockLog::open(&directory).unwrap();
+    assert_eq!(recovered.blocks, 6, "the open still finds six records");
+
+    let answer = log.read_at(2);
+    assert!(
+        matches!(answer, Err(StoreError::Unlinked { height: 2 })),
+        "height two is damaged in a place only its neighbour can see, and the \
+         neighbour is still there to see it however little sense its length \
+         prefix makes. It answered {answer:?}"
+    );
+
+    // And the records the damage does not reach are untouched by the change.
+    // Three and four are not among them and never were: the index entry that
+    // was broken is the end of one and the start of the other, so both are
+    // refused for that, which is the rule this file keeps about a derived
+    // file costing the records it covers.
+    for height in [0u64, 1, 5] {
+        let block = log
+            .read_at(height)
+            .unwrap_or_else(|error| panic!("height {height} was refused: {error}"))
+            .unwrap_or_else(|| panic!("height {height} vanished"));
+        assert_eq!(
+            block.encode(),
+            blocks[usize::try_from(height).unwrap()].encode(),
+            "height {height} came back as something else"
+        );
+    }
+
+    drop(log);
+    let _ = std::fs::remove_dir_all(&directory);
+}
