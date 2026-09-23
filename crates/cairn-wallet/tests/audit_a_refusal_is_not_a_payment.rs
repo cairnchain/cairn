@@ -156,7 +156,7 @@ fn a_pool_with_no_room_is_not_a_payment_the_network_took() {
     for block in chain {
         wallet.node().submit_block(block).unwrap();
     }
-    while wallet.follow() > 0 {}
+    wallet.follow_to_the_tip();
     assert!(
         wallet.holdings().spendable > Amount::ZERO,
         "the wallet was meant to have something to send"

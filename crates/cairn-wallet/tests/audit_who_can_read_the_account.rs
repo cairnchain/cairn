@@ -85,7 +85,7 @@ fn a_wallet_with_an_account(name: &str) -> (PathBuf, PathBuf, Block) {
     for block in chain {
         wallet.node().submit_block(block).unwrap();
     }
-    while wallet.follow() > 0 {}
+    wallet.follow_to_the_tip();
     drop(wallet);
     (directory, data.join("history.dat"), one_more)
 }

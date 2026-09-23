@@ -184,7 +184,7 @@ fn a_note_spent_in_a_block_the_account_skipped_is_not_this_key_s_money() {
     for block in chain.iter().take(OURS) {
         wallet.node().submit_block(block.clone()).unwrap();
     }
-    while wallet.follow() > 0 {}
+    wallet.follow_to_the_tip();
     let before = wallet.holdings();
     assert_eq!(
         before.stranded,
@@ -214,7 +214,7 @@ fn a_note_spent_in_a_block_the_account_skipped_is_not_this_key_s_money() {
         "this test needs the block carrying the payment to be one the node has \
          let go of, and the log begins at {readable_from}"
     );
-    while wallet.follow() > 0 {}
+    wallet.follow_to_the_tip();
 
     let after = wallet.holdings();
     let counted_as_ours: Vec<NoteId> = after.unprovable.iter().map(|one| one.id).collect();

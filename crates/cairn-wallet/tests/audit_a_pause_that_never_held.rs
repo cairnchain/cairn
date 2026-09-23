@@ -107,7 +107,7 @@ fn a_wallet_with_more_stranded_than_one_question_carries(name: &str) -> (Wallet,
         for block in &chain {
             wallet.node().submit_block(block.clone()).unwrap();
         }
-        while wallet.follow() > 0 {}
+        wallet.follow_to_the_tip();
         assert!(wallet.node().write_ledger(), "the ledger went down first");
         wallet.node().keep_blocks(1);
         wait_for("the node to drop the blocks below its ledger", || {
@@ -118,7 +118,7 @@ fn a_wallet_with_more_stranded_than_one_question_carries(name: &str) -> (Wallet,
     // Started again from the ledger, which is what takes the places out of the
     // node's hands and leaves the wallet with notes it cannot place.
     let (wallet, _) = Wallet::open(&key_file, rules, &data).unwrap();
-    while wallet.follow() > 0 {}
+    wallet.follow_to_the_tip();
     (wallet, directory)
 }
 

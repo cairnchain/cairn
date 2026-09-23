@@ -138,7 +138,7 @@ fn a_note_a_block_carried_away_is_not_money_this_wallet_still_holds() {
 
     // The account reads its way to the tip, which is the state every face
     // leaves it in and the state a restart loads it in.
-    while wallet.follow() > 0 {}
+    wallet.follow_to_the_tip();
     let before = wallet.holdings();
     assert_eq!(before.spendable, cairn("200"), "four blocks at fifty");
     assert_eq!(before.total(), cairn("200"));
@@ -218,7 +218,7 @@ fn a_note_a_block_carried_away_is_not_money_this_wallet_still_holds() {
 fn a_place_this_wallet_no_longer_owns_is_not_a_place_to_ask_about() {
     let (wallet, mut forge, directory) = funded("spent-cold", 2, 4);
     let recipient = SecretKey::from_bytes(&[9; 32]).public_key();
-    while wallet.follow() > 0 {}
+    wallet.follow_to_the_tip();
 
     let fee = cairn("0.5");
     wallet.send(recipient, cairn("120"), fee).unwrap();

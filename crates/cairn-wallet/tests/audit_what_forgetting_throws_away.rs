@@ -91,7 +91,7 @@ fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
 }
 
 fn catch_the_history_up(wallet: &Wallet) {
-    while wallet.follow() > 0 {}
+    wallet.follow_to_the_tip();
 }
 
 struct Forge {

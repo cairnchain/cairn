@@ -103,7 +103,7 @@ impl Chain {
         for block in &chain {
             wallet.node().submit_block(block.clone()).unwrap();
         }
-        while wallet.follow() > 0 {}
+        wallet.follow_to_the_tip();
         if ledger {
             assert!(wallet.node().write_ledger());
         }

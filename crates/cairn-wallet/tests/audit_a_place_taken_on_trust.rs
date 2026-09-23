@@ -116,12 +116,12 @@ fn a_wallet_whose_node_forgot_the_places(
     for block in &blocks {
         wallet.node().submit_block(block.clone()).unwrap();
     }
-    while wallet.follow() > 0 {}
+    wallet.follow_to_the_tip();
     assert!(wallet.node().write_ledger(), "the node wrote its ledger");
     drop(wallet);
 
     let (wallet, _) = Wallet::open(&key_file, params(), &data).unwrap();
-    while wallet.follow() > 0 {}
+    wallet.follow_to_the_tip();
     (wallet, data)
 }
 
