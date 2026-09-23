@@ -1648,6 +1648,11 @@ impl ChainStore {
             // out of it.
             let created = transfer.outputs.len();
             let freed = outcome.spent_hot.len();
+            // Reading this as `>=` is the same function. On the equal case the
+            // one arm subtracts nothing and the other adds nothing, so the
+            // count comes out where it went in either way, and no input tells
+            // them apart. Written down because a mutation pass will keep
+            // offering it.
             if created > freed {
                 let Some(left) = places.checked_sub(created.saturating_sub(freed)) else {
                     continue;
