@@ -116,4 +116,82 @@ fn the_burial_anchor_can_be_rebuilt() {
          return None on any network where burial == MAX_REORG_DEPTH (testnet-6 \
          and mainnet both do)"
     );
+
+    // And the edge itself, read off what is held rather than off the anchor.
+    // The two were the same number when this was written and are not any more:
+    // the records reach past the anchor now, so everything above says nothing
+    // about where the window ends. Nothing in this workspace had ever gone far
+    // enough for it to end at all, which is a whole edge no fixture stood on:
+    // the chain above is exactly `HELD_WINDOW` long and the first record is
+    // only let go on the block after it.
+    for _ in 0..4 {
+        let block = source.mine(&miner);
+        store.add_block(block, NOW).unwrap();
+    }
+    let tip = store.height().unwrap();
+    // Records cover every height from `undo_from` to the tip, and a rewind
+    // lands on the height below the first of them.
+    let held = u64::try_from(store.undo_records()).unwrap();
+    let undo_from = tip + 1 - held;
+    assert!(
+        undo_from > 1,
+        "the window has trimmed, so there is an edge to stand on"
+    );
+    assert!(
+        store.ledger_at(undo_from - 1).is_some(),
+        "the deepest height a rewind lands on is the one below the first record"
+    );
+    assert!(
+        store.ledger_at(undo_from - 2).is_none(),
+        "and one deeper than that is past what was kept"
+    );
+}
+
+/// What `ledger_at` answers is a ledger at that height, and nothing where it
+/// cannot be at one.
+///
+/// Three things were unmeasured here and each is a different way of handing
+/// back the wrong chain. The test above and the ones beside it ask only
+/// whether an answer came, never what height it is at, and they ask only
+/// about heights at or below the tip.
+///
+/// - The walk down is what makes the answer a ledger at that height. Turned
+///   around it does not run, and the present comes back wearing a height it
+///   does not have. This is the ledger a newcomer is handed.
+/// - Past the tip, one condition read as two answers with the present again,
+///   for a height this node has not reached.
+///
+/// The deep edge is the other half and belongs to the test above, which mines
+/// far enough for the window to trim. It had drifted off that edge: the
+/// records reach further back than when it was written, so it was asking
+/// about a height comfortably inside. It is read off `undo_records` now, so
+/// it stands on the edge wherever the edge moves to.
+#[test]
+fn a_ledger_at_a_height_is_at_that_height_or_is_not_given() {
+    let miner = wallet(1);
+    let mut source = Miner::new();
+    let mut store = ChainStore::new(params());
+    for _ in 0..8 {
+        let block = source.mine(&miner);
+        store.add_block(block, NOW).unwrap();
+    }
+
+    let tip = store.height().unwrap();
+    for height in 0..=tip {
+        let at = store
+            .ledger_at(height)
+            .unwrap_or_else(|| panic!("height {height} is inside the window"));
+        assert_eq!(
+            at.tip().map(|tip| tip.height),
+            Some(height),
+            "the ledger given for height {height} has to be the one at it"
+        );
+    }
+
+    for above in [tip + 1, tip + 2, tip + 1000] {
+        assert!(
+            store.ledger_at(above).is_none(),
+            "height {above} is above the tip {tip} and this node has no ledger there"
+        );
+    }
 }
