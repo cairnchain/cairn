@@ -749,6 +749,56 @@ fn a_transfer_too_large_for_a_block_is_refused_outright() {
     assert!(tight.accept_transfer(ordinary).unwrap());
 }
 
+/// A transfer exactly the size a block has room for is taken.
+///
+/// The bound refuses what no block could carry, and a transfer that fills the
+/// room exactly is one a block carries. Read one place over it becomes the
+/// opposite: the largest payment anyone can make turns into one nobody can
+/// make, and the refusal names a limit the transfer meets.
+///
+/// Nothing stood on that edge. The test above builds a transfer past the
+/// bound and one comfortably under it, so the comparison could be moved
+/// without either of them noticing.
+#[test]
+fn a_transfer_exactly_the_size_a_block_has_room_for_is_taken() {
+    let mut params = params();
+    // Small enough that an ordinary wide spend passes it, so this test builds
+    // a transfer rather than a megabyte.
+    params.max_block_bytes = 4096;
+    let owner = wallet(1);
+    let (store, notes) = funded_widely(2, &owner);
+
+    let (id, note) = notes[0];
+    let wide = wide_spend(&params, id, note, &owner, &wallet(2), pebbles(2_000_000));
+    let bytes = cairn_primitives::codec::Encode::encode(&wide).len();
+
+    // Rules whose room for transfers is this transfer and not one byte more.
+    // Taken from `room_for_transfers` rather than written down, so the two
+    // cannot drift apart and leave this test standing on the wrong edge.
+    let overhead = params.max_block_bytes - ChainStore::room_for_transfers(params.max_block_bytes);
+    params.max_block_bytes = bytes + overhead;
+    assert_eq!(
+        ChainStore::room_for_transfers(params.max_block_bytes),
+        bytes,
+        "the rules have room for exactly this transfer"
+    );
+
+    let mut tight = ChainStore::new(params);
+    for height in 0.. {
+        match store.block_at(height) {
+            Some(block) => tight.add_block(block.clone(), NOW).unwrap(),
+            None => break,
+        };
+    }
+
+    assert_eq!(
+        tight.accept_transfer(wide),
+        Ok(true),
+        "a transfer that fills the room exactly is one a block can carry"
+    );
+    assert_eq!(tight.pool_len(), 1, "and it is waiting");
+}
+
 /// Nothing waits for a block for free any more.
 ///
 /// Zero-fee transfers used to be pooled, and on a quiet chain they were also
