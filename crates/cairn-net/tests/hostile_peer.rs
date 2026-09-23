@@ -707,3 +707,73 @@ fn the_greeting_that_asks_for_the_chain_writes_down_the_work_it_asked_at() {
         "at the work this node held when it asked"
     );
 }
+
+/// Where the line is for asking a peer for its chain.
+///
+/// The test above greets a peer claiming all the work there is, so it says
+/// that a heavier peer is asked and nothing about where "heavier" begins.
+/// `theirs.total_work > local.chain.total_work()` read as `>=` moves the line
+/// one step down, and that step is not one peer's worth of traffic. Every node
+/// on a settled network is at the same work as every other, so every handshake
+/// would answer with a `GetChain` and a locator, and every peer would answer
+/// that with a chain this node already has.
+///
+/// The round trip is the smaller half of it. `chain_asked` is what prices the
+/// blocks that come back as a catch-up, and a node that arms it on every
+/// greeting hands out the catching-up price to peers that carry nothing,
+/// which is the discount the two tests above exist to keep bounded.
+#[test]
+fn a_peer_no_heavier_than_this_node_is_not_asked_for_its_chain() {
+    let mut chain = ChainStore::new(params());
+    let now = 2_000_000_000u64;
+    let ours = holding_work(&mut chain, now);
+    let genesis = chain.genesis().unwrap_or(Hash32::ZERO);
+
+    let hello = |total_work: u128, nonce: u64| {
+        Message::Hello(cairn_net::message::Handshake {
+            version: cairn_net::message::PROTOCOL_VERSION,
+            network: params().network,
+            genesis,
+            tip: Hash32::ZERO,
+            height: 5,
+            total_work,
+            listen: 0,
+            nonce,
+            keeps: Keeps::default(),
+        })
+    };
+
+    let mut level = PeerState::default();
+    let reaction = on_message(&mut solo(&mut chain), &mut level, hello(ours, 7), now);
+    assert!(level.greeted, "the greeting was taken");
+    assert!(
+        !reaction
+            .reply
+            .iter()
+            .any(|said| matches!(said, Message::GetChain { .. })),
+        "a peer at the same work as this node holds nothing this node is \
+         missing, and on a settled network that is every peer it will ever \
+         greet"
+    );
+    assert!(
+        !level.chain_asked,
+        "and nothing it sends afterwards is priced as a catch-up"
+    );
+    assert_eq!(
+        level.work_when_asked, None,
+        "nothing was asked, so there is no work to have asked at"
+    );
+
+    // One step over the line is the whole of the difference.
+    let mut ahead = PeerState::default();
+    let reaction = on_message(&mut solo(&mut chain), &mut ahead, hello(ours + 1, 8), now);
+    assert!(
+        reaction
+            .reply
+            .iter()
+            .any(|said| matches!(said, Message::GetChain { .. })),
+        "a peer with more work than this node is asked for it, which is what \
+         the comparison is for"
+    );
+    assert!(ahead.chain_asked, "and its answer is a catch-up");
+}
