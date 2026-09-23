@@ -998,7 +998,7 @@ proportional to the depth of the set rather than its size. Over half of
 what a hot note costs is the tree that commits to it, which is where the
 room left is.
 
-The implementation is roughly 51 800 lines of Rust with 1 532 tests, no
+The implementation is roughly 53 300 lines of Rust with 1 600 tests, no
 unsafe code, no asynchronous runtime, and five dependencies. Arithmetic
 side effects, slice indexing, and panicking helpers are denied at the
 workspace level. It is small enough to be read, which is the point: a
