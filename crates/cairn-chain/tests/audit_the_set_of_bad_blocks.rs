@@ -136,6 +136,80 @@ fn a_block_that_failed_once_is_not_judged_twice() {
     );
 }
 
+/// A version the rules at this height refuse is remembered like any other
+/// bad header.
+///
+/// `settles_the_header` sorts refusals into two piles: the ones that are
+/// about the block, which go in the set for good, and the ones that are about
+/// the reader, which do not, because an update reverses them. `WrongVersion`
+/// is the one that looks like the second and belongs in the first: this build
+/// knows the version the block carries and knows the rules where it sits, so
+/// no update makes the block right.
+///
+/// Nothing measured which pile it went in. Taking `WrongVersion` out of that
+/// list left every test in this repository passing, and a node would have
+/// judged the same refused block again on every offer, for as long as anybody
+/// kept offering it. That is the whole reason the set exists.
+#[test]
+fn a_version_the_rules_at_this_height_refuse_is_remembered() {
+    let chain = real_chain(3);
+    let mut store = ChainStore::new(params());
+    for block in &chain {
+        store.add_block(block.clone(), NOW).unwrap();
+    }
+    let tip = chain.last().unwrap();
+
+    // Nothing else is wrong with it: the body is the one an honest producer
+    // would publish on this tip, and only the version is not what the rules
+    // at that height require. Version zero rather than one above the ceiling,
+    // which is the other half of the pair and is deliberately not remembered.
+    let miner = SecretKey::from_bytes(&[1; 32]);
+    let rules = params();
+    let mut state = LedgerState::new();
+    for block in &chain {
+        connect_block(&mut state, block, &rules, NOW).unwrap();
+    }
+    let height = state.next_height().unwrap();
+    let coinbase = CoinbaseTransaction::new(
+        height,
+        vec![Note::new(rules.initial_reward, miner.public_key())],
+    );
+    let mut wrong = assemble_block(
+        &state,
+        coinbase,
+        Vec::new(),
+        &rules,
+        tip.header.timestamp + 600,
+        0,
+    )
+    .unwrap();
+    assert_eq!(
+        wrong.header.version, BLOCK_VERSION,
+        "the producer builds at the version the rules ask for"
+    );
+    wrong.header.version = 0;
+    let wrong = mine_block(wrong, ATTEMPTS).expect("a nonce exists");
+    let id = wrong.id();
+
+    assert_eq!(
+        store.add_block(wrong.clone(), NOW),
+        Err(ChainError::InvalidBlock {
+            id,
+            source: BlockError::WrongVersion {
+                height,
+                found: 0,
+                required: BLOCK_VERSION,
+            },
+        }),
+        "the first offer should name the version the rules require"
+    );
+    assert_eq!(
+        store.add_block(wrong, NOW),
+        Err(ChainError::KnownBad { id }),
+        "the second offer should be answered from the set rather than judged again"
+    );
+}
+
 /// What a stranger can make this node remember.
 ///
 /// Every bad block costs its maker a header at difficulty one and nothing
