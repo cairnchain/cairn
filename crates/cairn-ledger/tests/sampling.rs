@@ -13,7 +13,7 @@ use cairn_accumulator::Archive;
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::BlockHeader;
 use cairn_ledger::note::Note;
-use cairn_ledger::pow::{work_of, DIFFICULTY_WINDOW};
+use cairn_ledger::pow::{meets_target, work_of, DIFFICULTY_WINDOW};
 use cairn_ledger::sampling::{
     check_start, covering, draw, levels_of, open_start, seed_of, work_before, Sample, SampledStart,
     StartError,
@@ -634,4 +634,138 @@ fn a_chain_that_sheds_its_difficulty_is_still_weighed() {
             "work is the sum of the difficulties, which is what the bound counts"
         );
     }
+}
+
+/// Every refusal the sample and tail checks can earn, and which one answers.
+///
+/// Twenty two of `StartError`'s refusals are named somewhere in the suite and
+/// six are named nowhere. This is what those six are worth, asked rather than
+/// assumed: two of them are what a weighing answers and had never been
+/// measured, and four are shadowed by a cheaper refusal that answers first.
+///
+/// The order is the point, and is why the four are pinned here rather than
+/// left out. A weighing is what an anonymous stranger hands a node with no
+/// chain, and every check it survives costs this node something: the cheap
+/// comparisons come before the folded paths on purpose, and
+/// `PastTheTip` sits ahead of the proof for exactly that reason, which the
+/// code says where it stands. A table that names which refusal answers is a
+/// table that fails if that order is ever quietly changed.
+#[test]
+fn the_refusals_a_weighing_can_earn_and_the_ones_it_cannot() {
+    let keeper = Keeper::build(HEIGHT);
+    let honest = keeper.open(16);
+    check_start(&honest, 16, NOW, &params()).expect("the honest chain is taken");
+
+    // Difficulty here is the network's floor, where very nearly every hash
+    // meets its target, so a header is made workless by asking more of it
+    // rather than by changing what it says.
+    let workless = |mut header: BlockHeader| -> BlockHeader {
+        header.difficulty = u64::MAX;
+        assert!(
+            !meets_target(&header.id(), header.difficulty),
+            "the floor moved and this no longer makes a workless header"
+        );
+        header
+    };
+    let solved = |mut header: BlockHeader| -> BlockHeader {
+        for nonce in 0..ATTEMPTS {
+            header.nonce = nonce;
+            if meets_target(&header.id(), header.difficulty) {
+                return header;
+            }
+        }
+        panic!("no nonce at difficulty {}", header.difficulty);
+    };
+
+    // A header the tail carries that nobody did the work for. First in the
+    // run, where there is nothing under it to be inconsistent with, so what
+    // answers is the work and not the linking.
+    let mut bent = honest.clone();
+    let at = bent.tail[0].height;
+    bent.tail[0] = workless(bent.tail[0]);
+    assert_eq!(
+        check_start(&bent, 16, NOW, &params()),
+        Err(StartError::TailWithoutWork { at }),
+        "the run up to the tip is where a forger's cheap blocks would live, and \
+         a header in it that nobody mined is the plainest form of that"
+    );
+
+    // A sample stating more work than the whole chain it is drawn from. Said
+    // before its path is folded, which is what keeps a wrong answer cheap to
+    // refuse.
+    let mut bent = honest.clone();
+    bent.samples[0].header.total_work = honest.tip.total_work.saturating_add(1);
+    bent.samples[0].header = solved(bent.samples[0].header);
+    assert_eq!(
+        check_start(&bent, 16, NOW, &params()),
+        Err(StartError::PastTheTip { index: 0 }),
+        "a header inside a chain cannot be worth more than the chain"
+    );
+    // Reading that comparison as `>=` survives this and is equivalent on
+    // anything that can arrive: a sample is drawn from the work standing
+    // behind the tip, so an honest one is worth strictly less than the tip,
+    // and the only input the two readings disagree about is one no draw ever
+    // asks for.
+
+    // The four that answer as something else, each with what answers instead.
+
+    // A sample stating less work than the draw that asked for it: the
+    // placement is read off the same two numbers and is checked first.
+    let mut bent = honest.clone();
+    bent.samples[0].header.total_work = 1;
+    bent.samples[0].header = solved(bent.samples[0].header);
+    assert_eq!(
+        check_start(&bent, 16, NOW, &params()),
+        Err(StartError::WrongPlace { index: 0 }),
+        "so `WorkRunsBackwards` and `OpeningWorthLessThanItCost` are not \
+         reachable by understating a sample: what a sample states is bound to \
+         the work that was drawn for it before any of the shapes below are \
+         looked at"
+    );
+
+    // The parent, likewise: it is held to being the header the tip names, and
+    // changing anything about it changes its identifier.
+    let mut bent = honest.clone();
+    if let Some(parent) = bent.parent.as_mut() {
+        parent.header.total_work = 1;
+        parent.header = solved(parent.header);
+    }
+    assert_eq!(
+        check_start(&bent, 16, NOW, &params()),
+        Err(StartError::ParentNotTheTipsOwn),
+        "the parent is pinned by name, not by its numbers"
+    );
+
+    // A real header of another chain, at the floor of the run. It is not the
+    // one the draw pinned, but what answers is that it does not link: the run
+    // has to end at the tip and be consecutive, so the header it holds at the
+    // pinned height is the tip's own ancestor at that height, and the pinned
+    // sample was proven to be exactly that. `TailMissesWhatWasOpened` is the
+    // check for a disagreement the other rules leave no room for.
+    let another = Keeper::mined_by(HEIGHT, 2);
+    let mut bent = honest.clone();
+    let floor = usize::try_from(bent.tail[0].height).unwrap();
+    bent.tail[0] = another.headers[floor];
+    assert_eq!(
+        check_start(&bent, 16, NOW, &params()),
+        Err(StartError::TailNotConsecutive {
+            at: honest.tail[1].height
+        }),
+        "a run holding somebody else's header does not link, and that is read \
+         before what the run was supposed to carry"
+    );
+
+    // A tip claiming a thousand times its work. The draw is seeded from the
+    // tip and scaled by the work behind it, so inflating it asks different
+    // questions, and the honest answers no longer sit where the new draw
+    // looks.
+    let mut bent = honest.clone();
+    bent.tip.total_work = honest.tip.total_work.saturating_mul(1_000);
+    bent.tip = solved(bent.tip);
+    assert_eq!(
+        check_start(&bent, 16, NOW, &params()),
+        Err(StartError::WrongPlace { index: 0 }),
+        "which is why `BlocksWorthMoreThanTheyCould` cannot be reached by \
+         inflating the tip: the draw moves with it"
+    );
 }
