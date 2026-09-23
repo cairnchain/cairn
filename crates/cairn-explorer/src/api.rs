@@ -22,7 +22,7 @@ use cairn_net::Node;
 use cairn_primitives::codec::Encode;
 use cairn_primitives::{hex, Amount, Hash32};
 
-use crate::index::{Head, Held, Index, NoteRecord, Reading, Size};
+use crate::index::{read_to_the_end, Head, Held, Index, NoteRecord, Reading, Size};
 use cairn_http::{Mark, Writer};
 use cairn_http::{Request, Response};
 
@@ -193,14 +193,48 @@ impl Explorer {
     /// a thousand two hundred blocks, `/api/status` was answered no times at
     /// all while the walk ran, and the one request in flight waited the whole
     /// of it. That is the site the door was opened early to avoid.
+    /// Bounded by the chain it is reading, which is what
+    /// [`read_to_the_end`] is for. This loop had no end but the one the
+    /// walk itself reports, so a walk that stopped being able to say `Done`
+    /// left this thread turning for as long as the process lived. Nothing
+    /// about the site would look wrong: the index is handed back every turn,
+    /// so every route still answers, off an index that stopped moving.
+    ///
+    /// Reaching the bound is not an error and nothing is said about it. The
+    /// walk is driven again from `main`, and a chain that grew under a long
+    /// rebuild is the ordinary reason to come back.
+    ///
+    /// The chain is asked its height once here, for the bound, and not once
+    /// per turn: what this whole shape exists to avoid is holding it while
+    /// blocks are read, and one question before the walk starts is not that.
+    ///
+    /// Standing aside is done at the top of the next turn, on what the last
+    /// one cost, rather than at the bottom of the one just taken. The order of
+    /// the two is the same either way: a turn, then a stand aside, then a
+    /// turn, and no stand aside after the last. Written this way there is
+    /// nothing here to decide, and what decides is [`read_to_the_end`], where
+    /// the whole suite stands on it.
+    ///
+    /// It was written the other way first, as `if reading == Reading::More`
+    /// around the stand aside, and the mutation check on the change said that
+    /// comparison could be turned around with nothing noticing. It could:
+    /// reversed, the walk yields once it has finished and never while it runs,
+    /// which is the failure the paragraph above describes, put back by hand.
     pub(crate) fn refresh(&self) {
-        loop {
-            let began = std::time::Instant::now();
-            if self.read_a_batch() == Reading::Done {
-                return;
+        let reach = self
+            .node
+            .with_chain(cairn_chain::ChainStore::height)
+            .unwrap_or_default();
+        let mut last_turn: Option<std::time::Duration> = None;
+        let _ = read_to_the_end(reach, || {
+            if let Some(took) = last_turn.take() {
+                self.stand_aside(took);
             }
-            self.stand_aside(began.elapsed());
-        }
+            let began = std::time::Instant::now();
+            let reading = self.read_a_batch();
+            last_turn = Some(began.elapsed());
+            reading
+        });
     }
 
     /// Waits for whoever wanted the index to have had it, for no longer than

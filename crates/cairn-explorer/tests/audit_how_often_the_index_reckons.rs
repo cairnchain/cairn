@@ -33,7 +33,7 @@ use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
 
-use index::{Head, Held, Index, Reading};
+use index::{read_to_the_end, Head, Held, Index};
 
 const NOW: u64 = 2_000_000_000;
 
@@ -107,13 +107,15 @@ fn the_distribution_is_reckoned_on_a_block_in_sixteen_and_not_on_every_one() {
                     .map(Block::id)
             }),
         };
-        while walk.refresh(
-            &head,
-            |height| at(&blocks, height),
-            |height| id_at(&blocks, height),
-            || Some(head.tip),
-        ) == Reading::More
-        {}
+        assert!(
+            read_to_the_end(head.tip, || walk.refresh(
+                &head,
+                |height| at(&blocks, height),
+                |height| id_at(&blocks, height),
+                || Some(head.tip),
+            )),
+            "the walk never said it had reached the tip"
+        );
         if walk.stock_at() != last {
             reckoned += 1;
             last = walk.stock_at();
@@ -149,13 +151,15 @@ fn the_distribution_says_the_height_it_was_worked_out_at() {
         tip: 19,
         at_last_read: None,
     };
-    while walk.refresh(
-        &head,
-        |height| at(&blocks, height),
-        |height| id_at(&blocks, height),
-        || Some(head.tip),
-    ) == Reading::More
-    {}
+    assert!(
+        read_to_the_end(head.tip, || walk.refresh(
+            &head,
+            |height| at(&blocks, height),
+            |height| id_at(&blocks, height),
+            || Some(head.tip),
+        )),
+        "the walk never said it had reached the tip"
+    );
 
     assert_eq!(
         walk.stock_at(),

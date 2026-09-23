@@ -51,7 +51,7 @@ use cairn_net::Node;
 use cairn_primitives::Amount;
 
 use api::Explorer;
-use index::{Head, Held, Index, Reading};
+use index::{read_to_the_end, Head, Held, Index};
 
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
@@ -904,7 +904,15 @@ fn a_refused_read_costs_the_blocks_under_it_nothing() {
         tip,
         at_last_read: None,
     };
-    while index.refresh(&head, read, |_| None, || Some(head.tip)) == Reading::More {}
+    assert!(
+        read_to_the_end(head.tip, || index.refresh(
+            &head,
+            read,
+            |_| None,
+            || Some(head.tip)
+        )),
+        "the walk never said it had reached the tip"
+    );
 
     assert_eq!(
         index.covers(),
@@ -926,7 +934,15 @@ fn a_refused_read_costs_the_blocks_under_it_nothing() {
         tip,
         at_last_read: Some(chain[6].id()),
     };
-    while index.refresh(&head, read, |_| None, || Some(head.tip)) == Reading::More {}
+    assert!(
+        read_to_the_end(head.tip, || index.refresh(
+            &head,
+            read,
+            |_| None,
+            || Some(head.tip)
+        )),
+        "the walk never said it had reached the tip"
+    );
     assert_eq!(index.covers(), Some((0, tip)), "and the hole is filled in");
     assert!(index.locate(&chain[7].coinbase.id()).is_some());
     assert!(index.locate(&chain[0].coinbase.id()).is_some());
@@ -963,7 +979,15 @@ fn a_rebuild_of_the_same_length_still_counts_who_holds_what() {
         tip: 9,
         at_last_read: None,
     };
-    while index.refresh(&head, read, |_| None, || Some(head.tip)) == Reading::More {}
+    assert!(
+        read_to_the_end(head.tip, || index.refresh(
+            &head,
+            read,
+            |_| None,
+            || Some(head.tip)
+        )),
+        "the walk never said it had reached the tip"
+    );
     assert_eq!(index.blocks_read(), 10);
     assert_eq!(index.holders(), 1, "the miner holds what it mined");
 
@@ -972,7 +996,15 @@ fn a_rebuild_of_the_same_length_still_counts_who_holds_what() {
         tip: 20,
         at_last_read: Some(chain[9].id()),
     };
-    while index.refresh(&head, read, |_| None, || Some(head.tip)) == Reading::More {}
+    assert!(
+        read_to_the_end(head.tip, || index.refresh(
+            &head,
+            read,
+            |_| None,
+            || Some(head.tip)
+        )),
+        "the walk never said it had reached the tip"
+    );
     assert_eq!(index.blocks_read(), 10, "ten in, ten out");
     assert_eq!(index.covers(), Some((11, 20)));
     assert_eq!(
