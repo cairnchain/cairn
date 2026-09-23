@@ -324,6 +324,20 @@ impl ConsensusParams {
             // Not yet made. A network exists once its first block does, and
             // that block will be mined in the open on the day it is announced.
             "mainnet" => None,
+            // The network line here changes nothing today and is not
+            // redundant. `NetworkId::TESTNET` is an alias for `TESTNET_6`, and
+            // `Self::testnet()` below spreads that alias in, so naming
+            // `TESTNET_6` again writes the value that was already there:
+            // deleting the line is an equivalent mutation, measured.
+            //
+            // It stops being one the day the alias moves to the next testnet,
+            // which is the day this arm has to keep answering about
+            // testnet-6 while the alias means something else. The guard for
+            // that is `network_rules.rs`
+            // `::the_network_a_rule_set_names_is_the_one_its_first_block_belongs_to`,
+            // which reads the first block off whatever network the rules
+            // name; with this line gone and the alias moved, the two stop
+            // agreeing and it says so.
             "testnet" | "testnet-6" => Some(Self {
                 network: NetworkId::TESTNET_6,
                 genesis: crate::genesis::pinned(NetworkId::TESTNET_6),
