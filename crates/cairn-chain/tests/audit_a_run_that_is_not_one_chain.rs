@@ -72,6 +72,68 @@ fn handed(blocks: usize) -> (LedgerState, Vec<BlockHeader>) {
     (state, headers)
 }
 
+/// A ledger is adopted onto a node with no chain, and onto nothing else.
+///
+/// Replacing a chain a node already follows would be a reorganisation of
+/// unbounded depth, chosen by whoever offered the replacement, which is the
+/// one thing the depth limit exists to refuse. `AlreadyFollowing` is what says
+/// so, and it was a refusal nothing in the workspace had ever produced.
+#[test]
+fn a_node_already_on_a_chain_does_not_take_another_one() {
+    let params = ConsensusParams::testnet();
+    let (state, headers) = handed(8);
+    let (other, other_headers) = handed(6);
+
+    let mut joined = ChainStore::new(params);
+    assert_eq!(joined.adopt(state, &headers), Ok(()));
+    assert_eq!(joined.height(), Some(7));
+
+    assert_eq!(
+        joined.adopt(other, &other_headers),
+        Err(ChainError::AlreadyFollowing),
+        "a second ledger is not a reorganisation anybody gets to ask for"
+    );
+    assert_eq!(
+        joined.height(),
+        Some(7),
+        "and the node is left where it was"
+    );
+}
+
+/// A block that names the tip and does not sit above it is refused, and says
+/// both heights.
+///
+/// The parent link and the height are two claims, and a block is the one that
+/// carries both: a node that took the link alone would file a block at a
+/// height it does not claim, and answer about it there ever after.
+/// `BrokenHeight` was a refusal nothing had ever produced.
+#[test]
+fn a_block_that_names_the_tip_and_not_its_height_is_refused() {
+    let params = ConsensusParams::testnet();
+    let (made, _) = chain(4, &wallet(1));
+    let mut store = ChainStore::new(params);
+    for block in made.iter().take(3) {
+        store.add_block(block.clone(), NOW).unwrap();
+    }
+    let tip = store.height().expect("a chain to stand on");
+
+    let mut bent = made[3].clone();
+    assert_eq!(
+        bent.header.previous,
+        store.id_at(tip).expect("the tip"),
+        "it is built on the tip, which is what makes the height the question"
+    );
+    bent.header.height += 1;
+
+    assert_eq!(
+        store.add_block(bent, NOW),
+        Err(ChainError::BrokenHeight {
+            parent: tip,
+            found: tip + 2,
+        })
+    );
+}
+
 /// A run with a hole in it is refused, and the run it was cut from is taken.
 ///
 /// `Branch::from_tail` reads the run twice over. It files the nth header at the
