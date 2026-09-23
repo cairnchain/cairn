@@ -1630,9 +1630,9 @@ pub fn on_message(
 #[allow(clippy::unwrap_used)]
 mod what_an_ask_costs {
     use super::{
-        a_window_has_turned, cost_of, what_the_wire_costs, PeerState, ALLOWANCE, BYTES_PER_UNIT,
-        COST_CHAIN, COST_JOIN, COST_PER_BLOCK_SERVED, COST_PER_HEADER_SERVED, COST_TRIVIAL,
-        WINDOW_SECONDS,
+        a_window_has_turned, cost_of, what_the_wire_costs, PeerState, Window, ALLOWANCE,
+        BYTES_PER_UNIT, COST_CHAIN, COST_JOIN, COST_PER_BLOCK_SERVED, COST_PER_HEADER_SERVED,
+        COST_TRIVIAL, WINDOW_SECONDS,
     };
     use crate::message::{
         Message, PeerAddress, JOIN_PART_BYTES, MAX_HEADERS, MAX_REQUESTED, MAX_SHARED_ADDRESSES,
@@ -1709,6 +1709,35 @@ mod what_an_ask_costs {
             !a_window_has_turned(window * 5, 0),
             "a clock that went backwards has not turned a window"
         );
+    }
+
+    /// A window is worth keeping exactly while rolling it would change nothing.
+    ///
+    /// `current` is the one question a node asks a window from outside the
+    /// accounting, and it asks it to decide whether to drop the record of an
+    /// address that has gone. The two have to agree: a window `current` calls
+    /// dead while `roll` would still add to its count loses a spend, and one
+    /// it calls alive while `roll` would reset it is a record the node keeps
+    /// for ever, which is the map growing without bound that the sweep
+    /// exists to stop. Nothing measured either half.
+    #[test]
+    fn a_window_is_current_exactly_while_it_still_holds_its_count() {
+        for begun in [0_u64, 7, WINDOW_SECONDS, 41, 12_345] {
+            let mut window = Window::default();
+            window.roll(begun);
+            for now in [0_u64, 1, 9, 10, 11, 41, 49, 50, 12_345, 12_350] {
+                let mut rolled = window;
+                let turned = rolled.roll(now);
+                assert_eq!(
+                    window.current(now),
+                    !turned,
+                    "a window begun at {begun} answered {} about {now}, where rolling it to \
+                     {now} {} the count",
+                    window.current(now),
+                    if turned { "threw away" } else { "kept" }
+                );
+            }
+        }
     }
 
     fn asks_a_window_pays_for(message: &Message) -> u32 {
@@ -1872,7 +1901,15 @@ mod what_an_ask_costs {
         let mut served = 0usize;
         // The ask is charged first, then each block as it goes out, which is
         // the order the node serves in.
+        //
+        // Bounded by what the cheapest ask costs: a window that pays for more
+        // than that never runs out, and waiting for it would hang the suite
+        // rather than fail it.
+        let most = ALLOWANCE / COST_TRIVIAL;
+        let mut asks = 0u32;
         while peer.afford(cost_of(&ask, &peer), 0) {
+            asks = asks.saturating_add(1);
+            assert!(asks <= most, "a window paid for more asks than it holds");
             for _ in 0..MAX_REQUESTED {
                 if !peer.afford_serving(block_bytes, 0) {
                     return served;

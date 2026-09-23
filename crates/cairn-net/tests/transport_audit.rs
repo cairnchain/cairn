@@ -1269,7 +1269,15 @@ fn a_node_lets_go_of_the_peer_and_its_queue_together() {
             }
             asked += 1;
         }
+        // A window is ten seconds, so one that has not turned in thirty is
+        // not a slow machine, it is the wait itself being wrong, and waiting
+        // on it would hang the suite rather than fail it.
+        let patience = Instant::now() + Duration::from_secs(30);
         while !a_window_has_turned(began, seconds_now()) {
+            assert!(
+                Instant::now() < patience,
+                "a window that began at {began} had not turned thirty seconds later"
+            );
             std::thread::sleep(Duration::from_millis(100));
         }
     }
