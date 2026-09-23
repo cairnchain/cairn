@@ -1979,34 +1979,42 @@ This order is normative.
     <tr><td class="n">8</td><td>NotOnTheWeighedChain</td><td>the anchor does not sit in that forest at the height it states</td></tr>
     <tr><td class="n">9</td><td>HotSetTooLarge</td><td>more notes than this network's rules allow</td></tr>
     <tr><td class="n">10</td><td>DuplicateHotNote</td><td>one note named twice</td></tr>
-    <tr><td class="n">11</td><td>MaturityWindowTooLarge</td><td>more waiting coinbases than the maturity depth</td></tr>
-    <tr><td class="n">12</td><td>SupplyAboveTheSchedule</td><td>more money than the schedule has paid by the anchor's height</td></tr>
-    <tr><td class="n">13</td><td>HistoryMismatch</td><td>the second forest is not the one the anchor commits to</td></tr>
-    <tr><td class="n">14</td><td>RecentNotEndingAtTip</td><td>the recent run is empty, or does not end at the anchor</td></tr>
-    <tr><td class="n">15</td><td>TooFewRecent</td><td>fewer recent headers than the anchor's height allows for</td></tr>
-    <tr><td class="n">16</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a recent header belongs elsewhere</td></tr>
-    <tr><td class="n">17</td><td>RecentWithoutWork</td><td>a recent header carries no proof of work</td></tr>
-    <tr><td class="n">18</td><td>RecentNotConsecutive</td><td>the recent run is not one chain</td></tr>
-    <tr><td class="n">19</td><td>BuriedRunWrongLength</td><td>the buried run is not the height difference, or is past the ceiling</td></tr>
-    <tr><td class="n">20</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a buried header belongs elsewhere</td></tr>
-    <tr><td class="n">21</td><td>BuriedRunNotConsecutive</td><td>a buried header does not follow the one below it</td></tr>
-    <tr><td class="n">22</td><td>BuriedWithoutWork</td><td>a buried header carries no proof of work</td></tr>
-    <tr><td class="n">23</td><td>SoftwareTooOld</td><td>the rules at a buried header's height are past what this build knows</td></tr>
-    <tr><td class="n">24</td><td>WrongVersion</td><td>a buried header carries a version other than the one its height requires</td></tr>
-    <tr><td class="n">25</td><td>BuriedAtTheWrongDifficulty</td><td>not what the retarget demands of it</td></tr>
-    <tr><td class="n">26</td><td>BuriedOutOfTime</td><td>not later than the median of the window before it</td></tr>
-    <tr><td class="n">27</td><td>BuriedWorkDoesNotAddUp</td><td>not the work below it plus its own</td></tr>
-    <tr><td class="n">28</td><td>BuriedRunNotEndingAtTheTip</td><td>the run does not end at the tip</td></tr>
-    <tr><td class="n">29</td><td>NotOnTheWeighedChain</td><td>the forest rebuilt from the run is not the one the tip commits to</td></tr>
-    <tr><td class="n">30</td><td>StateRootMismatch</td><td>the ledger rebuilt from this does not produce the anchor's state root</td></tr>
-    <tr><td class="n">31</td><td>BadGraceProof</td><td>a path for a note in the grace window does not fold to the cold commitment</td></tr>
-    <tr><td class="n">32</td><td>MissingGraceProof</td><td>a note in the grace window has no path</td></tr>
+    <tr><td class="n">11</td><td>NoteInBothTiers</td><td>one note named in the hot set and in the grace window at once</td></tr>
+    <tr><td class="n">12</td><td>TiersAboveTheSchedule</td><td>the two tiers together hold more money than the schedule has paid</td></tr>
+    <tr><td class="n">13</td><td>GraceWindowTooLarge</td><td>the grace window holds more blocks than the rules keep</td></tr>
+    <tr><td class="n">14</td><td>GraceWindowHoldsTooMuch</td><td>or more notes than they keep</td></tr>
+    <tr><td class="n">15</td><td>GracePositionTwice</td><td>the window names one cold position twice, which is one leaf offered as two notes</td></tr>
+    <tr><td class="n">16</td><td>MaturityWindowTooLarge</td><td>more waiting coinbases than the maturity depth</td></tr>
+    <tr><td class="n">17</td><td>MaturityOutsideTheWindow</td><td>a coinbase maturing at a height the window does not cover</td></tr>
+    <tr><td class="n">18</td><td>SupplyAboveTheSchedule</td><td>more money than the schedule has paid by the anchor's height</td></tr>
+    <tr><td class="n">19</td><td>HistoryMismatch</td><td>the second forest is not the one the anchor commits to</td></tr>
+    <tr><td class="n">20</td><td>RecentNotEndingAtTip</td><td>the recent run is empty, or does not end at the anchor</td></tr>
+    <tr><td class="n">21</td><td>TooFewRecent</td><td>fewer recent headers than the anchor's height allows for</td></tr>
+    <tr><td class="n">22</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a recent header belongs elsewhere</td></tr>
+    <tr><td class="n">23</td><td>WrongVersion</td><td>a recent header carries a version other than the one its height requires</td></tr>
+    <tr><td class="n">24</td><td>RecentWithoutWork</td><td>a recent header carries no proof of work</td></tr>
+    <tr><td class="n">25</td><td>RecentWorkDoesNotAddUp</td><td>a recent header's total is not the one below it plus its own</td></tr>
+    <tr><td class="n">26</td><td>RecentNotConsecutive</td><td>the recent run is not one chain</td></tr>
+    <tr><td class="n">27</td><td>BuriedRunWrongLength</td><td>the buried run is not the height difference, or is past the ceiling</td></tr>
+    <tr><td class="n">28</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a buried header belongs elsewhere</td></tr>
+    <tr><td class="n">29</td><td>BuriedRunNotConsecutive</td><td>a buried header does not follow the one below it</td></tr>
+    <tr><td class="n">30</td><td>BuriedWithoutWork</td><td>a buried header carries no proof of work</td></tr>
+    <tr><td class="n">31</td><td>SoftwareTooOld</td><td>the rules at a buried header's height are past what this build knows</td></tr>
+    <tr><td class="n">32</td><td>WrongVersion</td><td>a buried header carries a version other than the one its height requires</td></tr>
+    <tr><td class="n">33</td><td>BuriedAtTheWrongDifficulty</td><td>not what the retarget demands of it</td></tr>
+    <tr><td class="n">34</td><td>BuriedOutOfTime</td><td>not later than the median of the window before it</td></tr>
+    <tr><td class="n">35</td><td>BuriedWorkDoesNotAddUp</td><td>not the work below it plus its own</td></tr>
+    <tr><td class="n">36</td><td>BuriedRunNotEndingAtTheTip</td><td>the run does not end at the tip</td></tr>
+    <tr><td class="n">37</td><td>NotOnTheWeighedChain</td><td>the forest rebuilt from the run is not the one the tip commits to</td></tr>
+    <tr><td class="n">38</td><td>StateRootMismatch</td><td>the ledger rebuilt from this does not produce the anchor's state root</td></tr>
+    <tr><td class="n">39</td><td>BadGraceProof</td><td>a path for a note in the grace window does not fold to the cold commitment</td></tr>
+    <tr><td class="n">40</td><td>MissingGraceProof</td><td>a note in the grace window has no path</td></tr>
   </tbody>
 </table>
 
-Nine, ten, eleven and twelve come before the ledger is rebuilt because each of
-them needs nothing but a number that arrived on the wire, and the size of what
-follows is otherwise decided by whoever sent it.
+Nine to eighteen come before the ledger is rebuilt because each of them needs
+nothing but what arrived on the wire, and the size of what follows is otherwise
+decided by whoever sent it.
 
 **Ten is not covered by the state root and cannot be.** The hot set is
 committed to as a tree keyed by note identifier, so a list naming a note twice
@@ -2015,7 +2023,7 @@ free, past every check that ends at the header, and what it buys is not a note
 but a place in the eviction order, which is the one structure a receiver builds
 from the list rather than from the commitment.
 
-Twenty-nine is what a forest proof alone cannot say. A proof says a header sits
+Thirty-seven is what a forest proof alone cannot say. A proof says a header sits
 at a position in a forest; it does not say the forest is a chain, and the forest
 belongs to whoever made the tip. The header forest is append only, so the
 receiver does not have to take the proof's word for it: it holds the forest as
