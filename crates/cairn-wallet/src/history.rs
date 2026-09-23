@@ -1010,6 +1010,40 @@ impl Decode for History {
     clippy::arithmetic_side_effects
 )]
 mod tests {
+
+    /// What a movement is called, to the person and to the disk.
+    ///
+    /// Three words and three tags, and nothing held either. The words are what
+    /// the page reads: it puts a minus sign in front of an amount when the
+    /// movement's way is "sent", so renaming that one turns every payment made
+    /// into a payment received on the screen. The tags are how a movement is
+    /// written down, so dropping one turns every stored movement of that kind
+    /// into a record the wallet reads back as nothing. `cargo mutants` did
+    /// both with the suite green.
+    #[test]
+    fn a_movement_is_called_what_the_page_reads_and_stored_as_what_it_reads_back() {
+        for direction in [Direction::Received, Direction::Mined, Direction::Sent] {
+            assert_eq!(
+                Direction::from_tag(direction.tag()),
+                Some(direction),
+                "{direction:?} does not read back as what it was written as"
+            );
+        }
+        assert_eq!(Direction::from_tag(3), None, "a tag no direction has");
+
+        assert_eq!(Direction::Received.as_str(), "received");
+        assert_eq!(Direction::Mined.as_str(), "mined");
+        assert_eq!(Direction::Sent.as_str(), "sent");
+
+        // And the page is reading that word rather than one of its own.
+        let page = include_str!("page.rs");
+        assert!(
+            page.contains(&format!("=== \"{}\"", Direction::Sent.as_str())),
+            "the page no longer compares a movement's way against {:?}, so the \
+             sign in front of an amount is decided by something else now",
+            Direction::Sent.as_str()
+        );
+    }
     use super::*;
     use cairn_crypto::SecretKey;
     use cairn_ledger::block::BlockHeader;
@@ -1089,6 +1123,28 @@ mod tests {
         );
     }
 
+    /// A history with nothing in it says so, and one with a movement says
+    /// that.
+    ///
+    /// The name clippy asks for beside `len`, which the page reads to decide
+    /// whether to show a list or the sentence saying there is nothing yet. It
+    /// could answer yes to a history holding movements, and the suite stayed
+    /// green.
+    #[test]
+    fn a_history_is_empty_exactly_when_it_holds_no_movements() {
+        let mine = key(1);
+        let mut history = History::new();
+        assert_eq!(history.len(), 0);
+        assert!(history.is_empty(), "a history that has read nothing");
+
+        history.take(&block(0, mine, Vec::new()), mine);
+        assert_eq!(history.len(), 1);
+        assert!(
+            !history.is_empty(),
+            "and one that has read a block paying this key"
+        );
+    }
+
     #[test]
     fn mining_a_block_is_money_arriving() {
         let mine = key(1);
@@ -1129,6 +1185,81 @@ mod tests {
             latest.amount,
             amount("21"),
             "twenty to them and one to whoever carried it"
+        );
+    }
+
+    /// A list that is exactly full still says how far back it reaches.
+    ///
+    /// Past `MAX_MOVEMENTS` the oldest are dropped and how far back the
+    /// account reaches moves with them, because what was dropped is what it
+    /// can no longer answer for. At exactly that many nothing is dropped, and
+    /// nothing should move: `cargo mutants` could turn the comparison into
+    /// `>=`, and then an account that had read every block from the first
+    /// would say it only reaches back to its oldest payment, which is a
+    /// sentence about somebody's money that is not true.
+    #[test]
+    fn a_list_that_is_exactly_full_still_reaches_back_to_where_it_began() {
+        let mine = key(1);
+        let them = key(2);
+        let mut history = History::new();
+
+        // The first block pays somebody else, so where this account begins
+        // and where its oldest payment sits are different numbers.
+        history.take(&block(0, them, Vec::new()), mine);
+        assert_eq!(history.from(), Some(0), "it began at the first block");
+
+        for height in 1..=MAX_MOVEMENTS as u64 {
+            history.take(&block(height, mine, Vec::new()), mine);
+        }
+        assert_eq!(
+            history.len(),
+            MAX_MOVEMENTS,
+            "exactly full, nothing dropped"
+        );
+        assert_eq!(
+            history.from(),
+            Some(0),
+            "and it still reaches back to the block it began at"
+        );
+
+        // One more, and the oldest goes: what it can answer for moves with it.
+        history.take(&block(MAX_MOVEMENTS as u64 + 1, mine, Vec::new()), mine);
+        assert_eq!(history.len(), MAX_MOVEMENTS);
+        assert_eq!(
+            history.from(),
+            Some(2),
+            "the oldest payment it still holds is the one at height two"
+        );
+    }
+
+    /// Money that went round and came back is not a payment.
+    ///
+    /// A transfer that spends this key's notes and pays the whole of them back
+    /// to it moved nothing: the amount is nought, and a movement of nought in
+    /// a list of payments is a line the person has to work out the meaning of.
+    /// The comparison that drops it could be `>=` with the suite green, since
+    /// nothing else in the workspace builds a transfer that gathers and
+    /// returns exactly the same amount.
+    #[test]
+    fn money_that_went_round_and_came_back_is_not_a_payment() {
+        let mine = key(1);
+        let them = key(2);
+        let mut history = History::new();
+        let first = block(0, mine, Vec::new());
+        history.take(&first, mine);
+        let held = first.coinbase.created_notes()[0].0;
+        assert_eq!(history.len(), 1, "the block that paid this key");
+
+        // Gathered and handed straight back, whole: nothing left and nothing
+        // arrived.
+        let round_trip = Transfer::new(vec![Input::hot(held)], vec![Note::new(amount("50"), mine)]);
+        history.take(&block(1, them, vec![round_trip]), mine);
+
+        assert_eq!(
+            history.len(),
+            1,
+            "a transfer that moved nothing left a line in the list: {:?}",
+            history.movements().next()
         );
     }
 
@@ -1335,6 +1466,50 @@ mod tests {
             history.held().count(),
             1,
             "and what the account still names is exactly the notes it kept a place for"
+        );
+    }
+
+    /// Forgetting keeps the heights the places were judged by, so the next
+    /// forgetting judges them the same way.
+    ///
+    /// What decides whether a place is kept is the height the note was paid
+    /// at, against the line below which a switch can no longer reach. Those
+    /// heights are rebuilt along with everything else, and `cargo mutants`
+    /// could drop them from the rebuild: a note with no height counts as
+    /// settled, so the second forgetting would keep every place the first one
+    /// had kept, including the ones a switch can still take away.
+    #[test]
+    fn forgetting_twice_judges_the_same_places_the_same_way() {
+        let mine = key(1);
+        let mut history = History::new();
+        for height in 0..10 {
+            history.take(&block(height, mine, Vec::new()), mine);
+        }
+
+        let settled = NoteId::new(block(2, mine, Vec::new()).coinbase.id(), 0);
+        let nearer = NoteId::new(block(5, mine, Vec::new()).coinbase.id(), 0);
+        assert!(history.fell_at(settled, amount("50"), 11));
+        assert!(history.fell_at(nearer, amount("50"), 12));
+
+        // Below three is settled, so both places are kept the first time.
+        history.forget(Some(6));
+        assert_eq!(history.where_it_fell(&settled), Some(11));
+        assert_eq!(history.where_it_fell(&nearer), Some(12));
+
+        // And now the line moves back, as it does when a node restarts from a
+        // ledger it was handed. The nearer note is no longer settled, so its
+        // place goes; the older one stays.
+        history.forget(Some(3));
+        assert_eq!(
+            history.where_it_fell(&settled),
+            Some(11),
+            "a note paid below the line keeps its place through both"
+        );
+        assert_eq!(
+            history.where_it_fell(&nearer),
+            None,
+            "and one paid above it loses its place the moment the line passes \
+             it, which takes the height it was paid at"
         );
     }
 
