@@ -241,3 +241,46 @@ fn opening_an_empty_forest_touches_one_level() {
 
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// A level holding more than the leaves account for is cut back on open.
+///
+/// That is what a reorganisation leaves behind, and what an append torn
+/// between two levels leaves behind: nodes reaching past the leaves they were
+/// folded from. They are not wrong bytes, they are bytes about leaves that are
+/// gone, and a proof folded through one of them answers for a forest nobody
+/// has. `cargo mutants` could turn the comparison that notices into its
+/// opposite, so the cut never happens, with the whole suite green.
+#[test]
+fn a_level_reaching_past_the_leaves_is_cut_back_when_the_forest_opens() {
+    let (tree, directory) = grown("overlong");
+    drop(tree);
+
+    let level = directory.join(format!("{HEADER_TREE}.1"));
+    let before = std::fs::metadata(&level).unwrap().len();
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&level)
+            .unwrap();
+        file.write_all(&[0xAB; 32]).unwrap();
+    }
+    assert_eq!(
+        std::fs::metadata(&level).unwrap().len(),
+        before + 32,
+        "the level was made longer than the leaves account for"
+    );
+
+    let tree = HeaderTree::open(&directory).unwrap();
+    assert_eq!(
+        std::fs::metadata(&level).unwrap().len(),
+        before,
+        "a level reaching past the leaves is cut back to what they account for"
+    );
+    assert!(
+        refused(&tree).is_empty(),
+        "and every position still proves against the forest it belongs to"
+    );
+
+    drop(tree);
+    let _ = std::fs::remove_dir_all(&directory);
+}
