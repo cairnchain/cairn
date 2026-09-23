@@ -210,17 +210,34 @@ fn a_tree_is_empty_exactly_when_it_holds_no_leaves() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// Opening a forest with nothing in it touches one level and not sixty four.
+///
+/// `mend_levels` walks upward from level zero and stops at the first height
+/// that holds nothing and has no file, because nothing above a height like
+/// that can hold anything either. Without that stop it opens every height
+/// there is, and opening a level creates it: a node that had never seen a
+/// header would leave sixty four files behind, and `cargo mutants` could take
+/// the stop away, or move it to height zero where it swallows the level the
+/// leaves live on, with the whole suite green.
 #[test]
-fn zz_probe_files() {
-    let directory = scratch("probe-files");
+fn opening_an_empty_forest_touches_one_level() {
+    let directory = scratch("empty-levels");
     std::fs::create_dir_all(&directory).unwrap();
     let tree = HeaderTree::open(&directory).unwrap();
+    assert!(tree.is_empty());
     drop(tree);
+
     let mut names: Vec<String> = std::fs::read_dir(&directory)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
-    println!("PROBE {} files: {names:?}", names.len());
+    assert_eq!(
+        names,
+        vec![format!("{HEADER_TREE}.0")],
+        "an empty forest left {} files behind",
+        names.len()
+    );
+
     let _ = std::fs::remove_dir_all(&directory);
 }
