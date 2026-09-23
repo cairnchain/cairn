@@ -1469,6 +1469,50 @@ mod tests {
         );
     }
 
+    /// Forgetting keeps the heights the places were judged by, so the next
+    /// forgetting judges them the same way.
+    ///
+    /// What decides whether a place is kept is the height the note was paid
+    /// at, against the line below which a switch can no longer reach. Those
+    /// heights are rebuilt along with everything else, and `cargo mutants`
+    /// could drop them from the rebuild: a note with no height counts as
+    /// settled, so the second forgetting would keep every place the first one
+    /// had kept, including the ones a switch can still take away.
+    #[test]
+    fn forgetting_twice_judges_the_same_places_the_same_way() {
+        let mine = key(1);
+        let mut history = History::new();
+        for height in 0..10 {
+            history.take(&block(height, mine, Vec::new()), mine);
+        }
+
+        let settled = NoteId::new(block(2, mine, Vec::new()).coinbase.id(), 0);
+        let nearer = NoteId::new(block(5, mine, Vec::new()).coinbase.id(), 0);
+        assert!(history.fell_at(settled, amount("50"), 11));
+        assert!(history.fell_at(nearer, amount("50"), 12));
+
+        // Below three is settled, so both places are kept the first time.
+        history.forget(Some(6));
+        assert_eq!(history.where_it_fell(&settled), Some(11));
+        assert_eq!(history.where_it_fell(&nearer), Some(12));
+
+        // And now the line moves back, as it does when a node restarts from a
+        // ledger it was handed. The nearer note is no longer settled, so its
+        // place goes; the older one stays.
+        history.forget(Some(3));
+        assert_eq!(
+            history.where_it_fell(&settled),
+            Some(11),
+            "a note paid below the line keeps its place through both"
+        );
+        assert_eq!(
+            history.where_it_fell(&nearer),
+            None,
+            "and one paid above it loses its place the moment the line passes \
+             it, which takes the height it was paid at"
+        );
+    }
+
     /// And with no settled line at all, nothing is kept: a wallet that cannot
     /// say how deep the switch could have gone says nothing about any of them.
     #[test]
