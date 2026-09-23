@@ -1630,8 +1630,9 @@ pub fn on_message(
 #[allow(clippy::unwrap_used)]
 mod what_an_ask_costs {
     use super::{
-        cost_of, what_the_wire_costs, PeerState, ALLOWANCE, BYTES_PER_UNIT, COST_CHAIN, COST_JOIN,
-        COST_PER_BLOCK_SERVED, COST_PER_HEADER_SERVED, COST_TRIVIAL,
+        a_window_has_turned, cost_of, what_the_wire_costs, PeerState, ALLOWANCE, BYTES_PER_UNIT,
+        COST_CHAIN, COST_JOIN, COST_PER_BLOCK_SERVED, COST_PER_HEADER_SERVED, COST_TRIVIAL,
+        WINDOW_SECONDS,
     };
     use crate::message::{
         Message, PeerAddress, JOIN_PART_BYTES, MAX_HEADERS, MAX_REQUESTED, MAX_SHARED_ADDRESSES,
@@ -1677,6 +1678,37 @@ mod what_an_ask_costs {
             ),
             transfers: Vec::new(),
         }
+    }
+
+    /// When asking again is worth anything.
+    ///
+    /// The one thing about this accounting that anybody outside this layer
+    /// reads: a node collecting a handover whose question went unanswered
+    /// waits for the window to turn before asking again. Answering yes to
+    /// every pair makes it ask straight back into a window already spent,
+    /// which is the hammering the allowance exists to stop; answering yes only
+    /// where the two are the same window makes it wait for ever. Nothing
+    /// measured either.
+    #[test]
+    fn a_window_turns_when_the_clock_crosses_into_the_next_one() {
+        let window = WINDOW_SECONDS;
+        assert!(
+            !a_window_has_turned(0, window - 1),
+            "the same window, at both ends of it"
+        );
+        assert!(
+            a_window_has_turned(window - 1, window),
+            "one second later is the next window"
+        );
+        assert!(
+            !a_window_has_turned(window, window * 2 - 1),
+            "and the next window is a window too"
+        );
+        assert!(a_window_has_turned(0, window * 5), "several windows on");
+        assert!(
+            !a_window_has_turned(window * 5, 0),
+            "a clock that went backwards has not turned a window"
+        );
     }
 
     fn asks_a_window_pays_for(message: &Message) -> u32 {
