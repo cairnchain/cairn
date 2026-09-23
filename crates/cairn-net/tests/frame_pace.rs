@@ -173,6 +173,40 @@ fn an_honest_slow_reader_is_written_to_until_it_has_the_whole_frame() {
 /// slot and up to a megabyte of buffer for as long as it cared to. Renewing by
 /// progress does not help it: a byte every fifty milliseconds is twenty a
 /// second, and the frame wants sixty four kilobytes.
+/// A frame too large to send is refused before a byte of it goes out.
+///
+/// `MAX_FRAME_BYTES` is what a reader refuses, and the writer holds to the
+/// same number so that a node never opens a frame its peer will close on. It
+/// was a refusal nothing had ever produced: every message this workspace
+/// builds fits, which is the point of the caps on each of them, and so the
+/// one that says what happens when a build gets that wrong went unasked.
+#[test]
+fn a_frame_larger_than_the_wire_takes_is_refused_before_it_is_written() {
+    let network = NetworkId::new(0x0a1b_2c3d);
+    let message = Message::JoinPart {
+        what: Joining::Ledger,
+        at: cairn_primitives::hash::Hash32::from_bytes([0u8; 32]),
+        part: 0,
+        parts: 1,
+        bytes: vec![0u8; MAX_FRAME_BYTES],
+    };
+
+    let mut written: Vec<u8> = Vec::new();
+    let refused = write_message(&mut written, network, &message);
+    match refused {
+        Err(WireError::OversizedSend { size }) => assert!(
+            size > MAX_FRAME_BYTES,
+            "a frame of {size} against a ceiling of {MAX_FRAME_BYTES}"
+        ),
+        other => panic!("a frame past the ceiling was answered {other:?}"),
+    }
+    assert!(
+        written.is_empty(),
+        "nothing goes out before the size is known: {} bytes were written",
+        written.len()
+    );
+}
+
 #[test]
 fn a_dribbling_sender_still_loses_the_frame() {
     let network = NetworkId::new(0x0a1b_2c3d);
