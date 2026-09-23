@@ -1250,3 +1250,67 @@ fn a_wallet_that_has_not_checked_its_chain_says_so_before_anything_smaller() {
         "a stranded wallet was told to wait: {stranded}"
     );
 }
+
+/// A wallet that cannot write its account says so, from the state it is in.
+///
+/// `keeping_its_account` is the wallet's only way of saying that the one
+/// record of what this key was paid, outside the chain, has stopped being
+/// kept. The warning it produces is measured above, by building a `Progress`
+/// by hand and reading the sentence back. Nothing had ever put a wallet in
+/// that state and asked it.
+///
+/// So the field that carries the warning could be read as anything and the
+/// suite would agree: what was measured is the rendering, and what decides is
+/// the wallet.
+///
+/// The write is stopped with a directory standing where the partial file has
+/// to be created, which needs no permissions and works the same everywhere.
+/// `History::save` writes beside the account and renames, so a directory in
+/// the way is a file that cannot be created, which is the shape a full disk
+/// has and the one the sentence names.
+#[test]
+fn a_wallet_that_cannot_write_its_account_says_so() {
+    let secret = SecretKey::from_bytes(&[11; 32]);
+    let (wallet, mut forge, directory) = funded("no-account", 11, 3);
+    assert!(
+        wallet.follow_to_the_tip() > 0,
+        "the wallet read the blocks it was paid in"
+    );
+    assert!(
+        wallet.progress().keeping_its_account,
+        "a wallet whose disk is fine is keeping its account"
+    );
+
+    // Where the account is written beside, so writing it cannot start.
+    let partial = directory.join("data").join("history.part");
+    std::fs::create_dir_all(&partial).unwrap();
+
+    // One more block, so the wallet reads it and writes its account again.
+    let block = forge.mine(&secret.public_key(), Vec::new());
+    wallet.node().submit_block(block).unwrap();
+    assert!(
+        wallet.follow_to_the_tip() > 0,
+        "the wallet read the block it was given"
+    );
+
+    let progress = wallet.progress();
+    assert!(
+        !progress.keeping_its_account,
+        "the account could not be written and the wallet says it is keeping it, \
+         which is the one thing a person would act on: it reads as safe to close"
+    );
+    let warning = progress.warning().expect("something to say");
+    assert!(
+        warning.contains("cannot write down its own account"),
+        "and the warning is the one written for it: {warning}"
+    );
+
+    // The balance is still right, which is the other half of the sentence.
+    assert!(
+        wallet.holdings().spendable > Amount::ZERO,
+        "a wallet that cannot write its account still answers about the money"
+    );
+
+    drop(wallet);
+    let _ = std::fs::remove_dir_all(&directory);
+}
