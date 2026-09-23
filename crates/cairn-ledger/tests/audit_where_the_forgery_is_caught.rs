@@ -247,15 +247,23 @@ impl Forgery {
 fn ground_tips(tip: &BlockHeader, attempts: usize) -> Vec<BlockHeader> {
     let mut tips = Vec::with_capacity(attempts);
     let mut candidate = *tip;
-    let mut nonce = tip.nonce;
-    while tips.len() < attempts {
+    // Bounded the way `mine_header` is, and for the same reason: a loop that
+    // ends only when the code under test says so hangs the suite instead of
+    // failing it.
+    for nonce in tip.nonce..tip.nonce.saturating_add(ATTEMPTS) {
         candidate.nonce = nonce;
         if meets_target(&candidate.id(), candidate.difficulty) {
             tips.push(candidate);
+            if tips.len() == attempts {
+                return tips;
+            }
         }
-        nonce += 1;
     }
-    tips
+    panic!(
+        "only {} nonces met a difficulty of {}",
+        tips.len(),
+        candidate.difficulty
+    );
 }
 
 /// The harness has to be able to build something the check accepts, or a table

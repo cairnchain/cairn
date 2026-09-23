@@ -180,7 +180,16 @@ fn rss_kb() -> u64 {
 
 /// Walks the index to the tip, the way `Explorer::refresh` does.
 fn read_all(index: &mut Index, head: &Head, block_at: impl Fn(u64) -> Held) {
-    while index.refresh(head, &block_at, |_| None, || Some(head.tip)) == Reading::More {}
+    // Bounded, because a walk that ends only when the code under test says
+    // so hangs the suite instead of failing it.
+    let mut turns = 0u64;
+    while index.refresh(head, &block_at, |_| None, || Some(head.tip)) == Reading::More {
+        turns += 1;
+        assert!(
+            turns < (1 << 20),
+            "the walk never said it had reached the tip"
+        );
+    }
 }
 
 /// Weighs one chain and says what a note cost on it.

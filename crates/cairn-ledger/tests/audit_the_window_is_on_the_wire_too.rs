@@ -40,14 +40,20 @@ use cairn_crypto::SecretKey;
 use cairn_ledger::block::{BlockHeader, HeaderSummary};
 use cairn_ledger::handover::{accept, Handover};
 use cairn_ledger::note::{Note, NoteId};
-use cairn_ledger::pow::{median_time_past, meets_target, next_difficulty, work_of, RECENT_HEADERS};
+use cairn_ledger::pow::{median_time_past, next_difficulty, work_of, RECENT_HEADERS};
 use cairn_ledger::state::{header_leaf, HotEntry};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
-use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
+use cairn_ledger::validation::{assemble_block, connect_block, mine_header, ConsensusParams};
 use cairn_ledger::{cold_leaf, note_key, LedgerState};
 use cairn_primitives::codec::Encode;
 use cairn_primitives::hash::{hash, Domain, Hasher};
 use cairn_primitives::{Amount, Hash32};
+
+/// How many nonces a forged header is given to meet its own target.
+///
+/// At these difficulties one is almost always enough. The bound is what
+/// turns a target nothing meets into a failure instead of a hang.
+const ATTEMPTS: u64 = 1 << 24;
 
 const NOW: u64 = 2_000_000_000;
 const BURIAL: u64 = 8;
@@ -224,7 +230,7 @@ fn rerun_above(handover: &mut Handover, below: &[BlockHeader], params: &Consensu
     for height in (at.height + 1)..=tip_height {
         clock += SPACING;
         let difficulty = next_difficulty(&window, params.target_block_time);
-        let mut header = BlockHeader {
+        let header = BlockHeader {
             version: 1,
             network: params.network,
             height,
@@ -241,9 +247,7 @@ fn rerun_above(handover: &mut Handover, below: &[BlockHeader], params: &Consensu
             median_time_past(&window).is_none_or(|median| header.timestamp > median),
             "the forged run is not later than its own median"
         );
-        while !meets_target(&header.id(), difficulty) {
-            header.nonce += 1;
-        }
+        let header = mine_header(header, ATTEMPTS).expect("a nonce at this difficulty");
         if height < tip_height {
             archive.add(header_leaf(&header.id())).unwrap();
         }

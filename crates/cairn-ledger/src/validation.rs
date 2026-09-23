@@ -1308,19 +1308,31 @@ pub fn expected_difficulty(state: &LedgerState, params: &ConsensusParams) -> u64
     }
 }
 
-/// Searches for a nonce that satisfies the block's difficulty.
+/// Searches for a nonce that satisfies the header's difficulty.
 ///
 /// Deliberately the naive loop. A real miner runs it across cores and rolls the
 /// coinbase extra nonce once the nonce space is exhausted, but neither changes
 /// what makes a block valid. Returns `None` if no nonce below `attempts` works.
-pub fn mine_block(mut block: Block, attempts: u64) -> Option<Block> {
+///
+/// The bound is the whole point of the argument. A run of headers forged for
+/// a handover has no bodies to carry, so the fixtures that build one were
+/// turning the nonce in loops of their own, `while !meets_target(..)`, which
+/// end only if this says yes: a target nothing meets hangs the suite instead
+/// of failing it.
+pub fn mine_header(mut header: BlockHeader, attempts: u64) -> Option<BlockHeader> {
     for nonce in 0..attempts {
-        block.header.nonce = nonce;
-        if meets_target(&block.header.id(), block.header.difficulty) {
-            return Some(block);
+        header.nonce = nonce;
+        if meets_target(&header.id(), header.difficulty) {
+            return Some(header);
         }
     }
     None
+}
+
+/// The same search, for a block that carries its body with it.
+pub fn mine_block(mut block: Block, attempts: u64) -> Option<Block> {
+    block.header = mine_header(block.header, attempts)?;
+    Some(block)
 }
 
 /// Builds the block a producer would publish, with both roots filled in.

@@ -227,6 +227,24 @@ fn turn(
     )
 }
 
+/// Turns the walk until it says it has read as far as the chain reaches.
+///
+/// Bounded, because a loop that ends only when the code under test says so
+/// hangs the suite instead of failing it.
+fn turn_to_the_end(
+    walk: &mut Index,
+    head_from: &Branch,
+    ends_on: &Branch,
+    tip: u64,
+    read: impl Fn(u64) -> Held,
+) {
+    let mut turns = 0u64;
+    while turn(walk, head_from, ends_on, tip, &read) == Reading::More {
+        turns += 1;
+        assert!(turns < (1 << 20), "the walk never reached the tip");
+    }
+}
+
 /// Nothing the index holds is off a branch this node has left.
 #[test]
 fn the_walk_never_settles_holding_a_branch_the_node_left() {
@@ -253,19 +271,16 @@ fn the_walk_never_settles_holding_a_branch_the_node_left() {
                 let other = 1 - following;
                 let served = branches[other];
                 switched += 1;
-                while turn(&mut walk, from, served, tip, |height| {
+                turn_to_the_end(&mut walk, from, served, tip, |height| {
                     if height < flip {
                         from.held(height)
                     } else {
                         served.held(height)
                     }
-                }) == Reading::More
-                {}
+                });
                 following = other;
             } else {
-                while turn(&mut walk, from, from, tip, |height| from.held(height)) == Reading::More
-                {
-                }
+                turn_to_the_end(&mut walk, from, from, tip, |height| from.held(height));
             }
         }
 
