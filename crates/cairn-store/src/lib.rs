@@ -642,8 +642,23 @@ impl BlockLog {
     /// For the one case the index is no use in and the log still is: an entry
     /// that will not read, with the record it names sitting where it always
     /// was. The end of this record is the start of that one, and how far it
-    /// runs is its own length prefix, which is the same thing every other
-    /// record here is read by.
+    /// runs is its own length prefix.
+    ///
+    /// That length says how far the record runs and nothing about the header,
+    /// which sits at a fixed offset and is a fixed width. It used to be asked
+    /// anyway: a length past the end of the log, or past the largest record
+    /// there can be, gave up here and answered nothing. Giving up is not
+    /// neutral, because the caller then falls back to the record *before* this
+    /// one, which names only its `previous` field, and that is the weak answer
+    /// this whole road was built to stop being the answer.
+    ///
+    /// Measured on three faults rather than two, in
+    /// `audit_a_neighbour_that_cannot_be_reached.rs`: a byte of a record's
+    /// state root, the index entry for the record after it, and that record's
+    /// own length prefix. Asking the length, the node served a block nobody
+    /// mined. Not asking it, the header still reads — the read is bounded by
+    /// `HEADER_BYTES` and a file too short to hold it fails the read — the
+    /// link check sees the flipped byte, and the record is refused.
     fn header_after(&self, index: usize) -> Result<Option<BlockHeader>, StoreError> {
         let after = index.saturating_add(1);
         if after >= self.count {
@@ -659,9 +674,6 @@ impl BlockLog {
         let end = start
             .saturating_add(4)
             .saturating_add(u64::from(u32::from_le_bytes(length)));
-        if end > self.end || end.saturating_sub(start) > max_record_on_disk() {
-            return Ok(None);
-        }
         self.header_between(start, end, after)
     }
 
