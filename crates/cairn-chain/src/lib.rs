@@ -542,8 +542,12 @@ struct StoredBlock {
     /// limit, where the notes and proofs are nearly all of it: "decoding costs
     /// 1.4x". True of that block, and the block this ceiling is up against is
     /// the smallest one, because the smallest block is what a peer sends when
-    /// it wants the node to hold as many as possible. An empty block is three
-    /// hundred and twelve bytes on the wire and measured 1 608 resident.
+    /// it wants the node to hold as many as possible. An empty block is 244
+    /// bytes on the wire, and the resident figure this was argued from, 1 608,
+    /// was measured when it was 312. That measurement has not been retaken and
+    /// the wire form has moved under it, so what carries is the shape and not
+    /// the number: at the small end the factor is several times 1.4, which is
+    /// why the count is not the wire form.
     bytes: usize,
 }
 
@@ -563,10 +567,20 @@ struct StoredBlock {
 /// A floor is also why one mutation of the line below lives. Turning `+` into
 /// `-` or `*`, or `/` into `*`, each changes the figure by enough that the
 /// count of what a node holds no longer matches what it was fed, and the
-/// suite says so. Turning `/` into `%` changes it by at most seven bytes in
-/// about a hundred and twenty, which no honest property distinguishes: both
-/// values are floors on the same real cost, and pinning this one to the byte
-/// would make the test a restatement of the line it guards.
+/// suite says so. Turning `/` into `%` leaves 544 where there was 612, and no
+/// honest property distinguishes them: both are floors on the same real cost,
+/// and pinning this one to the byte would make the test a restatement of the
+/// line it guards.
+///
+/// That said "at most seven bytes in about a hundred and twenty", which is a
+/// true sentence about a remainder answering a question nobody asked. What
+/// moves is `entry / 8` against `entry % 8`, and on a 64-bit target the entry
+/// is 544 bytes, so the eighth is 68 and the remainder is nought. The figure
+/// it was weighed against was wrong too: this constant is 612, not a hundred
+/// and twenty. The conclusion survives its arithmetic, which is luck rather
+/// than reasoning, and the reasoning is what a reader would have been
+/// checking. It was written from the types so it could not drift; the sentence
+/// beside it was not, and did.
 pub const HELD_OVERHEAD: usize = {
     let entry = size_of::<Hash32>() + size_of::<StoredBlock>();
     entry + entry / 8
@@ -2917,8 +2931,9 @@ impl ChainStore {
     /// blocks nothing sized left the node holding 42 MB, the sweep ran and
     /// dropped none of it, and each further block a peer offered was another
     /// two megabytes with nothing to take it back.
-    /// What measures this, measured rather than assumed: the count it looks
-    /// at, the join, and both halves of the `retain`. Not the bytes.
+    /// What measures this, measured rather than assumed: both thresholds, the
+    /// join, and both halves of the `retain`. All but the slack in each
+    /// threshold.
     ///
     /// Deleting the whole function reads like cover for all of it and is not:
     /// what that deletes is the unconditional call to
@@ -2930,34 +2945,20 @@ impl ChainStore {
     /// reach, what the other drops is the oldest off the branch, and the
     /// oldest is what falls out of reach first.
     ///
-    /// Five are measured now, by
-    /// `audit_what_a_stranger_can_make_a_node_hold.rs`
-    /// `::what_a_rewind_can_no_longer_reach_is_dropped_before_it_is_oldest`.
-    /// It fills to the one count that makes this sweep fire while the other
-    /// has nothing to do, then moves only the cutoff. That kills the count
-    /// read as `<` or `==`, the join read as `and`, and either half of the
-    /// `retain` turned around, which is the half that drops the node's own
-    /// rivals of its tip.
+    /// Seven are measured now, by the pair of tests at the end of
+    /// `audit_what_a_stranger_can_make_a_node_hold.rs`. Both hold a population
+    /// off the branch that the sweep by age has nothing to say about, then
+    /// move nothing but the cutoff. One arrives here by the count and one by
+    /// the bytes, which are two separate ways in: a fixture that only ever
+    /// arrives by one leaves the other free to be read backwards.
     ///
-    /// Four still live, and they are not the same kind of gap.
-    ///
-    /// The count read as `>=` fires one entry earlier and is otherwise the
-    /// same sweep. Nothing here can call that a defect without pinning the
-    /// slack itself, which is a restatement of the line.
-    ///
-    /// The three readings of the byte threshold want pressure coming from the
-    /// branch rather than from branches this node is not on:
-    /// `held_bytes_ceiling` counts a full window at the largest block the
-    /// rules allow, and `hold` counts [`HELD_OVERHEAD`] on top of each, so a
-    /// window of near-maximum blocks crosses the ceiling while what is held
-    /// off the branch is under [`MAX_SIDE_BYTES`] and the second sweep does
-    /// nothing. That wants a thousand blocks at the size limit, which is why
-    /// no fixture here has one, and the margin it would stand on is the
-    /// window times [`HELD_OVERHEAD`]: about a hundred and twenty kilobytes.
-    ///
-    /// Written down rather than left to be assumed. The next reader counting
-    /// the byte half as measured is the failure the note above
-    /// `forget_oldest_side_blocks` describes, from the other side.
+    /// The two left are the slack in each threshold, read as `>=` instead of
+    /// `>`. Each fires one entry, or one byte, earlier than this does, and is
+    /// otherwise the same sweep. Nothing here can call that a defect without
+    /// pinning the slack itself, which is a restatement of the line, and the
+    /// repository already answers that shape with a note rather than a test:
+    /// `earlier`, `SPLIT_ABOVE`, [`HELD_OVERHEAD`] and `selection` all carry
+    /// one.
     fn forget_unreachable_branches(&mut self) {
         let limit = MAX_REORG_DEPTH.saturating_add(MAX_SIDE_BLOCKS);
         let by_count = self.blocks.len() > limit;

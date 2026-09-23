@@ -715,3 +715,127 @@ fn what_a_rewind_can_no_longer_reach_is_dropped_before_it_is_oldest() {
         store.len()
     );
 }
+
+/// Crossing the ceiling is enough on its own to drop what a rewind cannot
+/// reach, with nothing at all over the second sweep's limits.
+///
+/// The test above reaches this sweep by count. `by_count || by_bytes` has two
+/// ways in, and a fixture that only ever arrives by the first leaves the
+/// second free to be read backwards: with the byte threshold turned into `<`
+/// or `==`, a node whose own window has outgrown its ceiling sweeps nothing,
+/// and what it is holding is unreachable history it will never let go of.
+///
+/// Arriving by bytes means holding more than the ceiling while what is held
+/// off the branch stays under [`MAX_SIDE_BYTES`], and the ceiling gives the
+/// window a full block of room for every height in it. The gap between the
+/// two is what `hold` adds on top of the wire form, `HELD_WINDOW` times
+/// `HELD_OVERHEAD`: six hundred and twenty seven kilobytes of room, which is
+/// what this stands in.
+///
+/// So the node reads one number differently from the miner that made these
+/// blocks: the largest block it will take is the size of the blocks it is
+/// actually being given, measured off them rather than written down. Its
+/// window then weighs more than the ceiling allows the window, and a little
+/// under `MAX_SIDE_BYTES` of rivals carries the total over while the sweep by
+/// age still has nothing to do.
+#[test]
+fn crossing_the_ceiling_is_enough_to_drop_what_a_rewind_cannot_reach() {
+    let mining = params();
+    let miner = wallet(1);
+    let mut shared = Chain::new(mining);
+    let chain = shared.mine_empty(&miner, MAX_REORG_DEPTH + 60);
+
+    let widest = chain
+        .iter()
+        .map(|block| block.encode().len())
+        .max()
+        .expect("a chain to measure");
+    let rules = mining.with_max_block_bytes(widest);
+    let ceiling = ChainStore::held_bytes_ceiling(&rules);
+
+    let mut store = ChainStore::new(rules);
+    for block in &chain {
+        store.add_block(block.clone(), NOW).unwrap();
+    }
+    let tip = store.height().expect("a chain to stand on");
+
+    let under_tip = store.id_at(tip - 1).expect("the block below the tip");
+    let recent = side_block(tip, under_tip, 0, 1, &wallet(9));
+    let recent_id = recent.id();
+    assert_eq!(
+        store.add_block(recent, NOW).unwrap(),
+        Accepted::SideBranch,
+        "a rival of the tip was not held aside"
+    );
+
+    let oldest = tip - MAX_REORG_DEPTH as u64;
+    let at = oldest + 1;
+    let parent = store
+        .id_at(oldest)
+        .expect("the oldest height the branch names");
+
+    // Sixteen kilobytes each, so that filling `MAX_SIDE_BYTES` takes about two
+    // thousand of them and the count never becomes the way in.
+    let mut ancient = Vec::new();
+    for nonce in 0..MAX_SIDE_BLOCKS as u64 {
+        if store.held_bytes() > ceiling {
+            break;
+        }
+        let block = side_block(at, parent, 16 * 1024, nonce, &wallet(9));
+        let id = block.id();
+        assert_eq!(
+            store.add_block(block, NOW).unwrap(),
+            Accepted::SideBranch,
+            "a losing block was not held aside"
+        );
+        ancient.push(id);
+    }
+    assert!(
+        store.held_bytes() > ceiling,
+        "{} rivals left the node at {} bytes against a ceiling of {ceiling}, so this \
+         fixture no longer reaches the sweep by size",
+        ancient.len(),
+        store.held_bytes()
+    );
+
+    // What says this arrived by the byte threshold and not by the other one.
+    assert!(
+        store.len() <= MAX_REORG_DEPTH + MAX_SIDE_BLOCKS,
+        "the node holds {} entries, which is over the count this sweep also looks at, \
+         so the byte threshold is not what let it in",
+        store.len()
+    );
+    assert!(
+        ancient.iter().all(|id| store.contains(id)),
+        "the sweep by age has already run, so what the sweep by reach does is hidden \
+         behind it again and this fixture separates nothing"
+    );
+    assert!(
+        store.contains(&recent_id),
+        "the rival of the tip is already gone"
+    );
+    let before = store.held_bytes();
+
+    // Two, because the cutoff has to pass the height the rivals sit at, and it
+    // stands one below them.
+    for block in shared.mine_empty(&miner, 2) {
+        store.add_block(block, NOW).unwrap();
+    }
+
+    assert!(
+        ancient.iter().all(|id| !store.contains(id)),
+        "the node is over its ceiling at {} bytes, against {before} before its branch \
+         moved by two, and still holds blocks no rewind it allows can reach",
+        store.held_bytes()
+    );
+    assert!(
+        store.contains(&recent_id),
+        "the sweep dropped a rival of the tip, which is inside the window and is what \
+         a fork choice would have to switch to"
+    );
+    assert!(
+        store.held_bytes() <= ceiling,
+        "the node holds {} bytes against a ceiling of {ceiling}",
+        store.held_bytes()
+    );
+}
