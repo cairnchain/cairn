@@ -251,3 +251,55 @@ fn a_retired_network_is_named_and_not_written_out_in_hexadecimal() {
     let live = ConsensusParams::for_network("testnet-6").unwrap();
     assert_eq!(live.network_name(), NetworkId::TESTNET_6.name().unwrap());
 }
+
+/// The network a rule set names is the network its first block belongs to.
+///
+/// `for_network` writes the network three times in each arm: once as the
+/// `network` field, and twice more as the argument to `genesis::pinned` and
+/// `genesis::opens_at`. Nothing held those three together, and the obvious
+/// cover does not: `every_network_answers_to_the_name_it_reports` above asks
+/// whether the rules and the name they report agree *with each other*, and
+/// they would agree just as well if both were wrong, because the name is read
+/// off the same field. A true sentence about a round trip, offered as the
+/// answer to a question about which network this is.
+///
+/// What a disagreement costs: every header carries the network it was built
+/// under and it is the first thing checked on the way in, so a build that
+/// names one network and pins another's first block refuses every honest peer
+/// and has every block it mines refused. Each half looks correct on its own.
+///
+/// The testnet arm cannot show this today, and that is worth knowing rather
+/// than assuming. `NetworkId::TESTNET` is an alias for `TESTNET_6`, so naming
+/// `TESTNET_6` there writes a value the spread rule set already carried:
+/// deleting the line is an equivalent mutation, and it is noted where it sits.
+/// The day that alias moves to the next testnet, this test is what says the
+/// line has to be there. Measured both ways: with the alias pointed at
+/// `TESTNET_5` and the line gone, this fails; with the line back, it passes.
+#[test]
+fn the_network_a_rule_set_names_is_the_one_its_first_block_belongs_to() {
+    for name in NAMED {
+        let Some(params) = ConsensusParams::for_network(name) else {
+            continue;
+        };
+        assert_eq!(
+            params.genesis,
+            cairn_ledger::genesis::pinned(params.network),
+            "{name} names {:?} and pins a first block that is not that \
+             network's, so every header it builds carries a network its own \
+             chain does not start on",
+            params.network
+        );
+        assert_eq!(
+            params.opens_at,
+            cairn_ledger::genesis::opens_at(params.network),
+            "{name} names {:?} and opens at a moment that is not that \
+             network's",
+            params.network
+        );
+        assert!(
+            params.genesis.is_some(),
+            "{name} answers `for_network` and so is a network that exists, \
+             which means it has a first block"
+        );
+    }
+}
