@@ -1010,6 +1010,40 @@ impl Decode for History {
     clippy::arithmetic_side_effects
 )]
 mod tests {
+
+    /// What a movement is called, to the person and to the disk.
+    ///
+    /// Three words and three tags, and nothing held either. The words are what
+    /// the page reads: it puts a minus sign in front of an amount when the
+    /// movement's way is "sent", so renaming that one turns every payment made
+    /// into a payment received on the screen. The tags are how a movement is
+    /// written down, so dropping one turns every stored movement of that kind
+    /// into a record the wallet reads back as nothing. `cargo mutants` did
+    /// both with the suite green.
+    #[test]
+    fn a_movement_is_called_what_the_page_reads_and_stored_as_what_it_reads_back() {
+        for direction in [Direction::Received, Direction::Mined, Direction::Sent] {
+            assert_eq!(
+                Direction::from_tag(direction.tag()),
+                Some(direction),
+                "{direction:?} does not read back as what it was written as"
+            );
+        }
+        assert_eq!(Direction::from_tag(3), None, "a tag no direction has");
+
+        assert_eq!(Direction::Received.as_str(), "received");
+        assert_eq!(Direction::Mined.as_str(), "mined");
+        assert_eq!(Direction::Sent.as_str(), "sent");
+
+        // And the page is reading that word rather than one of its own.
+        let page = include_str!("page.rs");
+        assert!(
+            page.contains(&format!("=== \"{}\"", Direction::Sent.as_str())),
+            "the page no longer compares a movement's way against {:?}, so the \
+             sign in front of an amount is decided by something else now",
+            Direction::Sent.as_str()
+        );
+    }
     use super::*;
     use cairn_crypto::SecretKey;
     use cairn_ledger::block::BlockHeader;
@@ -1089,6 +1123,28 @@ mod tests {
         );
     }
 
+    /// A history with nothing in it says so, and one with a movement says
+    /// that.
+    ///
+    /// The name clippy asks for beside `len`, which the page reads to decide
+    /// whether to show a list or the sentence saying there is nothing yet. It
+    /// could answer yes to a history holding movements, and the suite stayed
+    /// green.
+    #[test]
+    fn a_history_is_empty_exactly_when_it_holds_no_movements() {
+        let mine = key(1);
+        let mut history = History::new();
+        assert_eq!(history.len(), 0);
+        assert!(history.is_empty(), "a history that has read nothing");
+
+        history.take(&block(0, mine, Vec::new()), mine);
+        assert_eq!(history.len(), 1);
+        assert!(
+            !history.is_empty(),
+            "and one that has read a block paying this key"
+        );
+    }
+
     #[test]
     fn mining_a_block_is_money_arriving() {
         let mine = key(1);
@@ -1129,6 +1185,37 @@ mod tests {
             latest.amount,
             amount("21"),
             "twenty to them and one to whoever carried it"
+        );
+    }
+
+    /// Money that went round and came back is not a payment.
+    ///
+    /// A transfer that spends this key's notes and pays the whole of them back
+    /// to it moved nothing: the amount is nought, and a movement of nought in
+    /// a list of payments is a line the person has to work out the meaning of.
+    /// The comparison that drops it could be `>=` with the suite green, since
+    /// nothing else in the workspace builds a transfer that gathers and
+    /// returns exactly the same amount.
+    #[test]
+    fn money_that_went_round_and_came_back_is_not_a_payment() {
+        let mine = key(1);
+        let them = key(2);
+        let mut history = History::new();
+        let first = block(0, mine, Vec::new());
+        history.take(&first, mine);
+        let held = first.coinbase.created_notes()[0].0;
+        assert_eq!(history.len(), 1, "the block that paid this key");
+
+        // Gathered and handed straight back, whole: nothing left and nothing
+        // arrived.
+        let round_trip = Transfer::new(vec![Input::hot(held)], vec![Note::new(amount("50"), mine)]);
+        history.take(&block(1, them, vec![round_trip]), mine);
+
+        assert_eq!(
+            history.len(),
+            1,
+            "a transfer that moved nothing left a line in the list: {:?}",
+            history.movements().next()
         );
     }
 
