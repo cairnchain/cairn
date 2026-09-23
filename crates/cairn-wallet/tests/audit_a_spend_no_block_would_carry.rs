@@ -144,7 +144,7 @@ fn a_spend_that_no_block_could_carry_is_refused_by_the_wallet() {
     for block in &chain {
         wallet.node().submit_block(block.clone()).unwrap();
     }
-    while wallet.follow() > 0 {}
+    wallet.follow_to_the_tip();
 
     let holdings = wallet.holdings();
     assert!(
@@ -229,7 +229,7 @@ fn a_wallet_holding(chain: &[Block], mine: &SecretKey, name: &str) -> (Wallet, P
     for block in chain {
         wallet.node().submit_block(block.clone()).unwrap();
     }
-    while wallet.follow() > 0 {}
+    wallet.follow_to_the_tip();
     (wallet, directory)
 }
 

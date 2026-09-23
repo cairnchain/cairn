@@ -110,7 +110,7 @@ fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
 
 /// Reads its way to the end of the chain, which is what fills the account.
 fn catch_the_history_up(wallet: &Wallet) {
-    while wallet.follow() > 0 {}
+    wallet.follow_to_the_tip();
 }
 
 /// Mines blocks on a private ledger, paying whoever is named.

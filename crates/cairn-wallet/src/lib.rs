@@ -1320,6 +1320,41 @@ impl Wallet {
         taken
     }
 
+    /// Reads to the tip rather than one batch of it, and says how much it took.
+    ///
+    /// [`Self::follow`] reads at most [`CATCH_UP_BATCH`] blocks, because that
+    /// is how the lock is let go of often enough for the next block to arrive.
+    /// Reading to the tip is calling it until it has nothing left, and that
+    /// was written out at eighteen places in this crate as three tokens with
+    /// no name: sixteen in tests and twice here. A copy is a second place the
+    /// same fact lives, and the one that moves is never the copy.
+    ///
+    /// Bounded, which the eighteen were not. A turn that reads nothing ends
+    /// this, and if a turn never stops reading the count ends it instead: a
+    /// turn that reads takes at least one block, and a chain has no more
+    /// blocks to take than it has heights. That is [`CATCH_UP_BATCH`] times
+    /// the turns a full read needs, so the bound is nowhere near an honest
+    /// read and squarely in front of one that cannot stop.
+    ///
+    /// The difference is what happens when the reading breaks. Unbounded, a
+    /// wallet that could not move forward span here for ever: in a test that
+    /// is a run which hangs instead of failing, and in a node it is a page
+    /// that never answers. Bounded, both say so. What comes back at the bound
+    /// is an account that is behind, which is what comes back the instant any
+    /// of these return anyway: the chain moves on.
+    pub fn follow_to_the_tip(&self) -> usize {
+        let heights = self.node.height().map_or(0, |tip| tip.saturating_add(1));
+        let mut taken = 0usize;
+        for _ in 0..=heights {
+            let read = self.follow();
+            if read == 0 {
+                break;
+            }
+            taken = taken.saturating_add(read);
+        }
+        taken
+    }
+
     /// Writes down where this key's fallen notes landed, while the node can
     /// still say.
     ///
@@ -1386,7 +1421,7 @@ impl Wallet {
     /// last eighty-eight out without a word.
     #[must_use]
     pub fn history(&self) -> Vec<Movement> {
-        while self.follow() > 0 {}
+        self.follow_to_the_tip();
         self.history
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1622,7 +1657,7 @@ impl Wallet {
         // two disagreed inside one answer: the served page counted the money
         // out of an account that was behind and listed the movements out of
         // one that was not, in the same object.
-        while self.follow() > 0 {}
+        self.follow_to_the_tip();
         let mine = self.address();
         // This wallet's own account of what it has been paid, which is what
         // lets it notice a note the node has stopped following, and where each
