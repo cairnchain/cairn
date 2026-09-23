@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use cairn_chain::{
-    Accepted, Bodies, ChainError, ChainStore, Located, HELD_WINDOW, MAX_REORG_DEPTH,
+    Accepted, Bodies, ChainError, ChainStore, Located, HELD_WINDOW, MAX_LOCATOR, MAX_REORG_DEPTH,
 };
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::Block;
@@ -551,6 +551,118 @@ fn a_branch_read_from_the_first_block_knows_its_first_block() {
     assert_eq!(store.id_at(0), Some(blocks[0].id()));
     assert_eq!(store.branch_start(), Some(0));
     assert!(!store.agrees_with(&Located::new(0, Hash32::ZERO)));
+}
+
+/// What a locator names, and what it is for.
+///
+/// Two nodes exchange these to find where their branches parted without
+/// either sending its history, so a locator that names nothing, or names one
+/// height over and over, is a catch-up that starts from the beginning every
+/// time. `cargo mutants` could empty it, or turn either half of the guard
+/// that stops it, with the whole suite green.
+#[test]
+fn a_locator_names_the_tip_first_and_thins_as_it_goes_back() {
+    let miner = wallet(1);
+    let mut source = Source::new();
+    let mut blocks = Vec::new();
+    source.run(&miner, 40, &mut blocks);
+
+    let mut store = ChainStore::new(params());
+    for block in &blocks {
+        store.add_block(block.clone(), NOW).unwrap();
+    }
+
+    let locator = store.locator();
+    assert!(!locator.is_empty(), "a node on a chain names where it is");
+    assert_eq!(
+        locator.first().map(|entry| entry.height),
+        store.height(),
+        "the first entry is the tip, which is where a peer starts comparing"
+    );
+    assert_eq!(
+        locator.last().map(|entry| entry.height),
+        Some(0),
+        "and the last is the first block, so two branches always meet somewhere"
+    );
+
+    let heights: Vec<u64> = locator.iter().map(|entry| entry.height).collect();
+    assert!(
+        heights.windows(2).all(|pair| pair[0] > pair[1]),
+        "each entry is deeper than the one before it: {heights:?}"
+    );
+    assert!(
+        locator.len() <= MAX_LOCATOR,
+        "and there are never more than the wire allows"
+    );
+
+    // The shape is the whole of what it is for: dense where branches usually
+    // part, thinning as agreement becomes certain. The first ten steps back
+    // are one block each, and after that each step is twice the one before it
+    // until the walk reaches the first block.
+    let gaps: Vec<u64> = heights.windows(2).map(|pair| pair[0] - pair[1]).collect();
+    assert!(
+        gaps.iter().take(10).all(|gap| *gap == 1),
+        "the recent end is sampled block by block: {gaps:?}"
+    );
+    let thinning: Vec<u64> = gaps.iter().copied().skip(10).collect();
+    assert_eq!(
+        thinning.first(),
+        Some(&2),
+        "the step doubles once the dense end is spent: {gaps:?}"
+    );
+    assert!(
+        thinning.windows(2).all(|pair| pair[1] <= pair[0] * 2),
+        "and never by more than twice, except where the walk lands on the \
+         first block: {gaps:?}"
+    );
+    assert!(
+        thinning.iter().any(|gap| *gap > 2),
+        "a locator that stopped thinning would name every block of a long \
+         chain: {gaps:?}"
+    );
+
+    // Every height it names is one this node still holds, which is the whole
+    // of what makes the comparison meaningful.
+    for entry in &locator {
+        assert_eq!(
+            store.id_at(entry.height),
+            Some(entry.id),
+            "the locator names a height this node does not hold at {}",
+            entry.height
+        );
+    }
+}
+
+/// A store answers where a block sits, and says nothing for one it does not
+/// hold.
+///
+/// Read wherever a branch is compared with another, and `cargo mutants` could
+/// make it answer nothing to everything, or the same height to everything,
+/// with the suite green.
+#[test]
+fn a_store_says_where_a_block_sits_on_its_branch() {
+    let miner = wallet(1);
+    let mut source = Source::new();
+    let mut blocks = Vec::new();
+    source.run(&miner, 6, &mut blocks);
+
+    let mut store = ChainStore::new(params());
+    for block in &blocks {
+        store.add_block(block.clone(), NOW).unwrap();
+    }
+
+    for (height, block) in blocks.iter().enumerate() {
+        assert_eq!(
+            store.height_of(&block.id()),
+            Some(height as u64),
+            "the block at {height} is not where the store says it is"
+        );
+    }
+    assert_eq!(
+        store.height_of(&Hash32::from_bytes([0xA5; 32])),
+        None,
+        "and a block it never saw sits nowhere"
+    );
 }
 
 /// The locator's order is the sender's, and the answer follows it.

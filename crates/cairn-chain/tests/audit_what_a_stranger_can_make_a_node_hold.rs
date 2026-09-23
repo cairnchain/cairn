@@ -26,7 +26,9 @@
     clippy::arithmetic_side_effects
 )]
 
-use cairn_chain::{Accepted, ChainStore, HELD_WINDOW, MAX_SIDE_BYTES, MILESTONE};
+use cairn_chain::{
+    Accepted, ChainStore, HELD_WINDOW, MAX_REORG_DEPTH, MAX_SIDE_BLOCKS, MAX_SIDE_BYTES, MILESTONE,
+};
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader, BLOCK_VERSION};
 use cairn_ledger::note::{NetworkId, Note, NoteId};
@@ -219,6 +221,69 @@ fn offer_side_blocks(rules: ConsensusParams, bytes: usize, count: u64) -> (usize
         );
     }
     (store.held_bytes(), store.len())
+}
+
+/// The sweep keeps the rivals a node may yet have to switch to, and counts
+/// them.
+///
+/// Measured on a branch longer than the window a reorganisation may reach back
+/// over, which is where a node holds its own blocks and a stranger's at once:
+/// twelve thousand rivals of the tip leave it holding the branch's window plus
+/// `MAX_SIDE_BLOCKS` of them, and no more, however many were offered.
+///
+/// Both halves matter. A node that kept no rivals would have a fork choice
+/// deciding between its branch and nothing; one that kept them all would hold
+/// whatever a stranger cared to send.
+///
+/// Which sweep the count belongs to is worth saying, because the obvious
+/// answer is wrong. Joining the two halves of `forget_unreachable_branches`
+/// with "and", or moving either of its thresholds, leaves this measurement
+/// unchanged: what enforces both limits is `forget_oldest_side_blocks`, whose
+/// own note says `MAX_SIDE_BLOCKS` "was a trigger and never a bound" until it
+/// was made one. The first sweep drops what is out of reach; this is what the
+/// second one settles at.
+#[test]
+fn the_sweep_keeps_the_rivals_inside_the_window_and_counts_them() {
+    let rules = params();
+    let miner = wallet(1);
+    let mut shared = Chain::new(rules);
+    let chain = shared.mine_empty(&miner, MAX_REORG_DEPTH + 60);
+
+    let mut store = ChainStore::new(rules);
+    for block in &chain {
+        store.add_block(block.clone(), NOW).unwrap();
+    }
+    let tip = store.height().expect("a chain to stand on");
+    let branch_entries = store.len();
+    assert!(
+        tip > MAX_REORG_DEPTH as u64,
+        "a branch longer than the window it may undo"
+    );
+
+    // Rivals of the tip, which is where a rival has to sit to be worth
+    // anything: a node refuses a block from under the floor it has settled.
+    let previous = store.id_at(tip - 1).expect("the block below the tip");
+    for nonce in 0..12_000u64 {
+        let block = side_block(tip, previous, 4096, nonce, &wallet(9));
+        assert_eq!(
+            store.add_block(block, NOW).unwrap(),
+            Accepted::SideBranch,
+            "a losing block was not held aside"
+        );
+    }
+
+    assert!(
+        store.len() > branch_entries,
+        "the sweep dropped every rival, leaving the fork choice deciding \
+         between this branch and nothing"
+    );
+    assert!(
+        store.len() <= MAX_REORG_DEPTH + MAX_SIDE_BLOCKS + 1,
+        "twelve thousand rivals left the node holding {} entries against its \
+         own count of {}",
+        store.len(),
+        MAX_REORG_DEPTH + MAX_SIDE_BLOCKS + 1
+    );
 }
 
 /// What a stranger can make a node hold has to be bounded by the node, not by
