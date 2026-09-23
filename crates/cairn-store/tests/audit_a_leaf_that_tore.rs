@@ -185,3 +185,42 @@ fn a_leaf_nothing_can_vouch_for_is_not_written_over() {
 
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// A tree with nothing in it says so, and one with a leaf in it says that.
+///
+/// `is_empty` is the name clippy asks for beside `len`, and nothing in the
+/// workspace calls it: a node asks the log how many headers it holds, not the
+/// forest. So it was a method that could answer the same thing to every
+/// question, and `cargo mutants` made it answer yes to a tree of sixteen
+/// leaves with the whole suite green. Asked once here, against the count it is
+/// meant to be the other face of.
+#[test]
+fn a_tree_is_empty_exactly_when_it_holds_no_leaves() {
+    let directory = scratch("empty");
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut tree = HeaderTree::open(&directory).unwrap();
+
+    assert_eq!(tree.len(), 0);
+    assert!(tree.is_empty(), "a tree opened on an empty directory");
+
+    tree.append(leaf(0)).unwrap();
+    assert_eq!(tree.len(), 1);
+    assert!(!tree.is_empty(), "and one that was given a leaf");
+
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn zz_probe_files() {
+    let directory = scratch("probe-files");
+    std::fs::create_dir_all(&directory).unwrap();
+    let tree = HeaderTree::open(&directory).unwrap();
+    drop(tree);
+    let mut names: Vec<String> = std::fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    println!("PROBE {} files: {names:?}", names.len());
+    let _ = std::fs::remove_dir_all(&directory);
+}
