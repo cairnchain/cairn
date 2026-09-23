@@ -165,3 +165,73 @@ fn a_log_holds_the_heights_of_its_run_and_no_others() {
     drop(log);
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// A log with nothing in it takes any run, and one that was emptied is empty
+/// on disk as well as in memory.
+///
+/// `join` asks whether this log holds anything before it asks whether the run
+/// in front of it ends where this one starts, because a log holding nothing
+/// starts nowhere. `cargo mutants` could make that first question always
+/// answer yes, and a node filling in the headers from before it arrived would
+/// be told its own empty log is out of order. And `clear` could do nothing at
+/// all with the suite green, which is a log that says it is empty and holds
+/// every header it ever had.
+#[test]
+fn an_empty_log_takes_any_run_and_an_emptied_one_is_empty_on_disk() {
+    let blocks = chain(6, 1);
+
+    let (front, front_directory) = written("front-run", &blocks[..3]);
+    let (mut empty, empty_directory) = written("takes-any", &[]);
+    assert!(empty.is_empty());
+    empty
+        .join(&front)
+        .expect("a log holding nothing starts nowhere");
+    assert_eq!(empty.len(), 3, "and takes the run it was given");
+
+    empty.clear().unwrap();
+    assert_eq!(empty.len(), 0, "an emptied log holds nothing");
+    drop(empty);
+
+    let back = HeaderLog::open(&empty_directory).unwrap();
+    assert_eq!(
+        back.len(),
+        0,
+        "and holds nothing when it is opened again, which is what says the \
+         file was cut rather than the count forgotten"
+    );
+
+    drop(back);
+    drop(front);
+    let _ = std::fs::remove_dir_all(&front_directory);
+    let _ = std::fs::remove_dir_all(&empty_directory);
+}
+
+/// A log cut back keeps the height it starts at, and says so.
+///
+/// `keep_below` sets the start to nought only when it kept nothing, because a
+/// log that still holds headers still starts where it did. `cargo mutants`
+/// could turn that test around, and then a log cut back would claim to start
+/// at height nought while holding headers from somewhere else: every height
+/// it answers about after that is wrong by the distance it really started at.
+#[test]
+fn a_log_cut_back_still_starts_where_it_started() {
+    let blocks = chain(9, 1);
+    let (mut log, directory) = written("cut-back", &blocks[5..]);
+    assert_eq!(log.len(), 4);
+    assert!(log.holds(5), "it starts at five, not at nought");
+    assert!(!log.holds(0));
+
+    log.keep_below(7).unwrap();
+    assert_eq!(log.len(), 2, "heights five and six are kept");
+    assert!(
+        log.holds(5) && log.holds(6),
+        "and it still answers for them"
+    );
+    assert!(
+        !log.holds(0) && !log.holds(7),
+        "and for nothing outside the run it has left"
+    );
+
+    drop(log);
+    let _ = std::fs::remove_dir_all(&directory);
+}
