@@ -130,3 +130,38 @@ fn two_runs_of_one_chain_still_merge() {
     let _ = std::fs::remove_dir_all(&at);
     let _ = std::fs::remove_dir_all(&front_at);
 }
+
+/// A log says which heights it holds, at both ends of the run and on both
+/// sides of it.
+///
+/// Three claims joined by "and": it holds something, the height is not below
+/// where the run starts, and it is not past where the run reaches. Joining any
+/// two of them with "or" makes a log answer for heights it does not hold, and
+/// what reads this decides whether a node goes to the disk for a header or
+/// tells a peer it has nothing. `cargo mutants` turned both joins and the
+/// whole suite stayed green.
+#[test]
+fn a_log_holds_the_heights_of_its_run_and_no_others() {
+    let blocks = chain(4, 1);
+    let (empty, directory) = written("holds-empty", &[]);
+    assert!(
+        !empty.holds(0),
+        "a log with nothing in it holds no height at all"
+    );
+    drop(empty);
+    let _ = std::fs::remove_dir_all(&directory);
+
+    let (log, directory) = written("holds", &blocks);
+    assert_eq!(log.len(), 4);
+    for height in 0..4 {
+        assert!(log.holds(height), "the run it was given, at {height}");
+    }
+    assert!(
+        !log.holds(log.reaches()),
+        "and not the height it reaches, which is the next one to be written"
+    );
+    assert!(!log.holds(u64::MAX), "nor anything past that");
+
+    drop(log);
+    let _ = std::fs::remove_dir_all(&directory);
+}
