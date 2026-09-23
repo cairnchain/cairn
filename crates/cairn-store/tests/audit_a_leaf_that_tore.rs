@@ -185,3 +185,102 @@ fn a_leaf_nothing_can_vouch_for_is_not_written_over() {
 
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// A tree with nothing in it says so, and one with a leaf in it says that.
+///
+/// `is_empty` is the name clippy asks for beside `len`, and nothing in the
+/// workspace calls it: a node asks the log how many headers it holds, not the
+/// forest. So it was a method that could answer the same thing to every
+/// question, and `cargo mutants` made it answer yes to a tree of sixteen
+/// leaves with the whole suite green. Asked once here, against the count it is
+/// meant to be the other face of.
+#[test]
+fn a_tree_is_empty_exactly_when_it_holds_no_leaves() {
+    let directory = scratch("empty");
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut tree = HeaderTree::open(&directory).unwrap();
+
+    assert_eq!(tree.len(), 0);
+    assert!(tree.is_empty(), "a tree opened on an empty directory");
+
+    tree.append(leaf(0)).unwrap();
+    assert_eq!(tree.len(), 1);
+    assert!(!tree.is_empty(), "and one that was given a leaf");
+
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Opening a forest with nothing in it touches one level and not sixty four.
+///
+/// `mend_levels` walks upward from level zero and stops at the first height
+/// that holds nothing and has no file, because nothing above a height like
+/// that can hold anything either. Without that stop it opens every height
+/// there is, and opening a level creates it: a node that had never seen a
+/// header would leave sixty four files behind, and `cargo mutants` could take
+/// the stop away, or move it to height zero where it swallows the level the
+/// leaves live on, with the whole suite green.
+#[test]
+fn opening_an_empty_forest_touches_one_level() {
+    let directory = scratch("empty-levels");
+    std::fs::create_dir_all(&directory).unwrap();
+    let tree = HeaderTree::open(&directory).unwrap();
+    assert!(tree.is_empty());
+    drop(tree);
+
+    let mut names: Vec<String> = std::fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![format!("{HEADER_TREE}.0")],
+        "an empty forest left {} files behind",
+        names.len()
+    );
+
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// A level holding more than the leaves account for is cut back on open.
+///
+/// That is what a reorganisation leaves behind, and what an append torn
+/// between two levels leaves behind: nodes reaching past the leaves they were
+/// folded from. They are not wrong bytes, they are bytes about leaves that are
+/// gone, and a proof folded through one of them answers for a forest nobody
+/// has. `cargo mutants` could turn the comparison that notices into its
+/// opposite, so the cut never happens, with the whole suite green.
+#[test]
+fn a_level_reaching_past_the_leaves_is_cut_back_when_the_forest_opens() {
+    let (tree, directory) = grown("overlong");
+    drop(tree);
+
+    let level = directory.join(format!("{HEADER_TREE}.1"));
+    let before = std::fs::metadata(&level).unwrap().len();
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&level)
+            .unwrap();
+        file.write_all(&[0xAB; 32]).unwrap();
+    }
+    assert_eq!(
+        std::fs::metadata(&level).unwrap().len(),
+        before + 32,
+        "the level was made longer than the leaves account for"
+    );
+
+    let tree = HeaderTree::open(&directory).unwrap();
+    assert_eq!(
+        std::fs::metadata(&level).unwrap().len(),
+        before,
+        "a level reaching past the leaves is cut back to what they account for"
+    );
+    assert!(
+        refused(&tree).is_empty(),
+        "and every position still proves against the forest it belongs to"
+    );
+
+    drop(tree);
+    let _ = std::fs::remove_dir_all(&directory);
+}
