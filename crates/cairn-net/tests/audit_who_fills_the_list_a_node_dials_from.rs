@@ -271,10 +271,16 @@ fn a_table_strangers_filled_still_leaves_a_node_a_way_out_of_it() {
             tick = tick.saturating_add(1);
             for socket in &mut held {
                 let _ = write_message(socket, params().network, &Message::Ping(tick));
+                // Bounded, because a drain that ends only when the code
+                // under test says so hangs the suite instead of failing it.
+                let mut read = 0u64;
                 while matches!(
                     read_message(socket, params().network, MAX_FRAME_BYTES),
                     Ok(Incoming::Message(_))
-                ) {}
+                ) {
+                    read += 1;
+                    assert!(read < (1 << 20), "the socket never ran out of answers");
+                }
             }
         }
         held

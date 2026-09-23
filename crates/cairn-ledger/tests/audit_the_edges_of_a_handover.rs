@@ -115,10 +115,16 @@ impl Node {
 /// turning the nonce until it does not.
 fn without_work(header: BlockHeader) -> BlockHeader {
     let mut broken = header;
-    while meets_target(&broken.id(), broken.difficulty) {
-        broken.nonce += 1;
+    // Bounded the way `mine_header` is, and for the same reason: a loop that
+    // ends only when the code under test says so hangs the suite instead of
+    // failing it.
+    for nonce in 0..ATTEMPTS {
+        broken.nonce = nonce;
+        if !meets_target(&broken.id(), broken.difficulty) {
+            return broken;
+        }
     }
-    broken
+    panic!("every nonce met a difficulty of {}", broken.difficulty);
 }
 
 /// The control the three refusals below are worth nothing without.
