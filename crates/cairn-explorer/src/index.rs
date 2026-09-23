@@ -285,6 +285,36 @@ pub(crate) enum Reading {
     More,
 }
 
+/// Turns a walk until it has read as far as the chain reaches, and says
+/// whether it got there.
+///
+/// `refresh` reads one batch and hands the index back, because holding it for
+/// a whole rebuild is what would make the site stop answering. Reading to the
+/// end is calling it until it says [`Reading::Done`], and that was written out
+/// at eleven places in this crate: nine as a bare `while ... == Reading::More
+/// {}` with nothing stopping them, and twice as a hand-written counter bounded
+/// at a million turns. Three answers to one question, and the two counted ones
+/// count to a number nothing chose.
+///
+/// The bound here is read off the chain instead. A turn that says `More`
+/// stopped on the batch bound with the chain still above it, so it read at
+/// least one height, and a chain has no more heights to read than its tip
+/// names. Since a batch is many heights, that is far more turns than an honest
+/// read takes and far fewer than for ever.
+///
+/// The answer is a `bool` rather than a panic because this runs in the site as
+/// well as in the suite, and the two want different things from it: a test
+/// asserts on it and fails, while the walk in the site returns and is called
+/// again, which is what it would do at the tip anyway.
+pub(crate) fn read_to_the_end(reach: u64, mut turn: impl FnMut() -> Reading) -> bool {
+    for _ in 0..=reach {
+        if turn() == Reading::Done {
+            return true;
+        }
+    }
+    false
+}
+
 /// Bytes one note that has ever existed costs the index, measured on the
 /// running implementation.
 ///

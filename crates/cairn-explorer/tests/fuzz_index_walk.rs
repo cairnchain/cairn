@@ -47,7 +47,7 @@ use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_primitives::{Amount, Hash32};
 
-use index::{Head, Held, Index, Reading};
+use index::{read_to_the_end, Head, Held, Index, Reading};
 
 /// Heights the two branches share.
 const FORK: u64 = 4;
@@ -238,11 +238,10 @@ fn turn_to_the_end(
     tip: u64,
     read: impl Fn(u64) -> Held,
 ) {
-    let mut turns = 0u64;
-    while turn(walk, head_from, ends_on, tip, &read) == Reading::More {
-        turns += 1;
-        assert!(turns < (1 << 20), "the walk never reached the tip");
-    }
+    assert!(
+        read_to_the_end(tip, || turn(walk, head_from, ends_on, tip, &read)),
+        "the walk never reached the tip"
+    );
 }
 
 /// Nothing the index holds is off a branch this node has left.
@@ -290,10 +289,9 @@ fn the_walk_never_settles_holding_a_branch_the_node_left() {
         let settled = branches[following];
         let left = branches[1 - following];
         for _ in 0..20 {
-            while turn(&mut walk, settled, settled, settled.tip(), |height| {
+            turn_to_the_end(&mut walk, settled, settled, settled.tip(), |height| {
                 settled.held(height)
-            }) == Reading::More
-            {}
+            });
         }
 
         let Some((_, through)) = walk.covers() else {

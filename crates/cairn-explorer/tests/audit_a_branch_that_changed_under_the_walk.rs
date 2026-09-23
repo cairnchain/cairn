@@ -51,7 +51,7 @@ use cairn_ledger::validation::{assemble_block, connect_block, mine_block, Consen
 use cairn_ledger::LedgerState;
 use cairn_primitives::{Amount, Hash32};
 
-use index::{Head, Held, Index, Reading};
+use index::{read_to_the_end, Head, Held, Index, Reading};
 
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
@@ -256,7 +256,11 @@ fn a_switch_inside_one_turn_leaves_the_index_on_the_branch_that_lost() {
     // chain had not reached higher when the head was taken.
     let short = Branch::of(&[&common, &run_a[..4]]);
     assert_eq!(short.tip(), 6);
-    while a_turn(&mut walk, &short, |height| short.held(height)) == Reading::More {}
+    assert!(
+        read_to_the_end(short.tip(), || a_turn(&mut walk, &short, |height| short
+            .held(height))),
+        "the walk never said it had reached the tip"
+    );
     assert_eq!(walk.covers(), Some((0, 6)));
 
     // Turn two. The head is taken off A and agrees, which is what the check
@@ -300,7 +304,12 @@ fn a_switch_inside_one_turn_leaves_the_index_on_the_branch_that_lost() {
 
     // Every turn after it, on the branch the node now follows.
     for _ in 0..8 {
-        while a_turn(&mut walk, &branch_b, |height| branch_b.held(height)) == Reading::More {}
+        assert!(
+            read_to_the_end(branch_b.tip(), || a_turn(&mut walk, &branch_b, |height| {
+                branch_b.held(height)
+            })),
+            "the walk never said it had reached the tip"
+        );
     }
     assert_eq!(
         walk.covers(),
@@ -390,7 +399,12 @@ fn a_switch_between_the_head_and_the_first_height_is_never_noticed() {
     let branch_b = Branch::of(&[&common, &run_b]);
 
     let mut walk = Index::new();
-    while a_turn(&mut walk, &branch_a, |height| branch_a.held(height)) == Reading::More {}
+    assert!(
+        read_to_the_end(branch_a.tip(), || a_turn(&mut walk, &branch_a, |height| {
+            branch_a.held(height)
+        })),
+        "the walk never said it had reached the tip"
+    );
     assert_eq!(walk.covers(), Some((0, 3)), "level with A's tip");
 
     // The head, taken with the chain in hand, on the branch that is about to
@@ -403,14 +417,21 @@ fn a_switch_between_the_head_and_the_first_height_is_never_noticed() {
     };
     // The chain is given back. The switch lands. Every height the walk now
     // asks for comes off B.
-    while walk.refresh(
-        &head,
-        |height| branch_b.held(height),
-        |height| branch_b.id_at(height),
-        || Some(branch_b.tip()),
-    ) == Reading::More
-    {}
-    while a_turn(&mut walk, &branch_b, |height| branch_b.held(height)) == Reading::More {}
+    assert!(
+        read_to_the_end(branch_b.tip(), || walk.refresh(
+            &head,
+            |height| branch_b.held(height),
+            |height| branch_b.id_at(height),
+            || Some(branch_b.tip()),
+        )),
+        "the walk never said it had reached the tip"
+    );
+    assert!(
+        read_to_the_end(branch_b.tip(), || a_turn(&mut walk, &branch_b, |height| {
+            branch_b.held(height)
+        })),
+        "the walk never said it had reached the tip"
+    );
 
     assert_eq!(walk.covers(), Some((0, 5)));
     assert_eq!(
@@ -454,7 +475,11 @@ fn a_branch_that_got_shorter_inside_a_turn_is_not_agreed_with() {
     let short = Branch::of(&[&up_to(&long, 7)]);
 
     let mut walk = Index::new();
-    while a_turn(&mut walk, &long, |height| long.held(height)) == Reading::More {}
+    assert!(
+        read_to_the_end(long.tip(), || a_turn(&mut walk, &long, |height| long
+            .held(height))),
+        "the walk never said it had reached the tip"
+    );
     assert_eq!(
         walk.covers(),
         Some((0, 10)),

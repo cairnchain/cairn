@@ -53,7 +53,7 @@ use cairn_ledger::validation::ConsensusParams;
 use cairn_primitives::codec::Encode;
 use cairn_primitives::{Amount, Hash32};
 
-use index::{Head, Held, Index, Movement, NoteRecord, Reading};
+use index::{read_to_the_end, Head, Held, Index, Movement, NoteRecord};
 
 /// Distinct public keys, made the way `audit_index_cost.rs` makes them.
 fn fresh_owners(count: usize) -> Vec<PublicKey> {
@@ -180,16 +180,15 @@ fn rss_kb() -> u64 {
 
 /// Walks the index to the tip, the way `Explorer::refresh` does.
 fn read_all(index: &mut Index, head: &Head, block_at: impl Fn(u64) -> Held) {
-    // Bounded, because a walk that ends only when the code under test says
-    // so hangs the suite instead of failing it.
-    let mut turns = 0u64;
-    while index.refresh(head, &block_at, |_| None, || Some(head.tip)) == Reading::More {
-        turns += 1;
-        assert!(
-            turns < (1 << 20),
-            "the walk never said it had reached the tip"
-        );
-    }
+    assert!(
+        read_to_the_end(head.tip, || index.refresh(
+            head,
+            &block_at,
+            |_| None,
+            || Some(head.tip)
+        )),
+        "the walk never said it had reached the tip"
+    );
 }
 
 /// Weighs one chain and says what a note cost on it.
