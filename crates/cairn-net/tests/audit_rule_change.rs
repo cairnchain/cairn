@@ -22,9 +22,9 @@
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
-use cairn_chain::ChainStore;
+use cairn_chain::{ChainStore, Outdated};
 use cairn_crypto::SecretKey;
-use cairn_ledger::block::{Block, BLOCK_VERSION};
+use cairn_ledger::block::{Activation, Block, BLOCK_VERSION};
 use cairn_ledger::note::Note;
 use cairn_ledger::transaction::CoinbaseTransaction;
 use cairn_ledger::validation::{
@@ -382,4 +382,97 @@ fn an_unreadable_transfer_says_nothing_about_this_build() {
         "transfer version 9 is not supported",
         "named where it belongs, and nowhere near the block count"
     );
+}
+
+/// A rule change scheduled at height five, written under a version this build
+/// does not have. What a node looks like once it has been told the network is
+/// moving and has not been updated.
+const ANNOUNCED: &[Activation] = &[
+    Activation {
+        height: 0,
+        version: BLOCK_VERSION,
+    },
+    Activation {
+        height: 5,
+        version: BLOCK_VERSION + 1,
+    },
+];
+
+/// A node whose own schedule has passed its build says so, and says it about
+/// itself.
+///
+/// The test above is the node that has *not* been told: nothing is scheduled,
+/// so the block never reaches `SoftwareTooOld`, and the answer is `unjudged`
+/// with `outdated` empty. This is the other one, and it is the case the
+/// machinery was built for: the schedule says height five is judged by rules
+/// this build does not have, so nothing about the block is in question and
+/// nothing about the peer is either.
+///
+/// Neither of the two things that carry it was measured. The guard that reads
+/// `ChainError::outdated` can be read as false and the field can be deleted
+/// from the answer, and the whole of `cairn-net` stays green. Read as false,
+/// the refusal falls through to the arm that answers a bad block, so a node
+/// that has been told the network moved on closes the connection and holds it
+/// against every peer that has updated. With the field gone it does not close
+/// anything, and simply never says why it stopped following the chain.
+///
+/// The three fields apart is the point. `outdated` stops the node and is the
+/// one answer a stranger must not be able to ask for, which is why it is
+/// reached from this node's own schedule and never from what a block claims.
+#[test]
+fn a_node_whose_schedule_has_passed_its_build_says_so_about_itself() {
+    let mut miner = Miner::new();
+    let settled: Vec<Block> = (0..5).map(|_| miner.mine()).collect();
+    // Mined by a network that has the rules, at the height the change governs.
+    let at_the_change = miner.candidate(None);
+    assert_eq!(at_the_change.header.height, 5);
+
+    let announced = ConsensusParams {
+        activations: ANNOUNCED,
+        ..params()
+    };
+    let mut chain = ChainStore::new(announced);
+    for block in &settled {
+        chain.add_block(block.clone(), NOW).unwrap();
+    }
+    assert_eq!(
+        chain.height(),
+        Some(4),
+        "everything under the change applies"
+    );
+
+    let mut peer = greeted();
+    let reaction = on_message(
+        &mut solo(&mut chain),
+        &mut peer,
+        Message::Block(Box::new(at_the_change)),
+        NOW,
+    );
+
+    assert_eq!(
+        reaction.drop_peer, None,
+        "the peer carried what its own chain carries, and closing on it cuts \
+         off everyone who has updated"
+    );
+    assert_eq!(
+        reaction.outdated,
+        Some(Outdated {
+            height: 5,
+            required: BLOCK_VERSION + 1,
+            known: BLOCK_VERSION,
+        }),
+        "a node that stops following the chain here and does not say why \
+         leaves its operator with a height that stopped moving and nothing to \
+         read"
+    );
+    assert!(
+        reaction.applied.is_none(),
+        "the block is not followed: this build cannot judge it"
+    );
+    assert!(
+        reaction.unreachable.is_none(),
+        "and this is not a place the node cannot get back from; an update \
+         gets it back"
+    );
+    assert_eq!(chain.height(), Some(4), "the node stands where it was");
 }
