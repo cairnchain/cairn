@@ -2896,6 +2896,33 @@ impl ChainStore {
     /// blocks nothing sized left the node holding 42 MB, the sweep ran and
     /// dropped none of it, and each further block a peer offered was another
     /// two megabytes with nothing to take it back.
+    /// What measures this, measured rather than assumed: the last line of it,
+    /// and nothing else.
+    ///
+    /// Deleting the whole function is caught, which reads like cover and is
+    /// not: what that deletes is the unconditional call to
+    /// [`Self::forget_oldest_side_blocks`] at the end. Everything the function
+    /// does for itself survives being read the other way round. Nine
+    /// mutations, nine survivors, with the chain suite and the network suite
+    /// both green: either threshold moved or inverted, the join between them
+    /// turned to `and`, and either half of the `retain` turned around, which
+    /// is the one that drops the node's own branch.
+    ///
+    /// The reason is that the two sweeps overlap almost exactly. What this one
+    /// drops is what a rewind can no longer reach; what the other drops is the
+    /// oldest off the branch, and the oldest is what falls out of reach first.
+    /// The input that separates them is pressure coming from the branch rather
+    /// than from branches this node is not on: `held_bytes_ceiling` counts a
+    /// full window at the largest block the rules allow, and `hold` counts
+    /// [`HELD_OVERHEAD`] on top of each, so a window of near-maximum blocks
+    /// crosses the ceiling while what is held off the branch is well under
+    /// [`MAX_SIDE_BYTES`] and the second sweep does nothing. Building that
+    /// wants a thousand blocks at the size limit, which is why no fixture
+    /// here has one.
+    ///
+    /// Written down rather than left to be assumed. The next reader counting
+    /// this as measured is the failure the note above
+    /// `forget_oldest_side_blocks` describes, from the other side.
     fn forget_unreachable_branches(&mut self) {
         let limit = MAX_REORG_DEPTH.saturating_add(MAX_SIDE_BLOCKS);
         let by_count = self.blocks.len() > limit;
