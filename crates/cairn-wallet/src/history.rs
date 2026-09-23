@@ -1188,6 +1188,50 @@ mod tests {
         );
     }
 
+    /// A list that is exactly full still says how far back it reaches.
+    ///
+    /// Past `MAX_MOVEMENTS` the oldest are dropped and how far back the
+    /// account reaches moves with them, because what was dropped is what it
+    /// can no longer answer for. At exactly that many nothing is dropped, and
+    /// nothing should move: `cargo mutants` could turn the comparison into
+    /// `>=`, and then an account that had read every block from the first
+    /// would say it only reaches back to its oldest payment, which is a
+    /// sentence about somebody's money that is not true.
+    #[test]
+    fn a_list_that_is_exactly_full_still_reaches_back_to_where_it_began() {
+        let mine = key(1);
+        let them = key(2);
+        let mut history = History::new();
+
+        // The first block pays somebody else, so where this account begins
+        // and where its oldest payment sits are different numbers.
+        history.take(&block(0, them, Vec::new()), mine);
+        assert_eq!(history.from(), Some(0), "it began at the first block");
+
+        for height in 1..=MAX_MOVEMENTS as u64 {
+            history.take(&block(height, mine, Vec::new()), mine);
+        }
+        assert_eq!(
+            history.len(),
+            MAX_MOVEMENTS,
+            "exactly full, nothing dropped"
+        );
+        assert_eq!(
+            history.from(),
+            Some(0),
+            "and it still reaches back to the block it began at"
+        );
+
+        // One more, and the oldest goes: what it can answer for moves with it.
+        history.take(&block(MAX_MOVEMENTS as u64 + 1, mine, Vec::new()), mine);
+        assert_eq!(history.len(), MAX_MOVEMENTS);
+        assert_eq!(
+            history.from(),
+            Some(2),
+            "the oldest payment it still holds is the one at height two"
+        );
+    }
+
     /// Money that went round and came back is not a payment.
     ///
     /// A transfer that spends this key's notes and pays the whole of them back
