@@ -125,4 +125,16 @@ fn the_refusals_that_were_there_still_say_what_they_said() {
         PublicKey::from_bytes(&above_the_field),
         Err(CryptoError::NonCanonicalPublicKey)
     );
+
+    // And the third, which nothing had ever produced: thirty two bytes that
+    // are a number in the field and are not a point on the curve. Found by
+    // counting up rather than chosen: the first such encoding whose leading
+    // byte is anything at all.
+    let mut not_a_point = [0u8; 32];
+    not_a_point[0] = 2;
+    assert_eq!(
+        PublicKey::from_bytes(&not_a_point),
+        Err(CryptoError::MalformedPublicKey),
+        "a canonical number that is not a point has its own refusal"
+    );
 }
