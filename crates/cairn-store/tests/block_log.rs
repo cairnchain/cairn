@@ -805,3 +805,88 @@ fn a_damaged_index_never_keeps_a_node_from_starting() {
         let _ = std::fs::remove_dir_all(&directory);
     }
 }
+
+/// A log that has been cut at both ends still knows which heights it holds.
+///
+/// `first` is where the log begins, and every question about a height is
+/// answered by subtracting it: `holds`, `read_at` and `reaches` are all that
+/// one number and the count. `keep_first` sets it back to nought when the log
+/// is emptied, which is right, and nothing had ever asked what it does when
+/// the log is *not* emptied.
+///
+/// Nothing could have asked. Every fixture in this crate builds its chain from
+/// height nought, so `first` is nought before the trim and nought after it,
+/// and the two answers are the same answer. A log only begins somewhere else
+/// once its bottom has been dropped, which is what `keep_from` is for and what
+/// every node past `--keep` has done.
+///
+/// So: drop the bottom, then cut the top, and ask the questions a serving node
+/// asks. Read the other way, a log holding heights twelve to fifteen says it
+/// holds nought to three, and answers about blocks it does not have.
+#[test]
+fn a_log_cut_at_both_ends_still_knows_where_it_begins() {
+    let blocks = chain(20);
+    let directory = scratch("both-ends");
+    let (mut log, _) = BlockLog::open(&directory).unwrap();
+    for block in &blocks {
+        log.append(block).unwrap();
+    }
+
+    // The bottom goes, which is what puts the log somewhere other than nought.
+    log.keep_from(12).unwrap();
+    assert_eq!(log.reaches(), 20, "the tip is where it was");
+    assert!(
+        log.read_at(12).unwrap().is_some(),
+        "the log begins at twelve, which is the whole premise"
+    );
+    assert!(log.read_at(11).unwrap().is_none(), "and not below it");
+
+    // Then the top, which is what a reorganisation does.
+    log.keep_below(16).unwrap();
+    assert_eq!(
+        log.reaches(),
+        16,
+        "a log holding twelve to fifteen reaches sixteen, and it said {}",
+        log.reaches()
+    );
+
+    // The heights either side of both edges, which is what `holds` is for and
+    // what every read goes through.
+    for height in [0u64, 11, 16, 17, 99] {
+        assert!(
+            !log.holds(height),
+            "the log holds twelve to fifteen and says it holds {height}"
+        );
+        assert!(
+            log.read_at(height).unwrap().is_none(),
+            "and answers about {height}"
+        );
+    }
+    // The count `holds` looks at first cannot be measured here and is not a
+    // gap: an empty log reaches exactly where it begins, so the two
+    // comparisons after it already answer no for every height.
+    for height in 12..16u64 {
+        assert!(log.holds(height), "the log does not say it holds {height}");
+        let block = log
+            .read_at(height)
+            .unwrap()
+            .unwrap_or_else(|| panic!("height {height} vanished"));
+        assert_eq!(
+            block.header.id(),
+            blocks[usize::try_from(height).unwrap()].header.id(),
+            "height {height} came back as another block"
+        );
+    }
+
+    drop(log);
+    let (again, _) = BlockLog::open(&directory).unwrap();
+    assert_eq!(
+        again.reaches(),
+        16,
+        "and a start reads the same two numbers back off the disk"
+    );
+    assert!(again.holds(12) && !again.holds(16));
+
+    drop(again);
+    let _ = std::fs::remove_dir_all(&directory);
+}
