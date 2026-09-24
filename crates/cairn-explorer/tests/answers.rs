@@ -1603,3 +1603,54 @@ fn the_notes_an_address_holds_are_paged_and_not_repeated() {
         "and it named none of them twice"
     );
 }
+
+/// How many blocks sit on a block, counted past one.
+///
+/// This is the number somebody reads to decide a payment has settled, and
+/// every test here asked it of a block at the tip or of a chain one block
+/// long, where the right answer is one. So an explorer that said one for
+/// every block in the chain passed, and so did one that said nought, which
+/// on the page is "not confirmed" against a payment fifty blocks deep. The
+/// same held for the blocks left before the reward halves, which nothing
+/// read at all.
+#[test]
+fn a_block_deep_in_the_chain_is_confirmed_by_every_block_on_it() {
+    let params = params();
+    let miner = wallet(1);
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(&miner, 6);
+    let explorer = explorer(params);
+    feed(&explorer, &blocks);
+    explorer.refresh();
+    assert_eq!(
+        explorer.node().height(),
+        Some(5),
+        "six blocks, the tip at five"
+    );
+
+    // The block at height one, and the five blocks from it to the tip.
+    let deep = &blocks[1];
+    for (route, what) in [
+        (format!("block/{}", deep.id()), "the block"),
+        ("block/1".to_owned(), "the block by its height"),
+        (format!("tx/{}", deep.coinbase.id()), "a transaction in it"),
+    ] {
+        let answer = ask(&explorer, &route);
+        assert!(
+            says(&answer, "confirmations", "5,"),
+            "{what} is five blocks deep: {}",
+            body(&answer)
+        );
+    }
+
+    // Six blocks mined, so the next is the sixth height and the reward halves
+    // that many blocks short of a whole interval.
+    let left = params.halving_interval - 6;
+    let answer = ask(&explorer, "status");
+    assert!(
+        says(&answer, "nextHalving", &format!("{left},"))
+            || says(&answer, "nextHalving", &format!("{left}}}")),
+        "the reward halves in {left} blocks: {}",
+        body(&answer)
+    );
+}
