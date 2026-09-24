@@ -1,0 +1,37 @@
+# The weekly mutation run, once more for the shards that did not finish.
+#
+# A shard of `mutants.yml` is red only when it did not play every mutant it
+# was dealt, and `whole` is red when any shard is missing or short. Neither is
+# a finding: it is a runner GitHub shut down, which happened to one shard of
+# the first run twenty minutes in and took its results with it. Waiting for a
+# person to notice turns that into a week with a hole in it.
+#
+# Twice at most. A shard that is short three times running is not bad luck,
+# and running it again would hide that.
+#
+# Never for a pull request: there `changed` is red when a mutant on a changed
+# line survives, and that is a finding.
+
+name: mutants-retry
+
+on:
+  workflow_run:
+    workflows: [mutants]
+    types: [completed]
+
+permissions:
+  actions: write
+
+jobs:
+  again:
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.event != 'pull_request' &&
+      github.event.workflow_run.run_attempt < 3
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run the shards that did not finish again
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ github.event.workflow_run.id }}
+        run: gh run rerun "$RUN" --failed --repo "$GITHUB_REPOSITORY"
