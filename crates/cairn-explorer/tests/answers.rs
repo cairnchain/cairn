@@ -1602,4 +1602,24 @@ fn the_notes_an_address_holds_are_paged_and_not_repeated() {
         early.len() + later.len(),
         "and it named none of them twice"
     );
+
+    // And each list says when it has run out, which nothing above asked. A
+    // cursor offered on the last page of either list, or withheld on the
+    // first page of movements, passed all of it.
+    assert!(
+        says(&first, "next", "100"),
+        "the movements go on past the first page: {}",
+        body(&first)
+    );
+    assert!(
+        says(&second, "moreNotes", "false"),
+        "the second page of notes is the last one: {}",
+        body(&second)
+    );
+    let last = ask(&explorer, &format!("address/{owner}?from=100"));
+    assert!(
+        says(&last, "next", "null"),
+        "and so is the second page of movements: {}",
+        body(&last)
+    );
 }
