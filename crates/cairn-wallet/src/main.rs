@@ -16,7 +16,8 @@ use cairn_crypto::SecretKey;
 use cairn_ledger::validation::ConsensusParams;
 use cairn_net::seeds;
 use cairn_primitives::Amount;
-use cairn_wallet::{keyfile, serve, Covered, Wallet, WalletError};
+use cairn_wallet::history::{Direction, Movement};
+use cairn_wallet::{keyfile, serve, Covered, Holdings, Wallet, WalletError};
 
 const HELP: &str = "\
 cairn-wallet, a Cairn wallet that is itself a node
@@ -220,28 +221,31 @@ fn show_address(arguments: &[String]) -> Result<(), String> {
 /// themselves. Where the list begins is visible from the list. A gap in the
 /// middle is not: the movements on both sides of it are there, and the blocks
 /// inside it read as a stretch in which nothing happened to this key.
-fn say_what_was_not_read(covered: &Covered, listed: usize) {
+fn what_was_not_read(covered: &Covered, listed: usize) -> Vec<String> {
     // An empty list needs the same fact said the other way round. "As far back
     // as block N" beside no rows at all reads as a list, and what it is is the
     // absence of one over a stretch of chain this wallet never looked at.
+    let mut lines = Vec::new();
     match (listed, covered.from) {
-        (0, Some(from)) if from > 0 => {
-            println!("Nothing since block {from}, which is as far back as this wallet read.");
-        }
-        (0, _) => println!("Nothing yet."),
-        (_, Some(from)) if from > 0 => {
-            println!("As far back as block {from}: this wallet did not read what came before.");
-        }
+        (0, Some(from)) if from > 0 => lines.push(format!(
+            "Nothing since block {from}, which is as far back as this wallet read."
+        )),
+        (0, _) => lines.push("Nothing yet.".to_owned()),
+        (_, Some(from)) if from > 0 => lines.push(format!(
+            "As far back as block {from}: this wallet did not read what came before."
+        )),
         _ => {}
     }
     if let Some(missed) = covered.missed_below {
-        say(&format!(
+        lines.push(String::new());
+        lines.extend(wrapped(&format!(
             "This wallet could not read every block up to {missed}, because the node had let \
              go of them by the time it looked. Anything that happened to this key in the ones \
              it missed is not in the list above. The balance is counted from the chain rather \
              than from the list, so it is right whatever the list is missing."
-        ));
+        )));
     }
+    lines
 }
 
 /// Prints a paragraph on its own, wrapped to the width the rest of this uses.
@@ -295,46 +299,8 @@ fn show_balance(arguments: &[String]) -> Result<(), String> {
     show_waiting(&wallet);
     show_undone(&wallet);
 
-    if holdings.ripening > Amount::ZERO {
-        println!();
-        println!(
-            "Another {} is in block rewards that cannot be spent yet.",
-            holdings.ripening
-        );
-        match holdings.ripe_at {
-            Some(at) => println!("The first of them moves at block {at}."),
-            None => println!("They move once their blocks are settled."),
-        }
-        println!("A reward is the one kind of money whose existence depends on its");
-        println!("block surviving, so the rules hold it still until nothing can undo it.");
-    }
-
-    if let Some(note) = holdings.unaccounted_note() {
-        say(&note);
-    }
-
-    if let Some(words) = recovery.words() {
-        println!();
-        if holdings.stranded > Amount::ZERO {
-            println!(
-                "Another {} is in notes that cannot move yet.",
-                holdings.stranded
-            );
-        }
-        for line in wrapped(&words) {
-            println!("{line}");
-        }
-    }
-    // Only when there is nothing at all. It used to be asked of the notes a
-    // spend can reach for, which are empty for a wallet whose money is a young
-    // reward, whose notes are promised to a payment waiting for a block, or
-    // whose notes have fallen out of reach: this line then told somebody who
-    // had just been shown their own balance that there was nothing here and
-    // that they should go and check their connection.
-    if holdings.empty_handed() {
-        println!();
-        println!("Nothing here yet. If this key should hold something, check that the");
-        println!("wallet reached a peer and caught up to the height you expect.");
+    for line in beside_the_balance(&holdings, recovery.words()) {
+        println!("{line}");
     }
 
     say_what_happened(&wallet);
@@ -357,44 +323,109 @@ fn show_balance(arguments: &[String]) -> Result<(), String> {
 /// The web face says all of it, from the same `Covered`, and said so before
 /// this did.
 fn say_what_happened(wallet: &Wallet) {
-    let movements = wallet.history();
-    let covered = wallet.history_covers();
+    for line in what_happened(&wallet.history(), &wallet.history_covers()) {
+        println!("{line}");
+    }
+}
 
-    println!();
-    println!("What happened, newest first:");
-    println!();
+/// The lines `say_what_happened` prints, from the movements and what they
+/// cover.
+fn what_happened(movements: &[Movement], covered: &Covered) -> Vec<String> {
+    let mut lines = vec![
+        String::new(),
+        "What happened, newest first:".to_owned(),
+        String::new(),
+    ];
     for movement in movements.iter().take(MOVEMENTS_SHOWN) {
-        println!(
+        lines.push(format!(
             "  {:<9} {}{:<22} block {}",
             movement.direction.as_str(),
-            if movement.direction == cairn_wallet::history::Direction::Sent {
+            if movement.direction == Direction::Sent {
                 "-"
             } else {
                 "+"
             },
             movement.amount.to_string(),
             movement.height,
-        );
+        ));
     }
     if !movements.is_empty() {
-        println!();
+        lines.push(String::new());
     }
 
     // A list that stops short and does not say where it stopped is a list that
     // has told somebody something untrue about their own money. It stops at
     // both ends: at the top when the wallet has not finished reading the
     // chain, and at the bottom when there is more than fits a screen.
-    say_what_was_not_read(&covered, movements.len());
+    lines.extend(what_was_not_read(covered, movements.len()));
     if movements.len() > MOVEMENTS_SHOWN {
-        println!(
+        lines.push(format!(
             "Showing the newest {MOVEMENTS_SHOWN} of {}.",
             movements.len()
-        );
+        ));
     }
     let behind = covered.behind();
     if behind > 0 {
-        println!("Still reading: {behind} block(s) of the chain are not in this list yet.");
+        lines.push(format!(
+            "Still reading: {behind} block(s) of the chain are not in this list yet."
+        ));
     }
+    lines
+}
+
+/// Everything `balance` says about money that is not on the balance line.
+///
+/// Rewards not ripe yet, notes this account no longer answers for, notes that
+/// cannot move, and a wallet with nothing at all. Kept apart from the printing
+/// so each can be held to when it is said: it all used to be printed in the
+/// middle of reading the wallet, and not one of the four conditions was asked
+/// of anything.
+fn beside_the_balance(holdings: &Holdings, recovery: Option<String>) -> Vec<String> {
+    let mut lines = Vec::new();
+    if holdings.ripening > Amount::ZERO {
+        lines.push(String::new());
+        lines.push(format!(
+            "Another {} is in block rewards that cannot be spent yet.",
+            holdings.ripening
+        ));
+        lines.push(match holdings.ripe_at {
+            Some(at) => format!("The first of them moves at block {at}."),
+            None => "They move once their blocks are settled.".to_owned(),
+        });
+        lines.push("A reward is the one kind of money whose existence depends on its".to_owned());
+        lines.push(
+            "block surviving, so the rules hold it still until nothing can undo it.".to_owned(),
+        );
+    }
+
+    if let Some(note) = holdings.unaccounted_note() {
+        lines.push(String::new());
+        lines.extend(wrapped(&note));
+    }
+
+    if let Some(words) = recovery {
+        lines.push(String::new());
+        if holdings.stranded > Amount::ZERO {
+            lines.push(format!(
+                "Another {} is in notes that cannot move yet.",
+                holdings.stranded
+            ));
+        }
+        lines.extend(wrapped(&words));
+    }
+    // Only when there is nothing at all. It used to be asked of the notes a
+    // spend can reach for, which are empty for a wallet whose money is a young
+    // reward, whose notes are promised to a payment waiting for a block, or
+    // whose notes have fallen out of reach: this line then told somebody who
+    // had just been shown their own balance that there was nothing here and
+    // that they should go and check their connection.
+    if holdings.empty_handed() {
+        lines.push(String::new());
+        lines
+            .push("Nothing here yet. If this key should hold something, check that the".to_owned());
+        lines.push("wallet reached a peer and caught up to the height you expect.".to_owned());
+    }
+    lines
 }
 
 /// Movements printed. Past this a terminal is being filled rather than read,
@@ -686,7 +717,9 @@ fn join(flags: &Flags) -> Result<Wallet, String> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
-    use super::{wrapped, Flags};
+    use super::{beside_the_balance, what_happened, what_was_not_read, wrapped, Flags};
+    use super::{Amount, Covered, Direction, Holdings, Movement, MOVEMENTS_SHOWN};
+    use cairn_primitives::Hash32;
 
     fn parsed(line: &[&str]) -> Flags {
         let arguments: Vec<String> = line.iter().map(|&word| word.to_owned()).collect();
@@ -756,6 +789,191 @@ mod tests {
             wrapped(&format!("a {long} b")),
             ["a", long.as_str(), "b"],
             "a word wider than a line has a line of its own and is not cut"
+        );
+    }
+
+    fn pebbles(count: u64) -> Amount {
+        Amount::from_pebbles(count).unwrap()
+    }
+
+    /// A wallet holding something spendable and nothing else.
+    fn holding() -> Holdings {
+        Holdings {
+            spendable: pebbles(5_000),
+            ripening: Amount::ZERO,
+            ripe_at: None,
+            waiting: Amount::ZERO,
+            stranded: Amount::ZERO,
+            unprovable: Vec::new(),
+            unaccounted: Vec::new(),
+            notes: Vec::new(),
+        }
+    }
+
+    fn says(lines: &[String], words: &str) -> bool {
+        lines.iter().any(|line| line.contains(words))
+    }
+
+    /// What `balance` says beside the number is said when it is so, and only
+    /// then.
+    ///
+    /// All of it used to be printed in the middle of reading the wallet, so
+    /// nothing could ask it anything: a wallet with rewards ripening passed
+    /// with them unmentioned, one with none was told of nought in rewards,
+    /// notes that could not move went unnamed, and a wallet holding money was
+    /// free to be told it held nothing.
+    #[test]
+    fn what_is_beside_the_balance_is_said_when_it_is_so() {
+        assert!(
+            beside_the_balance(&holding(), None).is_empty(),
+            "money that can move and nothing else needs nothing said beside it"
+        );
+
+        let ripening = Holdings {
+            ripening: pebbles(700),
+            ripe_at: Some(120),
+            ..holding()
+        };
+        let lines = beside_the_balance(&ripening, None);
+        assert!(
+            says(
+                &lines,
+                &format!("Another {} is in block rewards", pebbles(700))
+            ),
+            "{lines:?}"
+        );
+        assert!(
+            says(&lines, "The first of them moves at block 120."),
+            "{lines:?}"
+        );
+        let unsettled = Holdings {
+            ripe_at: None,
+            ..ripening
+        };
+        assert!(says(
+            &beside_the_balance(&unsettled, None),
+            "They move once their blocks are settled."
+        ));
+
+        let stranded = Holdings {
+            stranded: pebbles(300),
+            ..holding()
+        };
+        let lines = beside_the_balance(&stranded, Some("Words about it.".to_owned()));
+        assert!(
+            says(
+                &lines,
+                &format!("Another {} is in notes that cannot move yet.", pebbles(300))
+            ),
+            "{lines:?}"
+        );
+        assert!(says(&lines, "Words about it."), "{lines:?}");
+        let lines = beside_the_balance(&holding(), Some("Words about it.".to_owned()));
+        assert!(
+            !says(&lines, "cannot move yet"),
+            "nothing stranded is nothing to count: {lines:?}"
+        );
+
+        let nothing = Holdings {
+            spendable: Amount::ZERO,
+            ..holding()
+        };
+        assert!(says(
+            &beside_the_balance(&nothing, None),
+            "Nothing here yet."
+        ));
+        assert!(!says(
+            &beside_the_balance(&holding(), None),
+            "Nothing here yet."
+        ));
+    }
+
+    fn moved(height: u64, direction: Direction) -> Movement {
+        Movement {
+            height,
+            at: 0,
+            direction,
+            amount: pebbles(50),
+            id: Hash32::ZERO,
+        }
+    }
+
+    fn covered(from: u64, through: u64, tip: u64) -> Covered {
+        Covered {
+            from: Some(from),
+            through: Some(through),
+            missed_below: None,
+            tip: Some(tip),
+        }
+    }
+
+    /// The list of movements says where it stops, at both ends.
+    ///
+    /// Nothing read it: a list cut at the screen's length without saying how
+    /// many were left out passed, as did one that said it was cut when it was
+    /// not, a wallet still reading that did not say so, and one that said so
+    /// when it had finished.
+    #[test]
+    fn the_list_of_movements_says_where_it_stops() {
+        let many: Vec<Movement> = (0..25)
+            .map(|height| moved(height, Direction::Received))
+            .collect();
+        let lines = what_happened(&many, &covered(0, 24, 24));
+        let rows = lines.iter().filter(|line| line.contains(" block ")).count();
+        assert_eq!(rows, MOVEMENTS_SHOWN);
+        assert!(says(&lines, "Showing the newest 20 of 25."), "{lines:?}");
+        assert!(
+            !says(&lines, "Still reading"),
+            "it has read to the tip: {lines:?}"
+        );
+
+        let fits = &many[..MOVEMENTS_SHOWN];
+        assert!(!says(
+            &what_happened(fits, &covered(0, 24, 24)),
+            "Showing the newest"
+        ));
+
+        let behind = what_happened(fits, &covered(0, 27, 30));
+        assert!(says(&behind, "Still reading: 3 block(s)"), "{behind:?}");
+
+        let sent = what_happened(&[moved(4, Direction::Sent)], &covered(0, 4, 4));
+        assert!(
+            sent[3].contains(" -"),
+            "a payment out is written as one: {sent:?}"
+        );
+        assert_eq!(
+            sent[4], "",
+            "and the list is closed off from what follows it"
+        );
+
+        assert_eq!(
+            what_happened(&[], &covered(0, 4, 4)),
+            ["", "What happened, newest first:", "", "Nothing yet."],
+            "an empty list says so and nothing more"
+        );
+    }
+
+    /// Where the list begins, and the stretch it never read, are said.
+    #[test]
+    fn what_was_not_read_is_said() {
+        assert_eq!(
+            what_was_not_read(&covered(70, 90, 90), 0),
+            ["Nothing since block 70, which is as far back as this wallet read."]
+        );
+        assert_eq!(what_was_not_read(&covered(0, 90, 90), 0), ["Nothing yet."]);
+        assert_eq!(
+            what_was_not_read(&covered(70, 90, 90), 3),
+            ["As far back as block 70: this wallet did not read what came before."]
+        );
+        assert!(what_was_not_read(&covered(0, 90, 90), 3).is_empty());
+        let holed = Covered {
+            missed_below: Some(40),
+            ..covered(0, 90, 90)
+        };
+        let lines = what_was_not_read(&holed, 3);
+        assert!(
+            says(&lines, "could not read every block up to 40"),
+            "{lines:?}"
         );
     }
 }
