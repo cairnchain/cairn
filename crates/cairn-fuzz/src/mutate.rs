@@ -92,18 +92,32 @@ pub fn mutate(rng: &mut Rng, seed: &[u8], corpus: &[Vec<u8>]) -> Vec<u8> {
     bytes
 }
 
+/// One of the operators above, and the bytes it was handed.
+type Operator = fn(&mut Rng, Vec<u8>, &[Vec<u8>]) -> Vec<u8>;
+
+/// Every operator, in the order they are drawn.
+///
+/// A table rather than a `match`, so that each one can be held to what it is
+/// named for and every one of them can be seen to be drawn. The test that said
+/// every operator was reached counted the lengths the whole set produced, and
+/// with any one of them dropped there were still more than enough.
+const OPERATORS: [Operator; 10] = [
+    |rng, bytes, _| flip_a_bit(rng, bytes),
+    |rng, bytes, _| set_a_byte(rng, bytes),
+    |rng, bytes, _| write_a_count(rng, bytes),
+    |rng, bytes, _| write_a_wide_value(rng, bytes),
+    |rng, bytes, _| truncate(rng, bytes),
+    |rng, bytes, _| insert_a_run(rng, bytes),
+    |rng, bytes, _| delete_a_run(rng, bytes),
+    |rng, bytes, _| duplicate_a_run(rng, bytes),
+    |rng, bytes, _| swap_two_runs(rng, bytes),
+    splice_in,
+];
+
 fn one_operator(rng: &mut Rng, bytes: Vec<u8>, corpus: &[Vec<u8>]) -> Vec<u8> {
-    match rng.below(10) {
-        0 => flip_a_bit(rng, bytes),
-        1 => set_a_byte(rng, bytes),
-        2 => write_a_count(rng, bytes),
-        3 => write_a_wide_value(rng, bytes),
-        4 => truncate(rng, bytes),
-        5 => insert_a_run(rng, bytes),
-        6 => delete_a_run(rng, bytes),
-        7 => duplicate_a_run(rng, bytes),
-        8 => swap_two_runs(rng, bytes),
-        _ => splice_in(rng, bytes, corpus),
+    match OPERATORS.get(rng.below(OPERATORS.len())) {
+        Some(operator) => operator(rng, bytes, corpus),
+        None => bytes,
     }
 }
 
@@ -285,6 +299,7 @@ pub fn splice(rng: &mut Rng, head: &[u8], tail: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -327,6 +342,155 @@ mod tests {
         }
     }
 
+    /// Forty bytes, each its own index, so a change shows where it landed.
+    fn frame() -> Vec<u8> {
+        (0..40).collect()
+    }
+
+    fn changed(before: &[u8], after: &[u8]) -> Vec<usize> {
+        (0..before.len().min(after.len()))
+            .filter(|&at| before.get(at) != after.get(at))
+            .collect()
+    }
+
+    /// Each operator does the one thing it is named for, on every draw.
+    ///
+    /// The campaigns that use these hold the code under test to its claims,
+    /// and nothing held the operators to theirs. One that answered an empty
+    /// frame or a fixed byte made every campaign that drew it test nothing,
+    /// and passed; the weekly mutation run found thirty seven such changes
+    /// alive in this file.
+    #[test]
+    fn each_operator_does_what_it_is_named_for() {
+        let start = frame();
+        let mut rng = Rng::new(11);
+        let mut kept = std::collections::BTreeSet::new();
+        for _ in 0..2_000 {
+            let after = flip_a_bit(&mut rng, start.clone());
+            let at = changed(&start, &after);
+            assert_eq!(
+                (after.len(), at.len()),
+                (start.len(), 1),
+                "a flip is one byte"
+            );
+            assert_eq!(
+                (start[at[0]] ^ after[at[0]]).count_ones(),
+                1,
+                "and one bit of it"
+            );
+
+            let after = set_a_byte(&mut rng, start.clone());
+            assert_eq!(after.len(), start.len());
+            assert!(changed(&start, &after).len() <= 1, "a set is one byte");
+
+            let after = write_a_count(&mut rng, start.clone());
+            assert_eq!(after.len(), start.len());
+            let at = changed(&start, &after);
+            if let (Some(first), Some(last)) = (at.first(), at.last()) {
+                assert!(last - first < 4, "a count is four bytes wide");
+            }
+
+            let after = write_a_wide_value(&mut rng, start.clone());
+            assert_eq!(after.len(), start.len());
+            let at = changed(&start, &after);
+            if let (Some(first), Some(last)) = (at.first(), at.last()) {
+                assert!(last - first < 8, "a wide value is eight bytes wide");
+            }
+
+            let after = truncate(&mut rng, start.clone());
+            assert!(
+                after.len() < start.len() && start.starts_with(&after),
+                "a truncation is a shorter prefix"
+            );
+            kept.insert(after.len());
+
+            let after = insert_a_run(&mut rng, start.clone());
+            let added = after.len() - start.len();
+            assert!(added > 0, "an insert adds");
+            assert!(
+                (0..=start.len())
+                    .any(|at| after[..at] == start[..at] && after[at + added..] == start[at..]),
+                "and keeps the frame on both sides of what it added"
+            );
+
+            let after = delete_a_run(&mut rng, start.clone());
+            let gone = start.len() - after.len();
+            assert!(
+                (1..=16).contains(&gone),
+                "a deletion takes away a run, not the frame: {gone} bytes"
+            );
+            assert!(
+                (0..=after.len())
+                    .any(|at| after[..at] == start[..at] && after[at..] == start[at + gone..]),
+                "one run, and keeps the rest"
+            );
+
+            let after = duplicate_a_run(&mut rng, start.clone());
+            let extra = after.len() - start.len();
+            assert!(extra > 0, "a duplicate adds");
+            assert!(
+                (extra..=start.len()).any(|end| after[..end] == start[..end]
+                    && after[end..end + extra] == start[end - extra..end]
+                    && after[end + extra..] == start[end..]),
+                "a run of the frame, written again after itself"
+            );
+        }
+        assert_eq!(
+            kept.len(),
+            start.len(),
+            "a truncation keeps every length short of the whole, not one of them"
+        );
+    }
+
+    /// Every operator in the table is drawn, and none of them stands in for
+    /// another.
+    #[test]
+    fn every_operator_in_the_table_is_drawn() {
+        let mut rng = Rng::new(13);
+        let mut drawn = [0usize; OPERATORS.len()];
+        for _ in 0..10_000 {
+            drawn[rng.below(OPERATORS.len())] += 1;
+        }
+        assert!(drawn.iter().all(|&count| count > 500), "{drawn:?}");
+
+        let corpus = vec![vec![200u8; 40]];
+        let mut seen = std::collections::BTreeSet::new();
+        for (index, operator) in OPERATORS.iter().enumerate() {
+            let mut rng = Rng::new(14);
+            let after = (0..50).map(|_| operator(&mut rng, frame(), &corpus));
+            seen.insert(after.collect::<Vec<_>>());
+            assert_eq!(
+                seen.len(),
+                index + 1,
+                "operator {index} does what another one does"
+            );
+        }
+    }
+
+    /// A splice carries material from elsewhere in the corpus, and nothing
+    /// that was in neither.
+    #[test]
+    fn a_splice_carries_material_from_elsewhere() {
+        let start = frame();
+        let corpus = vec![vec![200u8; 40]];
+        let mut rng = Rng::new(12);
+        let mut carried = 0usize;
+        for _ in 0..1_000 {
+            let after = splice_in(&mut rng, start.clone(), &corpus);
+            assert!(
+                after.iter().all(|&byte| byte < 40 || byte == 200),
+                "a splice invented a byte: {after:?}"
+            );
+            if after.contains(&200) {
+                carried += 1;
+            }
+        }
+        assert!(
+            carried > 500,
+            "only {carried} of 1000 splices carried anything in"
+        );
+    }
+
     #[test]
     fn swapping_runs_keeps_the_bytes_and_moves_them() {
         let mut rng = Rng::new(9);
@@ -345,5 +509,9 @@ mod tests {
             }
         }
         assert!(moved > 500, "only {moved} of 1000 swaps moved anything");
+
+        // Two bytes are the smallest frame with two runs in it, and there is
+        // only one way to swap them.
+        assert_eq!(swap_two_runs(&mut rng, vec![1, 2]), [2, 1]);
     }
 }
