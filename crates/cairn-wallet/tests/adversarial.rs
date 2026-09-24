@@ -1314,3 +1314,52 @@ fn a_wallet_that_cannot_write_its_account_says_so() {
     drop(wallet);
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// CLAIM UNDER TEST: how far a wallet has read is on the disk once it has read
+/// that far.
+///
+/// `follow` writes the account after every batch it reads, and nothing checked
+/// that it did, because two things covered for it. Reading a block that pays
+/// the wallet also runs the step that notes where the payment landed, which
+/// writes the whole account. And reading to the tip calls `follow` until it
+/// finds nothing, and that last empty call wrote. So a `follow` that wrote
+/// only when it had read nothing passed everything, and was one batch late:
+/// the account on disk trailed what had been read until the next quiet look.
+/// A node that stops in between, on a machine run with `--keep`, restarts from
+/// the oldest block it still holds, and what came before is gone.
+#[test]
+fn how_far_a_wallet_has_read_is_on_the_disk_once_it_has_read_it() {
+    let directory = scratch("written");
+    std::fs::create_dir_all(&directory).unwrap();
+    let key_file = directory.join("key");
+    let secret = SecretKey::from_bytes(&[27; 32]);
+    cairn_wallet::keyfile::write(&key_file, &secret).unwrap();
+    let data = directory.join("data");
+    let (wallet, _) = Wallet::open(&key_file, params(), &data).unwrap();
+
+    let somebody_else = SecretKey::from_bytes(&[28; 32]).public_key();
+    let mut forge = Forge::new();
+    for _ in 0..5 {
+        let block = forge.mine(&somebody_else, Vec::new());
+        wallet.node().submit_block(block).unwrap();
+    }
+
+    // One reading and no more: reading again finds nothing, and writes the
+    // account on its way out.
+    assert_eq!(wallet.follow(), 5, "the account read every block in one go");
+
+    let (saved, _) = cairn_wallet::history::History::load(&data.join("history.dat"));
+    assert!(
+        saved.is_empty(),
+        "none of the blocks paid this key, so nothing else had cause to write the file"
+    );
+    assert_eq!(
+        saved.next(),
+        5,
+        "the file says the account has read through block four, which is the only \
+         copy of that a restart on a node that has let go of those blocks will see"
+    );
+
+    wallet.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+}

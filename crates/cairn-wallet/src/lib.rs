@@ -2317,8 +2317,36 @@ fn wait_until(patience: Duration, ready: impl Fn() -> bool) -> bool {
 mod tests {
     use super::{
         ceiling, one_question, said_plainly, select, shuffle, still_outstanding,
-        too_old_for_this_chain, Held, NoDraft, Outdated, Progress, Recovery, MAX_PROVEN,
+        too_old_for_this_chain, Covered, Held, NoDraft, Outdated, Progress, Recovery, MAX_PROVEN,
     };
+
+    /// How many blocks an account has not read, when it has not read some.
+    ///
+    /// Both tests that asked were asked of an account at the tip, where the
+    /// answer is nought, so an account that always said nought passed them,
+    /// and so did one that said nought having read nothing at all. The page
+    /// shows this number as the reason the list under it is short.
+    #[test]
+    fn an_account_says_how_many_blocks_it_has_not_read() {
+        let covered = |through, tip| Covered {
+            from: Some(0),
+            through,
+            missed_below: None,
+            tip,
+        };
+        assert_eq!(covered(Some(7), Some(10)).behind(), 3);
+        assert_eq!(
+            covered(None, Some(10)).behind(),
+            11,
+            "an account that read nothing has every block from nought to read"
+        );
+        assert_eq!(covered(Some(10), Some(10)).behind(), 0);
+        assert_eq!(
+            covered(None, None).behind(),
+            0,
+            "and no chain is nothing to read"
+        );
+    }
 
     /// A bad address is answered as a bad address, in the same words by both
     /// faces.
