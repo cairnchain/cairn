@@ -292,6 +292,118 @@ mod tests {
         assert_eq!(Rng::new(3).below(0), 0);
     }
 
+    /// The generator is `SplitMix64`, value for value.
+    ///
+    /// A campaign reports a failure as a seed and a case number, and that pair
+    /// has to replay the same case for whoever reads the report, next month as
+    /// much as today. The tests above held that one build agrees with itself.
+    /// Nothing held the algorithm, so a mixing step with `|` where it has `^`
+    /// passed, and would have made every reported seed name a different case.
+    /// These are the published reference values for seeds 0 and 1 234 567.
+    #[test]
+    fn the_generator_is_splitmix64_value_for_value() {
+        let mut zero = Rng::new(0);
+        assert_eq!(
+            [zero.next_u64(), zero.next_u64(), zero.next_u64()],
+            [
+                0xe220_a839_7b1d_cdaf,
+                0x6e78_9e6a_a1b9_65f4,
+                0x06c4_5d18_8009_454f
+            ]
+        );
+        let mut other = Rng::new(1_234_567);
+        assert_eq!(
+            [other.next_u64(), other.next_u64(), other.next_u64()],
+            [
+                0x599e_d017_fb08_fc85,
+                0x2c73_f084_5854_0fa5,
+                0x883e_bce5_a3f2_7c77
+            ]
+        );
+    }
+
+    /// Every way of drawing reaches across what it says it draws from.
+    ///
+    /// Nothing held these, so a `u32` that was always nought passed, as did a
+    /// coin that always landed one way, "interesting" values that were only
+    /// ever nought or one, arrays of one repeated byte, and case seeds that
+    /// ignored the run they belong to. Each would have had every campaign
+    /// testing a handful of inputs over and over and reporting it as
+    /// thousands.
+    #[test]
+    fn every_way_of_drawing_reaches_across_its_range() {
+        use std::collections::HashSet;
+        let mut rng = Rng::new(42);
+
+        let words: HashSet<u32> = (0..1_000).map(|_| rng.next_u32()).collect();
+        assert!(words.len() > 990, "{} distinct u32 in 1000", words.len());
+
+        let heads = (0..1_000).filter(|_| rng.bool()).count();
+        assert!((400..600).contains(&heads), "{heads} heads in 1000 throws");
+
+        let wide: HashSet<u64> = (0..1_000).map(|_| rng.edgy_u64()).collect();
+        let narrow: HashSet<u32> = (0..1_000).map(|_| rng.edgy_u32()).collect();
+        for (drawn, interesting, what) in [
+            (
+                wide.len(),
+                INTERESTING_U64.iter().filter(|v| wide.contains(v)).count(),
+                "u64",
+            ),
+            (
+                narrow.len(),
+                INTERESTING_U32
+                    .iter()
+                    .filter(|v| narrow.contains(v))
+                    .count(),
+                "u32",
+            ),
+        ] {
+            assert!(drawn > 400, "only {drawn} distinct edgy {what} in 1000");
+            assert!(
+                interesting > 10,
+                "only {interesting} of the edgy {what} values drawn"
+            );
+        }
+
+        let tens = (0..10_000).filter(|_| rng.chance(10)).count();
+        assert!(
+            (800..1_200).contains(&tens),
+            "{tens} in 10 000 draws came up one in ten"
+        );
+
+        let edgy: HashSet<u8> = (0..1_000).map(|_| rng.edgy_byte()).collect();
+        assert!(edgy.len() > 100, "only {} distinct edgy bytes", edgy.len());
+        assert!(
+            INTERESTING_U8.iter().all(|byte| edgy.contains(byte)),
+            "the boundary bytes are the point of this one"
+        );
+        for len in [0, 1, 37] {
+            assert_eq!(rng.bytes(len).len(), len, "bytes asked for {len}");
+            assert_eq!(
+                rng.plausible_bytes(len).len(),
+                len,
+                "plausible asked for {len}"
+            );
+        }
+        let plausible = rng.plausible_bytes(1_000);
+        let zeros: usize = plausible.iter().map(|&byte| usize::from(byte == 0)).sum();
+        assert!(
+            (400..800).contains(&zeros),
+            "{zeros} zeros in 1000 plausible bytes, which lean on nought by half"
+        );
+
+        let arrays: HashSet<[u8; 4]> = (0..100).map(|_| rng.array::<4>()).collect();
+        assert!(arrays.len() > 95, "{} distinct arrays in 100", arrays.len());
+
+        let seeds: HashSet<u64> = (0..1_000).map(|case| seed_for(7, case)).collect();
+        assert_eq!(seeds.len(), 1_000, "two cases of one run share a seed");
+        assert_ne!(
+            seed_for(1, 5),
+            seed_for(2, 5),
+            "the same case of two runs is the same case"
+        );
+    }
+
     #[test]
     fn a_case_number_reaches_the_same_seed_twice() {
         assert_eq!(seed_for(11, 90_000), seed_for(11, 90_000));

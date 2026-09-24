@@ -146,6 +146,37 @@ mod tests {
         assert_eq!(seen, 64);
     }
 
+    /// A campaign given a time budget runs cases for that long, and says
+    /// which seed it ran from.
+    ///
+    /// This is how the nightly run drives every campaign, through
+    /// `CAIRN_FUZZ_SECONDS`, and no test here ever set a budget: the loop
+    /// that honours one was reached by nothing, so a loop that ran no case at
+    /// all passed, and every nightly campaign would have reported nought cases
+    /// and succeeded.
+    #[test]
+    fn a_campaign_with_a_budget_runs_until_it_is_spent() {
+        let campaign = Campaign {
+            name: "budgeted",
+            seed: 0xabcd,
+            cases: None,
+            budget: Some(Duration::from_millis(20)),
+        };
+        assert_eq!(campaign.seed(), 0xabcd);
+        let ran = campaign.run(1, |_, rng| {
+            let _ = rng.next_u64();
+        });
+        assert!(
+            ran.cases > 1,
+            "a twenty millisecond budget ran {} cases",
+            ran.cases
+        );
+        assert!(
+            ran.elapsed >= Duration::from_millis(20),
+            "and stopped early"
+        );
+    }
+
     #[test]
     fn a_case_is_reachable_on_its_own() {
         if steered() {
