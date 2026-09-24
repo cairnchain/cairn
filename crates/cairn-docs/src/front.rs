@@ -96,13 +96,16 @@ fn roman(value: usize) -> String {
         (4, "IV"),
         (1, "I"),
     ];
+    // Each sign is written as many times as it fits, counted rather than
+    // looped for. The loop this replaces wrote a sign while the rest was at
+    // least its size; with that comparison turned round it wrote "M" for as
+    // long as there was memory, and on the weekly mutation run that was all of
+    // a runner's, which took the machine down with every result on it.
     let mut left = value;
     let mut out = String::new();
     for (size, sign) in SIGNS {
-        while left >= size {
-            out.push_str(sign);
-            left = left.saturating_sub(size);
-        }
+        out.push_str(&sign.repeat(left.checked_div(size).unwrap_or(0)));
+        left = left.checked_rem(size).unwrap_or(left);
     }
     out
 }
@@ -296,7 +299,16 @@ mod tests {
 
     #[test]
     fn a_count_in_roman_is_the_count_a_reader_knows() {
-        for (value, written) in [(1, "I"), (4, "IV"), (8, "VIII"), (14, "XIV"), (40, "XL")] {
+        for (value, written) in [
+            (0, ""),
+            (1, "I"),
+            (4, "IV"),
+            (8, "VIII"),
+            (14, "XIV"),
+            (40, "XL"),
+            (1994, "MCMXCIV"),
+            (3888, "MMMDCCCLXXXVIII"),
+        ] {
             assert_eq!(super::roman(value), written);
         }
     }
