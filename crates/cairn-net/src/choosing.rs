@@ -948,6 +948,41 @@ mod tests {
         );
     }
 
+    /// The join being collected names the peer it was asked of and when.
+    ///
+    /// The first question of a join is the one most likely to be dropped, and
+    /// the path that asks it again reads this to know whom to ask and since
+    /// when. Nothing else read it, so answering nothing passed, as did naming
+    /// peer nought at moment nought, and naming a peer that is being read
+    /// from block by block, which has no join to be asked again for.
+    #[test]
+    fn the_join_being_collected_names_its_peer_and_its_moment() {
+        let mut chooser = contested();
+        assert_eq!(chooser.asking_join(), None, "nothing has been asked yet");
+        let at = 100 + SETTLING;
+        assert_eq!(
+            chooser.step(at, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Join)
+        );
+        assert_eq!(chooser.asking_join(), Some((1, at)));
+
+        let mut reading = two_at_one_address();
+        assert_eq!(
+            reading.step(at, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Join)
+        );
+        reading.failed(1, at);
+        assert_eq!(
+            reading.step(at + 1, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(2, Approach::Read)
+        );
+        assert_eq!(
+            reading.asking_join(),
+            None,
+            "a peer read from block by block has no join to be asked again for"
+        );
+    }
+
     #[test]
     fn nothing_is_asked_until_the_settling_has_passed() {
         let mut chooser = contested();
