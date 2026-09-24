@@ -867,6 +867,18 @@ fn a_record_the_disk_will_not_read_is_not_a_block_the_node_dropped() {
         "and a node keeping no blocks at all is holding nothing under its \
          chain, with nothing coming"
     );
+
+    // Both ends of the run are inside it. Nothing asked about either, so the
+    // first block a node keeps could be written off as dropped, and the walk
+    // would have stepped over a record it holds.
+    assert!(
+        matches!(api::nothing_at(5, Some(5), Some(19)), Held::Refused),
+        "the first block of the run is in the run"
+    );
+    assert!(
+        matches!(api::nothing_at(19, Some(5), Some(19)), Held::Refused),
+        "and so is the last"
+    );
 }
 
 /// One refused read costs the blocks under it nothing.
