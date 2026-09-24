@@ -71,6 +71,50 @@ jobs:
         run: rustup show
       - run: cargo test --workspace --locked
 
+  # What the node and the store do when the disk is full, on a disk that is.
+  #
+  # Nine audits make that claim, among them the one that says a node whose
+  # disk stops taking writes says so and then stops, before the gap it cannot
+  # close. Each one needs a filesystem it can fill, reads its name from
+  # `CAIRN_AUDIT_FULL_DIR`, and skips without it, since a portable test cannot
+  # make a disk genuinely full. Nothing here set it, so all nine skipped on
+  # every run of every job and each reported itself passed: the weekly
+  # mutation run found `note_writing`'s decision to stop the node could be
+  # turned round with the whole suite green, because the only test that
+  # reaches it had never run anywhere. Run on a sixty four megabyte ext4 image
+  # mounted for the purpose they pass, in seconds.
+  #
+  # One test at a time, because each fills the whole filesystem and a second
+  # one filling it alongside would be measuring the first.
+  full-disk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the toolchain this repository pins
+        run: rustup show
+      - name: A small filesystem to fill
+        run: |
+          truncate -s 64M "$RUNNER_TEMP/small.img"
+          mkfs.ext4 -q "$RUNNER_TEMP/small.img"
+          sudo mkdir -p /mnt/small
+          sudo mount -o loop "$RUNNER_TEMP/small.img" /mnt/small
+          sudo chown "$(id -u):$(id -g)" /mnt/small
+      - name: The audits that need it
+        env:
+          CAIRN_AUDIT_FULL_DIR: /mnt/small
+        # `--nocapture` so a skip would show: each one prints why it skipped,
+        # and the step below fails the job if any did.
+        run: |
+          for crate in cairn-store cairn-net; do
+            cargo test --locked -p "$crate" --test audit_out_of_room \
+              -- --test-threads=1 --nocapture 2>&1 | tee -a out.txt
+            test "${PIPESTATUS[0]}" -eq 0
+          done
+          if grep -q "skipped: set CAIRN_AUDIT_FULL_DIR" out.txt; then
+            echo "an audit that needs a full disk skipped with one mounted" >&2
+            exit 1
+          fi
+
   # A node has to build for the machines people actually run servers on, and
   # those are not the machines this is developed on.
   #
