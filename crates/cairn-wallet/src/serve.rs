@@ -683,6 +683,28 @@ mod tests {
         assert!(!constant_time_eq(b"abX", b"abc"), "the last byte");
     }
 
+    /// The secret's own characters in another order are a wrong key.
+    ///
+    /// Every refusal above differs from the secret in one byte, which is the
+    /// one case where it does not matter how the differences are gathered.
+    /// Gathered with `^` rather than `|`, two differences cancel, and the
+    /// comparison asks only whether the key's bytes XOR to what the secret's
+    /// do. Any reordering of the secret does. So does about one guess in
+    /// thirty two of the right length, against the one in 2^192 that
+    /// `SECRET_BYTES` is there to buy, for the page that spends the money.
+    #[test]
+    fn the_secret_in_another_order_does_not_open_the_page() {
+        let opened = opened();
+        assert!(
+            turned_away(&opened, &asking("127.0.0.1:7777", "", "k=bacdef")).is_some(),
+            "two characters of the secret swapped opened the page"
+        );
+        assert!(
+            !constant_time_eq(b"ab", b"ba"),
+            "two differences that cancel each other are still two differences"
+        );
+    }
+
     /// An address, written out of a key rather than typed.
     ///
     /// The accepting half of this used to be `"11".repeat(32)`, a string of
