@@ -264,10 +264,28 @@ jobs:
           #
           # cargo-mutants exits 2 when a mutant survived and 3 when one timed
           # out. Both are what this run is for, not a failure of it.
+          #
+          # A mutant's tests are given as long as the unmutated run took, not
+          # five times as long, which is cargo-mutants' default. That run
+          # tests every crate the shard holds, and dealt round-robin a shard
+          # holds all of them, so it takes about eighteen minutes, and five
+          # times that is what the first run dealt this way set: 5 099 to
+          # 5 356 seconds. A mutant is tested against its own crate only, the
+          # longest of which takes about seven minutes, so each mutant that
+          # hangs a test was waited out for an hour and a half, and a shard
+          # that drew three of them ran four hours twenty one against a
+          # deadline of five. One crate's suite has no business taking longer
+          # than every crate's together.
+          #
+          # A multiplier and not a stated number: a stated `--timeout` bounds
+          # the unmutated run as well, and eighteen minutes on a slow runner
+          # is close enough to any round figure to fail a shard before it has
+          # tested anything.
           cargo mutants \
             --shard "${{ matrix.shard }}/$SHARDS" \
             --sharding "$SHARDING" \
             --test-workspace=false \
+            --timeout-multiplier 1 \
             --minimum-test-timeout 120 \
             -j 2 || {
             status=$?
