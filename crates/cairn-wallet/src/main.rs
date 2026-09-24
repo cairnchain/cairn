@@ -682,3 +682,80 @@ fn join(flags: &Flags) -> Result<Wallet, String> {
     }
     Ok(wallet)
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::{wrapped, Flags};
+
+    fn parsed(line: &[&str]) -> Flags {
+        let arguments: Vec<String> = line.iter().map(|&word| word.to_owned()).collect();
+        Flags::parse(&arguments).unwrap()
+    }
+
+    /// What a command was told is what it reads back.
+    ///
+    /// Nothing in this file had a test of its own, and the two that run the
+    /// binary only reach the refusals. So reading every option as absent
+    /// passed, as did reading `--fee-anyway` as always given or never given,
+    /// and reading a list of seeds as empty.
+    #[test]
+    fn a_command_reads_back_what_it_was_given() {
+        let flags = parsed(&[
+            "key.json",
+            "--to",
+            "somebody",
+            "--seed",
+            "one.example:9333",
+            "--seed",
+            "two.example:9333",
+            "--fee-anyway",
+        ]);
+        assert_eq!(flags.value("to"), Some("somebody"));
+        assert_eq!(flags.value("amount"), None, "and nothing it was not told");
+        assert!(flags.given("fee-anyway"));
+        assert!(!flags.given("fee"), "an option not given is not given");
+        assert_eq!(
+            flags.values("seed"),
+            ["one.example:9333", "two.example:9333"],
+            "every seed, in order"
+        );
+        assert!(flags.values("amount").is_empty());
+    }
+
+    /// A paragraph comes out as lines no wider than the rest of the output,
+    /// with every word in it, once, in order.
+    ///
+    /// Nothing read this either: it could answer nothing, one empty line or a
+    /// word of its own choosing, break before every word, or never break.
+    #[test]
+    fn a_paragraph_is_wrapped_without_losing_a_word() {
+        let text = "Spending a note that has been put away needs a small piece of evidence \
+                    that goes stale, and this wallet's own copy had gone stale for three \
+                    notes. It asked two of the machines it is connected to, got fresh \
+                    evidence back, and checked it against the chain it has verified itself.";
+        let lines = wrapped(text);
+        assert!(lines.len() > 1, "a paragraph this long is more than a line");
+        for line in &lines {
+            assert!(line.len() < 76, "{line:?} is {} wide", line.len());
+            assert!(!line.is_empty() && !line.starts_with(' ') && !line.ends_with(' '));
+        }
+        assert!(
+            lines[0].len() > 60,
+            "a line is filled before the next one starts: {lines:?}"
+        );
+        assert_eq!(
+            lines.join(" "),
+            text.split_whitespace().collect::<Vec<_>>().join(" "),
+            "every word, once, in order"
+        );
+
+        assert!(wrapped("").is_empty(), "nothing to say is no lines");
+        let long = "x".repeat(90);
+        assert_eq!(
+            wrapped(&format!("a {long} b")),
+            ["a", long.as_str(), "b"],
+            "a word wider than a line has a line of its own and is not cut"
+        );
+    }
+}
