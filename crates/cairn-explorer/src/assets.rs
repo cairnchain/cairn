@@ -103,19 +103,16 @@ pub(crate) fn answer(request: &Request) -> Response {
         "/cairn.css" => Response::asset(CSS, STYLE),
         "/cairn.js" => Response::asset(JS, SCRIPT),
         "/languages.json" => Response::json(languages()),
-        path if PAPERS.iter().any(|(at, _)| *at == path) => {
-            match PAPERS.iter().find(|(at, _)| *at == path) {
-                Some((_, body)) => Response::asset(HTML, body),
-                None => Response::error(404, "no such paper"),
-            }
-        }
-        path if PAPER_STYLES.iter().any(|(at, _)| *at == path) => {
-            match PAPER_STYLES.iter().find(|(at, _)| *at == path) {
-                Some((_, body)) => Response::asset(CSS, body),
-                None => Response::error(404, "no such style"),
-            }
-        }
         path => {
+            // Asked once each, where each was asked twice: whether it is here
+            // and then where, with a refusal between the two for the case the
+            // first answer had already ruled out.
+            if let Some((_, body)) = PAPERS.iter().find(|(at, _)| *at == path) {
+                return Response::asset(HTML, body);
+            }
+            if let Some((_, body)) = PAPER_STYLES.iter().find(|(at, _)| *at == path) {
+                return Response::asset(CSS, body);
+            }
             if let Some(tag) = path
                 .strip_prefix("/i18n/")
                 .and_then(|file| file.strip_suffix(".json"))
@@ -147,7 +144,56 @@ fn languages() -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
-    use super::{LOCALES, PAPERS};
+    use super::{answer, LOCALES, PAPERS, PAPER_STYLES};
+    use cairn_http::{Request, Response};
+
+    fn get(path: &str) -> Response {
+        answer(&Request {
+            path: path.to_owned(),
+            query: String::new(),
+            head_only: false,
+            post: false,
+            body: String::new(),
+            host: String::new(),
+            origin: String::new(),
+        })
+    }
+
+    /// Each paper, each paper's stylesheet and each language file is served
+    /// at its own address as itself.
+    ///
+    /// An address this module does not know is answered with the page, which
+    /// is how a link into the page works. So a paper whose route went missing
+    /// was answered with the page as well, status 200, and nothing noticed;
+    /// the same held for a language file answered in the other language, and
+    /// for a list of languages that listed none.
+    #[test]
+    fn each_paper_style_and_language_is_served_as_itself() {
+        for (path, body) in PAPERS.iter().chain(PAPER_STYLES.iter()) {
+            let served = get(path);
+            assert_eq!(served.status, 200, "{path}");
+            assert!(
+                served.body == body.as_bytes(),
+                "{path} was served as something else"
+            );
+        }
+        for (code, _, body) in LOCALES {
+            let served = get(&format!("/i18n/{code}.json"));
+            assert!(
+                served.body == body.as_bytes(),
+                "{code} was served as something else"
+            );
+        }
+        assert_eq!(get("/i18n/xx.json").status, 404, "a language nobody wrote");
+
+        let listed = String::from_utf8(get("/languages.json").body).unwrap();
+        for (code, name, _) in LOCALES {
+            assert!(
+                listed.contains(&format!("\"code\":\"{code}\"")) && listed.contains(name),
+                "{code} is not in {listed}"
+            );
+        }
+    }
 
     /// Words a document of this length cannot avoid, and which differ enough
     /// between the two languages to tell one from the other.
