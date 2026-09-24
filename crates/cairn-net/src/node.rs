@@ -1637,6 +1637,37 @@ struct Unreadable {
     last: u64,
 }
 
+/// Which refusal a report of unwritten blocks carries, given the one a pass
+/// just met and the one already standing.
+///
+/// Kept out of [`Shared`] so it can be read and tested on its own: on a real
+/// disk the refusals arrive in whatever order the filesystem gives them, and
+/// the case that matters, a cheap refusal arriving after a costly one, is the
+/// ledger failing once a second behind blocks that have stopped reaching the
+/// disk at all.
+fn the_refusal_to_say(
+    fresh: Option<&Refusing>,
+    standing: Option<&Unwritten>,
+) -> Option<(Writing, String)> {
+    match (fresh, standing) {
+        // The costlier of the two stands, for the reason in
+        // [`Writing::costs`]. Between two of the same cost the fresh words
+        // are said, being what the disk says now.
+        (Some(fresh), Some(standing)) if standing.what.costs() > fresh.what.costs() => {
+            Some((standing.what, standing.because.clone()))
+        }
+        (Some(fresh), _) => Some((fresh.what, fresh.because.clone())),
+        // A pass with nothing to write says nothing new about why the disk
+        // stopped taking things, so what opened the gap still stands.
+        (None, Some(standing)) => Some((standing.what, standing.because.clone())),
+        // A gap with nothing anywhere to explain it, which is a log that was
+        // already short when this node opened it. The next block applied
+        // tries to fill it and finds out why it cannot; guessing here would
+        // only put a made up sentence in front of an operator.
+        (None, None) => None,
+    }
+}
+
 /// Counts one block this build could not read, against the address it came
 /// from.
 ///
@@ -2388,21 +2419,9 @@ impl Shared {
             *held = None;
             return;
         }
-        let (what, because) = match (wrote.refusing.as_ref(), held.as_ref()) {
-            // The costlier of the two stands, for the reason in
-            // [`Writing::costs`].
-            (Some(fresh), Some(standing)) if standing.what.costs() > fresh.what.costs() => {
-                (standing.what, standing.because.clone())
-            }
-            (Some(fresh), _) => (fresh.what, fresh.because.clone()),
-            // A pass with nothing to write says nothing new about why the disk
-            // stopped taking things, so what opened the gap still stands.
-            (None, Some(standing)) => (standing.what, standing.because.clone()),
-            // A gap with nothing anywhere to explain it, which is a log that
-            // was already short when this node opened it. The next block
-            // applied tries to fill it and finds out why it cannot; guessing
-            // here would only put a made up sentence in front of an operator.
-            (None, None) => return,
+        let Some((what, because)) = the_refusal_to_say(wrote.refusing.as_ref(), held.as_ref())
+        else {
+            return;
         };
         let within_reach = behind <= MAX_BEHIND;
         *held = Some(Unwritten {
@@ -8127,6 +8146,67 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A report of unwritten blocks names the costlier refusal, and between two
+    /// of one cost the words the disk says now.
+    ///
+    /// The ledger fails once a second on a full disk, and the report it would
+    /// otherwise replace is the one about blocks not reaching the disk at all.
+    /// No test reached the choice between them: the audits that fill a disk
+    /// run with no budget, so the ledger is never written, and a report that
+    /// let the cheapest refusal speak over the dearest passed them all.
+    #[test]
+    fn the_costlier_refusal_is_the_one_said() {
+        let standing = |what, because: &str| Unwritten {
+            what,
+            because: because.to_owned(),
+            reached: 40,
+            written_through: Some(20),
+            blocks: 19,
+            within_reach: true,
+        };
+        let fresh = |what, because: &str| Refusing {
+            what,
+            because: because.to_owned(),
+        };
+
+        let said = the_refusal_to_say(
+            Some(&fresh(Writing::Ledger, "no space left on device")),
+            Some(&standing(Writing::Blocks, "no space left on device")),
+        );
+        assert_eq!(
+            said.map(|(what, _)| what),
+            Some(Writing::Blocks),
+            "the ledger does not speak over blocks that are being lost"
+        );
+
+        let said = the_refusal_to_say(
+            Some(&fresh(Writing::Blocks, "input/output error")),
+            Some(&standing(Writing::Headers, "no space left on device")),
+        );
+        assert_eq!(
+            said,
+            Some((Writing::Blocks, "input/output error".to_owned())),
+            "and blocks speak over anything cheaper"
+        );
+
+        let said = the_refusal_to_say(
+            Some(&fresh(Writing::Blocks, "input/output error")),
+            Some(&standing(Writing::Blocks, "no space left on device")),
+        );
+        assert_eq!(
+            said,
+            Some((Writing::Blocks, "input/output error".to_owned())),
+            "between two of one cost the disk's words now are the ones said"
+        );
+
+        assert_eq!(
+            the_refusal_to_say(None, Some(&standing(Writing::Headers, "gone"))),
+            Some((Writing::Headers, "gone".to_owned())),
+            "a pass that met nothing leaves what opened the gap standing"
+        );
+        assert_eq!(the_refusal_to_say(None, None), None);
     }
 
     /// A short valid chain, built off to the side.
