@@ -2,9 +2,14 @@
 #
 # A shard of `mutants.yml` is red only when it did not play every mutant it
 # was dealt, and `whole` is red when any shard is missing or short. Neither is
-# a finding: it is a runner GitHub shut down, which happened to one shard of
-# the first run twenty minutes in and took its results with it. Waiting for a
-# person to notice turns that into a week with a hole in it.
+# a finding: it is a runner lost, or a shard stopped at its deadline. Waiting
+# for a person to notice turns that into a week with a hole in it.
+#
+# The one lost runner of the first run was not GitHub's doing, though it read
+# as that: a mutant that allocated without end took the machine down, and it
+# would have done so again on every retry. That is what the memory ceiling in
+# `mutants.yml` is for, and a retry is only worth anything for what is not
+# the same every time.
 #
 # Twice at most. A shard that is short three times running is not bad luck,
 # and running it again would hide that.
@@ -24,14 +29,36 @@ permissions:
 
 jobs:
   again:
+    # A shard stopped at its deadline makes the whole run `cancelled` rather
+    # than `failure`, so asking for `failure` alone let the first shard that
+    # ran out of time go unrepeated, which is the case this file is for. A
+    # person cancelling the run is also `cancelled`, and is not to be undone.
+    # What tells the two apart is `whole`: it runs unless the run itself was
+    # cancelled, and fails only when a shard is missing or short.
     if: >-
-      github.event.workflow_run.conclusion == 'failure' &&
+      (github.event.workflow_run.conclusion == 'failure' ||
+       github.event.workflow_run.conclusion == 'cancelled') &&
       github.event.workflow_run.event != 'pull_request' &&
       github.event.workflow_run.run_attempt < 3
     runs-on: ubuntu-latest
     steps:
-      - name: Run the shards that did not finish again
+      - name: Whether the run left shards unmeasured
+        id: whole
         env:
           GH_TOKEN: ${{ github.token }}
           RUN: ${{ github.event.workflow_run.id }}
+        run: |
+          outcome=$(gh run view "$RUN" --repo "$GITHUB_REPOSITORY" --json jobs \
+            --jq '.jobs[] | select(.name == "whole") | .conclusion')
+          echo "whole: ${outcome:-did not run}"
+          echo "outcome=$outcome" >> "$GITHUB_OUTPUT"
+      - name: Run the shards that did not finish again
+        if: steps.whole.outputs.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ github.event.workflow_run.id }}
+        # `--failed` takes the cancelled jobs as well as the failed ones, and
+        # `whole` with them since it depends on them: checked by hand on run
+        # 35991944962, whose second attempt queued shards 10 and 14 and
+        # nothing else.
         run: gh run rerun "$RUN" --failed --repo "$GITHUB_REPOSITORY"
