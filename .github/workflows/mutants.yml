@@ -63,10 +63,28 @@ env:
   # and it would have failed that way silently, since a killed shard and a
   # shard full of survivors are both a red job.
   #
-  # Twenty four puts the longest of those near a hundred minutes. The cost is
-  # runners, which this repository does not pay for, and the build each one
-  # repeats, which is a quarter of an hour against hours of testing.
+  # Twenty four was meant to put the longest of those near a hundred minutes,
+  # and the first run of it did not: its shards took from ten minutes to past
+  # five hours. The split was not the one this file described. See SHARDING.
   SHARDS: 24
+  # How the mutants are dealt to the shards.
+  #
+  # This file said round-robin, and cargo-mutants' default is `slice`: the
+  # first twenty fourth of the list to shard 0, and so on, in source order. So
+  # a shard was a stretch of one or two files, and a file's cost is its suite's.
+  # Shard 16 of the first run was 185 mutants of `cairn-net/src/node.rs`, each
+  # up to seven minutes of tests, and it was stopped at the deadline with 160
+  # played; shard 19 was done in ten minutes. Round-robin gives every shard a
+  # twenty fourth of every file, so no shard is the one that holds the node.
+  #
+  # Written once, because the coverage check in `plan` has to deal the same
+  # way the shards do or it checks a split nobody ran.
+  SHARDING: round-robin
+  # Which cargo-mutants. It was whatever was newest on the day, which is a
+  # weekly run whose list of mutants, names and default split can change
+  # between two Sundays with nothing in this repository changing. It did
+  # change once already: the split this file assumed is not the default.
+  CARGO_MUTANTS: 27.1.0
 
 jobs:
   # What this change would let through. Only the mutants that fall on lines
@@ -91,7 +109,7 @@ jobs:
       # repository's guards hold should not answer it by trusting one more
       # thing nobody here has read.
       - name: Install cargo-mutants
-        run: cargo install --locked cargo-mutants
+        run: cargo install --locked "cargo-mutants@$CARGO_MUTANTS"
       - name: What this change touched
         run: |
           git diff "origin/${{ github.base_ref }}"...HEAD > pr.diff
@@ -153,12 +171,13 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       shards: ${{ steps.shards.outputs.list }}
+      sizes: ${{ steps.cover.outputs.sizes }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the toolchain this repository pins
         run: rustup show
       - name: Install cargo-mutants
-        run: cargo install --locked cargo-mutants
+        run: cargo install --locked "cargo-mutants@$CARGO_MUTANTS"
       - name: The shard numbers
         id: shards
         run: |
@@ -166,6 +185,7 @@ jobs:
           echo "list=$list" >> "$GITHUB_OUTPUT"
           echo "$list"
       - name: Every mutant is in exactly one shard
+        id: cover
         # Without colour, because this step is a comparison of two listings and
         # escape codes are the sort of thing that makes two identical lines
         # differ.
@@ -174,23 +194,37 @@ jobs:
         run: |
           cargo mutants --list | sort > all.txt
           : > covered.txt
+          : > sizes.txt
           for k in $(seq 0 $((SHARDS - 1))); do
-            cargo mutants --shard "$k/$SHARDS" --list >> covered.txt
+            cargo mutants --shard "$k/$SHARDS" --sharding "$SHARDING" --list > shard.txt
+            cat shard.txt >> covered.txt
+            wc -l < shard.txt >> sizes.txt
           done
           sort -o covered.txt covered.txt
           diff all.txt covered.txt
           echo "$(wc -l < all.txt) mutants, all of them in a shard"
+          # How many each shard holds, so `whole` can tell a shard that played
+          # all of its mutants from one that was stopped partway.
+          echo "sizes=$(jq -cs . sizes.txt)" >> "$GITHUB_OUTPUT"
 
   # Everything, once a week, so the standing figure is a number and not a
-  # feeling. Sharded because one machine takes hours: the shards are
-  # round-robin, so each gets a spread of crates rather than one large one.
+  # feeling. Sharded because one machine takes hours, and dealt round-robin so
+  # each shard gets a spread of every file rather than one large one.
+  #
+  # A shard is green when it played every mutant it was dealt, whatever it
+  # found. It was red whenever anything survived, which is every week and will
+  # be for a long time, so red said nothing: the first run lost one shard to a
+  # runner GitHub shut down and another to the deadline, and both looked like
+  # the twenty two that had simply found survivors. What was found is a number,
+  # and `whole` below reports it; red is kept for a shard that did not finish,
+  # which is the one thing somebody has to act on.
   everything:
     needs: plan
     if: github.event_name != 'pull_request'
     # Far past the work, because this is a deadline for something that has to
     # happen: met, it costs nothing. What it buys is that a shard which will
     # not finish says so as itself, rather than being killed at the platform's
-    # six hours in a way that looks the same as finding survivors.
+    # six hours.
     timeout-minutes: 300
     strategy:
       fail-fast: false
@@ -202,20 +236,113 @@ jobs:
       - name: Install the toolchain this repository pins
         run: rustup show
       - name: Install cargo-mutants
-        run: cargo install --locked cargo-mutants
+        run: cargo install --locked "cargo-mutants@$CARGO_MUTANTS"
       - name: One shard of the mutants
         run: |
           # A copy per job here rather than `--in-place`, because this run is
           # hundreds of mutants and two at a time is worth more than the build
           # `--in-place` saves. The two flags are mutually exclusive.
+          #
+          # cargo-mutants exits 2 when a mutant survived and 3 when one timed
+          # out. Both are what this run is for, not a failure of it.
           cargo mutants \
             --shard "${{ matrix.shard }}/$SHARDS" \
+            --sharding "$SHARDING" \
             --test-workspace=false \
             --minimum-test-timeout 120 \
-            -j 2
+            -j 2 || {
+            status=$?
+            test "$status" -eq 2 || test "$status" -eq 3 || exit "$status"
+          }
       - name: The survivors, which are the point of this run
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: mutants-shard-${{ matrix.shard }}
           path: mutants.out/
+          # A shard run again after a runner was lost replaces what the lost
+          # one managed to upload, rather than failing on the name.
+          overwrite: true
+
+  # Whether the week was measured, and what it found.
+  #
+  # Each shard knows only its own share, so nothing said whether the whole list
+  # had been played. The first run was missing a shard outright, since a runner
+  # that is shut down uploads nothing, and one shard was a hundred and sixty of
+  # a hundred and eighty five; neither was visible without downloading every
+  # artifact and counting. This counts: every shard has to be there, finished,
+  # with as many mutants played as `plan` dealt it. It fails naming the ones
+  # that are not, and `mutants-retry.yml` runs those again.
+  whole:
+    needs: [plan, everything]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: mutants-shard-*
+          path: shards
+      - name: Every shard finished, and what they found together
+        env:
+          SIZES: ${{ needs.plan.outputs.sizes }}
+        run: |
+          python3 - <<'EOF'
+          import collections, json, os, pathlib, sys
+
+          sizes = json.loads(os.environ["SIZES"])
+          short = []
+          outcomes = collections.Counter()
+          missed = []
+          timed_out = []
+          for shard, size in enumerate(sizes):
+              path = pathlib.Path(f"shards/mutants-shard-{shard}/outcomes.json")
+              if not path.exists():
+                  short.append(f"shard {shard}: no results at all")
+                  continue
+              report = json.loads(path.read_text())
+              played = [o for o in report["outcomes"] if "Mutant" in o["scenario"]]
+              if report.get("end_time") is None or len(played) != size:
+                  short.append(f"shard {shard}: {len(played)} of {size} played")
+              for o in played:
+                  outcomes[o["summary"]] += 1
+                  name = o["scenario"]["Mutant"]["name"]
+                  if o["summary"] == "MissedMutant":
+                      missed.append(name)
+                  elif o["summary"] == "Timeout":
+                      timed_out.append(name)
+
+          pathlib.Path("missed.txt").write_text("".join(n + "\n" for n in sorted(missed)))
+          pathlib.Path("timeout.txt").write_text("".join(n + "\n" for n in sorted(timed_out)))
+          files = collections.Counter(n.split(":")[0] for n in missed)
+          lines = [
+              f"## {sum(sizes)} mutants, {sum(outcomes.values())} played",
+              "",
+              "| caught | missed | timed out | unviable |",
+              "|---:|---:|---:|---:|",
+              f"| {outcomes['CaughtMutant']} | {outcomes['MissedMutant']} "
+              f"| {outcomes['Timeout']} | {outcomes['Unviable']} |",
+              "",
+              "Missed means missed by the tests of the mutant's own crate. One "
+              "that a crate depending on it would catch is counted here too, so "
+              "this is a ceiling on what nothing in the workspace notices.",
+              "",
+              "| file | missed |",
+              "|---|---:|",
+          ] + [f"| `{f}` | {n} |" for f, n in files.most_common()]
+          if short:
+              lines += ["", "### Not measured", ""] + [f"- {s}" for s in short]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("\n".join(lines) + "\n")
+          print("\n".join(lines))
+          if short:
+              sys.exit(1)
+          EOF
+      - name: Every survivor, in one place
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mutants-whole
+          path: |
+            missed.txt
+            timeout.txt
+          overwrite: true
