@@ -1,0 +1,2 @@
+crates/cairn-chain/src/lib.rs:1053:9: replace ChainStore::is_archiving -> bool with true
+crates/cairn-chain/src/lib.rs:1883:46: replace || with && in ChainStore::adopt

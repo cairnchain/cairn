@@ -1,0 +1,25 @@
+crates/cairn-net/src/book.rs:198:5: replace fresh_salt -> u64 with 1
+crates/cairn-net/src/book.rs:249:51: replace ^ with | in place_of
+crates/cairn-net/src/book.rs:750:9: replace AddressBook::has_seeds -> bool with false
+crates/cairn-net/src/choosing.rs:414:90: replace > with >= in Chooser::allows
+crates/cairn-net/src/choosing.rs:681:65: replace > with < in Chooser::clock_went_back
+crates/cairn-net/src/choosing.rs:686:42: replace > with == in Chooser::clock_went_back
+crates/cairn-net/src/choosing.rs:749:51: replace < with <= in Chooser::owed_a_turn
+crates/cairn-net/src/node.rs:164:39: replace * with +
+crates/cairn-net/src/node.rs:1665:28: replace < with <= in count_unreadable
+crates/cairn-net/src/node.rs:1774:52: replace || with && in count_out_of_step
+crates/cairn-net/src/node.rs:2141:39: replace > with < in Shared::forget_spent_windows
+crates/cairn-net/src/node.rs:2384:45: delete ! in Shared::note_writing
+crates/cairn-net/src/node.rs:2468:9: replace Shared::cannot_judge with ()
+crates/cairn-net/src/node.rs:2578:59: replace > with >= in Shared::trim_history
+crates/cairn-net/src/node.rs:3351:66: replace != with == in Node::open_with
+crates/cairn-net/src/node.rs:4172:25: delete ! in Node::recover_proofs
+crates/cairn-net/src/node.rs:4858:9: replace Store::discard_filling with ()
+crates/cairn-net/src/node.rs:5368:28: replace || with && in Shared::fill_headers
+crates/cairn-net/src/node.rs:5716:21: replace > with < in grow_forest
+crates/cairn-net/src/node.rs:5797:40: replace match guard held == now with true in write_headers
+crates/cairn-net/src/node.rs:6367:13: replace < with <= in catch_up_headers
+crates/cairn-net/src/node.rs:6769:13: replace > with == in look_up_seed_names
+crates/cairn-net/src/node.rs:7350:25: replace && with || in read_loop
+crates/cairn-net/src/node.rs:914:9: replace <impl std::fmt::Display for Reading>::fmt -> std::fmt::Result with Ok(Default::default())
+crates/cairn-net/src/wire.rs:230:17: replace < with <= in fill

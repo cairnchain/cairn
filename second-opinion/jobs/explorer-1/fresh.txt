@@ -1,0 +1,28 @@
+crates/cairn-explorer/src/api.rs:172:9: replace Explorer::index -> MutexGuard<'_, Index> with MutexGuard::from(Default::default())
+crates/cairn-explorer/src/api.rs:172:9: replace Explorer::index -> MutexGuard<'_, Index> with MutexGuard::new()
+crates/cairn-explorer/src/api.rs:224:9: replace Explorer::refresh with ()
+crates/cairn-explorer/src/api.rs:256:52: replace > with < in Explorer::stand_aside
+crates/cairn-explorer/src/api.rs:256:52: replace > with >= in Explorer::stand_aside
+crates/cairn-explorer/src/api.rs:256:75: replace < with <= in Explorer::stand_aside
+crates/cairn-explorer/src/api.rs:256:75: replace < with > in Explorer::stand_aside
+crates/cairn-explorer/src/api.rs:309:9: replace Explorer::held_at -> Held with Default::default()
+crates/cairn-explorer/src/api.rs:355:9: replace Explorer::answer -> Option<Response> with None
+crates/cairn-explorer/src/api.rs:383:9: replace Explorer::read -> (Option<Response>, Vec<u64>) with (None, vec![0])
+crates/cairn-explorer/src/api.rs:383:9: replace Explorer::read -> (Option<Response>, Vec<u64>) with (None, vec![])
+crates/cairn-explorer/src/api.rs:383:9: replace Explorer::read -> (Option<Response>, Vec<u64>) with (Some(Default::default()), vec![1])
+crates/cairn-explorer/src/api.rs:414:5: replace nothing_at -> Held with Default::default()
+crates/cairn-explorer/src/api.rs:416:23: replace < with <= in nothing_at
+crates/cairn-explorer/src/api.rs:416:23: replace < with > in nothing_at
+crates/cairn-explorer/src/api.rs:505:9: replace Health::of -> Self with Default::default()
+crates/cairn-explorer/src/api.rs:559:19: replace == with != in Context<'_>::answering
+crates/cairn-explorer/src/api.rs:559:9: replace Context<'_>::answering -> bool with true
+crates/cairn-explorer/src/api.rs:55:5: replace most_one_answer_carries -> usize with 1
+crates/cairn-explorer/src/api.rs:572:9: replace Context<'_>::block_at -> Option<Block> with Some(Default::default())
+crates/cairn-explorer/src/api.rs:583:12: delete ! in Context<'_>::block_at
+crates/cairn-explorer/src/api.rs:609:9: replace Context<'_>::block -> Option<Block> with Some(Default::default())
+crates/cairn-explorer/src/api.rs:617:9: replace Context<'_>::height -> Option<u64> with Some(0)
+crates/cairn-explorer/src/api.rs:64:36: replace * with +
+crates/cairn-explorer/src/api.rs:80:5: replace too_much_now -> bool with false
+crates/cairn-explorer/src/api.rs:81:15: replace == with != in too_much_now
+crates/cairn-explorer/src/api.rs:81:38: replace <= with > in too_much_now
+crates/cairn-explorer/src/main.rs:40:5: replace run -> Result<(), String> with Ok(())

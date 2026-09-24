@@ -1,0 +1,25 @@
+crates/cairn-net/src/book.rs:210:38: replace >> with << in mixed
+crates/cairn-net/src/book.rs:250:13: replace ^ with | in place_of
+crates/cairn-net/src/choosing.rs:325:22: replace || with && in Chooser::noted
+crates/cairn-net/src/choosing.rs:456:9: replace Chooser::best_standing -> Option<u128> with Some(0)
+crates/cairn-net/src/choosing.rs:681:65: replace > with >= in Chooser::clock_went_back
+crates/cairn-net/src/choosing.rs:686:48: replace || with && in Chooser::clock_went_back
+crates/cairn-net/src/choosing.rs:865:56: replace > with >= in Chooser::finish
+crates/cairn-net/src/node.rs:1654:20: replace > with == in count_unreadable
+crates/cairn-net/src/node.rs:1684:17: replace < with == in too_old_for_the_chain
+crates/cairn-net/src/node.rs:1774:84: replace > with >= in count_out_of_step
+crates/cairn-net/src/node.rs:2141:39: replace > with >= in Shared::forget_spent_windows
+crates/cairn-net/src/node.rs:2394:46: replace match guard standing.what.costs() > fresh.what.costs() with false in Shared::note_writing
+crates/cairn-net/src/node.rs:2517:35: replace > with < in Shared::could_not_weigh
+crates/cairn-net/src/node.rs:2968:9: replace Shared::forget with ()
+crates/cairn-net/src/node.rs:3883:9: replace Node::unjudged -> Option<Unjudged> with None
+crates/cairn-net/src/node.rs:4202:31: delete ! in Node::reach_for_an_archivist
+crates/cairn-net/src/node.rs:5175:9: replace Shared::shows_the_chain -> bool with false
+crates/cairn-net/src/node.rs:5415:51: replace > with < in Shared::fill_headers
+crates/cairn-net/src/node.rs:5716:21: replace > with >= in grow_forest
+crates/cairn-net/src/node.rs:5810:26: replace > with >= in write_headers
+crates/cairn-net/src/node.rs:6668:28: replace match guard has_gone_quiet(Some(moved), now) with false in drive_choosing
+crates/cairn-net/src/node.rs:6769:17: replace && with || in look_up_seed_names
+crates/cairn-net/src/node.rs:7386:12: delete ! in read_loop
+crates/cairn-net/src/refusal.rs:112:9: replace Refusals::is_empty -> bool with true
+crates/cairn-net/src/wire.rs:297:27: replace match guard error.kind() == io::ErrorKind::Interrupted with false in drain

@@ -1,0 +1,2 @@
+crates/cairn-net/src/node.rs:6852:41: delete ! in dial_from_book
+crates/cairn-net/src/node.rs:6907:5: replace loses_the_tie -> bool with true

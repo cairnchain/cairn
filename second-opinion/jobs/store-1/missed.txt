@@ -1,0 +1,13 @@
+crates/cairn-store/src/headers.rs:189:20: replace > with >= in HeaderLog::holds
+crates/cairn-store/src/lib.rs:107:39: replace * with +
+crates/cairn-store/src/lib.rs:1176:18: replace == with != in BlockLog::keep_first
+crates/cairn-store/src/lib.rs:1425:25: replace > with >= in BlockLog::walk
+crates/cairn-store/src/lib.rs:1598:21: replace > with >= in <impl Iterator for Replay<'_>>::next
+crates/cairn-store/src/lib.rs:284:5: replace sync_directory -> std::io::Result<()> with Ok(())
+crates/cairn-store/src/lib.rs:394:28: delete ! in sync_the_directory_of
+crates/cairn-store/src/lib.rs:394:28: replace match guard !directory.as_os_str().is_empty() with true in sync_the_directory_of
+crates/cairn-store/src/lib.rs:538:20: replace > with >= in BlockLog::holds
+crates/cairn-store/src/lib.rs:645:13: delete match arm Ok(Some(earlier)) in BlockLog::named_by_its_neighbour
+crates/cairn-store/src/lib.rs:736:33: replace || with && in BlockLog::keep_from
+crates/cairn-store/src/lib.rs:977:23: replace > with >= in BlockLog::append
+crates/cairn-store/src/lib.rs:989:26: replace > with == in BlockLog::append

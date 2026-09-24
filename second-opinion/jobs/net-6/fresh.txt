@@ -1,0 +1,2 @@
+crates/cairn-net/src/node.rs:6889:5: replace register -> Registration with Default::default()
+crates/cairn-net/src/node.rs:6909:9: delete ! in loses_the_tie

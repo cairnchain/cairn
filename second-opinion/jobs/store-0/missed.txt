@@ -1,0 +1,14 @@
+crates/cairn-store/src/header_tree.rs:397:23: replace > with >= in HeaderTree::mend_levels
+crates/cairn-store/src/lib.rs:1039:76: replace > with >= in BlockLog::bounds
+crates/cairn-store/src/lib.rs:1098:21: replace > with >= in BlockLog::read
+crates/cairn-store/src/lib.rs:1425:25: replace > with == in BlockLog::walk
+crates/cairn-store/src/lib.rs:1499:29: replace > with >= in BlockLog::settle
+crates/cairn-store/src/lib.rs:1744:9: replace <impl Drop for DirectoryLock>::drop with ()
+crates/cairn-store/src/lib.rs:393:5: replace sync_the_directory_of -> std::io::Result<()> with Ok(())
+crates/cairn-store/src/lib.rs:394:28: replace match guard !directory.as_os_str().is_empty() with false in sync_the_directory_of
+crates/cairn-store/src/lib.rs:408:5: replace write_beside_and_move -> std::io::Result<()> with Ok(())
+crates/cairn-store/src/lib.rs:538:58: replace < with <= in BlockLog::holds
+crates/cairn-store/src/lib.rs:656:9: replace BlockLog::header_of -> Result<Option<BlockHeader>, StoreError> with Ok(None)
+crates/cairn-store/src/lib.rs:977:23: replace > with == in BlockLog::append
+crates/cairn-store/src/lib.rs:989:26: replace > with < in BlockLog::append
+crates/cairn-store/src/lib.rs:989:26: replace > with >= in BlockLog::append

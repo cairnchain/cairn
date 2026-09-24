@@ -1,0 +1,25 @@
+crates/cairn-net/src/book.rs:212:13: replace ^= with &= in mixed
+crates/cairn-net/src/book.rs:264:23: replace >= with < in neighbourhood_of
+crates/cairn-net/src/choosing.rs:382:9: replace Chooser::asking_join -> Option<(u64, u64)> with None
+crates/cairn-net/src/choosing.rs:456:9: replace Chooser::best_standing -> Option<u128> with Some(1)
+crates/cairn-net/src/choosing.rs:682:13: replace || with && in Chooser::clock_went_back
+crates/cairn-net/src/choosing.rs:687:13: replace || with && in Chooser::clock_went_back
+crates/cairn-net/src/joining.rs:235:9: replace <impl fmt::Display for Joined>::fmt -> fmt::Result with Ok(Default::default())
+crates/cairn-net/src/node.rs:1654:20: replace > with >= in count_unreadable
+crates/cairn-net/src/node.rs:1730:61: replace < with <= in no_showing_checks_out
+crates/cairn-net/src/node.rs:1778:13: delete field own_first_block from struct OutOfStep expression in count_out_of_step
+crates/cairn-net/src/node.rs:2142:17: replace || with && in Shared::forget_spent_windows
+crates/cairn-net/src/node.rs:2394:46: replace match guard standing.what.costs() > fresh.what.costs() with true in Shared::note_writing
+crates/cairn-net/src/node.rs:2517:35: replace > with == in Shared::could_not_weigh
+crates/cairn-net/src/node.rs:3050:33: replace || with && in open_the_chain
+crates/cairn-net/src/node.rs:3993:9: replace Node::out_of_reach -> u64 with 0
+crates/cairn-net/src/node.rs:4211:9: replace Node::pool_len -> usize with 0
+crates/cairn-net/src/node.rs:5175:9: replace Shared::shows_the_chain -> bool with true
+crates/cairn-net/src/node.rs:5415:51: replace > with == in Shared::fill_headers
+crates/cairn-net/src/node.rs:5725:18: replace > with < in grow_forest
+crates/cairn-net/src/node.rs:5885:22: replace > with >= in write_blocks
+crates/cairn-net/src/node.rs:6668:28: replace match guard has_gone_quiet(Some(moved), now) with true in drive_choosing
+crates/cairn-net/src/node.rs:6769:45: replace < with <= in look_up_seed_names
+crates/cairn-net/src/node.rs:7428:5: replace note_the_ending with ()
+crates/cairn-net/src/seeds.rs:147:27: replace match guard strict with true in start_from
+crates/cairn-net/src/wire.rs:300:17: replace < with <= in drain

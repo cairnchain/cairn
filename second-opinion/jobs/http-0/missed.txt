@@ -1,0 +1,24 @@
+crates/cairn-http/src/http.rs:1061:5: replace would_wait -> bool with false
+crates/cairn-http/src/http.rs:1061:5: replace would_wait -> bool with true
+crates/cairn-http/src/http.rs:1157:9: delete match arm 408 in refusal
+crates/cairn-http/src/http.rs:136:5: replace most_one_answer_carries -> usize with 0
+crates/cairn-http/src/http.rs:136:5: replace most_one_answer_carries -> usize with 1
+crates/cairn-http/src/http.rs:152:30: replace * with +
+crates/cairn-http/src/http.rs:165:31: replace * with +
+crates/cairn-http/src/http.rs:197:31: replace * with +
+crates/cairn-http/src/http.rs:36:37: replace * with +
+crates/cairn-http/src/http.rs:38:37: replace * with +
+crates/cairn-http/src/http.rs:476:23: replace == with != in <impl Drop for Held>::drop
+crates/cairn-http/src/http.rs:752:19: replace < with <= in drain
+crates/cairn-http/src/http.rs:756:27: replace match guard error.kind() == io::ErrorKind::WouldBlock with true in drain
+crates/cairn-http/src/http.rs:794:5: replace hang_up with ()
+crates/cairn-http/src/http.rs:891:31: replace match guard would_wait(&error) with false in <impl Write for Timed<'_>>::write
+crates/cairn-http/src/http.rs:891:31: replace match guard would_wait(&error) with true in <impl Write for Timed<'_>>::write
+crates/cairn-http/src/http.rs:898:9: replace <impl Write for Timed<'_>>::flush -> io::Result<()> with Ok(())
+crates/cairn-http/src/json.rs:134:9: replace Writer::usize with ()
+crates/cairn-http/src/json.rs:144:9: replace Writer::null with ()
+crates/cairn-http/src/json.rs:159:9: replace Writer::field_usize with ()
+crates/cairn-http/src/json.rs:169:9: replace Writer::field_null with ()
+crates/cairn-http/src/json.rs:42:9: replace Writer::written -> usize with 0
+crates/cairn-http/src/json.rs:42:9: replace Writer::written -> usize with 1
+crates/cairn-http/src/json.rs:67:20: replace > with >= in Writer::rewind

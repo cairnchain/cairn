@@ -1,0 +1,5 @@
+crates/cairn-primitives/src/codec.rs:229:17: replace > with >= in take_at_most
+crates/cairn-primitives/src/hash.rs:26:9: replace Hash32::to_bytes -> [u8; HASH_LEN] with [0; HASH_LEN]
+crates/cairn-primitives/src/hash.rs:26:9: replace Hash32::to_bytes -> [u8; HASH_LEN] with [1; HASH_LEN]
+crates/cairn-primitives/src/merkle.rs:51:9: delete match arm [] in merkle_root
+crates/cairn-primitives/src/merkle.rs:52:9: delete match arm [only] in merkle_root

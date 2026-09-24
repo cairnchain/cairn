@@ -1,0 +1,11 @@
+crates/cairn-ledger/src/emission.rs:65:17: replace > with >= in emitted_by
+crates/cairn-ledger/src/handover.rs:1325:17: replace > with == in decode_grace
+crates/cairn-ledger/src/handover.rs:1344:14: replace > with >= in decode_proofs
+crates/cairn-ledger/src/sampling.rs:1071:34: replace > with >= in check_the_tail
+crates/cairn-ledger/src/state.rs:1541:9: replace LedgerState::supply_after -> Option<Amount> with Some(Default::default())
+crates/cairn-ledger/src/state.rs:430:9: replace ColdTier::plain -> Self with Default::default()
+crates/cairn-ledger/src/state.rs:576:9: replace ColdSet::leaf_at -> Option<Hash32> with None
+crates/cairn-ledger/src/validation.rs:326:13: delete match arm "mainnet" in ConsensusParams::for_network
+crates/cairn-ledger/src/validation.rs:808:23: replace match guard (held.transfer, held.input) <= (found.transfer, found.input) with true in earlier
+crates/cairn-ledger/src/validation.rs:820:22: replace < with == in first_failure
+crates/cairn-ledger/src/validation.rs:846:68: delete ! in first_failure

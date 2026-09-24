@@ -1,0 +1,25 @@
+crates/cairn-net/src/book.rs:212:24: replace >> with << in mixed
+crates/cairn-net/src/book.rs:282:23: replace >= with < in neighbourhood_of
+crates/cairn-net/src/choosing.rs:382:9: replace Chooser::asking_join -> Option<(u64, u64)> with Some((0, 1))
+crates/cairn-net/src/choosing.rs:679:37: replace > with < in Chooser::clock_went_back
+crates/cairn-net/src/choosing.rs:682:63: replace > with == in Chooser::clock_went_back
+crates/cairn-net/src/choosing.rs:687:66: replace > with == in Chooser::clock_went_back
+crates/cairn-net/src/message.rs:650:26: replace > with >= in <impl Decode for Message>::decode_from
+crates/cairn-net/src/node.rs:1654:32: replace < with == in count_unreadable
+crates/cairn-net/src/node.rs:1735:17: replace < with == in no_showing_checks_out
+crates/cairn-net/src/node.rs:1946:30: replace < with <= in owed_this_round
+crates/cairn-net/src/node.rs:2178:19: replace < with <= in Shared::has_room_for
+crates/cairn-net/src/node.rs:2394:68: replace > with == in Shared::note_writing
+crates/cairn-net/src/node.rs:2517:66: replace || with && in Shared::could_not_weigh
+crates/cairn-net/src/node.rs:3317:23: replace && with || in Node::open_with
+crates/cairn-net/src/node.rs:4091:9: replace Node::cold_len -> u64 with 0
+crates/cairn-net/src/node.rs:4246:9: replace Node::mended_nodes -> u64 with 1
+crates/cairn-net/src/node.rs:5191:12: delete ! in Shared::seed_headers
+crates/cairn-net/src/node.rs:5460:13: replace || with && in Shared::fill_headers
+crates/cairn-net/src/node.rs:5735:35: replace == with != in grow_forest
+crates/cairn-net/src/node.rs:6118:22: replace < with <= in maintenance_loop
+crates/cairn-net/src/node.rs:6740:21: replace < with <= in collect_finished
+crates/cairn-net/src/node.rs:6769:45: replace < with > in look_up_seed_names
+crates/cairn-net/src/node.rs:7298:30: replace > with == in read_loop
+crates/cairn-net/src/node.rs:81:48: replace - with /
+crates/cairn-net/src/wire.rs:149:38: replace * with +

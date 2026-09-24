@@ -1,0 +1,3 @@
+crates/cairn-net/src/node.rs:6842:29: replace || with && in dial_from_book
+crates/cairn-net/src/node.rs:6907:34: replace < with <= in loses_the_tie
+crates/cairn-net/src/node.rs:6942:5: replace start_writing -> io::Result<thread::JoinHandle<()>> with Ok(JoinHandle::new())

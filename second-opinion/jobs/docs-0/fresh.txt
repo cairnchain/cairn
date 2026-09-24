@@ -1,0 +1,60 @@
+crates/cairn-docs/src/front.rs:102:20: replace >= with < in roman
+crates/cairn-docs/src/front.rs:112:5: replace split -> Result<(Front, &str)> with Ok((Default::default(), ""))
+crates/cairn-docs/src/front.rs:112:5: replace split -> Result<(Front, &str)> with Ok((Default::default(), "xyzzy"))
+crates/cairn-docs/src/front.rs:128:34: replace || with && in split
+crates/cairn-docs/src/front.rs:134:16: delete ! in split
+crates/cairn-docs/src/front.rs:199:5: replace numerals_of -> Result<Numerals> with Ok(Default::default())
+crates/cairn-docs/src/front.rs:211:5: replace subsections_of -> Result<Subsections> with Ok(Default::default())
+crates/cairn-docs/src/front.rs:224:5: replace once -> Result<()> with Ok(())
+crates/cairn-docs/src/front.rs:224:8: delete ! in once
+crates/cairn-docs/src/front.rs:238:5: replace set -> Result<()> with Ok(())
+crates/cairn-docs/src/front.rs:64:9: replace Numerals::of -> String with "xyzzy".into()
+crates/cairn-docs/src/front.rs:64:9: replace Numerals::of -> String with String::new()
+crates/cairn-docs/src/front.rs:84:5: replace roman -> String with "xyzzy".into()
+crates/cairn-docs/src/front.rs:84:5: replace roman -> String with String::new()
+crates/cairn-docs/src/lib.rs:46:5: replace folder -> PathBuf with Default::default()
+crates/cairn-docs/src/lib.rs:55:5: replace markdown_path -> PathBuf with Default::default()
+crates/cairn-docs/src/lib.rs:61:5: replace html_path -> PathBuf with Default::default()
+crates/cairn-docs/src/lib.rs:80:9: replace <impl fmt::Display for Error>::fmt -> fmt::Result with Ok(Default::default())
+crates/cairn-docs/src/main.rs:17:5: replace main -> ExitCode with Default::default()
+crates/cairn-docs/src/main.rs:34:5: replace run -> Result<usize, String> with Ok(0)
+crates/cairn-docs/src/main.rs:34:5: replace run -> Result<usize, String> with Ok(1)
+crates/cairn-docs/src/main.rs:41:42: replace == with != in run
+crates/cairn-docs/src/main.rs:54:5: replace read -> Result<String, String> with Ok("xyzzy".into())
+crates/cairn-docs/src/main.rs:54:5: replace read -> Result<String, String> with Ok(String::new())
+crates/cairn-docs/src/main.rs:59:5: replace shown -> String with "xyzzy".into()
+crates/cairn-docs/src/main.rs:59:5: replace shown -> String with String::new()
+crates/cairn-docs/src/render.rs:105:9: replace Page<'a>::run -> Result<()> with Ok(())
+crates/cairn-docs/src/render.rs:130:29: replace == with != in Page<'a>::run
+crates/cairn-docs/src/render.rs:149:9: replace Page<'a>::title_block -> Result<()> with Ok(())
+crates/cairn-docs/src/render.rs:150:12: delete ! in Page<'a>::title_block
+crates/cairn-docs/src/render.rs:177:12: delete ! in Page<'a>::title_block
+crates/cairn-docs/src/render.rs:190:9: replace Page<'a>::footer_block -> Result<()> with Ok(())
+crates/cairn-docs/src/render.rs:205:9: replace Page<'a>::heading -> Result<Open> with Ok(Default::default())
+crates/cairn-docs/src/render.rs:239:25: replace != with == in Page<'a>::heading
+crates/cairn-docs/src/render.rs:276:9: replace Page<'a>::open_summary -> Open with Default::default()
+crates/cairn-docs/src/render.rs:286:9: replace Page<'a>::close with ()
+crates/cairn-docs/src/render.rs:298:9: replace Page<'a>::block -> Result<()> with Ok(())
+crates/cairn-docs/src/render.rs:357:9: replace Page<'a>::list -> Result<()> with Ok(())
+crates/cairn-docs/src/render.rs:388:9: replace Page<'a>::inline -> Result<String> with Ok("xyzzy".into())
+crates/cairn-docs/src/render.rs:388:9: replace Page<'a>::inline -> Result<String> with Ok(String::new())
+crates/cairn-docs/src/render.rs:391:36: replace match guard until == Some(end) with false in Page<'a>::inline
+crates/cairn-docs/src/render.rs:391:36: replace match guard until == Some(end) with true in Page<'a>::inline
+crates/cairn-docs/src/render.rs:391:42: replace == with != in Page<'a>::inline
+crates/cairn-docs/src/render.rs:429:9: replace Page<'a>::space with ()
+crates/cairn-docs/src/render.rs:437:9: replace Page<'a>::blank with ()
+crates/cairn-docs/src/render.rs:441:9: replace Page<'a>::line with ()
+crates/cairn-docs/src/render.rs:449:5: replace inline_of -> Result<String> with Ok("xyzzy".into())
+crates/cairn-docs/src/render.rs:449:5: replace inline_of -> Result<String> with Ok(String::new())
+crates/cairn-docs/src/render.rs:461:5: replace reindent -> String with "xyzzy".into()
+crates/cairn-docs/src/render.rs:461:5: replace reindent -> String with String::new()
+crates/cairn-docs/src/render.rs:464:24: delete ! in reindent
+crates/cairn-docs/src/render.rs:483:5: replace escape -> String with "xyzzy".into()
+crates/cairn-docs/src/render.rs:483:5: replace escape -> String with String::new()
+crates/cairn-docs/src/render.rs:48:5: replace render -> Result<String> with Ok("xyzzy".into())
+crates/cairn-docs/src/render.rs:48:5: replace render -> Result<String> with Ok(String::new())
+crates/cairn-docs/src/render.rs:496:5: replace attribute -> String with "xyzzy".into()
+crates/cairn-docs/src/render.rs:496:5: replace attribute -> String with String::new()
+crates/cairn-docs/src/render.rs:61:5: replace options -> Options with Default::default()
+crates/cairn-docs/src/render.rs:75:9: replace Open::indent -> usize with 0
+crates/cairn-docs/src/render.rs:75:9: replace Open::indent -> usize with 1

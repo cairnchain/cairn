@@ -1,0 +1,7 @@
+crates/cairn-accumulator/src/forest.rs:1230:9: replace Archive::truncate_inner with ()
+crates/cairn-accumulator/src/forest.rs:1313:31: replace || with && in Archive::prove_in
+crates/cairn-accumulator/src/forest.rs:280:9: replace PathsBefore::is_empty -> bool with false
+crates/cairn-accumulator/src/forest.rs:567:26: replace < with <= in Forest::rewind_to
+crates/cairn-accumulator/src/key.rs:85:9: replace <impl fmt::Display for Key>::fmt -> fmt::Result with Ok(Default::default())
+crates/cairn-accumulator/src/proof.rs:46:32: replace > with >= in Proof::verify_absence
+crates/cairn-accumulator/src/tree.rs:277:9: replace SparseMerkleTree::contains -> bool with true

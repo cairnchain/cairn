@@ -1,0 +1,26 @@
+crates/cairn-net/src/book.rs:212:13: replace ^= with |= in mixed
+crates/cairn-net/src/book.rs:269:23: replace >= with < in neighbourhood_of
+crates/cairn-net/src/choosing.rs:382:9: replace Chooser::asking_join -> Option<(u64, u64)> with Some((0, 0))
+crates/cairn-net/src/choosing.rs:616:39: replace >= with < in Chooser::step
+crates/cairn-net/src/choosing.rs:682:63: replace > with < in Chooser::clock_went_back
+crates/cairn-net/src/choosing.rs:687:66: replace > with < in Chooser::clock_went_back
+crates/cairn-net/src/joining.rs:71:32: replace > with >= in Collecting::started
+crates/cairn-net/src/node.rs:1654:32: replace < with <= in count_unreadable
+crates/cairn-net/src/node.rs:1735:17: replace < with <= in no_showing_checks_out
+crates/cairn-net/src/node.rs:1786:28: replace < with <= in count_out_of_step
+crates/cairn-net/src/node.rs:2176:38: replace == with != in Shared::has_room_for
+crates/cairn-net/src/node.rs:2394:68: replace > with < in Shared::note_writing
+crates/cairn-net/src/node.rs:2517:35: replace > with >= in Shared::could_not_weigh
+crates/cairn-net/src/node.rs:3311:20: replace > with >= in Node::open_with
+crates/cairn-net/src/node.rs:3993:9: replace Node::out_of_reach -> u64 with 1
+crates/cairn-net/src/node.rs:4246:9: replace Node::mended_nodes -> u64 with 0
+crates/cairn-net/src/node.rs:5187:9: replace Shared::seed_headers with ()
+crates/cairn-net/src/node.rs:5415:51: replace > with >= in Shared::fill_headers
+crates/cairn-net/src/node.rs:5735:27: replace && with || in grow_forest
+crates/cairn-net/src/node.rs:6091:27: replace match guard error.kind() == io::ErrorKind::Interrupted with false in accept_loop
+crates/cairn-net/src/node.rs:6736:5: replace collect_finished with ()
+crates/cairn-net/src/node.rs:6769:45: replace < with == in look_up_seed_names
+crates/cairn-net/src/node.rs:7189:5: replace held_off -> bool with false
+crates/cairn-net/src/node.rs:7435:12: delete ! in note_the_ending
+crates/cairn-net/src/sync.rs:824:9: replace Reaction::idle -> Self with Default::default()
+crates/cairn-net/src/wire.rs:314:19: replace > with >= in write_message

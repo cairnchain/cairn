@@ -1,0 +1,18 @@
+crates/cairn-chain/src/lib.rs:2734:9: replace ChainStore::undo_limit -> u64 with 0
+crates/cairn-chain/src/lib.rs:2751:9: replace ChainStore::held_bytes_ceiling -> usize with 0
+crates/cairn-chain/src/lib.rs:2758:9: replace ChainStore::hold with ()
+crates/cairn-chain/src/lib.rs:2802:9: replace ChainStore::recount with ()
+crates/cairn-chain/src/lib.rs:2825:9: replace ChainStore::side_blocks -> usize with 1
+crates/cairn-chain/src/lib.rs:2833:9: replace ChainStore::side_bytes -> usize with 1
+crates/cairn-chain/src/lib.rs:2858:9: replace ChainStore::forget_oldest_side_blocks with ()
+crates/cairn-chain/src/lib.rs:2860:35: replace && with || in ChainStore::forget_oldest_side_blocks
+crates/cairn-chain/src/lib.rs:2877:21: replace <= with > in ChainStore::forget_oldest_side_blocks
+crates/cairn-chain/src/lib.rs:2877:50: replace <= with > in ChainStore::forget_oldest_side_blocks
+crates/cairn-chain/src/lib.rs:2964:42: replace > with < in ChainStore::forget_unreachable_branches
+crates/cairn-chain/src/lib.rs:2964:42: replace > with >= in ChainStore::forget_unreachable_branches
+crates/cairn-chain/src/lib.rs:2965:40: replace > with == in ChainStore::forget_unreachable_branches
+crates/cairn-chain/src/lib.rs:2966:21: replace || with && in ChainStore::forget_unreachable_branches
+crates/cairn-chain/src/lib.rs:2973:76: replace >= with < in ChainStore::forget_unreachable_branches
+crates/cairn-chain/src/lib.rs:3042:9: replace ChainStore::reapply -> Result<(), ChainError> with Ok(())
+crates/cairn-chain/src/lib.rs:3062:9: replace ChainStore::body_of -> Option<Block> with None
+crates/cairn-chain/src/lib.rs:3067:20: replace == with != in ChainStore::body_of

@@ -1,0 +1,4 @@
+crates/cairn-chain/src/lib.rs:1053:9: replace ChainStore::is_archiving -> bool with false
+crates/cairn-chain/src/lib.rs:1686:24: replace > with >= in ChainStore::selection
+crates/cairn-chain/src/lib.rs:1931:53: replace > with < in ChainStore::adopt
+crates/cairn-chain/src/lib.rs:586:19: replace / with %

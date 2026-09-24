@@ -1,0 +1,25 @@
+crates/cairn-net/src/book.rs:198:5: replace fresh_salt -> u64 with 0
+crates/cairn-net/src/book.rs:214:24: replace >> with << in mixed
+crates/cairn-net/src/book.rs:472:9: replace AddressBook::is_seed -> bool with true
+crates/cairn-net/src/choosing.rs:383:56: replace == with != in Chooser::asking_join
+crates/cairn-net/src/choosing.rs:681:13: replace || with && in Chooser::clock_went_back
+crates/cairn-net/src/choosing.rs:686:42: replace > with < in Chooser::clock_went_back
+crates/cairn-net/src/choosing.rs:748:48: replace < with <= in Chooser::owed_a_turn
+crates/cairn-net/src/node.rs:1460:9: replace Asking::satisfied -> bool with false
+crates/cairn-net/src/node.rs:1654:75: replace > with >= in count_unreadable
+crates/cairn-net/src/node.rs:1774:29: replace > with >= in count_out_of_step
+crates/cairn-net/src/node.rs:2139:9: replace Shared::forget_spent_windows with ()
+crates/cairn-net/src/node.rs:2299:9: replace Shared::undertake with ()
+crates/cairn-net/src/node.rs:2416:12: delete ! in Shared::note_writing
+crates/cairn-net/src/node.rs:2528:32: replace < with <= in Shared::could_not_weigh
+crates/cairn-net/src/node.rs:3351:40: replace || with && in Node::open_with
+crates/cairn-net/src/node.rs:4172:21: replace || with && in Node::recover_proofs
+crates/cairn-net/src/node.rs:4525:16: delete ! in take_piece
+crates/cairn-net/src/node.rs:5261:9: replace Shared::clear_filling with ()
+crates/cairn-net/src/node.rs:5502:36: replace == with != in Shared::throw_the_run_away
+crates/cairn-net/src/node.rs:5740:21: replace > with >= in grow_forest
+crates/cairn-net/src/node.rs:6264:5: replace still_wanted -> Option<(Joining, u32)> with None
+crates/cairn-net/src/node.rs:6769:13: replace > with < in look_up_seed_names
+crates/cairn-net/src/node.rs:7346:25: replace && with || in read_loop
+crates/cairn-net/src/node.rs:834:9: replace <impl std::fmt::Display for Writing>::fmt -> std::fmt::Result with Ok(Default::default())
+crates/cairn-net/src/wire.rs:222:27: replace match guard is_deadline(&error) with true in fill

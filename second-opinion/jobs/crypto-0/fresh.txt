@@ -1,0 +1,16 @@
+crates/cairn-crypto/src/lib.rs:103:9: replace SecretKey::to_bytes -> [u8; SECRET_KEY_LEN] with [0; SECRET_KEY_LEN]
+crates/cairn-crypto/src/lib.rs:107:9: replace SecretKey::public_key -> PublicKey with Default::default()
+crates/cairn-crypto/src/lib.rs:135:5: replace is_canonically_encoded -> bool with false
+crates/cairn-crypto/src/lib.rs:137:27: replace &= with |= in is_canonically_encoded
+crates/cairn-crypto/src/lib.rs:179:9: replace PublicKey::from_bytes -> Result<Self, CryptoError> with Ok(Default::default())
+crates/cairn-crypto/src/lib.rs:200:9: replace PublicKey::to_bytes -> [u8; PUBLIC_KEY_LEN] with [0; PUBLIC_KEY_LEN]
+crates/cairn-crypto/src/lib.rs:204:9: replace PublicKey::as_bytes -> &[u8; PUBLIC_KEY_LEN] with Box::leak(Box::new([0; PUBLIC_KEY_LEN]))
+crates/cairn-crypto/src/lib.rs:213:9: replace PublicKey::verify -> Result<(), CryptoError> with Ok(())
+crates/cairn-crypto/src/lib.rs:221:9: replace <impl PartialOrd for PublicKey>::partial_cmp -> Option<std::cmp::Ordering> with Some(Default::default())
+crates/cairn-crypto/src/lib.rs:233:9: replace <impl std::hash::Hash for PublicKey>::hash with ()
+crates/cairn-crypto/src/lib.rs:254:9: replace <impl Encode for PublicKey>::encode_to with ()
+crates/cairn-crypto/src/lib.rs:273:9: replace Signature::from_bytes -> Self with Default::default()
+crates/cairn-crypto/src/lib.rs:285:9: replace Signature::to_bytes -> [u8; SIGNATURE_LEN] with [0; SIGNATURE_LEN]
+crates/cairn-crypto/src/lib.rs:301:9: replace <impl Encode for Signature>::encode_to with ()
+crates/cairn-crypto/src/lib.rs:79:5: replace random_bytes -> Result<[u8; N], CryptoError> with Ok([0; N])
+crates/cairn-crypto/src/lib.rs:93:9: replace SecretKey::generate -> Result<Self, CryptoError> with Ok(Default::default())

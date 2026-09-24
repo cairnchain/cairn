@@ -1,0 +1,7 @@
+crates/cairn-accumulator/src/forest.rs:1034:9: replace Archive::is_empty -> bool with true
+crates/cairn-accumulator/src/forest.rs:1270:37: replace > with >= in Archive::held_node
+crates/cairn-accumulator/src/forest.rs:280:32: replace && with || in PathsBefore::is_empty
+crates/cairn-accumulator/src/forest.rs:346:18: replace > with >= in <impl Decode for Forest>::decode_from
+crates/cairn-accumulator/src/forest.rs:918:17: replace < with <= in refresh
+crates/cairn-accumulator/src/proof.rs:46:32: replace > with == in Proof::verify_absence
+crates/cairn-accumulator/src/tree.rs:277:9: replace SparseMerkleTree::contains -> bool with false

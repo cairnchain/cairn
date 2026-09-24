@@ -1,0 +1,46 @@
+# A one-off second opinion on the survivors of weekly run 35908561443, on a
+# branch that is not meant to be merged. See second-opinion/run.sh.
+name: second-opinion
+
+on:
+  push:
+    branches: [chore/mutants-second-opinion]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    outputs:
+      jobs: ${{ steps.jobs.outputs.list }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: jobs
+        run: echo "list=$(cat second-opinion/jobs.json)" >> "$GITHUB_OUTPUT"
+
+  second:
+    needs: list
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        job: ${{ fromJSON(needs.list.outputs.jobs) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup show
+      - run: cargo install --locked cargo-mutants@27.1.0
+      - run: ./second-opinion/run.sh "${{ matrix.job }}"
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: second-${{ matrix.job }}
+          path: |
+            own/mutants.out/
+            dependents/mutants.out/
+            own-missed.txt
+            dependents-targets.txt
