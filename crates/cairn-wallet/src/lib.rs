@@ -2972,20 +2972,20 @@ mod tests {
         let said = waiting.warning().expect("a person is told");
         assert!(
             said.contains("12 showings from 3 different peers over 240 seconds"),
-            "what was tried is not said in numbers: {said}"
+            "what was tried is not said in numbers"
         );
         assert!(
             said.contains("a run of 9000 headers is longer than this build takes"),
             "the refusal is not quoted, and it is what tells a chain this build \
-             cannot weigh from somebody making one up: {said}"
+             cannot weigh from somebody making one up"
         );
         assert!(
             said.contains("reading the chain block by block"),
-            "and what the node does instead is not said: {said}"
+            "and what the node does instead is not said"
         );
         assert!(
             said.contains("Leave it running"),
-            "nor what the person should do, which is nothing: {said}"
+            "nor what the person should do, which is nothing"
         );
     }
 
@@ -3015,21 +3015,18 @@ mod tests {
             .expect("an account that was not read back is said");
             assert!(
                 said.contains("did not read back the account it had written down"),
-                "{why:?} was not said to be an account that did not read back: {said}"
+                "{why:?} was not said to be an account that did not read back"
             );
-            assert!(
-                said.contains(own),
-                "{why:?} was not told its own reason: {said}"
-            );
+            assert!(said.contains(own), "{why:?} was not told its own reason");
             for (other, theirs) in cases {
                 assert!(
                     other == why || !said.contains(theirs),
-                    "{why:?} was told the reason for {other:?}: {said}"
+                    "{why:?} was told the reason for {other:?}"
                 );
             }
             assert!(
                 said.contains("the key file is not touched"),
-                "{why:?} did not say the key is safe: {said}"
+                "{why:?} did not say the key is safe"
             );
         }
     }
