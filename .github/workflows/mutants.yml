@@ -85,6 +85,25 @@ env:
   # between two Sundays with nothing in this repository changing. It did
   # change once already: the split this file assumed is not the default.
   CARGO_MUTANTS: 27.1.0
+  # A ceiling on the memory of every test binary, and of nothing else: cargo
+  # starts test binaries through the target's runner, and the compiler is not
+  # one of them.
+  #
+  # cargo-mutants' timeout stops a mutant that spins. It does not stop one
+  # that allocates, and one did: turning a comparison round in the loop that
+  # writes roman figures made it write "M" until the runner had no memory
+  # left. The machine went down with every result on it, twice, and it read
+  # as GitHub shutting a runner down, which `mutants-retry.yml` would have
+  # answered by running it again into the same wall. Under this ceiling the
+  # test binary dies alone, its test fails, and the mutant counts as caught.
+  #
+  # Four gigabytes, because the whole workspace suite runs under it with the
+  # profile these jobs build, measured on this runner, and two test binaries
+  # at a time at the ceiling still leave the machine room. Both triples, so
+  # that a runner image changing architecture does not drop the ceiling
+  # without a word.
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=4294967296 --
+  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=4294967296 --
 
 jobs:
   # What this change would let through. Only the mutants that fall on lines
