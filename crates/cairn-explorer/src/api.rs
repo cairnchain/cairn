@@ -2084,13 +2084,40 @@ fn readable(bytes: &[u8]) -> Option<String> {
 )]
 mod tests {
     use super::{
-        holdings, limit_of, next_after, offset_of, ADDRESS_PAGE, ADDRESS_SCAN, MAX_PAGE, PAGE,
+        holdings, limit_of, next_after, offset_of, readable, ADDRESS_PAGE, ADDRESS_SCAN, MAX_PAGE,
+        PAGE,
     };
     use crate::index::NoteRecord;
     use cairn_crypto::SecretKey;
     use cairn_http::Request;
     use cairn_ledger::note::NoteId;
     use cairn_primitives::{Amount, Hash32};
+
+    /// What a miner wrote into a coinbase is shown as text only when it is
+    /// text.
+    ///
+    /// Nothing read this. So showing no message at all passed, as did showing
+    /// every message, and showing one made of nothing but control characters
+    /// while hiding the printable ones.
+    #[test]
+    fn a_coinbase_message_is_shown_when_it_is_text_and_not_otherwise() {
+        assert_eq!(
+            readable(b"mined in a shed").as_deref(),
+            Some("mined in a shed")
+        );
+        assert_eq!(readable(b""), None, "nothing written is nothing to show");
+        assert_eq!(
+            readable(b"\x07\x08"),
+            None,
+            "control characters are not text"
+        );
+        assert_eq!(readable(b"one\ntwo"), None, "and one of them is enough");
+        assert_eq!(
+            readable(&[0xff, 0xfe]),
+            None,
+            "nor are bytes that are not UTF-8"
+        );
+    }
 
     /// The naming pass does not walk an address's notes.
     ///
