@@ -1,0 +1,38 @@
+# A one-off probe, on a branch that is not meant to be merged: whether the
+# audits that need a genuinely full disk pass when they are given one.
+name: probe-out-of-room
+
+on:
+  push:
+    branches: [chore/probe-out-of-room]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  full-disk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup show
+      - name: A small filesystem to fill
+        run: |
+          truncate -s 64M "$RUNNER_TEMP/small.img"
+          mkfs.ext4 -q "$RUNNER_TEMP/small.img"
+          sudo mkdir -p /mnt/small
+          sudo mount -o loop "$RUNNER_TEMP/small.img" /mnt/small
+          sudo chown "$(id -u):$(id -g)" /mnt/small
+          df -h /mnt/small
+      - name: The store's
+        env:
+          CAIRN_AUDIT_FULL_DIR: /mnt/small
+        run: cargo test --locked -p cairn-store --test audit_out_of_room -- --test-threads=1 --nocapture
+      - name: The node's
+        if: always()
+        env:
+          CAIRN_AUDIT_FULL_DIR: /mnt/small
+        run: cargo test --locked -p cairn-net --test audit_out_of_room -- --test-threads=1 --nocapture
