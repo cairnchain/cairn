@@ -1681,8 +1681,8 @@ fn count_unreadable(met: &mut Unreadable, from: Option<Sender>, version: u16, no
     // moved on renews its own evidence every block, so nothing that matters is
     // lost by forgetting; what is gained is that a stray one a year ago never
     // adds up to a claim about this build.
-    let lapsed =
-        met.blocks > 0 && (now < met.last || now.saturating_sub(met.last) > UNJUDGED_MEMORY);
+    // An empty count is not asked first: starting it again changes nothing.
+    let lapsed = now < met.last || now.saturating_sub(met.last) > UNJUDGED_MEMORY;
     if lapsed {
         *met = Unreadable::default();
     }
@@ -1748,6 +1748,48 @@ struct Unweighed {
     last: u64,
 }
 
+/// Whether an address's mark is still worth keeping: something holds it, or
+/// its window is the current one. Kept apart from the table it prunes so the
+/// rule can be held on its own.
+fn still_counted(window: &Arc<Mutex<Window>>, now: u64) -> bool {
+    Arc::strong_count(window) > 1
+        || window
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .current(now)
+}
+
+/// Counts one showing of a chain's work that would not weigh, against the
+/// address it came from.
+///
+/// Kept out of [`Shared`] so the counting can be read and tested on its own,
+/// as the two counts beside it are. It is the same count, and it was the one
+/// of the three left inside, with every one of its comparisons held by
+/// nothing.
+fn count_unweighed(met: &mut Unweighed, from: Option<Sender>, because: &str, now: u64) {
+    // A different refusal is a different question. Three peers failing in
+    // three ways are three peers; three failing in one way are a chain, and
+    // only the second is worth a person's afternoon.
+    //
+    // An empty count is not asked whether it has lapsed: starting it again
+    // changes nothing, and asking was one more comparison nothing could see.
+    let lapsed = met.because != because || now < met.last;
+    if lapsed {
+        *met = Unweighed::default();
+    }
+    if met.showings == 0 {
+        met.first = now;
+        because.clone_into(&mut met.because);
+    }
+    met.showings = met.showings.saturating_add(1);
+    met.last = now;
+    if let Some(from) = from {
+        if met.peers.len() < UNWEIGHED_SENDERS {
+            met.peers.insert(from);
+        }
+    }
+}
+
 /// Whether what this node has met adds up to a chain it cannot weigh.
 ///
 /// No stretch of time is asked for, unlike [`too_old_for_the_chain`], and the
@@ -1802,7 +1844,8 @@ struct OutOfStep {
 /// and counted by address rather than by connection for the reason
 /// [`Sender`] gives.
 fn count_out_of_step(met: &mut OutOfStep, from: Option<Sender>, ahead: u64, now: u64) {
-    let lapsed = met.blocks > 0 && (now < met.last || now.saturating_sub(met.last) > BEHIND_MEMORY);
+    // An empty count is not asked first: starting it again changes nothing.
+    let lapsed = now < met.last || now.saturating_sub(met.last) > BEHIND_MEMORY;
     if lapsed {
         let own_first_block = met.own_first_block;
         *met = OutOfStep {
@@ -2168,13 +2211,7 @@ impl Shared {
     /// attacker feeds.
     fn forget_spent_windows(&self, now: u64) {
         let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
-        windows.retain(|_, window| {
-            Arc::strong_count(window) > 1
-                || window
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .current(now)
-        });
+        windows.retain(|_, window| still_counted(window, now));
     }
 
     /// Turns `host` away for a while.
@@ -2530,24 +2567,7 @@ impl Shared {
             .unweighed
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        // A different refusal is a different question. Three peers failing in
-        // three ways are three peers; three failing in one way are a chain,
-        // and only the second is worth a person's afternoon.
-        let lapsed = met.showings > 0 && (met.because != because || now < met.last);
-        if lapsed {
-            *met = Unweighed::default();
-        }
-        if met.showings == 0 {
-            met.first = now;
-            because.clone_into(&mut met.because);
-        }
-        met.showings = met.showings.saturating_add(1);
-        met.last = now;
-        if let Some(from) = from {
-            if met.peers.len() < UNWEIGHED_SENDERS {
-                met.peers.insert(from);
-            }
-        }
+        count_unweighed(&mut met, from, because, now);
     }
 
     fn network(&self) -> NetworkId {
@@ -8209,6 +8229,39 @@ mod tests {
         assert_eq!(the_refusal_to_say(None, None), None);
     }
 
+    /// The table of address marks lets go of the ones nothing counts for.
+    ///
+    /// Each address a connection arrives from leaves a mark, and the table of
+    /// them is fed by strangers. A pass that dropped none passed everything
+    /// here, which is a table that grows by one row per address until it is
+    /// full and every newcomer shares the one crowded allowance.
+    #[test]
+    fn marks_nothing_counts_for_are_let_go_of() {
+        let node = Node::bind(ConsensusParams::testnet(), loopback()).unwrap();
+        let live = IpAddr::from([203, 0, 113, 1]);
+        let gone = IpAddr::from([203, 0, 113, 2]);
+        let connection = node.shared.allowance_for(Some(live));
+        drop(node.shared.allowance_for(Some(gone)));
+
+        node.shared.forget_spent_windows(1_000_000);
+        {
+            let windows = node
+                .shared
+                .windows
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            assert!(
+                windows.contains_key(&live),
+                "a live connection keeps its mark"
+            );
+            assert!(
+                !windows.contains_key(&gone),
+                "an address that left and whose window is over is let go of"
+            );
+        }
+        drop(connection);
+    }
+
     /// A short valid chain, built off to the side.
     fn chain_of(count: usize, params: ConsensusParams) -> Vec<Block> {
         let miner = cairn_crypto::SecretKey::from_bytes(&[7; 32]);
@@ -8809,5 +8862,90 @@ mod what_a_queue_holds {
     fn the_largest_message_still_fits() {
         let (parts, _) = accepted(crate::message::JOIN_PART_BYTES);
         assert!(parts >= 1, "one join part goes into an empty queue");
+    }
+}
+
+/// The count of showings that would not weigh, and the rule for which
+/// address marks are worth keeping.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod unweighed_tests {
+    use super::{count_unweighed, still_counted, Unweighed, Window, UNWEIGHED_SENDERS};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::{Arc, Mutex};
+
+    fn address(last: u8) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, last)), 9_944)
+    }
+
+    /// The same words from anybody add up, other words start again, and so
+    /// does a clock that stepped back.
+    ///
+    /// The same count as the two beside it, and the one left inside `Shared`,
+    /// so nothing could reach it: a count that never started again passed, as
+    /// did one that started again only when both the words and the clock
+    /// changed, one that started again whenever two showings came in the same
+    /// second, and a cap on peers one past the cap.
+    #[test]
+    fn the_same_refusal_adds_up_and_a_different_one_starts_again() {
+        let mut met = Unweighed::default();
+        count_unweighed(&mut met, Some(address(1)), "no path", 1_000);
+        count_unweighed(&mut met, Some(address(2)), "no path", 1_000);
+        assert_eq!(met.showings, 2, "two in one second are two");
+
+        count_unweighed(
+            &mut met,
+            Some(address(3)),
+            "a root that does not fold",
+            1_010,
+        );
+        assert_eq!(
+            (met.showings, met.first, met.peers.len()),
+            (1, 1_010, 1),
+            "other words are another question"
+        );
+        assert_eq!(met.because, "a root that does not fold");
+
+        count_unweighed(&mut met, Some(address(4)), "a root that does not fold", 900);
+        assert_eq!(
+            (met.showings, met.first),
+            (1, 900),
+            "and a clock that stepped back starts it again"
+        );
+
+        let mut crowd = Unweighed::default();
+        for peer in 0..=UNWEIGHED_SENDERS {
+            count_unweighed(
+                &mut crowd,
+                Some(address(u8::try_from(peer).unwrap())),
+                "no path",
+                1_000,
+            );
+        }
+        assert_eq!(crowd.peers.len(), UNWEIGHED_SENDERS, "kept up to the cap");
+    }
+
+    /// A mark is kept while something holds it or while its window lasts, and
+    /// dropped once neither is true.
+    ///
+    /// Held by nothing: keeping every mark forever passed, as did dropping one
+    /// a live connection was still counting against, which is the refill by
+    /// hanging up that the marks exist to stop.
+    #[test]
+    fn a_mark_is_kept_while_it_counts_for_something() {
+        let held = Arc::new(Mutex::new(Window::default()));
+        let connection = Arc::clone(&held);
+        assert!(
+            still_counted(&held, 100),
+            "a live connection still counts against it"
+        );
+        drop(connection);
+
+        let alone = Arc::new(Mutex::new(Window::default()));
+        assert!(still_counted(&alone, 5), "its window is the current one");
+        assert!(
+            !still_counted(&alone, 100),
+            "nobody holds it and its window is over"
+        );
     }
 }
