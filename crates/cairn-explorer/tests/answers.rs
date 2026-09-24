@@ -1674,3 +1674,46 @@ fn a_block_deep_in_the_chain_is_confirmed_by_every_block_on_it() {
         body(&answer)
     );
 }
+
+/// A page of blocks holds the blocks it names, as many as were asked for.
+///
+/// The one test that read this page asked whether any size on it was null,
+/// and an empty page has no null on it. So a page that listed nothing passed,
+/// as did one that listed one block more than the limit, and one whose
+/// entries were written as nothing at all.
+#[test]
+fn a_page_of_blocks_holds_the_blocks_it_was_asked_for() {
+    let params = params();
+    let miner = wallet(1);
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(&miner, 6);
+    let explorer = explorer(params);
+    feed(&explorer, &blocks);
+    explorer.refresh();
+
+    let heights = |page: &str| -> Vec<u64> {
+        page.split("\"height\":")
+            .skip(1)
+            .map(|rest| {
+                rest.chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse()
+                    .unwrap()
+            })
+            .collect()
+    };
+
+    let answer = ask(&explorer, "blocks?limit=3");
+    let page = body(&answer);
+    assert_eq!(heights(&page), [5, 4, 3], "the three from the tip: {page}");
+    assert!(
+        says(&answer, "next", "2"),
+        "and where to go on from: {page}"
+    );
+
+    let answer = ask(&explorer, "blocks?from=2&limit=3");
+    let page = body(&answer);
+    assert_eq!(heights(&page), [2, 1, 0], "the three to the first: {page}");
+    assert!(says(&answer, "next", "null"), "and nowhere after: {page}");
+}
