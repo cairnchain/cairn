@@ -1748,6 +1748,16 @@ struct Unweighed {
     last: u64,
 }
 
+/// Whether one more connection from `host` fits beside the connections held,
+/// given where each of them came from.
+///
+/// Apart from the table of peers so the rule can be held on its own: a peer
+/// cannot be built without a socket, so nothing asked it, and counting every
+/// other address against this one, or letting it one past its share, passed.
+fn room_beside(held: impl Iterator<Item = Option<IpAddr>>, host: IpAddr) -> bool {
+    held.filter(|from| *from == Some(host)).count() < MAX_PER_HOST
+}
+
 /// Whether an address's mark is still worth keeping: something holds it, or
 /// its window is the current one. Kept apart from the table it prunes so the
 /// rule can be held on its own.
@@ -2239,11 +2249,7 @@ impl Shared {
         if !can_be_refused(host) {
             return true;
         }
-        let from_host = peers
-            .values()
-            .filter(|peer| peer.host == Some(host))
-            .count();
-        from_host < MAX_PER_HOST
+        room_beside(peers.values().map(|peer| peer.host), host)
     }
 
     /// Whether one more connection somebody else opened is welcome.
@@ -8260,6 +8266,85 @@ mod tests {
             );
         }
         drop(connection);
+    }
+
+    /// A node with no seed looks its names up, and waits its period before
+    /// looking again.
+    ///
+    /// This is the only way a node that could resolve nothing at start comes
+    /// to know of anybody, and nothing ran it: looking up every round passed,
+    /// as did never looking up again after a lookup, looking one second
+    /// early, and waiting one second past the period.
+    #[test]
+    fn a_node_with_no_seed_looks_its_names_up_and_not_too_often() {
+        let node = Node::bind(ConsensusParams::testnet(), loopback()).unwrap();
+        // The last lookup is put in 2096 before there is a name to look up,
+        // so the node's own rounds, on today's clock, never find one due.
+        let last = 4_000_000_000;
+        node.shared
+            .names_looked_up_at
+            .store(last, Ordering::Relaxed);
+        // An address for documentation, which resolves without asking anyone.
+        node.shared.seed_names().push("192.0.2.7:9944".to_owned());
+
+        look_up_seed_names(&node.shared, last + NAME_LOOKUP_PERIOD - 1);
+        assert!(
+            !node.shared.book().has_seeds(),
+            "a lookup a second before its period was taken"
+        );
+        look_up_seed_names(&node.shared, last + NAME_LOOKUP_PERIOD);
+        assert!(
+            node.shared.book().has_seeds(),
+            "and the one its period allows was not"
+        );
+    }
+
+    /// The threads of peers that have gone are collected.
+    ///
+    /// One handle per peer that ever connected, kept for the life of the
+    /// process unless this runs, and nothing ran it: a pass that collected
+    /// nothing passed, which is a leak fed by anybody who connects and hangs
+    /// up.
+    #[test]
+    fn the_threads_of_peers_that_have_gone_are_collected() {
+        let node = Node::bind(ConsensusParams::testnet(), loopback()).unwrap();
+        let before = node.shared.threads().len();
+        let handles: Vec<_> = (0..3).map(|_| std::thread::spawn(|| {})).collect();
+        while !handles.iter().all(JoinHandle::is_finished) {
+            std::thread::yield_now();
+        }
+        node.shared.threads().extend(handles);
+
+        collect_finished(&node.shared);
+        assert!(
+            node.shared.threads().len() <= before,
+            "three finished threads were left holding their handles"
+        );
+    }
+
+    /// One address gets its share of connections and no more, and other
+    /// addresses do not count against it.
+    #[test]
+    fn an_address_gets_its_share_of_connections_and_no_more() {
+        let one = IpAddr::from([203, 0, 113, 1]);
+        let other = IpAddr::from([203, 0, 113, 2]);
+        let held = |from_one: usize| {
+            std::iter::repeat_n(Some(one), from_one)
+                .chain(std::iter::repeat_n(Some(other), MAX_PER_HOST))
+                .chain(std::iter::once(None))
+        };
+        assert!(
+            room_beside(held(MAX_PER_HOST - 1), one),
+            "one short of its share, and every other address full, is room for one"
+        );
+        assert!(
+            !room_beside(held(MAX_PER_HOST), one),
+            "a whole share is no room"
+        );
+        assert!(
+            room_beside(held(MAX_PER_HOST), IpAddr::from([198, 51, 100, 4])),
+            "and an address holding nothing has room whatever the others hold"
+        );
     }
 
     /// A short valid chain, built off to the side.
