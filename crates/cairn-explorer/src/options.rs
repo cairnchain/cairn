@@ -230,7 +230,22 @@ pub(crate) fn size(bytes: u64) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{parse_arguments, resolve_options, HELP};
+    use super::{parse_arguments, resolve_options, size, HELP, KEEP_EVERYTHING};
+
+    /// A size is said back the way an operator would write it.
+    ///
+    /// It is the line that tells somebody how much of the chain this explorer
+    /// keeps, and nothing read it: saying every size in bytes passed, as did
+    /// saying every one as a gigabyte count of nought.
+    #[test]
+    fn a_size_is_said_the_way_it_would_be_written() {
+        assert_eq!(size(KEEP_EVERYTHING), "every one ever accepted");
+        assert_eq!(size(8_000_000_000), "8 GB, older ones dropped");
+        assert_eq!(size(1_000_000_000), "1 GB, older ones dropped");
+        assert_eq!(size(999_999_999), "999 MB, older ones dropped");
+        assert_eq!(size(1_000_000), "1 MB, older ones dropped");
+        assert_eq!(size(999_999), "999999 bytes, older ones dropped");
+    }
 
     fn arguments(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| (*part).to_owned()).collect()
