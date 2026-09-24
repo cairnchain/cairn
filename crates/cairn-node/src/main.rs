@@ -1678,3 +1678,108 @@ mod what_the_exit_code_says {
         );
     }
 }
+
+/// What this program tells the person running it, held to what it says.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod what_an_operator_is_told {
+    use super::{
+        addresses_not_written, nobody_can_get_in, probation_line, short, stamp, will_not_read_back,
+        wrapped,
+    };
+    use cairn_net::node::{Probation, Reading, Unread};
+    use cairn_net::Unanswered;
+    use std::time::{Duration, Instant};
+
+    /// Every sentence here carries the facts it was given.
+    ///
+    /// None of them had a test. The weekly mutation run found each one could
+    /// be emptied, or replaced by a word of its own, with the whole suite
+    /// green: the reason a disk gave, the directory, how many times, how long
+    /// the node has run. Those are the parts of each sentence an operator can
+    /// act on, and the rest is there to make them readable.
+    #[test]
+    fn each_message_carries_what_it_was_given() {
+        let said = addresses_not_written("no space left on device", "/var/lib/cairn");
+        assert!(said.contains("no space left on device") && said.contains("/var/lib/cairn"));
+
+        let refused = Unanswered {
+            because: "too many open files".to_owned(),
+            refusals: 12,
+        };
+        let said = nobody_can_get_in(&refused, 40);
+        assert!(said.contains("the last 12 attempts"), "{said}");
+        assert!(said.contains("too many open files"), "{said}");
+        assert!(said.contains("40 have been turned away"), "{said}");
+
+        let once = Unread {
+            what: Reading::Blocks,
+            height: 812,
+            because: "input/output error".to_owned(),
+            refusals: 1,
+        };
+        let said = will_not_read_back(&once, "/var/lib/cairn");
+        assert!(said.contains("at block 812") && said.contains("input/output error"));
+        assert!(said.contains("/var/lib/cairn"), "{said}");
+        assert!(
+            !said.contains("It has happened"),
+            "once is not a count worth giving: {said}"
+        );
+        let again = Unread {
+            refusals: 3,
+            ..once
+        };
+        assert!(
+            will_not_read_back(&again, "/var/lib/cairn")
+                .contains("It has happened 3 times since this node started."),
+            "and more than once is"
+        );
+    }
+
+    /// The probation line names the blocks from a chain the node cannot
+    /// reach when there are any, and only then.
+    #[test]
+    fn the_probation_line_names_what_it_cannot_reach_when_there_is_some() {
+        let probation = Probation {
+            anchor: 1_000,
+            settles_at: 1_100,
+            reached: 1_040,
+        };
+        assert_eq!(
+            probation_line(&probation, 0),
+            format!("probation {probation}")
+        );
+        assert_eq!(
+            probation_line(&probation, 5),
+            format!("probation {probation}, and 5 blocks arrived from a chain it cannot reach")
+        );
+    }
+
+    /// How long the node has run, and an identifier cut to its first twelve.
+    #[test]
+    fn a_stamp_and_a_short_identifier_read_as_they_should() {
+        let started = Instant::now()
+            .checked_sub(Duration::from_secs(3_725))
+            .unwrap();
+        assert_eq!(stamp(started), "01:02:05");
+        assert_eq!(short("0123456789abcdef"), "0123456789ab");
+        assert_eq!(short("abc"), "abc", "a shorter one is left whole");
+    }
+
+    /// A paragraph comes out as lines no wider than a terminal, every word
+    /// once and in order, and nothing for nothing.
+    #[test]
+    fn a_paragraph_is_wrapped_without_losing_a_word() {
+        let text = "the disk under the directory will not give back something this node put \
+                    there, and a peer catching up over that block is sent the blocks around \
+                    it and drops them.";
+        let lines = wrapped(text);
+        assert!(lines.len() > 1);
+        assert!(lines.iter().all(|line| line.len() < 76 && !line.is_empty()));
+        assert_eq!(
+            lines.join(" "),
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        );
+        assert!(wrapped("").is_empty());
+    }
+}
