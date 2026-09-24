@@ -465,7 +465,9 @@ impl Recovery {
         } else {
             format!("{} notes", self.stranded)
         };
-        if self.rebuilt > 0 && self.rebuilt >= self.stranded {
+        // At least one note is stranded here, so every one of them rebuilt is
+        // also at least one rebuilt, and asking that as well asked nothing.
+        if self.rebuilt >= self.stranded {
             return Some(format!(
                 "Spending a note that has been put away needs a small piece of \
                  evidence that goes stale, and this wallet's own copy had gone \
@@ -2741,5 +2743,95 @@ mod tests {
             !words.contains("have not been asked about yet"),
             "nothing was held back, so there is nothing to say: {words}"
         );
+    }
+
+    /// Which of the answers a person with stuck money is given, one state at
+    /// a time.
+    ///
+    /// The tests that reach this through a running wallet each look for one
+    /// phrase, and two of the answers share the phrase they look for: a
+    /// wallet connected to nobody and a wallet connected to peers that keep
+    /// no record both end in `--archive`. So telling somebody they are
+    /// connected to nothing when they are connected to two peers passed, and
+    /// so did telling them their money could move again only in part when all
+    /// of it could, and naming "0 of them" as notes nothing can reach. Each
+    /// state here is held to its own sentence and kept out of the others'.
+    #[test]
+    fn each_state_of_stuck_money_is_told_its_own_answer() {
+        let stuck = Recovery {
+            stranded: 3,
+            asked: 2,
+            archivists: 1,
+            answered: 2,
+            ..Recovery::default()
+        };
+        let cases = [
+            (
+                "every note rebuilt",
+                Recovery {
+                    rebuilt: 3,
+                    ..stuck
+                },
+                "That money can move again",
+                "still stuck",
+            ),
+            (
+                "some notes rebuilt",
+                Recovery {
+                    rebuilt: 1,
+                    ..stuck
+                },
+                "got fresh evidence for 1 of them",
+                "can move again",
+            ),
+            (
+                "nobody to ask",
+                Recovery {
+                    asked: 0,
+                    archivists: 0,
+                    answered: 0,
+                    ..stuck
+                },
+                "not connected to anything at all",
+                "none of the",
+            ),
+            (
+                "peers, none of them keeping the record",
+                Recovery {
+                    archivists: 0,
+                    ..stuck
+                },
+                "none of the 2 this wallet is connected to says it did",
+                "not connected to anything",
+            ),
+            (
+                "a peer keeping the record, and no answer from it",
+                stuck,
+                "It asked 1 machines that keep the whole record",
+                "--archive",
+            ),
+        ];
+        for (state, recovery, said, not_said) in cases {
+            let words = recovery.words().expect("three notes are stuck");
+            assert!(words.contains(said), "{state}: {words}");
+            assert!(
+                !words.contains(not_said),
+                "{state} was told something only another state is: {words}"
+            );
+            assert!(
+                !words.contains("cannot ask about at all"),
+                "{state}: every note's place is known, so none is one nothing \
+                 can reach: {words}"
+            );
+        }
+
+        let one = Recovery {
+            stranded: 1,
+            ..stuck
+        };
+        let words = one.words().expect("one note is stuck");
+        assert!(words.contains("holds one note it"), "{words}");
+        let words = stuck.words().expect("three notes are stuck");
+        assert!(words.contains("holds 3 notes it"), "{words}");
     }
 }
