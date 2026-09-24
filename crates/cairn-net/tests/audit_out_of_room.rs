@@ -481,6 +481,20 @@ fn a_node_whose_disk_stops_taking_writes_says_so_and_then_stops() {
         if losing_at.is_none() && unwritten.blocks > 0 {
             losing_at = Some(unwritten.clone());
         }
+        // Once blocks are what is being lost, every later pass that fails on
+        // the headers first is the cheaper refusal, and the report stays on
+        // the costlier one. Nothing asked this, so a report that went back to
+        // naming the headers while blocks fell away behind it passed.
+        if let Some(losing) = &losing_at {
+            if losing.what == Writing::Blocks {
+                assert_eq!(
+                    unwritten.what,
+                    Writing::Blocks,
+                    "blocks are being lost and the report names something cheaper: {}",
+                    unwritten.because
+                );
+            }
+        }
         if !unwritten.within_reach {
             stopped_at = Some(unwritten);
             break;
@@ -544,6 +558,73 @@ fn a_node_whose_disk_stops_taking_writes_says_so_and_then_stops() {
     );
 
     it_takes_no_connection(&node);
+    drop(node);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// The claim on `note_writing`: "A pass that wrote everything and refused
+/// nothing clears whatever was held, so a disk that comes back says so by this
+/// going quiet". And the one under `Unwritten`: an ordinary hiccup closes
+/// itself, because the next block writes everything the log is missing.
+///
+/// Neither was run. Every test here that fills the disk keeps it full past the
+/// point of no return, so a node that stopped on the first write it could not
+/// make passed them all, and so did one that went on reporting a full disk
+/// after the room had come back and the log had caught up.
+#[test]
+fn a_disk_that_comes_back_in_time_is_caught_up_and_goes_quiet() {
+    let Ok(root) = std::env::var("CAIRN_AUDIT_FULL_DIR") else {
+        eprintln!("skipped: set CAIRN_AUDIT_FULL_DIR to a directory on a small filesystem");
+        return;
+    };
+    let root = PathBuf::from(root);
+    let directory = root.join("back");
+    let _ = std::fs::remove_dir_all(&directory);
+
+    let mut source = Chain::new();
+    source.run(&wallet(4), 40);
+
+    let (node, _) = Node::open(params(), loopback(), &directory).unwrap();
+    node.keep_blocks(u64::MAX);
+    for block in &source.blocks[..20] {
+        node.submit_block(block.clone()).unwrap();
+    }
+    assert_eq!(node.written_through(), Some(19), "the disk is level so far");
+
+    let ballast = eat_the_room(&root);
+    for block in &source.blocks[20..30] {
+        let _ = node.submit_block(block.clone());
+    }
+    let short = node
+        .unwritten()
+        .expect("a disk that stopped taking writes is said out loud");
+    assert!(
+        short.within_reach,
+        "ten blocks behind is inside the window: {short:?}"
+    );
+    let witness = Node::bind(params(), loopback()).unwrap();
+    assert!(
+        node.connect(witness.address()).is_ok(),
+        "and a node inside the window is still running: it waits for the room \
+         rather than stopping on the first write it could not make"
+    );
+
+    std::fs::remove_dir_all(&ballast).unwrap();
+    for block in &source.blocks[30..] {
+        node.submit_block(block.clone()).unwrap();
+    }
+    assert_eq!(
+        node.written_through(),
+        node.height(),
+        "the room came back in time and the next block wrote the gap"
+    );
+    assert_eq!(
+        node.unwritten(),
+        None,
+        "and a disk that has caught up says nothing more about it"
+    );
+
+    drop(witness);
     drop(node);
     let _ = std::fs::remove_dir_all(&directory);
 }
