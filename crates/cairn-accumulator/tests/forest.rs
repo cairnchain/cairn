@@ -621,3 +621,60 @@ fn what_a_proof_says_it_costs_is_what_the_wire_writes() {
         "and the empty one, which is the length and nothing else"
     );
 }
+
+/// An archive is empty when nothing in it is standing, whatever places it has
+/// handed out.
+///
+/// The forest's own answer, asked of the archive because the archive is what
+/// an archivist holds and asks. Nothing did, so an archive that called itself
+/// empty always, or never, passed.
+#[test]
+fn an_archive_is_empty_when_nothing_in_it_is_standing() {
+    let mut archive = Archive::new();
+    assert!(archive.is_empty(), "a new archive holds nothing");
+
+    let (position, _) = archive.add(leaf(0)).unwrap();
+    assert!(
+        !archive.is_empty(),
+        "an archive holding a leaf said it was empty"
+    );
+
+    assert!(archive.remove(position));
+    assert_eq!(
+        archive.forest().leaves(),
+        1,
+        "the place is still handed out"
+    );
+    assert!(
+        archive.is_empty(),
+        "an archive whose only leaf was emptied said it was not empty"
+    );
+}
+
+/// An archive proves nothing against more leaves than it holds.
+///
+/// `prove_in` builds a path for the forest as it stood at a leaf count, and a
+/// count past the archive's own names leaves it has never seen: the path would
+/// fold empty places into a tree no forest anybody holds contains. It was only
+/// ever asked at counts the archive had reached, so an archive that answered
+/// for a count past its own, when the place itself was inside it, passed.
+#[test]
+fn an_archive_proves_nothing_against_more_leaves_than_it_holds() {
+    let mut archive = Archive::new();
+    for index in 0..3u64 {
+        archive.add(leaf(index)).unwrap();
+    }
+
+    assert!(archive.prove_in(0, 3).is_some(), "the count it holds");
+    assert!(archive.prove_in(0, 2).is_some(), "and a count it held");
+    assert_eq!(
+        archive.prove_in(0, 4),
+        None,
+        "an archive of three leaves proved a place against four"
+    );
+    assert_eq!(
+        archive.prove_in(3, 3),
+        None,
+        "a place past the count is not in it"
+    );
+}

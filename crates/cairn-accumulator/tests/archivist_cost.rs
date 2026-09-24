@@ -33,6 +33,7 @@
 
 use cairn_accumulator::forest::forest_leaf;
 use cairn_accumulator::Archive;
+use cairn_primitives::hash::counting;
 
 /// Bytes an archivist holds for every note that has ever fallen.
 ///
@@ -159,4 +160,84 @@ fn a_resident_reading_of_it_swings_between_the_content_and_twice_it() {
     // The published 72 sits inside that swing, which is what it is: a reading
     // taken somewhere on it, not a second opinion about the content.
     assert!(best < 72.0 && 72.0 < worst);
+}
+
+/// Undoing appends leaves an archive holding what one that never made them
+/// holds.
+///
+/// A reorganisation takes headers back off one at a time and a block's undo
+/// takes its notes off in a run, and both have to let go of the inner nodes
+/// those leaves completed. No proof reads a node past the last leaf, so an
+/// archive that kept every node it had ever closed proved and committed exactly
+/// as before, and nothing looked at what it held: the count above, the one the
+/// papers publish, went on counting nodes over leaves that were gone.
+#[test]
+fn undoing_appends_lets_go_of_the_nodes_they_completed() {
+    const KEPT: u64 = 1_000;
+    const UNDONE: u64 = 24;
+
+    let mut archive = Archive::new();
+    for index in 0..KEPT {
+        archive.add(forest_leaf(&index.to_le_bytes()));
+    }
+    let before = archive.forest().clone();
+    for index in KEPT..KEPT + UNDONE {
+        archive.add(forest_leaf(&index.to_le_bytes()));
+    }
+    assert_eq!(
+        archive.hashes_held(),
+        restated_hashes(KEPT + UNDONE),
+        "the appends closed the nodes the design says they close"
+    );
+
+    // One at a time.
+    for _ in 0..UNDONE {
+        assert!(archive.remove_last());
+    }
+    assert_eq!(
+        archive.hashes_held(),
+        restated_hashes(KEPT),
+        "taking the last leaf off {UNDONE} times left the nodes those leaves closed"
+    );
+
+    // And as a run.
+    for index in KEPT..KEPT + UNDONE {
+        archive.add(forest_leaf(&index.to_le_bytes()));
+    }
+    archive.rewind(&before, usize::try_from(UNDONE).unwrap(), &[]);
+    assert_eq!(
+        archive.hashes_held(),
+        restated_hashes(KEPT),
+        "rewinding {UNDONE} appends left the nodes those leaves closed"
+    );
+}
+
+/// A proof an archivist serves is read out of what it holds, and costs no
+/// hashing at all.
+///
+/// Every sibling on a path covers leaves that have all arrived, and the archive
+/// holds every node like that, so a proof is one lookup a level. That includes
+/// the last node of a row, the one ending exactly at the last leaf. Nothing
+/// counted, so an archive that took that node for one reaching past its leaves,
+/// and built it again from below on every proof that asked for it, answered
+/// with the same path and passed.
+#[test]
+fn a_proof_is_read_out_of_the_archive_and_not_hashed() {
+    for count in [8u64, 1_000, 1_024] {
+        let mut archive = Archive::new();
+        for index in 0..count {
+            archive.add(forest_leaf(&index.to_le_bytes()));
+        }
+        for position in 0..count {
+            counting::reset();
+            let proof = archive.prove(position);
+            let hashed = counting::hashed();
+            assert!(proof.is_some(), "an archivist proves place {position}");
+            assert_eq!(
+                hashed, 0,
+                "proving place {position} of {count} hashed {hashed} bytes, where every \
+                 node it asks for is held"
+            );
+        }
+    }
 }

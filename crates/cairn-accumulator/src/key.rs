@@ -156,4 +156,22 @@ mod tests {
         let key = Key::from_bytes([7; KEY_LEN]);
         assert_eq!(Key::decode(&key.encode()).unwrap(), key);
     }
+
+    /// A key is written as its bytes in lowercase hexadecimal, first byte
+    /// first.
+    ///
+    /// It is how a key is shown to a person, and `Debug` writes it the same
+    /// way. Nothing read it, so a key that wrote nothing at all passed.
+    #[test]
+    fn a_key_is_written_as_its_bytes_in_hexadecimal() {
+        let mut bytes = [0u8; KEY_LEN];
+        bytes[0] = 0xab;
+        bytes[1] = 0x01;
+        bytes[KEY_LEN - 1] = 0xf0;
+        let expected = format!("ab01{}f0", "00".repeat(KEY_LEN - 3));
+        assert!(
+            Key::from_bytes(bytes).to_string() == expected,
+            "a key was not written as its bytes in hexadecimal, first byte first"
+        );
+    }
 }

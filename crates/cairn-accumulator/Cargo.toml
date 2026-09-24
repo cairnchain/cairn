@@ -15,4 +15,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 cairn-fuzz.workspace = true
+# For `tests/archivist_cost.rs`, which counts what serving a proof hashes
+# rather than timing it. Only the test build asks for it.
+cairn-primitives = { workspace = true, features = ["count-hashing"] }
 hex.workspace = true
