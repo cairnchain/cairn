@@ -7454,8 +7454,8 @@ fn note_the_ending(
 )]
 mod unjudged_tests {
     use super::{
-        count_unreadable, too_old_for_the_chain, Unreadable, UNJUDGED_BLOCKS, UNJUDGED_PEERS,
-        UNJUDGED_STRETCH,
+        count_unreadable, too_old_for_the_chain, Unreadable, UNJUDGED_BLOCKS, UNJUDGED_MEMORY,
+        UNJUDGED_PEERS, UNJUDGED_SENDERS, UNJUDGED_STRETCH,
     };
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -7568,6 +7568,57 @@ mod unjudged_tests {
         let said = too_old_for_the_chain(&met).expect("two addresses over the stretch");
         assert_eq!(said.peers, UNJUDGED_PEERS);
     }
+
+    /// A silence longer than the memory ends the count, and nothing shorter
+    /// does.
+    ///
+    /// The rule is written out above `count_unreadable`, which is kept apart so
+    /// it can be tested on its own, and nothing held it. A count that never
+    /// lapsed passed, as did one that lapsed a second early, one that started
+    /// again whenever two blocks arrived in the same second, and one a clock
+    /// stepping back left standing. The peers it keeps were capped one past
+    /// the cap.
+    #[test]
+    fn the_count_lapses_after_a_silence_and_not_before() {
+        let mut met = Unreadable::default();
+        count_unreadable(&mut met, Some(address(1)), 7, 1_000);
+        count_unreadable(&mut met, Some(address(2)), 7, 1_000);
+        assert_eq!(
+            met.blocks, 2,
+            "two in one second are two, not a fresh start"
+        );
+
+        count_unreadable(&mut met, Some(address(3)), 7, 1_000 + UNJUDGED_MEMORY);
+        assert_eq!(
+            met.blocks, 3,
+            "a silence as long as the memory is not past it"
+        );
+
+        let later = 1_000 + 2 * UNJUDGED_MEMORY + 1;
+        count_unreadable(&mut met, Some(address(4)), 7, later);
+        assert_eq!(
+            (met.blocks, met.first, met.peers.len()),
+            (1, later, 1),
+            "a silence past the memory starts the count again"
+        );
+
+        count_unreadable(&mut met, Some(address(5)), 7, 500);
+        assert_eq!(
+            (met.blocks, met.first),
+            (1, 500),
+            "and so does a clock that stepped back"
+        );
+
+        let mut crowd = Unreadable::default();
+        for peer in 0..=UNJUDGED_SENDERS {
+            count_unreadable(&mut crowd, Some(address(peer as u8)), 7, 1_000);
+        }
+        assert_eq!(
+            crowd.peers.len(),
+            UNJUDGED_SENDERS,
+            "the peers are kept up to the cap and no further"
+        );
+    }
 }
 
 /// What a node says and does about a clock, its own or a block's.
@@ -7592,7 +7643,8 @@ mod clock_tests {
 
     use super::{
         clock_is_behind, count_out_of_step, is_peer_fault, open_the_chain, window_is_over,
-        ChainStore, OutOfStep, WireError, BEHIND_BLOCKS, BEHIND_PEERS, FLOOD_WINDOW,
+        ChainStore, OutOfStep, WireError, BEHIND_BLOCKS, BEHIND_MEMORY, BEHIND_PEERS,
+        BEHIND_SENDERS, FLOOD_WINDOW,
     };
     use crate::wire::MAX_FRAME_BYTES;
 
@@ -7754,6 +7806,66 @@ mod clock_tests {
         let mut chain = ChainStore::new(params);
         assert!(open_the_chain(&mut chain, None, params, 0).is_none());
         assert!(chain.is_empty());
+    }
+
+    /// A silence longer than the memory ends the count of blocks from the
+    /// future, and does not end what the first block of this network said.
+    ///
+    /// The same rule as the count of unreadable blocks, written the same way,
+    /// and held by nothing either: a count that never lapsed passed, as did
+    /// one that lapsed a second early or at every second block in one second,
+    /// and one that forgot this node had refused its own network's first
+    /// block, which no peer sent it and no silence unsays.
+    #[test]
+    fn a_silence_ends_the_count_and_not_what_the_first_block_said() {
+        let mut record = OutOfStep {
+            own_first_block: true,
+            ..OutOfStep::default()
+        };
+        count_out_of_step(&mut record, Some(address(1)), 900, 1_000);
+        count_out_of_step(&mut record, Some(address(2)), 900, 1_000);
+        assert_eq!(
+            record.blocks, 2,
+            "two in one second are two, not a fresh start"
+        );
+
+        count_out_of_step(&mut record, Some(address(3)), 900, 1_000 + BEHIND_MEMORY);
+        assert_eq!(
+            record.blocks, 3,
+            "a silence as long as the memory is not past it"
+        );
+
+        count_out_of_step(
+            &mut record,
+            Some(address(4)),
+            900,
+            1_000 + 2 * BEHIND_MEMORY + 1,
+        );
+        assert_eq!(
+            (record.blocks, record.peers.len()),
+            (1, 1),
+            "a silence past the memory starts the count again"
+        );
+        assert!(
+            record.own_first_block,
+            "and leaves standing that this node refused its own first block"
+        );
+
+        count_out_of_step(&mut record, Some(address(5)), 900, 500);
+        assert_eq!(
+            record.blocks, 1,
+            "a clock that stepped back starts it again"
+        );
+
+        let mut crowd = OutOfStep::default();
+        for peer in 0..=BEHIND_SENDERS {
+            count_out_of_step(&mut crowd, Some(address(peer as u8)), 900, 1_000);
+        }
+        assert_eq!(
+            crowd.peers.len(),
+            BEHIND_SENDERS,
+            "the peers are kept up to the cap and no further"
+        );
     }
 }
 
