@@ -1,0 +1,40 @@
+# A one-off probe, on a branch that is not meant to be merged: whether a cap on
+# the address space of each test binary turns a mutant that allocates without
+# end into a failed test instead of a dead runner, and whether the unmutated
+# suite fits under the same cap.
+name: ceiling-probe
+
+on:
+  push:
+    branches: [chore/mutants-memory-ceiling-probe]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # cargo launches every test binary through this, and nothing else.
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=4294967296 --
+
+jobs:
+  runaway:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup show
+      - run: cargo install --locked cargo-mutants@27.1.0
+      - run: ./second-opinion/run.sh docs-0
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runaway
+          path: own/mutants.out/
+
+  suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup show
+      - run: cargo test --workspace --locked
