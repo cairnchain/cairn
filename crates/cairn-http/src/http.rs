@@ -163,6 +163,8 @@ const DRAIN_CHUNK: usize = 2 * 1024;
 /// The reasoning was always about bytes; the constant is now the thing the
 /// reasoning is about.
 const DRAIN_BYTES: usize = 16 * 1024;
+// The sentence above, held where it is said rather than trusted.
+const _: () = assert!(DRAIN_BYTES >= MAX_HEAD_BYTES + MAX_BODY_BYTES);
 /// How often [`drain`] looks again while it is waiting for bytes.
 const DRAIN_POLL: Duration = Duration::from_millis(5);
 /// How long a refusal waits for the request it is answering.
@@ -1215,9 +1217,9 @@ pub fn bind(address: SocketAddr) -> io::Result<TcpListener> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        answering, drain, let_go_of_the_done, one_machine, percent_decode, reason, wait_on,
-        Request, Slots, Waiting, ANSWER_DEADLINE, DRAIN_BYTES, MAX_CONNECTIONS, MAX_PER_HOST,
-        REFUSALS_QUEUED,
+        answering, drain, let_go_of_the_done, one_machine, percent_decode, reason, refusal,
+        wait_on, would_wait, Request, Slots, Waiting, ANSWER_DEADLINE, DRAIN_BYTES,
+        MAX_CONNECTIONS, MAX_PER_HOST, REFUSALS_QUEUED,
     };
     use std::collections::VecDeque;
     use std::fmt::Write as _;
@@ -1610,7 +1612,8 @@ mod tests {
     #[test]
     fn an_address_from_outside_stops_at_its_share() {
         let slots = Arc::new(Slots::default());
-        let host = Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+        let address = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        let host = Some(address);
         let held: Vec<_> = (0..MAX_PER_HOST).filter_map(|_| slots.take(host)).collect();
         assert_eq!(held.len(), MAX_PER_HOST);
         assert!(
@@ -1623,6 +1626,55 @@ mod tests {
                 .is_some(),
             "while everybody else is still served"
         );
+
+        // One of them hangs up. Its place comes back, and only its place:
+        // the count of that address was forgotten outright on every hang-up
+        // with the rest still open, and nothing here asked, so an address
+        // could hold its share, drop one, and hold a whole share again.
+        let mut held = held;
+        held.pop();
+        let again = slots.take(host);
+        assert!(again.is_some(), "the place it left is taken again");
+        assert!(
+            slots.take(host).is_none(),
+            "and the rest of the share is still counted against it"
+        );
+
+        drop(held);
+        drop(again);
+        let counts = slots.counts();
+        assert!(
+            !counts.from_host.contains_key(&address),
+            "an address with nothing open is not a row in the table any more"
+        );
+    }
+
+    /// A socket saying "not now" is told apart from one saying "no".
+    ///
+    /// Every read and write that waits turns on this, and nothing asked it:
+    /// taking every error for "not now" passed, which spins a writer on a
+    /// reset connection until its deadline, and so did taking none of them,
+    /// which gives up on a slow reader at the first pause.
+    #[test]
+    fn a_socket_that_says_not_now_is_told_from_one_that_says_no() {
+        use std::io::{Error, ErrorKind};
+        for kind in [
+            ErrorKind::WouldBlock,
+            ErrorKind::TimedOut,
+            ErrorKind::Interrupted,
+        ] {
+            assert!(would_wait(&Error::from(kind)), "{kind:?} is not now");
+        }
+        for kind in [ErrorKind::ConnectionReset, ErrorKind::BrokenPipe] {
+            assert!(!would_wait(&Error::from(kind)), "{kind:?} is no");
+        }
+    }
+
+    /// A caller cut off at the deadline is told that, and not that its
+    /// request was malformed.
+    #[test]
+    fn a_late_request_is_told_it_was_late() {
+        assert_eq!(refusal(408), "the request did not arrive in time");
     }
 
     /// The loopback is the proxy carrying the whole public site, so counting
