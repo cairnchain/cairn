@@ -5713,14 +5713,13 @@ fn grow_forest(forest: &mut HeaderTree, headers: &HeaderLog) -> Option<Refusing>
     if headers.first_height() != 0 {
         return None;
     }
-    if forest.len() > headers.reaches() {
-        if let Err(error) = forest.keep_first(headers.reaches()) {
-            return Some(Refusing::at(Writing::Headers, &error));
-        }
-    }
     // Where the two part company, walked back from the end. A reorganisation
     // replaces headers without shortening the log, so the lengths agreeing is
     // not the same as the contents agreeing.
+    //
+    // A forest longer than the log needs no cut of its own before this: the
+    // walk starts no further than the log reaches, and the cut after it takes
+    // the forest back to where they agree, which is never past that.
     let mut common = forest.len().min(headers.reaches());
     while common > 0 {
         let at = common.saturating_sub(1);
@@ -7961,6 +7960,61 @@ mod tests {
     /// binds them: they are two peers being compared with each other.
     fn loopback() -> SocketAddr {
         SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
+    }
+
+    /// A branch replaced at the same length is replaced in the forest.
+    ///
+    /// Two miners each finding a block at the same height is the ordinary way
+    /// a branch is replaced, and it replaces headers without shortening the
+    /// log. The note inside `grow_forest` says so, and no forest here was ever
+    /// grown from a log that did it: every one only got longer or shorter. So
+    /// a walk that never looked back passed, as did one that stopped at the
+    /// first leaf it held whatever that leaf was, and one that found where the
+    /// two part and then cut nothing. Each leaves the forest proving headers
+    /// the chain no longer has.
+    #[test]
+    fn a_branch_replaced_at_the_same_length_is_replaced_in_the_forest() {
+        let directory =
+            std::env::temp_dir().join(format!("cairn-same-length-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut headers = HeaderLog::open(&directory).unwrap();
+        let mut forest = HeaderTree::open(&directory).unwrap();
+
+        let first = linked_headers(5, ConsensusParams::testnet().network);
+        for header in &first {
+            headers.append(header).unwrap();
+        }
+        assert!(grow_forest(&mut forest, &headers).is_none());
+        assert_eq!(forest.len(), 5);
+
+        // The same three, then another fourth and fifth.
+        let mut second = first[..3].to_vec();
+        for replaced in &first[3..] {
+            let previous = second.last().unwrap().id();
+            second.push(BlockHeader {
+                previous,
+                nonce: replaced.nonce + 100,
+                ..*replaced
+            });
+        }
+        headers.keep_below(3).unwrap();
+        for header in &second[3..] {
+            headers.append(header).unwrap();
+        }
+        assert_eq!(headers.reaches(), 5, "the log is exactly as long as it was");
+
+        assert!(grow_forest(&mut forest, &headers).is_none());
+        assert_eq!(forest.len(), 5);
+        for header in &second {
+            assert_eq!(
+                forest.leaf_at(header.height).unwrap(),
+                Some(header_leaf(&header.id())),
+                "the leaf at {} is the header the log holds there",
+                header.height
+            );
+        }
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// A short valid chain, built off to the side.
