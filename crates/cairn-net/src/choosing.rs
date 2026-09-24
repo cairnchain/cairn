@@ -675,19 +675,13 @@ impl Chooser {
     ///
     /// Read here rather than at every deadline because this runs once a round
     /// and is the only place a turn is handed out.
+    ///
+    /// Nothing is asked first. Pulling a moment back to `now` leaves every one
+    /// that is not ahead of it where it was, so asking whether any is ahead
+    /// saved a walk of a couple of thousand entries at most, once a round, and
+    /// was seventeen comparisons that could each be turned round with nothing
+    /// noticing.
     fn clock_went_back(&mut self, now: u64) {
-        let behind = |at: &u64| *at > now;
-        let stale = self.first_claim_at.as_ref().is_some_and(behind)
-            || self.asked.as_ref().is_some_and(|(_, _, at)| *at > now)
-            || self.proven.as_ref().is_some_and(|(_, at)| *at > now)
-            || self
-                .claims
-                .values()
-                .any(|claim| claim.heard > now || claim.tried.as_ref().is_some_and(behind))
-            || self.unbacked_hosts.values().any(|spent| spent.at > now);
-        if !stale {
-            return;
-        }
         if let Some(first) = self.first_claim_at.as_mut() {
             *first = (*first).min(now);
         }
