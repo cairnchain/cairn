@@ -1028,7 +1028,16 @@ fn status_line(
 }
 
 fn stamp(since: Instant) -> String {
-    let seconds = since.elapsed().as_secs();
+    clock(since.elapsed().as_secs())
+}
+
+/// A count of seconds as hours, minutes and seconds.
+///
+/// Apart from `stamp` so that it can be asked about any length of time. An
+/// `Instant` an hour in the past does not exist on a machine up for less than
+/// an hour, which on Windows, where the clock under `Instant` starts at boot,
+/// is a freshly started build machine.
+fn clock(seconds: u64) -> String {
     format!(
         "{:02}:{:02}:{:02}",
         seconds / 3_600,
@@ -1684,12 +1693,12 @@ mod what_the_exit_code_says {
 #[allow(clippy::unwrap_used)]
 mod what_an_operator_is_told {
     use super::{
-        addresses_not_written, nobody_can_get_in, probation_line, short, stamp, will_not_read_back,
-        wrapped,
+        addresses_not_written, clock, nobody_can_get_in, probation_line, short, stamp,
+        will_not_read_back, wrapped,
     };
     use cairn_net::node::{Probation, Reading, Unread};
     use cairn_net::Unanswered;
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     /// Every sentence here carries the facts it was given.
     ///
@@ -1758,10 +1767,13 @@ mod what_an_operator_is_told {
     /// How long the node has run, and an identifier cut to its first twelve.
     #[test]
     fn a_stamp_and_a_short_identifier_read_as_they_should() {
-        let started = Instant::now()
-            .checked_sub(Duration::from_secs(3_725))
-            .unwrap();
-        assert_eq!(stamp(started), "01:02:05");
+        assert_eq!(clock(3_725), "01:02:05");
+        assert_eq!(clock(59), "00:00:59");
+        assert_eq!(
+            stamp(Instant::now()),
+            "00:00:00",
+            "a node that has just started"
+        );
         assert_eq!(short("0123456789abcdef"), "0123456789ab");
         assert_eq!(short("abc"), "abc", "a shorter one is left whole");
     }
