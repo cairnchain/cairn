@@ -63,15 +63,26 @@ pub(crate) struct OwnerRecord {
     /// rebuilding that list to answer one page was work an anonymous caller
     /// could ask for as often as they liked.
     pub(crate) movements: Vec<Movement>,
-    pub(crate) received: Amount,
-    pub(crate) spent: Amount,
+    /// Everything paid to this owner, and everything it paid out, in pebbles.
+    ///
+    /// Not amounts, on purpose. An amount stops at the most money there will
+    /// ever be, which bounds what an owner holds and not what has passed
+    /// through it: change comes back to the key that spent, so an address
+    /// holding a hundred thousand that pays ten thousand times has been paid
+    /// a billion. Kept as amounts, both stopped at the ceiling, every payment
+    /// in was dropped whole while every payment out still counted, and the
+    /// balance slid to nothing. A `u64` of pebbles reaches about a hundred and
+    /// eighty times the ceiling before it saturates, in the same eight bytes,
+    /// so what the index costs a note does not move.
+    pub(crate) received: u64,
+    pub(crate) spent: u64,
 }
 
 impl OwnerRecord {
     pub(crate) fn balance(&self) -> Amount {
-        self.received
-            .checked_sub(self.spent)
-            .unwrap_or(Amount::ZERO)
+        // What was paid in and not out again is what this owner's unspent
+        // notes come to, which is below the ceiling on any sum of amounts.
+        Amount::from_pebbles(self.received.saturating_sub(self.spent)).unwrap_or(Amount::MAX_MONEY)
     }
 }
 
@@ -632,10 +643,7 @@ impl Index {
             value,
         });
         self.movements = self.movements.saturating_add(1);
-        record.received = record
-            .received
-            .checked_add(value)
-            .unwrap_or(record.received);
+        record.received = record.received.saturating_add(value.as_pebbles());
         self.totals.notes_created = self.totals.notes_created.saturating_add(1);
     }
 
@@ -647,7 +655,7 @@ impl Index {
         let value = record.value;
         let owner = record.owner;
         if let Some(owner) = self.owners.get_mut(&owner) {
-            owner.spent = owner.spent.checked_add(value).unwrap_or(owner.spent);
+            owner.spent = owner.spent.saturating_add(value.as_pebbles());
             owner.movements.push(Movement {
                 height,
                 incoming: false,
@@ -780,5 +788,60 @@ impl Index {
     /// The height the distribution above was worked out at.
     pub(crate) fn stock_at(&self) -> Option<u64> {
         self.stock_at
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::arithmetic_side_effects)]
+mod tests {
+    use cairn_crypto::SecretKey;
+    use cairn_ledger::note::NoteId;
+    use cairn_primitives::{Amount, Hash32};
+
+    use super::Index;
+
+    /// What an owner holds is told right however much has passed through it.
+    ///
+    /// What an owner was paid and what it paid out were kept as amounts, and
+    /// an amount stops at the most money there will ever be. What an owner
+    /// holds is below that; what has passed through one is not, because a
+    /// wallet sends its change back to the key it spent from, so an address
+    /// holding a hundred thousand that pays ten thousand times has been paid
+    /// a billion. Past that point every payment in was dropped whole while
+    /// every payment out still counted, and the balance slid to nothing and
+    /// stayed there, on the page that tells a person what they hold. Every
+    /// index the tests built had seen a few block rewards, so an index that
+    /// stopped counting at the ceiling passed.
+    #[test]
+    fn an_owner_whose_money_has_gone_round_past_the_ceiling_is_told_what_it_holds() {
+        let owner = SecretKey::generate().unwrap().public_key();
+        let half = Amount::from_pebbles(Amount::MAX_MONEY.as_pebbles() / 2).unwrap();
+        let mut index = Index::new();
+
+        // Half of everything there can be, paid in and out twice, and then in
+        // once more: a billion and a half through the address, half a billion
+        // still in it.
+        for turn in 0..3u8 {
+            let id = NoteId::new(Hash32::from_bytes([turn; 32]), 0);
+            index.credit(id, half, owner, u64::from(turn));
+            if turn < 2 {
+                index.debit(&id, u64::from(turn), Hash32::from_bytes([turn; 32]));
+            }
+        }
+
+        let record = index.owner(&owner).unwrap();
+        assert_eq!(
+            record.balance(),
+            half,
+            "an owner holding half of all the money there can be was told it held \
+             another figure, because what had passed through it was counted as an \
+             amount and stopped counting at the ceiling"
+        );
+        let pebbles = half.as_pebbles();
+        assert_eq!(
+            (record.received, record.spent),
+            (pebbles * 3, pebbles * 2),
+            "what the owner was paid and paid out stopped counting at the ceiling"
+        );
     }
 }

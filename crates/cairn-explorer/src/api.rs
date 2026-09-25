@@ -1815,8 +1815,8 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
     };
 
     json.field_str("balance", &record.balance().as_pebbles().to_string());
-    json.field_str("received", &record.received.as_pebbles().to_string());
-    json.field_str("spent", &record.spent.as_pebbles().to_string());
+    json.field_str("received", &record.received.to_string());
+    json.field_str("spent", &record.spent.to_string());
     json.field_usize("notes", record.notes.len());
 
     let notes_from = note_offset_of(request);
