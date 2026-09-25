@@ -1022,6 +1022,10 @@ fn check_the_genesis(start: &SampledStart, params: &ConsensusParams) -> Result<(
     }
 }
 
+// `check_the_tail` keeps the retarget's window of summaries and reads the
+// median off it as well, so the median's window has to fit inside it.
+const _: () = assert!(crate::pow::MEDIAN_TIME_WINDOW <= DIFFICULTY_WINDOW + 1);
+
 /// Walks the top of the chain, which the draw does not reach.
 ///
 /// Starts a full retarget window below the deepest header the draw landed on,
@@ -1076,6 +1080,11 @@ fn check_the_tail(start: &SampledStart, params: &ConsensusParams) -> Result<(), 
     // that at the end of every step. Reserving the run's own length instead
     // sized a reader's allocation from a number the sender chose, for room
     // nothing ever puts anything in.
+    //
+    // The retarget's window and not `RECENT_HEADERS`, which is what every rule
+    // needs, and the median below reads this too. The two are the same number
+    // while the median's window is the shorter, which the assertion above this
+    // function says.
     let mut summaries: Vec<HeaderSummary> = Vec::with_capacity(DIFFICULTY_WINDOW.saturating_add(1));
     let mut previous: Option<&BlockHeader> = None;
     let mut carried_the_pinned = false;

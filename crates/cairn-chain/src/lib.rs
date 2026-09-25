@@ -2968,6 +2968,9 @@ impl ChainStore {
     /// `earlier`, `SPLIT_ABOVE`, [`HELD_OVERHEAD`] and `selection` all carry
     /// one.
     fn forget_unreachable_branches(&mut self) {
+        // `MAX_REORG_DEPTH` where the branch holds `HELD_WINDOW`, one more, so
+        // this fires one side block early. Early only walks sooner: what the
+        // walk drops is out of reach whenever it runs.
         let limit = MAX_REORG_DEPTH.saturating_add(MAX_SIDE_BLOCKS);
         let by_count = self.blocks.len() > limit;
         let by_bytes = self.held_bytes > Self::held_bytes_ceiling(&self.params);
