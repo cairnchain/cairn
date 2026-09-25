@@ -227,7 +227,7 @@ fn fill<R: Read>(
             }
             Err(error) => return Err(WireError::Io(error)),
         }
-        if read < wanted && !patience.holds(read) {
+        if read < wanted && !patience.holds(read, Instant::now()) {
             return Err(WireError::Stalled { had: read, wanted });
         }
     }
@@ -261,19 +261,23 @@ impl Patience {
         }
     }
 
-    /// Whether a frame that has moved `moved` bytes may carry on.
+    /// Whether a frame that has moved `moved` bytes by `now` may carry on.
     ///
     /// Renewed by progress rather than by time, which is the difference
     /// between judging a peer on how fast it is and judging it on whether it
     /// is still going. A link too slow to move [`PROGRESS_BYTES`] in
     /// [`FRAME_PATIENCE`] is one that cannot follow this chain at all.
-    fn holds(&mut self, moved: usize) -> bool {
+    ///
+    /// Handed the moment rather than reading the clock, so the second the
+    /// deadline falls on can be asked: read here, it was a comparison nothing
+    /// could reach, since no test can make the clock read exactly the deadline.
+    fn holds(&mut self, moved: usize, now: Instant) -> bool {
         if moved.saturating_sub(self.marked) >= PROGRESS_BYTES {
             self.marked = moved;
-            self.by = patience_from(Instant::now());
+            self.by = patience_from(now);
             return true;
         }
-        Instant::now() < self.by
+        now < self.by
     }
 }
 
@@ -297,7 +301,7 @@ fn drain<W: Write>(writer: &mut W, bytes: &[u8], patience: &mut Patience) -> Res
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(WireError::Io(error)),
         }
-        if sent < size && !patience.holds(sent) {
+        if sent < size && !patience.holds(sent, Instant::now()) {
             return Err(WireError::Unaccepted { sent, size });
         }
     }
@@ -377,4 +381,311 @@ pub fn read_message<R: Read>(
         });
     }
     Ok(Incoming::Message(crate::message::Message::decode(&body)?))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::io::{self, Read, Write};
+    use std::time::Instant;
+
+    use cairn_ledger::note::NetworkId;
+    use cairn_primitives::codec::Encode;
+    use cairn_primitives::Hash32;
+
+    use super::{
+        drain, fill, patience_from, read_message, write_message, Filled, Incoming, Patience,
+        WireError, HEADER_BYTES, MAX_FRAME_BYTES,
+    };
+    use crate::message::{Joining, Message};
+
+    const NETWORK: NetworkId = NetworkId::new(0x0a1b_2c3d);
+
+    /// One thing a scripted socket does when asked.
+    enum Turn {
+        /// Hands over, or takes, at most this many bytes.
+        Give(usize),
+        /// Raises an error of this kind.
+        Fail(io::ErrorKind),
+    }
+
+    /// A socket that does what it was told, in order, and then waits out its
+    /// deadline for ever.
+    struct Script {
+        bytes: Vec<u8>,
+        at: usize,
+        turns: VecDeque<Turn>,
+    }
+
+    impl Script {
+        fn new(bytes: Vec<u8>, turns: impl IntoIterator<Item = Turn>) -> Self {
+            Self {
+                bytes,
+                at: 0,
+                turns: turns.into_iter().collect(),
+            }
+        }
+    }
+
+    impl Read for Script {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            match self.turns.pop_front() {
+                Some(Turn::Give(most)) => {
+                    let rest = self.bytes.get(self.at..).unwrap_or_default();
+                    let count = rest.len().min(out.len()).min(most);
+                    for (slot, byte) in out.iter_mut().zip(rest).take(count) {
+                        *slot = *byte;
+                    }
+                    self.at = self.at.saturating_add(count);
+                    Ok(count)
+                }
+                Some(Turn::Fail(kind)) => Err(io::Error::from(kind)),
+                None => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+            }
+        }
+    }
+
+    impl Write for Script {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            match self.turns.pop_front() {
+                Some(Turn::Give(most)) => {
+                    let count = bytes.len().min(most);
+                    self.bytes
+                        .extend_from_slice(bytes.get(..count).unwrap_or_default());
+                    Ok(count)
+                }
+                Some(Turn::Fail(kind)) => Err(io::Error::from(kind)),
+                None => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn framed(message: &Message) -> Vec<u8> {
+        let mut frame = Vec::new();
+        write_message(&mut frame, NETWORK, message).unwrap();
+        frame
+    }
+
+    /// Patience that ran out the moment it was made.
+    fn spent() -> Patience {
+        Patience {
+            by: Instant::now(),
+            marked: 0,
+        }
+    }
+
+    /// A signal in the middle of a read loses nothing, and a frame that
+    /// arrives a few bytes at a time is read whole.
+    ///
+    /// Every reader the tests handed this module either delivered what it
+    /// was asked for or never finished, and none was interrupted. So a `fill`
+    /// that treated an interrupted read as the connection failing passed, and
+    /// so did one that gave a frame up after its first partial read.
+    #[test]
+    fn a_frame_read_in_pieces_and_interrupted_arrives_whole() {
+        let message = Message::Ping(7);
+        let frame = framed(&message);
+        let mut turns = vec![Turn::Fail(io::ErrorKind::Interrupted)];
+        turns.extend(frame.iter().map(|_| Turn::Give(3)));
+        turns.insert(4, Turn::Fail(io::ErrorKind::Interrupted));
+        let mut socket = Script::new(frame, turns);
+        match read_message(&mut socket, NETWORK, MAX_FRAME_BYTES) {
+            Ok(Incoming::Message(read)) => assert_eq!(read, message),
+            other => panic!("a frame read in pieces, with signals, came back {other:?}"),
+        }
+    }
+
+    /// A connection that fails is not a peer with nothing to say.
+    ///
+    /// Only the two kinds a socket's deadline raises are silence. Nothing
+    /// handed this module any other error, so a `fill` that took every error
+    /// for the deadline passed: a reset connection read as a quiet peer before
+    /// a frame, and as a stalled one inside it, and the reading loop went
+    /// round again on a socket that was already gone.
+    #[test]
+    fn a_connection_that_fails_is_not_a_quiet_peer() {
+        for kind in [io::ErrorKind::WouldBlock, io::ErrorKind::TimedOut] {
+            let mut idle = Script::new(Vec::new(), [Turn::Fail(kind)]);
+            assert!(
+                matches!(
+                    read_message(&mut idle, NETWORK, MAX_FRAME_BYTES),
+                    Ok(Incoming::Quiet)
+                ),
+                "the deadline passing before a frame is not a failure"
+            );
+        }
+
+        let mut reset = Script::new(Vec::new(), [Turn::Fail(io::ErrorKind::ConnectionReset)]);
+        match read_message(&mut reset, NETWORK, MAX_FRAME_BYTES) {
+            Err(WireError::Io(error)) => {
+                assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+            }
+            other => panic!("a reset connection before a frame read as {other:?}"),
+        }
+
+        let frame = framed(&Message::Ping(7));
+        let mut cut = Script::new(
+            frame,
+            [
+                Turn::Give(HEADER_BYTES),
+                Turn::Fail(io::ErrorKind::ConnectionReset),
+            ],
+        );
+        match read_message(&mut cut, NETWORK, MAX_FRAME_BYTES) {
+            Err(WireError::Io(error)) => {
+                assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+            }
+            other => panic!("a connection reset inside a frame read as {other:?}"),
+        }
+    }
+
+    /// A frame whose last byte arrives is taken, however late, and one that
+    /// is still short when its patience is spent is not.
+    ///
+    /// The patience is asked between reads of a frame that is not finished
+    /// yet. Nothing ran a frame to its end with the patience already spent,
+    /// so a `fill` that asked it once more after the last byte passed, and
+    /// threw away a whole frame for arriving at the deadline.
+    #[test]
+    fn a_frame_that_finishes_is_taken_and_one_that_does_not_is_not() {
+        let mut buffer = [0u8; 8];
+        let mut whole = Script::new(vec![1u8; 8], [Turn::Give(8)]);
+        assert!(
+            matches!(
+                fill(&mut whole, &mut buffer, &mut spent()),
+                Ok(Filled::Complete)
+            ),
+            "a frame that arrived whole was refused for being late"
+        );
+
+        let mut short = Script::new(vec![1u8; 8], [Turn::Give(1), Turn::Give(7)]);
+        assert!(
+            matches!(
+                fill(&mut short, &mut buffer, &mut spent()),
+                Err(WireError::Stalled { had: 1, wanted: 8 })
+            ),
+            "a frame still short when its patience was spent was read on"
+        );
+    }
+
+    /// The same on the way out: the last byte taken is a frame sent, and a
+    /// peer still short of it when the patience is spent is given up on.
+    #[test]
+    fn a_frame_that_is_taken_whole_is_sent_and_one_that_is_not_is_not() {
+        let bytes = [1u8; 8];
+        let mut whole = Script::new(Vec::new(), [Turn::Give(8)]);
+        assert!(
+            drain(&mut whole, &bytes, &mut spent()).is_ok(),
+            "a frame the peer took whole was given up on for being late"
+        );
+
+        let mut short = Script::new(Vec::new(), [Turn::Give(1), Turn::Give(7)]);
+        assert!(
+            matches!(
+                drain(&mut short, &bytes, &mut spent()),
+                Err(WireError::Unaccepted { sent: 1, size: 8 })
+            ),
+            "a peer still short of the frame when its patience was spent was \
+             written to on"
+        );
+    }
+
+    /// A signal in the middle of a write loses nothing, and a peer that takes
+    /// a frame a few bytes at a time is written the whole of it.
+    ///
+    /// The mirror of the first test here, and missing for the same reason:
+    /// no writer the tests used was ever interrupted.
+    #[test]
+    fn a_frame_written_in_pieces_and_interrupted_is_sent_whole() {
+        let message = Message::Ping(7);
+        let frame = framed(&message);
+        let mut turns = vec![Turn::Fail(io::ErrorKind::Interrupted)];
+        turns.extend(frame.iter().map(|_| Turn::Give(3)));
+        turns.insert(4, Turn::Fail(io::ErrorKind::Interrupted));
+        let mut socket = Script::new(Vec::new(), turns);
+        assert!(
+            write_message(&mut socket, NETWORK, &message).is_ok(),
+            "a peer taking the frame in pieces, with signals, was given up on"
+        );
+        assert_eq!(socket.bytes, frame, "what went out is not the frame");
+    }
+
+    /// Patience runs out at its deadline and not before, and is renewed by
+    /// sixty four kilobytes and nothing less.
+    ///
+    /// The deadline was read off the clock inside the comparison, so the
+    /// second it falls on could not be asked. And the renewal was held only
+    /// by frames that moved a great deal or nothing, so a floor of about a
+    /// kilobyte, which lets a dribbler hold a frame for a thousand renewals
+    /// rather than sixteen, passed.
+    #[test]
+    fn patience_ends_at_its_deadline_and_is_renewed_by_sixty_four_kilobytes() {
+        let start = Instant::now();
+        let mut fresh = Patience {
+            by: patience_from(start),
+            marked: 0,
+        };
+        let by = fresh.by;
+        assert!(fresh.holds(0, start), "patience ran out as it was given");
+        assert!(!fresh.holds(0, by), "patience held at its own deadline");
+
+        let mut late = Patience {
+            by: start,
+            marked: 0,
+        };
+        assert!(
+            !late.holds(64 * 1024 - 1, start),
+            "a frame was renewed for moving less than sixty four kilobytes"
+        );
+        assert!(
+            late.holds(64 * 1024, start),
+            "a frame that moved sixty four kilobytes was not renewed"
+        );
+    }
+
+    /// A frame exactly as large as the wire takes is sent.
+    ///
+    /// The ceiling was asked from above only, with a frame past it, so a
+    /// writer that refused the largest frame the reader accepts passed. That
+    /// is the frame a block at the consensus limit comes closest to, and a
+    /// node that could not send it could not hand its block to anyone.
+    #[test]
+    fn a_frame_exactly_at_the_ceiling_is_sent() {
+        let empty = Message::JoinPart {
+            what: Joining::Ledger,
+            at: Hash32::ZERO,
+            part: 0,
+            parts: 1,
+            bytes: Vec::new(),
+        };
+        let room = MAX_FRAME_BYTES.checked_sub(empty.encode().len()).unwrap();
+        let largest = Message::JoinPart {
+            what: Joining::Ledger,
+            at: Hash32::ZERO,
+            part: 0,
+            parts: 1,
+            bytes: vec![0u8; room],
+        };
+        assert_eq!(
+            largest.encode().len(),
+            MAX_FRAME_BYTES,
+            "the message built is not exactly at the ceiling"
+        );
+
+        let mut written = Vec::new();
+        assert!(
+            write_message(&mut written, NETWORK, &largest).is_ok(),
+            "a frame exactly at the ceiling was refused"
+        );
+        assert_eq!(
+            Some(written.len()),
+            MAX_FRAME_BYTES.checked_add(HEADER_BYTES),
+            "the frame written is not the whole of it"
+        );
+    }
 }
