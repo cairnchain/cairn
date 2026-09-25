@@ -966,17 +966,33 @@ fn a_round_that_changes_no_address_does_not_write_the_book_again() {
     );
     assert_eq!(left, sentinel);
 
-    // And the case that must still reach the disk.
+    // And the case that must still reach the disk, counted in rounds like the
+    // rest. It was a deadline of twenty seconds, and a round is not a fixed
+    // length: it dials before it writes, and on a loaded Windows runner the
+    // rounds before this point took seven seconds or more each, so twenty
+    // seconds was under three rounds, and once that was not enough. Every
+    // round writes a book that changed, so the address is on the disk by the
+    // end of the first whole round after it was given, and five is room for a
+    // write the disk refused and the next round made good. A node that never
+    // writes it still fails here, and says what the disk answered.
     let fresh = SocketAddr::from((Ipv4Addr::new(240, 200, 200, 1), 8_333));
     node.remember_seed(fresh);
-    let caught_up = until(Duration::from_secs(20), || {
-        std::fs::read_to_string(&path).is_ok_and(|held| held.contains(&fresh.to_string()))
-    });
+    let mut caught_up = false;
+    for _ in 0..5 {
+        assert!(rounds(), "the node stopped asking for addresses");
+        caught_up =
+            std::fs::read_to_string(&path).is_ok_and(|held| held.contains(&fresh.to_string()));
+        if caught_up {
+            break;
+        }
+    }
+    let refused = node.unsaved_addresses();
     node.shutdown();
     drop(node);
     assert!(
         caught_up,
-        "an address the node was given never reached the file"
+        "an address the node was given never reached the file in five rounds, and the last \
+         write it tried was answered {refused:?}"
     );
     let back = std::fs::read_to_string(&path).unwrap();
     assert_eq!(
