@@ -17,7 +17,9 @@ use cairn_ledger::pow::work_of;
 use cairn_ledger::transaction::{Transfer, Witness};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_net::joining::Joined;
-use cairn_net::node::{Filling, Probation, Stranded, Unjudged, Unread, Unweighable, Unwritten};
+use cairn_net::node::{
+    Behind, Filling, Probation, Stranded, Unjudged, Unread, Unweighable, Unwritten,
+};
 use cairn_net::Node;
 use cairn_primitives::codec::Encode;
 use cairn_primitives::{hex, Amount, Hash32};
@@ -469,6 +471,15 @@ struct Health {
     unwritten: Option<Unwritten>,
     /// What it could not read back off its own disk, if anything.
     unread: Option<Unread>,
+    /// Whether the blocks this node refuses say the machine's clock is behind
+    /// the network's.
+    ///
+    /// A node on a slow clock refuses every honest block from the moment the
+    /// chain moves past its clock, and a site over it goes on serving the chain
+    /// it had as the chain, with a height that has stopped. `cairnd` names it
+    /// first among the causes, because it produces the symptoms of the others,
+    /// and it was the one state of its node this page did not carry.
+    clock_behind: Option<Behind>,
     /// Whether the blocks arriving say this build is too old for its chain.
     unjudged: Option<Unjudged>,
     /// Whether nobody can show this node what work stands behind the chain.
@@ -511,6 +522,7 @@ impl Health {
             peers: node.peers_introduced(),
             unwritten: node.unwritten(),
             unread: node.unread(),
+            clock_behind: node.clock_behind(),
             unjudged: node.unjudged(),
             unweighable: node.unweighable(),
             mended: node.mended_nodes(),
@@ -923,6 +935,27 @@ fn index_cost(json: &mut Writer, size: Size) {
     json.field_str("bytes", &size.bytes.to_string());
 }
 
+/// What the node says about this machine's clock, from the blocks it refused.
+///
+/// The gap is `seconds` less `drift`, and both are given so a reader does the
+/// subtraction the way `cairnd` does it. `ownFirstBlock` is what tells a hint
+/// from a certainty: blocks from peers carry dates strangers wrote, and the
+/// network's first block is in this program.
+fn clock_field(json: &mut Writer, behind: Option<&Behind>) {
+    let Some(behind) = behind else {
+        json.field_null("clockBehind");
+        return;
+    };
+    json.key("clockBehind");
+    json.begin_object();
+    json.field_u64("seconds", behind.seconds);
+    json.field_u64("drift", behind.drift);
+    json.field_u64("blocks", behind.blocks);
+    json.field_u64("peers", u64::try_from(behind.peers).unwrap_or(u64::MAX));
+    json.field_bool("ownFirstBlock", behind.own_first_block);
+    json.end_object();
+}
+
 /// What the node says about nobody being able to show it the chain.
 ///
 /// Its own function only because [`node_object`] is at the length where one
@@ -1055,6 +1088,8 @@ fn node_object(json: &mut Writer, context: &Context<'_>) {
         }
         None => json.field_null("unread"),
     }
+
+    clock_field(json, node.clock_behind.as_ref());
 
     match &node.unjudged {
         Some(unjudged) => {
@@ -2142,6 +2177,7 @@ mod tests {
             peers: 0,
             unwritten: None,
             unread: None,
+            clock_behind: None,
             unjudged: None,
             unweighable: None,
             filling: None,

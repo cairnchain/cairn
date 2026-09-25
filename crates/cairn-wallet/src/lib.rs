@@ -30,7 +30,9 @@ use cairn_crypto::{random_bytes, PublicKey, SecretKey};
 use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::transaction::{Input, Transfer};
 use cairn_ledger::validation::{ConsensusParams, TransferError};
-use cairn_net::node::{Probation, Refused, Stranded, Unjudged, Unread, Unweighable, Unwritten};
+use cairn_net::node::{
+    Behind, Probation, Refused, Stranded, Unjudged, Unread, Unweighable, Unwritten,
+};
 use cairn_net::{Joined, Node, MAX_PROVEN};
 use cairn_primitives::codec::Encode;
 use cairn_primitives::{Amount, Hash32};
@@ -625,6 +627,17 @@ pub struct Progress {
     /// So what it looks like is a page saying "still reading" about blocks it
     /// is not going to read, next to a height that keeps climbing, for ever.
     pub unread: Option<Unread>,
+    /// Whether the blocks the node is refusing say this machine's clock is
+    /// behind the network's, if enough of them came from enough peers, or if
+    /// the one it refused was the network's first.
+    ///
+    /// A block dated too far past the reading machine's clock is refused, so
+    /// a wallet on a slow clock refuses every honest block from the moment the
+    /// chain moves past its clock. What it shows is a height that has stopped
+    /// beside the balance of a chain the network has left, and payments to its
+    /// owner never arrive. `cairnd` has named this since the node learned to
+    /// count it, and the wallet, where the balance is read, did not.
+    pub clock_behind: Option<Behind>,
     /// Blocks the node met that this build has no rules to judge, if enough of
     /// them came from enough peers to mean anything.
     pub unjudged: Option<Unjudged>,
@@ -653,6 +666,36 @@ pub struct Progress {
     /// when the rescan catches up: the movements below where the reading
     /// restarts are gone whatever the height says afterwards.
     pub lost_its_account: Option<Discarded>,
+}
+
+/// The line for a wallet whose machine's clock is behind the network's.
+///
+/// It names something outside the program, which no other line here does,
+/// and it is the one reading a person cannot make from the outside: a wallet
+/// on a slow clock shows a height and a balance exactly like one whose peers
+/// have gone quiet, and the two are mended in different places.
+fn clock_is_slow(behind: &Behind) -> String {
+    let out_by = behind.seconds.saturating_sub(behind.drift);
+    if behind.own_first_block {
+        return format!(
+            "The clock on this machine is behind the day this network opened, by at least \
+             {out_by} seconds: this wallet refused the network's first block, which is \
+             written into this program and which nobody sent it. Until the clock is right it \
+             cannot follow the chain at all, so there is no balance to show. Set the time on \
+             this machine and start the wallet again. Nothing is lost and the key file is not \
+             touched."
+        );
+    }
+    format!(
+        "The clock on this machine looks at least {out_by} seconds slow. {} blocks from {} \
+         different peers were refused for being dated ahead of it, the furthest by {} \
+         seconds, where the rules allow {}. Until the clock is right this wallet cannot \
+         follow the chain: the height beside this has stopped, payments made to you since \
+         will not appear, and the balance is the one it had then. Anyone can write a date \
+         into a block, so this is a reason to look at the clock rather than a verdict. \
+         Nothing is lost and the key file is not touched.",
+        behind.blocks, behind.peers, behind.seconds, behind.drift,
+    )
 }
 
 /// The line for a wallet whose own account of what it was paid did not read
@@ -707,8 +750,10 @@ impl Progress {
     /// Only one line is shown, so the order is a ranking, and the ranking is
     /// what the numbers beside it are worth. First the two that mean this
     /// wallet has stopped following the chain and will not start again. Then
-    /// the one that means the number is not this wallet's own reading at all.
-    /// Then the ones that mean the number is right and something else is at
+    /// the one that means the number is not this wallet's own reading at all,
+    /// and then the one that means it is this wallet's reading of a chain the
+    /// network has left. Then the ones that mean the number is right and
+    /// something else is at
     /// risk, and last the account this wallet lost, because that balance is
     /// right and becomes right again on its own, and what it costs is a record
     /// rather than money.
@@ -748,6 +793,15 @@ impl Progress {
                 probation.checked(),
                 probation.owed()
             ));
+        }
+        // Above the lines that say the balance is right, because under a slow
+        // clock it is not: it is this wallet's own reading of a chain the
+        // network has left. `cairnd` prints every line it has and puts this
+        // one below the disk; here only one is shown, and the disk's line
+        // would tell the person the balance is right for the chain as it
+        // stands.
+        if let Some(behind) = &self.clock_behind {
+            return Some(clock_is_slow(behind));
         }
         if let Some(unwritten) = &self.unwritten {
             let kept = unwritten.written_through.map_or_else(
@@ -1194,6 +1248,7 @@ impl Wallet {
             stranded: self.node.stranded(),
             unwritten: self.node.unwritten(),
             unread: self.node.unread(),
+            clock_behind: self.node.clock_behind(),
             unjudged: self.node.unjudged(),
             unweighable: self.node.unweighable(),
             keeping_its_account: self.wrote_history.lock().map_or(true, |wrote| *wrote),
@@ -2418,7 +2473,9 @@ mod tests {
     use cairn_crypto::SecretKey;
     use cairn_ledger::note::{Note, NoteId};
     use cairn_ledger::validation::TransferError;
-    use cairn_net::node::{Probation, Reading, Refused, Unread, Unweighable};
+    use cairn_net::node::{
+        Behind, Probation, Reading, Refused, Unread, Unweighable, Unwritten, Writing,
+    };
     use cairn_net::Joined;
     use cairn_primitives::{Amount, Hash32};
     use std::collections::BTreeMap;
@@ -2604,6 +2661,7 @@ mod tests {
             lost_its_account: None,
             unwritten: None,
             unread: None,
+            clock_behind: None,
             unjudged: None,
             unweighable: None,
             height: Some(10),
@@ -2951,6 +3009,76 @@ mod tests {
         assert!(
             two.contains("still names 2 notes, worth 70.00000000 CAIRN"),
             "two notes were not counted as two, worth what they add up to: {two}"
+        );
+    }
+
+    /// A slow clock is told in numbers, above the lines that call the balance
+    /// right, and a refused first block is told as the certainty it is.
+    ///
+    /// Nothing read `Node::clock_behind` here, so a wallet refusing honest
+    /// blocks for its clock said nothing at all, and with a full disk beside
+    /// it said the balance was right for the chain as it stands.
+    #[test]
+    fn a_slow_clock_is_told_in_numbers_above_a_balance_called_right() {
+        let behind = Behind {
+            seconds: 9_000,
+            drift: 7_200,
+            blocks: 8,
+            peers: 2,
+            own_first_block: false,
+        };
+        let slow = Progress {
+            clock_behind: Some(behind),
+            ..healthy()
+        };
+        let said = slow.warning().expect("a person is told");
+        assert!(
+            said.contains("at least 1800 seconds slow"),
+            "how far out the clock is, which is the gap less the drift, is not said"
+        );
+        assert!(
+            said.contains("8 blocks from 2 different peers"),
+            "the evidence is not said in numbers"
+        );
+        assert!(
+            said.contains("payments made to you since will not appear"),
+            "what it costs the person is not said"
+        );
+
+        let and_a_full_disk = Progress {
+            unwritten: Some(Unwritten {
+                what: Writing::Blocks,
+                because: "no space left on device".to_owned(),
+                reached: 1_200,
+                written_through: Some(900),
+                blocks: 300,
+                within_reach: true,
+            }),
+            ..slow
+        };
+        let said = and_a_full_disk.warning().expect("a person is told");
+        assert!(
+            said.contains("clock"),
+            "the line shown under a slow clock and a full disk says the balance is \
+             right for the chain as it stands, which a slow clock makes untrue"
+        );
+
+        let before_the_opening = Progress {
+            clock_behind: Some(Behind {
+                own_first_block: true,
+                ..behind
+            }),
+            ..healthy()
+        };
+        let said = before_the_opening.warning().expect("a person is told");
+        assert!(
+            said.contains("behind the day this network opened"),
+            "a refused first block is told as a slow clock rather than as the \
+             certainty it is"
+        );
+        assert!(
+            !said.contains("reason to look"),
+            "a certainty is hedged as a reason to look"
         );
     }
 
