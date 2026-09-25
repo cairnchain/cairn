@@ -138,11 +138,24 @@ pub fn names_for(asked: &[String], network: NetworkId) -> Vec<String> {
 /// name server is not up yet at the moment the node starts should come up
 /// anyway; the node asks again once it is running.
 pub fn start_from(asked: &[String], network: NetworkId) -> Result<Vec<SocketAddr>, String> {
-    let strict = !asked.is_empty();
+    gather(&names_for(asked, network), !asked.is_empty(), resolve)
+}
+
+/// Every address `names` resolve to by `resolve`, in order and without
+/// repeats, stopping at the first failure only when `strict`.
+///
+/// Apart from [`start_from`] so the lenient half can be asked. It is reached
+/// only when a written-in name will not resolve, and whether one does is up to
+/// the machine's name server on the day, which a test cannot choose.
+fn gather(
+    names: &[String],
+    strict: bool,
+    resolve: impl Fn(&str) -> Result<Vec<SocketAddr>, String>,
+) -> Result<Vec<SocketAddr>, String> {
     let mut found: Vec<SocketAddr> = Vec::new();
 
-    for name in names_for(asked, network) {
-        let addresses = match resolve(&name) {
+    for name in names {
+        let addresses = match resolve(name) {
             Ok(addresses) => addresses,
             Err(error) if strict => return Err(error),
             Err(_) => continue,
@@ -286,6 +299,37 @@ mod tests {
     fn a_seed_that_was_asked_for_and_cannot_be_reached_stops_the_node() {
         let asked = vec!["127.0.0.1".to_owned()];
         assert!(start_from(&asked, NetworkId::TESTNET_6).is_err(), "no port");
+    }
+
+    /// A written-in name that will not resolve is passed over, and one the
+    /// operator typed stops the node.
+    ///
+    /// The lenient half was never reached: the only written-in name resolves
+    /// on any machine with a network, so a `start_from` that stopped the node
+    /// over any name at all passed, and a node started before its name server
+    /// was up refused to start.
+    #[test]
+    fn a_written_in_name_that_will_not_resolve_is_passed_over() {
+        let reached: SocketAddr = "127.0.0.1:9944".parse().unwrap();
+        let names = vec!["down.invalid:9944".to_owned(), "up.invalid:9944".to_owned()];
+        let answer = |name: &str| {
+            if name.starts_with("up.") {
+                Ok(vec![reached])
+            } else {
+                Err(format!("`{name}` resolved to nothing"))
+            }
+        };
+        assert_eq!(
+            gather(&names, false, answer),
+            Ok(vec![reached]),
+            "a written-in name that would not resolve stopped the node, or \
+             took the next one with it"
+        );
+        assert!(
+            gather(&names, true, answer).is_err(),
+            "a name the operator asked for and that will not resolve was \
+             passed over in silence"
+        );
     }
 
     #[test]

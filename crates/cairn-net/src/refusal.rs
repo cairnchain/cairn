@@ -271,6 +271,33 @@ mod tests {
         );
     }
 
+    /// Forgetting the refusals that are over keeps the ones that are not, and
+    /// a table holding one is not empty.
+    ///
+    /// The only test of the sweep ran it at a moment every entry had expired,
+    /// and the only reads of `is_empty` expected it to say yes. So a sweep
+    /// that kept exactly the expired entries and dropped every live one
+    /// passed, and so did an `is_empty` that said yes to everything.
+    #[test]
+    fn forgetting_the_expired_keeps_the_live() {
+        let mut refusals = Refusals::new();
+        refusals.refuse(host(1), 1_000);
+        // Refused while the first is still running, so the sweep on the way
+        // into `refuse` leaves both for `forget_expired` to judge.
+        refusals.refuse(host(2), 1_500);
+        assert_eq!(refusals.len(), 2);
+        refusals.forget_expired(1_000 + REFUSAL_SECONDS);
+        assert!(
+            refusals.refuses(host(2), 1_000 + REFUSAL_SECONDS),
+            "the sweep dropped a refusal that was still running"
+        );
+        assert_eq!(refusals.len(), 1, "the sweep kept a refusal that was over");
+        assert!(
+            !refusals.is_empty(),
+            "a table holding a refusal says it holds none"
+        );
+    }
+
     /// Otherwise a node, a wallet and an explorer on one machine would lock
     /// each other out.
     #[test]
