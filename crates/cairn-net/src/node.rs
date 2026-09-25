@@ -1725,6 +1725,10 @@ fn too_old_for_the_chain(met: &Unreadable) -> Option<Unjudged> {
     })
 }
 
+// A clock that went backwards leaves nothing of a stretch, so the stretch is
+// what refuses it, in every build and not only the ones that run the tests.
+const _: () = assert!(UNJUDGED_STRETCH > 0);
+
 /// Showings that would not weigh, as they add up.
 ///
 /// Counted rather than acted on, the same shape as [`Unreadable`]. What one of
@@ -8023,11 +8027,6 @@ mod peers_and_loops {
             "a clock that went backwards was taken as a stretch of showings"
         );
     }
-
-    /// A clock that went backwards leaves nothing of a stretch, so the
-    /// stretch is what refuses it. See `too_old_for_the_chain`, which asks
-    /// nothing else about one.
-    const _: () = assert!(UNJUDGED_STRETCH > 0);
 
     /// The burial is asked for at most once in a second, and asked for again
     /// when the clock is put back behind the last question.
