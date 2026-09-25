@@ -9702,6 +9702,7 @@ mod clock_tests {
         // produces. These must stay faults or a node stops defending itself.
         assert!(is_peer_fault(&WireError::FrameTooLarge {
             declared: MAX_FRAME_BYTES + 1,
+            limit: MAX_FRAME_BYTES,
         }));
         assert!(is_peer_fault(&WireError::Malformed(
             cairn_primitives::codec::CodecError::UnexpectedEnd

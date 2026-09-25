@@ -248,7 +248,7 @@ fn an_oversized_frame_is_refused_before_anything_is_reserved() {
     let mut cursor = framed.as_slice();
     let outcome = read_message(&mut cursor, NetworkId::TESTNET, MAX_FRAME_BYTES);
     match outcome {
-        Err(WireError::FrameTooLarge { declared }) => {
+        Err(WireError::FrameTooLarge { declared, .. }) => {
             assert!(declared > MAX_FRAME_BYTES);
         }
         other => panic!("expected a refusal, got {other:?}"),
