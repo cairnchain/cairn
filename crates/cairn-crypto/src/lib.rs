@@ -435,4 +435,59 @@ mod tests {
     fn the_secret_key_never_prints_its_material() {
         assert_eq!(format!("{:?}", key(5)), "SecretKey(redacted)");
     }
+
+    /// Comparing two keys with `<` and `>` gives the order their bytes have.
+    ///
+    /// `Ord` was held by every sorted set of owners and `PartialOrd` by
+    /// nothing, so a key that answered "not comparable" to every comparison
+    /// passed: `a < b` and `a > b` both false for two different keys.
+    #[test]
+    fn two_keys_compare_the_way_their_bytes_do() {
+        for (left, right) in [(1u8, 2u8), (3, 4), (5, 6), (7, 7)] {
+            let left = key(left).public_key();
+            let right = key(right).public_key();
+            let order = left.as_bytes().cmp(right.as_bytes());
+            assert_eq!(
+                left.partial_cmp(&right),
+                Some(order),
+                "two keys did not compare the way their bytes do"
+            );
+            assert_eq!(
+                left < right,
+                order.is_lt(),
+                "`<` on two keys disagreed with their byte order"
+            );
+            assert_eq!(
+                left > right,
+                order.is_gt(),
+                "`>` on two keys disagreed with their byte order"
+            );
+        }
+    }
+
+    /// Different keys hash apart.
+    ///
+    /// The explorer's index files every owner in a map keyed by the key, so a
+    /// key that fed its hasher nothing puts every owner in one bucket and
+    /// turns each lookup into a walk over all of them. Nothing hashed a key,
+    /// so exactly that passed.
+    #[test]
+    fn different_keys_hash_apart() {
+        use std::hash::{BuildHasher, BuildHasherDefault};
+        let hasher = BuildHasherDefault::<std::collections::hash_map::DefaultHasher>::default();
+        let mut seen = std::collections::BTreeSet::new();
+        for seed in 0..64u8 {
+            seen.insert(hasher.hash_one(key(seed).public_key()));
+        }
+        assert_eq!(
+            seen.len(),
+            64,
+            "sixty four different keys came out as fewer different hashes"
+        );
+        assert_eq!(
+            hasher.hash_one(key(9).public_key()),
+            hasher.hash_one(key(9).public_key()),
+            "and one key hashes the same way twice"
+        );
+    }
 }

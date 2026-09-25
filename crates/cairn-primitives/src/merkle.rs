@@ -47,11 +47,9 @@ fn merkle_node(left: Hash32, right: Hash32) -> Hash32 {
 /// anyone writing that verifier, or passing digests from anywhere else, has
 /// to check this argument still holds before doing it.
 pub fn merkle_root(leaves: &[Hash32]) -> Hash32 {
-    let mut level: Vec<Hash32> = match leaves {
-        [] => return hash(Domain::MerkleEmpty, &[]),
-        [only] => return *only,
-        _ => leaves.to_vec(),
-    };
+    // No arm for none or one: the fold never runs on either, so one leaf is
+    // its own root and none falls to the empty digest at the end.
+    let mut level: Vec<Hash32> = leaves.to_vec();
 
     while level.len() > 1 {
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
