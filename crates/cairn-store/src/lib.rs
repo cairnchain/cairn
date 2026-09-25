@@ -83,6 +83,9 @@ pub const BLOCK_INDEX: &str = "blocks.idx";
 /// Bytes one entry of the index takes.
 const OFFSET_BYTES: u64 = 8;
 
+/// Bytes at the front of a record that say how long the rest of it is.
+const LENGTH_BYTES: u64 = 4;
+
 /// The name of the file that marks a directory as in use.
 const LOCK_FILE: &str = "lock";
 
@@ -1037,12 +1040,22 @@ impl BlockLog {
     /// untouched and hand `read` a record size chosen by the file, and near
     /// `u64::MAX` that is an allocation failure, which in Rust is a process
     /// abort with no message.
+    ///
+    /// A span shorter than the four bytes that say how long a record is cannot
+    /// name one, and is refused here with the rest. It used to pass, and when
+    /// it was the last entry and ended where the file ends the start kept it:
+    /// `read` then ran off the end of the file asking for those four bytes, and
+    /// the `UnexpectedEof` went out as a disk that could not be reached. The
+    /// nightly campaign reported it on seven nights out of eight.
     fn bounds(&self, index: usize) -> Result<Option<(u64, u64)>, StoreError> {
         if index >= self.count {
             return Ok(None);
         }
         let checked = |start: u64, end: u64| {
-            if end <= start || end > self.end || end.saturating_sub(start) > max_record_on_disk() {
+            if end.saturating_sub(start) < LENGTH_BYTES
+                || end > self.end
+                || end.saturating_sub(start) > max_record_on_disk()
+            {
                 return Err(StoreError::Misindexed {
                     index,
                     start,
