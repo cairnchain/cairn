@@ -501,6 +501,20 @@ impl ConsensusParams {
         )
     }
 
+    /// The most the last [`Self::burial`] blocks can weigh on this network.
+    ///
+    /// What a node's block log never goes below, whatever budget it is given:
+    /// the chain lets go of block bodies from memory on the promise that the
+    /// log still holds that window, so the trim never cuts into it. At the
+    /// network's largest block it is the number an operator sizing a disk
+    /// needs. `cairnd` and the explorer both print it beside the budget they
+    /// were given, and both read it here, so the two cannot state different
+    /// floors for the same trim.
+    pub fn burial_bytes(&self) -> u64 {
+        self.burial
+            .saturating_mul(u64::try_from(self.max_block_bytes).unwrap_or(u64::MAX))
+    }
+
     /// The same rules with a hot set small enough to exercise eviction.
     #[must_use]
     pub const fn with_hot_capacity(mut self, capacity: usize) -> Self {
@@ -1660,6 +1674,30 @@ pub fn disconnect_block(state: &mut LedgerState, connected: &ConnectedBlock) {
 mod tests {
     use super::*;
     use cairn_crypto::SecretKey;
+
+    /// The floor under a disk budget is the burial times the largest block.
+    ///
+    /// It was worked out inside `cairnd`, where the explorer, which trims
+    /// through the same node, could not reach it, so the explorer printed a
+    /// budget with no floor under it. Nothing here held the figure, so an
+    /// answer of nought, of the burial alone or of the largest block alone
+    /// passed, and an operator would have sized a disk off it.
+    #[test]
+    fn the_floor_under_a_disk_budget_is_the_burial_at_the_largest_block() {
+        let params = ConsensusParams::testnet()
+            .with_burial(8)
+            .with_max_block_bytes(1_000);
+        assert_eq!(
+            params.burial_bytes(),
+            8_000,
+            "eight blocks of a thousand bytes are not eight thousand bytes here"
+        );
+        assert_eq!(
+            params.with_max_block_bytes(usize::MAX).burial_bytes(),
+            u64::MAX,
+            "a floor too large to count is not the largest number there is"
+        );
+    }
 
     /// A block of exactly the bytes a network allows is taken, and one byte
     /// more is not.

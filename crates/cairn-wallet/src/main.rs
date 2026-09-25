@@ -91,6 +91,24 @@ fn run(arguments: &[String]) -> Result<(), String> {
     }
 }
 
+/// Every option name this program reads.
+///
+/// An unknown name stops it rather than being passed over, as it stops
+/// `cairnd` and the explorer. Taken and ignored, `--netwrok devnet` read a
+/// balance on the default network and printed it as the answer, and `--fees`
+/// paid the least the network carries instead of what its sender had priced.
+const KNOWN: [&str; 9] = [
+    "data",
+    "seed",
+    "network",
+    "wait",
+    "fee",
+    "fee-anyway",
+    "to",
+    "amount",
+    "port",
+];
+
 /// Options that are the whole of what they say, with nothing after them.
 const BARE: [&str; 1] = ["fee-anyway"];
 
@@ -111,9 +129,22 @@ impl Flags {
         while let Some(argument) = arguments.get(index) {
             index = index.saturating_add(1);
             let Some(name) = argument.strip_prefix("--") else {
+                // Every command takes one key file and names everything else.
+                // A second loose word was dropped, so `--fee-anyway 0.5`, from
+                // somebody who read the flag as taking the fee, paid the least
+                // the network carries and never mentioned the figure.
+                if !flags.loose.is_empty() {
+                    return Err(format!(
+                        "unexpected argument `{argument}`: a command takes one key file, and \
+                         everything else is named with `--`"
+                    ));
+                }
                 flags.loose.push(argument.clone());
                 continue;
             };
+            if !KNOWN.contains(&name) {
+                return Err(format!("unknown option `--{name}`; try `help`"));
+            }
             if BARE.contains(&name) {
                 flags.named.entry(name.to_owned()).or_default();
                 continue;
@@ -121,6 +152,15 @@ impl Flags {
             let Some(value) = arguments.get(index) else {
                 return Err(format!("`--{name}` needs a value"));
             };
+            // A value that begins with two dashes is a value left out, as
+            // `cairnd` and the explorer read it. Taken as one, `--data
+            // --network devnet` kept a chain in a directory called `--network`
+            // and joined the default network.
+            if value.starts_with("--") {
+                return Err(format!(
+                    "`--{name}` needs a value, and `{value}` is another option"
+                ));
+            }
             index = index.saturating_add(1);
             flags
                 .named
@@ -754,6 +794,69 @@ mod tests {
             "every seed, in order"
         );
         assert!(flags.values("amount").is_empty());
+    }
+
+    fn refused(line: &[&str]) -> String {
+        let arguments: Vec<String> = line.iter().map(|&word| word.to_owned()).collect();
+        Flags::parse(&arguments).unwrap_err()
+    }
+
+    /// An option name the wallet does not know stops it, as it stops `cairnd`
+    /// and the explorer.
+    ///
+    /// Any `--name` at all was taken and the ones nothing reads were passed
+    /// over. Nothing asked this, so `--netwrok devnet` read a balance on the
+    /// default network and printed it as the answer, and `--fees 0.5` paid the
+    /// least the network carries instead of what its sender had priced.
+    #[test]
+    fn an_option_the_wallet_does_not_know_stops_it() {
+        let error = refused(&["key.json", "--netwrok", "devnet"]);
+        assert!(
+            error.contains("unknown option `--netwrok`"),
+            "a misspelt network was passed over: {error}"
+        );
+        let error = refused(&["key.json", "--to", "somebody", "--fees", "0.5"]);
+        assert!(
+            error.contains("unknown option `--fees`"),
+            "a misspelt fee was passed over: {error}"
+        );
+    }
+
+    /// A value that is another option is refused rather than taken, as it is
+    /// by `cairnd` and the explorer.
+    ///
+    /// Nothing asked this, so `--data --network devnet` kept a chain in a
+    /// directory called `--network`, read `devnet` as a word nobody asked for,
+    /// and joined the default network.
+    #[test]
+    fn an_option_standing_where_a_value_belongs_is_not_the_value() {
+        let error = refused(&["key.json", "--data", "--network", "devnet"]);
+        assert!(
+            error.contains("`--data` needs a value, and `--network` is another option"),
+            "an option was taken as the value of the one before it: {error}"
+        );
+    }
+
+    /// A word past the key file that no option asked for stops the wallet
+    /// rather than being dropped, as a loose word stops `cairnd` and the
+    /// explorer.
+    ///
+    /// The first loose word is the key file and every one after it was
+    /// dropped. Nothing asked this, so `--fee-anyway 0.5`, written by somebody
+    /// who read the flag as taking the fee, paid the least the network carries
+    /// and never mentioned the figure it had been handed.
+    #[test]
+    fn a_word_no_option_asked_for_stops_the_wallet() {
+        let error = refused(&["key.json", "--fee-anyway", "0.5"]);
+        assert!(
+            error.contains("unexpected argument `0.5`"),
+            "a word nothing reads was dropped: {error}"
+        );
+        let error = refused(&["one.json", "two.json"]);
+        assert!(
+            error.contains("unexpected argument `two.json`"),
+            "a second key file was dropped in favour of the first: {error}"
+        );
     }
 
     /// A paragraph comes out as lines no wider than the rest of the output,

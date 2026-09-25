@@ -807,7 +807,7 @@ fn will_not_read_back(unread: &Unread, directory: &str) -> String {
 fn too_old(unjudged: &Unjudged) -> String {
     format!(
         "this build looks too old for the chain it is on. {} blocks from {} peers over the \
-         last {} minutes are written under block version {}, and this build has the rules \
+         last {} are written under block version {}, and this build has the rules \
          only for version {}, so it cannot judge them and is not following them. It has not \
          stopped on that, because anyone can write a version number in a block. But if the \
          height above has also stopped moving, the network has changed its rules and this \
@@ -815,7 +815,9 @@ fn too_old(unjudged: &Unjudged) -> String {
          is picked up where it was left.",
         unjudged.blocks,
         unjudged.peers,
-        unjudged.over / 60,
+        // Said the way every other stretch here is said. Dividing by sixty on
+        // the spot said a stretch under a minute as nought minutes.
+        roughly(unjudged.over),
         unjudged.version,
         unjudged.known,
     )
@@ -939,10 +941,10 @@ fn clock_is_slow(behind: &Behind) -> String {
 /// asked, peers dropped, and a height that takes hours to move.
 fn cannot_weigh(unweighable: &Unweighable) -> String {
     format!(
-        "no peer has been able to show this node what work stands behind the chain. {} showings          from {} peers, over {} minutes, were all refused with the same words: {}. Nothing has          stopped. This node is reading the chain block by block instead, which is how nodes          worked before the shorter way existed, and it checks more rather than less; what it          costs is time and bandwidth. Peers making chains up is one reason for this line. The          other is a chain whose difficulty has fallen far below what it once ran at, which needs          a longer run of headers than this build will take: that one mends itself as the chain          catches up, and until it does every honest node answering is refused in exactly this          way.",
+        "no peer has been able to show this node what work stands behind the chain. {} showings          from {} peers, over {}, were all refused with the same words: {}. Nothing has          stopped. This node is reading the chain block by block instead, which is how nodes          worked before the shorter way existed, and it checks more rather than less; what it          costs is time and bandwidth. Peers making chains up is one reason for this line. The          other is a chain whose difficulty has fallen far below what it once ran at, which needs          a longer run of headers than this build will take: that one mends itself as the chain          catches up, and until it does every honest node answering is refused in exactly this          way.",
         unweighable.showings,
         unweighable.peers,
-        unweighable.over / 60,
+        roughly(unweighable.over),
         unweighable.because,
     )
 }
@@ -1222,6 +1224,32 @@ mod said_out_loud {
     };
     use cairn_net::node::{Behind, Restored, Unjudged, Unweighable, Unwritten, Writing};
     use cairn_net::Filling;
+
+    /// A stretch under a minute is said in seconds, the way `roughly` says
+    /// every stretch in this file, and not as nought minutes.
+    ///
+    /// The lines about showings that would not weigh and blocks this build
+    /// cannot judge divided by sixty where they stood. Nothing puts a floor
+    /// under how long the showings take to add up, three from two peers can
+    /// arrive inside a minute, and nothing asked, so an operator was told they
+    /// had arrived "over 0 minutes".
+    #[test]
+    fn a_stretch_under_a_minute_is_not_said_as_nought_minutes() {
+        let text = cannot_weigh(&Unweighable {
+            because: "it could not be read as a weighing at all".to_owned(),
+            showings: 3,
+            peers: 2,
+            over: 40,
+        });
+        assert!(
+            text.contains("over 40 seconds"),
+            "forty seconds of showings are not said as forty seconds"
+        );
+        assert!(
+            !text.contains("0 minutes"),
+            "forty seconds of showings are said as nought minutes"
+        );
+    }
 
     /// A disk that dropped a write says so, in the number it dropped.
     ///
