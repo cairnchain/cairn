@@ -1558,4 +1558,252 @@ mod tests {
             "the second connection at the address that just failed took the turn"
         );
     }
+
+    /// A claim of no work opens no choice, and nothing is written down once
+    /// the choice is made.
+    ///
+    /// Both halves of the first line of [`Chooser::noted`], asked apart.
+    /// Nothing asked either, so a `noted` that returned only when the choice
+    /// was made and the claim was empty passed: a claim of nought held every
+    /// peer off, and after the choice the table the finish emptied went on
+    /// filling with what strangers said, for the life of the node.
+    #[test]
+    fn a_claim_of_no_work_opens_nothing_and_a_made_choice_hears_nothing() {
+        let mut empty = Chooser::new();
+        empty.noted(1, Some(host(1)), 0, LONG, true, 100);
+        assert!(
+            !empty.holds_off(2),
+            "a claim of no work at all opened a choice and held every peer off"
+        );
+        assert!(
+            empty.claims.is_empty(),
+            "a claim of no work was written down"
+        );
+
+        let mut made = contested();
+        made.step(200, true, 0, JoinProgress::NothingYet, &[1, 2]);
+        assert_eq!(
+            made.step(210, false, 900, JoinProgress::NothingYet, &[1, 2]),
+            Step::Quiet
+        );
+        made.noted(3, Some(host(3)), 5_000, LONG, true, 211);
+        assert!(
+            made.claims.is_empty(),
+            "a claim heard after the choice was made was kept, though nothing \
+             ever reads it again"
+        );
+    }
+
+    /// A claim equal to what was shown does not outweigh it.
+    ///
+    /// Heavier means heavier. Nothing asked about a tie, so a chooser that
+    /// counted an equal claim as heavier passed, and two peers claiming the
+    /// same chain held each other's showing off until the patience ran out.
+    #[test]
+    fn a_claim_equal_to_the_showing_does_not_hold_it_off() {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(1)), 900, LONG, true, 100);
+        chooser.noted(2, Some(host(2)), 900, LONG, true, 100);
+        assert_eq!(
+            chooser.step(102, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(2, Approach::Join)
+        );
+        assert!(
+            chooser.shown(2, 900, 103),
+            "a claim no heavier than the showing held the commitment off"
+        );
+    }
+
+    /// The patience is against words, and a heavier showing still standing is
+    /// not words.
+    ///
+    /// Once [`PROVEN_PATIENCE`] has run, a lighter showing may be taken over
+    /// heavier claims nobody backed. It may not be taken over a heavier chain
+    /// somebody did show and is still there to hand over. Nothing asked that,
+    /// so a chooser that measured every showing against nothing passed, and a
+    /// node took the lighter of two chains it had seen proved.
+    #[test]
+    fn a_lighter_showing_is_not_taken_over_a_heavier_one_still_standing() {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(1)), 900, LONG, true, 100);
+        chooser.noted(2, Some(host(2)), 500, LONG, true, 100);
+        chooser.noted(3, Some(host(3)), 5_000, LONG, true, 100);
+        assert!(
+            !chooser.shown(1, 900, 102),
+            "a claim of 5000 stands inside the patience"
+        );
+        let over = 102 + OWED_PATIENCE;
+        assert!(
+            !chooser.shown(2, 500, over),
+            "a chain of 500 was taken while a proved chain of 900 was still \
+             there to be handed over"
+        );
+        assert!(
+            chooser.allows(1, 900, over),
+            "and the heavier showing is the one the patience lets through"
+        );
+    }
+
+    /// A read gets its whole answering window, and no more.
+    ///
+    /// Nothing asked about a read that has only just been asked, so a chooser
+    /// that gave up on a read the round after asking it, and never gave up on
+    /// one that had outlasted its window, passed.
+    #[test]
+    fn a_read_is_given_its_answering_window_and_no_more() {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(1)), 900, LONG, false, 100);
+        chooser.noted(2, Some(host(2)), 500, LONG, false, 100);
+        assert_eq!(
+            chooser.step(200, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Read)
+        );
+        assert_eq!(
+            chooser.step(
+                200 + FIRST_ANSWER_PATIENCE - 1,
+                true,
+                0,
+                JoinProgress::NothingYet,
+                &[1, 2]
+            ),
+            Step::Quiet,
+            "a read was given up on inside its answering window"
+        );
+        assert_eq!(
+            chooser.step(
+                200 + FIRST_ANSWER_PATIENCE,
+                true,
+                0,
+                JoinProgress::NothingYet,
+                &[1, 2]
+            ),
+            Step::Ask(2, Approach::Read),
+            "a read that showed nothing in its window was waited on past it"
+        );
+    }
+
+    /// A claim heard in the same second the proof landed stood when it
+    /// landed, and is owed its turn.
+    ///
+    /// The set owed a turn is fixed at the moment of proving, and moments here
+    /// are whole seconds, so a claim written down in that second may have
+    /// arrived before the proof. Nothing asked about that second, so a chooser
+    /// that shut the claim out of it passed.
+    #[test]
+    fn a_claim_heard_in_the_second_of_the_proof_is_owed_its_turn() {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(1)), 900, LONG, true, 100);
+        chooser.noted(3, Some(host(3)), 5_000, LONG, true, 102);
+        assert!(!chooser.shown(1, 900, 102));
+        assert!(
+            !chooser.allows(1, 900, 102 + PROVEN_PATIENCE),
+            "a claim that stood when the proof landed was passed over without \
+             ever being asked"
+        );
+    }
+
+    /// A turn handed out is owed for its answering window, and not a second
+    /// longer.
+    ///
+    /// Nothing asked about the second the window closes, so a chooser that
+    /// kept owing the turn through it passed, and held a proved chain off for
+    /// one more round than the bound it states.
+    #[test]
+    fn a_turn_handed_out_is_owed_for_its_window_and_no_longer() {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(1)), 900, LONG, true, 100);
+        chooser.noted(2, Some(host(2)), 5_000, LONG, true, 100);
+        assert!(
+            !chooser.shown(1, 900, 102),
+            "proven at 102, and 2 claims more"
+        );
+        // Asked as the patience runs out, so on either side of the window's
+        // end the patience is over and only the turn holds anything off.
+        let asked = 102 + PROVEN_PATIENCE;
+        assert_eq!(
+            chooser.step(asked, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(2, Approach::Join)
+        );
+        let closes = asked + FIRST_ANSWER_PATIENCE;
+        assert!(
+            !chooser.allows(1, 900, closes - 1),
+            "the turn handed out was cut short"
+        );
+        assert!(
+            chooser.allows(1, 900, closes),
+            "the turn handed out was still owed once its window had closed"
+        );
+    }
+
+    /// A turn nobody handed out is owed until the shared budget is spent, and
+    /// not a second longer.
+    ///
+    /// [`OWED_PATIENCE`] is one budget for every claim that stood when the
+    /// proof landed. Nothing asked about the second it runs out, so a chooser
+    /// that kept owing turns through it passed.
+    #[test]
+    fn a_turn_nobody_handed_out_is_owed_until_the_budget_is_spent() {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(1)), 900, LONG, true, 100);
+        chooser.noted(2, Some(host(2)), 5_000, LONG, true, 100);
+        assert!(!chooser.shown(1, 900, 102));
+        let spent = 102 + OWED_PATIENCE;
+        assert!(
+            !chooser.allows(1, 900, spent - 1),
+            "a claim never asked lost its turn before the budget was spent"
+        );
+        assert!(
+            chooser.allows(1, 900, spent),
+            "a claim never asked was still owed a turn once the budget was spent"
+        );
+    }
+
+    /// An address's pause ends at the second it is over.
+    ///
+    /// Nothing asked about that second, so a pause one second longer than
+    /// [`held_off_for`] says passed.
+    #[test]
+    fn a_pause_is_over_at_the_second_it_ends() {
+        let paused = |now: u64| {
+            let mut chooser = Chooser::new();
+            let shared = host(9);
+            chooser.noted(1, Some(shared), 900, LONG, true, 100);
+            chooser.noted(2, Some(shared), 500, LONG, true, 100);
+            chooser.noted(3, Some(host(4)), 10, LONG, true, 100);
+            let connected = &[1u64, 2, 3];
+            assert_eq!(
+                chooser.step(102, true, 0, JoinProgress::NothingYet, connected),
+                Step::Ask(1, Approach::Join)
+            );
+            chooser.failed(1, 103);
+            chooser.step(now, true, 0, JoinProgress::NothingYet, connected)
+        };
+        let ends = 103 + held_off_for(1);
+        assert_eq!(
+            paused(ends - 1),
+            Step::Ask(3, Approach::Join),
+            "the pause ended early"
+        );
+        assert_eq!(
+            paused(ends),
+            Step::Ask(2, Approach::Join),
+            "the pause ran a second past its end"
+        );
+    }
+
+    /// A peer claiming exactly what the chain carries is not nudged.
+    ///
+    /// The nudge is for peers still claiming more, and there is nothing more
+    /// in a claim equal to the chain. Nothing asked about a tie, so a finish
+    /// that nudged every peer claiming as much passed.
+    #[test]
+    fn a_peer_claiming_exactly_the_chain_is_not_nudged() {
+        let mut chooser = contested();
+        chooser.step(200, true, 0, JoinProgress::NothingYet, &[1, 2]);
+        assert_eq!(
+            chooser.step(210, false, 500, JoinProgress::NothingYet, &[1, 2]),
+            Step::Quiet,
+            "a peer claiming no more than the chain carries was nudged"
+        );
+    }
 }
