@@ -2681,12 +2681,12 @@ mod tests {
         assert!(
             !said.contains("no longer anywhere"),
             "a node that stopped {} blocks behind still held all of them, and the line \
-             says they are gone: {said}",
+             says they are gone",
             MAX_BEHIND + 1
         );
         assert!(
             said.contains("asks the network"),
-            "and it does not say where a restart finds them: {said}"
+            "and it does not say where a restart finds them"
         );
     }
 
