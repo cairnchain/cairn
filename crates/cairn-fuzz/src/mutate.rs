@@ -25,14 +25,14 @@
 use crate::Rng;
 
 /// Bytes worth writing where a byte is read.
-pub const INTERESTING_U8: &[u8] = &[0x00, 0x01, 0x02, 0x03, 0x7f, 0x80, 0x81, 0xfe, 0xff];
+pub(crate) const INTERESTING_U8: &[u8] = &[0x00, 0x01, 0x02, 0x03, 0x7f, 0x80, 0x81, 0xfe, 0xff];
 
 /// Counts worth writing where a length is read.
 ///
 /// `MAX_SEQUENCE_LEN` and the value just past it are here by name: that
 /// boundary is checked in `cairn-primitives::codec` and again, differently, in
 /// every decoder that caps a sequence of its own.
-pub const INTERESTING_U32: &[u32] = &[
+pub(crate) const INTERESTING_U32: &[u32] = &[
     0,
     1,
     2,
@@ -58,7 +58,7 @@ pub const INTERESTING_U32: &[u32] = &[
 ];
 
 /// Values worth writing where a height, a position or a timestamp is read.
-pub const INTERESTING_U64: &[u64] = &[
+pub(crate) const INTERESTING_U64: &[u64] = &[
     0,
     1,
     2,
@@ -285,7 +285,7 @@ fn splice_in(rng: &mut Rng, bytes: Vec<u8>, corpus: &[Vec<u8>]) -> Vec<u8> {
 /// reaches a decoder's later branches carrying material it was never handed
 /// alongside those branches before.
 #[must_use]
-pub fn splice(rng: &mut Rng, head: &[u8], tail: &[u8]) -> Vec<u8> {
+pub(crate) fn splice(rng: &mut Rng, head: &[u8], tail: &[u8]) -> Vec<u8> {
     let cut = rng.between(0, head.len());
     let from = rng.between(0, tail.len());
     let mut out = Vec::with_capacity(head.len().saturating_add(tail.len()));

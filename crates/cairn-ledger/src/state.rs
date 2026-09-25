@@ -341,7 +341,7 @@ pub struct ColdSpend {
     pub id: NoteId,
     /// Where the note sits in the forest. Positions are handed out in order
     /// and never reused, so this is stable for the life of the chain.
-    pub position: u64,
+    pub(crate) position: u64,
     pub note: Note,
     /// What the spender presented. Kept because taking the note back out of
     /// the forest on a reorganisation needs the same siblings.
@@ -405,7 +405,7 @@ pub const WATCHED_NOTES: usize = 8_192;
 /// comment used to contradict: the network does not need it, and the person
 /// who does is whoever lost their own proof.
 #[derive(Clone, Debug)]
-pub enum ColdSet {
+pub(crate) enum ColdSet {
     Roots(Forest),
     Archive(Archive),
 }
@@ -426,14 +426,15 @@ pub struct ColdTier {
 
 impl ColdTier {
     /// What a node that only validates keeps.
-    pub fn plain() -> Self {
+    #[cfg(test)]
+    fn plain() -> Self {
         Self {
             now: ColdSet::plain(),
         }
     }
 
     /// What a node that can answer with proofs keeps.
-    pub fn archiving() -> Self {
+    fn archiving() -> Self {
         Self {
             now: ColdSet::archiving(),
         }
@@ -455,7 +456,7 @@ impl ColdTier {
         self.now.is_empty()
     }
 
-    pub fn next_position(&self) -> u64 {
+    fn next_position(&self) -> u64 {
         self.now.next_position()
     }
 
@@ -510,16 +511,17 @@ impl Default for ColdSet {
 
 impl ColdSet {
     /// What a node that only validates keeps.
-    pub fn plain() -> Self {
+    #[cfg(test)]
+    fn plain() -> Self {
         Self::Roots(Forest::new())
     }
 
     /// What a node that can answer with proofs keeps.
-    pub fn archiving() -> Self {
+    fn archiving() -> Self {
         Self::Archive(Archive::new())
     }
 
-    pub fn is_archiving(&self) -> bool {
+    fn is_archiving(&self) -> bool {
         matches!(self, Self::Archive(_))
     }
 
@@ -531,31 +533,31 @@ impl ColdSet {
     }
 
     /// The thirty two bytes the state commitment folds in.
-    pub fn commitment(&self) -> Hash32 {
+    fn commitment(&self) -> Hash32 {
         self.forest().commitment()
     }
 
     /// Notes still standing in the cold set.
-    pub fn len(&self) -> u64 {
+    fn len(&self) -> u64 {
         self.forest().len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.forest().is_empty()
     }
 
     /// Positions handed out so far, which is where the next one goes.
-    pub fn next_position(&self) -> u64 {
+    fn next_position(&self) -> u64 {
         self.forest().leaves()
     }
 
     /// Whether the note at `position` is what the proof says it is.
-    pub fn verify(&self, position: u64, leaf: Hash32, proof: &ForestProof) -> bool {
+    fn verify(&self, position: u64, leaf: Hash32, proof: &ForestProof) -> bool {
         self.forest().verify(position, leaf, proof)
     }
 
     /// Builds a proof. Only an archivist can answer.
-    pub fn prove(&self, position: u64) -> Option<ForestProof> {
+    fn prove(&self, position: u64) -> Option<ForestProof> {
         match self {
             Self::Roots(_) => None,
             Self::Archive(archive) => archive.prove(position),
@@ -564,7 +566,7 @@ impl ColdSet {
 
     /// Where a fallen note sits. Only an archivist can answer, which is
     /// exactly the service a wallet that lost its record pays for.
-    pub fn locate(&self, id: &NoteId, note: &Note) -> Option<u64> {
+    fn locate(&self, id: &NoteId, note: &Note) -> Option<u64> {
         match self {
             Self::Roots(_) => None,
             Self::Archive(archive) => archive.locate(cold_leaf(id, note)),
@@ -572,7 +574,8 @@ impl ColdSet {
     }
 
     /// The leaf at a position, if this holder keeps leaves at all.
-    pub fn leaf_at(&self, position: u64) -> Option<Hash32> {
+    #[cfg(test)]
+    fn leaf_at(&self, position: u64) -> Option<Hash32> {
         match self {
             Self::Roots(_) => None,
             Self::Archive(archive) => archive.leaf_at(position),
@@ -630,7 +633,7 @@ impl ColdSet {
 
     /// The proof for a position: the one being kept current, or one rebuilt
     /// from the leaves if this is an archivist.
-    pub fn proof_of(&self, position: u64) -> Option<ForestProof> {
+    fn proof_of(&self, position: u64) -> Option<ForestProof> {
         match self {
             Self::Roots(forest) => forest.proof_of(position).cloned(),
             Self::Archive(archive) => archive.prove(position),
@@ -729,9 +732,9 @@ pub struct StateTransition {
     /// The coinbase this block paid and the height its notes may first be
     /// spent at, or nothing when it paid nobody and so created nothing that
     /// has to wait.
-    pub coinbase: Option<Maturing>,
+    pub(crate) coinbase: Option<Maturing>,
     /// What the coinbase created.
-    pub minted: Amount,
+    pub(crate) minted: Amount,
     /// What the transfers gave up as fees, which is money that existed before
     /// this block and does not after it, whether or not the coinbase took it.
     pub fees: Amount,
@@ -1033,13 +1036,13 @@ pub struct LedgerState {
 /// in the wrong order would build a ledger that is wrong in a way nothing here
 /// would notice, which is the one thing a rebuilt ledger must not be.
 pub(crate) struct Pieces {
-    pub hot: Vec<(NoteId, HotEntry)>,
-    pub cold: Forest,
-    pub grace: VecDeque<Vec<Fallen>>,
-    pub maturing: VecDeque<Maturing>,
-    pub supply: Amount,
-    pub headers_before_tip: Forest,
-    pub recent: Vec<HeaderSummary>,
+    pub(crate) hot: Vec<(NoteId, HotEntry)>,
+    pub(crate) cold: Forest,
+    pub(crate) grace: VecDeque<Vec<Fallen>>,
+    pub(crate) maturing: VecDeque<Maturing>,
+    pub(crate) supply: Amount,
+    pub(crate) headers_before_tip: Forest,
+    pub(crate) recent: Vec<HeaderSummary>,
 }
 
 impl LedgerState {
@@ -1333,7 +1336,7 @@ impl LedgerState {
     }
 
     /// Parent identifier the next block must carry.
-    pub fn expected_parent(&self) -> Hash32 {
+    pub(crate) fn expected_parent(&self) -> Hash32 {
         self.tip.map_or(Hash32::ZERO, |tip| tip.id)
     }
 
@@ -1500,7 +1503,7 @@ impl LedgerState {
     /// persistent, and the cold side only ever needs its roots, because
     /// appending takes nothing else and removing takes a proof the block
     /// already carries.
-    pub fn project(&self, transition: &StateTransition, height: u64) -> Option<Hash32> {
+    pub(crate) fn project(&self, transition: &StateTransition, height: u64) -> Option<Hash32> {
         let mut hot_tree = self.hot_tree.clone();
         let mut cold = ColdSet::Roots(self.cold.now.snapshot());
         let fallen = replay(
@@ -1537,7 +1540,7 @@ impl LedgerState {
     /// Worked out where a refusal can be reported as what it is, rather than
     /// inside the projection where the only answer available is that the block
     /// produces no root at all.
-    pub fn supply_after(&self, transition: &StateTransition) -> Option<Amount> {
+    pub(crate) fn supply_after(&self, transition: &StateTransition) -> Option<Amount> {
         supply_after(self.supply, transition.minted, transition.fees)
     }
 

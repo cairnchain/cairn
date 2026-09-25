@@ -31,7 +31,7 @@ pub enum Built {
 /// What one arm fed a decoder, and how much of it the decoder took.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Arm {
-    pub fed: usize,
+    fed: usize,
     pub accepted: usize,
 }
 
@@ -49,7 +49,7 @@ impl Arm {
     /// with a decimal point in it invites reading the number as a
     /// measurement of something rather than as the shape of the run.
     #[must_use]
-    pub fn per_thousand(&self) -> usize {
+    fn per_thousand(&self) -> usize {
         self.accepted
             .saturating_mul(1_000)
             .checked_div(self.fed)

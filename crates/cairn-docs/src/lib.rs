@@ -84,4 +84,4 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// What every step here answers with.
-pub type Result<T> = std::result::Result<T, Error>;
+type Result<T> = std::result::Result<T, Error>;

@@ -13,7 +13,7 @@
 
 pub mod history;
 pub mod keyfile;
-pub mod page;
+mod page;
 pub mod serve;
 
 use std::collections::{BTreeMap, BTreeSet};

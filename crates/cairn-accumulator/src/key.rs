@@ -50,7 +50,7 @@ impl Key {
 
     /// The bit that picks a side at `depth`, counting from the most significant
     /// bit of the first byte. `true` means the right child.
-    pub fn bit(&self, depth: usize) -> bool {
+    pub(crate) fn bit(&self, depth: usize) -> bool {
         let byte_index = depth.checked_div(8).unwrap_or(0);
         let bit_index = u32::try_from(depth.checked_rem(8).unwrap_or(0)).unwrap_or(0);
         self.0.get(byte_index).is_some_and(|byte| {
@@ -60,7 +60,7 @@ impl Key {
     }
 
     /// Whether the two keys agree on their first `bits` bits.
-    pub fn shares_prefix(&self, other: &Self, bits: usize) -> bool {
+    pub(crate) fn shares_prefix(&self, other: &Self, bits: usize) -> bool {
         let bits = bits.min(MAX_DEPTH);
         let whole_bytes = bits.checked_div(8).unwrap_or(0);
         let leftover_bits = u32::try_from(bits.checked_rem(8).unwrap_or(0)).unwrap_or(0);

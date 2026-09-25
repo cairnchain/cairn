@@ -21,14 +21,14 @@ use crate::{seed_for, Rng};
 /// Fixed rather than drawn from the clock, because a suite whose cases change
 /// between runs is a suite where a regression that reappears on Tuesday can be
 /// argued away as noise on Wednesday.
-pub const DEFAULT_SEED: u64 = 0xCA12_F022_1D05_CA12;
+pub(crate) const DEFAULT_SEED: u64 = 0xCA12_F022_1D05_CA12;
 
 /// What a campaign did, for the test to report and to assert a floor on.
 #[derive(Clone, Copy, Debug)]
 pub struct Ran {
     pub cases: usize,
-    pub elapsed: Duration,
-    pub seed: u64,
+    elapsed: Duration,
+    seed: u64,
 }
 
 /// One named campaign, with its case count and its seed settled.

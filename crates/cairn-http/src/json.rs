@@ -125,17 +125,17 @@ impl Writer {
         escape_into(value, &mut self.out);
     }
 
-    pub fn u64(&mut self, value: u64) {
+    fn u64(&mut self, value: u64) {
         self.separate();
         let _ = write!(self.out, "{value}");
     }
 
-    pub fn usize(&mut self, value: usize) {
+    fn usize(&mut self, value: usize) {
         self.separate();
         let _ = write!(self.out, "{value}");
     }
 
-    pub fn bool(&mut self, value: bool) {
+    fn bool(&mut self, value: bool) {
         self.separate();
         self.out.push_str(if value { "true" } else { "false" });
     }

@@ -9,17 +9,13 @@ pub mod choosing;
 pub mod joining;
 pub mod message;
 pub mod node;
-pub mod refusal;
+mod refusal;
 pub mod seeds;
 pub mod sync;
 pub mod wire;
 
-pub use book::AddressBook;
 pub use joining::Joined;
-pub use message::{Handshake, Keeps, Message, PeerAddress, Placed, MAX_PROVEN, PROTOCOL_VERSION};
+pub use message::{Keeps, Message, PeerAddress, MAX_PROVEN, PROTOCOL_VERSION};
 pub use node::{
-    Filling, Node, NodeError, Recovered, Restored, Unanswered, KEEP_BLOCK_BYTES, NAME_LOOKUP_PERIOD,
+    Filling, Node, NodeError, Restored, Unanswered, KEEP_BLOCK_BYTES, NAME_LOOKUP_PERIOD,
 };
-pub use seeds::start_from;
-pub use sync::{on_message, DropReason, Local, PeerState, Reaction};
-pub use wire::{read_message, write_message, WireError, MAX_FRAME_BYTES};

@@ -1149,9 +1149,9 @@ fn resolve_transfer(
 /// What applying a block body does to the state, computed without mutation.
 #[derive(Clone, Debug)]
 pub struct BlockEffect {
-    pub transition: StateTransition,
-    pub total_fees: Amount,
-    pub state_root: Hash32,
+    transition: StateTransition,
+    total_fees: Amount,
+    state_root: Hash32,
 }
 
 fn check_coinbase_shape(
