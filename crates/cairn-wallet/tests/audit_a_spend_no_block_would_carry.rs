@@ -53,11 +53,12 @@ use std::path::PathBuf;
 use cairn_chain::ChainStore;
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::Block;
-use cairn_ledger::note::Note;
-use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
+use cairn_ledger::note::{Note, NoteId};
+use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
-use cairn_primitives::Amount;
+use cairn_primitives::codec::Encode;
+use cairn_primitives::{Amount, Hash32};
 use cairn_wallet::{Wallet, WalletError};
 
 const NOW: u64 = 2_000_000_000;
@@ -293,4 +294,83 @@ fn every_spend_the_wallet_accepts_is_one_a_block_would_carry() {
         "the sweep never reached a spend too large to carry, so the guard under test was \
          never asked anything: the largest gather was {widest} notes"
     );
+}
+
+/// A spend exactly as large as a block carries is let through, and a miner
+/// chooses it.
+///
+/// The refusal above is for a spend no block carries, and a block carries one
+/// that fills its room to the byte: the pool and the miner both turn away only
+/// what is larger. Neither test above lands on that byte, so a wallet that also
+/// refused the spend that fits exactly passed, and turned away a payment every
+/// node would have carried.
+#[test]
+fn a_spend_exactly_as_large_as_a_block_carries_is_let_through() {
+    let mine = SecretKey::from_bytes(&[4; 32]);
+    let payee = SecretKey::from_bytes(&[9; 32]).public_key();
+
+    // The spend below gathers one note and pays out two, the payment and the
+    // change. Every field of it is a fixed width, so this is its size to the
+    // byte whatever the notes hold.
+    let shape = Transfer::new(
+        vec![Input::hot(NoteId::new(Hash32::ZERO, 0))],
+        vec![Note::new(Amount::ZERO, payee); 2],
+    );
+    let spend = shape.encode().len();
+    let reserve = BLOCK_BYTES - ChainStore::room_for_transfers(BLOCK_BYTES);
+    let rules = ConsensusParams::testnet()
+        .with_coinbase_maturity(0)
+        .with_max_block_bytes(spend + reserve);
+    assert_eq!(
+        ChainStore::room_for_transfers(rules.max_block_bytes),
+        spend,
+        "a block of this size has room for exactly this spend, or this asks nothing"
+    );
+
+    let mut state = LedgerState::new();
+    let height = state.next_height().unwrap();
+    let coinbase = CoinbaseTransaction::new(
+        height,
+        vec![Note::new(rules.initial_reward, mine.public_key())],
+    );
+    let block = assemble_block(&state, coinbase, Vec::<Transfer>::new(), &rules, 1_600, 0).unwrap();
+    let block = mine_block(block, ATTEMPTS).unwrap();
+    connect_block(&mut state, &block, &rules, NOW).unwrap();
+
+    let directory = scratch("exactly");
+    std::fs::create_dir_all(&directory).unwrap();
+    let key_file = directory.join("key");
+    cairn_wallet::keyfile::write(&key_file, &mine).unwrap();
+    let (wallet, _) = Wallet::open(&key_file, rules, &directory.join("data")).unwrap();
+    wallet.node().submit_block(block).unwrap();
+    wallet.follow_to_the_tip();
+
+    let asking = Amount::from_cairn("10").unwrap();
+    let fee = wallet.floor_for(payee, asking);
+    let sent = match wallet.send(payee, asking, fee) {
+        Ok(sent) => sent,
+        Err(refused) => panic!(
+            "a spend of exactly the {spend} bytes a block carries was refused, and every \
+             node would have carried it: {refused}"
+        ),
+    };
+    assert_eq!(
+        sent.notes, 1,
+        "one note gathered, as the shape above was measured"
+    );
+    assert!(
+        sent.change > Amount::ZERO,
+        "and a change output, as the shape above was measured"
+    );
+
+    let chosen = wallet
+        .node()
+        .with_chain(|held| held.selection(rules.max_transfers_per_block).0);
+    assert!(
+        chosen.iter().any(|transfer| transfer.id() == sent.id),
+        "and a miner reading this pool chooses it"
+    );
+
+    wallet.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
 }

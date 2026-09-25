@@ -812,6 +812,75 @@ mod tests {
         );
     }
 
+    /// Asking for mainnet is told that mainnet does not exist yet, and asking
+    /// for a name nobody uses is told the name is unknown.
+    ///
+    /// Both were only held to be refusals, so a node that told the operator
+    /// asking for mainnet that it had never heard of it, and told everyone
+    /// else that mainnet has not been mined yet, passed.
+    #[test]
+    fn a_refused_network_is_told_why_it_was_refused() {
+        let said = |name: &str| -> String {
+            match resolve_options(&args(&["--network", name])) {
+                Err(Stopping::Misread(said)) => said,
+                Err(Stopping::CouldNotStart(said)) => format!("a failed start: {said}"),
+                Ok(_) => "accepted".to_owned(),
+            }
+        };
+        assert!(
+            matches!(
+                resolve_options(&args(&["--network", "mainnet"])),
+                Err(Stopping::Misread(_))
+            ),
+            "a network name is a misread command line, not a failed start"
+        );
+        let mainnet = said("mainnet");
+        assert!(
+            mainnet.contains("does not exist yet"),
+            "mainnet is not called an unknown name: {mainnet}"
+        );
+        let moonnet = said("moonnet");
+        assert!(
+            moonnet.contains("unknown network `moonnet`"),
+            "a name nobody uses is called unknown: {moonnet}"
+        );
+        assert!(
+            !moonnet.contains("does not exist yet"),
+            "and is not told it has yet to be mined: {moonnet}"
+        );
+    }
+
+    /// The summary says the seeds were written into the program only when
+    /// nobody named any.
+    ///
+    /// Nothing read that line, so a summary that said "written into the
+    /// program, none given" above the seeds an operator typed, and said
+    /// nothing about where a node given none got its seeds from, passed.
+    #[test]
+    fn the_summary_says_where_the_seeds_came_from() {
+        let mut options = resolve_options(&args(&["--seed", "127.0.0.1:1111"]))
+            .unwrap()
+            .unwrap();
+        let summary = describe(&options);
+        assert!(
+            summary.contains("seed         127.0.0.1:1111"),
+            "the seed named is listed: {summary}"
+        );
+        assert!(
+            !summary.contains("written into the program"),
+            "a seed the operator named is not called one written in: {summary}"
+        );
+
+        // The same addresses as a node that was given none would have them,
+        // off the list written in for its network.
+        options.seeds_asked_for = false;
+        let summary = describe(&options);
+        assert!(
+            summary.contains("seeds        written into the program, none given"),
+            "a node given no seed says where its seeds came from: {summary}"
+        );
+    }
+
     #[test]
     fn a_mining_key_must_be_a_usable_key() {
         let secret = cairn_crypto::SecretKey::from_bytes(&[3; 32]);

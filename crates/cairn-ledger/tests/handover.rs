@@ -9,7 +9,7 @@
     clippy::arithmetic_side_effects
 )]
 
-use cairn_accumulator::Archive;
+use cairn_accumulator::{Archive, ForestProof};
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::handover::{accept, Handover, HandoverError};
@@ -19,6 +19,7 @@ use cairn_ledger::state::{GRACE_BLOCKS, GRACE_NOTES};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
 use cairn_ledger::LedgerState;
+use cairn_primitives::codec::{CodecError, Decode, Encode};
 use cairn_primitives::{Amount, Hash32};
 
 const NOW: u64 = 2_000_000_000;
@@ -1107,4 +1108,60 @@ fn a_recent_run_is_refused_when_its_version_or_its_work_does_not_hold() {
         }
         other => panic!("a recent run whose work does not add up: {other:?}"),
     }
+}
+
+/// A grace window of exactly what the rules keep crosses the wire, and one
+/// note or one path more is refused while it is being read.
+///
+/// The decoder holds the window and the paths beside it to `GRACE_NOTES`
+/// before it reserves for either. Every handover written out here carried a
+/// window far under that, and the tests that stuffed one to the ceiling or
+/// past it handed the struct to `accept` without writing it down. So the
+/// comparisons could refuse a full window the rules allow, or read any window
+/// that does not land on the ceiling exactly, and pass.
+#[test]
+fn a_grace_window_at_its_ceiling_crosses_the_wire_and_one_more_does_not() {
+    let miner = wallet(1);
+    let mut node = Node::new();
+    node.mine_empty(&miner, RECENT_HEADERS + 4);
+
+    let honest = node.handover();
+    let (id, place, fallen) = honest
+        .grace
+        .iter()
+        .flatten()
+        .next()
+        .copied()
+        .expect("a window with something in it");
+
+    // What the decoder is asked is how many, not whether they make a window,
+    // so one note and one path repeated is enough.
+    let mut full = honest.clone();
+    full.grace = vec![vec![(id, place, fallen); GRACE_NOTES]];
+    full.grace_proofs = vec![(place, ForestProof::default()); GRACE_NOTES];
+    let read = Handover::decode(&full.encode()).expect("a window of exactly what the rules keep");
+    assert_eq!(read.grace.iter().map(Vec::len).sum::<usize>(), GRACE_NOTES);
+    assert_eq!(read.grace_proofs.len(), GRACE_NOTES);
+
+    let mut one_note_more = full.clone();
+    one_note_more.grace[0].push((id, place, fallen));
+    assert_eq!(
+        Handover::decode(&one_note_more.encode()).err(),
+        Some(CodecError::InvalidValue {
+            type_name: "Handover grace window"
+        }),
+        "a window one note past what the rules keep was read"
+    );
+
+    let mut one_path_more = full;
+    one_path_more
+        .grace_proofs
+        .push((place, ForestProof::default()));
+    assert_eq!(
+        Handover::decode(&one_path_more.encode()).err(),
+        Some(CodecError::InvalidValue {
+            type_name: "Handover grace proofs"
+        }),
+        "paths one past what the window can hold were read"
+    );
 }

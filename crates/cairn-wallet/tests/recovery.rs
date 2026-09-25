@@ -441,3 +441,82 @@ fn a_path_that_has_gone_stale_is_not_offered_and_is_asked_for_again() {
     drop(stuck.wallet);
     let _ = std::fs::remove_dir_all(&stuck.directory);
 }
+
+/// **Somebody new to ask is asked at once, and nobody new is not.**
+///
+/// The pause that keeps a page from asking once a second gives way to exactly
+/// two arrivals: the first peer of a wallet that had nobody to ask, and an
+/// archivist where there was none. Each is a moment somebody is waiting on.
+///
+/// The one test that reached this let an archivist arrive at a wallet that had
+/// asked nobody, which is both arrivals at once, so either half of the rule
+/// could be wrong and it still passed. A wallet that ignored its first peer
+/// until the pause ran out passed, so did one that ignored an archivist once it
+/// had asked anybody, and so did one that put the same question to the same
+/// peers on every redraw.
+#[test]
+fn somebody_new_to_ask_is_asked_at_once_and_nobody_new_is_not() {
+    let stuck = a_wallet_that_lost_its_record("new-to-ask");
+    let wallet = &stuck.wallet;
+
+    let alone = wallet.recover_stranded();
+    assert_eq!(alone.asked, 0, "nobody is connected yet");
+    assert!(alone.stranded > 0, "and there is money to ask about");
+
+    // A peer that keeps no record, which is the most an ordinary wallet has.
+    let plain = Node::bind(params(), loopback()).unwrap();
+    assert!(wallet.reach(plain.address()));
+    wait_for("the plain peer to introduce itself", || {
+        wallet.node().peers_introduced() >= 1
+    });
+    assert_eq!(
+        wallet.node().archiving_peers(),
+        0,
+        "the peer keeps no record, so only the first half of the rule applies"
+    );
+
+    let first_peer = wallet.recover_stranded();
+    assert!(
+        first_peer.asked >= 1,
+        "a wallet that had nobody to ask waited out its pause instead of asking \
+         the first peer it had"
+    );
+    assert_eq!(first_peer.archivists, 0);
+    let told = wallet.last_recovery();
+    assert_eq!(
+        (told.stranded, told.asked),
+        (first_peer.stranded, first_peer.asked),
+        "what the last asking came to is not what the face redrawing is shown"
+    );
+
+    // The page redraws. Same places, same peers, same nothing.
+    let questions = wallet.node().proofs_asked_for();
+    let redrawn = wallet.recover_stranded();
+    assert_eq!(
+        wallet.node().proofs_asked_for(),
+        questions,
+        "a redraw with nobody new to ask put the same question to the same peers \
+         again"
+    );
+    assert_eq!(
+        redrawn.asked, first_peer.asked,
+        "and said what it said before"
+    );
+
+    // An archivist arrives at a wallet that has already asked somebody.
+    assert!(wallet.reach(stuck.keeper.address()));
+    wait_for("the archivist to say what it keeps", || {
+        wallet.node().archiving_peers() >= 1
+    });
+    let archivist = wallet.recover_stranded();
+    assert!(
+        archivist.archivists >= 1 && archivist.rebuilt > 0,
+        "an archivist arrived and the wallet went on waiting out its pause, \
+         because it had asked a peer before: {archivist:?}"
+    );
+
+    plain.shutdown();
+    stuck.keeper.shutdown();
+    drop(stuck.wallet);
+    let _ = std::fs::remove_dir_all(&stuck.directory);
+}

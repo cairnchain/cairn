@@ -706,3 +706,32 @@ impl Decode for Message {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Joining, Message, MAX_JOIN_PARTS};
+    use cairn_primitives::codec::{Decode, Encode};
+    use cairn_primitives::Hash32;
+
+    /// The last piece of the largest answer allowed is read, not refused.
+    ///
+    /// The ceiling on pieces was asked from above only, with one past it, so
+    /// a decoder that refused an answer cut into exactly [`MAX_JOIN_PARTS`]
+    /// pieces passed. That is the answer the constant says is allowed, and a
+    /// node refusing it could never finish joining from a peer that sent it.
+    #[test]
+    fn the_last_piece_of_the_largest_answer_allowed_is_read() {
+        let last = Message::JoinPart {
+            what: Joining::Ledger,
+            at: Hash32::ZERO,
+            part: MAX_JOIN_PARTS.saturating_sub(1),
+            parts: MAX_JOIN_PARTS,
+            bytes: vec![7u8; 16],
+        };
+        assert_eq!(
+            Message::decode(&last.encode()),
+            Ok(last),
+            "an answer in exactly as many pieces as the ceiling allows was refused"
+        );
+    }
+}

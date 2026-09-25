@@ -485,6 +485,64 @@ mod tests {
         assert_eq!(contents.trim().len(), 64, "and it still holds the key");
     }
 
+    /// A key file named without a directory is made durable in the directory
+    /// it is written to, which is the one the wallet was started in.
+    ///
+    /// No test named a key file without a directory, so a sync that read the
+    /// directory the wrong way round passed: for every path the tests used it
+    /// synced the current directory in place of the right one, which succeeds.
+    /// Given a bare name it asks for a directory with no name at all, and
+    /// `write` then tells somebody whose key is safely on disk that the machine
+    /// would not confirm it.
+    #[test]
+    fn a_key_named_without_a_directory_is_made_durable_where_it_is_written() {
+        assert!(
+            sync_the_directory(Path::new("key")).is_ok(),
+            "a key file named on its own lives in the directory the wallet runs \
+             in, and syncing that directory was refused"
+        );
+    }
+
+    /// A key file whose directory will not confirm it is not reported as
+    /// written.
+    ///
+    /// The address a new key makes is read off the screen and given out, so
+    /// "written" has to mean on the disk under its name. Nothing held that to
+    /// the directory: a write that skipped syncing it, or synced some other
+    /// directory, passed every test, because every directory the tests used
+    /// answered.
+    ///
+    /// A directory that lets files be made in it and cannot itself be opened
+    /// is one that will not answer. Somebody who can read anything reads this
+    /// one too, so under root there is nothing to refuse and the test says so
+    /// by returning early.
+    #[cfg(unix)]
+    #[test]
+    fn a_key_whose_directory_will_not_confirm_it_is_not_called_written() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let sealed = scratch("unconfirmed").join("sealed");
+        std::fs::create_dir_all(&sealed).unwrap();
+        let mode = |bits| std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(bits));
+        mode(0o300).unwrap();
+        if std::fs::File::open(&sealed).is_ok() {
+            mode(0o700).unwrap();
+            return;
+        }
+
+        let outcome = write(&sealed.join("key"), &SecretKey::from_bytes(&[6; 32]));
+        mode(0o700).unwrap();
+        let said = outcome.expect_err(
+            "a key file whose directory would not be synced was reported as written, \
+             and its address would be given out",
+        );
+        assert!(said.contains("would not confirm it"), "{said}");
+        assert!(
+            said.contains("Check the file is there"),
+            "and the person is told what to do before giving the address out: {said}"
+        );
+    }
+
     /// Windows has no mode to read back, so what is checked is the whole of
     /// what the standard library can promise there: while the handle writing
     /// the key is open, nobody else gets one. Everything past that instant is

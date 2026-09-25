@@ -35,7 +35,9 @@ use cairn_ledger::validation::{assemble_block, connect_block, mine_block, Consen
 use cairn_ledger::LedgerState;
 use cairn_primitives::codec::Encode;
 use cairn_primitives::hash::counting;
-use cairn_store::{BlockLog, HeaderLog, BLOCK_INDEX, BLOCK_LOG, HEADER_BYTES, HEADER_LOG};
+use cairn_store::{
+    BlockLog, HeaderLog, StoreError, BLOCK_INDEX, BLOCK_LOG, HEADER_BYTES, HEADER_LOG,
+};
 
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
@@ -44,6 +46,10 @@ const ATTEMPTS: u64 = 1 << 22;
 /// the header, whose version, network, height, previous and transactions root
 /// come first.
 const STATE_ROOT_IN_RECORD: usize = 4 + 2 + 4 + 8 + 32 + 32;
+
+/// Where `previous` sits inside a record: four bytes of length prefix, then
+/// the header's version, network and height.
+const PREVIOUS_IN_RECORD: usize = 4 + 2 + 4 + 8;
 
 fn scratch(name: &str) -> PathBuf {
     let directory =
@@ -250,6 +256,43 @@ fn no_single_flipped_byte_makes_a_height_answer_with_another_block() {
         "{tried} flips: {wrong} wrong answers from a record with another one \
          after it, {wrong_from_the_index} from the index. First: {first}"
     );
+}
+
+/// The last record, which has no record after it to name it.
+///
+/// The sweep above counts it apart, and says what it is held to instead: what
+/// the record before can say about it, which is its height and its parent.
+/// The height is checked against the height asked for. The parent was held by
+/// nothing: reading the record before as though it were not there, which the
+/// check takes as nothing to compare against, left the suite green, and a tip
+/// naming a parent this log does not hold was served as the block at its
+/// height.
+#[test]
+fn the_last_record_is_refused_when_it_names_a_parent_the_log_does_not_hold() {
+    let blocks = chain(4);
+    let directory = scratch("last-parent");
+    built(&directory, &blocks);
+
+    let path = directory.join(BLOCK_LOG);
+    let whole = std::fs::read(&path).unwrap();
+    let at = *records(&whole).last().unwrap() + PREVIOUS_IN_RECORD;
+    put(&path, at as u64, &[whole[at] ^ 0x01]);
+
+    let (log, recovered) = BlockLog::open(&directory).expect("the open decodes two records");
+    assert_eq!(recovered.blocks, 4, "nothing about the shape gives it away");
+
+    let answer = log.read_at(3).map(|found| found.map(|block| block.id()));
+    assert!(
+        matches!(answer, Err(StoreError::Unlinked { height: 3 })),
+        "the last record names a parent this log does not hold, and height 3 \
+         was not refused as unlinked"
+    );
+    // The link between the two is what broke, so the record before is refused
+    // as well, and the two before that are untouched.
+    assert!(log.read_at(2).is_err());
+    assert_eq!(log.read_at(0).unwrap().unwrap().id(), blocks[0].id());
+    assert_eq!(log.read_at(1).unwrap().unwrap().id(), blocks[1].id());
+    let _ = std::fs::remove_dir_all(&directory);
 }
 
 /// What the checks cost, against what the block they answer about costs.

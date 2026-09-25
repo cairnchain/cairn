@@ -19,7 +19,9 @@ use cairn_crypto::SecretKey;
 use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::state::GRACE_NOTES;
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
-use cairn_ledger::validation::{assemble_block, connect_block, disconnect_block, ConsensusParams};
+use cairn_ledger::validation::{
+    assemble_block, connect_block, disconnect_block, BlockError, ConsensusParams,
+};
 use cairn_ledger::LedgerState;
 use cairn_primitives::Amount;
 
@@ -285,5 +287,45 @@ fn a_landing_larger_than_the_window_leaves_nothing_spendable_without_a_proof() {
         state.grace_len(),
         before_window.iter().map(Vec::len).sum::<usize>(),
         "the index came back holding something the window does not"
+    );
+}
+
+/// A block that would carry the issued total past what an amount can hold is
+/// refused for that, by name.
+///
+/// The total is asked before the projection so a block that breaks it is
+/// reported as what it is. No fixture here issues more than a few hundred
+/// CAIRN, so a ledger that answered every block's new total as nought passed:
+/// the block was still refused, one step later and for the wrong reason, as a
+/// note not where its proof said.
+#[test]
+fn a_block_carrying_the_issued_total_past_the_ceiling_is_refused_for_that() {
+    // A first block that issues everything an amount can hold, which is the
+    // shortest way to a total with no room left above it.
+    let mut params = ConsensusParams::testnet().with_coinbase_maturity(0);
+    params.initial_reward = Amount::MAX_MONEY;
+    let miner = wallet(1);
+    let mut state = LedgerState::new();
+
+    let coinbase =
+        CoinbaseTransaction::new(0, vec![Note::new(Amount::MAX_MONEY, miner.public_key())]);
+    let block = assemble_block(&state, coinbase, Vec::new(), &params, 1_000, 0).unwrap();
+    connect_block(&mut state, &block, &params, NOW).unwrap();
+    assert_eq!(
+        state.supply(),
+        Amount::MAX_MONEY,
+        "the total is at the ceiling"
+    );
+
+    let one = Amount::from_pebbles(1).unwrap();
+    let coinbase = CoinbaseTransaction::new(1, vec![Note::new(one, miner.public_key())]);
+    assert_eq!(
+        assemble_block(&state, coinbase, Vec::new(), &params, 1_600, 0).err(),
+        Some(BlockError::SupplyDoesNotAddUp {
+            supply: Amount::MAX_MONEY,
+            minted: one,
+            fees: Amount::ZERO,
+        }),
+        "a block issuing one pebble over the ceiling was not refused for the total"
     );
 }

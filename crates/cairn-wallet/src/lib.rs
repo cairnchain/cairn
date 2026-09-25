@@ -936,7 +936,10 @@ pub const CATCH_UP_BATCH: u64 = 512;
 
 /// How long the chain has to sit still, with somebody to ask, before catching
 /// up counts as done.
-const SETTLED_FOR: Duration = Duration::from_secs(2);
+///
+/// Public for the reason [`CATCH_UP_BATCH`] is: the test that holds the wait to
+/// it counts against the number rather than against a copy of it.
+pub const SETTLED_FOR: Duration = Duration::from_secs(2);
 
 /// How far above what the network asks a fee may go before the wallet stops
 /// and makes sure it was meant.
@@ -2413,7 +2416,7 @@ mod tests {
     use cairn_crypto::SecretKey;
     use cairn_ledger::note::{Note, NoteId};
     use cairn_ledger::validation::TransferError;
-    use cairn_net::node::{Probation, Reading, Refused, Unread};
+    use cairn_net::node::{Probation, Reading, Refused, Unread, Unweighable};
     use cairn_net::Joined;
     use cairn_primitives::{Amount, Hash32};
     use std::collections::BTreeMap;
@@ -2861,5 +2864,170 @@ mod tests {
         assert!(words.contains("holds one note it"), "{words}");
         let words = stuck.words().expect("three notes are stuck");
         assert!(words.contains("holds 3 notes it"), "{words}");
+    }
+
+    /// A refusal for want of money names the money that is there and cannot
+    /// move, and says nothing about it when there is none.
+    ///
+    /// That clause is where a person learns the shortfall is money they hold
+    /// and cannot reach yet, rather than money they lack. The tests that meet
+    /// this refusal on a running wallet read its fields and never its words,
+    /// so a refusal that dropped the clause, or said it about nought and not
+    /// about thirty, passed.
+    #[test]
+    fn a_refusal_for_want_of_money_names_what_is_stranded_and_only_that() {
+        let short = |stranded| {
+            super::WalletError::NotEnough {
+                needed: cairn("80"),
+                have: cairn("50"),
+                waiting: Amount::ZERO,
+                stranded,
+            }
+            .to_string()
+        };
+
+        let stuck = short(cairn("30"));
+        assert!(
+            stuck.contains("Another 30.00000000 CAIRN sits in notes this node cannot prove"),
+            "thirty CAIRN the wallet holds and cannot move went unmentioned in the \
+             refusal, so the person reads that they do not have it: {stuck}"
+        );
+
+        let none = short(Amount::ZERO);
+        assert!(
+            !none.contains("cannot prove"),
+            "a wallet with nothing stranded was told about stranded money: {none}"
+        );
+        assert!(
+            none.ends_with("more than the 50.00000000 CAIRN this wallet can spend"),
+            "and the refusal is the plain one: {none}"
+        );
+    }
+
+    /// Notes the account has stopped answering for are counted and valued in
+    /// words, and a wallet with none says nothing.
+    ///
+    /// This is the only place those notes reach a person, since they are kept
+    /// out of every figure on purpose. Nothing read the sentence, so one that
+    /// said nothing, or called one note "1 notes" and two notes "one note",
+    /// passed.
+    #[test]
+    fn notes_the_account_stopped_answering_for_are_named_with_their_worth() {
+        let owner = SecretKey::from_bytes(&[3; 32]).public_key();
+        let lost = |seed: u32, value: &str| super::Unprovable {
+            id: NoteId::new(Hash32::ZERO, seed),
+            note: Note::new(cairn(value), owner),
+            fell_at: None,
+        };
+        let holding = |unaccounted: Vec<super::Unprovable>| super::Holdings {
+            spendable: Amount::ZERO,
+            ripening: Amount::ZERO,
+            ripe_at: None,
+            waiting: Amount::ZERO,
+            stranded: Amount::ZERO,
+            unprovable: Vec::new(),
+            unaccounted,
+            notes: Vec::new(),
+        };
+
+        assert!(
+            holding(Vec::new()).unaccounted_note().is_none(),
+            "an account answering for everything it names has nothing to say"
+        );
+
+        let one = holding(vec![lost(0, "50")])
+            .unaccounted_note()
+            .expect("one note the account stopped answering for is said");
+        assert!(
+            one.contains("still names one note, worth 50.00000000 CAIRN"),
+            "one note was not named as one note with its worth: {one}"
+        );
+
+        let two = holding(vec![lost(0, "50"), lost(1, "20")])
+            .unaccounted_note()
+            .expect("two of them are said");
+        assert!(
+            two.contains("still names 2 notes, worth 70.00000000 CAIRN"),
+            "two notes were not counted as two, worth what they add up to: {two}"
+        );
+    }
+
+    /// A node nobody can show the chain to says what was tried and what it
+    /// is doing instead.
+    ///
+    /// From the outside this looks like a wallet with no balance taking a
+    /// long time, and the sentence is the difference. Nothing read it, so a
+    /// wallet that said nothing at all, or a word nobody could act on, passed.
+    #[test]
+    fn a_node_nobody_could_show_the_chain_to_says_what_was_tried() {
+        let waiting = Progress {
+            unweighable: Some(Unweighable {
+                because: "a run of 9000 headers is longer than this build takes".to_owned(),
+                showings: 12,
+                peers: 3,
+                over: 240,
+            }),
+            ..healthy()
+        };
+        let said = waiting.warning().expect("a person is told");
+        assert!(
+            said.contains("12 showings from 3 different peers over 240 seconds"),
+            "what was tried is not said in numbers"
+        );
+        assert!(
+            said.contains("a run of 9000 headers is longer than this build takes"),
+            "the refusal is not quoted, and it is what tells a chain this build \
+             cannot weigh from somebody making one up"
+        );
+        assert!(
+            said.contains("reading the chain block by block"),
+            "and what the node does instead is not said"
+        );
+        assert!(
+            said.contains("Leave it running"),
+            "nor what the person should do, which is nothing"
+        );
+    }
+
+    /// Each reason an account was not read back is told in its own words,
+    /// inside the same frame.
+    ///
+    /// The reasons send a person to different places: a disk that changed a
+    /// file is hardware to look at, and an older or newer version is not. The
+    /// tests that reach this only asked that some warning came back, so a
+    /// sentence that said nothing, or a word nobody could act on, passed.
+    #[test]
+    fn each_reason_an_account_was_not_read_back_is_told_its_own_way() {
+        use crate::history::Discarded;
+
+        let cases = [
+            (Discarded::BeforeTheStamp, "This happens once."),
+            (Discarded::DidNotVerify, "the disk changed it"),
+            (Discarded::FromANewerVersion, "your disk is fine"),
+            (Discarded::WouldNotOpen, "would not open"),
+        ];
+        for (why, own) in cases {
+            let said = Progress {
+                lost_its_account: Some(why),
+                ..healthy()
+            }
+            .warning()
+            .expect("an account that was not read back is said");
+            assert!(
+                said.contains("did not read back the account it had written down"),
+                "{why:?} was not said to be an account that did not read back"
+            );
+            assert!(said.contains(own), "{why:?} was not told its own reason");
+            for (other, theirs) in cases {
+                assert!(
+                    other == why || !said.contains(theirs),
+                    "{why:?} was told the reason for {other:?}"
+                );
+            }
+            assert!(
+                said.contains("the key file is not touched"),
+                "{why:?} did not say the key is safe"
+            );
+        }
     }
 }

@@ -1062,6 +1062,31 @@ mod tests {
         ));
     }
 
+    /// Link-local is `fe80::/10`, and that takes both of its first two bytes.
+    ///
+    /// Every link-local address tested began `fe80`, where either byte alone
+    /// already gives the answer, so a check that took either one passed. That
+    /// check read `2a80::1` as link-local, because its second byte starts the
+    /// way the one in `fe80` does, and refused an open address from every
+    /// stranger who named it.
+    #[test]
+    fn link_local_takes_both_bytes_of_its_prefix() {
+        for (text, want) in [
+            ("fe80::1", Realm::LinkLocal),
+            ("febf:ffff::1", Realm::LinkLocal),
+            ("2a80::1", Realm::Open),
+        ] {
+            let ip: IpAddr = text.parse().unwrap();
+            assert_eq!(realm_of(ip), want, "{text} was put in the wrong realm");
+        }
+        let open: SocketAddr = "[2a80::1]:9000".parse().unwrap();
+        let far_away = Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4)));
+        assert!(
+            worth_hearing_about(&open, far_away, false),
+            "an open address was refused because one of its bytes looks like fe80's"
+        );
+    }
+
     /// Whatever the operator says is where their node runs.
     #[test]
     fn the_operators_own_addresses_are_not_second_guessed() {
@@ -1148,6 +1173,100 @@ mod tests {
         assert_eq!(book.len(), MAX_PER_GROUP);
     }
 
+    /// A crowded neighbourhood makes room inside itself and nowhere else.
+    ///
+    /// The stretch of the book that making room reads is worked out from the
+    /// address that could not get in, and nothing checked where that stretch
+    /// ends. Every test filled one neighbourhood with nothing either side of
+    /// it, so a stretch that ran on past either end, in either family, found
+    /// nothing more to give up and passed. With a neighbour there, the
+    /// neighbour went, and the crowded neighbourhood grew past its share.
+    #[test]
+    fn a_crowded_neighbourhood_makes_room_inside_itself_and_nowhere_else() {
+        let v6 = |text: &str, port: u16| SocketAddr::new(text.parse().unwrap(), port);
+        let families = [
+            (
+                address(1, 1_024),
+                address(9, 9_000),
+                SocketAddr::from((Ipv4Addr::new(198, 51, 100, 7), 9_000)),
+                SocketAddr::from((Ipv4Addr::new(209, 0, 0, 7), 9_000)),
+            ),
+            (
+                v6("2001:db8::1", 1_024),
+                v6("2001:db8::9", 9_000),
+                v6("2001:db7::7", 9_000),
+                v6("2001:db9::7", 9_000),
+            ),
+        ];
+        for (crowd, newcomer, below, above) in families {
+            let mut book = AddressBook::new();
+            for step in 0..MAX_PER_GROUP {
+                let port = u16::try_from(step).unwrap().saturating_add(crowd.port());
+                assert!(book.insert(SocketAddr::new(crowd.ip(), port)));
+            }
+            // Written after the crowd, so each is newer than anything in it
+            // and would be the first to go from any stretch that reached it.
+            assert!(book.insert(below));
+            assert!(book.insert(above));
+            assert_ne!(group_of(&below), group_of(&crowd));
+            assert_ne!(group_of(&above), group_of(&crowd));
+            assert_eq!(group_of(&newcomer), group_of(&crowd));
+
+            assert!(book.insert(newcomer), "room is made for {newcomer}");
+            assert!(
+                book.contains(&below),
+                "{below} was given up to make room in the neighbourhood of {newcomer}"
+            );
+            assert!(
+                book.contains(&above),
+                "{above} was given up to make room in the neighbourhood of {newcomer}"
+            );
+            let crowded = book
+                .iter()
+                .filter(|held| group_of(held) == group_of(&crowd))
+                .count();
+            assert_eq!(
+                crowded, MAX_PER_GROUP,
+                "the neighbourhood of {newcomer} holds more than its share"
+            );
+        }
+    }
+
+    /// A full neighbourhood gives up the address it was told most recently.
+    ///
+    /// Which one goes is decided by when each was written down, and nothing
+    /// checked that it was: every test that filled a neighbourhood wrote it in
+    /// the order its addresses sort in, so the newest was also the highest,
+    /// and a book that forgot when it wrote anything and gave up the highest
+    /// instead passed. A stranger then only had to name addresses below one
+    /// this node already held to push that one out.
+    #[test]
+    fn a_full_neighbourhood_gives_up_the_address_it_was_told_last() {
+        let mut book = AddressBook::new();
+        let held = address(250, 9_000);
+        assert!(book.insert(held));
+        let named: Vec<SocketAddr> = (0..MAX_PER_GROUP.saturating_sub(1))
+            .map(|step| address(1, u16::try_from(step).unwrap().saturating_add(1_024)))
+            .collect();
+        for stranger in &named {
+            assert!(book.insert(*stranger), "the range fills up");
+            assert!(stranger < &held, "and every name sorts below the one held");
+        }
+        assert_eq!(book.len(), MAX_PER_GROUP, "and it is full");
+
+        let newest = named.last().copied().unwrap();
+        assert!(book.insert(address(2, 9_000)));
+        assert!(
+            book.contains(&held),
+            "{held}, written down before any of them, was given up for a stranger's \
+             latest name"
+        );
+        assert!(
+            !book.contains(&newest),
+            "{newest}, the last name written down, was kept"
+        );
+    }
+
     /// A book read back from a file remembers the addresses and nothing about
     /// them, so its whole order is decided by the tie-break. That used to be
     /// the address itself.
@@ -1179,6 +1298,100 @@ mod tests {
             ahead(&first) < lowest.len() || ahead(&second) < lowest.len(),
             "every address this book holds is unheard from, and the sixteen lowest              numbers came first in both of two independently started books. That is              the front of the dial list and the front of what is passed on, for the              price of renting the right range"
         );
+    }
+
+    /// Two books started apart do not put the same addresses in one order.
+    ///
+    /// The test above only asks that the lowest numbers are not all in front,
+    /// and a salt that was the same number on every start passed it: the
+    /// order was scrambled, and scrambled the same way on every node and at
+    /// every restart. Whoever wanted the front of every book on the network
+    /// could work out once which addresses to rent.
+    #[test]
+    fn two_books_started_apart_do_not_share_an_order() {
+        let mut first = AddressBook::new();
+        let mut second = AddressBook::new();
+        for index in 0..64 {
+            first.insert(spread(index));
+            second.insert(spread(index));
+        }
+        assert_eq!(first.len(), 64);
+        assert_eq!(second.len(), 64);
+        assert_ne!(
+            first.candidates(),
+            second.candidates(),
+            "two books started apart put sixty four unheard addresses in the same \
+             order, so the order is derived rather than drawn and anybody can \
+             work out who comes first"
+        );
+    }
+
+    /// No two addresses in the book draw the same place in the order.
+    ///
+    /// Where an unheard address sits is its draw, and the address itself only
+    /// settles a tie. Nothing checked that neighbours do not tie, so a place
+    /// that joined the bytes of an address, or its port, with `|` or `&`
+    /// instead of flipping them passed: it put addresses a bit or two apart on
+    /// the same number, and the address, lowest first, decided their order
+    /// after all.
+    #[test]
+    fn no_two_addresses_in_the_book_draw_the_same_place() {
+        let mut book = AddressBook::new();
+        for first in 1..=8u8 {
+            // One host on sixteen ports and sixteen hosts on one port, which
+            // between them fill one neighbourhood.
+            for port in 9_000..9_016u16 {
+                let one_host = SocketAddr::from((Ipv4Addr::new(first, 1, 1, 1), port));
+                assert!(book.insert(one_host));
+            }
+            for last in 2..18u8 {
+                let one_port = SocketAddr::from((Ipv4Addr::new(first, 1, 1, last), 9_000));
+                assert!(book.insert(one_port));
+            }
+        }
+        assert_eq!(book.len(), 256);
+
+        let mut drawn: BTreeMap<u64, SocketAddr> = BTreeMap::new();
+        for (_, draw, address) in &book.order {
+            let earlier = drawn.insert(*draw, *address);
+            assert!(
+                earlier.is_none(),
+                "{address} drew the same place as {earlier:?}, so the address itself \
+                 decided which of the two is dialled and passed on first"
+            );
+        }
+    }
+
+    /// One bit of difference going in moves about half the bits coming out.
+    ///
+    /// That is what `mixed` is for: two addresses next to each other in one
+    /// range have to land nowhere near each other in the order. Nothing
+    /// measured it, so a mixer whose shifts went the wrong way, or whose last
+    /// step joined with `&` or `|` where it should flip, passed. Some of those
+    /// tie one bit out to one bit in, flipping it every time or never.
+    #[test]
+    fn one_bit_in_moves_about_half_the_bits_out() {
+        // Neighbouring numbers, which is the case the mixing is there for.
+        let samples: u64 = 1_024;
+        for bit_in in 0..64u32 {
+            let differences: Vec<u64> = (0..samples)
+                .map(|value| mixed(value) ^ mixed(value ^ 1u64.rotate_left(bit_in)))
+                .collect();
+            for bit_out in 0..64u32 {
+                let flipped = differences
+                    .iter()
+                    .filter(|difference| **difference & 1u64.rotate_left(bit_out) != 0)
+                    .count();
+                let flipped = u64::try_from(flipped).unwrap();
+                assert!(
+                    flipped.saturating_mul(3) >= samples
+                        && flipped.saturating_mul(3) <= samples.saturating_mul(2),
+                    "flipping bit {bit_in} going in flipped bit {bit_out} coming out \
+                     {flipped} times in {samples}, so numbers next to each other stay \
+                     next to each other in that bit"
+                );
+            }
+        }
     }
 
     /// Whoever fills the book decides who a node can reach.
@@ -1396,6 +1609,45 @@ mod tests {
 
         miss_repeatedly(&mut book, &address(1, 9000), 10);
         assert!(book.contains(&address(1, 9000)));
+    }
+
+    /// The book tells an address its operator gave from one it learned.
+    ///
+    /// Nothing asked it about a learned address, so a book that called every
+    /// address a seed passed; and nothing asked whether it held a seed at all,
+    /// so a book that always said no passed too. That answer is what stops a
+    /// node looking its seed names up: one that was never told yes would go
+    /// on resolving them every period for as long as it ran.
+    #[test]
+    fn the_book_tells_a_given_address_from_a_learned_one() {
+        let mut book = AddressBook::new();
+        let learned = address(1, 9_000);
+        let given = address(2, 9_000);
+        book.insert(learned);
+        assert!(
+            !book.is_seed(&learned),
+            "an address a peer named was taken for one the operator gave"
+        );
+        assert!(
+            !book.is_seed(&given),
+            "an address the book does not hold was called a seed"
+        );
+        assert!(
+            !book.has_seeds(),
+            "a book holding only learned addresses said it held a seed"
+        );
+
+        book.insert_seed(given);
+        assert!(
+            book.has_seeds(),
+            "a book holding a seed said it held none, so its node would look the \
+             seed names up again"
+        );
+        assert!(book.is_seed(&given));
+        assert!(
+            !book.is_seed(&learned),
+            "an address a peer named became a seed because another address did"
+        );
     }
 
     /// Dialled once a second, three misses is three seconds, and a bad minute

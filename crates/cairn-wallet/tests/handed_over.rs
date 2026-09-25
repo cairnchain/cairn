@@ -230,3 +230,30 @@ fn a_peer_that_arrives_after_the_pool_took_it_is_still_offered_it() {
     drop(wallet);
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// A wallet that has been shut down is off the network there and then, and
+/// not only once it is dropped.
+///
+/// The command line shuts the wallet down and then goes on to say what
+/// happened, so what follows a shutdown is meant to happen with the node
+/// already gone. Every test that shut a wallet down went on to drop it, and
+/// dropping stops a node by itself, so a shutdown that did nothing at all
+/// passed every one of them.
+#[test]
+fn a_wallet_that_is_shut_down_stops_listening_at_once() {
+    let (wallet, _blocks, directory) = funded("shut-down", 5);
+    let listening = reachable(wallet.node().address());
+    assert!(
+        TcpStream::connect(listening).is_ok(),
+        "the wallet's node listens while it runs, or this asks nothing"
+    );
+
+    wallet.shutdown();
+    assert!(
+        TcpStream::connect(listening).is_err(),
+        "a wallet that had been shut down was still taking connections"
+    );
+
+    drop(wallet);
+    let _ = std::fs::remove_dir_all(&directory);
+}

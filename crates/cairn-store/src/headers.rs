@@ -186,7 +186,8 @@ impl HeaderLog {
 
     /// Whether this log holds the header at `height`.
     pub fn holds(&self, height: u64) -> bool {
-        self.count > 0 && height >= self.first && height < self.reaches()
+        // No `count > 0`: with none held, `reaches` is `first` and the range is empty.
+        height >= self.first && height < self.reaches()
     }
 
     /// Puts the records of `front` before this log's own, leaving one run.
