@@ -100,6 +100,35 @@ impl Given {
     fn has(&self, name: &str) -> bool {
         self.values.contains_key(name)
     }
+
+    /// Refuses a setting given twice with two different values.
+    ///
+    /// Only the first was ever read and the rest were dropped without a word,
+    /// so `--network devnet --network testnet-6` ran on devnet and said nothing
+    /// about the other. `cairnd` and the wallet refuse it, under the rule
+    /// [`KNOWN`] states for a name this program does not know: what is passed
+    /// over is how an operator runs something other than what they wrote.
+    ///
+    /// The same value twice drops nothing, so nothing is said. `seed` is a list
+    /// rather than a setting, and every one of them is used.
+    fn one_value_each(&self) -> Result<(), String> {
+        for (name, values) in &self.values {
+            if name == "seed" {
+                continue;
+            }
+            let Some(first) = values.first() else {
+                continue;
+            };
+            let Some(other) = values.iter().find(|value| *value != first) else {
+                continue;
+            };
+            return Err(format!(
+                "`--{name}` is given twice, as `{first}` and as `{other}`, and only the first \
+                 would ever be used. Say which one you mean."
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn parse_arguments(arguments: &[String]) -> Result<Given, String> {
@@ -141,6 +170,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
     if given.has("help") {
         return Ok(None);
     }
+    given.one_value_each()?;
 
     let data = PathBuf::from(given.first("data").unwrap_or(DEFAULT_DATA));
     let listen = seeds::resolve_one(given.first("listen").unwrap_or(DEFAULT_LISTEN))?;
@@ -215,22 +245,50 @@ fn parse_size(text: &str) -> Result<u64, String> {
 pub(crate) fn size(bytes: u64) -> String {
     if bytes == KEEP_EVERYTHING {
         "every one ever accepted".to_owned()
-    } else if bytes >= 1_000_000_000 {
-        format!(
-            "{} GB, older ones dropped",
-            bytes.saturating_div(1_000_000_000)
-        )
-    } else if bytes >= 1_000_000 {
-        format!("{} MB, older ones dropped", bytes.saturating_div(1_000_000))
     } else {
-        format!("{bytes} bytes, older ones dropped")
+        format!("{}, older ones dropped", in_units(bytes))
     }
+}
+
+/// A number of bytes in the largest unit it fills.
+fn in_units(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{} GB", bytes.saturating_div(1_000_000_000))
+    } else if bytes >= 1_000_000 {
+        format!("{} MB", bytes.saturating_div(1_000_000))
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+/// What this explorer keeps on disk, as its start says it: the budget, and
+/// under a budget the floor the trim never cuts into.
+///
+/// The trim keeps the last [`ConsensusParams::burial`] blocks whatever it is
+/// given, because the chain lets go of block bodies from memory on the promise
+/// that the log still holds them. `cairnd` says so beside its own budget, after
+/// `--keep 1MB` printed a megabyte and held a hundred and twenty eight times
+/// that. This explorer trims through the same node and printed the megabyte
+/// alone.
+pub(crate) fn kept(keep: u64, params: &ConsensusParams) -> String {
+    if keep == KEEP_EVERYTHING {
+        return size(keep);
+    }
+    format!(
+        "{}\n             never below the last {} blocks, whatever they weigh: up to {} on \
+         this network",
+        size(keep),
+        params.burial,
+        in_units(params.burial_bytes()),
+    )
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{parse_arguments, resolve_options, size, HELP, KEEP_EVERYTHING};
+    use super::{
+        kept, parse_arguments, resolve_options, size, ConsensusParams, HELP, KEEP_EVERYTHING,
+    };
 
     /// A size is said back the way an operator would write it.
     ///
@@ -245,6 +303,36 @@ mod tests {
         assert_eq!(size(999_999_999), "999 MB, older ones dropped");
         assert_eq!(size(1_000_000), "1 MB, older ones dropped");
         assert_eq!(size(999_999), "999999 bytes, older ones dropped");
+    }
+
+    /// Under a budget the explorer states the floor the trim never cuts into,
+    /// and keeping everything it states none.
+    ///
+    /// Its start said the budget alone. Nothing asked it, so an explorer given
+    /// a megabyte said it kept a megabyte on a network whose last blocks, the
+    /// ones no budget drops, weigh several, which `cairnd` had stopped saying
+    /// after the same figure misled its own operators.
+    #[test]
+    fn a_budget_is_said_with_the_floor_under_it() {
+        let params = ConsensusParams::testnet()
+            .with_burial(8)
+            .with_max_block_bytes(1_000_000);
+        let said = kept(1_000_000, &params);
+        assert!(
+            said.starts_with("1 MB, older ones dropped\n"),
+            "the budget is not the first thing said: {said}"
+        );
+        assert!(
+            said.contains(
+                "never below the last 8 blocks, whatever they weigh: up to 8 MB on this network"
+            ),
+            "the floor under the budget is not said, or not as the rules make it: {said}"
+        );
+        assert_eq!(
+            kept(KEEP_EVERYTHING, &params),
+            "every one ever accepted",
+            "an explorer that drops nothing states a floor under what it drops"
+        );
     }
 
     fn arguments(parts: &[&str]) -> Vec<String> {
@@ -336,6 +424,53 @@ mod tests {
         assert!(
             HELP.contains(&cold),
             "the help says something other than {cold} bytes a note for the cold set"
+        );
+    }
+
+    /// A setting given twice with two different values stops the program, as
+    /// it stops `cairnd` and the wallet, and the same value twice does not.
+    ///
+    /// Only the first value was ever read and the second was dropped without
+    /// a word. Nothing asked this, so `--network devnet --network testnet-6`
+    /// started an explorer on devnet that said nothing about the other name it
+    /// was given, and so did a `--keep` given twice.
+    #[test]
+    fn a_setting_given_twice_as_two_values_stops_the_program() {
+        let error = resolve_options(&arguments(&[
+            "--network",
+            "devnet",
+            "--network",
+            "testnet-6",
+        ]))
+        .unwrap_err();
+        assert!(
+            error.contains("given twice"),
+            "a network named twice was taken as the first: {error}"
+        );
+        assert!(
+            error.contains("devnet") && error.contains("testnet-6"),
+            "the refusal does not say which two it was handed: {error}"
+        );
+
+        let error = resolve_options(&arguments(&["--keep", "1GB", "--keep", "all"])).unwrap_err();
+        assert!(
+            error.contains("given twice"),
+            "a budget given twice was taken as the first: {error}"
+        );
+
+        assert!(
+            resolve_options(&arguments(&["--network", "devnet", "--network", "devnet"])).is_ok(),
+            "the same value twice drops nothing, and was refused"
+        );
+        assert!(
+            resolve_options(&arguments(&[
+                "--seed",
+                "127.0.0.1:1",
+                "--seed",
+                "127.0.0.1:2"
+            ]))
+            .is_ok(),
+            "a second seed is another peer, and was refused as a second answer"
         );
     }
 

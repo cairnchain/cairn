@@ -472,19 +472,6 @@ fn parse_size(text: &str) -> Result<u64, String> {
     Ok(count.saturating_mul(scale))
 }
 
-/// The most the blocks `--keep` cannot drop can come to on this network.
-///
-/// The trim keeps the burial window whatever budget it is given, because the
-/// chain releases block bodies from memory on the promise that the log still
-/// has them. At the network's largest block that window is this many bytes,
-/// which is the number an operator sizing a disk needs and the number a flat
-/// `--keep` figure was quietly wrong about.
-fn floor_under_keep(params: &ConsensusParams) -> u64 {
-    params
-        .burial
-        .saturating_mul(u64::try_from(params.max_block_bytes).unwrap_or(u64::MAX))
-}
-
 /// A size as an operator would read it back.
 pub(crate) fn size(bytes: u64) -> String {
     if bytes >= 1_000_000_000 {
@@ -575,7 +562,9 @@ pub(crate) fn describe(options: &Options) -> String {
             "             never below the last {} blocks, whatever they weigh: \
              up to {} on this network",
             options.params.burial,
-            size(floor_under_keep(&options.params)),
+            // Read off the rules rather than worked out here, so the explorer,
+            // which trims through the same node, states the same floor.
+            size(options.params.burial_bytes()),
         );
         // And what dropping them costs somebody else, which is the half an
         // operator has no other way to learn. There are two ways onto this

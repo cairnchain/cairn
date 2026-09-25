@@ -78,7 +78,10 @@ fn run(arguments: &[String]) -> Result<(), String> {
     // block there is.
     node.keep_blocks(options.keep);
     println!("listening    {}", node.address());
-    println!("blocks       {} kept on disk", options::size(options.keep));
+    println!(
+        "blocks       {}",
+        options::kept(options.keep, &options.params)
+    );
     println!(
         "restored     {} blocks, {} addresses",
         restored.blocks, restored.addresses
