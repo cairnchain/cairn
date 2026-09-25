@@ -2216,6 +2216,35 @@ mod tests {
         assert_eq!(plain.len(), keeper.len(), "one leaf gone, not two");
     }
 
+    /// A cold set that keeps leaves says which one stands at a place, and one
+    /// that keeps only roots says it cannot.
+    ///
+    /// Nothing in the workspace asked, so a cold set that answered nothing for
+    /// every place passed: an archivist holding every leaf that could not say
+    /// what any of them is.
+    #[test]
+    fn a_cold_set_that_keeps_leaves_says_which_one_stands_at_a_place() {
+        let mut plain = ColdSet::plain();
+        let mut keeper = ColdSet::archiving();
+        for index in 0..4u64 {
+            plain.add(leaf(index));
+            keeper.add(leaf(index));
+        }
+        for index in 0..4u64 {
+            assert_eq!(
+                keeper.leaf_at(index),
+                Some(leaf(index)),
+                "an archivist did not say which leaf stands at place {index}"
+            );
+            assert_eq!(
+                plain.leaf_at(index),
+                None,
+                "a node holding roots has no leaf to name"
+            );
+        }
+        assert_eq!(keeper.leaf_at(4), None, "a place not yet handed out");
+    }
+
     /// And neither of them empties anything on a batch it is going to refuse.
     #[test]
     fn a_batch_that_cannot_go_through_leaves_both_holders_alone() {

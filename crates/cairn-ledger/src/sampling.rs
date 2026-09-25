@@ -1507,6 +1507,56 @@ mod tests {
         }
     }
 
+    /// A run up to the tip of exactly the ceiling is walked, and one header
+    /// longer is refused for its length, when the weighing never crossed a
+    /// wire.
+    ///
+    /// Off the wire this half of the length check decides nothing, since the
+    /// decoder refuses a longer run before it reads one. It stays for a
+    /// weighing built in memory, which is what this is, and nothing built one
+    /// that long: the comparison could refuse a run of exactly the ceiling, or
+    /// walk any run past it that was not exactly the ceiling long, and pass.
+    #[test]
+    fn a_run_built_in_memory_is_walked_at_its_ceiling_and_refused_one_past_it() {
+        let params = ConsensusParams::testnet();
+        let window = u64::try_from(DIFFICULTY_WINDOW).unwrap();
+        for (wanted, refused_for_its_length) in [(MOST_TAIL, false), (MOST_TAIL + 1, true)] {
+            // The draw landed a full window up, so the run starts at height
+            // zero and holds one header more than the tip is high.
+            let mut pinned = bare_header();
+            pinned.height = window;
+            let mut tip = bare_header();
+            tip.height = wanted - 1;
+            let start = SampledStart {
+                tip,
+                tail: vec![bare_header(); usize::try_from(wanted).unwrap()],
+                parent: None,
+                genesis: ForestProof::default(),
+                history: Forest::default(),
+                samples: vec![Sample {
+                    header: pinned,
+                    proof: ForestProof::default(),
+                }],
+            };
+            let answer = check_the_tail(&start, &params);
+            if refused_for_its_length {
+                assert_eq!(
+                    answer,
+                    Err(StartError::TailWrongLength {
+                        given: wanted,
+                        wanted,
+                    }),
+                    "a run of {wanted} against a ceiling of {MOST_TAIL} was walked"
+                );
+            } else {
+                assert!(
+                    !matches!(answer, Err(StartError::TailWrongLength { .. })),
+                    "a run of exactly the ceiling was refused for its length: {answer:?}"
+                );
+            }
+        }
+    }
+
     /// The price of one answer is the wire's price, not the compiler's.
     ///
     /// `size_of::<BlockHeader>()` is 192 and the encoding writes 182: the

@@ -16,7 +16,7 @@
     clippy::arithmetic_side_effects
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use cairn_crypto::SecretKey;
@@ -345,4 +345,111 @@ fn asking_to_follow_again_does_not_climb_over_the_ceiling() {
             state.watched_notes().count()
         );
     }
+}
+
+/// The paths a node keeps are the window's and the followed notes', and no
+/// others, however the ceiling trims.
+///
+/// A note the ceiling lets go of keeps its path while the window still holds
+/// it, and loses it once nothing wants it. The first test here holds the paths
+/// under the window plus the ceiling, which is loose enough to hold either way
+/// round: with the question turned over, a note the window held lost the path
+/// a spend out of the window needs, a note it did not hold kept a path nobody
+/// wanted, and the suite passed.
+#[test]
+fn the_paths_kept_are_the_windows_and_the_followed_notes_and_no_others() {
+    let params = params();
+    let miner = wallet(1);
+    let alice = wallet(2);
+    let mut state = LedgerState::new();
+    state.watch_owner(alice.public_key());
+    let mut source = LedgerState::archiving();
+    let mut coinbase_notes: Vec<(NoteId, Note)> = Vec::new();
+
+    let rounds = (WATCHED_NOTES as u64 / SPRAY) + 6;
+    for round in 0..rounds {
+        let height = source.next_height().unwrap();
+        let mut transfers = Vec::new();
+        if let Some((id, note)) = coinbase_notes.pop() {
+            let mut left = note.value.as_pebbles();
+            let mut outputs = Vec::new();
+            for index in 0..SPRAY {
+                let value = 1 + ((index * 7919 + round * 104_729) % 4_096);
+                if left <= value {
+                    break;
+                }
+                left -= value;
+                outputs.push(Note::new(
+                    Amount::from_pebbles(value).unwrap(),
+                    alice.public_key(),
+                ));
+            }
+            outputs.push(Note::new(
+                Amount::from_pebbles(left).unwrap(),
+                alice.public_key(),
+            ));
+            let mut transfer = Transfer::new(vec![Input::hot(id)], outputs);
+            transfer.sign_input(params.network, 0, &note, &miner);
+            transfers.push(transfer);
+        }
+        let coinbase = CoinbaseTransaction::new(
+            height,
+            vec![Note::new(params.reward_at(height), miner.public_key())],
+        );
+        let block = assemble_block(
+            &source,
+            coinbase,
+            transfers,
+            &params,
+            1_000 + height * 600,
+            0,
+        )
+        .unwrap();
+        connect_block(&mut source, &block, &params, NOW).unwrap();
+        connect_block(&mut state, &block, &params, NOW).unwrap();
+        coinbase_notes.push((
+            NoteId::new(block.coinbase.id(), 0),
+            Note::new(params.reward_at(height), miner.public_key()),
+        ));
+
+        let wanted: BTreeSet<u64> = state
+            .grace_window()
+            .iter()
+            .flatten()
+            .map(|(_, position, _)| *position)
+            .chain(state.watched_notes().map(|(_, position, _)| position))
+            .collect();
+        for position in &wanted {
+            assert!(
+                state.cold().proof_of(*position).is_some(),
+                "block {round}: place {position} is wanted and its path was let go of"
+            );
+        }
+        assert_eq!(
+            state.watched_paths(),
+            wanted.len(),
+            "block {round}: paths kept for places nothing wants"
+        );
+    }
+
+    // Both halves of the question were asked: the ceiling was reached, and the
+    // window is still holding notes of this owner that the ceiling let go of.
+    assert_eq!(
+        state.watched_notes().count(),
+        WATCHED_NOTES,
+        "the ceiling was never reached"
+    );
+    let let_go_but_in_the_window = state
+        .grace_window()
+        .iter()
+        .flatten()
+        .filter(|(id, _, note)| {
+            note.owner == alice.public_key() && state.watched_position(id).is_none()
+        })
+        .count();
+    assert!(
+        let_go_but_in_the_window > 0,
+        "the window holds none of the notes the ceiling let go of, so this test is no \
+         longer asking what it says"
+    );
 }
