@@ -7542,8 +7542,17 @@ mod disk_and_headers {
                 height,
                 vec![Note::new(params.initial_reward, miner.public_key())],
             );
-            let block = assemble_block(&state, coinbase, Vec::<Transfer>::new(), &params, clock, 0)
-                .unwrap();
+            // The search for a nonce starts at the height rather than at a
+            // written-in number; any start finds one at this difficulty.
+            let block = assemble_block(
+                &state,
+                coinbase,
+                Vec::<Transfer>::new(),
+                &params,
+                clock,
+                height,
+            )
+            .unwrap();
             let block = mine_block(block, 1 << 22).unwrap();
             connect_block(&mut state, &block, &params, clock).unwrap();
             blocks.push(block);
