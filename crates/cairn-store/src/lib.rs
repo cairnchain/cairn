@@ -56,7 +56,7 @@ pub mod header_tree;
 pub mod headers;
 
 use std::fs::{File, OpenOptions, TryLockError};
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use cairn_ledger::block::{Block, BlockHeader};
@@ -1413,8 +1413,17 @@ impl BlockLog {
     fn walk(&self, from: u64, index_from: usize, total: u64) -> Result<Walk, StoreError> {
         let mut file = &self.file;
         file.seek(SeekFrom::Start(from))?;
-        let mut reader = BufReader::new(file);
+        Self::walk_from(BufReader::new(file), from, index_from, total)
+    }
 
+    /// The same walk over any reader, so what it makes of a read the disk
+    /// refuses can be asked without a disk that refuses.
+    fn walk_from(
+        mut reader: impl Read,
+        from: u64,
+        index_from: usize,
+        total: u64,
+    ) -> Result<Walk, StoreError> {
         let mut walk = Walk {
             ends: Vec::new(),
             offset: from,
@@ -1423,8 +1432,17 @@ impl BlockLog {
         loop {
             let index = index_from.saturating_add(walk.ends.len());
             let mut header = [0u8; 4];
-            if reader.read_exact(&mut header).is_err() {
-                break;
+            // The file ending is the one failure that means the file ended.
+            // Any other is the disk refusing, and was read as the end too:
+            // `settle` then cut the log there and called the cut an
+            // interrupted write, so one refused read deleted every block
+            // after it. It goes back as the refusal it is, the way the seek
+            // above already did.
+            if let Err(error) = reader.read_exact(&mut header) {
+                if error.kind() == ErrorKind::UnexpectedEof {
+                    break;
+                }
+                return Err(error.into());
             }
             let declared = usize::try_from(u32::from_le_bytes(header)).unwrap_or(usize::MAX);
             let left = total.saturating_sub(walk.offset).saturating_sub(4);
@@ -1474,8 +1492,11 @@ impl BlockLog {
                 break;
             }
             let mut body = vec![0u8; declared];
-            if reader.read_exact(&mut body).is_err() {
-                break;
+            if let Err(error) = reader.read_exact(&mut body) {
+                if error.kind() == ErrorKind::UnexpectedEof {
+                    break;
+                }
+                return Err(error.into());
             }
             if Block::decode(&body).is_err() {
                 walk.unreadable = Some(index);
@@ -1748,5 +1769,86 @@ impl Drop for DirectoryLock {
     /// a race. An idle lock file costs nothing.
     fn drop(&mut self) {
         let _ = self.file.unlock();
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::io::{self, Read};
+
+    use cairn_ledger::genesis;
+    use cairn_ledger::note::NetworkId;
+    use cairn_primitives::codec::Encode;
+
+    use super::BlockLog;
+
+    /// A disk that hands back `bytes` and then refuses every read after them.
+    struct Refusing {
+        bytes: io::Cursor<Vec<u8>>,
+    }
+
+    impl Read for Refusing {
+        fn read(&mut self, into: &mut [u8]) -> io::Result<usize> {
+            match self.bytes.read(into)? {
+                0 => Err(io::Error::other("the disk refused the read")),
+                read => Ok(read),
+            }
+        }
+    }
+
+    /// One record as the log frames it: its length, then the block.
+    fn record() -> Vec<u8> {
+        let block = genesis::block(NetworkId::DEVNET).unwrap().encode();
+        let mut framed = u32::try_from(block.len()).unwrap().to_le_bytes().to_vec();
+        framed.extend_from_slice(&block);
+        framed
+    }
+
+    /// A read the disk refused is not the end of the file.
+    ///
+    /// The walk that rebuilds the index read every failed read as the file
+    /// running out, and a walk that ran out of file has `settle` cut the log
+    /// where it stopped, sync the cut, and report the bytes as an interrupted
+    /// write. So one refused read while a node started deleted every block
+    /// after it and told the operator a write had been cut short. Every log
+    /// the tests walked was a real file that read, so a walk that could not
+    /// tell a disk that failed from a file that ended passed.
+    #[test]
+    fn a_read_the_disk_refused_is_not_taken_for_the_end_of_the_file() {
+        let whole = record();
+        // Past what is handed back, as a file the disk will not read to its
+        // end still is.
+        let total = u64::try_from(whole.len() * 3).unwrap();
+
+        let ended = BlockLog::walk_from(io::Cursor::new(whole.clone()), 0, 0, total).unwrap();
+        assert_eq!(
+            ended.ends.len(),
+            1,
+            "one whole record, then the end of the file"
+        );
+
+        // Refused where the next record's length would be, and then in the
+        // middle of a record's body: the walk reads both.
+        let mut cut_in_the_body = whole.clone();
+        cut_in_the_body.extend_from_slice(whole.get(..8).unwrap());
+        for (bytes, place) in [
+            (whole.clone(), "the next record's length"),
+            (cut_in_the_body, "a record's body"),
+        ] {
+            let refused = BlockLog::walk_from(
+                Refusing {
+                    bytes: io::Cursor::new(bytes),
+                },
+                0,
+                0,
+                total,
+            );
+            assert!(
+                refused.is_err(),
+                "a read the disk refused at {place} was taken for the end of the file, which \
+                 has the log cut there and the cut reported as an interrupted write"
+            );
+        }
     }
 }

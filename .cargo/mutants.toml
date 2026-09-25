@@ -37,6 +37,13 @@ exclude_re = [
     # same operators elsewhere are a real question.
     "replace \\| with \\^ in decode",
     "replace \\| with \\^ in decode_array",
+    # `Instant::now() < deadline` as `<=` in the wallet's wait for the chain to
+    # settle. The two differ only when the clock reads the deadline to the
+    # nanosecond, and then by one more round of a loop that sleeps two hundred
+    # milliseconds between looks: nothing a person or a test can tell apart.
+    # The same comparison was `<` before the line was touched for a patience
+    # the clock cannot count, and nothing about the boundary changed.
+    "replace < with <= in Wallet::catch_up",
 ]
 
 # A mutant that makes a loop run forever is one the suite would have caught if

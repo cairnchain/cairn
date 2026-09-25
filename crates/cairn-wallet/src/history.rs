@@ -812,6 +812,9 @@ impl History {
             file.sync_all()?;
         }
         std::fs::rename(&partial, path)?;
+        // Best effort, where the key file's own directory sync is required: a
+        // rename that does not reach the disk leaves the history before it,
+        // and this account can always be read again from the chain.
         if let Some(directory) = path.parent() {
             if let Ok(handle) = std::fs::File::open(directory) {
                 let _ = handle.sync_all();

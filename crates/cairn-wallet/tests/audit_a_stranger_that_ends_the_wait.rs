@@ -227,3 +227,48 @@ fn a_peer_that_introduced_itself_ends_the_wait() {
     drop(wallet);
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// A patience longer than the clock can count is a wait with no deadline, and
+/// not a wait of nothing.
+///
+/// The deadline was the clock now plus the patience, and where that sum did
+/// not fit in an `Instant` it was the clock now. So `--wait` given a number of
+/// seconds past what the clock holds did not wait at all: the wallet answered
+/// out of whatever chain was on disk, and then said that no chain had arrived
+/// in that many seconds. Every patience the tests gave fitted, so a wallet
+/// that turned the longest wait anyone can ask for into none passed.
+#[test]
+fn a_patience_past_what_the_clock_holds_still_waits_for_the_chain_to_settle() {
+    let (wallet, blocks, directory) = funded("unbounded", 5);
+
+    let peer = Node::bind(params(), loopback()).unwrap();
+    for block in &blocks {
+        peer.submit_block(block.clone()).unwrap();
+    }
+    peer.connect(reachable(wallet.node().address())).unwrap();
+    assert!(
+        until(Duration::from_secs(10), || wallet.node().peers_introduced()
+            == 1),
+        "the peer never introduced itself, so the wait could never end and this \
+         test asks nothing"
+    );
+    assert!(
+        Instant::now().checked_add(Duration::MAX).is_none(),
+        "the longest patience fits this clock, so this test asks nothing"
+    );
+
+    let began = Instant::now();
+    wallet.catch_up(Duration::MAX);
+    let waited = began.elapsed();
+
+    assert!(
+        waited >= cairn_wallet::SETTLED_FOR,
+        "the longest wait there is ended after {waited:?}, before the chain had \
+         held still for {:?}: a patience the clock cannot count was read as none",
+        cairn_wallet::SETTLED_FOR
+    );
+
+    wallet.shutdown();
+    drop(wallet);
+    let _ = std::fs::remove_dir_all(&directory);
+}

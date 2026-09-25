@@ -476,11 +476,17 @@ fn quote(wallet: &Wallet, request: &Request) -> Response {
         Ok(asked) => asked,
         Err(refusal) => return refusal,
     };
+    // Refused as sending refuses it, in the same words: a payment with no
+    // transfer to price has no price. This used to quote one anyway, with the
+    // ceiling standing in for a sum past it and nought for the floor of a
+    // payment the wallet could not make.
+    if let Some(error) = wallet.could_not_draft(asked.recipient, asked.amount, asked.fee) {
+        return refusal(&error.to_string());
+    }
+    let Some(total) = asked.amount.checked_add(asked.fee) else {
+        return refusal(&WalletError::TooLarge.to_string());
+    };
     let floor = wallet.floor_for(asked.recipient, asked.amount);
-    let total = asked
-        .amount
-        .checked_add(asked.fee)
-        .unwrap_or(Amount::MAX_MONEY);
 
     let mut json = Writer::new();
     json.begin_object();

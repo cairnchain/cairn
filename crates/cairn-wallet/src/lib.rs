@@ -1249,7 +1249,10 @@ impl Wallet {
             clock_behind: self.node.clock_behind(),
             unjudged: self.node.unjudged(),
             unweighable: self.node.unweighable(),
-            keeping_its_account: self.wrote_history.lock().map_or(true, |wrote| *wrote),
+            keeping_its_account: *self
+                .wrote_history
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
             lost_its_account: self.lost_its_account,
         }
     }
@@ -1269,13 +1272,15 @@ impl Wallet {
     /// also what a peer that completes the handshake and then says nothing
     /// leaves behind, and there is no reason to make that free.
     pub fn catch_up(&self, patience: Duration) {
-        let deadline = Instant::now()
-            .checked_add(patience)
-            .unwrap_or_else(Instant::now);
+        // None for a patience past what the clock can count, which is a wait
+        // with no deadline. It was the clock now, so the longest `--wait` a
+        // person could type waited for nothing and then said no chain had
+        // arrived in all that time.
+        let deadline = Instant::now().checked_add(patience);
         let mut last = self.node.height();
         let mut still_since = Instant::now();
 
-        while Instant::now() < deadline {
+        while deadline.is_none_or(|deadline| Instant::now() < deadline) {
             std::thread::sleep(Duration::from_millis(200));
             let height = self.node.height();
             if height != last {
@@ -1690,9 +1695,10 @@ impl Wallet {
     /// block its node still holds.
     fn write_history(&self, history: &History) {
         let kept = history.save(&self.history_file).is_ok();
-        if let Ok(mut wrote) = self.wrote_history.lock() {
-            *wrote = kept;
-        }
+        *self
+            .wrote_history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = kept;
     }
 
     /// One reading of the chain answering both, since the pool decides what is
@@ -1726,19 +1732,19 @@ impl Wallet {
             BTreeMap<NoteId, Amount>,
             BTreeMap<NoteId, u64>,
             BTreeSet<NoteId>,
-        ) = self
-            .history
-            .lock()
-            .map(|history| {
-                let held: BTreeMap<NoteId, Amount> = history.held().collect();
-                let landed = held
-                    .keys()
-                    .filter_map(|id| Some((*id, history.where_it_fell(id)?)))
-                    .collect();
-                let unanswered: BTreeSet<NoteId> = history.unaccounted().collect();
-                (held, landed, unanswered)
-            })
-            .unwrap_or_default();
+        ) = {
+            let history = self
+                .history
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let held: BTreeMap<NoteId, Amount> = history.held().collect();
+            let landed = held
+                .keys()
+                .filter_map(|id| Some((*id, history.where_it_fell(id)?)))
+                .collect();
+            let unanswered: BTreeSet<NoteId> = history.unaccounted().collect();
+            (held, landed, unanswered)
+        };
         // Paths somebody else rebuilt for this wallet. Each is checked below
         // against the set as it stands rather than remembered as good, because
         // the set moves whenever a note falls and a path is worth exactly what
@@ -1970,14 +1976,16 @@ impl Wallet {
         // other way round here is how two threads end up each holding what the
         // other is waiting for.
         if !answered.is_empty() {
-            if let Ok(mut history) = self.history.lock() {
-                let mut changed = false;
-                for id in &answered {
-                    changed |= history.accounted_for(id);
-                }
-                if changed {
-                    self.write_history(&history);
-                }
+            let mut history = self
+                .history
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut changed = false;
+            for id in &answered {
+                changed |= history.accounted_for(id);
+            }
+            if changed {
+                self.write_history(&history);
             }
         }
         (holdings, waiting)
@@ -2016,21 +2024,36 @@ impl Wallet {
         self.spend(recipient, amount, fee, true)
     }
 
-    fn spend(
+    /// Why a spend of `amount` paying `fee` could not even be drafted, if it
+    /// could not, asked without making it.
+    ///
+    /// For a quote. What a quote prices is the transfer this wallet would
+    /// build, and for money it does not have there is none: the quote used to
+    /// price nothing at nothing, and the page said the network asked nought
+    /// to carry a payment that sending then refused for want of money. This
+    /// is the question sending asks first, asked once for both.
+    pub fn could_not_draft(
         &self,
         recipient: PublicKey,
         amount: Amount,
         fee: Amount,
-        meant: bool,
-    ) -> Result<Sent, WalletError> {
+    ) -> Option<WalletError> {
+        self.drafted(recipient, amount, fee).err()
+    }
+
+    fn drafted(
+        &self,
+        recipient: PublicKey,
+        amount: Amount,
+        fee: Amount,
+    ) -> Result<Draft, WalletError> {
         if amount == Amount::ZERO {
             return Err(WalletError::NothingToSend);
         }
         let needed = amount.checked_add(fee).ok_or(WalletError::TooLarge)?;
 
         let holdings = self.holdings();
-        let draft = self
-            .draft(&holdings, recipient, amount, needed)
+        self.draft(&holdings, recipient, amount, needed)
             .map_err(|why| match why {
                 NoDraft::SpreadTooThin { over, reach } => WalletError::TooManyNotes {
                     over,
@@ -2043,7 +2066,17 @@ impl Wallet {
                     waiting: holdings.waiting,
                     stranded: holdings.stranded,
                 },
-            })?;
+            })
+    }
+
+    fn spend(
+        &self,
+        recipient: PublicKey,
+        amount: Amount,
+        fee: Amount,
+        meant: bool,
+    ) -> Result<Sent, WalletError> {
+        let draft = self.drafted(recipient, amount, fee)?;
 
         // The network turns away a transfer that pays less than the floor, so
         // the refusal is better said here, with the number, than fetched back
@@ -3156,5 +3189,205 @@ mod tests {
                 "{why:?} did not say the key is safe"
             );
         }
+    }
+
+    /// A wallet on a directory of its own, with no chain and no peer.
+    fn opened(name: &str) -> (super::Wallet, std::path::PathBuf) {
+        let directory =
+            std::env::temp_dir().join(format!("cairn-wallet-lib-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let key_file = directory.join("key");
+        crate::keyfile::write(&key_file, &SecretKey::generate().unwrap()).unwrap();
+        let (wallet, _) = super::Wallet::open(
+            &key_file,
+            cairn_ledger::validation::ConsensusParams::testnet(),
+            &directory.join("data"),
+        )
+        .unwrap();
+        (wallet, directory)
+    }
+
+    /// Leaves `lock` poisoned, the way a thread that panicked holding it does.
+    fn poison<T: Send>(lock: &std::sync::Mutex<T>) {
+        std::thread::scope(|scope| {
+            let _ = scope
+                .spawn(|| {
+                    let _held = lock.lock();
+                    std::panic::resume_unwind(Box::new("a thread panicked holding the lock"));
+                })
+                .join();
+        });
+        assert!(
+            lock.is_poisoned(),
+            "the lock is not poisoned, so the tests that use this ask nothing"
+        );
+    }
+
+    /// A wallet that could not write its account down says so, after a thread
+    /// panicked holding the answer as well as before.
+    ///
+    /// Every other lock in this crate, and in the node under it, is taken as
+    /// it stands once a thread has panicked holding it, and the node says why
+    /// at `Shared::outdated`: reading a poisoned lock with `.lock().ok()`
+    /// answers nothing for ever. This one answered `true`, so the line above
+    /// the money saying the account is no longer being written down went
+    /// away for good. Nothing poisoned a lock in any test, so a wallet that
+    /// answered a poisoned lock with a default passed.
+    #[test]
+    fn a_wallet_that_cannot_write_its_account_says_so_after_a_panic_held_the_answer() {
+        let (wallet, directory) = opened("poisoned-said");
+        *wallet.wrote_history.lock().unwrap() = false;
+        poison(&wallet.wrote_history);
+
+        let keeping = wallet.progress().keeping_its_account;
+        wallet.shutdown();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            !keeping,
+            "a wallet that could not write its account down said it was keeping it, \
+             because a thread had panicked holding the answer"
+        );
+    }
+
+    /// Whether the account was written down is recorded after a thread
+    /// panicked holding the record as well as before.
+    ///
+    /// It was recorded only when the lock was clean, so after a panic a save
+    /// that failed left the wallet saying the last one had worked. Nothing
+    /// poisoned a lock in any test, so a wallet that stopped recording passed.
+    #[test]
+    fn a_save_that_failed_is_recorded_after_a_panic_held_the_record() {
+        use crate::history::History;
+
+        let (mut wallet, directory) = opened("poisoned-recorded");
+        // Nowhere a file can be written, so the save fails.
+        wallet.history_file = directory.join("no-such-directory").join("history.dat");
+        poison(&wallet.wrote_history);
+
+        wallet.write_history(&History::new());
+        let recorded = *wallet
+            .wrote_history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        wallet.shutdown();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            !recorded,
+            "a save that failed was not recorded, because a thread had panicked \
+             holding the record, and the wallet went on saying its account was written"
+        );
+    }
+
+    /// Money the account recorded and the node cannot place is counted after
+    /// a thread panicked holding the account as well as before.
+    ///
+    /// The account was read with a default in its place when its lock was
+    /// poisoned, so every note it had recorded that the node has nothing to
+    /// say about left the balance without a word: the balance going quietly
+    /// down, which this crate has already said is the worse of the two ways
+    /// to be wrong. Nothing poisoned a lock in any test, so a wallet that
+    /// counted from an empty account after a panic passed.
+    #[test]
+    fn money_the_account_recorded_is_counted_after_a_panic_held_the_account() {
+        use cairn_ledger::block::{Block, BlockHeader};
+        use cairn_ledger::note::NetworkId;
+        use cairn_ledger::transaction::CoinbaseTransaction;
+
+        let (wallet, directory) = opened("poisoned-counted");
+        let mine = wallet.address();
+        let paid = cairn("50");
+        // A block this wallet's node never saw, so the account holds a note
+        // the node has nothing to say about.
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                network: NetworkId::TESTNET,
+                height: 0,
+                previous: Hash32::ZERO,
+                state_root: Hash32::ZERO,
+                transactions_root: Hash32::ZERO,
+                history: Hash32::ZERO,
+                timestamp: 1_000,
+                difficulty: 1,
+                total_work: 0,
+                nonce: 0,
+            },
+            coinbase: CoinbaseTransaction::new(0, vec![Note::new(paid, mine)]),
+            transfers: Vec::new(),
+        };
+        wallet.history.lock().unwrap().take(&block, mine);
+        poison(&wallet.history);
+
+        let stranded = wallet.holdings().stranded;
+        wallet.shutdown();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            stranded, paid,
+            "a note the account recorded and the node cannot place left the balance, \
+             because a thread had panicked holding the account"
+        );
+    }
+
+    /// A note the node answers for is taken off the list of ones the account
+    /// stopped answering for, after a thread panicked holding the account as
+    /// well as before.
+    ///
+    /// The marking was skipped when the lock was poisoned, so the note stayed
+    /// on the list and the wallet went on saying it had stopped answering for
+    /// money it could see. Nothing poisoned a lock in any test, so a wallet
+    /// that skipped it passed.
+    #[test]
+    fn a_note_found_again_is_accounted_for_after_a_panic_held_the_account() {
+        use cairn_ledger::transaction::CoinbaseTransaction;
+        use cairn_ledger::validation::{assemble_block, mine_block, ConsensusParams};
+
+        let (wallet, directory) = opened("poisoned-found");
+        let mine = wallet.address();
+        let params = ConsensusParams::testnet();
+        let coinbase = CoinbaseTransaction::new(0, vec![Note::new(params.initial_reward, mine)]);
+        let block = assemble_block(
+            &cairn_ledger::LedgerState::new(),
+            coinbase,
+            Vec::new(),
+            &params,
+            1_600,
+            0,
+        )
+        .unwrap();
+        wallet
+            .node()
+            .submit_block(mine_block(block, 1 << 22).unwrap())
+            .unwrap();
+        assert_eq!(wallet.node().height(), Some(0), "the node took the block");
+        wallet.follow_to_the_tip();
+        {
+            let mut history = wallet.history.lock().unwrap();
+            // Past a block it will never read, which is what marks every note
+            // held as one the account can no longer answer for.
+            let next = history.next();
+            history.skip_to(next + 1);
+            assert_eq!(
+                history.unaccounted().count(),
+                1,
+                "the note is not on the list, so this asks nothing"
+            );
+        }
+        poison(&wallet.history);
+
+        let _ = wallet.holdings();
+        let left = wallet
+            .history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unaccounted()
+            .count();
+        wallet.shutdown();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            left, 0,
+            "a note the node holds stayed on the list of ones the account stopped \
+             answering for, because a thread had panicked holding the account"
+        );
     }
 }

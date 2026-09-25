@@ -361,6 +361,101 @@ fn a_fee_typed_into_the_page_is_the_one_quoted_and_paid_once_said_again() {
     running.stop();
 }
 
+/// A quote whose amount and fee together pass the ceiling on any sum is
+/// refused, in the words sending the same pair is refused with.
+///
+/// The quote added the two and, where the sum failed, put the ceiling itself
+/// in its place, so the page read "Sending 999999999 and paying 5 to carry
+/// it, 1000000000 in all": a total that is not the sum of the two figures
+/// beside it, for a payment `Wallet::send` turns away as too large. Nothing
+/// asked for a quote past the ceiling, so a quote that answered a failed sum
+/// with a real looking one passed.
+#[test]
+fn a_quote_past_the_ceiling_is_refused_as_sending_it_is_and_not_totalled() {
+    let running = Running::start("ceiling", 10, 1);
+    let host = running.host();
+    let secret = running.secret().to_owned();
+    let recipient = SecretKey::generate().unwrap().public_key();
+
+    // One whole CAIRN under the ceiling, and a fee that takes the two past it.
+    let most = Amount::MAX_MONEY.as_pebbles() / cairn_primitives::amount::PEBBLES_PER_CAIRN;
+    let asked = format!("k={secret}&to={recipient}&amount={}&fee=5", most - 1);
+    let refused = cairn_wallet::WalletError::TooLarge.to_string();
+
+    let send = format!("POST /api/send HTTP/1.1\r\nhost: {host}\r\norigin: http://{host}");
+    let (status, answer) = running.ask(&send, &asked);
+    assert_eq!(status, 200);
+    assert!(
+        answer.contains("\"sent\":false") && answer.contains(&refused),
+        "sending an amount and a fee past the ceiling is refused as too large: {answer}"
+    );
+
+    let quote = format!("POST /api/quote HTTP/1.1\r\nhost: {host}\r\norigin: http://{host}");
+    let (status, answer) = running.ask(&quote, &asked);
+    assert_eq!(status, 200);
+    assert!(
+        !answer.contains("\"quoted\":true"),
+        "the quote gave a total for a payment sending refuses, and the total it \
+         gave is the ceiling rather than the sum of the two figures beside it: {answer}"
+    );
+    assert!(
+        answer.contains(&refused),
+        "the quote refuses in the words sending uses, so the two faces of one \
+         question give one answer: {answer}"
+    );
+
+    running.stop();
+}
+
+/// A quote for more than the wallet can spend is refused, in the words sending
+/// it is refused with, and does not say the network asks nothing.
+///
+/// The fee a quote names is worked out from the transfer the wallet would
+/// build, and for money it does not have there is no such transfer. That
+/// answered nought, and the page read it as the network's price: "The network
+/// asks 0.00000000 CAIRN", above a payment that sending then refused for want
+/// of money. Nothing quoted more than the wallet held, so a quote that turned
+/// "no transfer to price" into a price of nothing passed.
+#[test]
+fn a_quote_for_more_than_the_wallet_holds_is_refused_as_sending_it_is() {
+    let running = Running::start("short", 11, 1);
+    let host = running.host();
+    let secret = running.secret().to_owned();
+    let recipient = SecretKey::generate().unwrap().public_key();
+    let held = running.wallet.holdings().spendable;
+    assert!(
+        held > Amount::ZERO,
+        "the wallet has to hold something to be short of"
+    );
+    let asked = format!(
+        "k={secret}&to={recipient}&amount={}",
+        held.as_pebbles() / cairn_primitives::amount::PEBBLES_PER_CAIRN + 1
+    );
+
+    let send = format!("POST /api/send HTTP/1.1\r\nhost: {host}\r\norigin: http://{host}");
+    let (status, refused) = running.ask(&send, &asked);
+    assert_eq!(status, 200);
+    assert!(
+        refused.contains("\"sent\":false") && refused.contains("more than the"),
+        "sending more than the wallet holds is refused for want of money: {refused}"
+    );
+
+    let quote = format!("POST /api/quote HTTP/1.1\r\nhost: {host}\r\norigin: http://{host}");
+    let (status, answer) = running.ask(&quote, &asked);
+    assert_eq!(status, 200);
+    assert!(
+        !answer.contains("\"floor\":\"0.00000000 CAIRN\""),
+        "the quote said the network asks nothing to carry a payment the wallet cannot \
+         make: {answer}"
+    );
+    assert_eq!(
+        answer, refused,
+        "the quote and the send are one question and gave two answers"
+    );
+
+    running.stop();
+}
+
 /// A wallet whose whole balance is a reward too young to move is not an empty
 /// wallet, and the page must not call it one.
 ///

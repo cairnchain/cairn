@@ -85,3 +85,65 @@ fn a_wallet_that_read_no_movements_still_gives_an_account_of_itself() {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// A payment the wallet cannot make is refused before a fee is named for it,
+/// on the command line as on the page.
+///
+/// With no fee given, the command line fills in what the network asks, worked
+/// out from the transfer the wallet would build. For money it does not have
+/// there is no such transfer, and that answered nought: the command line
+/// printed "fee 0.00000000 CAIRN to carry it", a fee the network never asks,
+/// and only then the refusal for want of money. The page was corrected to
+/// refuse such a quote in the words sending uses; this is the same question
+/// on the other face, and nothing asked it here.
+#[test]
+fn a_payment_the_wallet_cannot_make_is_not_given_a_fee_of_nothing() {
+    let home = scratch("short");
+    let key = home.join("key");
+    let made = wallet(&["new", key.to_str().unwrap()]);
+    assert!(made.status.success(), "{}", said(&made));
+    let payee = home.join("payee");
+    let made = wallet(&["new", payee.to_str().unwrap()]);
+    assert!(made.status.success(), "{}", said(&made));
+    let shown = wallet(&["address", payee.to_str().unwrap()]);
+    let to = said(&shown)
+        .split_whitespace()
+        .find(|word| word.len() == 64)
+        .expect("the address command prints an address")
+        .to_owned();
+
+    let sent = wallet(&[
+        "send",
+        key.to_str().unwrap(),
+        "--to",
+        &to,
+        "--amount",
+        "1",
+        "--data",
+        home.join("data").to_str().unwrap(),
+        "--network",
+        "devnet",
+        // Nowhere, so this asks the command line and not the network.
+        "--seed",
+        "127.0.0.1:9",
+        "--wait",
+        "0",
+    ]);
+    let told = said(&sent);
+
+    assert!(
+        !sent.status.success(),
+        "a wallet holding nothing sent a payment: {told}"
+    );
+    assert!(
+        told.contains("more than the"),
+        "the refusal is for want of money: {told}"
+    );
+    assert!(
+        !told.contains("fee       0.00000000 CAIRN"),
+        "the command line named a fee of nothing for a payment the wallet cannot \
+         make, which the network never asks: {told}"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}

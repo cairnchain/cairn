@@ -567,6 +567,13 @@ fn spend(arguments: &[String]) -> Result<(), String> {
     // Without one named, what the network asks for. Nothing is not an option
     // any more and defaulting to it would send transfers nobody carries.
     let fee = asked.unwrap_or_else(|| wallet.floor_for(recipient, amount));
+    // Refused before a fee is named for it, as the page's quote is. For money
+    // this wallet does not have there is no transfer to price, and the line
+    // below used to name a fee of nothing for it.
+    if let Some(error) = wallet.could_not_draft(recipient, amount, fee) {
+        wallet.shutdown();
+        return Err(error.to_string());
+    }
 
     // Said before it is paid rather than only after. A fee is the one number
     // on this command line a person can get wrong by a factor of a hundred
