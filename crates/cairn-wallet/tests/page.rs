@@ -453,3 +453,62 @@ fn every_list_the_account_cuts_short_says_how_many_there_were() {
 
     running.stop();
 }
+
+/// How many notes have fallen is said of every note, and not of the ones the
+/// page happens to list.
+///
+/// The page lists the first two hundred of a wallet's notes and says above
+/// them "N notes, F of them fallen to the cold set". N came from the account
+/// and F was counted by the page over the list it had been handed, so past two
+/// hundred F counted only the fallen notes among the ones listed, and the
+/// listing puts the hot notes first: a wallet most of whose money needs a
+/// proof to move was told that little of it did. The test of the lists that
+/// are cut short pinned the counts the account sends, and this was not one of
+/// them, so nothing asked it.
+#[test]
+fn the_count_of_fallen_notes_is_of_every_note_and_not_of_those_listed() {
+    let params = ConsensusParams::testnet()
+        .with_coinbase_maturity(0)
+        .with_hot_capacity(16);
+    let running = Running::start_with("fallen", 7, 230, params);
+    let host = running.host();
+    let secret = running.secret().to_owned();
+
+    let (status, body) = running.get(&format!("/api/state?k={secret}"), &host, "");
+    assert_eq!(status, 200);
+
+    let holdings = running.wallet.holdings();
+    let fallen = holdings.notes.iter().filter(|held| held.is_cold()).count();
+    let listed = body.matches("\"source\":").count();
+    let fallen_listed = body.matches("\"cold\":true").count();
+    assert!(
+        holdings.notes.len() > listed,
+        "the wallet holds {} notes and the page listed {listed}, so this does not reach the cut",
+        holdings.notes.len()
+    );
+    assert!(
+        fallen > fallen_listed,
+        "{fallen} notes have fallen and {fallen_listed} of them are listed, so a count over \
+         the list and a count over the wallet agree here and this proves nothing"
+    );
+
+    assert!(
+        body.contains(&format!("\"fallen\":{fallen}")),
+        "the account does not say how many of its notes have fallen, so the page can only \
+         count the {fallen_listed} it lists of the {fallen} there are"
+    );
+
+    let (status, js) = running.get("/wallet.js", &host, "");
+    assert_eq!(status, 200);
+    assert!(
+        js.contains("state.fallen"),
+        "the page does not read the account's count of fallen notes"
+    );
+    assert!(
+        !js.contains("state.notes.filter"),
+        "the page still counts fallen notes over the list it was handed, which stops at two \
+         hundred"
+    );
+
+    running.stop();
+}
