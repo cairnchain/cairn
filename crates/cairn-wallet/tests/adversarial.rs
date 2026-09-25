@@ -1274,7 +1274,6 @@ fn a_wallet_that_has_not_checked_its_chain_says_so_before_anything_smaller() {
             height: Some(1_200),
             peers: 3,
             joining: Joined::Done,
-            total_work: 1,
             probation: Some(probation),
             outdated: None,
             stranded: None,

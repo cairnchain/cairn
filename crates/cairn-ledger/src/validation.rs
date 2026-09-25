@@ -1150,7 +1150,6 @@ fn resolve_transfer(
 #[derive(Clone, Debug)]
 pub struct BlockEffect {
     transition: StateTransition,
-    total_fees: Amount,
     state_root: Hash32,
 }
 
@@ -1307,7 +1306,6 @@ pub fn evaluate_block_body(
 
     Ok(BlockEffect {
         transition,
-        total_fees,
         state_root,
     })
 }
@@ -1407,7 +1405,6 @@ pub fn assemble_block(
 pub struct ConnectedBlock {
     pub transition: StateTransition,
     pub undo: BlockUndo,
-    pub total_fees: Amount,
 }
 
 /// Checks everything about a header that does not need the block body.
@@ -1642,7 +1639,6 @@ pub fn connect_block(
     Ok(ConnectedBlock {
         transition: effect.transition,
         undo,
-        total_fees: effect.total_fees,
     })
 }
 

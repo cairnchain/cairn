@@ -590,7 +590,6 @@ pub struct Progress {
     pub height: Option<u64>,
     pub peers: usize,
     pub joining: Joined,
-    pub total_work: u128,
     /// What the node has still to check before it stands behind the ledger it
     /// was handed.
     ///
@@ -1188,7 +1187,6 @@ impl Wallet {
             height: self.node.height(),
             peers: self.node.peers_introduced(),
             joining: self.node.joining(),
-            total_work: self.node.total_work(),
             probation: self.node.probation(),
             outdated: self.node.outdated(),
             stranded: self.node.stranded(),
@@ -2609,7 +2607,6 @@ mod tests {
             height: Some(10),
             peers: 1,
             joining: Joined::Done,
-            total_work: 10,
             probation: None,
             outdated: None,
             stranded: None,

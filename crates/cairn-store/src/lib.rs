@@ -203,6 +203,9 @@ pub enum StoreError {
 #[derive(Debug, Default)]
 pub struct Recovered {
     /// Records the log holds.
+    ///
+    /// Read by the tests, which hold an open to what it found. A node counts
+    /// the blocks it replays for itself, so nothing in production reads it.
     pub blocks: usize,
     /// Bytes cut off the end of the log, which no record accounted for.
     ///
