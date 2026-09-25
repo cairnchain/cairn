@@ -28,13 +28,14 @@
     clippy::arithmetic_side_effects
 )]
 
-use cairn_chain::{Accepted, ChainStore, MAX_POOLED};
+use cairn_chain::{Accepted, ChainStore, MAX_POOLED, MAX_POOL_BYTES};
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::Block;
 use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
+use cairn_primitives::codec::Encode;
 use cairn_primitives::Amount;
 
 const NOW: u64 = 2_000_000_000;
@@ -316,5 +317,221 @@ fn a_rewind_stops_asking_at_the_budget_and_not_at_the_end_of_what_it_undid() {
         "the branch that was undone carried {carried} transfers and the budget \
          is {MAX_POOLED}: with fewer, the stop above is the end of the list \
          rather than the bound"
+    );
+}
+
+/// Transfers a rewind offers back in the shapes below, which pay the plain
+/// fee and so rate below everything the pool is filled with.
+const UNDONE: usize = 8;
+
+/// A transfer paying one note out to as many as a transfer may name.
+///
+/// The shape that fills a pool by its bytes rather than by its count: one
+/// input, the most outputs the rules allow, and a pool full of them holds a
+/// tenth of the transfers `MAX_POOLED` has room for.
+fn wide(params: &ConsensusParams, id: NoteId, note: Note, owner: &SecretKey, fee: u64) -> Transfer {
+    let outputs = u64::try_from(params.max_outputs_per_transfer).unwrap();
+    let paid = note.value.as_pebbles() - fee;
+    let each = paid / outputs;
+    let first = paid - each * (outputs - 1);
+    let notes = (0..outputs)
+        .map(|index| {
+            let value = if index == 0 { first } else { each };
+            Note::new(pebbles(value), wallet(5).public_key())
+        })
+        .collect();
+    let mut transfer = Transfer::new(vec![Input::hot(id)], notes);
+    transfer.sign_input(params.network, 0, &note, owner);
+    transfer
+}
+
+/// Funds a chain with at least `wanted` spendable notes and returns them.
+fn funded(
+    source: &mut Source,
+    store: &mut ChainStore,
+    owner: &SecretKey,
+    wanted: usize,
+) -> Vec<(NoteId, Note)> {
+    let mut notes: Vec<(NoteId, Note)> = Vec::new();
+    while notes.len() < wanted {
+        let outputs = source.split_reward(owner);
+        let block = source.mine(outputs.clone(), Vec::new());
+        store.add_block(block.clone(), NOW).unwrap();
+        for (index, note) in outputs.into_iter().enumerate() {
+            notes.push((
+                NoteId::new(block.coinbase.id(), u32::try_from(index).unwrap()),
+                note,
+            ));
+        }
+    }
+    notes
+}
+
+/// Takes the heavier branch from `rival`, undoing what `source` added past
+/// the fork.
+fn switch_to_rival(rival: &mut Source, store: &mut ChainStore) {
+    let mut reorganised = false;
+    for _ in 0..2 {
+        let block = rival.mine(rival.split_reward(&wallet(1)), Vec::new());
+        if matches!(
+            store.add_block(block, NOW),
+            Ok(Accepted::Reorganised { .. })
+        ) {
+            reorganised = true;
+        }
+    }
+    assert!(reorganised, "the heavier branch was taken");
+}
+
+/// A pool full by its bytes turns away what it cannot take without being
+/// asked, the same as a pool full by its count.
+///
+/// `repool` settles cheaply the transfers a full pool could not take, so that
+/// they do not spend the budget, which counts the times the pool is asked. It
+/// decided "full" by the count alone, and the pool it stands in front of is
+/// full by the count or by the bytes, whichever comes first: `must_make_room`
+/// asks both. A pool of transfers paying out to hundreds of notes each is full
+/// by its bytes at a tenth of its count, and in front of it every transfer a
+/// rewind offered back was asked about and refused, a unit of the budget
+/// each, which is the spending on refusals this file was written against, in
+/// the one shape its fixtures did not build. Nothing asked it, because every
+/// pool in them filled by its count.
+#[test]
+fn a_pool_full_by_its_bytes_is_not_asked_about_what_it_cannot_take() {
+    let miner = wallet(1);
+    let params = params();
+    let mut source = Source::new();
+    let mut store = ChainStore::new(params);
+
+    // Enough notes for however many wide transfers fill the pool, the plain
+    // ones that close the last gap, and the ones the rewind will offer back.
+    let first = funded(&mut source, &mut store, &miner, 1);
+    let (id, note) = first[0];
+    let wide_bytes = wide(&params, id, note, &miner, 20_000_000).encode().len();
+    let plain_bytes = spend(&params, id, note, &miner, &wallet(3), pebbles(PLAIN_FEE))
+        .encode()
+        .len();
+    let wides = MAX_POOL_BYTES / wide_bytes + 1;
+    let fillers = wide_bytes / plain_bytes + 2;
+    let mut notes = funded(&mut source, &mut store, &miner, wides + fillers + UNDONE);
+    notes.extend(first);
+
+    let mut rival = Source {
+        params,
+        state: source.state.clone(),
+        clock: source.clock,
+    };
+
+    // The block the rewind will undo, carrying plain payments the winning
+    // branch does not.
+    let undone: Vec<Transfer> = notes
+        .drain(..UNDONE)
+        .map(|(id, note)| spend(&params, id, note, &miner, &wallet(3), pebbles(PLAIN_FEE)))
+        .collect();
+    let carried = source.mine(source.split_reward(&miner), undone.clone());
+    store.add_block(carried, NOW).unwrap();
+
+    // Filled by its bytes: wide transfers until one does not fit, then plain
+    // ones paying twice the plain fee until one of those does not either.
+    // Each rates above the payments being undone, so a full pool cannot take
+    // those.
+    let mut left = notes.into_iter();
+    for (id, note) in left.by_ref() {
+        if !store
+            .accept_transfer(wide(&params, id, note, &miner, 20_000_000))
+            .unwrap()
+        {
+            break;
+        }
+    }
+    for (id, note) in left.by_ref() {
+        let filler = spend(
+            &params,
+            id,
+            note,
+            &miner,
+            &wallet(4),
+            pebbles(PLAIN_FEE * 2),
+        );
+        if !store.accept_transfer(filler).unwrap() {
+            break;
+        }
+    }
+    assert!(
+        left.next().is_some(),
+        "the notes ran out before the pool refused anything, so it is not full"
+    );
+    assert!(
+        store.pool_len() < MAX_POOLED,
+        "the pool holds {} transfers, so it filled by its count and this asks nothing new",
+        store.pool_len()
+    );
+
+    switch_to_rival(&mut rival, &mut store);
+
+    for payment in &undone {
+        assert!(
+            store.pooled(&payment.id()).is_none(),
+            "a full pool took a payment rating below everything in it, so the rewind \
+             offered back something it had room for"
+        );
+    }
+    let offered = store.last_rewind_offered();
+    assert_eq!(
+        offered, 0,
+        "a pool full by its bytes was asked about {offered} of the {UNDONE} transfers it \
+         could not take, and each one spent a unit of the budget a pool full by its count \
+         would have kept"
+    );
+}
+
+/// A pool with room takes back a payment that rates below the cheapest thing
+/// in it.
+///
+/// The other half of the test above. Turning a transfer away without asking
+/// is right only when the pool is full; a pool with room takes whatever pays
+/// its floor, however the rate compares, and a rewind that skipped it would be
+/// cancelling a payment for being cheaper than a neighbour.
+#[test]
+fn a_pool_with_room_takes_back_a_payment_rating_below_its_cheapest() {
+    let miner = wallet(1);
+    let params = params();
+    let mut source = Source::new();
+    let mut store = ChainStore::new(params);
+
+    let mut notes = funded(&mut source, &mut store, &miner, 2);
+    let mut rival = Source {
+        params,
+        state: source.state.clone(),
+        clock: source.clock,
+    };
+
+    let (id, note) = notes.pop().unwrap();
+    let payment = spend(&params, id, note, &miner, &wallet(3), pebbles(PLAIN_FEE));
+    let carried = source.mine(source.split_reward(&miner), vec![payment.clone()]);
+    store.add_block(carried, NOW).unwrap();
+
+    let (id, note) = notes.pop().unwrap();
+    let dearer = spend(
+        &params,
+        id,
+        note,
+        &miner,
+        &wallet(4),
+        pebbles(PLAIN_FEE * 2),
+    );
+    assert!(store.accept_transfer(dearer).unwrap(), "the pool has room");
+
+    switch_to_rival(&mut rival, &mut store);
+
+    assert!(
+        store.pooled(&payment.id()).is_some(),
+        "a payment the winning branch never carried was not taken back into a pool with \
+         room for it, because something already in it paid a better rate"
+    );
+    assert_eq!(
+        store.last_rewind_offered(),
+        1,
+        "and the pool was asked once"
     );
 }

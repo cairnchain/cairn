@@ -684,9 +684,8 @@ fn falling_behind(unwritten: &Unwritten, directory: &str) -> String {
          and the disk said: {}. {}: a restart begins at the disk's number and asks the \
          network for the rest, which it can only be given while other people still have \
          them. Free some room under that directory, or find out what else is wrong with it. \
-         More than {MAX_BEHIND} blocks behind, the missing ones are gone from this node's \
-         memory too and no amount of room brings them back, so it stops there rather than \
-         go on making its own disk less worth restarting from.",
+         More than {MAX_BEHIND} blocks behind it stops, while it still holds the missing \
+         ones, rather than go on making its own disk less worth restarting from.",
         unwritten.what,
         unwritten.because,
         as_far_as(unwritten),
@@ -701,12 +700,11 @@ fn falling_behind(unwritten: &Unwritten, directory: &str) -> String {
 fn lost_the_disk(unwritten: &Unwritten, directory: &str) -> String {
     format!(
         "the disk under {directory} stopped taking what this node writes, and it has now \
-         accepted more blocks than it can ever write down. It was writing {}, and the disk \
-         said: {}. {}, and the blocks in between have left this node's memory, so there \
-         is nowhere left to read them from and no room would help. It stops here so that \
-         what is on the disk is still worth starting from: every block it took from now on \
-         would be one more the disk does not have. Free some room under that directory and \
-         start it again.",
+         accepted more than the {MAX_BEHIND} blocks it will carry without writing them down. \
+         It was writing {}, and the disk said: {}. {}, and a restart asks the network for \
+         the blocks in between. It stops here so that what is on the disk is still worth \
+         starting from: every block it took from now on would be one more the disk does not \
+         have. Free some room under that directory and start it again.",
         unwritten.what,
         unwritten.because,
         as_far_as(unwritten),
@@ -1422,6 +1420,37 @@ mod said_out_loud {
         );
     }
 
+    /// Neither line about a full disk explains the stop by a loss that has
+    /// not happened.
+    ///
+    /// A node stops at `MAX_BEHIND` blocks behind, and that number sits inside
+    /// the window a chain holds block bodies over: `cairn-net` holds it there
+    /// with an assertion and a test, and says it is the whole reason there is
+    /// a number. So at the stop every block in the gap is still in this node's
+    /// memory. One line said that past `MAX_BEHIND` the missing blocks are gone
+    /// from memory and no room brings them back, and the other that they have
+    /// left it. Nothing read either line against the number it explains, so a
+    /// stop explained by the reason for a different constant passed.
+    #[test]
+    fn the_lines_about_a_full_disk_do_not_say_the_blocks_have_left_memory() {
+        use cairn_net::node::MAX_BEHIND;
+
+        for text in [
+            falling_behind(&behind(MAX_BEHIND, true), "/var/lib/cairn"),
+            lost_the_disk(&behind(MAX_BEHIND + 1, false), "/var/lib/cairn"),
+        ] {
+            assert!(
+                !text.contains("memory"),
+                "a node that stops past {MAX_BEHIND} blocks behind still holds every one of \
+                 them, and the line says they are gone: {text}"
+            );
+            assert!(
+                text.contains("asks the network"),
+                "and it does not say where a restart finds them: {text}"
+            );
+        }
+    }
+
     /// Every number a person needs in order to act, in every one of them.
     #[test]
     fn the_lines_carry_the_two_heights_the_reason_and_the_directory() {
@@ -1444,7 +1473,6 @@ mod said_out_loud {
         }
     }
 
-    /// A log holding nothing at all is the awkward case, and it has to be a
     /// The notice period, from the schedule rather than from anybody.
     ///
     /// Three shapes and all three reachable, which is the half of this a test
@@ -1548,6 +1576,7 @@ mod said_out_loud {
         );
     }
 
+    /// A log holding nothing at all is the awkward case, and it has to be a
     /// sentence rather than the word "none" in a gap.
     #[test]
     fn a_disk_with_no_blocks_on_it_is_still_a_sentence() {

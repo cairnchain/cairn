@@ -810,8 +810,9 @@ impl Progress {
             let lost = if unwritten.within_reach {
                 "They can still reach it if the room comes back."
             } else {
-                "They are no longer anywhere this node can read them from, so \
-                 nothing done now will put them on the disk."
+                "The node has stopped rather than fall further behind, so nothing \
+                 done now will put them on the disk, and a restart asks the network \
+                 for them."
             };
             return Some(format!(
                 "The disk under the node this wallet runs is not taking what it writes. \
@@ -2683,6 +2684,43 @@ mod tests {
         assert!(said.contains("900"), "{said}");
         assert!(said.contains("40 of the 100"), "{said}");
         assert!(said.contains("has not yet checked"), "{said}");
+    }
+
+    /// A wallet whose node stopped over a full disk is not told the blocks
+    /// were lost.
+    ///
+    /// The node stops at `MAX_BEHIND` blocks behind, inside the window its
+    /// chain holds block bodies over, so when it stops it still holds every
+    /// block it did not write. The line said they were "no longer anywhere
+    /// this node can read them from". Nothing read it against the number, so a
+    /// person was told of a loss that had not happened, as the reason for a
+    /// stop that was a choice.
+    #[test]
+    fn a_node_stopped_over_its_disk_is_not_said_to_have_lost_the_blocks() {
+        use cairn_net::node::{Unwritten, Writing, MAX_BEHIND};
+
+        let stopped = Progress {
+            unwritten: Some(Unwritten {
+                what: Writing::Blocks,
+                because: "no space left on device".to_owned(),
+                reached: 1_200,
+                written_through: Some(1_200 - MAX_BEHIND - 1),
+                blocks: MAX_BEHIND + 1,
+                within_reach: false,
+            }),
+            ..healthy()
+        };
+        let said = stopped.warning().expect("a person is told");
+        assert!(
+            !said.contains("no longer anywhere"),
+            "a node that stopped {} blocks behind still held all of them, and the line \
+             says they are gone",
+            MAX_BEHIND + 1
+        );
+        assert!(
+            said.contains("asks the network"),
+            "and it does not say where a restart finds them"
+        );
     }
 
     /// A node with nothing to report, for the states below to differ from.

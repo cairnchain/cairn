@@ -431,7 +431,9 @@ fn a_frame_longer_than_the_cap_is_refused_before_it_is_reserved() {
         // have made a buffer of `declared` bytes before finding that out.
         let mut source = Feeding::new(frame);
         match read_message(&mut source, NetworkId::TESTNET, MAX_FRAME_BYTES) {
-            Err(WireError::FrameTooLarge { declared: found }) => {
+            Err(WireError::FrameTooLarge {
+                declared: found, ..
+            }) => {
                 assert_eq!(found, declared as usize);
             }
             other => panic!("a frame of {declared} bytes was answered with {other:?}"),

@@ -83,7 +83,7 @@ fn a_reader_refuses_what_the_caller_would_not_have_it_read() {
     assert!(
         matches!(
             read_message(&mut stranger, params().network, MOST_BEFORE_A_NAME),
-            Err(WireError::FrameTooLarge { declared }) if declared == over
+            Err(WireError::FrameTooLarge { declared, .. }) if declared == over
         ),
         "a caller that said {MOST_BEFORE_A_NAME} was handed a frame of {over} to read"
     );

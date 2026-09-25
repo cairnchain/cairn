@@ -329,6 +329,13 @@ fn state(wallet: &Wallet) -> Response {
     // the second and print the first.
     json.field_bool("anything", !holdings.empty_handed());
     json.field_usize("held", holdings.notes.len());
+    // Counted here over every note, because the list below stops at
+    // `NOTES_SHOWN` and a count the page made over that list was a count of
+    // the notes it was shown, said of all of them.
+    json.field_usize(
+        "fallen",
+        holdings.notes.iter().filter(|held| held.is_cold()).count(),
+    );
 
     // Payments handed over that no block carries yet. The one thing a person
     // watching an unmoved balance after pressing Send needs to be told.

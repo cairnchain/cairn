@@ -415,7 +415,7 @@ async function refresh() {
   // all leave this count at nought. Reading them as an empty wallet printed
   // "Nothing here yet" directly above the line naming the amount.
   const held = state.held;
-  const fallen = state.notes.filter((n) => n.cold).length;
+  const fallen = state.fallen;
   text("held-line", !state.anything
     ? "Nothing here yet. If this key should hold something, check the height above."
     : held === 0

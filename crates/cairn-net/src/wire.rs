@@ -157,8 +157,10 @@ pub enum WireError {
         expected: NetworkId,
         found: NetworkId,
     },
-    #[error("peer announced a {declared} byte frame, the limit is {MAX_FRAME_BYTES}")]
-    FrameTooLarge { declared: usize },
+    /// `limit` is the one that refused it, which for a peer that has not said
+    /// who it is is [`MOST_BEFORE_A_NAME`] and not [`MAX_FRAME_BYTES`].
+    #[error("peer announced a {declared} byte frame, the limit is {limit}")]
+    FrameTooLarge { declared: usize, limit: usize },
     #[error("frame body is malformed: {0}")]
     Malformed(#[from] CodecError),
     #[error("this node would have sent a {size} byte frame, over its own limit")]
@@ -359,8 +361,9 @@ pub fn read_message<R: Read>(
         });
     }
     let declared = usize::try_from(u32::decode_from(&mut cursor)?).unwrap_or(usize::MAX);
-    if declared > most.min(MAX_FRAME_BYTES) {
-        return Err(WireError::FrameTooLarge { declared });
+    let limit = most.min(MAX_FRAME_BYTES);
+    if declared > limit {
+        return Err(WireError::FrameTooLarge { declared, limit });
     }
 
     // What this caller will let this peer ask for, which is not the same
@@ -396,7 +399,7 @@ mod tests {
 
     use super::{
         drain, fill, patience_from, read_message, write_message, Filled, Incoming, Patience,
-        WireError, HEADER_BYTES, MAX_FRAME_BYTES,
+        WireError, HEADER_BYTES, MAX_FRAME_BYTES, MOST_BEFORE_A_NAME,
     };
     use crate::message::{Joining, Message};
 
@@ -686,6 +689,36 @@ mod tests {
             Some(written.len()),
             MAX_FRAME_BYTES.checked_add(HEADER_BYTES),
             "the frame written is not the whole of it"
+        );
+    }
+
+    /// A frame refused for its size is told against the limit that refused
+    /// it.
+    ///
+    /// A peer that has not said who it is may send [`MOST_BEFORE_A_NAME`], and
+    /// the refusal of anything past that named [`MAX_FRAME_BYTES`] as the
+    /// limit: a frame of four kilobytes and one byte was reported as over a
+    /// limit of a megabyte, a sentence that contradicts itself. Every test of
+    /// the refusal matched the variant and none read the words, so a refusal
+    /// naming the ceiling for a peer it knows rather than the one it had just
+    /// applied passed.
+    #[test]
+    fn a_frame_refused_for_its_size_names_the_limit_that_refused_it() {
+        let declared = MOST_BEFORE_A_NAME.checked_add(1).unwrap();
+        let mut frame = NETWORK.as_u32().encode();
+        frame.extend_from_slice(&u32::try_from(declared).unwrap().encode());
+
+        let said = match read_message(&mut frame.as_slice(), NETWORK, MOST_BEFORE_A_NAME) {
+            Err(error @ WireError::FrameTooLarge { .. }) => error.to_string(),
+            other => panic!("a frame past what a stranger may send came back {other:?}"),
+        };
+        assert!(
+            said.contains(&MOST_BEFORE_A_NAME.to_string()),
+            "the refusal does not name the limit a stranger is held to: {said}"
+        );
+        assert!(
+            !said.contains(&MAX_FRAME_BYTES.to_string()),
+            "the refusal names the ceiling for a peer it knows, which this frame is under: {said}"
         );
     }
 }
