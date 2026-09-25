@@ -2084,9 +2084,47 @@ fn readable(bytes: &[u8]) -> Option<String> {
 )]
 mod tests {
     use super::{
-        holdings, limit_of, next_after, offset_of, readable, ADDRESS_PAGE, ADDRESS_SCAN, MAX_PAGE,
-        PAGE,
+        holdings, limit_of, most_one_answer_carries, next_after, offset_of, readable, too_much_now,
+        ADDRESS_PAGE, ADDRESS_SCAN, MAX_PAGE, PAGE, ROOM_FOR_THE_REST,
     };
+    use cairn_http::Writer;
+
+    /// A list stops at the row that put the answer over the ceiling, takes
+    /// that row back, and never stops before its first row.
+    ///
+    /// Every page of blocks and every page of an address ends here, and no
+    /// test put an answer near the ceiling: stopping after every row passed,
+    /// as did never stopping, and stopping a row late.
+    #[test]
+    fn a_list_stops_at_the_row_that_went_over_and_never_before_the_first() {
+        let ceiling = most_one_answer_carries() - ROOM_FOR_THE_REST;
+        let row = "x".repeat(ceiling / 2);
+
+        let mut json = Writer::new();
+        json.begin_array();
+        let before = json.mark();
+        json.string(&row);
+        assert!(
+            !too_much_now(&mut json, 0, before),
+            "a first row always stays"
+        );
+        let before = json.mark();
+        json.string("small");
+        assert!(
+            !too_much_now(&mut json, 1, before),
+            "a row under the ceiling stays"
+        );
+
+        let before = json.mark();
+        let kept = json.written();
+        json.string(&row);
+        assert!(json.written() > ceiling, "the fixture has to go over");
+        assert!(
+            too_much_now(&mut json, 2, before),
+            "the row that went over stops the list"
+        );
+        assert_eq!(json.written(), kept, "and is taken back");
+    }
     use crate::index::NoteRecord;
     use cairn_crypto::SecretKey;
     use cairn_http::Request;
