@@ -1269,13 +1269,15 @@ impl Wallet {
     /// also what a peer that completes the handshake and then says nothing
     /// leaves behind, and there is no reason to make that free.
     pub fn catch_up(&self, patience: Duration) {
-        let deadline = Instant::now()
-            .checked_add(patience)
-            .unwrap_or_else(Instant::now);
+        // None for a patience past what the clock can count, which is a wait
+        // with no deadline. It was the clock now, so the longest `--wait` a
+        // person could type waited for nothing and then said no chain had
+        // arrived in all that time.
+        let deadline = Instant::now().checked_add(patience);
         let mut last = self.node.height();
         let mut still_since = Instant::now();
 
-        while Instant::now() < deadline {
+        while deadline.is_none_or(|deadline| Instant::now() < deadline) {
             std::thread::sleep(Duration::from_millis(200));
             let height = self.node.height();
             if height != last {
