@@ -11,10 +11,11 @@
 //! suite passes: every test that reaches the recorded place reaches it with a
 //! place that is right, so the fold never has anything to refuse.
 //!
-//! A place can be wrong without anybody being dishonest. It is written down
-//! once and never moved, on the reasoning that a place is fixed the moment a
-//! note falls; a branch this wallet later leaves can put a different note
-//! there. And the file is one a person can edit.
+//! A place can be wrong without anybody being dishonest. It is fixed for as
+//! long as the block the note fell in stands, and a branch this wallet later
+//! leaves can put a different note there; the node's newer answer is written
+//! over it, but only while the node still knows, and a node restarted from
+//! its ledger does not. And the file is one a person can edit.
 //!
 //! What the fold buys is that a wrong place costs nothing but a note the
 //! wallet says it cannot move. Without it the wallet offers a path to somebody
@@ -98,20 +99,6 @@ fn a_wallet_whose_node_forgot_the_places(
     let data = directory.join("data");
     let blocks = a_chain(&secret.public_key());
 
-    {
-        let (wallet, _) = Wallet::open(&key_file, params(), &data).unwrap();
-        drop(wallet);
-    }
-
-    // Written before the wallet reads anything, because a place is taken on
-    // the first answer and never moved: whatever is in the file when the
-    // wallet starts is the place it will keep.
-    if let Some((id, value, position)) = plant {
-        let mut history = History::new();
-        assert!(history.fell_at(id, value, position));
-        history.save(&data.join("history.dat")).unwrap();
-    }
-
     let (wallet, _) = Wallet::open(&key_file, params(), &data).unwrap();
     for block in &blocks {
         wallet.node().submit_block(block.clone()).unwrap();
@@ -119,6 +106,19 @@ fn a_wallet_whose_node_forgot_the_places(
     wallet.follow_to_the_tip();
     assert!(wallet.node().write_ledger(), "the node wrote its ledger");
     drop(wallet);
+
+    // Written after the wallet has read everything and before it starts
+    // again. Planted any earlier, the node's own answer is written over it as
+    // the notes fall. After the restart the node no longer knows where the
+    // planted note sits, so the file is the only record, which is where a
+    // place from a branch the wallet left ends up.
+    if let Some((id, value, position)) = plant {
+        let path = data.join("history.dat");
+        let (mut history, why) = History::load(&path);
+        assert_eq!(why, None, "the account read back");
+        assert!(history.fell_at(id, value, position));
+        history.save(&path).unwrap();
+    }
 
     let (wallet, _) = Wallet::open(&key_file, params(), &data).unwrap();
     wallet.follow_to_the_tip();
@@ -132,7 +132,7 @@ fn a_place_this_file_got_wrong_is_not_offered_as_a_path() {
     // that what is planted below is a real leaf rather than an empty one. A
     // position nothing sits at is refused by the accumulator before the fold
     // is reached, and a test built on one measures nothing.
-    let (honest_total, honest_data) = {
+    let (honest_total, honest_data, forgotten) = {
         let (wallet, data) = a_wallet_whose_node_forgot_the_places("honest", None);
         let holdings = wallet.holdings();
         assert!(
@@ -140,8 +140,9 @@ fn a_place_this_file_got_wrong_is_not_offered_as_a_path() {
             "the node was meant to have forgotten where these notes sit"
         );
         let total = holdings.total();
+        let forgotten: Vec<NoteId> = holdings.unprovable.iter().map(|one| one.id).collect();
         drop(wallet);
-        (total, data)
+        (total, data, forgotten)
     };
 
     let (account, why) = History::load(&honest_data.join("history.dat"));
@@ -150,12 +151,18 @@ fn a_place_this_file_got_wrong_is_not_offered_as_a_path() {
         .held()
         .filter_map(|(id, _)| Some((id, account.where_it_fell(&id)?)))
         .collect();
-    assert!(
-        places.len() >= 2,
-        "this chain was meant to leave at least two fallen notes to swap between"
-    );
-    let (mine, _) = places[0];
-    let (_, somebody_elses) = places[1];
+    // The note wearing the wrong place has to be one the restarted node cannot
+    // place, or the node's own word is read before the file's and the fold is
+    // never reached. The place it wears has to be one the node still holds a
+    // path to, or the accumulator refuses it before the fold.
+    let (mine, _) = *places
+        .iter()
+        .find(|(id, _)| forgotten.contains(id))
+        .expect("this chain was meant to leave a note the restarted node cannot place");
+    let (_, somebody_elses) = *places
+        .iter()
+        .find(|(id, _)| !forgotten.contains(id))
+        .expect("and one it still places, whose place is a real leaf with a path to it");
     let value = params().initial_reward;
 
     // One note, wearing another's place. Every byte of the file is the shape a

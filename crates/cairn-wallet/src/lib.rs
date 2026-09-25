@@ -1370,10 +1370,12 @@ impl Wallet {
     /// machine rather than about the chain and a ledger carries neither the
     /// asking nor the answer.
     ///
-    /// The place is the half worth keeping. It is fixed the moment a note
-    /// falls and never moves again, while the path up to it moves every time
+    /// The place is the half worth keeping. It is fixed for as long as the
+    /// block the note fell in stands, while the path up to it moves every time
     /// another note falls, which is why nobody keeps paths for strangers and
-    /// why the place is what a wallet has to be able to name later.
+    /// why the place is what a wallet has to be able to name later. A branch
+    /// that wins over the block can put the note elsewhere, and whatever the
+    /// node says now is written over what it said then.
     ///
     /// Walked rather than watched for, because there is nowhere to hang the
     /// watching: what the node knows is a map, and comparing it against this

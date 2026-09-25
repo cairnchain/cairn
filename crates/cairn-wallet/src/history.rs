@@ -204,11 +204,11 @@ pub struct History {
     /// keeps, for the ones that have.
     ///
     /// Written down while the node can still say, because the node will not
-    /// always be able to. A place is fixed for good the moment a note falls
-    /// and never moves again; what moves is the path up to it, which changes
-    /// every time another note falls and is nobody's to keep for ever. So the
-    /// wallet keeps the half that lasts, and the half that does not can be
-    /// asked for by anyone holding this.
+    /// always be able to. A place is fixed for as long as the block the note
+    /// fell in stands; what moves is the path up to it, which changes every
+    /// time another note falls and is nobody's to keep for ever. So the wallet
+    /// keeps the half that lasts, and the half that does not can be asked for
+    /// by anyone holding this.
     ///
     /// Without it there is nothing to ask about. A wallet that knows only that
     /// it owns a note knows the one thing an archivist cannot look up: the set
@@ -548,17 +548,25 @@ impl History {
     /// balance without a word: not stranded, which is a thing a wallet can say
     /// and ask about, but gone.
     ///
-    /// The first answer stands. A place is fixed when the note falls and never
-    /// moves, so anything later saying different is a second opinion about a
-    /// settled fact, and taking it would mean a wallet could be talked out of
-    /// where its own money sits.
+    /// The newest answer stands. It used to be the first, on the reasoning
+    /// that a place is fixed when the note falls and never moves, so a later
+    /// answer could only be a second opinion about a settled fact. Fixed for
+    /// as long as the block the note fell in stands, and no longer: a note
+    /// falls when the hot set runs out of room, which can be long after the
+    /// block that paid it, so a note paid below the reach of any
+    /// reorganisation can still fall inside it, and [`History::forget`] keeps
+    /// that note's place. The branch that wins can put it somewhere else. The
+    /// account kept the losing branch's place while its own node named the
+    /// right one, and once the node restarted and forgot, it asked archivists
+    /// about somebody else's leaf and the money stayed stranded.
+    ///
+    /// What calls this is the wallet reading its own node's ledger, which is
+    /// the chain as that node has checked it now, so a later answer is never
+    /// a weaker one. `Wallet::reckon` already takes the node's word over the
+    /// file's for the same reason.
     pub fn fell_at(&mut self, id: NoteId, value: Amount, position: u64) -> bool {
-        if self.fell.contains_key(&id) {
-            return false;
-        }
         self.held.entry(id).or_insert(value);
-        self.fell.insert(id, position);
-        true
+        self.fell.insert(id, position) != Some(position)
     }
 
     /// Where a note landed, if this account saw it land.
@@ -1629,14 +1637,17 @@ mod tests {
         assert!(history.fell_at(id, amount("50"), 41));
         assert_eq!(history.where_it_fell(&id), Some(41));
         assert!(
-            !history.fell_at(id, amount("50"), 9),
-            "a place is fixed when a note falls and never moves, so nothing \
-             later gets to say otherwise"
+            !history.fell_at(id, amount("50"), 41),
+            "the same place again is not news, and news is what gets the file written"
         );
-        assert_eq!(history.where_it_fell(&id), Some(41));
+        assert!(
+            history.fell_at(id, amount("50"), 9),
+            "a branch that won put the note somewhere else, and that is news"
+        );
+        assert_eq!(history.where_it_fell(&id), Some(9));
 
         let read = History::decode(&history.encode()).unwrap();
-        assert_eq!(read.where_it_fell(&id), Some(41));
+        assert_eq!(read.where_it_fell(&id), Some(9));
         assert_eq!(read.encode(), history.encode());
     }
 

@@ -2,8 +2,9 @@
 //!
 //! A note that has left the set every node keeps can only be spent alongside a
 //! path showing where it sits. The path goes stale and can be rebuilt on
-//! request; the place it is a path to is fixed for good when the note falls,
-//! and it is the only handle anybody has on that note. The set is a list of
+//! request; the place it is a path to is fixed once the block the note fell
+//! in can no longer be undone, and it is the only handle anybody has on that
+//! note. The set is a list of
 //! hashes with no name attached to any of them, so nothing in it can be looked
 //! up by the key that owns it: an archivist holding every leaf rebuilds a path
 //! for a place it is told, and cannot find a place it is not told.

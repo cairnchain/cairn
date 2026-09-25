@@ -5,7 +5,7 @@
 //! exists to be cheaper than, not a thing that cannot be done." True of the
 //! movements, and true of `held` while the blocks are still on the disk. The
 //! account keeps a third thing, `fell`: where each of this key's fallen notes
-//! landed, "fixed the moment a note falls and never moves again", and the one
+//! landed, "fixed for as long as the block the note fell in stands", and the one
 //! handle an archivist can be asked by. Its only source is the node's own
 //! watch list, which a node restarted from a written ledger comes back
 //! without. So on such a node the file is the only record of the places, and
