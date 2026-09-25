@@ -58,8 +58,22 @@ impl std::fmt::Display for Stopping {
 }
 
 fn main() {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
-    if let Err(message) = run(&arguments) {
+    // Read as it comes rather than through `std::env::args`, which panics on
+    // an argument that is not Unicode: a path with one stray byte in it was
+    // answered with a Rust panic and 101 rather than a message and 2.
+    let arguments: Result<Vec<String>, _> = std::env::args_os()
+        .skip(1)
+        .map(std::ffi::OsString::into_string)
+        .collect();
+    let ran = arguments
+        .map_err(|unreadable| {
+            Stopping::Misread(format!(
+                "`{}` is not text this program can read",
+                unreadable.to_string_lossy()
+            ))
+        })
+        .and_then(|arguments| run(&arguments));
+    if let Err(message) = ran {
         eprintln!("cairn-explorer: {message}");
         if let Stopping::Misread(_) = message {
             eprintln!();
