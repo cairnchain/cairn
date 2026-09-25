@@ -4916,6 +4916,22 @@ impl Store {
             && self.headers.reaches() >= reaches
             && self.forest.len() >= reaches
     }
+
+    /// Whether the collection weighed at `epoch`, against the header at
+    /// `oldest`, is no longer what this store holds.
+    ///
+    /// What is merged has to be what was weighed. The epoch says the
+    /// collection was not thrown away and started again while the log was let
+    /// go of, and the oldest header says nobody merged it first.
+    ///
+    /// Asked here rather than inline in [`Shared::fill_headers`] because the
+    /// only way to reach it there is another thread moving the store between
+    /// two takes of the lock, which no test can arrange on purpose.
+    fn moved_since_weighed(&self, oldest: u64, epoch: u64) -> bool {
+        self.filling_epoch != epoch
+            || self.headers.first_height() != oldest
+            || self.filling.reaches() < oldest
+    }
 }
 
 /// A step of the header merge that this node's own disk refused.
@@ -5498,13 +5514,7 @@ impl Shared {
         let Some(store) = log.as_mut() else {
             return Filled::Ignored;
         };
-        // What is merged has to be what was weighed. The epoch says the
-        // collection was not thrown away and started again while the log was
-        // let go of, and the oldest header says nobody merged it first.
-        if store.filling_epoch != epoch
-            || store.headers.first_height() != oldest
-            || store.filling.reaches() < oldest
-        {
+        if store.moved_since_weighed(oldest, epoch) {
             return Filled::Ignored;
         }
         if let Err(own) = join_logs(&mut store.headers, &store.filling) {
@@ -7479,6 +7489,977 @@ fn note_the_ending(
         if !greeted {
             shared.book().missed(&address, now);
         }
+    }
+}
+
+/// What a node's disk and its header log are held to: how they are opened,
+/// filled in from before the node arrived, written after a block, and cut, and
+/// what the node says about them.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+mod disk_and_headers {
+    use std::io::{Seek, SeekFrom, Write};
+    use std::net::Ipv4Addr;
+
+    use cairn_ledger::note::Note;
+    use cairn_ledger::transaction::CoinbaseTransaction;
+    use cairn_ledger::validation::{assemble_block, connect_block, mine_block};
+    use cairn_store::HEADER_TREE;
+
+    use super::*;
+
+    fn loopback() -> SocketAddr {
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
+    }
+
+    /// An empty directory of its own.
+    fn scratch(name: &str) -> PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("cairn-disk-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    /// A short valid chain built off to the side, and the ledger after each
+    /// of its blocks.
+    fn forged(count: usize, params: ConsensusParams) -> (Vec<Block>, Vec<LedgerState>) {
+        let miner = cairn_crypto::SecretKey::from_bytes(&[7; 32]);
+        let mut state = LedgerState::new();
+        let mut clock = 1_000u64;
+        let mut blocks = Vec::new();
+        let mut states = Vec::new();
+        for _ in 0..count {
+            let height = state.next_height().unwrap();
+            clock += 600;
+            let coinbase = CoinbaseTransaction::new(
+                height,
+                vec![Note::new(params.initial_reward, miner.public_key())],
+            );
+            let block = assemble_block(&state, coinbase, Vec::<Transfer>::new(), &params, clock, 0)
+                .unwrap();
+            let block = mine_block(block, 1 << 22).unwrap();
+            connect_block(&mut state, &block, &params, clock).unwrap();
+            blocks.push(block);
+            states.push(state.clone());
+        }
+        (blocks, states)
+    }
+
+    /// Headers that link to each other, with nothing mined behind them.
+    ///
+    /// Enough for a header log, which checks that each record sits at its own
+    /// height and names the one before it, and for nothing that weighs a run
+    /// against a commitment.
+    fn linked(count: u64) -> Vec<BlockHeader> {
+        let mut previous = Hash32::ZERO;
+        (0..count)
+            .map(|height| {
+                let header = BlockHeader {
+                    version: BLOCK_VERSION,
+                    network: ConsensusParams::testnet().network,
+                    height,
+                    previous,
+                    transactions_root: Hash32::from_bytes([7; 32]),
+                    state_root: Hash32::from_bytes([9; 32]),
+                    history: Hash32::from_bytes([11; 32]),
+                    timestamp: 1_000_000 + height * 600,
+                    difficulty: 1,
+                    total_work: u128::from(height),
+                    nonce: height,
+                };
+                previous = header.id();
+                header
+            })
+            .collect()
+    }
+
+    /// A store over `directory` holding these headers, and this run being
+    /// collected from before them.
+    fn store_in(directory: &Path, headers: &[BlockHeader], filling: &[BlockHeader]) -> Store {
+        let (blocks, _) = BlockLog::open(directory).unwrap();
+        let mut held = HeaderLog::open(directory).unwrap();
+        for header in headers {
+            held.append(header).unwrap();
+        }
+        let mut collected = HeaderLog::open_named(directory, FILLING_LOG).unwrap();
+        for header in filling {
+            collected.append(header).unwrap();
+        }
+        Store {
+            blocks,
+            headers: held,
+            forest: HeaderTree::open(directory).unwrap(),
+            filling: collected,
+            filling_epoch: 0,
+        }
+    }
+
+    /// A node started over `store`, with an empty chain and nobody to talk to.
+    fn started(store: Store, directory: &Path) -> Node {
+        let params = ConsensusParams::testnet();
+        Node::start(
+            params,
+            loopback(),
+            ChainStore::new(params),
+            Some(store),
+            AddressBook::new(),
+            Some(directory.to_path_buf()),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn with_store<T>(node: &Node, read: impl FnOnce(&Store) -> T) -> T {
+        let log = node
+            .shared
+            .log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        read(log.as_ref().unwrap())
+    }
+
+    fn finish(node: Node, directory: &Path) {
+        node.shutdown();
+        drop(node);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// A node opened over `directory` that has taken these blocks and written
+    /// them down.
+    fn holding(blocks: &[Block], params: ConsensusParams, directory: &Path) -> Node {
+        let (node, _) = Node::open(params, loopback(), directory).unwrap();
+        for block in blocks {
+            node.submit_block(block.clone()).unwrap();
+        }
+        node
+    }
+
+    fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            if ready() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!("waited for {what} and it never happened");
+    }
+
+    /// A chain that already holds its first block is not given it again, and
+    /// neither is its log.
+    ///
+    /// Nothing asked this, so a node that laid the pinned first block down
+    /// again whenever its chain had anything in it passed. The chain calls the
+    /// second copy a duplicate and takes it quietly, and the log, if it was
+    /// empty, got a block at height zero at its front: on a node handed a
+    /// ledger, whose chain is full and whose log starts empty, that is a log
+    /// that no longer starts where the ledger does.
+    #[test]
+    fn a_chain_that_holds_its_first_block_is_not_given_it_again() {
+        let params = ConsensusParams::for_network("testnet-6").expect("testnet-6 exists");
+        let opened = genesis::opens_at(params.network);
+        let directory = scratch("first-block-again");
+        let (mut log, _) = BlockLog::open(&directory).unwrap();
+
+        let mut chain = ChainStore::new(params);
+        assert!(open_the_chain(&mut chain, None, params, opened + 60).is_none());
+        assert!(
+            !chain.is_empty(),
+            "the fixture has to hold the first block, or the question below is empty"
+        );
+
+        assert!(open_the_chain(&mut chain, Some(&mut log), params, opened + 60).is_none());
+        let written = log.len();
+        drop(log);
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            written, 0,
+            "a chain that already held its first block had it written again into a log \
+             that did not"
+        );
+    }
+
+    /// What a node was writing or reading when its disk refused is said in
+    /// words that name it.
+    ///
+    /// These are what an operator reads when a disk is failing. Nothing read
+    /// them, so a node saying nothing at all in their place passed.
+    #[test]
+    fn what_a_node_was_writing_or_reading_is_named_in_words() {
+        let said = [
+            (Writing::Blocks.to_string(), "blocks"),
+            (Writing::Headers.to_string(), "headers"),
+            (Writing::Ledger.to_string(), "ledger"),
+            (Reading::Blocks.to_string(), "block"),
+            (Reading::Headers.to_string(), "header"),
+        ];
+        for (words, names) in said {
+            assert!(
+                words.contains(names),
+                "an operator was told the disk refused {words:?}, which does not name the {names}"
+            );
+        }
+    }
+
+    /// A question about where fallen notes sit is satisfied once every place
+    /// asked about has a path, and not before.
+    ///
+    /// Nothing asked it on its own. Every recovery in the suite ends with the
+    /// one peer asked having answered, which ends the wait by the other half
+    /// of the condition, so a question that was never satisfied by its paths
+    /// passed: it waited for the slowest peer asked, or the whole patience,
+    /// with every path it wanted already in hand.
+    #[test]
+    fn a_question_is_satisfied_once_every_place_asked_about_has_a_path() {
+        let path = || ForestProof {
+            siblings: Vec::new(),
+        };
+        let mut asking = Asking {
+            wanted: BTreeMap::from([(7, Hash32::ZERO), (9, Hash32::ZERO)]),
+            ..Asking::default()
+        };
+        assert!(!asking.satisfied(), "nothing has come back yet");
+        asking.found.insert(7, path());
+        assert!(!asking.satisfied(), "one place of two has a path");
+        asking.found.insert(9, path());
+        assert!(
+            asking.satisfied(),
+            "every place asked about has a path and the question is still open"
+        );
+        assert!(
+            !Asking::default().satisfied(),
+            "a question about nothing is answered by nothing"
+        );
+    }
+
+    /// Headers that end exactly where the blocks begin are carried on from the
+    /// blocks, and none of them is dropped.
+    ///
+    /// The gap the catch-up deletes the header log for is headers that stop
+    /// before the blocks start. Nothing tried the case one step away, so a
+    /// catch-up that counted "no gap" as a gap passed, and a node whose header
+    /// log ended at the first block it still held lost every header it had and
+    /// said it had dropped them.
+    #[test]
+    fn headers_that_end_where_the_blocks_begin_are_carried_on() {
+        let (blocks, _) = forged(6, ConsensusParams::testnet());
+        let directory = scratch("headers-meet-blocks");
+        let (mut log, _) = BlockLog::open(&directory).unwrap();
+        for block in &blocks[3..] {
+            log.append(block).unwrap();
+        }
+        let mut headers = HeaderLog::open(&directory).unwrap();
+        for block in &blocks[..3] {
+            headers.append(&block.header).unwrap();
+        }
+
+        let caught = catch_up_headers(&mut headers, &log);
+        let held = (headers.first_height(), headers.reaches());
+        drop((log, headers));
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert_eq!(
+            caught.dropped, 0,
+            "headers that led straight into the blocks were counted as stranded"
+        );
+        assert!(caught.unread.is_none(), "nothing refused a read or a write");
+        assert_eq!(
+            held,
+            (0, 6),
+            "the header log was not carried on from the blocks without a break"
+        );
+    }
+
+    /// A ledger file that is there and cannot be read stops the node, rather
+    /// than being taken for no file at all.
+    ///
+    /// Nothing tried a read that fails for any reason but the file being
+    /// missing, so a node that read every failure as "no ledger" passed. That
+    /// is the node that replays from block zero over a log beginning above it
+    /// and cuts the log to nothing, which is what the refusal exists to stop.
+    #[test]
+    fn a_ledger_file_that_cannot_be_read_stops_the_node() {
+        let params = ConsensusParams::testnet();
+        let directory = scratch("unreadable-ledger");
+        assert!(
+            matches!(read_handed_ledger(&directory, &params), Ok(None)),
+            "no file is no ledger"
+        );
+        // A name that is there and cannot be read as a file, on every system.
+        std::fs::create_dir_all(directory.join(HANDED_LEDGER)).unwrap();
+
+        match Node::open(params, loopback(), &directory) {
+            Err(NodeError::UnusableLedger { because }) => {
+                let _ = std::fs::remove_dir_all(&directory);
+                assert!(
+                    because.contains("could not be read"),
+                    "the node stopped, and said something other than that it could not \
+                     read the file"
+                );
+            }
+            Err(other) => {
+                let _ = std::fs::remove_dir_all(&directory);
+                panic!("the node stopped for another reason: {other}");
+            }
+            Ok((node, _)) => {
+                finish(node, &directory);
+                panic!(
+                    "a node started over a ledger file it could not read, as if there were \
+                     no file"
+                );
+            }
+        }
+    }
+
+    /// Headers off a branch replaced at the same length are written again from
+    /// the chain.
+    ///
+    /// Two miners finding a block at the same height is the ordinary way a
+    /// branch is replaced, and it leaves the header log exactly as long as the
+    /// chain. Nothing wrote headers after one, so a walk that stopped at the
+    /// first header it held, whatever that header was, passed: the node went
+    /// on showing a newcomer the branch it had left.
+    #[test]
+    fn headers_off_a_branch_replaced_at_the_same_length_are_written_again() {
+        let params = ConsensusParams::testnet();
+        let (blocks, _) = forged(5, params);
+        let mut chain = ChainStore::new(params);
+        for block in &blocks {
+            chain.add_block(block.clone(), 2_000_000_000).unwrap();
+        }
+
+        let directory = scratch("same-length-headers");
+        let mut headers = HeaderLog::open(&directory).unwrap();
+        // The same three, then a fourth and a fifth the chain does not have.
+        let mut left: Vec<BlockHeader> = blocks[..3].iter().map(|block| block.header).collect();
+        for replaced in &blocks[3..] {
+            let previous = left.last().unwrap().id();
+            left.push(BlockHeader {
+                previous,
+                nonce: replaced.header.nonce.wrapping_add(1),
+                ..replaced.header
+            });
+        }
+        for header in &left {
+            headers.append(header).unwrap();
+        }
+
+        let refusing = write_headers(&mut headers, &chain);
+        let held: Vec<Hash32> = (0..5)
+            .map(|height| headers.read_at(height).unwrap().unwrap().id())
+            .collect();
+        let reaches = headers.reaches();
+        drop(headers);
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert!(refusing.is_none(), "nothing refused a write");
+        assert_eq!(reaches, 5, "the log is as long as the chain");
+        for (height, block) in blocks.iter().enumerate() {
+            assert_eq!(
+                held[height],
+                block.id(),
+                "the header at {height} is still the one off the branch this node left"
+            );
+        }
+    }
+
+    /// Headers below anything the chain can compare them against stand, and
+    /// the gap above them is said.
+    ///
+    /// A node handed a ledger holds identifiers only from the headers that came
+    /// with it. Nothing gave the walk a header log reaching below those, so a
+    /// walk that took "nothing to compare against" as "wrong" passed, and it
+    /// deleted every header the node held on the strength of a chain that had
+    /// no opinion about any of them.
+    #[test]
+    fn headers_below_what_the_chain_can_compare_against_stand() {
+        let params = ConsensusParams::testnet();
+        let (blocks, states) = forged(11, params);
+        let recent: Vec<BlockHeader> = blocks[6..].iter().map(|block| block.header).collect();
+        let mut chain = ChainStore::new(params);
+        chain.adopt(states[10].clone(), &recent).unwrap();
+        assert!(
+            chain.id_at(3).is_none(),
+            "the fixture has to be a chain with nothing to say about height 3"
+        );
+
+        let directory = scratch("headers-below-the-chain");
+        let mut headers = HeaderLog::open(&directory).unwrap();
+        for block in &blocks[..4] {
+            headers.append(&block.header).unwrap();
+        }
+
+        let refusing = write_headers(&mut headers, &chain);
+        let held = (headers.first_height(), headers.reaches());
+        drop(headers);
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert_eq!(
+            held,
+            (0, 4),
+            "headers the chain had nothing to compare against were cut"
+        );
+        assert!(
+            refusing.is_some(),
+            "and the stretch above them that nothing can write was not said"
+        );
+    }
+
+    /// Where a collection of headers from before a node arrived is left after
+    /// a restart: the first header it holds and how far it reaches.
+    fn filling_after_a_restart(
+        name: &str,
+        headers: &[BlockHeader],
+        filling: &[BlockHeader],
+    ) -> (u64, u64) {
+        let directory = scratch(name);
+        drop(store_in(&directory, headers, filling));
+        let (node, _) = Node::open(ConsensusParams::testnet(), loopback(), &directory).unwrap();
+        let left = with_store(&node, |store| {
+            (store.filling.first_height(), store.filling.reaches())
+        });
+        finish(node, &directory);
+        left
+    }
+
+    /// A collection of headers from before a node arrived survives a restart
+    /// while it still leads up to the oldest header held.
+    ///
+    /// Nothing restarted a node in the middle of one, so a start that threw
+    /// every collection away passed. On a chain of any age that collection is
+    /// the whole history before the node arrived, fetched again from nothing
+    /// after every restart.
+    #[test]
+    fn a_collection_that_leads_up_to_the_headers_survives_a_restart() {
+        let headers = linked(30);
+        assert_eq!(
+            filling_after_a_restart("filling-kept", &headers[20..], &headers[..8]),
+            (0, 8),
+            "a collection leading up to the oldest header held was thrown away at the start"
+        );
+    }
+
+    /// A collection that leads nowhere is thrown away at the start: one left
+    /// beside a header log that already begins at the first block, and one
+    /// that does not begin at the first block itself.
+    ///
+    /// Nothing started a node over either, so a start that kept both passed,
+    /// and a collection beside a whole header log is headers nobody needs
+    /// being offered to a merge that has nothing to merge them in front of.
+    #[test]
+    fn a_collection_that_leads_nowhere_is_thrown_away_at_the_start() {
+        let headers = linked(30);
+        assert_eq!(
+            filling_after_a_restart("filling-beside-whole", &headers[..10], &headers[..4]),
+            (0, 0),
+            "a collection was kept beside a header log that already begins at the first block"
+        );
+        assert_eq!(
+            filling_after_a_restart("filling-off-the-ground", &headers[20..], &headers[3..6]),
+            (0, 0),
+            "a collection that does not begin at the first block was kept"
+        );
+    }
+
+    /// The headers a handover came with are written into an empty log, and a
+    /// log that already holds headers is left as it is.
+    ///
+    /// Nothing looked at the log after seeding it, so a seed that wrote
+    /// nothing passed, as did one that wrote only into a log that was not
+    /// empty: a node that joined a chain then held no headers to fill in
+    /// below, and a second seed ran a handover's headers on past what the
+    /// node had.
+    #[test]
+    fn handed_headers_are_written_only_into_an_empty_log() {
+        let directory = scratch("seeded");
+        let (node, _) = Node::open(ConsensusParams::testnet(), loopback(), &directory).unwrap();
+        let headers = linked(12);
+
+        node.shared.seed_headers(&headers[5..9]);
+        let seeded = with_store(&node, |store| {
+            (store.headers.first_height(), store.headers.reaches())
+        });
+        // A run that would follow straight on, which is the one a log that
+        // only refused what did not follow would take.
+        node.shared.seed_headers(&headers[9..]);
+        let again = with_store(&node, |store| {
+            (store.headers.first_height(), store.headers.reaches())
+        });
+        finish(node, &directory);
+
+        assert_eq!(
+            seeded,
+            (5, 9),
+            "the headers a handover came with were not written into an empty log"
+        );
+        assert_eq!(
+            again,
+            (5, 9),
+            "a log that already held headers was written to"
+        );
+    }
+
+    /// Throwing a collection away empties it and counts whatever comes next as
+    /// another collection.
+    ///
+    /// Nothing looked at the collection after it was thrown away, so a throw
+    /// that kept every header passed. What it would keep is half one peer's
+    /// run for the next peer to add to, which is the mixed run the whole turn
+    /// arrangement exists to prevent, and a count that did not move would let
+    /// a weighing of the old run be merged as the new one.
+    #[test]
+    fn a_collection_thrown_away_is_empty_and_counted_as_another() {
+        let directory = scratch("thrown-away");
+        let headers = linked(30);
+        let node = started(
+            store_in(&directory, &headers[20..], &headers[..8]),
+            &directory,
+        );
+
+        node.shared.clear_filling();
+        let left = with_store(&node, |store| (store.filling.len(), store.filling_epoch));
+        finish(node, &directory);
+
+        assert_eq!(
+            left,
+            (0, 1),
+            "a collection thrown away still held headers, or was counted as the same one"
+        );
+    }
+
+    /// A run that did not add up is thrown away only while it is still the run
+    /// that was weighed.
+    ///
+    /// Nothing threw a run away with a stale count, so a node that threw away
+    /// whatever was there on the word of a weighing of some earlier run passed,
+    /// and so did one that kept the run it had just weighed and found invented.
+    #[test]
+    fn a_run_is_thrown_away_only_while_it_is_the_run_that_was_weighed() {
+        let directory = scratch("thrown-when-weighed");
+        let headers = linked(30);
+        let node = started(
+            store_in(&directory, &headers[20..], &headers[..8]),
+            &directory,
+        );
+
+        let stale = node.shared.throw_the_run_away(7);
+        let after_stale = with_store(&node, |store| (store.filling.len(), store.filling_epoch));
+        let current = node.shared.throw_the_run_away(0);
+        let after_current = with_store(&node, |store| (store.filling.len(), store.filling_epoch));
+        finish(node, &directory);
+
+        assert!(matches!(stale, Filled::Discarded) && matches!(current, Filled::Discarded));
+        assert_eq!(
+            after_stale,
+            (8, 0),
+            "a run was thrown away on the word of a weighing of another run"
+        );
+        assert_eq!(
+            after_current,
+            (0, 1),
+            "the run that was weighed and did not add up was kept"
+        );
+    }
+
+    /// A node that holds every header back to the first block takes no run of
+    /// headers from before it arrived.
+    ///
+    /// Nothing offered one, so a node that went on to weigh and merge a run
+    /// whenever the run was not empty passed. With nothing before the first
+    /// block to collect, what it weighed was an empty forest against the first
+    /// header, and what it did next was throw away or merge a collection
+    /// nobody had asked for.
+    #[test]
+    fn a_node_holding_every_header_takes_no_run_from_before_it_arrived() {
+        let directory = scratch("whole-takes-nothing");
+        let headers = linked(10);
+        let node = started(store_in(&directory, &headers, &[]), &directory);
+
+        let offered = node.shared.fill_headers(0, &headers[..3]);
+        let left = with_store(&node, |store| {
+            (
+                store.headers.first_height(),
+                store.headers.reaches(),
+                store.filling.len(),
+                store.filling_epoch,
+            )
+        });
+        finish(node, &directory);
+
+        assert!(
+            matches!(offered, Filled::Ignored),
+            "a node holding every header did something with a run from before it arrived"
+        );
+        assert_eq!(left, (0, 10, 0, 0), "and its logs were touched");
+    }
+
+    /// A run that adds to a collection says how far the collection now reaches,
+    /// and one that adds nothing says nothing happened.
+    ///
+    /// The difference is what keeps a supplier's turn: a run renews it and a
+    /// run of nothing does not. Nothing looked at the answer for a run short of
+    /// the oldest header, so answering "ignored" to a run that grew the
+    /// collection passed, as did answering "grew" to one that added nothing.
+    #[test]
+    fn a_run_that_adds_to_a_collection_says_so_and_one_that_adds_nothing_does_not() {
+        let directory = scratch("grew-or-not");
+        let headers = linked(30);
+        let node = started(store_in(&directory, &headers[20..], &[]), &directory);
+
+        let part = node.shared.fill_headers(0, &headers[..8]);
+        // Asked from where the collection ends, and carrying only headers this
+        // node already holds, so nothing in it is added.
+        let nothing = node.shared.fill_headers(8, &headers[20..22]);
+        let reaches = with_store(&node, |store| store.filling.reaches());
+        finish(node, &directory);
+
+        assert!(
+            matches!(part, Filled::Grew(8)),
+            "a run that grew the collection to 8 was not reported as growing it"
+        );
+        assert!(
+            matches!(nothing, Filled::Ignored),
+            "a run that added nothing was reported as growing the collection"
+        );
+        assert_eq!(
+            reaches, 8,
+            "and the collection holds what the first run brought"
+        );
+    }
+
+    /// A collection is merged only while it is what was weighed: the same
+    /// collection, in front of the same oldest header, still reaching it.
+    ///
+    /// The weighing lets go of the log for a read per header, and any of the
+    /// three can change meanwhile. Nothing could make one change at the right
+    /// moment, so the check was held by nothing, and a check that asked only
+    /// two of the three, or asked them all at once, passed.
+    #[test]
+    fn a_collection_is_merged_only_while_it_is_what_was_weighed() {
+        let directory = scratch("what-was-weighed");
+        let headers = linked(30);
+        let mut store = store_in(&directory, &headers[20..], &headers[..20]);
+
+        let untouched = store.moved_since_weighed(20, 0);
+        let thrown_and_gathered_again = store.moved_since_weighed(20, 1);
+        let merged_by_somebody_else = store.moved_since_weighed(19, 0);
+        store.filling.keep_below(10).unwrap();
+        let short_of_the_header = store.moved_since_weighed(20, 0);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert!(
+            !untouched,
+            "a collection nobody touched was taken for one that moved"
+        );
+        assert!(
+            thrown_and_gathered_again,
+            "a collection thrown away and gathered again was taken for the one weighed"
+        );
+        assert!(
+            merged_by_somebody_else,
+            "a collection was taken as weighed against a header log that begins elsewhere"
+        );
+        assert!(
+            short_of_the_header,
+            "a collection no longer reaching the header it was weighed against was taken"
+        );
+    }
+
+    /// Headers offered through the door the tests use are checked and merged
+    /// like any others.
+    ///
+    /// Nothing looked at a node after offering it headers this way, so a door
+    /// that did nothing at all passed, and every test standing on it measured
+    /// a node that had been offered nothing.
+    #[test]
+    fn headers_offered_through_the_test_door_are_checked_and_merged() {
+        let (blocks, _) = forged(30, ConsensusParams::testnet());
+        let headers: Vec<BlockHeader> = blocks.iter().map(|block| block.header).collect();
+        let directory = scratch("offered");
+        let node = started(store_in(&directory, &headers[20..], &[]), &directory);
+
+        node.take_offered_headers(0, &headers[..20]);
+        let held = with_store(&node, |store| {
+            (
+                store.headers.first_height(),
+                store.headers.reaches(),
+                store.forest.len(),
+                store.filling.len(),
+            )
+        });
+        finish(node, &directory);
+
+        assert_eq!(
+            held,
+            (0, 30, 30, 0),
+            "a run offered through the test door that checks out was not merged in front of \
+             the headers, with the forest built over the whole"
+        );
+    }
+
+    /// A disk holding exactly its budget is not over it, and writes no ledger
+    /// to get under it.
+    ///
+    /// Nothing set a budget equal to what a node held, so a node that counted
+    /// the budget itself as over it passed, and it wrote a ledger of several
+    /// megabytes every time its log reached the budget exactly, to drop
+    /// nothing.
+    #[test]
+    fn a_disk_exactly_at_its_budget_writes_no_ledger_to_get_under_it() {
+        let params = ConsensusParams::testnet().with_burial(8);
+        let (blocks, _) = forged(20, params);
+        let directory = scratch("at-budget");
+        let node = holding(&blocks, params, &directory);
+        let ledger = directory.join(HANDED_LEDGER);
+
+        let bytes = node.kept_bytes();
+        node.keep_blocks(bytes);
+        node.shared.trim_history();
+        let at_budget = (ledger.exists(), node.blocks_from());
+
+        // The control: a budget far below it, so the question above is known
+        // to be one this node can answer by writing a ledger.
+        node.keep_blocks(1);
+        node.shared.trim_history();
+        wait_until("the log to be trimmed", || {
+            node.blocks_from().unwrap_or(0) > 0
+        });
+        let over_budget = ledger.exists();
+        finish(node, &directory);
+
+        assert_eq!(
+            at_budget,
+            (false, Some(0)),
+            "a disk holding exactly its budget wrote a ledger or dropped blocks"
+        );
+        assert!(over_budget, "a disk over its budget wrote no ledger");
+    }
+
+    /// A position the disk holds another block at is not one this node agrees
+    /// with.
+    ///
+    /// Nothing sent a locator naming a block this node held on disk under
+    /// another identifier, so a walk that agreed with any position the disk
+    /// held something at passed. The peer was then told to start above a block
+    /// it does not share with this node, and every block it was sent after
+    /// that built on a parent it did not have.
+    #[test]
+    fn a_position_the_disk_holds_another_block_at_is_not_agreed_with() {
+        let params = ConsensusParams::testnet();
+        let (blocks, _) = forged(6, params);
+        let directory = scratch("disagreed");
+        let node = holding(&blocks, params, &directory);
+
+        let elsewhere = Located::new(3, Hash32::from_bytes([0xab; 32]));
+        let answer = node.shared.chain_after(&[elsewhere], 100);
+        finish(node, &directory);
+
+        assert_eq!(
+            answer,
+            (0, 6),
+            "a position the disk holds another block at was agreed with"
+        );
+    }
+
+    /// A block on this node's disk is read back off it.
+    ///
+    /// The disk half of answering a peer far behind, and nothing asked it
+    /// directly: a read that found nothing passed every test that went through
+    /// it, because every one of them agreed with the peer in memory first.
+    #[test]
+    fn a_block_on_the_disk_is_read_back_off_it() {
+        let params = ConsensusParams::testnet();
+        let (blocks, _) = forged(6, params);
+        let directory = scratch("read-back");
+        let node = holding(&blocks, params, &directory);
+
+        let read = node.shared.block_off_disk(3).map(|block| block.id());
+        let past_the_end = node.shared.block_off_disk(6).is_none();
+        finish(node, &directory);
+
+        assert_eq!(
+            read,
+            Some(blocks[3].id()),
+            "the block at 3 is on the disk and was not read back"
+        );
+        assert!(past_the_end, "and a height past the log is nothing");
+    }
+
+    /// A forest node mended on the way to a proof is counted.
+    ///
+    /// The count is what tells an operator the disk dropped a write, and
+    /// nothing tore a node under a running node, so a count that stayed at
+    /// nought passed.
+    #[test]
+    fn a_forest_node_mended_on_the_way_to_a_proof_is_counted() {
+        let params = ConsensusParams::testnet();
+        let (blocks, _) = forged(16, params);
+        let directory = scratch("mended");
+        finish_keeping(holding(&blocks, params, &directory));
+
+        // The last node of level one, over leaves fourteen and fifteen: a node
+        // of the right length holding the wrong bytes, which is what a level
+        // whose length landed before its bytes did leaves behind.
+        let mut level = std::fs::OpenOptions::new()
+            .write(true)
+            .open(directory.join(format!("{HEADER_TREE}.1")))
+            .unwrap();
+        level.seek(SeekFrom::Start(7 * 32)).unwrap();
+        level.write_all(&[0u8; 32]).unwrap();
+        drop(level);
+
+        let (node, _) = Node::open(params, loopback(), &directory).unwrap();
+        let before = node.mended_nodes();
+        let proof = node.shared.proof_off_disk(14, 16);
+        let after = node.mended_nodes();
+        finish(node, &directory);
+
+        assert_eq!(before, 0, "nothing had been mended yet");
+        assert!(
+            proof.is_some(),
+            "the torn node was not mended, so there was nothing to count"
+        );
+        assert_eq!(
+            after, 1,
+            "a forest node mended on the way to a proof was not counted"
+        );
+    }
+
+    fn finish_keeping(node: Node) {
+        node.shutdown();
+        drop(node);
+    }
+
+    /// The cold set a node reports is the one its chain holds.
+    ///
+    /// Nothing put more than one note in a node's cold set and asked, so a
+    /// node that answered nought, or one, passed. The number is what a wallet
+    /// shows to say how much there is that it might have to ask about.
+    #[test]
+    fn the_cold_set_a_node_reports_is_the_one_its_chain_holds() {
+        let params = ConsensusParams::testnet()
+            .with_hot_capacity(4)
+            .with_max_evictions(4);
+        let (blocks, _) = forged(16, params);
+        let node = Node::bind(params, loopback()).unwrap();
+        for block in &blocks {
+            node.submit_block(block.clone()).unwrap();
+        }
+        let reported = node.cold_len();
+        let held = node.with_chain(|chain| chain.state().cold_len());
+        node.shutdown();
+
+        assert!(
+            held > 1,
+            "the fixture has to put more than one note in the cold set, or nought and one \
+             are both right"
+        );
+        assert_eq!(
+            reported, held,
+            "the node reported a cold set other than the one its chain holds"
+        );
+    }
+
+    /// A question about where fallen notes sit is counted once it is put, and
+    /// a question about nothing is not a question.
+    ///
+    /// Nothing asked the count of a node that had asked nothing, so a count
+    /// that said one before anything was asked passed.
+    #[test]
+    fn a_question_is_counted_once_it_is_put_and_not_before() {
+        let node = Node::bind(ConsensusParams::testnet(), loopback()).unwrap();
+        let before = node.proofs_asked_for();
+        let _ = node.recover_proofs(&[], Duration::ZERO);
+        let about_nothing = node.proofs_asked_for();
+        let _ = node.recover_proofs(&[(0, Hash32::ZERO)], Duration::ZERO);
+        let once = node.proofs_asked_for();
+        node.shutdown();
+
+        assert_eq!(
+            before, 0,
+            "a node that had asked nothing counted a question"
+        );
+        assert_eq!(about_nothing, 0, "a question about nothing was counted");
+        assert_eq!(once, 1, "a question that was put was not counted");
+    }
+
+    /// A question that everybody asked has answered ends there, rather than at
+    /// the end of its patience.
+    ///
+    /// Every recovery in the suite waited within its patience and looked only
+    /// at what came back, so a wait that ran to the end of the patience
+    /// whatever the answers passed. That is a wallet held for the whole wait
+    /// by a peer that answered at once that it could not help.
+    #[test]
+    fn a_question_everyone_asked_has_answered_ends_there() {
+        let params = ConsensusParams::testnet();
+        let answering = Node::bind(params, loopback()).unwrap();
+        let asking = Node::bind(params, loopback()).unwrap();
+        asking.connect(answering.address()).unwrap();
+        wait_until("the two nodes to introduce themselves", || {
+            asking.peers_introduced() == 1
+        });
+
+        let patience_seconds = 10;
+        let started = Instant::now();
+        let answer =
+            asking.recover_proofs(&[(0, Hash32::ZERO)], Duration::from_secs(patience_seconds));
+        let took = started.elapsed().as_secs();
+        asking.shutdown();
+        answering.shutdown();
+
+        assert_eq!(
+            (answer.asked, answer.answered),
+            (1, 1),
+            "the one peer was asked and answered"
+        );
+        assert!(
+            took < patience_seconds / 2,
+            "a question everyone asked had answered was held open for {took} seconds of a \
+             patience of {patience_seconds}"
+        );
+    }
+
+    /// A node connected to nobody reaches for an archivist it has heard of.
+    ///
+    /// Nothing started a recovery from a node with nobody connected and an
+    /// archivist in its book, so a node that never reached, or reached only
+    /// for addresses it was already connected to, passed. That is a wallet
+    /// told its money is out of reach while the address of somebody who could
+    /// help sat in its own book.
+    #[test]
+    fn a_node_connected_to_nobody_reaches_for_an_archivist_it_has_heard_of() {
+        let params = ConsensusParams::testnet();
+        let answering = Node::bind(params, loopback()).unwrap();
+        let asking = Node::bind(params, loopback()).unwrap();
+        let known = answering.address();
+        {
+            let mut book = asking.shared.book();
+            assert!(book.insert(known), "the address goes into the book");
+            book.keeps_the_cold_set(&known, true);
+            // A dial that came to nothing, so the dial round of upkeep leaves
+            // it alone for a minute and the only way to it is the reach.
+            let _ = book.missed(&known, unix_now());
+        }
+
+        let answer = asking.recover_proofs(&[(0, Hash32::ZERO)], Duration::from_secs(5));
+        asking.shutdown();
+        answering.shutdown();
+
+        assert_eq!(
+            answer.asked, 1,
+            "a node connected to nobody asked nobody, with an archivist in its book"
+        );
     }
 }
 
