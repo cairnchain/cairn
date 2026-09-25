@@ -356,4 +356,27 @@ mod tests {
             "past the ceiling, so the exchange is given up rather than grown"
         );
     }
+
+    /// An answer cut into as many pieces as a reader takes, each as large as
+    /// an answer is cut, is collected whole.
+    ///
+    /// The ceiling on bytes is for pieces that never complete anything, so it
+    /// has to sit above the largest answer the rules on pieces let an honest
+    /// node send. Nothing asked this: the test above measures the ceiling in
+    /// fractions of itself, so a ceiling of one megabyte, or of forty eight
+    /// bytes, passed it, and a node would have given up on any ledger larger
+    /// than that.
+    #[test]
+    fn the_largest_answer_the_pieces_allow_is_collected_whole() {
+        let piece = || vec![0; crate::message::JOIN_PART_BYTES];
+        let mut collecting =
+            Collecting::started(Joining::Ledger, tip(), 0, MAX_JOIN_PARTS, piece(), 0).unwrap();
+        for part in 1..MAX_JOIN_PARTS {
+            assert!(
+                collecting.take(Joining::Ledger, tip(), part, piece(), 0),
+                "a piece of an answer within the rules on pieces was refused for its bytes"
+            );
+        }
+        assert_eq!(collecting.wanted(), None, "and the answer is whole");
+    }
 }
