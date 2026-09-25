@@ -20,9 +20,10 @@ use std::path::PathBuf;
 use cairn_crypto::{PublicKey, SecretKey};
 use cairn_ledger::block::Block;
 use cairn_ledger::note::Note;
-use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
+use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
+use cairn_primitives::codec::Encode;
 use cairn_primitives::Amount;
 use cairn_wallet::{Wallet, WalletError};
 
@@ -237,6 +238,46 @@ fn a_spend_takes_as_few_notes_as_it_can() {
         sent.from_cold, 0,
         "nothing has fallen on a chain this short"
     );
+
+    wallet.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// A payment that takes a note whole costs what a transfer with no change in it
+/// costs, and that fee is taken.
+///
+/// With nothing to come back, the transfer has one output and the network asks
+/// one output's worth. The one spend with no change the tests made paid a fee
+/// the wallet had quoted itself, so a wallet that priced it with a second
+/// output of nothing, which weighs as much as a real one, passed: its quote and
+/// its check agreed with each other and not with the network, and it refused
+/// the fee the network asks.
+#[test]
+fn a_payment_that_takes_a_note_whole_is_priced_without_change() {
+    let (wallet, _forge, directory) = funded("whole", 12, 1);
+    let recipient = SecretKey::from_bytes(&[9; 32]).public_key();
+
+    let holdings = wallet.holdings();
+    assert_eq!(holdings.notes.len(), 1, "one reward, in one note");
+    let held = &holdings.notes[0];
+
+    // What the network asks of one note spent into one output, worked out the
+    // way the pool works it out, from the same public rules.
+    let shape = Transfer::new(
+        vec![Input::hot(held.id)],
+        vec![Note::new(held.note.value, recipient)],
+    );
+    let bytes = shape.encode().len();
+    let fee = cairn_chain::fee_floor(cairn_chain::transfer_weight(&shape, bytes, 1));
+    let amount = held.note.value.checked_sub(fee).unwrap();
+
+    let sent = wallet.send(recipient, amount, fee).expect(
+        "the fee the network asks for this transfer was refused, so the wallet priced \
+         a change output the transfer does not have",
+    );
+    assert_eq!(sent.change, Amount::ZERO, "nothing came back");
+    assert_eq!(sent.fee, fee);
+    assert_eq!(sent.notes, 1);
 
     wallet.shutdown();
     let _ = std::fs::remove_dir_all(&directory);

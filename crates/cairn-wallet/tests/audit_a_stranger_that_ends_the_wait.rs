@@ -177,10 +177,18 @@ fn a_stranger_who_says_nothing_does_not_end_the_wait() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
-/// And somebody who did introduce themselves still ends it.
+/// And somebody who did introduce themselves still ends it, once the chain has
+/// held still for the settle window and not before.
 ///
 /// Without this the test above passes on a wallet that never stops waiting at
 /// all, which is the other way to get every `--wait` wrong.
+///
+/// The lower bound is the third way, and nothing asked it: a wallet that
+/// stopped at the first look that found a peer and an unmoved height passed.
+/// That wallet answers a fifth of a second after it starts, out of whatever
+/// chain it already had, while the blocks it was waiting for are on their way.
+/// Measured from before the call, so the reading can only be longer than the
+/// wait itself and a loaded machine cannot fail it.
 #[test]
 fn a_peer_that_introduced_itself_ends_the_wait() {
     let (wallet, blocks, directory) = funded("introduced", 4);
@@ -207,6 +215,12 @@ fn a_peer_that_introduced_itself_ends_the_wait() {
         waited + Duration::from_secs(1) < PATIENCE,
         "a wallet whose chain has stopped moving, with a peer that could have sent \
          more and did not, waited its whole {PATIENCE:?} out"
+    );
+    assert!(
+        waited >= cairn_wallet::SETTLED_FOR,
+        "the wait ended after {waited:?}, before the chain had held still for {:?}: \
+         a wallet that answers then answers out of a chain it has not finished reading",
+        cairn_wallet::SETTLED_FOR
     );
 
     wallet.shutdown();

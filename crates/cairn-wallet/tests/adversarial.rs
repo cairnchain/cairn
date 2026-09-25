@@ -940,6 +940,37 @@ fn a_mistyped_fee_is_refused_and_the_fee_that_is_paid_is_shown() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// A fee as large as the payment is paid without being questioned, and only a
+/// larger one is.
+///
+/// The ceiling is the payment, or a wide multiple of the floor when that is
+/// more, and a fee at the ceiling is inside it. The test above pays five times
+/// the payment, far past it, so a wallet that also stopped at exactly the
+/// payment passed, and asked somebody to confirm a fee that was within what it
+/// pays unasked.
+#[test]
+fn a_fee_as_large_as_the_payment_is_paid_without_being_questioned() {
+    let (wallet, _forge, directory) = funded("at-the-ceiling", 33, 2);
+    let peer = Bystander::beside(&wallet);
+    let recipient = SecretKey::from_bytes(&[9; 32]).public_key();
+
+    let sent = wallet
+        .send(recipient, cairn("1"), cairn("1"))
+        .expect("a fee equal to the payment was refused as out of proportion");
+    assert_eq!(sent.fee, cairn("1"), "and it is the fee that was paid");
+
+    // One pebble more is past the payment, and that is what gets asked about.
+    let over = Amount::from_pebbles(cairn("1").as_pebbles() + 1).unwrap();
+    match wallet.send(recipient, cairn("1"), over) {
+        Err(WalletError::FeeOutOfProportion { fee, .. }) => assert_eq!(fee, over),
+        other => panic!("a fee larger than the payment went unquestioned: {other:?}"),
+    }
+
+    peer.stop();
+    wallet.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 /// CLAIM UNDER TEST: a key file that anyone on the machine can read is not
 /// quietly used.
 ///
@@ -1040,6 +1071,61 @@ fn a_reward_is_kept_out_of_what_can_be_spent_and_is_said_out_loud() {
         "and the wallet offers it, having held it back before"
     );
 
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// A reward can be spent on the block its window closes at.
+///
+/// The ledger keeps a reward's entry until the tip reaches the height it names,
+/// and refuses a spend of it only while the next block would sit below that
+/// height, so there is one block on which the entry is still there and the
+/// money can move. The test above reads the wallet with the next block at
+/// three and at five and never at four, so a wallet that held the reward back
+/// one block longer than the network does passed, and on that block showed its
+/// owner nothing to spend while the network would have carried the payment.
+#[test]
+fn a_reward_can_be_spent_on_the_block_its_window_closes_at() {
+    let held = ConsensusParams::testnet().with_coinbase_maturity(4);
+    let directory = scratch("window-closes");
+    std::fs::create_dir_all(&directory).unwrap();
+    let key_file = directory.join("key");
+    let secret = SecretKey::from_bytes(&[34; 32]);
+    cairn_wallet::keyfile::write(&key_file, &secret).unwrap();
+
+    let (wallet, _) = Wallet::open(&key_file, held, &directory.join("data")).unwrap();
+    let mut forge = Forge {
+        params: held,
+        state: LedgerState::new(),
+        clock: 1_000,
+    };
+    // Blocks nought to three, so the next block is four, which is where the
+    // reward from block nought may be spent.
+    for _ in 0..4 {
+        let block = forge.mine(&secret.public_key(), Vec::new());
+        wallet.node().submit_block(block).unwrap();
+    }
+
+    let holdings = wallet.holdings();
+    assert_eq!(
+        holdings.spendable, held.initial_reward,
+        "the reward from block nought can be carried by the next block and was \
+         held back as too young"
+    );
+    assert_eq!(
+        holdings.ripening,
+        Amount::from_pebbles(held.initial_reward.as_pebbles() * 3).unwrap(),
+        "and the three after it are still too young"
+    );
+    assert_eq!(holdings.ripe_at, Some(5), "the next of them moves at five");
+
+    // And the network agrees, which is what makes the number right.
+    let recipient = SecretKey::from_bytes(&[9; 32]).public_key();
+    let fee = wallet.floor_for(recipient, cairn("10"));
+    wallet
+        .send(recipient, cairn("10"), fee)
+        .expect("a spend of the reward is taken on the block its window closes at");
+
+    wallet.shutdown();
     let _ = std::fs::remove_dir_all(&directory);
 }
 

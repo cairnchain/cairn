@@ -1188,6 +1188,39 @@ mod tests {
         );
     }
 
+    /// A payment that takes a note whole, with nothing coming back to this
+    /// key, is recorded as a payment of the whole note.
+    ///
+    /// No test read a spend with no change back out of the account, so a
+    /// record that let one go by passed: the note left what the account holds
+    /// and no line in the list said where it went.
+    #[test]
+    fn a_spend_with_no_change_is_recorded_whole() {
+        let mine = key(1);
+        let them = key(2);
+        let mut history = History::new();
+        let first = block(0, mine, Vec::new());
+        history.take(&first, mine);
+        let held = first.coinbase.created_notes()[0].0;
+
+        let whole = Transfer::new(vec![Input::hot(held)], vec![Note::new(amount("49"), them)]);
+        history.take(&block(1, them, vec![whole]), mine);
+
+        assert_eq!(
+            history.len(),
+            2,
+            "a payment of everything the note held left no line in the list"
+        );
+        let latest = history.movements().next().unwrap();
+        assert_eq!(latest.direction, Direction::Sent);
+        assert_eq!(
+            latest.amount,
+            amount("50"),
+            "forty nine to them and one to whoever carried it"
+        );
+        assert_eq!(history.held().count(), 0, "and the note is no longer held");
+    }
+
     /// A list that is exactly full still says how far back it reaches.
     ///
     /// Past `MAX_MOVEMENTS` the oldest are dropped and how far back the

@@ -315,6 +315,52 @@ fn money_sent_from_the_page_leaves_the_wallet() {
     running.stop();
 }
 
+/// A fee typed into the page is the fee it quotes, and a steep one is paid
+/// once it is said again.
+///
+/// The only fee the page tests ever typed was the floor, which is also what a
+/// blank box is filled with, so a page that threw away whatever was typed and
+/// used the floor passed. So did a page that read the button saying "I mean
+/// it" the wrong way round, since nothing ever pressed it.
+#[test]
+fn a_fee_typed_into_the_page_is_the_one_quoted_and_paid_once_said_again() {
+    let running = Running::start("steep", 4, 2);
+    let host = running.host();
+    let secret = running.secret().to_owned();
+    let recipient = SecretKey::from_bytes(&[9; 32]).public_key();
+    let asked = format!("k={secret}&to={recipient}&amount=1&fee=5");
+
+    let quote = format!("POST /api/quote HTTP/1.1\r\nhost: {host}\r\norigin: http://{host}");
+    let (status, answer) = running.ask(&quote, &asked);
+    assert_eq!(status, 200);
+    assert!(
+        answer.contains("\"fee\":\"5.00000000 CAIRN\""),
+        "the fee typed is not the fee quoted, so the person is shown a number \
+         other than the one they are about to pay: {answer}"
+    );
+
+    let send = format!("POST /api/send HTTP/1.1\r\nhost: {host}\r\norigin: http://{host}");
+    let (status, answer) = running.ask(&send, &asked);
+    assert_eq!(status, 200);
+    assert!(
+        answer.contains("\"sent\":false") && answer.contains("\"steep\":true"),
+        "five CAIRN to carry one is asked about before it is paid: {answer}"
+    );
+
+    let (status, answer) = running.ask(&send, &format!("{asked}&anyway=1"));
+    assert_eq!(status, 200);
+    assert!(
+        answer.contains("\"sent\":true"),
+        "said again with the button the refusal puts up, the fee was still refused: {answer}"
+    );
+    assert!(
+        answer.contains("\"fee\":\"5.00000000 CAIRN\""),
+        "and what was paid is what was typed: {answer}"
+    );
+
+    running.stop();
+}
+
 /// A wallet whose whole balance is a reward too young to move is not an empty
 /// wallet, and the page must not call it one.
 ///
