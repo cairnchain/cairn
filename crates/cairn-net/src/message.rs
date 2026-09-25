@@ -403,7 +403,7 @@ pub enum Joining {
 impl Joining {
     /// Which of the two answers this is, so a node can keep one of each.
     #[must_use]
-    pub const fn slot(self) -> usize {
+    pub(crate) const fn slot(self) -> usize {
         match self {
             Self::Weight => 0,
             Self::Ledger => 1,

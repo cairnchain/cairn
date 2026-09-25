@@ -61,7 +61,7 @@ pub const MAX_CONNECTIONS: usize = 64;
 /// port with nothing in front of it, which is where one address really is one
 /// machine and where holding every slot is an attack somebody can mount from
 /// a laptop.
-pub const MAX_PER_HOST: usize = 16;
+const MAX_PER_HOST: usize = 16;
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a caller has, from being accepted, to finish asking.
 ///

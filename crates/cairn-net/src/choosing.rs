@@ -363,7 +363,7 @@ impl Chooser {
     /// on. Pieces from anybody else are noise: they used to land in the one
     /// collection there is and tear it down.
     #[must_use]
-    pub fn asked_join(&self, peer: u64) -> bool {
+    pub(crate) fn asked_join(&self, peer: u64) -> bool {
         self.asked
             .is_some_and(|(asked, approach, _)| asked == peer && approach == Approach::Join)
     }
@@ -378,7 +378,7 @@ impl Chooser {
     /// question is the one most likely to be dropped and the one the
     /// collection cannot date: until a piece arrives there is no collection.
     #[must_use]
-    pub fn asking_join(&self) -> Option<(u64, u64)> {
+    pub(crate) fn asking_join(&self) -> Option<(u64, u64)> {
         self.asked
             .and_then(|(peer, approach, at)| (approach == Approach::Join).then_some((peer, at)))
     }
@@ -476,7 +476,7 @@ impl Chooser {
     /// and an update makes it readable, so the judgement is about this build.
     /// It was the same call as the one above, which held an updated archivist
     /// off for a growing pause and then did the same to the next one.
-    pub fn cannot_be_taken(&mut self, peer: u64, now: u64) {
+    pub(crate) fn cannot_be_taken(&mut self, peer: u64, now: u64) {
         self.stops_counting(peer, now, false);
     }
 

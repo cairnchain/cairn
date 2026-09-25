@@ -263,7 +263,7 @@ impl PathsBefore {
     }
 
     /// The places written down.
-    pub fn places(&self) -> impl Iterator<Item = u64> + '_ {
+    fn places(&self) -> impl Iterator<Item = u64> + '_ {
         self.depths.keys().copied()
     }
 

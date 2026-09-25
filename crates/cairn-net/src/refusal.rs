@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 
 /// How long a peer that misbehaved is turned away for.
-pub const REFUSAL_SECONDS: u64 = 600;
+const REFUSAL_SECONDS: u64 = 600;
 
 /// Addresses held under refusal at once.
 ///
@@ -28,7 +28,7 @@ pub const REFUSAL_SECONDS: u64 = 600;
 /// `choosing::MAX_UNBACKED_HOSTS` is the same table with the same number and
 /// had the same defect, repaired with that reasoning written beside it. This
 /// is the sibling it was not carried to.
-pub const MAX_REFUSED: usize = 1_024;
+const MAX_REFUSED: usize = 1_024;
 
 /// Whether an address is one this node is willing to turn away.
 ///
@@ -39,18 +39,18 @@ pub const MAX_REFUSED: usize = 1_024;
 /// guess. Anything already running inside the machine has far more direct ways
 /// to interfere than connecting to a socket, so there is nothing to defend
 /// here anyway.
-pub fn can_be_refused(host: IpAddr) -> bool {
+pub(crate) fn can_be_refused(host: IpAddr) -> bool {
     !host.is_loopback()
 }
 
 /// Addresses turned away, and until when.
 #[derive(Debug, Default)]
-pub struct Refusals {
+pub(crate) struct Refusals {
     until: HashMap<IpAddr, u64>,
 }
 
 impl Refusals {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -69,7 +69,7 @@ impl Refusals {
     /// cannot stop anyone being refused. A host already in the table is
     /// written again whatever the count, so a repeat offender is extended
     /// rather than left on its old deadline.
-    pub fn refuse(&mut self, host: IpAddr, now: u64) {
+    pub(crate) fn refuse(&mut self, host: IpAddr, now: u64) {
         if !can_be_refused(host) {
             return;
         }
@@ -96,19 +96,21 @@ impl Refusals {
         self.until.insert(host, until);
     }
 
-    pub fn refuses(&self, host: IpAddr, now: u64) -> bool {
+    pub(crate) fn refuses(&self, host: IpAddr, now: u64) -> bool {
         self.until.get(&host).is_some_and(|until| *until > now)
     }
 
-    pub fn forget_expired(&mut self, now: u64) {
+    pub(crate) fn forget_expired(&mut self, now: u64) {
         self.until.retain(|_, until| *until > now);
     }
 
-    pub fn len(&self) -> usize {
+    #[cfg(test)]
+    fn len(&self) -> usize {
         self.until.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
         self.until.is_empty()
     }
 }

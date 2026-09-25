@@ -29,21 +29,21 @@ use crate::message::{Joining, MAX_JOIN_PARTS};
 /// before the draw count went from 512 to 4 096 and a figure nothing produced.
 /// `cairn-explorer/tests/published_figures.rs` measures what the encoder puts
 /// on the wire for one.
-pub const MAX_JOIN_BYTES: usize = 48 * 1024 * 1024;
+const MAX_JOIN_BYTES: usize = 48 * 1024 * 1024;
 
 /// Pieces of one answer, as they arrive.
 #[derive(Clone, Debug)]
-pub struct Collecting {
+pub(crate) struct Collecting {
     /// What is being collected.
-    pub what: Joining,
+    pub(crate) what: Joining,
     /// The tip every piece has to name, taken from the first one to arrive.
     ///
     /// A node that mines a block partway through an exchange starts answering
     /// about a different ledger. The pieces would not go together, and this is
     /// what notices rather than finding out at the end.
-    pub at: Hash32,
+    at: Hash32,
     /// How many pieces the answer takes, from the first one to arrive.
-    pub parts: u32,
+    parts: u32,
     /// When a piece last arrived that this did not already hold.
     ///
     /// Held here rather than beside this, because this is the thing that
@@ -60,7 +60,7 @@ impl Collecting {
     /// `None` when the piece is not one anything could be built from, which
     /// costs the sender the exchange rather than costing this node memory.
     #[must_use]
-    pub fn started(
+    pub(crate) fn started(
         what: Joining,
         at: Hash32,
         part: u32,
@@ -83,7 +83,14 @@ impl Collecting {
     }
 
     /// Takes a piece, saying whether it belonged to this collection.
-    pub fn take(&mut self, what: Joining, at: Hash32, part: u32, bytes: Vec<u8>, now: u64) -> bool {
+    pub(crate) fn take(
+        &mut self,
+        what: Joining,
+        at: Hash32,
+        part: u32,
+        bytes: Vec<u8>,
+        now: u64,
+    ) -> bool {
         if what != self.what || at != self.at || part >= self.parts {
             return false;
         }
@@ -106,13 +113,13 @@ impl Collecting {
 
     /// When a piece last arrived that this did not already hold.
     #[must_use]
-    pub const fn moved(&self) -> u64 {
+    const fn moved(&self) -> u64 {
         self.moved
     }
 
     /// The next piece this collection is missing, or `None` when it is whole.
     #[must_use]
-    pub fn wanted(&self) -> Option<u32> {
+    pub(crate) fn wanted(&self) -> Option<u32> {
         self.pieces
             .iter()
             .position(Option::is_none)
@@ -121,14 +128,14 @@ impl Collecting {
 
     /// Pieces held so far, out of the number the answer takes.
     #[must_use]
-    pub fn pieces_held(&self) -> u32 {
+    fn pieces_held(&self) -> u32 {
         let held = self.pieces.iter().filter(|piece| piece.is_some()).count();
         u32::try_from(held).unwrap_or(u32::MAX)
     }
 
     /// Bytes held across every piece so far.
     #[must_use]
-    pub fn held(&self) -> usize {
+    fn held(&self) -> usize {
         self.pieces
             .iter()
             .flatten()
@@ -138,7 +145,7 @@ impl Collecting {
 
     /// The whole answer, once nothing is missing.
     #[must_use]
-    pub fn whole(&self) -> Option<Vec<u8>> {
+    pub(crate) fn whole(&self) -> Option<Vec<u8>> {
         if self.wanted().is_some() {
             return None;
         }
@@ -152,7 +159,7 @@ impl Collecting {
 
 /// How far a node is through joining a chain it was not on.
 #[derive(Clone, Debug, Default)]
-pub enum Progress {
+pub(crate) enum Progress {
     /// Nothing asked for yet.
     #[default]
     Idle,
@@ -181,7 +188,7 @@ impl Progress {
     /// A node joining a chain shows no height for as long as it takes, which
     /// without this reads as a node that is not working.
     #[must_use]
-    pub fn reported(&self) -> Joined {
+    pub(crate) fn reported(&self) -> Joined {
         match self {
             Self::Idle => Joined::No,
             Self::Weighing(collecting) => Joined::Weighing {
@@ -205,7 +212,7 @@ impl Progress {
     /// `None` when there is nothing to wait for: a node that is not joining,
     /// or one that has finished.
     #[must_use]
-    pub const fn moved(&self) -> Option<u64> {
+    pub(crate) const fn moved(&self) -> Option<u64> {
         match self {
             Self::Idle | Self::Landed => None,
             Self::Weighing(collecting) | Self::Fetching { collecting, .. } => {
@@ -348,5 +355,28 @@ mod tests {
             !collecting.take(Joining::Ledger, tip(), 2, vec![0; MAX_JOIN_BYTES / 2], 0),
             "past the ceiling, so the exchange is given up rather than grown"
         );
+    }
+
+    /// An answer cut into as many pieces as a reader takes, each as large as
+    /// an answer is cut, is collected whole.
+    ///
+    /// The ceiling on bytes is for pieces that never complete anything, so it
+    /// has to sit above the largest answer the rules on pieces let an honest
+    /// node send. Nothing asked this: the test above measures the ceiling in
+    /// fractions of itself, so a ceiling of one megabyte, or of forty eight
+    /// bytes, passed it, and a node would have given up on any ledger larger
+    /// than that.
+    #[test]
+    fn the_largest_answer_the_pieces_allow_is_collected_whole() {
+        let piece = || vec![0; crate::message::JOIN_PART_BYTES];
+        let mut collecting =
+            Collecting::started(Joining::Ledger, tip(), 0, MAX_JOIN_PARTS, piece(), 0).unwrap();
+        for part in 1..MAX_JOIN_PARTS {
+            assert!(
+                collecting.take(Joining::Ledger, tip(), part, piece(), 0),
+                "a piece of an answer within the rules on pieces was refused for its bytes"
+            );
+        }
+        assert_eq!(collecting.wanted(), None, "and the answer is whole");
     }
 }

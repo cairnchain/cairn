@@ -75,7 +75,7 @@ use crate::validation::ConsensusParams;
 /// ability to be moved off it by a heavier chain.
 pub const BURIAL: u64 = 1_024;
 
-pub use crate::state::Fallen;
+use crate::state::Fallen;
 
 /// A ledger as it stood at one header, and everything needed to check it.
 #[derive(Clone, Debug)]

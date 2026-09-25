@@ -513,7 +513,7 @@ impl History {
 
     /// The height below which the list of movements may be missing entries.
     #[must_use]
-    pub const fn missed_below(&self) -> Option<u64> {
+    pub(crate) const fn missed_below(&self) -> Option<u64> {
         self.missed_below
     }
 
@@ -524,7 +524,7 @@ impl History {
     }
 
     /// Says the node still holds this note, which settles it.
-    pub fn accounted_for(&mut self, id: &NoteId) -> bool {
+    pub(crate) fn accounted_for(&mut self, id: &NoteId) -> bool {
         self.unaccounted.remove(id)
     }
 
@@ -599,7 +599,7 @@ impl History {
     /// A wallet handed a ledger, or one that dropped old blocks, has no way to
     /// read them and no way to guess. The history then begins where the wallet
     /// does, which it says rather than implying it covers everything.
-    pub fn skip_to(&mut self, height: u64) {
+    pub(crate) fn skip_to(&mut self, height: u64) {
         if height <= self.next {
             return;
         }

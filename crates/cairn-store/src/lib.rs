@@ -203,6 +203,9 @@ pub enum StoreError {
 #[derive(Debug, Default)]
 pub struct Recovered {
     /// Records the log holds.
+    ///
+    /// Read by the tests, which hold an open to what it found. A node counts
+    /// the blocks it replays for itself, so nothing in production reads it.
     pub blocks: usize,
     /// Bytes cut off the end of the log, which no record accounted for.
     ///
@@ -330,7 +333,7 @@ pub(crate) fn beside(target: &Path, suffix: &str) -> PathBuf {
 /// bytes nobody can use, under a name the next attempt will write over
 /// anyway, on the disk that was probably the reason it failed. Taking it away
 /// is what stops a node that could not free space from having spent some.
-pub fn write_and_sync(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+fn write_and_sync(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let written = OpenOptions::new()
         .write(true)
         .create(true)

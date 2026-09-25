@@ -1163,9 +1163,8 @@ fn resolve_transfer(
 /// What applying a block body does to the state, computed without mutation.
 #[derive(Clone, Debug)]
 pub struct BlockEffect {
-    pub transition: StateTransition,
-    pub total_fees: Amount,
-    pub state_root: Hash32,
+    transition: StateTransition,
+    state_root: Hash32,
 }
 
 fn check_coinbase_shape(
@@ -1321,7 +1320,6 @@ pub fn evaluate_block_body(
 
     Ok(BlockEffect {
         transition,
-        total_fees,
         state_root,
     })
 }
@@ -1421,7 +1419,6 @@ pub fn assemble_block(
 pub struct ConnectedBlock {
     pub transition: StateTransition,
     pub undo: BlockUndo,
-    pub total_fees: Amount,
 }
 
 /// Checks everything about a header that does not need the block body.
@@ -1656,7 +1653,6 @@ pub fn connect_block(
     Ok(ConnectedBlock {
         transition: effect.transition,
         undo,
-        total_fees: effect.total_fees,
     })
 }
 

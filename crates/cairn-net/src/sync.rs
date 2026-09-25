@@ -208,7 +208,7 @@ impl Window {
     ///
     /// A window that has passed is worth nothing to anybody, which is what
     /// lets the node drop the ones belonging to addresses that have gone.
-    pub fn current(&self, now: u64) -> bool {
+    pub(crate) fn current(&self, now: u64) -> bool {
         self.window == now.checked_div(WINDOW_SECONDS).unwrap_or(0)
     }
 }
@@ -565,7 +565,7 @@ const BYTES_PER_UNIT: usize = 512;
 /// mean a full batch of empty blocks costing sixteen megabytes' worth of
 /// allowance, which no honest sync could afford.
 #[must_use]
-pub fn what_the_wire_costs(bytes: usize) -> u32 {
+fn what_the_wire_costs(bytes: usize) -> u32 {
     u32::try_from(bytes.div_ceil(BYTES_PER_UNIT)).unwrap_or(u32::MAX)
 }
 
@@ -598,7 +598,7 @@ impl PeerState {
     /// read, not encoded and not queued. A peer that gets a short batch asks
     /// for the rest of it, which is what it already does about the heights
     /// this node no longer holds.
-    pub fn afford_serving(&mut self, bytes: usize, now: u64) -> bool {
+    pub(crate) fn afford_serving(&mut self, bytes: usize, now: u64) -> bool {
         self.afford(what_the_wire_costs(bytes), now)
     }
 }
@@ -686,7 +686,7 @@ pub struct Reaction {
     /// anything. What it also did was carry this message past the one place
     /// that charges for work, so the price the table puts on a path folded
     /// against the cold set was never asked for.
-    pub placed: Vec<Placed>,
+    pub(crate) placed: Vec<Placed>,
     /// Blocks newly worth telling every other peer about, with where they sit.
     pub broadcast: Vec<Located>,
     /// A locator a peer sent, waiting to be answered.
@@ -966,7 +966,7 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
 
 /// How long a batch of blocks may be outstanding before the node gives up on
 /// it and asks again.
-pub const BATCH_PATIENCE: u64 = 60;
+const BATCH_PATIENCE: u64 = 60;
 
 /// The chain length past which being handed a ledger beats reading one.
 ///

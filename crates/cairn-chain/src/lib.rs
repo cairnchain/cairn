@@ -3978,7 +3978,6 @@ mod tests {
         ConnectedBlock {
             transition: cairn_ledger::StateTransition::default(),
             undo: cairn_ledger::BlockUndo::default(),
-            total_fees: Amount::ZERO,
         }
     }
 

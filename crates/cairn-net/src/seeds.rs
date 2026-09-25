@@ -73,7 +73,7 @@ pub fn written_in(network: NetworkId) -> &'static [&'static str] {
 /// Sixty four keeps what a name is for. A seed service behind one name is a
 /// handful of machines, and sixty four of them is redundancy many times over,
 /// while leaving a single answer at a sixty fourth of the book.
-pub const MOST_PER_NAME: usize = 64;
+const MOST_PER_NAME: usize = 64;
 
 /// Every address `text` names, up to [`MOST_PER_NAME`].
 ///
@@ -81,7 +81,7 @@ pub const MOST_PER_NAME: usize = 64;
 /// redundancy this list deliberately does not: one name answers with every
 /// machine behind it, and a node tries them all. Not without bound, because
 /// what a name answers with is not the operator's to vouch for.
-pub fn resolve(text: &str) -> Result<Vec<SocketAddr>, String> {
+pub(crate) fn resolve(text: &str) -> Result<Vec<SocketAddr>, String> {
     let found: Vec<SocketAddr> = text
         .to_socket_addrs()
         .map_err(|error| format!("`{text}` is not an address: {error}"))?
@@ -97,7 +97,7 @@ pub fn resolve(text: &str) -> Result<Vec<SocketAddr>, String> {
 ///
 /// Its own function so that the cap can be asked without a name that answers
 /// with thousands, which is not something a test can make a resolver do.
-pub fn what_a_name_is_worth(mut found: Vec<SocketAddr>) -> Vec<SocketAddr> {
+fn what_a_name_is_worth(mut found: Vec<SocketAddr>) -> Vec<SocketAddr> {
     found.truncate(MOST_PER_NAME);
     found
 }

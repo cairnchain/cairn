@@ -10,6 +10,5 @@ pub mod hex;
 pub mod merkle;
 
 pub use amount::Amount;
-pub use codec::{CodecError, Decode, Encode, Reader};
-pub use hash::{Domain, Hash32, Hasher, HASH_LEN};
-pub use merkle::merkle_root;
+pub use codec::{Decode, Encode};
+pub use hash::Hash32;

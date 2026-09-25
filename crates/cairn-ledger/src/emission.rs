@@ -58,7 +58,7 @@ pub fn reward_at(height: u64, interval: u64, initial: Amount, tail: Amount) -> A
 /// nothing the type does not already bound, and no chain reaches one: the
 /// floor takes about a hundred and seventy thousand years to add the
 /// difference.
-pub fn emitted_by(height: u64, interval: u64, initial: Amount, tail: Amount) -> Amount {
+pub(crate) fn emitted_by(height: u64, interval: u64, initial: Amount, tail: Amount) -> Amount {
     let blocks = u128::from(height).saturating_add(1);
     let mut paid: u128 = 0;
     let mut left = blocks;

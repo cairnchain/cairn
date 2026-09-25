@@ -12,7 +12,7 @@
 
 /// The whole of it: markup, style and the small amount of script it takes to
 /// ask the wallet what it holds.
-pub const HTML: &str = r#"<!doctype html>
+pub(crate) const HTML: &str = r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -125,7 +125,7 @@ pub const HTML: &str = r#"<!doctype html>
 /// The style, served on its own because the policy this server sends
 /// forbids a page from carrying its own, which is the right default and
 /// worth keeping rather than loosening for one page.
-pub const CSS: &str = r#"  :root{
+pub(crate) const CSS: &str = r#"  :root{
     --ground:#12161A; --panel:#171C21; --sunk:#1B2127;
     --ink:#E4E8E2; --ink-2:#9BA5A0; --ink-3:#6C7873;
     --rule:#242B31; --rule-firm:#333C43;
@@ -245,7 +245,7 @@ pub const CSS: &str = r#"  :root{
 ///
 /// Hashed twice, because it writes a block number as `"#" + height` and one
 /// hash would end the string there.
-pub const JS: &str = r##""use strict";
+pub(crate) const JS: &str = r##""use strict";
 // The secret that came in the address. Kept in memory and put back on every
 // request; the wallet answers nothing without it.
 const KEY = new URLSearchParams(location.search).get("k") || "";

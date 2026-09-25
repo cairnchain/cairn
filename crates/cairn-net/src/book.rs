@@ -60,7 +60,7 @@ pub const MAX_PER_GROUP: usize = 32;
 /// Three only means something alongside the waiting below. Counted against
 /// dials a second apart, three misses is three seconds, and three seconds of
 /// a bad connection would empty the book.
-pub const MAX_MISSES: u8 = 3;
+pub(crate) const MAX_MISSES: u8 = 3;
 
 /// How long an address is left alone after one failed dial.
 ///
@@ -447,7 +447,7 @@ impl AddressBook {
     /// Marking one already in the book is the ordinary case: the book is read
     /// back from disk before the seeds are known, so the same addresses are
     /// usually already there as plain entries.
-    pub fn insert_seed(&mut self, address: SocketAddr) -> bool {
+    pub(crate) fn insert_seed(&mut self, address: SocketAddr) -> bool {
         if !is_dialable(&address) {
             return false;
         }
@@ -468,12 +468,14 @@ impl AddressBook {
     }
 
     /// Whether this address was given rather than learned.
-    pub fn is_seed(&self, address: &SocketAddr) -> bool {
+    #[cfg(test)]
+    fn is_seed(&self, address: &SocketAddr) -> bool {
         self.known.get(address).is_some_and(|known| known.seed)
     }
 
     /// The addresses this node was started from.
-    pub fn seeds(&self) -> Vec<SocketAddr> {
+    #[cfg(test)]
+    fn seeds(&self) -> Vec<SocketAddr> {
         self.known
             .iter()
             .filter(|(_, known)| known.seed)
@@ -498,7 +500,7 @@ impl AddressBook {
     /// that is the stranger's own address and costs nothing. On a devnet,
     /// inside one office, or behind one carrier gateway, every node shares
     /// that address, and one hello took the operator's seed out of the book.
-    pub fn remove(&mut self, address: &SocketAddr) -> bool {
+    pub(crate) fn remove(&mut self, address: &SocketAddr) -> bool {
         if self.known.get(address).is_some_and(|known| known.seed) {
             return false;
         }
@@ -539,7 +541,7 @@ impl AddressBook {
     /// reached the one address its operator gave it. It held one connection
     /// and knew twenty five addresses, so neither the connection ceiling nor
     /// an empty book was what stopped it.
-    pub fn answered(&mut self, address: &SocketAddr, now: u64) {
+    pub(crate) fn answered(&mut self, address: &SocketAddr, now: u64) {
         let Some(known) = self.known.get_mut(address) else {
             return;
         };
@@ -557,7 +559,7 @@ impl AddressBook {
     ///
     /// Returns whether that was the last chance it had. A seed has no last
     /// chance: it is left alone for longer and longer, and kept.
-    pub fn missed(&mut self, address: &SocketAddr, now: u64) -> bool {
+    pub(crate) fn missed(&mut self, address: &SocketAddr, now: u64) -> bool {
         let Some(known) = self.known.get_mut(address) else {
             return false;
         };
@@ -576,7 +578,7 @@ impl AddressBook {
     /// not a reason to write down an address that would not otherwise be kept,
     /// because who this node dials is decided by the book's own rules and not
     /// by what a stranger says it can do for anyone.
-    pub fn keeps_the_cold_set(&mut self, address: &SocketAddr, archives: bool) {
+    pub(crate) fn keeps_the_cold_set(&mut self, address: &SocketAddr, archives: bool) {
         if let Some(known) = self.known.get_mut(address) {
             known.archives = archives;
         }
@@ -587,7 +589,7 @@ impl AddressBook {
     /// For a wallet that needs a path rebuilt and is connected to nobody who
     /// can rebuild one. Ordered by when each last spoke, because the one that
     /// spoke most recently is the one most likely to answer a dial.
-    pub fn archivists(&self) -> Vec<SocketAddr> {
+    pub(crate) fn archivists(&self) -> Vec<SocketAddr> {
         let mut found: Vec<(u64, SocketAddr)> = self
             .known
             .iter()
@@ -606,7 +608,7 @@ impl AddressBook {
     /// node cannot tell which, and it does not need to. What it can tell is
     /// that the whole world went quiet at once, and the whole world does not
     /// go quiet at once.
-    pub fn forgive_all(&mut self) {
+    pub(crate) fn forgive_all(&mut self) {
         for known in self.known.values_mut() {
             known.misses = 0;
             known.quiet_until = 0;
@@ -617,7 +619,8 @@ impl AddressBook {
     ///
     /// An address never heard from sorts last but is still offered, since a
     /// node starting out has nothing else and every peer begins unheard.
-    pub fn candidates(&self) -> Vec<SocketAddr> {
+    #[cfg(test)]
+    fn candidates(&self) -> Vec<SocketAddr> {
         self.ordered()
             .into_iter()
             .map(|(address, _)| address)
@@ -628,7 +631,7 @@ impl AddressBook {
     ///
     /// An address that just failed is left out until its wait is over, so a
     /// bad minute costs a node one dial rather than an address.
-    pub fn ready(&self, now: u64) -> Vec<SocketAddr> {
+    pub(crate) fn ready(&self, now: u64) -> Vec<SocketAddr> {
         self.ordered()
             .into_iter()
             .filter(|(_, known)| known.quiet_until <= now)
@@ -661,7 +664,7 @@ impl AddressBook {
     /// Rotating rather than drawing at random keeps this a pure function of
     /// the book and the number given, which is what makes it testable. The
     /// caller passes the clock, so what circulates changes by the second.
-    pub fn sample(&self, max: usize, turn: u64) -> Vec<PeerAddress> {
+    pub(crate) fn sample(&self, max: usize, turn: u64) -> Vec<PeerAddress> {
         self.sample_reading(max, turn).0
     }
 
@@ -738,7 +741,7 @@ impl AddressBook {
     ///
     /// Two books with the same count and the same history write the same file.
     /// For a caller deciding whether writing it again would say anything new.
-    pub fn changes(&self) -> u64 {
+    pub(crate) fn changes(&self) -> u64 {
         self.changes
     }
 
@@ -746,7 +749,7 @@ impl AddressBook {
     ///
     /// Answered without building the list, because the answer is wanted once a
     /// round and the list is not.
-    pub fn has_seeds(&self) -> bool {
+    pub(crate) fn has_seeds(&self) -> bool {
         self.known.values().any(|known| known.seed)
     }
 

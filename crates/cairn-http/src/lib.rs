@@ -12,7 +12,7 @@
 //! answered with a status and dropped.
 
 pub mod http;
-pub mod json;
+mod json;
 
 pub use http::{bind, most_one_answer_carries, serve, Request, Response};
 pub use json::{Mark, Writer};

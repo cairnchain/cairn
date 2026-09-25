@@ -23,10 +23,10 @@
 
 pub mod forest;
 pub mod key;
-pub mod proof;
+mod proof;
 pub mod tree;
 
 pub use forest::{Archive, Forest, ForestProof, PathsBefore};
-pub use key::{Key, KEY_LEN, MAX_DEPTH};
+pub use key::{Key, MAX_DEPTH};
 pub use proof::Proof;
 pub use tree::{Change, SparseMerkleTree};

@@ -91,14 +91,15 @@
 //! number, so case 91 941 of a two-minute campaign is reachable in a
 //! millisecond by asking for that one case.
 
-pub mod arms;
-pub mod campaign;
+mod arms;
+mod campaign;
 pub mod mutate;
-pub mod shrink;
+mod shrink;
 
-pub use arms::{Arm, Arms, Built};
-pub use campaign::{Campaign, Ran, DEFAULT_SEED};
-pub use mutate::{mutate, splice, INTERESTING_U32, INTERESTING_U64, INTERESTING_U8};
+pub use arms::{Arms, Built};
+pub use campaign::Campaign;
+pub use mutate::mutate;
+use mutate::{INTERESTING_U32, INTERESTING_U64, INTERESTING_U8};
 pub use shrink::smallest;
 
 /// A small, fast, fully specified generator.
@@ -118,7 +119,7 @@ impl Rng {
     }
 
     /// The next sixty four bits.
-    pub fn next_u64(&mut self) -> u64 {
+    fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.state;
         z = (z ^ z.wrapping_shr(30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -126,7 +127,7 @@ impl Rng {
         z ^ z.wrapping_shr(31)
     }
 
-    pub fn next_u32(&mut self) -> u32 {
+    fn next_u32(&mut self) -> u32 {
         u32::try_from(self.next_u64() & 0xffff_ffff).unwrap_or(u32::MAX)
     }
 
@@ -138,7 +139,7 @@ impl Rng {
     ///
     /// Uniform bytes almost never produce `0x00` or `0xff` in a run of four,
     /// and a length prefix is exactly where those matter.
-    pub fn edgy_byte(&mut self) -> u8 {
+    fn edgy_byte(&mut self) -> u8 {
         if self.chance(2) {
             self.byte()
         } else {
@@ -249,7 +250,7 @@ impl Rng {
 /// ninety thousand without running the eighty nine thousand before it, which
 /// is what makes a failure worth reporting as a number.
 #[must_use]
-pub fn seed_for(run: u64, case: usize) -> u64 {
+fn seed_for(run: u64, case: usize) -> u64 {
     let case = u64::try_from(case).unwrap_or(u64::MAX);
     let mut mixer = Rng::new(run ^ case.wrapping_mul(0xD1B5_4A32_D192_ED03));
     mixer.next_u64()

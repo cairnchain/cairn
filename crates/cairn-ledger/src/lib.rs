@@ -16,13 +16,12 @@ pub mod state;
 pub mod transaction;
 pub mod validation;
 
-pub use block::{Block, BlockHeader, HeaderSummary};
-pub use note::{NetworkId, Note, NoteId};
+pub use block::{Block, HeaderSummary};
+pub use note::NetworkId;
 pub use state::{
-    cold_leaf, note_key, BlockUndo, ColdSet, ColdSpend, HotEntry, LedgerState, Maturing,
-    StateTransition, Tip,
+    cold_leaf, note_key, BlockUndo, ColdSpend, HotEntry, LedgerState, StateTransition,
 };
-pub use transaction::{CoinbaseTransaction, ColdWitness, Input, Transfer, Witness};
+pub use transaction::Witness;
 pub use validation::{
-    connect_block, disconnect_block, BlockError, ConnectedBlock, ConsensusParams, TransferError,
+    disconnect_block, BlockError, ConnectedBlock, ConsensusParams, TransferError,
 };

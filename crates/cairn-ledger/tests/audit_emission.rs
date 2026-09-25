@@ -636,7 +636,7 @@ fn a_fee_cannot_be_counted_twice_or_conjured_from_nothing() {
     )
     .unwrap();
     let connected = connect_block(&mut state, &block, &params, NOW).unwrap();
-    assert_eq!(connected.total_fees, fee);
+    assert_eq!(connected.transition.fees, fee);
 }
 
 /// What the maturity rule is for, told as the story it was found in.
@@ -810,7 +810,7 @@ fn money_in_equals_money_out_over_a_long_chain_and_a_reorganisation() {
         let before = u128::from(state.supply().as_pebbles());
         let connected = connect_block(state, &block, &params, NOW).unwrap();
         assert_eq!(
-            connected.total_fees, fees,
+            connected.transition.fees, fees,
             "the block's fees are not what was paid"
         );
         notes.apply(&connected);
@@ -1197,7 +1197,7 @@ fn a_block_that_overflows_the_tier_loses_nothing_on_the_way_down() {
     let before: u128 = u128::from(value.as_pebbles());
     let block = build(&state, &params, coinbase, vec![split]).unwrap();
     let connected = connect_block(&mut state, &block, &params, NOW).unwrap();
-    assert_eq!(connected.total_fees, fee);
+    assert_eq!(connected.transition.fees, fee);
 
     let transition = &connected.transition;
     let created: u128 = transition
