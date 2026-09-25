@@ -890,11 +890,13 @@ pub struct Unwritten {
     pub blocks: u64,
     /// Whether those blocks could still reach the disk if the room came back.
     ///
-    /// False once the gap has passed [`MAX_BEHIND`], and false for good. The
-    /// blocks in it are no longer anywhere this node can read them from, so
-    /// nothing an operator does now puts them on the disk; what is left is a
-    /// node that stops, and a directory that is still worth starting from
-    /// because it stopped falling further behind.
+    /// False once the gap has passed [`MAX_BEHIND`], and false for good,
+    /// because the node stops there. It still holds the blocks in the gap when
+    /// it does, since [`MAX_BEHIND`] sits inside the window a chain holds
+    /// bodies over, but a node that has stopped writes nothing: what is left
+    /// is a directory that is still worth starting from because it stopped
+    /// falling further behind, and a restart that asks the network for the
+    /// rest.
     pub within_reach: bool,
 }
 
