@@ -1729,3 +1729,254 @@ fn a_page_of_blocks_holds_the_blocks_it_was_asked_for() {
     assert_eq!(heights(&page), [2, 1, 0], "the three to the first: {page}");
     assert!(says(&answer, "next", "null"), "and nowhere after: {page}");
 }
+
+/// The heights a page of blocks lists, in the order it lists them.
+fn heights_listed(page: &str) -> Vec<u64> {
+    page.split("\"height\":")
+        .skip(1)
+        .map(|rest| {
+            rest.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .unwrap()
+        })
+        .collect()
+}
+
+/// What `network_object` writes for these rules, worked out from the rules.
+fn network_written(params: &ConsensusParams) -> String {
+    let genesis = params
+        .genesis
+        .map_or_else(|| "null".to_owned(), |genesis| format!("\"{genesis}\""));
+    format!(
+        "\"network\":{{\"name\":\"{}\",\"id\":\"0x{:08x}\",\"genesis\":{genesis},\"opensAt\":{}}}",
+        params.network_name(),
+        params.network.as_u32(),
+        params.opens_at
+    )
+}
+
+/// The status page names the block it stands on and the network it is on,
+/// and the rules page names the same network.
+///
+/// Nothing read either. A status whose tip was always `null` passed, and so
+/// did a `network` key with nothing written after it, on both pages, which is
+/// the one field that tells a reader which chain they are looking at.
+#[test]
+fn the_status_names_its_tip_and_both_pages_name_the_network() {
+    let params = params();
+    let miner = wallet(1);
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(&miner, 3);
+
+    let explorer = explorer(params);
+    feed(&explorer, &blocks);
+    explorer.refresh();
+
+    let status = body(&ask(&explorer, "status"));
+    assert!(
+        status.contains(&format!(
+            "\"tip\":{{\"height\":2,\"id\":\"{}\"",
+            blocks[2].id()
+        )),
+        "the status does not name the block at height 2 as its tip"
+    );
+    let network = network_written(&params);
+    assert!(
+        status.contains(&network),
+        "the status does not name the network it is on"
+    );
+    assert!(
+        body(&ask(&explorer, "params")).contains(&network),
+        "the rules page does not name the network they are the rules of"
+    );
+}
+
+/// A block whose body the node has let go of is still read into the index,
+/// still served, and served as itself.
+///
+/// A node keeps the bodies of its last sixty four blocks in memory and reads
+/// the rest back off its log, and no test here went past sixty four blocks on
+/// a node with a log. So a walk that refused every block off the log as one
+/// from a branch the node had left passed, leaving the index empty; so did a
+/// reading that never named the heights it wanted fetched, and one that,
+/// handed the blocks it asked for, served each height with a block from
+/// another.
+#[test]
+fn a_block_the_node_holds_only_on_disk_is_read_and_served_as_itself() {
+    let params = params();
+    let miner = wallet(1);
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(&miner, 80);
+
+    let archiving = Archiving::open(params, "on-disk-only");
+    let explorer = &archiving.explorer;
+    feed(explorer, &blocks);
+    assert!(
+        explorer
+            .node()
+            .with_chain(|chain| chain.block_at(3).is_none() && chain.block_at(10).is_none()),
+        "the node still holds these bodies in memory, so this tests nothing"
+    );
+    explorer.refresh();
+
+    let coinbase = blocks[3].coinbase.id();
+    assert_eq!(
+        ask(explorer, &format!("tx/{coinbase}")).status,
+        200,
+        "a transaction in a block held only on disk was never read into the index"
+    );
+
+    let answer = ask(explorer, "block/3");
+    assert_eq!(
+        answer.status, 200,
+        "a block held only on disk is not served"
+    );
+    assert!(
+        says(&answer, "id", &format!("\"{}\"", blocks[3].id())),
+        "the block served at height 3 is not the block at height 3"
+    );
+    let size = cairn_primitives::codec::Encode::encode(&blocks[3]).len();
+    assert!(
+        says(&answer, "size", &size.to_string()),
+        "the size given is not the {size} bytes the block takes encoded"
+    );
+
+    let page = body(&ask(explorer, "blocks?from=10&limit=5"));
+    assert_eq!(
+        heights_listed(&page),
+        [10, 9, 8, 7, 6],
+        "a page of blocks held only on disk lists each height once, in order"
+    );
+}
+
+/// A note that has fallen past the grace window is called cold, by a node
+/// that keeps the cold set and by one that does not.
+///
+/// The one test of `tier_of` was the note nobody holds, which is `unknown`.
+/// No test let a note fall far enough to be cold, so a `tier_of` that asked
+/// both questions at once, whether the node keeps the cold set and whether
+/// it found the note there, passed; it calls every cold note `unknown` on
+/// both kinds of node.
+#[test]
+fn a_note_that_fell_past_the_grace_window_is_called_cold() {
+    let mut params = params();
+    params.hot_capacity = 1;
+    let miner = wallet(1);
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(&miner, 72);
+    let fallen = NoteId::new(blocks[0].coinbase.id(), 0);
+    let reference = format!("{}:{}", fallen.source, fallen.index);
+
+    let plain = explorer(params);
+    let archiving = Archiving::open(params, "fallen-cold");
+    for (explorer, kind) in [(&plain, "plain"), (&archiving.explorer, "archiving")] {
+        feed(explorer, &blocks);
+        assert!(
+            explorer.node().with_chain(|chain| {
+                chain.state().hot_note(&fallen).is_none()
+                    && chain.state().within_grace(&fallen).is_none()
+            }),
+            "on the {kind} node the note has not fallen past the grace window, so this \
+             tests nothing"
+        );
+        explorer.refresh();
+        let answer = ask(explorer, &format!("note/{reference}"));
+        assert_eq!(answer.status, 200, "the {kind} node's index has the note");
+        assert!(
+            says(&answer, "tier", "\"cold\""),
+            "the {kind} node does not call a note that fell past the grace window cold"
+        );
+    }
+}
+
+/// The money the index counted is the money the ledger says was issued.
+///
+/// The status page prints both so the two can be compared rather than
+/// trusted. Nothing compared them, so an index that counted nought passed.
+#[test]
+fn the_money_the_index_counted_is_the_money_the_ledger_issued() {
+    let params = params();
+    let miner = wallet(1);
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(&miner, 3);
+
+    let explorer = explorer(params);
+    feed(&explorer, &blocks);
+    explorer.refresh();
+
+    let issued = explorer
+        .node()
+        .with_chain(|chain| chain.state().supply())
+        .as_pebbles();
+    assert_eq!(
+        issued,
+        3 * params.initial_reward.as_pebbles(),
+        "three rewards were issued"
+    );
+    let status = ask(&explorer, "status");
+    assert!(
+        says(&status, "issued", &format!("\"{issued}\"")),
+        "the ledger's figure is not the one printed"
+    );
+    assert!(
+        says(&status, "counted", &format!("\"{issued}\"")),
+        "the index did not count the {issued} pebbles the ledger issued"
+    );
+}
+
+/// The holders are the owners holding something, and the table of the
+/// largest keeps fifty of them.
+///
+/// No test had more than a handful of owners or one who had spent
+/// everything, so counting an owner holding nought as a holder passed, as
+/// did a table that never stopped at fifty.
+#[test]
+fn holders_hold_something_and_the_table_of_the_largest_keeps_fifty() {
+    let mut params = params();
+    params.max_coinbase_outputs = 256;
+    let owners: Vec<SecretKey> = (100..160u8).map(wallet).collect();
+    let mut forge = Forge::new(params);
+
+    // One block paying the reward out to sixty owners, a note each.
+    let height = forge.state.next_height().unwrap();
+    forge.clock += 600;
+    let share = Amount::from_pebbles(params.initial_reward.as_pebbles() / 60).unwrap();
+    let outputs: Vec<Note> = owners
+        .iter()
+        .map(|owner| Note::new(share, owner.public_key()))
+        .collect();
+    let coinbase = CoinbaseTransaction::new(height, outputs);
+    let block =
+        assemble_block(&forge.state, coinbase, Vec::new(), &params, forge.clock, 0).unwrap();
+    let first = mine_block(block, ATTEMPTS).expect("a nonce exists");
+    connect_block(&mut forge.state, &first, &params, NOW).unwrap();
+
+    // One of them spends the whole of their note, half to somebody new and
+    // half as the fee, and is left holding nothing.
+    let emptied = &owners[0];
+    let note = (
+        NoteId::new(first.coinbase.id(), 0),
+        first.coinbase.outputs[0],
+    );
+    let half = Amount::from_pebbles(share.as_pebbles() / 2).unwrap();
+    let transfer = spend(&params, emptied, &[note], wallet(3).public_key(), half);
+    let second = forge.carrying(&wallet(1), vec![transfer]);
+
+    let explorer = explorer(params);
+    feed(&explorer, &[first, second]);
+    explorer.refresh();
+
+    // Fifty nine of the sixty, the one paid, and the miner of the second block.
+    let answer = ask(&explorer, "holders");
+    assert!(
+        says(&answer, "holders", "61"),
+        "an owner holding nothing was counted as a holder, or a holder was missed"
+    );
+    let listed = body(&answer).matches("\"address\":").count();
+    assert_eq!(
+        listed, 50,
+        "the table of the largest holds fifty and no more"
+    );
+}

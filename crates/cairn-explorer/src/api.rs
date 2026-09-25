@@ -2131,6 +2131,75 @@ mod tests {
     use cairn_ledger::note::NoteId;
     use cairn_primitives::{Amount, Hash32};
 
+    /// A node with nothing to report, for a reading that never asks it.
+    fn nothing_to_say() -> super::Health {
+        super::Health {
+            outdated: None,
+            stranded: None,
+            probation: None,
+            joining: super::Joined::No,
+            out_of_reach: 0,
+            peers: 0,
+            unwritten: None,
+            unread: None,
+            unjudged: None,
+            unweighable: None,
+            filling: None,
+            written_through: None,
+            mended: 0,
+        }
+    }
+
+    /// Only the reading whose answer is sent encodes anything to count its
+    /// bytes, and that reading writes the count.
+    ///
+    /// Encoding a block again to report its size is the largest thing a page
+    /// of blocks does. The naming reading is thrown away, and nothing asked
+    /// what it spent: calling every reading the one that is sent, which
+    /// encodes every block twice per page, passed. So did a size that was
+    /// never written at all, since the only check on it was that it was not
+    /// `null`.
+    #[test]
+    fn only_the_reading_that_is_sent_pays_to_count_bytes() {
+        let chain =
+            cairn_chain::ChainStore::new(cairn_ledger::validation::ConsensusParams::testnet());
+        let index = crate::index::Index::new();
+        let health = nothing_to_say();
+        for (pass, written) in [
+            (super::Pass::Naming, "{\"size\":null}"),
+            (super::Pass::Answering, "{\"size\":7}"),
+        ] {
+            let context = super::Context {
+                chain: &chain,
+                index: &index,
+                health: &health,
+                fetched: &[],
+                pass,
+                wanted: std::cell::RefCell::new(Vec::new()),
+            };
+            let encoded = std::cell::Cell::new(0u32);
+            let mut json = Writer::new();
+            json.begin_object();
+            super::field_size(&mut json, &context, || {
+                encoded.set(encoded.get() + 1);
+                7
+            });
+            json.end_object();
+            assert_eq!(
+                json.finish(),
+                written,
+                "the {pass:?} reading wrote the wrong size"
+            );
+            let expected = u32::from(pass == super::Pass::Answering);
+            assert_eq!(
+                encoded.get(),
+                expected,
+                "the {pass:?} reading encoded {} times",
+                encoded.get()
+            );
+        }
+    }
+
     /// What a miner wrote into a coinbase is shown as text only when it is
     /// text.
     ///
