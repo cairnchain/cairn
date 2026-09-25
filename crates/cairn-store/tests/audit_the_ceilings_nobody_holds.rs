@@ -35,9 +35,18 @@
 //! Real logs are not that small. A node's block log is the chain, so the case
 //! that matters — a prefix over the ceiling with room in the file behind it —
 //! is the case only a real log has, and read as equality every such log takes
-//! a four megabyte record a flipped bit invented. The last test here builds a
-//! log past the ceiling and asks the three readers of a length on both sides
-//! of it.
+//! a four megabyte record a flipped bit invented. The test after the helpers
+//! builds a log past the ceiling and asks the three readers of a length on
+//! both sides of it.
+//!
+//! And a fifth, on the writer's side of the same line. Nothing in the crate
+//! wrote a block within a megabyte of the ceiling, so `append` refusing a
+//! block of exactly `MAX_RECORD_BYTES`, or taking one a byte past it, left
+//! the suite green. So did the walk moved by one, which no record of exactly
+//! the ceiling ever reached, and the walk read as equality, because the bytes
+//! behind every prefix it had been shown were not a block and the decoder
+//! refused them whichever way the ceiling was read. The last two tests put a
+//! block of exactly the ceiling, and one a byte past it, in front of both.
 
 #![allow(
     clippy::unwrap_used,
@@ -399,6 +408,11 @@ fn the_ceiling_is_where_it_says_on_a_log_larger_than_itself() {
     //
     // So what is held here is that the walk refuses and cuts nothing, which
     // is the verdict, and the reservation is left to the note.
+    //
+    // That is true of these bytes, which are the rest of a log and not a
+    // block. With a block behind the prefix the verdict does change, and
+    // `a_block_one_byte_past_the_ceiling_is_refused_by_the_writer_and_the_walk`
+    // holds the walk's ceiling there.
     drop(log);
     put(&directory.join(BLOCK_LOG), 0, &over.to_le_bytes());
     let _ = std::fs::remove_file(directory.join(BLOCK_INDEX));
@@ -477,5 +491,155 @@ fn the_ceiling_is_where_it_says_on_a_log_larger_than_itself() {
     );
 
     drop(log);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// A block whose encoding is exactly `bytes` long, for asking a ceiling about
+/// both sides of itself.
+///
+/// Filled with inputs rather than notes. Both decode, and a note carries a
+/// public key whose decoding is a curve decompression, which over four
+/// megabytes of notes is time spent on nothing the question needs. The last
+/// few bytes go in the coinbase's `extra`, the one field that grows a byte at
+/// a time, with a note or two taking what it cannot hold.
+fn a_block_of_exactly(bytes: usize) -> Block {
+    use cairn_ledger::transaction::{Input, Transfer, MAX_COINBASE_EXTRA, MOST_INPUTS};
+
+    let owner = SecretKey::from_bytes(&[9u8; 32]).public_key();
+    let value = cairn_primitives::Amount::from_pebbles(1).unwrap();
+    let input = Input::hot(cairn_ledger::note::NoteId::new(
+        cairn_primitives::Hash32::from_bytes([7u8; 32]),
+        0,
+    ));
+    let per_input = input.encode().len();
+    let per_note = Note::new(value, owner).encode().len();
+    let empty = Transfer::new(Vec::new(), Vec::new()).encode().len();
+
+    // A header and an empty coinbase, and nothing else yet.
+    let mut block = a_wide_block(0, cairn_primitives::Hash32::ZERO, 0);
+    block.transfers.clear();
+    let mut short = bytes - block.encode().len();
+    while short >= empty + per_input {
+        let many = ((short - empty) / per_input).min(MOST_INPUTS);
+        block
+            .transfers
+            .push(Transfer::new(vec![input.clone(); many], Vec::new()));
+        short -= empty + many * per_input;
+    }
+    let notes = short.saturating_sub(MAX_COINBASE_EXTRA).div_ceil(per_note);
+    block.coinbase = CoinbaseTransaction::with_extra(
+        0,
+        vec![Note::new(value, owner); notes],
+        vec![0u8; short - notes * per_note],
+    );
+    block.header.transactions_root = block.transactions_root();
+    assert_eq!(
+        block.encode().len(),
+        bytes,
+        "the fixture has to be a block of exactly {bytes} bytes"
+    );
+    block
+}
+
+/// A block exactly as wide as the ceiling, written, read, walked and replayed.
+///
+/// The ceiling is the largest record the log will read or write, so a body of
+/// exactly that many bytes is one this process writes and reads back. Where
+/// that line falls was held by nothing: `append` refusing such a block, and
+/// the walk setting it aside as damage, both left the suite green.
+#[test]
+fn a_block_as_wide_as_the_ceiling_is_written_and_read_back_by_every_reader() {
+    let block = a_block_of_exactly(MAX_RECORD_BYTES);
+    let directory = scratch("on-the-ceiling");
+    let (mut log, _) = BlockLog::open(&directory).unwrap();
+    let written = log.append(&block);
+    assert!(
+        written.is_ok(),
+        "a block of exactly {MAX_RECORD_BYTES} bytes is one this process may \
+         write, and append refused it"
+    );
+    assert_eq!(
+        log.read_at(0).unwrap().map(|found| found.id()),
+        Some(block.id()),
+        "the single read did not give back the block that was written"
+    );
+    drop(log);
+
+    // The walk is the reader that meets a record with no index to say how
+    // long it is, so the index goes.
+    std::fs::remove_file(directory.join(BLOCK_INDEX)).unwrap();
+    let (log, recovered) = BlockLog::open(&directory).unwrap();
+    assert_eq!(
+        (recovered.blocks, recovered.unreadable),
+        (1, None),
+        "the walk set aside, as damage, a record of exactly the ceiling"
+    );
+    assert_eq!(
+        log.read_at(0).unwrap().map(|found| found.id()),
+        Some(block.id()),
+        "the rebuilt index does not name the block that was written"
+    );
+    let replayed = log
+        .replay()
+        .next()
+        .map(|found| found.map(|block| block.id()));
+    assert!(
+        matches!(replayed, Some(Ok(id)) if id == block.id()),
+        "the replay did not give back the block that was written"
+    );
+    drop(log);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// A block one byte past the ceiling, refused by the writer and by the walk.
+///
+/// `append` read as equality took it and wrote it down. The walk read as
+/// equality is the case the test above records as unmeasurable, and it is
+/// only unmeasurable while the bytes behind the prefix are not a block: with
+/// this one behind it, the walk took the record, the index named it, and the
+/// open refused the whole log over a span no record may have. A start is
+/// meant to fail only because a file could not be reached.
+#[test]
+fn a_block_one_byte_past_the_ceiling_is_refused_by_the_writer_and_the_walk() {
+    let block = a_block_of_exactly(MAX_RECORD_BYTES + 1);
+    let directory = scratch("past-by-one");
+    let (mut log, _) = BlockLog::open(&directory).unwrap();
+    let refused = log.append(&block);
+    assert!(
+        matches!(refused, Err(StoreError::BlockTooLarge)),
+        "a block one byte past the ceiling was not refused as too large"
+    );
+    assert_eq!(
+        (log.len(), log.bytes()),
+        (0, 0),
+        "a refused block left something behind in the log"
+    );
+    drop(log);
+
+    // The same record put down by hand, the way a build with a wider ceiling
+    // would have written it, with no index so that the walk is what meets it.
+    let mut record = u32::try_from(MAX_RECORD_BYTES + 1)
+        .unwrap()
+        .to_le_bytes()
+        .to_vec();
+    record.extend_from_slice(&block.encode());
+    std::fs::write(directory.join(BLOCK_LOG), &record).unwrap();
+    let _ = std::fs::remove_file(directory.join(BLOCK_INDEX));
+    let Ok((_, recovered)) = BlockLog::open(&directory) else {
+        panic!(
+            "a record past the ceiling stopped the start, which only a file that \
+             cannot be reached may do"
+        );
+    };
+    assert_eq!(
+        (
+            recovered.blocks,
+            recovered.unreadable,
+            recovered.discarded_bytes
+        ),
+        (0, Some(0), 0),
+        "a length past the ceiling is damage, to be set aside and neither read \
+         nor cut"
+    );
     let _ = std::fs::remove_dir_all(&directory);
 }

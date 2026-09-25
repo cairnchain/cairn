@@ -386,9 +386,11 @@ fn move_into_place(staged: &Path, target: &Path) -> std::io::Result<()> {
 /// a path with no directory in it, where the parent is the empty string and
 /// opening it would fail: a node given an empty data directory writes
 /// `blocks.log` and nothing else. Read the other way round, that write fails
-/// for a node whose disk is fine. Reaching it from a test means writing into
-/// whatever directory the test process happens to be in, which is the
-/// repository, so it is written down here instead.
+/// for a node whose disk is fine. This said reaching it from a test meant
+/// writing into the repository; a test can choose the directory it runs in,
+/// and `audit_a_file_named_without_a_directory.rs` does, which holds the guard
+/// read as `true` and read without its `!`. Read as `false` it skips the wait
+/// for every path, which is one more of the survivors above.
 pub(crate) fn sync_the_directory_of(path: &Path) -> std::io::Result<()> {
     match path.parent() {
         Some(directory) if !directory.as_os_str().is_empty() => sync_directory(directory),
@@ -535,7 +537,8 @@ impl BlockLog {
 
     /// Whether this log holds the block at `height`.
     pub fn holds(&self, height: u64) -> bool {
-        self.count > 0 && height >= self.first && height < self.reaches()
+        // No `count > 0`: with none held, `reaches` is `first` and the range is empty.
+        height >= self.first && height < self.reaches()
     }
 
     /// Reads the block at `height`, rather than at a position.
