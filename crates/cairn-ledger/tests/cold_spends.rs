@@ -20,6 +20,7 @@ use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
 use cairn_ledger::{cold_leaf, Block, LedgerState};
+use cairn_primitives::codec::{Decode, Encode};
 
 const NOW: u64 = 1_000_000_000;
 const CAPACITY: usize = 8;
@@ -173,4 +174,57 @@ fn a_cold_note_cannot_be_consumed_twice() {
         }
     };
     assert!(again.is_err(), "one note, one spend");
+}
+
+/// A block spending a cold note reads back off the wire as it was written, and
+/// the chain still takes it.
+///
+/// A cold input carries the note, its place and its path, and every cold spend
+/// in the suite reached the next node as a value in memory. So a decoder that
+/// refused every cold witness passed, which is a network where a note that has
+/// fallen can be spent by nobody who has to send the spend to someone else.
+#[test]
+fn a_block_spending_a_cold_note_crosses_the_wire() {
+    let params = params();
+    let (miner, alice) = (wallet(1), wallet(2));
+    let mut state = LedgerState::archiving();
+
+    let notes = mine_empty(&mut state, &params, &miner, 10);
+    let (id0, note0) = notes[0];
+    let position = state
+        .cold()
+        .locate(&id0, &note0)
+        .expect("it is in the cold set");
+    let proof = state.cold().prove(position).expect("a current proof");
+
+    let mut transfer = Transfer::new(
+        vec![Input::cold(id0, note0, position, proof)],
+        vec![Note::new(note0.value, alice.public_key())],
+    );
+    transfer.sign_input(params.network, 0, &note0, &miner);
+    let height = state.next_height().unwrap();
+    let coinbase = CoinbaseTransaction::new(
+        height,
+        vec![Note::new(params.initial_reward, miner.public_key())],
+    );
+    let block = assemble_block(
+        &state,
+        coinbase,
+        vec![transfer],
+        &params,
+        1_000 + height * 600,
+        0,
+    )
+    .unwrap();
+
+    let read = Block::decode(&block.encode()).expect("a block spending a cold note reads back");
+    assert!(
+        read == block,
+        "a block spending a cold note read back as another block"
+    );
+    connect_block(&mut state, &read, &params, NOW).expect("and the chain takes it");
+    assert!(
+        state.cold().locate(&id0, &note0).is_none(),
+        "the note it spent is out of the cold set"
+    );
 }

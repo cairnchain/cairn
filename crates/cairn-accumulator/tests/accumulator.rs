@@ -352,3 +352,29 @@ fn what_a_proof_says_it_costs_is_what_the_wire_writes() {
     let empty = SparseMerkleTree::new().prove(missing);
     assert_eq!(empty.size_in_bytes(), empty.encode().len());
 }
+
+/// A tree holding entries is not empty, and says which keys it holds.
+///
+/// `is_empty` was only ever asked of trees that were empty, and `contains` was
+/// never asked at all, so a tree that called itself empty whatever it held, or
+/// answered the same about every key, passed.
+#[test]
+fn a_tree_says_what_it_holds() {
+    let mut tree = tree_with(0..3);
+    assert!(
+        !tree.is_empty(),
+        "a tree holding three entries said it was empty"
+    );
+    assert!(tree.contains(key(1)), "a key the tree holds");
+    assert!(
+        !tree.contains(key(3)),
+        "a tree said it held a key nobody added"
+    );
+
+    tree.remove(key(1));
+    assert!(
+        !tree.contains(key(1)),
+        "a tree said it held a key it let go of"
+    );
+    assert!(tree.contains(key(2)), "and still holds the others");
+}

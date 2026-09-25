@@ -1900,6 +1900,42 @@ mod tests {
         }
     }
 
+    /// Of two failures, the one named is the one validation reached first,
+    /// whichever order they are offered in.
+    ///
+    /// Only the path where the machine refused a thread ever offers a later
+    /// failure before an earlier one, and a test cannot make the machine
+    /// refuse, so the comparison was never asked a question it could get
+    /// wrong: an `earlier` that kept whatever it already held passed.
+    #[test]
+    fn of_two_failures_the_one_reached_first_is_named() {
+        let first = pending(1, 0, 3, false);
+        let later_input = pending(2, 0, 4, false);
+        let later_transfer = pending(3, 1, 0, false);
+        let named = |held: Option<&Pending>, found: &Pending| {
+            let kept = earlier(held, found);
+            (kept.transfer, kept.input)
+        };
+
+        assert_eq!(named(None, &later_transfer), (1, 0), "nothing held yet");
+        assert_eq!(
+            named(Some(&first), &later_transfer),
+            (0, 3),
+            "an earlier transfer held is kept"
+        );
+        assert_eq!(
+            named(Some(&later_transfer), &first),
+            (0, 3),
+            "a failure in a later transfer was named over one in an earlier transfer"
+        );
+        assert_eq!(
+            named(Some(&later_input), &first),
+            (0, 3),
+            "a failure at a later input was named over one at an earlier input of the \
+             same transfer"
+        );
+    }
+
     /// And nothing is reported when every one of them holds, at any size.
     #[test]
     fn a_split_check_finds_nothing_wrong_with_signatures_that_hold() {

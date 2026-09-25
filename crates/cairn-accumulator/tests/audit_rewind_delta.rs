@@ -424,3 +424,82 @@ fn what_a_holder_lets_go_of_is_what_a_record_costs() {
         "a path let go of did not come back the path it was"
     );
 }
+
+/// A record holding only a place emptied while watched is not empty, though it
+/// holds no paths.
+///
+/// `len` counts paths and leaves those places out on purpose, since a place
+/// costs a record the place alone. `is_empty` is the other question: whether
+/// the record has anything a rewind needs, and a place emptied while watched is
+/// something, because without it the rewind would not watch that place again.
+/// Nothing asked `is_empty` anything, so a record that called itself empty
+/// whenever it held no paths, or always, or never, passed.
+#[test]
+fn a_record_holding_only_an_emptied_place_is_not_empty() {
+    let mut forest = Forest::new();
+    for index in 0..4u64 {
+        let (position, proof) = forest.add(leaf(index)).unwrap();
+        forest.watch(position, proof);
+    }
+
+    let untouched = PathsBefore::before(forest.leaves());
+    assert!(untouched.is_empty(), "a record nothing was written into");
+
+    let mut let_go = PathsBefore::before(forest.leaves());
+    forest.clone().unwatch_keeping(1, &mut let_go);
+    assert_eq!(let_go.len(), 1, "a path let go of is written down");
+    assert!(
+        !let_go.is_empty(),
+        "a record holding a path said it was empty"
+    );
+
+    let mut spent = PathsBefore::before(forest.leaves());
+    forest.clone().unwatch_spent(2, &mut spent);
+    assert_eq!(spent.len(), 0, "an emptied place is not a path");
+    assert!(
+        !spent.is_empty(),
+        "a record holding a place emptied while watched said it was empty, so a \
+         rewind would take it for one with nothing to put back"
+    );
+}
+
+/// A place the change added and then emptied is not watched after the rewind,
+/// though it was watched when it went.
+///
+/// Of the four kinds of path `rewind_to` sorts, a place that did not exist
+/// before is the one dropped, and that has to hold for a place emptied while
+/// watched as well as for one merely appended. The ledger never builds this
+/// shape, since a block's removals are proved before its additions land, so
+/// every removal in this suite was of a place older than the change: a rewind
+/// that put a watch back on the place at the old leaf count, which is not a
+/// place in the forest it rewinds to, passed.
+#[test]
+fn a_place_added_and_emptied_by_one_change_is_not_watched_after_the_rewind() {
+    let mut forest = Forest::new();
+    for index in 0..5u64 {
+        forest.add(leaf(index)).unwrap();
+    }
+    let untouched = forest.clone();
+    let roots = forest.roots_only();
+    let mut before = PathsBefore::before(forest.leaves());
+
+    // The change appends a leaf, somebody watches it, and then it is emptied.
+    let (position, proof) = forest.add(leaf(5)).unwrap();
+    assert_eq!(
+        position,
+        untouched.leaves(),
+        "the first place past the old count"
+    );
+    forest.watch(position, proof.clone());
+    let emptied = vec![(position, leaf(5), proof)];
+    assert!(forest.remove_batch(&emptied), "the removal has to land");
+    forest.unwatch_spent(position, &mut before);
+
+    forest.rewind_to(&roots, &emptied, &before);
+    assert_eq!(
+        forest.proof_of(position),
+        None,
+        "the rewind watches place {position}, which the forest it went back to never held"
+    );
+    assert_eq!(forest, untouched, "the rewind did not put the forest back");
+}

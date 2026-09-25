@@ -108,6 +108,8 @@ impl Decode for Proof {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::key::KEY_LEN;
+    use crate::tree::SparseMerkleTree;
     use cairn_primitives::codec::MAX_SEQUENCE_LEN;
 
     /// A proof promising more siblings than a key has bits is refused at the
@@ -132,5 +134,66 @@ mod tests {
             Ok(&deepest),
             "the deepest path a key can take has to survive the wire"
         );
+    }
+
+    /// A membership proof that also names an occupant is refused.
+    ///
+    /// An occupant is what an absence proof carries: the entry sitting where
+    /// the key would be. A proof carrying one says the key is not there, and
+    /// it is not also taken as saying the key is, whatever its path folds to.
+    /// Every membership proof checked here came out of a tree, which never
+    /// writes one with an occupant, so a check that refused one only when its
+    /// path was too deep as well passed.
+    #[test]
+    fn a_membership_proof_that_names_an_occupant_is_refused() {
+        let key = Key::from_bytes([1; KEY_LEN]);
+        let other = Key::from_bytes([2; KEY_LEN]);
+        let value = Hash32::from_bytes([3; 32]);
+        let mut tree = SparseMerkleTree::new();
+        tree.insert(key, value);
+        tree.insert(other, value);
+
+        let honest = tree.prove(key);
+        assert!(
+            honest.verify_membership(tree.root(), key, value),
+            "the path is a real one"
+        );
+        let with_occupant = Proof::new(honest.siblings.clone(), Some((other, value)));
+        assert!(
+            !with_occupant.verify_membership(tree.root(), key, value),
+            "a proof naming an occupant was taken as proving membership"
+        );
+    }
+
+    /// An absence path as deep as a key has bits is checked on its fold, and
+    /// one level deeper is refused whatever it folds to.
+    ///
+    /// The bound is the key's length, the one the decoder holds a path to and
+    /// the one a membership path is held to. The root here is folded from the
+    /// path itself, so the depth is the only thing that can decide. Nothing
+    /// built an absence path at either depth, so the refusal could move a
+    /// level either way and pass.
+    #[test]
+    fn an_absence_path_is_refused_one_level_past_the_key_and_not_at_it() {
+        let key = Key::from_bytes([0x5a; KEY_LEN]);
+        for (depth, taken) in [(MAX_DEPTH, true), (MAX_DEPTH + 1, false)] {
+            let siblings = (0..depth)
+                .map(|level| Hash32::from_bytes([u8::try_from(level % 251).unwrap(); 32]))
+                .collect();
+            let path = Proof::new(siblings, None);
+            let root = path.fold(empty_hash(), key);
+            let answered = path.verify_absence(root, key);
+            if taken {
+                assert!(
+                    answered,
+                    "an absence path as deep as a key has bits was refused at the count"
+                );
+            } else {
+                assert!(
+                    !answered,
+                    "an absence path one level deeper than a key has bits was taken"
+                );
+            }
+        }
     }
 }
