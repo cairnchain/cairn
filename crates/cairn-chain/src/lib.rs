@@ -2441,9 +2441,17 @@ impl ChainStore {
                 // it could not possibly take, so that a rewind deeper than the
                 // pool is wide does not pay for the full check on every one of
                 // them.
+                //
+                // Full by the measure `accept_transfer` makes room by, the
+                // count or the bytes. Asked by the count alone, a pool full by
+                // its bytes was asked about every transfer it then refused, and
+                // each refusal spent the budget.
                 let bytes = transfer.encode().len();
                 let weight = transfer_weight(&transfer, bytes, outcome.spent_hot.len());
-                if self.pool.len() >= MAX_POOLED {
+                let taken = self
+                    .pool_bytes
+                    .saturating_add(pooled_cost(bytes, transfer.inputs.len()));
+                if must_make_room(self.pool.len(), taken) {
                     let offered = rate(outcome.fee, weight);
                     let cheapest = self.pool_by_rate.iter().next().map(|(at, _)| *at);
                     if cheapest.is_some_and(|least| offered <= least) {
