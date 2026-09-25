@@ -2016,21 +2016,36 @@ impl Wallet {
         self.spend(recipient, amount, fee, true)
     }
 
-    fn spend(
+    /// Why a spend of `amount` paying `fee` could not even be drafted, if it
+    /// could not, asked without making it.
+    ///
+    /// For a quote. What a quote prices is the transfer this wallet would
+    /// build, and for money it does not have there is none: the quote used to
+    /// price nothing at nothing, and the page said the network asked nought
+    /// to carry a payment that sending then refused for want of money. This
+    /// is the question sending asks first, asked once for both.
+    pub fn could_not_draft(
         &self,
         recipient: PublicKey,
         amount: Amount,
         fee: Amount,
-        meant: bool,
-    ) -> Result<Sent, WalletError> {
+    ) -> Option<WalletError> {
+        self.drafted(recipient, amount, fee).err()
+    }
+
+    fn drafted(
+        &self,
+        recipient: PublicKey,
+        amount: Amount,
+        fee: Amount,
+    ) -> Result<Draft, WalletError> {
         if amount == Amount::ZERO {
             return Err(WalletError::NothingToSend);
         }
         let needed = amount.checked_add(fee).ok_or(WalletError::TooLarge)?;
 
         let holdings = self.holdings();
-        let draft = self
-            .draft(&holdings, recipient, amount, needed)
+        self.draft(&holdings, recipient, amount, needed)
             .map_err(|why| match why {
                 NoDraft::SpreadTooThin { over, reach } => WalletError::TooManyNotes {
                     over,
@@ -2043,7 +2058,17 @@ impl Wallet {
                     waiting: holdings.waiting,
                     stranded: holdings.stranded,
                 },
-            })?;
+            })
+    }
+
+    fn spend(
+        &self,
+        recipient: PublicKey,
+        amount: Amount,
+        fee: Amount,
+        meant: bool,
+    ) -> Result<Sent, WalletError> {
+        let draft = self.drafted(recipient, amount, fee)?;
 
         // The network turns away a transfer that pays less than the floor, so
         // the refusal is better said here, with the number, than fetched back
