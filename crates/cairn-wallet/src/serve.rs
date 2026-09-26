@@ -27,7 +27,7 @@ use cairn_crypto::{random_bytes, PublicKey};
 use cairn_http::{Request, Response, Writer};
 use cairn_primitives::Amount;
 
-use crate::{parse_address, Wallet, WalletError};
+use crate::{parse_address, undone_note, Wallet, WalletError};
 
 /// Bytes of secret in the address of the page.
 const SECRET_BYTES: usize = 24;
@@ -419,10 +419,11 @@ fn state(wallet: &Wallet) -> Response {
     // that stops short and does not say where it stopped has told somebody
     // something untrue about their own money. This list holds up to
     // `MAX_UNDONE`, which is two hundred and fifty six, and shows a hundred,
-    // and the page renders what it shows as a finished sentence ending
-    // "Whoever you were paying has not been paid". A payment missing from it
-    // reads as a payment that went through.
+    // and the page renders what it shows as a finished sentence saying what
+    // became of the money, which the library words for both faces. A payment
+    // missing from it reads as a payment that went through.
     json.field_usize("undone_held", undone.len());
+    json.field_str("undoneNote", &undone_note(&undone).unwrap_or_default());
 
     let covered = wallet.history_covers();
     match covered.from {
