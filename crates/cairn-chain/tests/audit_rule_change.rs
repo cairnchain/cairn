@@ -221,7 +221,9 @@ fn the_schedule_is_what_turns_a_bad_block_into_an_admission() {
 /// A block below the version the rules require is the other direction, and it
 /// is the block's fault rather than the reader's: this build knows the version
 /// it carries and the rules where it sits. So it is remembered, and offered
-/// again it is answered without being judged again.
+/// again it is answered without being judged again, as a block from another
+/// version's rules: whoever offers it next has not updated, which the
+/// specification says is not held against it.
 ///
 /// Nothing else held this. `WrongVersion` could leave the list of verdicts a
 /// header settles and every test stayed green, the node judging the same bad
@@ -250,8 +252,9 @@ fn a_block_below_the_required_version_is_condemned_for_good() {
     );
     let again = store.add_block(behind, NOW).unwrap_err();
     assert!(
-        matches!(again, ChainError::KnownBad { .. }),
-        "remembered, not judged again: {again:?}"
+        matches!(again, ChainError::KnownForeign { found, .. } if found == BLOCK_VERSION - 1),
+        "remembered, not judged again, and remembered as another version's block \
+         rather than as one the rules condemn: {again:?}"
     );
 }
 

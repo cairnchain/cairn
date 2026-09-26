@@ -1581,6 +1581,20 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
             found,
             required,
         }),
+        // The same block, or a branch through it, offered again: by the next
+        // node that has not updated, in the same good faith as the first. It
+        // was answered as a block refused for a rule and fell to the last arm,
+        // so the first messenger was let go and every one after it refused.
+        Err(ChainError::KnownForeign {
+            height,
+            found,
+            required,
+            ..
+        }) => Reaction::close(DropReason::ForeignRules {
+            height,
+            found,
+            required,
+        }),
         // This node's own store, not the block and not the peer. It is
         // reachable without anybody doing anything wrong: a heavier branch is
         // offered, this node rewinds its own to take it, the new branch fails,
