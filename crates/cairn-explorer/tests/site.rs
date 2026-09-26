@@ -299,7 +299,7 @@ fn keys_used() -> (BTreeSet<String>, BTreeSet<String>) {
         }
     }
 
-    for attribute in ["data-t=\"", "data-t-placeholder=\""] {
+    for attribute in ["data-t=\"", "data-t-placeholder=\"", "data-t-label=\""] {
         let mut from = 0usize;
         while let Some(found) = PAGE[from..].find(attribute) {
             let at = from + found + attribute.len();

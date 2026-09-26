@@ -20,7 +20,10 @@
 
   --ink: #e4e8e2;
   --ink-2: #a3aeaa;
-  --ink-3: #6f7b77;
+  /* The palest ink sets labels, table headings and the sentence that says
+     how much of the chain a balance is about, all under eighteen pixels, so
+     it has to reach 4.5 to 1 on every ground. It read 4.13 on this one. */
+  --ink-3: #8d9893;
 
   --rule: #252d34;
   --rule-strong: #364149;
@@ -56,7 +59,7 @@
     --raised: #e3e6dd;
     --ink: #171b19;
     --ink-2: #4d554f;
-    --ink-3: #7b837c;
+    --ink-3: #646b66;
     --rule: #d8dbd2;
     --rule-strong: #bcc1b5;
     --accent: #64751b;
@@ -265,6 +268,12 @@ button, select, input { font: inherit; color: inherit; }
 .ticker {
   border-top: 1px solid var(--rule);
   background: var(--surface);
+}
+
+/* Figures from the last answer the page had, once the site stopped giving
+   it new ones. The notice above says how old they are. */
+.ticker.stale .tick-value {
+  color: var(--ink-3);
 }
 
 /*
