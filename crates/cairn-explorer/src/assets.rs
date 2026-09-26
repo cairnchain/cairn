@@ -50,7 +50,7 @@ macro_rules! paper {
     };
 }
 
-pub(crate) const PAPERS: [(&str, &str); 5] = [
+pub(crate) const PAPERS: [(&str, &str); 6] = [
     (
         "/whitepaper",
         paper!("en", "../../../docs/cairn-whitepaper.html"),
@@ -58,6 +58,10 @@ pub(crate) const PAPERS: [(&str, &str); 5] = [
     (
         "/specification",
         paper!("en", "../../../docs/cairn-specification.html"),
+    ),
+    (
+        "/threat-model",
+        paper!("en", "../../../docs/cairn-threat-model.html"),
     ),
     ("/design", paper!("fr", "../../../docs/cairn-design.html")),
     (
