@@ -219,9 +219,13 @@ fn a_block_the_disk_refuses_a_peer_is_named_here_rather_than_left_to_the_peer() 
         "the peer to catch up to the block below the spoiled one",
         || peer.height() == Some(SPOILED - 1),
     );
-    // Long enough for a second batch to have been asked for and answered, so
-    // that stopping here is where it stops rather than where it had reached.
-    std::thread::sleep(Duration::from_millis(500));
+    // Until the host has been asked for the spoiled record and refused it,
+    // so that stopping here is where it stops rather than where it had
+    // reached. It was half a second, a guess at one more round trip, and the
+    // refusal it was waiting for is the thing asserted below.
+    wait_for("the host to refuse the spoiled record", || {
+        host.unread().is_some()
+    });
 
     let reached = peer.height();
     let unread = host.unread();
