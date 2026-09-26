@@ -44,7 +44,7 @@ use cairn_store::{
 
 use crate::book::AddressBook;
 use crate::choosing::{self, Approach, Chooser, JoinProgress};
-use crate::joining::{Collecting, Joined, Progress};
+use crate::joining::{most_join_bytes, Collecting, Joined, Progress};
 use crate::message::{
     Joining, Keeps, Message, Placed, JOIN_PART_BYTES, MAX_CHAIN, MAX_HEADERS, MAX_PROVEN,
     MAX_SHARED_ADDRESSES,
@@ -6829,8 +6829,31 @@ fn read_handed_ledger(
     params: &ConsensusParams,
 ) -> Result<Option<Handed>, NodeError> {
     let unusable = |because: String| NodeError::UnusableLedger { because };
-    let bytes = match std::fs::read(directory.join(HANDED_LEDGER)) {
-        Ok(bytes) => bytes,
+    // No ledger this build writes or takes is longer than a join may be, and
+    // the length is asked before anything is read. Every decoder behind this
+    // bounds what it builds, and none of them was reached until the whole
+    // file was in memory, so a file of any length was allocated in full first.
+    let most = u64::try_from(most_join_bytes()).unwrap_or(u64::MAX);
+    let too_long = |length: u64| {
+        unusable(format!(
+            "{HANDED_LEDGER} is {length} bytes, longer than any ledger this build writes or \
+             takes ({most} bytes)"
+        ))
+    };
+    let read = std::fs::File::open(directory.join(HANDED_LEDGER)).and_then(|file| {
+        let length = file.metadata()?.len();
+        if length > most {
+            return Ok(Err(length));
+        }
+        // Bounded again, for a file that grew since it was measured: what is
+        // past the ceiling is not read, and what is read will not decode.
+        let mut bytes = Vec::new();
+        io::Read::read_to_end(&mut io::Read::take(file, most), &mut bytes)?;
+        Ok(Ok(bytes))
+    });
+    let bytes = match read {
+        Ok(Err(length)) => return Err(too_long(length)),
+        Ok(Ok(bytes)) => bytes,
         // The one failure that means what the caller used to assume of all of
         // them. A node with no ledger file has not written one yet, which is
         // every node before its first, and it starts from its own log.

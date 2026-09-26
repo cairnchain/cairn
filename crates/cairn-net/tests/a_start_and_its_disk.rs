@@ -667,3 +667,45 @@ fn a_stop_in_the_middle_of_a_reorganisation_leaves_no_seam_in_the_headers() {
         "and the start does not say it cut the abandoned branch's headers"
     );
 }
+
+/// A `ledger.dat` longer than any ledger this build writes or takes is
+/// refused by its length, before it is read.
+///
+/// Every decoder behind a start bounds what it builds, and none of them was
+/// reached until the whole file was in memory: a ledger file of any length
+/// was allocated in full first, and a failed allocation is a process gone
+/// with no message.
+#[test]
+fn a_ledger_file_longer_than_any_ledger_is_refused_before_it_is_read() {
+    let directory = scratch("long-ledger");
+    // Sparse: a length on the disk, with nothing written to it.
+    let file = std::fs::File::create(directory.join(HANDED_LEDGER)).unwrap();
+    file.set_len(1 << 30).unwrap();
+    drop(file);
+
+    let said = refusal(Node::open(params(), loopback(), &directory));
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert!(
+        said.contains("longer than any ledger"),
+        "a ledger file of a gigabyte was read before it was refused: {said}"
+    );
+
+    // And a file exactly at the ceiling the refusal names is read, and
+    // refused for what it holds rather than for its length.
+    let ceiling: u64 = said
+        .rsplit_once('(')
+        .and_then(|(_, rest)| rest.split_once(" bytes)"))
+        .and_then(|(number, _)| number.parse().ok())
+        .expect("the refusal names the ceiling");
+    let directory = scratch("ledger-at-the-ceiling");
+    let file = std::fs::File::create(directory.join(HANDED_LEDGER)).unwrap();
+    file.set_len(ceiling).unwrap();
+    drop(file);
+    let said = refusal(Node::open(params(), loopback(), &directory));
+    let _ = std::fs::remove_dir_all(&directory);
+    assert!(
+        said.contains("not a ledger this build can read"),
+        "a ledger file exactly at the ceiling was refused for its length: {said}"
+    );
+}

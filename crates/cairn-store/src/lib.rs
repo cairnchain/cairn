@@ -89,6 +89,10 @@ const LENGTH_BYTES: u64 = 4;
 /// The name of the file that marks a directory as in use.
 const LOCK_FILE: &str = "lock";
 
+/// The most of the lock file read to say who holds it: a process identifier
+/// is twenty digits at most, and the rest would only be a longer message.
+const HOLDER_BYTES: u64 = 64;
+
 /// The ledger a node was handed, as it stood when it was handed over.
 ///
 /// Only a node that joined a chain rather than reading it has one. Without it
@@ -1828,7 +1832,14 @@ impl DirectoryLock {
 /// is then the honest one rather than a guess, and an operator on that machine
 /// has the task manager for the rest.
 fn read_holder(path: &Path) -> String {
-    let holder = std::fs::read_to_string(path).unwrap_or_default();
+    // A line and no more. What is in there is a process identifier written
+    // for this message, and it was read whole: a lock file of any length was
+    // put into memory before anything was said about it.
+    let mut read = Vec::new();
+    if let Ok(file) = File::open(path) {
+        let _ = file.take(HOLDER_BYTES).read_to_end(&mut read);
+    }
+    let holder = String::from_utf8_lossy(&read);
     let holder = holder.trim();
     if holder.is_empty() {
         "another process".to_owned()
