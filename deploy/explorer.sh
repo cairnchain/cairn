@@ -20,7 +20,8 @@
 # One this run does not name is read back off the machine, the domain
 # included, so an update keeps the certificate the site already has. Naming a
 # setting changes it. Naming it empty puts it back to the default it ships
-# with.
+# with. Everything else on the unit's command line, such as `--keep`, is
+# carried as it stands.
 
 set -eu
 
@@ -29,15 +30,9 @@ SRC="/usr/local/src/cairn"
 DATA="/var/lib/cairn-explorer"
 UNIT=/etc/systemd/system/cairn-explorer.service
 CADDYFILE=/etc/caddy/Caddyfile
+BIN=/usr/local/bin/cairn-explorer
 
 say() { printf '\n== %s\n' "$1"; }
-
-if [ "$(id -u)" -ne 0 ]; then
-    echo "run this as root" >&2
-    echo "with sudo, pass the settings through env, since sudo clears them:" >&2
-    echo "  sudo env DOMAIN=... SEED=... sh $0" >&2
-    exit 1
-fi
 
 # What is already on this machine is the only record of what it was told to
 # do, so a setting this run does not name is read back out of it rather than
@@ -48,20 +43,19 @@ fi
 # An unset variable and an empty one are different things here. Unset says
 # nothing about a setting. Empty says put it back to the default.
 
-# The installed unit's ExecStart as one line: this script writes one line, and
-# the file it ships with wraps the same command across several.
-INSTALLED=""
-if [ -f "$UNIT" ]; then
-    INSTALLED=$(awk '/^ExecStart=/ {
+# A unit's ExecStart as one line: this script writes one line, and the file it
+# ships with wraps the same command across several.
+unit_line() {
+    awk '/^ExecStart=/ {
         line = $0
         while (sub(/\\$/, "", line)) { getline more; line = line " " more }
         print line
         exit
-    }' "$UNIT")
-fi
+    }' "$1"
+}
 
-# One argument out of that line, or all of them where it repeats, as --seed
-# does.
+# One argument out of the installed line, or all of them where it repeats, as
+# --seed does.
 carried() {
     found=""
     take=""
@@ -74,6 +68,29 @@ carried() {
         fi
     done
     echo "${found# }"
+}
+
+# Every other argument of the installed line, as it stands and in its order,
+# for the reason `install.sh` gives beside the same lines: an update that
+# rebuilt the line from its own settings dropped a `--keep` or anything else
+# an operator had added by hand, and said only what it had kept.
+the_rest() {
+    rest=""
+    program=1
+    skip=""
+    for word in $INSTALLED; do
+        if [ -n "$program" ]; then
+            program=""
+        elif [ -n "$skip" ]; then
+            skip=""
+        else
+            case "$word" in
+                --network | --data | --listen | --http | --seed) skip=1 ;;
+                *) rest="$rest $word" ;;
+            esac
+        fi
+    done
+    echo "${rest# }"
 }
 
 # The domain is not in the unit; the Caddyfile is where it is written down.
@@ -104,20 +121,176 @@ resolve() {
     eval "$1=\$value"
 }
 
-listen=$(carried listen)
-# A first guess only. Whatever this sets is put to `cairn-explorer --check`
-# below and replaced by the name the build gives if it is refused, so a
-# retired name here costs a line of output and nothing else. It is not
-# asked from the build at this point because the build is not installed
-# yet.
-resolve NETWORK "$(carried network)" testnet-6
-resolve PORT "${listen##*:}" 9945
-resolve HTTP "$(carried http)" 127.0.0.1:8080
-resolve SEED "$(carried seed)" ""
-resolve DOMAIN "$(carried_domain)" ""
+# What this run will write, settled from what it was told and what the
+# installed line says.
+the_settings() {
+    listen=$(carried listen)
+    # A first guess only. Whatever this sets is put to `cairn-explorer
+    # --check` below and replaced by the name the build gives if it is
+    # refused, so a retired name here costs a line of output and nothing
+    # else. It is not asked from the build at this point because the build
+    # is not built yet.
+    resolve NETWORK "$(carried network)" testnet-6
+    resolve PORT "${listen##*:}" 9945
+    resolve HTTP "$(carried http)" 127.0.0.1:8080
+    resolve SEED "$(carried seed)" ""
+    resolve DOMAIN "$(carried_domain)" ""
+    # Not settings this script is told. The directory and the address to
+    # listen on are whatever the installed line says, and the defaults on a
+    # first install.
+    data=$(carried data)
+    DATADIR=${data%% *}
+    DATADIR=${DATADIR:-$DATA}
+    ADDRESS=${listen%:*}
+    ADDRESS=${ADDRESS:-0.0.0.0}
+    REST=$(the_rest)
+}
+
+# The line this machine will run: what this run settled, and everything else
+# the installed line carried.
+the_line() {
+    line="--network $NETWORK --data $DATADIR --listen $ADDRESS:$PORT --http $HTTP"
+    if [ -n "$REST" ]; then
+        line="$line $REST"
+    fi
+    for peer in $SEED; do
+        line="$line --seed $peer"
+    done
+    echo "$line"
+}
+
+# The shipped unit with this machine's line in it, collapsed from the several
+# lines it ships on into one, and with the directory that line names as the
+# one place the explorer may write. Every other directive is left as it ships.
+write_unit() {
+    awk -v bin="$BIN" -v args="$ARGS" -v data="$DATADIR" '
+        /^ExecStart=/ { print "ExecStart=" bin " " args; skip = /\\$/; next }
+        skip { skip = /\\$/; next }
+        /^ReadWritePaths=/ { print "ReadWritePaths=" data; next }
+        { print }
+    ' "$1"
+}
+
+# What a build calls a network, or nothing where it does not know the name.
+name_of() {
+    (cd / && "$1" --check --network "$2" 2>/dev/null) | awk '/^network/ {print $2; exit}'
+}
+
+# A test network gets retired when a rule has to change, and its name stays
+# written in the unit file of every machine that was running it. Carrying a
+# setting forward is right until the build stops accepting it, and then it is
+# a service that will not start. The explorer itself is asked, since it is the
+# only thing that knows which names this build has.
+settle_the_network() {
+    if (cd / && "$1" --check --network "$NETWORK") >/dev/null 2>&1; then
+        return 0
+    fi
+    # Asked, not written down, for the reason `install.sh` carries beside the
+    # same lines: the day testnet-6 is retired, a rescue that hands back
+    # `testnet-6` hands back a retired network, which is what the check above
+    # exists to catch. The build says which name is current on the first line
+    # of `--check`.
+    fallback=$( (cd / && "$1" --check 2>/dev/null) | awk '/^network/ {print $2; exit}')
+    if [ -z "$fallback" ]; then
+        echo "network  $NETWORK is not a network this build knows, and this build" >&2
+        echo "         would not say which one is. Nothing is installed." >&2
+        exit 1
+    fi
+    echo "network  $NETWORK is not a network this build knows, so $fallback is used"
+    echo "         instead. Name one explicitly to choose another."
+    NETWORK=$fallback
+}
+
+# The whole line, put to the build before anything on this machine changes,
+# for the reason `install.sh` gives: a PORT or a SEED the explorer refuses
+# installed a service that restarted five times and stopped.
+check_the_line() {
+    # Unquoted on purpose: this is a list of arguments and not one argument.
+    # shellcheck disable=SC2086
+    if ! "$1" --check $ARGS >/dev/null 2>&1; then
+        echo "cairn-explorer refuses the line this would install, so nothing is" >&2
+        echo "installed:" >&2
+        echo "  $ARGS" >&2
+        # shellcheck disable=SC2086
+        "$1" --check $ARGS >&2 || true
+        exit 1
+    fi
+}
+
+# Moves the chain and the index of a network this machine is leaving out of the
+# way of the one it is joining, and keeps them, for the reason `install.sh`
+# gives beside the same lines.
+set_aside() {
+    if [ ! -d "$1" ] || [ -z "$(ls -A "$1")" ]; then
+        return 0
+    fi
+    kept="$1.$2"
+    if [ -e "$kept" ]; then
+        kept="$kept.$(date +%Y%m%d%H%M%S)"
+    fi
+    systemctl stop cairn-explorer 2>/dev/null || true
+    if ! mv "$1" "$kept"; then
+        systemctl start cairn-explorer 2>/dev/null || true
+        echo "data     $1 holds $2's chain and this machine is moving to $3, and it" >&2
+        echo "         could not be moved aside to $kept. Nothing else is changed;" >&2
+        echo "         move or empty it yourself and run this again." >&2
+        exit 1
+    fi
+    mkdir -p "$1"
+    echo "data     $2's chain is kept in $kept: an explorer on $3 starts from nothing"
+}
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "run this as root" >&2
+    echo "with sudo, pass the settings through env, since sudo clears them:" >&2
+    echo "  sudo env DOMAIN=... SEED=... sh $0" >&2
+    exit 1
+fi
+
+INSTALLED=""
+if [ -f "$UNIT" ]; then
+    INSTALLED=$(unit_line "$UNIT")
+fi
+
+# What the loops above cannot carry faithfully: quoting, which would split a
+# word differently from systemd, a variable or specifier systemd would expand,
+# or a pattern the shell would.
+case "$INSTALLED" in
+    *\"* | *\'* | *\\* | *\$* | *%* | *\** | *\?* | *\[*)
+        echo "the installed unit's command line has something this script cannot" >&2
+        echo "carry as it stands:" >&2
+        echo "  $INSTALLED" >&2
+        echo "write it without quotes, variables or patterns, and run this again." >&2
+        exit 1
+        ;;
+esac
+
+the_settings
+
+# The network the directory holds, in the words of the build that is running
+# it, asked before that build is replaced, for the reason `install.sh` gives.
+WAS=""
+named=$(carried network)
+named=${named%% *}
+if [ -n "$named" ]; then
+    if [ -x "$BIN" ]; then
+        WAS=$(name_of "$BIN" "$named")
+    fi
+    WAS=${WAS:-$named}
+fi
+
+case "$DATADIR" in
+    /*) ;;
+    *)
+        echo "the installed unit keeps its chain in $DATADIR, which is not a full" >&2
+        echo "path; write it as one and run this again." >&2
+        exit 1
+        ;;
+esac
 
 echo "network  $NETWORK"
-echo "port     $PORT"
+echo "listen   $ADDRESS:$PORT"
+echo "data     $DATADIR"
 echo "http     $HTTP"
 echo "seeds    ${SEED:-none}"
 if [ -n "$DOMAIN" ]; then
@@ -127,6 +300,9 @@ else
 fi
 if [ -n "$KEPT" ]; then
     echo "kept     ${KEPT# }, which this run did not name"
+fi
+if [ -n "$REST" ]; then
+    echo "carried  $REST, as the installed unit had it"
 fi
 
 say "Source"
@@ -151,54 +327,36 @@ say "Build"
 # binaries it publishes; the machines that build from source were resolving
 # whatever cargo decided at the time.
 ( cd "$SRC" && cargo build --release --locked --bin cairn-explorer )
-install -m 0755 "$SRC/target/release/cairn-explorer" /usr/local/bin/cairn-explorer
+BUILT="$SRC/target/release/cairn-explorer"
 
-say "User and directory"
+say "Service"
+# Everything the new build is asked, it is asked here, before it is installed
+# and before anything the running explorer depends on is touched: a refusal
+# below leaves this machine exactly as it was.
+settle_the_network "$BUILT"
+NOW=$(name_of "$BUILT" "$NETWORK")
+ARGS=$(the_line)
+check_the_line "$BUILT"
+
 # The same unprivileged user a node runs as, since neither holds anything.
 if ! id cairn >/dev/null 2>&1; then
     useradd --system --home-dir "$DATA" --shell /usr/sbin/nologin cairn
 fi
-mkdir -p "$DATA"
-chown cairn:cairn "$DATA"
-chmod 0750 "$DATA"
-
-say "Service"
-# A test network gets retired when a rule has to change, and its name stays
-# written in the unit file of every machine that was running it. Carrying a
-# setting forward is right until the build stops accepting it, and then it is
-# a service that will not start. The explorer itself is asked, since it is the
-# only thing that knows which names this build has.
-if [ -n "$NETWORK" ] && ! /usr/local/bin/cairn-explorer --check --network "$NETWORK" >/dev/null 2>&1; then
-    # Asked, not written down, for the reason `install.sh` carries beside the
-    # same lines: the day testnet-6 is retired, a rescue that hands back
-    # `testnet-6` hands back a retired network, which is what the check above
-    # exists to catch. The build says which name is current on the first line
-    # of `--check`.
-    fallback=$(/usr/local/bin/cairn-explorer --check 2>/dev/null | awk '/^network/ {print $2; exit}')
-    if [ -z "$fallback" ]; then
-        echo "network  $NETWORK is not a network this build knows, and this build" >&2
-        echo "         would not say which one is. Nothing is installed." >&2
-        exit 1
-    fi
-    echo "network  $NETWORK is not a network this build knows, so $fallback is used"
-    echo "         instead. Name one explicitly to choose another."
-    NETWORK=$fallback
+if [ -n "$WAS" ] && [ "$WAS" != "$NOW" ]; then
+    set_aside "$DATADIR" "$WAS" "$NOW"
 fi
+mkdir -p "$DATADIR"
+chown cairn:cairn "$DATADIR"
+chmod 0750 "$DATADIR"
 
-# Written from the settings above rather than copied, so the unit says in full
-# what this machine does, and is a record the next run can read back.
-ARGS="--network $NETWORK --data $DATA --listen 0.0.0.0:$PORT --http $HTTP"
-for peer in $SEED; do
-    ARGS="$ARGS --seed $peer"
-done
-awk -v args="$ARGS" '
-    /^ExecStart=/ { print "ExecStart=/usr/local/bin/cairn-explorer " args; skip = 1; next }
-    skip && /\\$/ { next }
-    skip { skip = 0; next }
-    { print }
-' "$SRC/deploy/cairn-explorer.service" > "$UNIT"
+install -m 0755 "$BUILT" "$BIN"
+write_unit "$SRC/deploy/cairn-explorer.service" > "$UNIT"
 systemctl daemon-reload
 systemctl enable cairn-explorer
+# A unit that failed its last five starts is refused a sixth until its
+# interval has passed, a start asked for by hand included. This is the run
+# that has just mended whatever failed, so the count is cleared first.
+systemctl reset-failed cairn-explorer 2>/dev/null || true
 systemctl restart cairn-explorer
 
 say "Certificate and proxy"
@@ -303,7 +461,24 @@ fi
 
 say "Done"
 grep '^ExecStart=' "$UNIT"
+# An explorer that cannot start stops within a second or two, and what follows
+# spoke of a site being served whether or not it was.
+sleep 3
+running=""
+if systemctl is-active --quiet cairn-explorer; then
+    running=1
+fi
 systemctl --no-pager --lines=5 status cairn-explorer || true
+if [ -z "$running" ]; then
+    cat <<NOTE
+
+The explorer is not running. What it said as it stopped is above, and all of
+it is in the journal:
+
+  what it said         journalctl -u cairn-explorer -n 50
+NOTE
+    exit 1
+fi
 echo
 if [ -n "$DOMAIN" ]; then
     echo "The site is at https://$DOMAIN/ once the certificate is issued,"
@@ -322,8 +497,9 @@ cat <<NOTE
   update it            sh explorer.sh
 
 The update line takes no settings: this machine keeps the ones it already
-has, the domain among them. Naming one changes it, and naming it empty puts
-it back to the default, which is the only way a setting goes back on its own:
+has, the domain among them, and every other argument on the unit's command
+line. Naming one changes it, and naming it empty puts it back to the default,
+which is the only way a setting goes back on its own:
 
   change the domain    sudo env DOMAIN=example.org sh explorer.sh
   back to plain HTTP   sudo env DOMAIN= sh explorer.sh
