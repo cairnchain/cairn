@@ -1288,7 +1288,9 @@ impl Peer {
     /// See [`Peer::greeted`]. A connection this node accepted and has not yet
     /// answered a hello on is one where every other message costs the
     /// connection: the peer refuses it as unannounced, closes, and turns this
-    /// host away for a while.
+    /// host away for a while. One this node dialled is spoken to from the
+    /// moment it is in the table, which is safe only because `attach_peer`
+    /// queues its introduction before putting it there.
     const fn worth_speaking_to(&self) -> bool {
         self.dialled || self.greeted
     }
@@ -7460,6 +7462,28 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
     let (sender, inbox) = mpsc::sync_channel::<(Message, usize)>(OUTBOUND_QUEUE);
     let outbound = Outbound::new(sender);
+    // Queued before the connection is in the table, where a connection this
+    // node dialled already counts as somebody to speak to. The introduction
+    // waits on the chain, and it used to be queued after the entry: anything
+    // broadcast in between went first, and the far end hangs up on a message
+    // from a connection that has not said who it is, as misbehaviour.
+    if initiator {
+        let hello = {
+            let chain = shared.chain();
+            let shows = shared.shows_the_chain(&chain);
+            let keeps = Keeps {
+                headers: shows,
+                cold_set: chain.is_archiving(),
+            };
+            Message::Hello(local_handshake(
+                &chain,
+                keeps,
+                shared.address.port(),
+                shared.nonce,
+            ))
+        };
+        let _ = outbound.try_send(hello);
+    }
     shared.peers().insert(
         id,
         Peer {
@@ -7487,24 +7511,6 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
         let _ = closing_end.shutdown(Shutdown::Both);
         return false;
     };
-
-    if initiator {
-        let hello = {
-            let chain = shared.chain();
-            let shows = shared.shows_the_chain(&chain);
-            let keeps = Keeps {
-                headers: shows,
-                cold_set: chain.is_archiving(),
-            };
-            Message::Hello(local_handshake(
-                &chain,
-                keeps,
-                shared.address.port(),
-                shared.nonce,
-            ))
-        };
-        let _ = outbound.try_send(hello);
-    }
 
     // Held where both this thread and the reader can reach it. The reader
     // joins it, because the connection is given up only once both threads are
@@ -9948,6 +9954,54 @@ mod peers_and_loops {
             node.shared.peers().get(&id).map(|peer| peer.greeted),
             Some(false),
             "a connection refused at its introduction was marked greeted"
+        );
+    }
+
+    /// A connection this node dialled carries its introduction before anything
+    /// else this node says.
+    ///
+    /// A dialled connection went into the peer table, where it already counts
+    /// as somebody to speak to, before its introduction was queued, and the
+    /// introduction waits on the chain. Anything broadcast in between went
+    /// first: upkeep's question for addresses once a round, an announcement
+    /// from a peer's thread while a block held the chain. The far end, reading
+    /// a message from a connection that had not said who it was, hung up on
+    /// it as misbehaviour and turned this host away. Nothing asked this, so a
+    /// node that could speak before introducing itself on its own dial passed.
+    #[test]
+    fn a_dialled_connection_says_who_it_is_before_anything_else() {
+        let node = quiet();
+        node.shared.running.store(true, Ordering::SeqCst);
+        let (near, mut far) = a_socket();
+        let address = far.local_addr().unwrap();
+        let attaching = {
+            // Held, so the introduction cannot be written while the broadcast
+            // below is made.
+            let chain = node.shared.chain();
+            let shared = Arc::clone(&node.shared);
+            let attaching = thread::spawn(move || attach_peer(&shared, near, Some(address)));
+            // Until the connection is in the table, or for long enough that it
+            // is not getting there while the chain is held.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while node.shared.peers().is_empty() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            node.shared.broadcast(None, &Message::GetPeers);
+            drop(chain);
+            attaching
+        };
+        assert!(attaching.join().unwrap(), "the connection was not kept");
+        far.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let first = read_message(
+            &mut far,
+            node.shared.network(),
+            crate::wire::MAX_FRAME_BYTES,
+        );
+        stop_all(&node);
+        assert!(
+            matches!(first, Ok(Incoming::Message(Message::Hello(_)))),
+            "a connection this node dialled carried something else before its \
+             introduction, which the far end hangs up on as misbehaviour: {first:?}"
         );
     }
 
