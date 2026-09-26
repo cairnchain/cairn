@@ -117,10 +117,15 @@ struct Known {
 
 impl Known {
     /// How long to leave an address alone after `misses` failures running.
+    ///
+    /// A multiplication rather than a shift of the delay itself. A shift
+    /// narrower than the number is answered even when every bit went out the
+    /// top, so thirty two misses came back as no wait at all; a product that
+    /// does not fit says so.
     fn quiet_for(misses: u8) -> u64 {
         let steps = u32::from(misses.saturating_sub(1)).saturating_mul(2);
-        RETRY_DELAY
-            .checked_shl(steps)
+        1u64.checked_shl(steps)
+            .and_then(|factor| RETRY_DELAY.checked_mul(factor))
             .unwrap_or(MAX_QUIET)
             .min(MAX_QUIET)
     }
@@ -1692,6 +1697,33 @@ mod tests {
         let last = 19 * MAX_QUIET;
         assert!(book.ready(last).is_empty());
         assert_eq!(book.ready(last + MAX_QUIET), vec![address(1, 9000)]);
+    }
+
+    /// However many dials an address has missed, it is left alone at least as
+    /// long as it was after the miss before, and never past the longest wait.
+    ///
+    /// The wait is `RETRY_DELAY` shifted left, and a shift narrower than the
+    /// number is answered even when every bit of it went out the top: at
+    /// thirty two misses the wait came back as nothing. Nothing asked past
+    /// twenty, so a seed that had missed thirty two dials in a row passed
+    /// while being dialled again at once.
+    #[test]
+    fn the_wait_after_a_miss_never_shrinks_however_many_there_were() {
+        let mut before = 0;
+        for misses in 1..=u8::MAX {
+            let wait = Known::quiet_for(misses);
+            assert!(
+                wait >= before,
+                "the wait after a miss went back down, so an address that has missed \
+                 dial after dial is dialled again sooner than one that missed once"
+            );
+            assert!(wait <= MAX_QUIET, "the wait went past the longest one");
+            before = wait;
+        }
+        assert_eq!(
+            before, MAX_QUIET,
+            "a long run of misses ends at the longest wait"
+        );
     }
 
     /// A machine restarting must not cost its address a place in the book.
