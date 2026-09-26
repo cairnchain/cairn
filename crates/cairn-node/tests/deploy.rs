@@ -819,4 +819,105 @@ echo "network      $network (0x00000000)""#;
             );
         }
     }
+
+    /// The names of the headers the explorer's server sends with every answer,
+    /// read out of `cairn-http` where they are written.
+    fn headers_the_server_sends() -> Vec<String> {
+        const SERVER: &str = include_str!("../../../crates/cairn-http/src/http.rs");
+        let block = SERVER
+            .split_once("const SECURITY_HEADERS: &str = concat!(")
+            .and_then(|(_, rest)| rest.split_once(");"))
+            .expect("the server's headers are written in one place")
+            .0;
+        let joined: String = block
+            .lines()
+            .filter_map(|line| {
+                let start = line.find('"')?;
+                let end = line.rfind('"')?;
+                line.get(start + 1..end)
+            })
+            .collect();
+        joined
+            .split("\\r\\n")
+            .filter_map(|header| header.split_once(':'))
+            .map(|(name, _)| name.trim().to_ascii_lowercase())
+            .collect()
+    }
+
+    /// The Caddyfile an explorer machine is left with, run under `name`.
+    fn caddyfile(name: &str) -> String {
+        let machine = Machine::new(&EXPLORER, name, "sh");
+        machine.running("testnet-6", "testnet-6");
+        machine.building("testnet-6", "testnet-6");
+        let output = machine.run(&[("DOMAIN", "example.org")]);
+        assert!(output.status.success(), "{}", said(&output));
+        fs::read_to_string(machine.at("/etc/caddy/Caddyfile")).unwrap()
+    }
+
+    /// The public site is served the explorer's own security headers, and the
+    /// proxy in front writes none of them over.
+    ///
+    /// Caddy's `header Name value` replaces what the server behind it sent,
+    /// and the Caddyfile set a Content-Security-Policy of its own, looser than
+    /// the server's (`form-action 'self'` where the server says `'none'`,
+    /// `default-src 'self'` where it says `'none'`). So the public site was
+    /// served the policy nobody tested, and a tightening made in `cairn-http`
+    /// never reached it. Nothing read the two places together.
+    #[test]
+    fn the_proxy_writes_none_of_the_headers_the_explorer_sends() {
+        let sent = headers_the_server_sends();
+        assert!(
+            sent.iter().any(|name| name == "content-security-policy"),
+            "the server's headers were not found where they are written: {sent:?}"
+        );
+        let written = caddyfile("headers");
+        for line in written.lines() {
+            let Some(name) = line.split_whitespace().next() else {
+                continue;
+            };
+            assert!(
+                !sent.contains(&name.to_ascii_lowercase()),
+                "the Caddyfile writes {name} over the one the explorer sends: {line}"
+            );
+        }
+    }
+
+    /// A request that could carry a body is answered by the proxy and never
+    /// reaches the explorer.
+    ///
+    /// The explorer serves nothing but GET and HEAD. Behind the proxy every
+    /// reader arrives from the loopback, where the explorer's limit per
+    /// address applies to nobody, and the proxy imposed nothing per client: a
+    /// POST whose body never came held one of the explorer's connections for
+    /// its whole deadline, and one laptop holding all of them took the public
+    /// site down. The explorer now refuses a POST on its head; this keeps it
+    /// from reaching the explorer at all.
+    #[test]
+    fn a_request_with_a_body_never_reaches_the_explorer() {
+        let written = caddyfile("methods");
+        let matcher = written
+            .split_once("not method GET HEAD")
+            .map(|(before, _)| before)
+            .and_then(|before| before.rsplit_once('@'))
+            .and_then(|(_, name)| name.split_whitespace().next())
+            .map(str::to_owned);
+        let Some(matcher) = matcher else {
+            panic!("the Caddyfile names no matcher for methods other than GET and HEAD: {written}");
+        };
+        let refusal = written
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with(&format!("respond @{matcher} ")));
+        assert!(
+            refusal.is_some_and(|line| line.ends_with(" 405")),
+            "the Caddyfile does not answer @{matcher} itself with a 405, so it is \
+             passed to the explorer: {written}"
+        );
+        let answered = written.find(&format!("respond @{matcher} "));
+        let proxied = written.find("reverse_proxy");
+        assert!(
+            answered.is_some() && proxied.is_some(),
+            "the refusal and the proxy are both in the site block: {written}"
+        );
+    }
 }

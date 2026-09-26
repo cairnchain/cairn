@@ -409,18 +409,27 @@ cat > "$CADDYFILE" <<CADDY
 }
 
 $SITE {
+    # The explorer serves GET and HEAD and nothing else, so anything that
+    # could carry a body is answered here and never reaches it. Behind this
+    # proxy every reader arrives from the loopback, where the explorer's own
+    # limit per address applies to nobody, and a POST whose body never came
+    # held one of its connections until its deadline: enough of them from
+    # one machine and the site answered nobody else.
+    @withbody {
+        not method GET HEAD
+    }
+    respond @withbody 405
+
     reverse_proxy $HTTP
 
-    # The site loads nothing from anywhere else, so nothing else is allowed.
-    # Said here rather than only in a comment: a page that fetched a script
-    # from somewhere could be made to show a balance that is not the chain's,
-    # and the reader would have no way to tell. The one exception is the
-    # favicon, which is drawn inline as a data URI rather than fetched.
+    # The page's own security headers, the Content-Security-Policy among them,
+    # are the explorer's: it sends them with every answer and they pass
+    # through untouched. They were written here as well, and a header written
+    # here replaces the one the explorer sent, so the public site was served
+    # a looser policy than the one the explorer holds and tests. What is left
+    # is what only the proxy can say.
     header {
-        Content-Security-Policy "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
         Strict-Transport-Security "max-age=31536000"
-        X-Content-Type-Options nosniff
-        Referrer-Policy no-referrer
         -Server
     }
 }
