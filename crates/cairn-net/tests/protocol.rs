@@ -19,7 +19,8 @@ use cairn_ledger::validation::{assemble_block, connect_block, mine_block, Consen
 use cairn_ledger::LedgerState;
 use cairn_net::message::{Handshake, Message, PeerAddress, Placed, MAX_CHAIN, PROTOCOL_VERSION};
 use cairn_net::sync::{
-    local_handshake, on_message, tick, DropReason, Local, PeerState, BATCH_PATIENCE,
+    asked_for_the_chain, local_handshake, on_message, tick, DropReason, Local, PeerState,
+    BATCH_PATIENCE,
 };
 use cairn_net::wire::{read_message, write_message, Incoming, WireError, MAX_FRAME_BYTES};
 use cairn_net::Keeps;
@@ -1493,6 +1494,119 @@ fn blocks_this_node_asked_for_do_not_use_up_its_allowance() {
     }
     assert_eq!(store.height(), Some(2), "all three landed");
     assert_eq!(peer.spent, 3, "one apiece, not the price of a stranger's");
+}
+
+/// Spends `peer`'s window down to `left` units with asks whose prices this
+/// file already holds: a request for addresses and a ping.
+fn spend_the_window_down_to(chain: &mut ChainStore, peer: &mut PeerState, left: u32, now: u64) {
+    let target = 8_192 - left;
+    while peer.spent + 64 <= target {
+        on_message(&mut solo(chain), peer, Message::GetPeers, now);
+    }
+    while peer.spent < target {
+        on_message(
+            &mut solo(chain),
+            peer,
+            Message::Ping(peer.spent.into()),
+            now,
+        );
+    }
+    assert_eq!(
+        peer.spent, target,
+        "the fixture spends exactly what it says"
+    );
+}
+
+/// Seven blocks answering a question this node asked, delivered against a
+/// window holding seven units, and the height they took the chain to.
+fn seven_blocks_against_seven_units(asked_from_outside: bool) -> Option<u64> {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(8);
+    let mut node = store_with(params, &blocks[..1]);
+    let mut peer = greeted_peer(u128::MAX / 2, 1_000);
+    if asked_from_outside {
+        asked_for_the_chain(&node, &mut peer);
+    }
+    let asked = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Chain { from: 1, count: 7 },
+        NOW,
+    );
+    assert!(matches!(asked.reply.first(), Some(Message::GetBlocks(_))));
+    spend_the_window_down_to(&mut node, &mut peer, 7, NOW);
+    for block in &blocks[1..] {
+        on_message(
+            &mut solo(&mut node),
+            &mut peer,
+            Message::Block(Box::new(block.clone())),
+            NOW,
+        );
+    }
+    node.height()
+}
+
+/// A batch answering a question the node put from outside this layer is
+/// charged as an answer, a unit a block.
+///
+/// The layer marked the questions it sent itself and nothing else could mark
+/// one, so the answer to the node's own questions (the choice of whom to
+/// read from, the nudge after it, the probation's question for the burial,
+/// the question after a handover lands) was priced as a push, and a busy
+/// window refused the batch. The unmarked half here is that price, which is
+/// right for a question nobody asked.
+#[test]
+fn a_batch_answering_a_question_the_node_asked_from_outside_is_charged_as_an_answer() {
+    assert_eq!(
+        seven_blocks_against_seven_units(true),
+        Some(7),
+        "seven blocks answering this node's own question were priced as pushes"
+    );
+    assert_eq!(
+        seven_blocks_against_seven_units(false),
+        Some(0),
+        "seven blocks nobody asked for were taken at the price of an answer"
+    );
+}
+
+/// A question put from outside is marked by the rule the layer keeps for its
+/// own: once for a peer whose last round moved nothing, and never by undoing
+/// a mark already standing.
+///
+/// The probation asks everyone every half minute while nothing arrives, and
+/// a discount on every one of those would be a peer choosing a batch at a
+/// unit a block, twice a minute, for nothing it delivered.
+#[test]
+fn a_question_repeated_while_nothing_arrives_buys_one_answer_at_the_discount() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(2);
+    let mut node = store_with(params, &blocks[..1]);
+    let mut peer = greeted_peer(u128::MAX / 2, 1_000);
+
+    asked_for_the_chain(&node, &mut peer);
+    assert!(peer.chain_asked, "the first question is marked");
+    peer.chain_asked = false;
+    asked_for_the_chain(&node, &mut peer);
+    assert!(
+        !peer.chain_asked,
+        "a question repeated with nothing moved in between was given the discount again"
+    );
+    peer.chain_asked = true;
+    asked_for_the_chain(&node, &mut peer);
+    assert!(
+        peer.chain_asked,
+        "a question from outside took away the mark of one still outstanding"
+    );
+
+    peer.chain_asked = false;
+    node.add_block(blocks[1].clone(), NOW).unwrap();
+    asked_for_the_chain(&node, &mut peer);
+    assert!(
+        peer.chain_asked,
+        "a question after the chain moved was not given the discount"
+    );
 }
 
 /// The wire has to carry what the rules allow.

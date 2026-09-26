@@ -107,7 +107,11 @@ pub struct PeerState {
     /// one that was closed.
     ///
     /// Set where a `GetChain` is sent, which is only ever this node's own
-    /// doing, and taken by the `Chain` that answers it.
+    /// doing, and taken by the `Chain` that answers it. This layer sends one
+    /// from `greet` and `follow_up`; the node sends one from outside it, and
+    /// says so through [`asked_for_the_chain`], which it could not do until
+    /// that was written: every answer to the node's own questions was priced
+    /// as a push.
     ///
     /// This said "nothing a peer says sets it", which was true of the
     /// assignment and false of what causes it. `follow_up` asks again whenever
@@ -1358,6 +1362,22 @@ fn follow_up(chain: &ChainStore, peer: &mut PeerState, now: u64) -> Reaction {
         }]);
     }
     Reaction::idle()
+}
+
+/// Writes down that this node asked `peer` for its chain from outside this
+/// layer, so the `Chain` that answers is taken as an answer.
+///
+/// By the same rule `follow_up` keeps: the discount is for a peer asked for
+/// the first time or whose last round moved this node's chain, so a question
+/// the node repeats while nothing arrives, which the probation does every half
+/// minute, does not buy a peer a batch at a unit a block each time. A mark
+/// already standing is kept, so a greeting's question still outstanding is not
+/// unmarked by one put from outside after it.
+pub fn asked_for_the_chain(chain: &ChainStore, peer: &mut PeerState) {
+    let now_work = chain.total_work();
+    let earned = peer.work_when_asked.is_none_or(|before| now_work > before);
+    peer.chain_asked = peer.chain_asked || earned;
+    peer.work_when_asked = Some(now_work);
 }
 
 /// Abandons the outstanding batch once [`BATCH_PATIENCE`] has passed without a

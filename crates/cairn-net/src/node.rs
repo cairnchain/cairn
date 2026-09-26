@@ -51,8 +51,8 @@ use crate::message::{
 };
 use crate::refusal::{can_be_refused, Refusals};
 use crate::sync::{
-    a_window_has_turned, local_handshake, on_message, tick, Allowance, Local, PeerState, Reaction,
-    Window,
+    a_window_has_turned, asked_for_the_chain, local_handshake, on_message, tick, Allowance, Local,
+    PeerState, Reaction, Window,
 };
 use crate::wire::{most_from, read_frame, write_message, Framed, WireError};
 
@@ -1207,6 +1207,21 @@ struct Outbound {
     sender: SyncSender<(Message, usize)>,
     /// Bytes queued and not yet written.
     waiting: Arc<AtomicUsize>,
+    /// Set when this node asked the peer for its chain from outside the
+    /// connection's own loop, and taken by that loop before the next message
+    /// is decided on.
+    ///
+    /// The sync layer writes down a `GetChain` it sends itself, so the `Chain`
+    /// that answers is taken as an answer and the blocks it names are charged
+    /// as blocks this node went looking for. The node puts the same question
+    /// from four other places: the choice of whom to read from, the nudge
+    /// once the choice is made, the probation's question for the burial, and
+    /// the question after a handover lands. None of them could reach the
+    /// connection's state, so the answer to every one was taken as a peer
+    /// choosing heights for itself, and each block of the batch was priced as
+    /// a push: seven blocks at nine units each against a window holding
+    /// seven, refused in silence, the heights left outstanding.
+    asked_for_the_chain: Arc<AtomicBool>,
 }
 
 impl Outbound {
@@ -1214,7 +1229,33 @@ impl Outbound {
         Self {
             sender,
             waiting: Arc::new(AtomicUsize::new(0)),
+            asked_for_the_chain: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Queues a message this node composed outside the connection's own
+    /// loop, saying whether there was room for it.
+    ///
+    /// [`Self::try_send`], with a `GetChain` written down where the loop will
+    /// find it. See [`Self::asked_for_the_chain`].
+    fn send_from_outside(&self, message: Message) -> Result<(), ()> {
+        if !matches!(message, Message::GetChain { .. }) {
+            return self.try_send(message);
+        }
+        // Before the message is queued, so its answer cannot be read ahead of
+        // the mark; put back if it never went.
+        let before = self.asked_for_the_chain.swap(true, Ordering::SeqCst);
+        let sent = self.try_send(message);
+        if sent.is_err() {
+            self.asked_for_the_chain.store(before, Ordering::SeqCst);
+        }
+        sent
+    }
+
+    /// Whether this node asked the peer for its chain from outside the loop
+    /// since the loop last looked.
+    fn take_the_question_asked_from_outside(&self) -> bool {
+        self.asked_for_the_chain.swap(false, Ordering::SeqCst)
     }
 
     /// A queue nobody reads, for a connection this node has finished with.
@@ -2798,7 +2839,7 @@ impl Shared {
     /// Queued and never waited on, for the same reason a broadcast is.
     fn send_to(&self, id: PeerId, message: Message) {
         if let Some(peer) = self.peers().get(&id) {
-            let _ = peer.outbound.try_send(message);
+            let _ = peer.outbound.send_from_outside(message);
         }
     }
 
@@ -3546,7 +3587,7 @@ impl Shared {
             // what it missed and a block above its tip asks for the chain, and
             // the second is already being cleared up by the thread that was
             // reading from it.
-            if peer.outbound.try_send(message.clone()).is_ok() {
+            if peer.outbound.send_from_outside(message.clone()).is_ok() {
                 taken = taken.saturating_add(1);
             }
         }
@@ -5048,7 +5089,9 @@ fn join_piece(shared: &Arc<Shared>, from: PeerId, message: Message, outbound: &O
     let Some(next) = take_join_part(shared, from, what, at, part, parts, bytes) else {
         return Taken::Handled;
     };
-    if outbound.try_send(next).is_err() {
+    // The question after a ledger lands is a `GetChain` this layer composed
+    // rather than the sync layer, and its answer is owed the price of one.
+    if outbound.send_from_outside(next).is_err() {
         return Taken::Failed;
     }
     Taken::Handled
@@ -7650,15 +7693,24 @@ fn in_file(file: &'static str) -> impl FnOnce(StoreError) -> NodeError {
 ///
 /// Also says who handed in a body held aside that this message made fail, so
 /// the connection that sent it can be ended and its address refused.
+///
+/// `asked` is whether this node asked the peer for its chain from outside the
+/// connection's loop since the last message, which is written down before
+/// this one is read in case it is the answer. See
+/// [`Outbound::asked_for_the_chain`].
 fn decide(
     shared: &Arc<Shared>,
     id: PeerId,
     peer: &mut PeerState,
     message: Message,
+    asked: bool,
 ) -> (Reaction, Vec<Transfer>, Option<HandedIn>) {
     // Chain first and log second, here and everywhere, so two threads never
     // take these two the other way round from each other.
     let mut chain = shared.chain();
+    if asked {
+        asked_for_the_chain(&chain, peer);
+    }
 
     // The log is taken twice rather than held across the decision, because the
     // decision may itself read a block body off it: a chain that let go of a
@@ -8624,7 +8676,8 @@ fn read_loop(
 
         // The chain is held for the decision and for writing the log, and let
         // go before anything is sent, so a slow peer never stalls the chain.
-        let (mut reaction, passing, blamed) = decide(shared, id, &mut peer, message);
+        let asked = outbound.take_the_question_asked_from_outside();
+        let (mut reaction, passing, blamed) = decide(shared, id, &mut peer, message, asked);
         shared.turn_away(blamed);
 
         // Paths offered back for places this node asked about, folded now that
@@ -10289,6 +10342,52 @@ mod peers_and_loops {
             held + weight > WINDOW_BUYS,
             "the queue refused an answer with room left under what a window buys"
         );
+    }
+
+    /// A question for the chain this node sends from outside a connection's
+    /// loop is written down for that loop, and nothing else is.
+    ///
+    /// Nothing could be. The loop's state is its own, and the places the
+    /// node asks from outside it (the choice of whom to read from, the nudge,
+    /// the probation, the landing of a ledger) only queued a message, so the
+    /// batch answering each was priced as a push.
+    #[test]
+    fn a_question_for_the_chain_sent_from_outside_the_loop_is_written_down_for_it() {
+        let node = quiet();
+        let (near, _far) = a_socket();
+        let (sender, _inbox) = mpsc::sync_channel(OUTBOUND_QUEUE);
+        let outbound = Outbound::new(sender);
+        node.shared.peers().insert(
+            1,
+            Peer {
+                outbound: outbound.clone(),
+                ..stand_in(&near, true)
+            },
+        );
+        let asking = || Message::GetChain {
+            locator: Vec::new(),
+        };
+
+        node.shared.send_to(1, Message::GetPeers);
+        assert!(
+            !outbound.take_the_question_asked_from_outside(),
+            "a question that was not for the chain was written down as one"
+        );
+        node.shared.send_to(1, asking());
+        assert!(
+            outbound.take_the_question_asked_from_outside(),
+            "a question for the chain handed to one peer was not written down for its loop"
+        );
+        assert!(
+            !outbound.take_the_question_asked_from_outside(),
+            "a question written down once was taken twice"
+        );
+        node.shared.broadcast(None, &asking());
+        assert!(
+            outbound.take_the_question_asked_from_outside(),
+            "a question for the chain put to everyone was not written down for this loop"
+        );
+        node.shared.peers().clear();
     }
 
     /// A node that has reached nobody takes exactly as many connections from
