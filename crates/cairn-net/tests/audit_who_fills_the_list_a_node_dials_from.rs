@@ -305,3 +305,78 @@ fn a_table_strangers_filled_still_leaves_a_node_a_way_out_of_it() {
          it was off the network",
     );
 }
+
+/// **A node whose every slot for outsiders is held makes room for a newcomer
+/// rather than shutting it out.**
+///
+/// The reserve kept back for a node's own dials left the other half of the
+/// question: the forty slots it gives outsiders were never given up, and
+/// what holds them is not misbehaviour, so nothing refused it. Twenty
+/// addresses that greet and speak held all forty for good, a newcomer's dial
+/// was taken and shut before a greeting, and a full honest node was the same
+/// to everybody trying it as a dead one. Nothing dialled a full node, so
+/// that passed.
+///
+/// Counted in greetings, not in time: the patience is only how long a failure
+/// takes to say so.
+#[test]
+fn a_full_node_makes_room_for_a_newcomer() {
+    let honest = Node::bind(params(), loopback()).unwrap();
+    let honest_at = honest.address();
+    let slots = MAX_PEERS.saturating_sub(TARGET_PEERS);
+
+    let mut crowd: Vec<TcpStream> = Vec::new();
+    for at in 0..slots {
+        let Ok(mut socket) = TcpStream::connect(honest_at) else {
+            continue;
+        };
+        let listen = 20_000u16.saturating_add(u16::try_from(at).unwrap_or(0));
+        if write_message(
+            &mut socket,
+            params().network,
+            &hello(9_000u64.saturating_add(at as u64), listen),
+        )
+        .is_ok()
+        {
+            crowd.push(socket);
+        }
+    }
+    let full = wait_until(Duration::from_secs(60), || {
+        honest.peers_introduced() >= slots
+    });
+
+    // The newcomer says hello and waits for the answer. A node that shuts
+    // the door answers the next read at once, with the socket closing.
+    let mut newcomer = TcpStream::connect(honest_at).unwrap();
+    let _ = newcomer.set_read_timeout(Some(Duration::from_secs(30)));
+    write_message(&mut newcomer, params().network, &hello(8_000, 30_000)).unwrap();
+    let mut welcomed = false;
+    for _ in 0..64 {
+        match read_message(&mut newcomer, params().network, MAX_FRAME_BYTES) {
+            Ok(Incoming::Message(Message::Welcome(_))) => {
+                welcomed = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    let held = honest.peer_count();
+    honest.shutdown();
+    drop(crowd);
+
+    assert!(
+        full,
+        "the crowd should hold every slot the node gives outsiders"
+    );
+    assert!(
+        welcomed,
+        "a newcomer never got into a node whose slots for outsiders were all held by \
+         strangers that behaved: none of them was given up to make room, and its hello \
+         was met with the connection shutting"
+    );
+    assert!(
+        held <= MAX_PEERS,
+        "making room took the node past the connections it holds at once"
+    );
+}

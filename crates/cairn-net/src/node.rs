@@ -44,7 +44,7 @@ use cairn_store::{
     JoinFailed, StoreError, BLOCK_LOG, HANDED_LEDGER, HEADER_BYTES, HEADER_LOG, HEADER_TREE,
 };
 
-use crate::book::{machine_of, AddressBook};
+use crate::book::{drawn_place, group_of_host, machine_of, AddressBook, Group};
 use crate::choosing::{self, Approach, Chooser, JoinProgress};
 use crate::joining::{most_join_bytes, Collecting, Joined, Progress};
 use crate::message::{
@@ -82,6 +82,11 @@ pub const MAX_PEERS: usize = 48;
 /// exact address, so that was twenty four addresses, a quarter of a /24 or
 /// twenty four out of one machine's IPv6 /64; it is two per machine now, and
 /// an IPv6 machine is its /64.
+///
+/// Nor are these slots held for good by whoever took them first. A node
+/// whose slots for outsiders are all taken lets one of them go to make room
+/// for a visitor, the youngest of the neighbourhood holding the most, and
+/// keeps the ones that are useful or were there first: see `to_let_go`.
 pub const MOST_FROM_OUTSIDE: usize = MAX_PEERS - TARGET_PEERS;
 
 /// Connections accepted from any one machine: one IPv4 address, or one IPv6
@@ -1336,6 +1341,10 @@ impl Outbound {
 }
 
 /// One live connection, as the rest of the node sees it.
+// Four facts about one connection that do not depend on each other: who
+// opened it, whether it has introduced itself, what it keeps, and whether it
+// is on its way out. An enum would have to name all sixteen combinations.
+#[allow(clippy::struct_excessive_bools)]
 struct Peer {
     outbound: Outbound,
     /// Kept so a shutdown can unblock the thread reading from it.
@@ -1402,6 +1411,17 @@ struct Peer {
     /// after it has said this, so a node that has not reached it is behind
     /// that peer, and one that has may still be.
     claims: Option<(u64, u128)>,
+    /// Whether this connection was chosen to make room for a visitor and is
+    /// on its way out. It holds no slot from then on: see
+    /// [`Shared::make_room_for`].
+    leaving: bool,
+    /// When this peer last handed over a block this node took, or nought.
+    ///
+    /// What a crowd cannot fake without doing the work, and so what keeps a
+    /// connection when room is made: see [`to_let_go`].
+    took_block_at: u64,
+    /// When this peer last handed over a transfer this node took, or nought.
+    took_transfer_at: u64,
 }
 
 impl Peer {
@@ -1435,6 +1455,10 @@ struct Shared {
     /// Drawn once at start. A node behind a router cannot recognise its own
     /// address coming back from a peer, but it can recognise this.
     nonce: u64,
+    /// Also drawn once at start, and never said, unlike the nonce: it orders
+    /// the neighbourhoods [`to_let_go`] keeps one connection from, so which
+    /// ones those are is nothing a stranger can aim at.
+    neighbourhood_salt: u64,
     chain: Mutex<ChainStore>,
     /// Absent when the node keeps its chain only in memory.
     ///
@@ -2232,6 +2256,127 @@ fn room_beside(held: impl Iterator<Item = Option<IpAddr>>, host: IpAddr) -> bool
         < MAX_PER_HOST
 }
 
+/// Connections kept for having most recently handed over a block this node
+/// took, when room is made for a visitor.
+const KEPT_FOR_BLOCKS: usize = 4;
+
+/// The same, for transfers.
+const KEPT_FOR_TRANSFERS: usize = 4;
+
+/// Neighbourhoods one connection each is kept from, when room is made.
+const KEPT_BY_NEIGHBOURHOOD: usize = 4;
+
+/// One connection somebody else opened, as the choice of whom to let go of
+/// sees it.
+#[derive(Clone, Copy, Debug)]
+struct Standing {
+    /// Handed out in order, so the lowest has been connected the longest.
+    id: PeerId,
+    host: Option<IpAddr>,
+    took_block_at: u64,
+    took_transfer_at: u64,
+}
+
+/// The neighbourhood a connection came from. One with no address to speak of
+/// is a neighbourhood of its own.
+fn neighbourhood(standing: &Standing) -> Group {
+    standing.host.map_or([0; 5], group_of_host)
+}
+
+/// Which connection somebody else opened is let go of to make room for a
+/// visitor from `visitor`, if any may be.
+///
+/// A full node used to shut the door on everybody, and what fills it is not
+/// misbehaviour: forty connections that greet and speak were held for good,
+/// a newcomer's dial was taken and shut before a word, and a full honest node
+/// looked to everybody trying it like a dead one. Twenty addresses held every
+/// node on a network that way, and the newcomers that could reach nobody else
+/// were left with whoever held them.
+///
+/// So a full node makes room, the way Bitcoin's `AttemptToEvictConnection`
+/// does, and what it keeps is what a crowd cannot fake cheaply:
+///
+/// - a connection from inside this machine, when the visitor is from outside
+///   it: that is the operator's own wallet or explorer;
+/// - one connection from each of [`KEPT_BY_NEIGHBOURHOOD`] neighbourhoods,
+///   the longest connected of each, from an order this node draws for itself
+///   so nobody outside knows which neighbourhoods are kept;
+/// - the [`KEPT_FOR_TRANSFERS`] that most recently handed over a transfer this
+///   node took, and the [`KEPT_FOR_BLOCKS`] a block, since being useful costs
+///   fees or work;
+/// - the longer connected half of what is left, since a crowd that arrived to
+///   take a node's slots arrived after the peers it found there.
+///
+/// Of what remains, the neighbourhood holding the most connections gives up
+/// its youngest, so a party holding many slots is the one that pays for each
+/// newcomer, and a peer alone in its neighbourhood is behind every one of
+/// them. Nothing remaining is none: the visitor is turned away, as before.
+fn to_let_go(inbound: &[Standing], visitor: IpAddr, salt: u64) -> Option<PeerId> {
+    let from_outside = can_be_refused(visitor);
+    let mut left: Vec<Standing> = inbound
+        .iter()
+        .filter(|standing| !from_outside || standing.host.is_none_or(can_be_refused))
+        .copied()
+        .collect();
+
+    let mut drawn: Vec<(u64, Group)> = left
+        .iter()
+        .map(|standing| {
+            let group = neighbourhood(standing);
+            (drawn_place(group, salt), group)
+        })
+        .collect();
+    drawn.sort_unstable();
+    drawn.dedup();
+    for (_, group) in drawn.into_iter().take(KEPT_BY_NEIGHBOURHOOD) {
+        let oldest = left
+            .iter()
+            .enumerate()
+            .filter(|(_, standing)| neighbourhood(standing) == group)
+            .min_by_key(|(_, standing)| standing.id)
+            .map(|(at, _)| at);
+        if let Some(at) = oldest {
+            left.swap_remove(at);
+        }
+    }
+    keep_the_latest(
+        &mut left,
+        |standing| standing.took_transfer_at,
+        KEPT_FOR_TRANSFERS,
+    );
+    keep_the_latest(
+        &mut left,
+        |standing| standing.took_block_at,
+        KEPT_FOR_BLOCKS,
+    );
+
+    left.sort_unstable_by_key(|standing| standing.id);
+    let older = left.len().checked_div(2).unwrap_or(0);
+    left.drain(..older);
+
+    let mut crowds: HashMap<Group, (usize, PeerId)> = HashMap::new();
+    for standing in &left {
+        let crowd = crowds
+            .entry(neighbourhood(standing))
+            .or_insert((0, standing.id));
+        crowd.0 = crowd.0.saturating_add(1);
+        crowd.1 = crowd.1.max(standing.id);
+    }
+    crowds.into_values().max().map(|(_, youngest)| youngest)
+}
+
+/// Takes out of `left` the `count` that most recently did what `at` says,
+/// among those that ever did.
+fn keep_the_latest(left: &mut Vec<Standing>, at: impl Fn(&Standing) -> u64, count: usize) {
+    left.sort_unstable_by_key(|standing| std::cmp::Reverse(at(standing)));
+    let kept = left
+        .iter()
+        .take(count)
+        .take_while(|standing| at(standing) > 0)
+        .count();
+    left.drain(..kept);
+}
+
 /// Whether an address's mark is still worth keeping: something holds it, or
 /// its window is the current one. Kept apart from the table it prunes so the
 /// rule can be held on its own.
@@ -2726,9 +2871,12 @@ impl Shared {
     }
 
     /// Whether one more connection from `host` is welcome.
+    ///
+    /// A connection on its way out to make room for a visitor holds nothing
+    /// here: its slot went to the visitor the moment it was chosen.
     fn has_room_for(&self, host: Option<IpAddr>) -> bool {
         let peers = self.peers();
-        if peers.len() >= MAX_PEERS {
+        if peers.values().filter(|peer| !peer.leaving).count() >= MAX_PEERS {
             return false;
         }
         let Some(host) = host else {
@@ -2737,7 +2885,13 @@ impl Shared {
         if !can_be_refused(host) {
             return true;
         }
-        room_beside(peers.values().map(|peer| peer.host), host)
+        room_beside(
+            peers
+                .values()
+                .filter(|peer| !peer.leaving)
+                .map(|peer| peer.host),
+            host,
+        )
     }
 
     /// Whether one more connection somebody else opened is welcome.
@@ -2770,13 +2924,75 @@ impl Shared {
             let peers = self.peers();
             let dialled = peers.values().filter(|peer| peer.dialled).count();
             peers
-                .len()
+                .values()
+                .filter(|peer| !peer.leaving)
+                .count()
                 .saturating_add(TARGET_PEERS.saturating_sub(dialled))
         };
         if held >= MAX_PEERS {
             return false;
         }
         self.has_room_for(host)
+    }
+
+    /// Lets go of one connection somebody else opened, to make room for a
+    /// visitor from `visitor`, and says whether it did.
+    ///
+    /// Only where the table is what turned the visitor away: a visitor its
+    /// own machine's share already turns away is making room for nobody. And
+    /// one at a time. The connection chosen stops holding a slot the moment
+    /// it is chosen, and leaves the table once its threads have wound down,
+    /// which a shut socket makes a matter of moments; until it has, nobody
+    /// else is let go of, so the table holds at most one more than
+    /// [`MAX_PEERS`], and only for those moments.
+    ///
+    /// Which one goes is [`to_let_go`], and it may be none.
+    fn make_room_for(&self, visitor: IpAddr) -> bool {
+        let mut peers = self.peers();
+        if peers.values().any(|peer| peer.leaving) {
+            return false;
+        }
+        let staying = || peers.values().filter(|peer| !peer.leaving);
+        if can_be_refused(visitor) && !room_beside(staying().map(|peer| peer.host), visitor) {
+            return false;
+        }
+        let inbound: Vec<Standing> = peers
+            .iter()
+            .filter(|(_, peer)| !peer.dialled)
+            .map(|(id, peer)| Standing {
+                id: *id,
+                host: peer.host,
+                took_block_at: peer.took_block_at,
+                took_transfer_at: peer.took_transfer_at,
+            })
+            .collect();
+        let Some(chosen) = to_let_go(&inbound, visitor, self.neighbourhood_salt) else {
+            return false;
+        };
+        let Some(peer) = peers.get_mut(&chosen) else {
+            return false;
+        };
+        peer.leaving = true;
+        let _ = peer.stream.shutdown(Shutdown::Both);
+        true
+    }
+
+    /// Writes down that a peer handed over a block or a transfer this node
+    /// took, which is what keeps its connection when room is made.
+    fn credit(&self, id: PeerId, reaction: &Reaction, passing: &[Transfer], now: u64) {
+        let block = reaction.applied.is_some();
+        let transfer = !passing.is_empty();
+        // Most messages carry neither, and those do not take the table.
+        if block || transfer {
+            if let Some(peer) = self.peers().get_mut(&id) {
+                if block {
+                    peer.took_block_at = now;
+                }
+                if transfer {
+                    peer.took_transfer_at = now;
+                }
+            }
+        }
     }
 
     /// Ends one connection, leaving its own threads to clear it up.
@@ -4191,6 +4407,7 @@ impl Node {
             address,
             offers_its_address,
             nonce: fresh_nonce(),
+            neighbourhood_salt: fresh_nonce(),
             chain: Mutex::new(chain),
             log: Arc::new(Mutex::new(log)),
             book: Mutex::new(book),
@@ -7197,8 +7414,12 @@ fn save_book(shared: &Arc<Shared>) {
 ///
 /// Accepting without limit is the cheapest attack there is: two threads and a
 /// read buffer per connection, and nothing stopping one machine from opening
-/// thousands. The three refusals here are the ceiling, the per address share,
+/// thousands. The three refusals here are the ceiling, the per machine share,
 /// and peers still under refusal for something they did earlier.
+///
+/// A ceiling reached is not the end of it. A table full of connections that
+/// behave is a node nobody new can reach, so a full table lets go of one of
+/// them first, when there is one it may let go of: see [`to_let_go`].
 ///
 /// The listener is polled rather than blocked on. A blocking accept only
 /// returns when someone connects, so stopping the node meant opening a
@@ -7223,7 +7444,13 @@ fn accept_loop(shared: &Arc<Shared>, listener: &TcpListener) {
                 // Without the IPv6 hat a dual stack listener puts on every IPv4
                 // peer, so every table after this reads one spelling.
                 let host = from.ip().to_canonical();
-                if shared.refuses(host, unix_now()) || !shared.has_room_to_accept(Some(host)) {
+                // A full table makes room rather than shutting the door, when
+                // there is somebody it may let go of: see `to_let_go`.
+                let room = || {
+                    shared.has_room_to_accept(Some(host))
+                        || (shared.make_room_for(host) && shared.has_room_to_accept(Some(host)))
+                };
+                if shared.refuses(host, unix_now()) || !room() {
                     let _ = stream.shutdown(Shutdown::Both);
                     continue;
                 }
@@ -8492,10 +8719,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
     };
     // Without the IPv6 hat, as in the accept loop: this is where the address
     // a peer is written down at comes from.
-    let remote = stream
-        .peer_addr()
-        .ok()
-        .map(|address| address.ip().to_canonical());
+    let remote = stream.peer_addr().ok().map(|at| at.ip().to_canonical());
     // Small messages benefit from going out immediately rather than waiting for
     // a larger packet to fill, and every message here is an answer someone is
     // blocked on.
@@ -8543,6 +8767,9 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
             dialled_to: dialled,
             keeps: Keeps::default(),
             claims: None,
+            leaving: false,
+            took_block_at: 0,
+            took_transfer_at: 0,
         },
     );
 
@@ -8901,6 +9128,7 @@ fn read_loop(
         let asked = outbound.take_the_question_asked_from_outside();
         let (mut reaction, passing, blamed) = decide(shared, id, &mut peer, message, asked);
         shared.turn_away(blamed);
+        shared.credit(id, &reaction, &passing, last_heard);
 
         // Paths offered back for places this node asked about, folded now that
         // the chain has been let go of. Named in the reaction rather than
@@ -10570,6 +10798,9 @@ mod peers_and_loops {
             greeted: false,
             keeps: Keeps::default(),
             claims: None,
+            leaving: false,
+            took_block_at: 0,
+            took_transfer_at: 0,
         }
     }
 
@@ -12372,6 +12603,156 @@ mod peers_and_loops {
             "what an answer to a question that had ended brought was taken"
         );
     }
+
+    /// A peer that handed over a block this node took is written down as
+    /// having done so, and as nothing else.
+    ///
+    /// That mark is what keeps its connection when a full node makes room.
+    /// Nothing set it before there was a reason to, so a node that never
+    /// wrote it down passed, and so did one that wrote a block down as a
+    /// transfer.
+    #[test]
+    fn a_peer_that_handed_over_a_block_is_credited_with_it() {
+        let node = quiet();
+        let params = ConsensusParams::testnet();
+        let block = a_first_block(params);
+        let greeting = hello(params.network, 0, 0, stranger(&node));
+        let mut line = Line::open(node, None);
+        line.send(&greeting);
+        assert!(line.hears(|message| matches!(message, Message::Welcome(_))));
+        line.send(&Message::Ping(1));
+        assert!(line.hears(|message| matches!(message, Message::Pong(1))));
+        let before = line
+            .node
+            .shared
+            .peers()
+            .get(&line.id)
+            .map(|peer| (peer.took_block_at, peer.took_transfer_at));
+        line.send(&Message::Block(Box::new(block)));
+        line.send(&Message::Ping(2));
+        assert!(line.hears(|message| matches!(message, Message::Pong(2))));
+        let after = line
+            .node
+            .shared
+            .peers()
+            .get(&line.id)
+            .map(|peer| (peer.took_block_at, peer.took_transfer_at));
+        drop(line.close());
+        assert_eq!(before, Some((0, 0)), "a greeting and a ping were credited");
+        let (block_at, transfer_at) = after.unwrap();
+        assert!(block_at > 0, "a block this node took was not credited");
+        assert_eq!(transfer_at, 0, "a block was credited as a transfer");
+    }
+
+    /// A place in the table for a connection somebody else opened from
+    /// `host`.
+    fn from_outside(socket: &TcpStream, host: IpAddr) -> Peer {
+        Peer {
+            host: Some(host),
+            ..stand_in(socket, false)
+        }
+    }
+
+    /// A full node lets go of exactly one connection to make room for a
+    /// visitor, and of nobody while that one is still leaving, and a
+    /// connection on its way out holds no slot.
+    ///
+    /// Held here rather than over sockets, because every socket a test opens
+    /// comes from the loopback and the rules about machines never apply to
+    /// it. Letting go of several at once, or of one while another was still
+    /// leaving, passed, which is a table any crowd empties by arriving; so
+    /// did counting the leaving one's slot, which is a visitor turned away
+    /// after somebody was let go of for it.
+    #[test]
+    fn making_room_lets_go_of_one_connection_at_a_time() {
+        let node = quiet();
+        let (socket, far) = a_socket();
+        let crowd = |at: usize| IpAddr::from([203, 0, u8::try_from(at).unwrap(), 1]);
+        {
+            let mut peers = node.shared.peers();
+            for at in 0..MAX_PEERS {
+                peers.insert(u64::try_from(at).unwrap(), from_outside(&socket, crowd(at)));
+            }
+        }
+        let visitor = IpAddr::from([192, 0, 2, 1]);
+        assert!(
+            !node.shared.has_room_for(Some(visitor)),
+            "the fixture is full"
+        );
+        assert!(
+            node.shared.make_room_for(visitor),
+            "a full table made no room"
+        );
+        let leaving: Vec<PeerId> = node
+            .shared
+            .peers()
+            .iter()
+            .filter(|(_, peer)| peer.leaving)
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(
+            leaving.len(),
+            1,
+            "room was made by letting go of other than one"
+        );
+        assert!(
+            node.shared.has_room_for(Some(visitor)),
+            "the connection on its way out still held its slot"
+        );
+        assert!(
+            !node.shared.make_room_for(IpAddr::from([192, 0, 2, 2])),
+            "a second connection was let go of while the first was still leaving"
+        );
+
+        drop(far);
+
+        // Its machine's share is counted without it, too.
+        let node = quiet();
+        let (socket, _far) = a_socket();
+        let host = crowd(1);
+        {
+            let mut peers = node.shared.peers();
+            for at in 0..MAX_PER_HOST {
+                peers.insert(u64::try_from(at).unwrap(), from_outside(&socket, host));
+            }
+        }
+        assert!(
+            !node.shared.has_room_for(Some(host)),
+            "the fixture is at its share"
+        );
+        if let Some(peer) = node.shared.peers().get_mut(&0) {
+            peer.leaving = true;
+        }
+        assert!(
+            node.shared.has_room_for(Some(host)),
+            "the connection on its way out was counted in its machine's share"
+        );
+    }
+
+    /// A full node makes no room for a visitor its own machine's share turns
+    /// away.
+    #[test]
+    fn making_room_is_not_for_a_visitor_already_at_its_share() {
+        let node = quiet();
+        let (socket, _far) = a_socket();
+        let visitor = IpAddr::from([192, 0, 2, 1]);
+        {
+            let mut peers = node.shared.peers();
+            for at in 0..MAX_PEERS {
+                let host = if at < MAX_PER_HOST {
+                    visitor
+                } else {
+                    IpAddr::from([203, 0, u8::try_from(at).unwrap(), 1])
+                };
+                peers.insert(u64::try_from(at).unwrap(), from_outside(&socket, host));
+            }
+        }
+        assert!(
+            !node.shared.make_room_for(visitor),
+            "a connection was let go of for a visitor its own share turns away"
+        );
+        assert!(!node.shared.peers().values().any(|peer| peer.leaving));
+    }
 }
 
 /// What a node says and does about a clock, its own or a block's.
@@ -13312,6 +13693,145 @@ mod tests {
             from(within_one_machine(1)),
             from(next_door()),
             "two machines counted as one"
+        );
+    }
+
+    /// An inbound connection from `host`, the `id`th to arrive.
+    fn standing(id: PeerId, host: IpAddr) -> Standing {
+        Standing {
+            id,
+            host: Some(host),
+            took_block_at: 0,
+            took_transfer_at: 0,
+        }
+    }
+
+    /// Ten peers each alone in its neighbourhood, connected first, and a crowd
+    /// of thirty from one neighbourhood after them.
+    fn a_crowd_beside_honest_peers() -> Vec<Standing> {
+        let honest = (0..10u8).map(|at| standing(u64::from(at), IpAddr::from([198, at, 0, 1])));
+        let crowd = (10..40u8).map(|at| standing(u64::from(at), IpAddr::from([203, 0, at, 1])));
+        honest.chain(crowd).collect()
+    }
+
+    /// A full node lets go of the youngest connection of the neighbourhood
+    /// holding the most, whatever it drew.
+    ///
+    /// Nothing made room before, so there was nothing to hold; letting go of
+    /// the oldest, or of anybody from the least crowded neighbourhood, would
+    /// have passed, and either hands a crowd the honest peers' slots.
+    #[test]
+    fn room_is_made_by_the_youngest_of_the_most_crowded_neighbourhood() {
+        let inbound = a_crowd_beside_honest_peers();
+        let visitor = IpAddr::from([192, 0, 2, 1]);
+        for salt in 0..64 {
+            assert_eq!(
+                to_let_go(&inbound, visitor, salt),
+                Some(39),
+                "room was not made by the youngest of the crowd"
+            );
+        }
+    }
+
+    /// A peer alone in its neighbourhood outlasts a crowd, however young it
+    /// is.
+    #[test]
+    fn a_peer_alone_in_its_neighbourhood_outlasts_a_crowd() {
+        let mut inbound: Vec<Standing> = (0..40u8)
+            .map(|at| standing(u64::from(at), IpAddr::from([203, 0, at, 1])))
+            .collect();
+        inbound.push(standing(40, IpAddr::from([198, 51, 100, 1])));
+        let chosen = to_let_go(&inbound, IpAddr::from([192, 0, 2, 1]), 7);
+        assert_eq!(
+            chosen,
+            Some(39),
+            "the newest arrival was let go of for being new"
+        );
+    }
+
+    /// Connections that handed over what this node took are kept.
+    ///
+    /// Being useful is what a crowd cannot fake without doing the work or
+    /// paying the fees, so it is what keeps a slot.
+    #[test]
+    fn a_peer_that_handed_over_blocks_or_transfers_keeps_its_slot() {
+        let mut inbound = a_crowd_beside_honest_peers();
+        for (standing, at) in inbound.iter_mut().rev().zip(1..) {
+            if at <= KEPT_FOR_BLOCKS {
+                standing.took_block_at = 1_000 + u64::try_from(at).unwrap();
+            } else if at <= KEPT_FOR_BLOCKS + KEPT_FOR_TRANSFERS {
+                standing.took_transfer_at = 1_000 + u64::try_from(at).unwrap();
+            }
+        }
+        let kept = u64::try_from(KEPT_FOR_BLOCKS + KEPT_FOR_TRANSFERS).unwrap();
+        for salt in 0..64 {
+            assert_eq!(
+                to_let_go(&inbound, IpAddr::from([192, 0, 2, 1]), salt),
+                Some(39 - kept),
+                "a connection that handed over a block or a transfer this node took \
+                 was let go of"
+            );
+        }
+    }
+
+    /// A visitor from outside never takes the place of a connection from
+    /// inside this machine, and one from inside may.
+    #[test]
+    fn a_visitor_from_outside_never_takes_the_place_of_one_from_inside() {
+        let inbound: Vec<Standing> = (0..40)
+            .map(|at| standing(at, IpAddr::V4(Ipv4Addr::LOCALHOST)))
+            .collect();
+        assert_eq!(
+            to_let_go(&inbound, IpAddr::from([192, 0, 2, 1]), 7),
+            None,
+            "a stranger took the place of the operator's own connection"
+        );
+        assert_eq!(
+            to_let_go(&inbound, IpAddr::V4(Ipv4Addr::LOCALHOST), 7),
+            Some(39),
+            "a devnet on one machine made no room for its own newcomer"
+        );
+    }
+
+    /// The neighbourhoods a full node keeps a connection from are the ones
+    /// it drew, and the connection kept from each is one from that
+    /// neighbourhood.
+    ///
+    /// Five connections from five neighbourhoods: four are kept for where
+    /// they come from, and the one let go of is from the neighbourhood drawn
+    /// last. Keeping a connection from somewhere else passed every other test
+    /// here, which is a node whose diversity is kept by nothing.
+    #[test]
+    fn the_neighbourhoods_kept_are_the_ones_the_node_drew() {
+        let inbound: Vec<Standing> = (0..5u8)
+            .map(|at| standing(u64::from(at), IpAddr::from([198, at, 0, 1])))
+            .collect();
+        for salt in 0..64 {
+            let drawn_last = inbound
+                .iter()
+                .max_by_key(|standing| drawn_place(neighbourhood(standing), salt))
+                .map(|standing| standing.id);
+            assert_eq!(
+                to_let_go(&inbound, IpAddr::from([192, 0, 2, 1]), salt),
+                drawn_last,
+                "a connection kept for its neighbourhood was not the one from the \
+                 neighbourhoods drawn"
+            );
+        }
+    }
+
+    /// Nobody left to let go of is nobody let go of.
+    #[test]
+    fn a_node_whose_connections_are_all_kept_makes_no_room() {
+        let visitor = IpAddr::from([192, 0, 2, 1]);
+        assert_eq!(to_let_go(&[], visitor, 7), None);
+        let few: Vec<Standing> = (0..3u8)
+            .map(|at| standing(u64::from(at), IpAddr::from([198, at, 0, 1])))
+            .collect();
+        assert_eq!(
+            to_let_go(&few, visitor, 7),
+            None,
+            "a connection kept for its neighbourhood was let go of"
         );
     }
 

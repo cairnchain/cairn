@@ -252,7 +252,7 @@ impl Default for AddressBook {
 /// read like a v4 range is not counted against that range. The two are
 /// different stretches of the book, and what makes room in a full
 /// neighbourhood reads one stretch.
-type Group = [u8; 5];
+pub(crate) type Group = [u8; 5];
 
 /// One number standing for a whole address, before the book's own draw is
 /// mixed into it.
@@ -318,7 +318,13 @@ fn neighbourhood_of(address: &SocketAddr) -> (SocketAddr, SocketAddr) {
 
 /// Which neighbourhood an address belongs to.
 fn group_of(address: &SocketAddr) -> Group {
-    match address.ip() {
+    group_of_host(address.ip())
+}
+
+/// Which neighbourhood a host belongs to: the rule the book groups by, for
+/// the rules beside it that need the same answer.
+pub(crate) fn group_of_host(ip: IpAddr) -> Group {
+    match ip {
         IpAddr::V4(ip) => {
             let octets = ip.octets();
             [4, octets[0], octets[1], 0, 0]
@@ -328,6 +334,14 @@ fn group_of(address: &SocketAddr) -> Group {
             [6, octets[0], octets[1], octets[2], octets[3]]
         }
     }
+}
+
+/// Where a neighbourhood sits in an order this node draws for itself, so
+/// which neighbourhoods come first is nothing anybody outside can aim at.
+pub(crate) fn drawn_place(group: Group, salt: u64) -> u64 {
+    group.iter().fold(mixed(salt), |carried, byte| {
+        mixed(carried ^ u64::from(*byte))
+    })
 }
 
 /// The one machine an address stands for, to every rule that counts, pauses
@@ -2054,6 +2068,40 @@ mod tests {
         let mut book = AddressBook::new();
         assert!(!book.missed(&address(9, 9000), 0));
         assert!(book.is_empty());
+    }
+
+    /// Where a neighbourhood sits in the order a node draws moves with every
+    /// bit of the neighbourhood and with the draw.
+    ///
+    /// The order decides which neighbourhoods a full node keeps a connection
+    /// from, and it is only worth anything if nobody outside can aim at it. A
+    /// place that ignored the draw, or some bits of the neighbourhood, passed
+    /// every test of what is kept, because those tests hold for any order.
+    #[test]
+    fn every_bit_of_a_neighbourhood_and_the_draw_move_its_place() {
+        const BITS: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
+        for salt in 0..64u64 {
+            let group: Group = [4, 203, u8::try_from(salt).unwrap(), 0, 0];
+            let place = drawn_place(group, salt);
+            assert_ne!(
+                drawn_place(group, salt ^ 1),
+                place,
+                "another draw put the neighbourhood in the same place"
+            );
+            for at in 0..group.len() {
+                for bit in BITS {
+                    let mut other = group;
+                    if let Some(byte) = other.get_mut(at) {
+                        *byte ^= bit;
+                    }
+                    assert_ne!(
+                        drawn_place(other, salt),
+                        place,
+                        "two neighbourhoods one bit apart drew the same place"
+                    );
+                }
+            }
+        }
     }
 
     /// An IPv4 address spelt as IPv6 is the same address in the book, and
