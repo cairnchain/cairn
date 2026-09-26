@@ -32,8 +32,8 @@ use cairn_ledger::block::BlockHeader;
 use cairn_ledger::note::Note;
 use cairn_ledger::pow::{meets_target, work_of, DIFFICULTY_WINDOW};
 use cairn_ledger::sampling::{
-    check_start, draw, levels_of, seed_of, work_before, Sample, SampledStart, StartError,
-    SHALLOWEST,
+    check_start_with_count, draw, levels_of, seed_of, work_before, Sample, SampledStart,
+    StartError, SHALLOWEST,
 };
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
@@ -283,7 +283,8 @@ fn a_rebuild_with_nothing_forged_is_the_chain_it_rebuilt_and_is_accepted() {
     for tip in ground_tips(control.shown.last().unwrap(), TIPS) {
         for reach_up in [false, true] {
             let start = control.present(tip, COUNT, reach_up);
-            check_start(&start, COUNT, NOW, &params()).expect("the control has to be accepted");
+            check_start_with_count(&start, COUNT, NOW, &params())
+                .expect("the control has to be accepted");
         }
     }
 }
@@ -308,7 +309,7 @@ fn a_forgery_whose_links_are_not_rebuilt_is_refused_for_its_links() {
             "this fork was meant to be out of the draw's reach"
         );
         let start = unlinked.present(tip, COUNT, true);
-        let refusal = check_start(&start, COUNT, NOW, &params());
+        let refusal = check_start_with_count(&start, COUNT, NOW, &params());
         assert!(
             matches!(refusal, Err(StartError::ParentNotTheTipsOwn)),
             "a forgery with stale links was refused for {refusal:?}"
@@ -336,7 +337,8 @@ fn the_draw_refuses_a_lie_it_reaches_and_never_one_it_does_not() {
             !shallow.the_draw_reaches(&tip, COUNT),
             "the draw should not reach a fork inside the band it does not resolve"
         );
-        let refusal = check_start(&shallow.present(tip, COUNT, true), COUNT, NOW, &params());
+        let refusal =
+            check_start_with_count(&shallow.present(tip, COUNT, true), COUNT, NOW, &params());
         assert!(
             !matches!(refusal, Err(StartError::WrongPlace { .. })),
             "the draw refused a lie it cannot see"
@@ -361,7 +363,8 @@ fn the_draw_refuses_a_lie_it_reaches_and_never_one_it_does_not() {
         // Both neighbours, because a forger opens whichever gets through and
         // the check refuses each on a different half of the same comparison.
         for reach_up in [false, true] {
-            let refusal = check_start(&deep.present(tip, COUNT, reach_up), COUNT, NOW, &params());
+            let refusal =
+                check_start_with_count(&deep.present(tip, COUNT, reach_up), COUNT, NOW, &params());
             assert_eq!(
                 reaches,
                 matches!(refusal, Err(StartError::WrongPlace { .. })),
@@ -384,6 +387,7 @@ fn the_draw_refuses_a_lie_it_reaches_and_never_one_it_does_not() {
     println!(
         "\n  a lie of 200 work at 2000 blocks deep: {caught} of {TIPS} tips caught by the\n  \
          draw, {through} through. A forger that grinds tips asks again for the price of\n  \
-         a tip, which is the tip's own work.\n"
+         a tip, which is the tip's own work until the run is walked to the floor, and\n  \
+         a draw's hashes after that.\n"
     );
 }

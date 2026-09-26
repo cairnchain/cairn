@@ -15,8 +15,8 @@ use cairn_ledger::block::BlockHeader;
 use cairn_ledger::note::Note;
 use cairn_ledger::pow::{meets_target, work_of, DIFFICULTY_WINDOW};
 use cairn_ledger::sampling::{
-    check_start, covering, draw, levels_of, open_start, seed_of, work_before, Sample, SampledStart,
-    StartError,
+    check_start, check_start_with_count, covering, draw, levels_of, open_start, seed_of,
+    work_before, Sample, SampledStart, StartError, SAMPLES,
 };
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
@@ -150,9 +150,41 @@ fn an_honest_chain_answers_every_question_asked_of_it() {
     let keeper = Keeper::build(HEIGHT);
     let start = keeper.open(64);
 
-    let weighed = check_start(&start, 64, NOW, &params()).expect("an honest chain checks out");
+    let weighed =
+        check_start_with_count(&start, 64, NOW, &params()).expect("an honest chain checks out");
     assert_eq!(weighed.height, HEIGHT - 1);
     assert_eq!(weighed.total_work, keeper.tip().total_work);
+    assert_eq!(weighed.tip, keeper.tip().id());
+}
+
+/// A weighing opened at fewer questions than the published count is refused
+/// by the weighing a node runs, and the same answers at the full count are
+/// taken.
+///
+/// The count was an argument to `check_start`, and the bound every document
+/// quotes is for 4 096 questions. A caller naming 64 weighed an honest-looking
+/// chain against a bar 64 times lower and nothing said so; every caller in
+/// the workspace named the right count, and nothing made the next one. The
+/// count is the draw's one security parameter, so it is no longer the
+/// caller's to choose.
+#[test]
+fn a_weighing_opened_at_fewer_questions_than_the_published_count_is_refused() {
+    let keeper = Keeper::build(HEIGHT);
+
+    let short = keeper.open(64);
+    check_start_with_count(&short, 64, NOW, &params())
+        .expect("the instrument asking 64 questions is answered by 64");
+    assert_eq!(
+        check_start(&short, NOW, &params()).err(),
+        Some(StartError::WrongCount {
+            wanted: SAMPLES,
+            given: 64,
+        }),
+        "a weighing of 64 questions was taken where the rules ask 4 096"
+    );
+
+    let full = keeper.open(SAMPLES);
+    let weighed = check_start(&full, NOW, &params()).expect("an honest chain checks out");
     assert_eq!(weighed.tip, keeper.tip().id());
 }
 
@@ -218,7 +250,7 @@ fn a_tip_that_overstates_its_work_is_caught() {
 
     assert!(
         matches!(
-            check_start(&start, 64, NOW, &params()),
+            check_start_with_count(&start, 64, NOW, &params()),
             Err(StartError::WrongPlace { .. })
         ),
         "a tip claiming four times its work should not pass"
@@ -237,7 +269,7 @@ fn a_history_the_tip_does_not_commit_to_is_refused() {
         ..keeper.open(16)
     };
     assert_eq!(
-        check_start(&start, 16, NOW, &params()),
+        check_start_with_count(&start, 16, NOW, &params()),
         Err(StartError::HistoryMismatch),
         "the tip commits to its history, so a different one is not it"
     );
@@ -281,7 +313,7 @@ fn a_header_from_another_chain_is_refused() {
 
     assert!(
         matches!(
-            check_start(&start, 16, NOW, &params()),
+            check_start_with_count(&start, 16, NOW, &params()),
             Err(StartError::NotInHistory { .. })
         ),
         "being a real block somewhere is not being a block here"
@@ -302,7 +334,7 @@ fn a_header_without_work_is_refused() {
 
     assert!(
         matches!(
-            check_start(&start, 16, NOW, &params()),
+            check_start_with_count(&start, 16, NOW, &params()),
             Err(StartError::SampleWithoutWork { .. })
         ),
         "a header that did no work proves nothing about a chain"
@@ -342,7 +374,7 @@ fn a_header_that_does_not_span_the_work_drawn_is_refused() {
     // exactly when refusing this costs less than refusing that. With the two
     // the other way round both refusals fold a path and the saving is nought.
     counting::reset();
-    let refused = check_start(&start, 16, NOW, &params());
+    let refused = check_start_with_count(&start, 16, NOW, &params());
     let at_the_wrong_place = counting::hashed();
 
     let elsewhere = Keeper::mined_by(HEIGHT, 2);
@@ -351,7 +383,7 @@ fn a_header_that_does_not_span_the_work_drawn_is_refused() {
     foreign.samples[0].header = elsewhere.headers[usize::try_from(answered).unwrap()];
     counting::reset();
     assert!(matches!(
-        check_start(&foreign, 16, NOW, &params()),
+        check_start_with_count(&foreign, 16, NOW, &params()),
         Err(StartError::NotInHistory { .. })
     ));
     let merely_foreign = counting::hashed();
@@ -378,7 +410,7 @@ fn a_short_answer_is_refused() {
 
     assert!(
         matches!(
-            check_start(&start, 16, NOW, &params()),
+            check_start_with_count(&start, 16, NOW, &params()),
             Err(StartError::WrongCount { .. })
         ),
         "every question has to be answered"
@@ -394,7 +426,7 @@ fn a_history_shorter_than_the_tip_is_refused() {
 
     assert!(
         matches!(
-            check_start(&start, 16, NOW, &params()),
+            check_start_with_count(&start, 16, NOW, &params()),
             Err(StartError::HistoryWrongLength { .. } | StartError::TipWithoutWork)
         ),
         "the history holds one leaf per block before the tip, and no fewer"
@@ -429,7 +461,8 @@ fn a_keeper_answers_a_draw_it_did_not_choose() {
     // answered the same questions.
     let mut pinned = params();
     pinned.genesis = Some(keeper.headers[0].id());
-    let weighed = check_start(&start, 64, NOW, &pinned).expect("and the answer stands up");
+    let weighed =
+        check_start_with_count(&start, 64, NOW, &pinned).expect("and the answer stands up");
     assert_eq!(weighed.total_work, tip.total_work);
 
     // The heights it opened are the ones the draw asked about, found by
@@ -478,7 +511,7 @@ fn a_keeper_of_one_block_opens_an_empty_path_to_it() {
     let mut pinned = params();
     pinned.genesis = Some(tip.id());
     assert_eq!(
-        check_start(&start, 64, NOW, &pinned).map(|weighed| weighed.height),
+        check_start_with_count(&start, 64, NOW, &pinned).map(|weighed| weighed.height),
         Err(StartError::NothingOpened)
     );
 }
@@ -600,11 +633,11 @@ fn a_chain_padded_out_with_weightless_blocks_is_refused() {
     };
     assert!(
         matches!(
-            check_start(&start, 64, NOW, &params()),
+            check_start_with_count(&start, 64, NOW, &params()),
             Err(StartError::BlocksWorthLessThanTheyCost { .. })
         ),
         "a thousand blocks cannot be worth one hash, and were: {:?}",
-        check_start(&start, 64, NOW, &params())
+        check_start_with_count(&start, 64, NOW, &params())
     );
 }
 
@@ -618,7 +651,7 @@ fn a_chain_padded_out_with_weightless_blocks_is_refused() {
 fn a_chain_that_sheds_its_difficulty_is_still_weighed() {
     let keeper = Keeper::build(HEIGHT);
     let start = keeper.open(64);
-    check_start(&start, 64, NOW, &params())
+    check_start_with_count(&start, 64, NOW, &params())
         .expect("an honest chain checks out whatever its difficulty did");
 
     for pair in keeper.headers.windows(2) {
@@ -654,7 +687,7 @@ fn a_chain_that_sheds_its_difficulty_is_still_weighed() {
 fn the_refusals_a_weighing_can_earn_and_the_ones_it_cannot() {
     let keeper = Keeper::build(HEIGHT);
     let honest = keeper.open(16);
-    check_start(&honest, 16, NOW, &params()).expect("the honest chain is taken");
+    check_start_with_count(&honest, 16, NOW, &params()).expect("the honest chain is taken");
 
     // Difficulty here is the network's floor, where very nearly every hash
     // meets its target, so a header is made workless by asking more of it
@@ -684,7 +717,7 @@ fn the_refusals_a_weighing_can_earn_and_the_ones_it_cannot() {
     let at = bent.tail[0].height;
     bent.tail[0] = workless(bent.tail[0]);
     assert_eq!(
-        check_start(&bent, 16, NOW, &params()),
+        check_start_with_count(&bent, 16, NOW, &params()),
         Err(StartError::TailWithoutWork { at }),
         "the run up to the tip is where a forger's cheap blocks would live, and \
          a header in it that nobody mined is the plainest form of that"
@@ -697,7 +730,7 @@ fn the_refusals_a_weighing_can_earn_and_the_ones_it_cannot() {
     bent.samples[0].header.total_work = honest.tip.total_work.saturating_add(1);
     bent.samples[0].header = solved(bent.samples[0].header);
     assert_eq!(
-        check_start(&bent, 16, NOW, &params()),
+        check_start_with_count(&bent, 16, NOW, &params()),
         Err(StartError::PastTheTip { index: 0 }),
         "a header inside a chain cannot be worth more than the chain"
     );
@@ -715,7 +748,7 @@ fn the_refusals_a_weighing_can_earn_and_the_ones_it_cannot() {
     bent.samples[0].header.total_work = 1;
     bent.samples[0].header = solved(bent.samples[0].header);
     assert_eq!(
-        check_start(&bent, 16, NOW, &params()),
+        check_start_with_count(&bent, 16, NOW, &params()),
         Err(StartError::WrongPlace { index: 0 }),
         "so `WorkRunsBackwards` and `OpeningWorthLessThanItCost` are not \
          reachable by understating a sample: what a sample states is bound to \
@@ -731,7 +764,7 @@ fn the_refusals_a_weighing_can_earn_and_the_ones_it_cannot() {
         parent.header = solved(parent.header);
     }
     assert_eq!(
-        check_start(&bent, 16, NOW, &params()),
+        check_start_with_count(&bent, 16, NOW, &params()),
         Err(StartError::ParentNotTheTipsOwn),
         "the parent is pinned by name, not by its numbers"
     );
@@ -747,7 +780,7 @@ fn the_refusals_a_weighing_can_earn_and_the_ones_it_cannot() {
     let floor = usize::try_from(bent.tail[0].height).unwrap();
     bent.tail[0] = another.headers[floor];
     assert_eq!(
-        check_start(&bent, 16, NOW, &params()),
+        check_start_with_count(&bent, 16, NOW, &params()),
         Err(StartError::TailNotConsecutive {
             at: honest.tail[1].height
         }),
@@ -763,7 +796,7 @@ fn the_refusals_a_weighing_can_earn_and_the_ones_it_cannot() {
     bent.tip.total_work = honest.tip.total_work.saturating_mul(1_000);
     bent.tip = solved(bent.tip);
     assert_eq!(
-        check_start(&bent, 16, NOW, &params()),
+        check_start_with_count(&bent, 16, NOW, &params()),
         Err(StartError::WrongPlace { index: 0 }),
         "which is why `BlocksWorthMoreThanTheyCould` cannot be reached by \
          inflating the tip: the draw moves with it"

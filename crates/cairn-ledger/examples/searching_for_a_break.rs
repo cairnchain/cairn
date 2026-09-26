@@ -200,11 +200,12 @@ fn the_winner(rows: &[Row], total: u128) {
          forgery starts, as a share of the chain's work; 'gap/chain' how much of what\n  \
          it presents no block of it spans. A row whose 'log2 miss' is above\n  \
          {TARGET:.0} is a forgery the shipped count does not stop.\n\n  \
-         The margin for grinding survives with the figure. `SAMPLES` says a forger\n  \
-         with 2^80 tips faces 2^80 times the chance and that 2^80 against 2^-128 is\n  \
-         still 2^-48, so the margin absorbs it. When the level count could be written\n  \
-         down that was no longer true: 2^80 tips against a miss of 2^-58 is a\n  \
-         certainty, and all that held the line was the price of a tip.",
+         The margin for grinding survives with the figure, and is stated as a budget.\n  \
+         A forger with g tips faces g times the chance, and a tip can be walked down\n  \
+         to one hash plus its draw, so `SAMPLES` quotes the 2^-161.9 of forty per cent\n  \
+         against 2^33 tips. When the level count could be written down no budget\n  \
+         held: at 2^-58 a tip one gets through after about 2^58 tips, which is 2^70\n  \
+         hashes on a run walked to the floor, and the price of a tip held nothing.",
         levels_for(BLOCKS),
     );
 }

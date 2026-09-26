@@ -197,7 +197,7 @@ fn changeable(weighing: &Weighing) -> usize {
 #[test]
 fn the_chain_these_rules_mined_is_weighed_as_it_stands() {
     let weighing = honest();
-    check_start(&weighing.start, SAMPLES, NOW, &params()).expect("its own rules weigh it");
+    check_start(&weighing.start, NOW, &params()).expect("its own rules weigh it");
 
     // And the tail really is a run of moving difficulties, or the mutations
     // below would be changing a number to itself.
@@ -236,7 +236,7 @@ fn a_tail_header_that_keeps_its_parents_difficulty_is_refused() {
         weighing.start.tail[at - 1].total_work + u128::from(parent);
     weighing.start.tail[at] = solve(weighing.start.tail[at]);
 
-    let refused = check_start(&weighing.start, SAMPLES, NOW, &params());
+    let refused = check_start(&weighing.start, NOW, &params());
     assert!(
         matches!(
             refused,
@@ -271,7 +271,7 @@ fn a_tail_header_dated_before_the_median_of_its_window_is_refused() {
     weighing.start.tail[at].timestamp = median;
     weighing.start.tail[at] = solve(weighing.start.tail[at]);
 
-    let refused = check_start(&weighing.start, SAMPLES, NOW, &params());
+    let refused = check_start(&weighing.start, NOW, &params());
     assert!(
         matches!(
             refused,
@@ -303,7 +303,7 @@ fn a_tip_that_opens_no_parent_is_refused_by_name() {
     weighing.start.parent = None;
 
     assert_eq!(
-        check_start(&weighing.start, SAMPLES, NOW, &params()),
+        check_start(&weighing.start, NOW, &params()),
         Err(StartError::ParentNotOpened)
     );
 }
@@ -321,7 +321,7 @@ fn a_run_of_the_wrong_length_is_refused_and_says_both_numbers() {
     weighing.start.tail.remove(0);
 
     assert_eq!(
-        check_start(&weighing.start, SAMPLES, NOW, &params()),
+        check_start(&weighing.start, NOW, &params()),
         Err(StartError::TailWrongLength {
             given: wanted - 1,
             wanted
@@ -355,7 +355,7 @@ fn a_run_whose_links_do_not_match_is_refused_though_the_heights_do() {
     );
 
     assert_eq!(
-        check_start(&weighing.start, SAMPLES, NOW, &params()),
+        check_start(&weighing.start, NOW, &params()),
         Err(StartError::TailNotConsecutive { at: height })
     );
 }

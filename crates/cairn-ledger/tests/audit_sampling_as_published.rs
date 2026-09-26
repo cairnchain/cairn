@@ -31,15 +31,16 @@ const THIRTY_YEARS: u64 = 30 * 365 * 24 * 60;
 /// at the difficulty floor, spaced as tightly as the retarget still allows.
 const CHEAP_BLOCKS: u64 = 1_000;
 
-/// The tightest spacing that leaves a chain at the difficulty floor, read off
-/// the rule rather than written down.
+/// The tightest even spacing that leaves a chain at the difficulty floor, read
+/// off the rule rather than written down.
 ///
 /// The prose used to say the target, and that is what the argument below used
 /// to be priced at. At the floor the retarget answers `floor(target / gap)`,
-/// which reaches one as soon as the gap passes half the target, so the true
-/// answer is 31 seconds and the run costs half the chain time the papers
-/// claimed for it. `tests/retarget_timewarp.rs` pins the same boundary against
-/// a chain that was mined rather than a window written by hand.
+/// which reaches one as soon as the gap passes half the target, so for an
+/// evenly spaced run the answer is 31 seconds and the run costs half the chain
+/// time the papers claimed for it. `tests/retarget_timewarp.rs` pins the same
+/// boundary against a chain that was mined rather than a window written by
+/// hand, and the tightest unevenly spaced run beside it.
 fn cheapest_spacing_at_the_floor(target: u64) -> u64 {
     (1..=target)
         .find(|gap| {
@@ -59,42 +60,44 @@ fn cheapest_spacing_at_the_floor(target: u64) -> u64 {
 /// about it.
 ///
 /// `sampling.rs` said "a day ahead of the reader is refused" and the paper
-/// said the same. Both are true, since a day ahead is indeed refused, and both
-/// understate the rule by twelve times inside the one paragraph that rule
-/// carries. What makes the attack cost real waiting is the gap between the
-/// stated span of the cheap blocks and the drift, so quoting the drift twelve
-/// times too large quietly gives the argument away.
+/// said the same. Both were true, since a day ahead is indeed refused, and
+/// both understated the rule by twelve times inside the one paragraph that
+/// rule carries. What makes the attack cost real waiting is the gap between
+/// the stated span of the cheap blocks and the drift, so quoting the drift
+/// too large quietly gives the argument away.
+///
+/// The drift was then two hours on every network, which let a minority
+/// dating its blocks at it slow the chain by half; it is ten of a network's
+/// own blocks now, and the prose has to say that rather than the hours.
 #[test]
-fn the_drift_the_joining_argument_rests_on_is_two_hours() {
-    let params = ConsensusParams::testnet();
-    assert_eq!(params.max_timestamp_drift, 2 * 60 * 60);
+fn the_drift_the_joining_argument_rests_on_is_ten_blocks() {
     for network in ["testnet", "testnet-6", "devnet"] {
+        let params = ConsensusParams::for_network(network).unwrap();
         assert_eq!(
-            ConsensusParams::for_network(network)
-                .unwrap()
-                .max_timestamp_drift,
             params.max_timestamp_drift,
+            10 * params.target_block_time,
             "{network} refuses a different future from the one the papers describe"
         );
     }
+    let params = ConsensusParams::testnet();
+    assert_eq!(params.max_timestamp_drift, 600);
 
-    let hours = params.max_timestamp_drift / 3_600;
-    assert_eq!(hours, 2);
     assert!(
-        SAMPLING.contains("refuses a tip more than two hours ahead of its own"),
+        SAMPLING.contains("refuses a tip more than ten blocks ahead of its own"),
         "the sampling doc no longer names the drift the rule enforces"
     );
     assert!(
-        !SAMPLING.contains("a day ahead of the reader is refused"),
-        "the day is back in the sampling doc"
+        !SAMPLING.contains("a day ahead of the reader is refused")
+            && !SAMPLING.contains("more than two hours ahead"),
+        "a drift the rule no longer allows is back in the sampling doc"
     );
     assert!(
-        PAPER.contains("More than two hours"),
+        PAPER.contains("More than ten blocks"),
         "the paper no longer names the drift the rule enforces"
     );
     assert!(
-        !PAPER.contains("A day ahead of the"),
-        "the day is back in the paper"
+        !PAPER.contains("A day ahead of the") && !PAPER.contains("More than two hours"),
+        "a drift the rule no longer allows is back in the paper"
     );
 
     // And the shape of the argument, so that the two numbers are checked
@@ -102,11 +105,15 @@ fn the_drift_the_joining_argument_rests_on_is_two_hours() {
     // span a good deal more stated time than the reader will accept in
     // advance, or a forger waits out nothing.
     //
-    // Priced at the spacing the rule actually permits. This used to multiply by
-    // the target, which is what the prose said and what no rule demands, and it
-    // put the margin at eight drifts where the rule buys four.
+    // Priced at the even spacing the rule permits. An uneven run does about
+    // five percent better, which `retarget_timewarp.rs` pins, and that moves
+    // nothing here. This used to multiply by the target, which is what the
+    // prose said and what no rule demands.
     let spacing = cheapest_spacing_at_the_floor(params.target_block_time);
-    assert_eq!(spacing, 31, "the floor holds from {spacing} s a block");
+    assert_eq!(
+        spacing, 31,
+        "evenly spaced, the floor holds from {spacing} s a block"
+    );
     assert!(
         spacing > params.target_block_time / 2,
         "half the target exactly would still ask for twice the floor"
@@ -114,14 +121,10 @@ fn the_drift_the_joining_argument_rests_on_is_two_hours() {
 
     let stated = CHEAP_BLOCKS * spacing;
     assert!(
-        stated > params.max_timestamp_drift * 4,
-        "a thousand cheap blocks span {stated} seconds against a drift of {}",
+        stated > params.max_timestamp_drift * 50,
+        "a thousand cheap blocks span {stated} seconds against a drift of {}, so the \
+         reader takes nearly none of them in advance",
         params.max_timestamp_drift
-    );
-    assert!(
-        stated < params.max_timestamp_drift * 5,
-        "the margin is four drifts and a bit, and quoting more of it is how this \
-         went wrong the first time"
     );
     assert!(
         !SAMPLING.contains("have to be spaced at the target"),

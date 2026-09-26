@@ -34,7 +34,7 @@ use cairn_accumulator::Archive;
 use cairn_ledger::block::{BlockHeader, BLOCK_VERSION};
 use cairn_ledger::pow::{meets_target, MAX_RETARGET_FACTOR, MIN_DIFFICULTY};
 use cairn_ledger::sampling::{
-    check_start, draw, levels_of, seed_of, work_before, Sample, SampledStart, StartError,
+    check_start_with_count, draw, levels_of, seed_of, work_before, Sample, SampledStart, StartError,
 };
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::validation::ConsensusParams;
@@ -167,7 +167,7 @@ fn a_stretch_stating_exactly_the_most_is_not_refused_for_stating_too_much() {
     // What answers is the run at the top, where every header is held to the
     // difficulty the retarget demands of it. The bound underneath has nothing
     // to say about a stretch sitting exactly on it.
-    let refused = check_start(&start, SAMPLES_ASKED, NOW, &params());
+    let refused = check_start_with_count(&start, SAMPLES_ASKED, NOW, &params());
     assert!(
         matches!(refused, Err(StartError::TailAtTheWrongDifficulty { .. })),
         "a chain climbing by the full factor is refused by the rule for the run \

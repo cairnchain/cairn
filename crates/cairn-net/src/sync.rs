@@ -1276,9 +1276,9 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
         Err(ChainError::Corrupt) => Reaction::close(DropReason::OwnStore),
         // A block dated further ahead than this node's clock allows. The only
         // refusal here that the same node reverses by waiting, and the only
-        // one two honest nodes can disagree about: a miner an hour and fifty
-        // eight minutes fast publishes a block valid to everybody whose clock
-        // is right, and a node two minutes slow refuses it.
+        // one two honest nodes can disagree about: a miner eight minutes fast,
+        // on a network that allows ten, publishes a block valid to everybody
+        // whose clock is right, and a node two minutes slow refuses it.
         //
         // It used to fall through to the arm below, so that node closed the
         // connection and refused the host for `REFUSAL_SECONDS`, which is ten

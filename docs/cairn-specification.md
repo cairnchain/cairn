@@ -937,7 +937,7 @@ at a time by whoever starts a node.
   <tbody>
     <tr><td>target block time</td><td class="n">60 s</td><td>the retarget and the solve-time clamp</td></tr>
     <tr><td>genesis difficulty</td><td class="n">2<sup>27</sup></td><td>the first block, before any history exists</td></tr>
-    <tr><td>drift allowance</td><td class="n">7 200 s</td><td>how far ahead of a reader a timestamp may sit</td></tr>
+    <tr><td>drift allowance</td><td class="n">600 s</td><td>how far ahead of a reader a timestamp may sit: ten target block times</td></tr>
     <tr><td>halving interval</td><td class="n">1 051 200</td><td>the emission schedule</td></tr>
     <tr><td>initial reward</td><td class="n">5 000 000 000 pebbles</td><td>the emission schedule</td></tr>
     <tr><td>tail reward</td><td class="n">1 000 000 pebbles</td><td>the emission schedule</td></tr>
@@ -949,8 +949,12 @@ at a time by whoever starts a node.
 
 A throwaway network may set some of them far lower, and the reference
 implementation's does: a five second block, a genesis difficulty of
-2<sup>23</sup>, and a burial and maturity of 32. The emission schedule and the
-drift allowance are the same everywhere.
+2<sup>23</sup>, and a burial and maturity of 32. The emission schedule is the
+same everywhere. The drift allowance is ten of the network's own target block
+times everywhere, so the throwaway network's is 50 seconds: it is measured
+against the retarget's clamp, which is counted in blocks, and a number of
+seconds shared by networks whose blocks differ twelvefold is what the
+timestamp rules below were once wrong about.
 
 ### Proof of work
 
@@ -1068,9 +1072,19 @@ timeline the retarget keeps for itself: it opens at the anchor's timestamp and
 then moves only by what the retarget actually counted, so a header thrown
 forward past the clamp advances the timeline by the clamp and no more, and the
 headers after it have their gaps measured from where the timeline really
-stands. The excess comes back in full. Measuring each gap against its own
-parent instead leaves the give-back short by whatever the clamp cut off, which
-is exactly the difference a miner holding two blocks in a row keeps.
+stands. The excess comes back in full while the header is inside the window.
+Measuring each gap against its own parent instead leaves the give-back short
+by whatever the clamp cut off, which is exactly the difference a miner holding
+two blocks in a row keeps.
+
+The anchor's timestamp is taken raw, and that is the one place the excess is
+counted a second time. When a header thrown forward becomes `w[0]`, the
+timeline opens at the time it claimed, so the gaps after it measure short by
+what it claimed beyond the clamp, once, for the retarget that has it as its
+anchor. At a drift allowance of ten target block times that is under a
+hundredth of the steady difficulty on either network, measured; it was 1.36
+times the steady difficulty on a sixty second chain and four times on a five
+second one when the allowance was two hours.
 
 Three edge cases the rule answers explicitly, and each is a case a second
 implementation reaches by accident before it reaches it on purpose.
@@ -1117,11 +1131,12 @@ over two hours. A tenfold loss reaches ninety per cent after 64 blocks and
 13 080 seconds. The damping is what a miner writing its own timestamps cannot
 get past, and it is the same damping that makes an honest answer take hours.
 
-**At the floor the rule reduces to a division, and the floor is held from 31
-seconds a block and not from 60.** When `previous` is 1 and every difficulty
-in the window is 1, `average` is 1 and steps 10 to 12 collapse: with a window
-spaced `g` seconds apart, `expected` is `4095 * T`, `weighted` is `4095 * g`,
-and the answer is `T / g` clamped into 1 … 4. At a sixty second target:
+**At the floor the rule reduces to a division, and the floor is held from
+about half the target and not from the target.** When `previous` is 1 and every
+difficulty in the window is 1, `average` is 1 and steps 10 to 12 collapse: with
+a window spaced evenly `g` seconds apart, `expected` is `4095 * T`, `weighted`
+is `4095 * g`, and the answer is `T / g` clamped into 1 … 4. At a sixty second
+target, for an evenly spaced window:
 
 <table>
   <thead><tr><th class="n">Spacing</th><th class="n">Next difficulty</th></tr></thead>
@@ -1135,12 +1150,23 @@ and the answer is `T / g` clamped into 1 … 4. At a sixty second target:
   </tbody>
 </table>
 
-So a chain at the floor spaced 31 seconds apart holds the floor for as long as
-anyone cares to keep it, and one spaced 30 apart leaves it at the second
-block. Any argument that prices a run of blocks at the floor MUST price it at
-31 seconds a block and not at the target, or it prices it at twice what it
-costs. Off a real difficulty the same spacing is not free: 31 seconds a block
-off 2<sup>20</sup> asks for very nearly twice the difficulty a block.
+So a chain at the floor spaced evenly 31 seconds apart holds the floor for as
+long as anyone cares to keep it, and one spaced evenly 30 apart leaves it at
+the second block. A chain need not be spaced evenly. The floor holds while
+`weighted` stays above `4095 * T / 2`, and ninety gaps of 30 seconds with one
+of 31 among them keep it there for ever, at a mean just over 30 seconds; the
+first window after a fork holds the honest chain's gaps, which buys a little
+more at the start. The tightest branch of 1 024 blocks found, taking each
+timestamp as low as the median rule and a retarget of 1 allow, spans 30 069
+seconds, 8 h 21 m, against the 31 744 an even 31 seconds gives.
+
+Any argument that prices a run of blocks at the floor MUST price it by what
+such a run can span and not at a per-block spacing: a run of 1 024 at 30 069
+seconds or less, and never at the target, which is twice what it costs. The
+figure is measured rather than derived, and an implementation that finds a
+tighter branch has found a smaller number that arguments are then bound by.
+Off a real difficulty the same spacing is not free: 31 seconds a block off
+2<sup>20</sup> asks for very nearly twice the difficulty a block.
 
 ### Timestamps
 
@@ -1171,7 +1197,21 @@ block to claim an easier difficulty stops working.
 
 **Not further ahead than the reader allows.** A node MUST refuse a block whose
 timestamp is greater than the node's own clock, read as seconds since the Unix
-epoch, plus the network's drift allowance of 7 200 seconds.
+epoch, plus the network's drift allowance, which is ten of its target block
+times: 600 seconds on the public networks.
+
+The allowance is counted in blocks because what it is measured against is. It
+was 7 200 seconds on every network, which is twenty of the retarget's clamp
+ceilings at a sixty second block. A minority dating its blocks that far ahead,
+or an honest miner whose clock was an hour or two fast, held the median time
+past in the future; an honest block dated at the median plus one then moved the
+retarget's timeline a second while real time moved a minute, and the retarget
+read a chain producing blocks in no time and asked for its steepest rise, block
+after block. Measured with a thirty per cent share, a sixty second chain ran at
+1.53 times its target with single blocks asked for 115 times the steady
+difficulty, and a five second one at fourteen times its target. At ten target
+block times the same share leaves both within a tenth of their target. A
+clock kept by NTP meets ten minutes with room.
 
 **The first two are facts about the block. The third is a fact about the
 reader, and that distinction is load-bearing.** Two nodes given the same bytes
@@ -1347,13 +1387,14 @@ equal.
 
 What burial costs is chain time. At a sixty second block, 1 024 blocks on
 schedule is 61 440 seconds, 17 h 04 m. At the difficulty floor a branch can be
-held with gaps of 31 seconds, as the retarget section shows, so the same 1 024
-blocks span 31 744 seconds, 8 h 49 m. **The second figure is the one any
-argument about how long an attacker must sit is entitled to**, and it is half
-the first. The drift bound is what keeps that time real: a node refuses a
-block more than two hours ahead of its own clock, so a branch spanning nearly
-nine hours cannot be handed over all at once, and its author waits out the
-difference while everybody else keeps working.
+held at a little over 30 seconds a block, as the retarget section shows, and
+the tightest such branch of 1 024 blocks found spans 30 069 seconds, 8 h 21 m.
+**The second figure is the one any argument about how long an attacker must
+sit is entitled to**, and it is under half the first. The drift bound is what
+keeps that time real: a node refuses a block more than ten blocks ahead of its
+own clock, ten minutes on the public networks, so a branch spanning more than
+eight hours cannot be handed over all at once, and its author waits out the
+difference, all of it but ten minutes, while everybody else keeps working.
 
 **The third rule in the table is not a consensus rule. It is a local retention
 policy, and the difference has a consequence a second implementation must
@@ -1645,6 +1686,13 @@ was no second price either. Measured on a thirty year chain, a forger holding
 40 per cent of the world's work went from missing all 4 096 draws with 2^-207 to
 missing them with 2^-58, against a figure published as 2^-128.
 
+`count` is 4 096, and it is not the reader's to choose. It is the one
+parameter every figure published for this draw is computed at, so a node MUST
+ask exactly 4 096 questions of every weighing it takes; a weighing checked at
+any other count has cleared a bar nothing here describes. The reference
+implementation's measuring instruments ask fewer, to make a forgery likely
+enough to see, through a function named for it.
+
 The draw is empty when `total` is zero or when no samples are asked for.
 Otherwise, for each index `i` from `0` to `count - 1`, in order:
 
@@ -1769,18 +1817,31 @@ rather than drawn and so a forger chooses it. The window below the pinned
 header comes along because those headers have to chain into it, and a forger
 cannot swap them without having mined the pinned header on top of its own.
 
-Below the pinned header, only the chaining is checked, since the window that
-would judge those difficulties is not present. At and above it, each header is
-held to the same rules a node applies to any block it is handed: the difficulty
-the retarget demands of it, a timestamp later than the median of its window,
-and its own work added to its parent's total.
+Below the pinned header, only the chaining and the version are checked, since
+the window that would judge those difficulties is not present and the version
+needs none. At and above it, each header is held to the same rules a node
+applies to any block it is handed: the difficulty the retarget demands of it, a
+timestamp later than the median of its window, and its own work added to its
+parent's total.
+
+The version is asked of every header in the run: each MUST carry exactly the
+version the rules require at its height. It is asked only when the build can
+judge the tip at all, meaning the rules at the tip's height and the tip's own
+version are both within what the build knows. A chain past that is one the
+build cannot judge, and the handover that follows says so and stops the node;
+a weighing refused for it would be an honest peer held to rules the reader
+lacks. The drift allowance is not asked of the run's headers. A block dated
+past the reader's clock is refused when it arrives and taken once the clock
+catches up, and a refusal here would be held against the peer who showed the
+weighing.
 
 The tip's own timestamp is measured against the reading node's clock, against
-the same drift the block rules allow, which is two hours on every network here.
+the same drift the block rules allow, which is ten target block times on every
+network here.
 It is checked before the draw rather than left to the validation that follows,
 for two reasons. It is where the decision is made: without it a forger hands
 over a chain whose cheap blocks are spaced across days it never waited, since
-blocks at the difficulty floor have to be spaced past half the target or the
+blocks at the difficulty floor have to average about half the target or the
 retarget demands more of them, so a run of them states far more time than a
 reader will take in advance and the forger has to sit through the difference in
 real time. And the same timestamp is what the number of halvings is counted
@@ -1828,12 +1889,13 @@ to the tip.
     <tr><td class="n">25</td><td>TailWrongLength</td><td>the run is not the length the pinned header and the tip demand, or that length is past the ceiling</td></tr>
     <tr><td class="n">26</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a header in the run belongs elsewhere</td></tr>
     <tr><td class="n">27</td><td>TailWithoutWork</td><td>a header in the run carries no proof of work</td></tr>
-    <tr><td class="n">28</td><td>TailNotConsecutive</td><td>a header in the run does not follow the one below it</td></tr>
-    <tr><td class="n">29</td><td>TailAtTheWrongDifficulty</td><td>above the pinned header, not the difficulty the retarget demands</td></tr>
-    <tr><td class="n">30</td><td>TailOutOfTime</td><td>above the pinned header, not later than the median of its window</td></tr>
-    <tr><td class="n">31</td><td>TailWorkDoesNotAddUp</td><td>above the pinned header, not the work below it plus its own</td></tr>
-    <tr><td class="n">32</td><td>TailMissesWhatWasOpened</td><td>the run does not carry the pinned header, or carries a different one at its height</td></tr>
-    <tr><td class="n">33</td><td>TailNotConsecutive</td><td>the run does not end at the tip</td></tr>
+    <tr><td class="n">28</td><td>TailWrongVersion</td><td>a header in the run carries a version other than the one its height requires, where the build can judge the tip</td></tr>
+    <tr><td class="n">29</td><td>TailNotConsecutive</td><td>a header in the run does not follow the one below it</td></tr>
+    <tr><td class="n">30</td><td>TailAtTheWrongDifficulty</td><td>above the pinned header, not the difficulty the retarget demands</td></tr>
+    <tr><td class="n">31</td><td>TailOutOfTime</td><td>above the pinned header, not later than the median of its window</td></tr>
+    <tr><td class="n">32</td><td>TailWorkDoesNotAddUp</td><td>above the pinned header, not the work below it plus its own</td></tr>
+    <tr><td class="n">33</td><td>TailMissesWhatWasOpened</td><td>the run does not carry the pinned header, or carries a different one at its height</td></tr>
+    <tr><td class="n">34</td><td>TailNotConsecutive</td><td>the run does not end at the tip</td></tr>
   </tbody>
 </table>
 
@@ -1886,10 +1948,27 @@ can be carried back out of by the ordinary rule. Any argument that wants a
 duration instead has to say which chain it is timing, because a branch sitting
 at the difficulty floor states the same depth in a fraction of the time.
 
-It is per tip. The seed is the tip's own identifier, so a forger that dislikes
-the questions it drew can find another tip and ask again, and a forger with `g`
-tips faces `g` times the chance. A tip costs the tip's own work, which is what
-makes that a cost rather than a bar, but the figure is a per-tip figure.
+It is per tip, and a tip can be cheap. The seed is the tip's own identifier,
+so a forger that dislikes the questions it drew can find another tip and ask
+again, and a forger with `g` tips faces `g` times the chance. A tip does not
+cost the chain's work. The run up to the tip is held to the difficulty the
+retarget demands, and a run whose stated gaps sit at the clamp ceiling walks
+that demand down to the floor, where every nonce is a valid tip: from
+2<sup>40</sup> the walk is 826 blocks, 82 hours of stated time and about
+twenty-one blocks' work, paid once, and a forger that forked deep has the time.
+After it a fresh tip costs one hash and the 4 096 of its own draw, which is
+2<sup>12</sup> hashes, and nothing else.
+
+So the figure MUST be quoted against a grinding budget. At 40 per cent the
+inequality above gives 2^-161.9 a tip, which stays under 2^-128 against
+2<sup>33</sup> tips, 2<sup>45</sup> hashes of grinding, and not against
+2<sup>34</sup>. The staircase the draw really is is worth more per question
+than the inequality, so that budget is a floor under the real one and not the
+real one; at the measured 42.96 per cent there is no budget at all, since that
+is the share at which one tip alone reaches 2^-128. Tying the tip's difficulty
+to the pinned header's would make a fresh seed cost work again, and would
+refuse honest chains after a collapse deeper than the tie; it is not a rule
+here.
 
 Past half the world's work nothing here helps, and nothing anywhere else does
 either: a forger at half has nothing left to invent and can mine the chain.
@@ -1986,35 +2065,49 @@ This order is normative.
     <tr><td class="n">15</td><td>GracePositionTwice</td><td>the window names one cold position twice, which is one leaf offered as two notes</td></tr>
     <tr><td class="n">16</td><td>MaturityWindowTooLarge</td><td>more waiting coinbases than the maturity depth</td></tr>
     <tr><td class="n">17</td><td>MaturityOutsideTheWindow</td><td>a coinbase maturing at a height the window does not cover</td></tr>
-    <tr><td class="n">18</td><td>SupplyAboveTheSchedule</td><td>more money than the schedule has paid by the anchor's height</td></tr>
-    <tr><td class="n">19</td><td>HistoryMismatch</td><td>the second forest is not the one the anchor commits to</td></tr>
-    <tr><td class="n">20</td><td>RecentNotEndingAtTip</td><td>the recent run is empty, or does not end at the anchor</td></tr>
-    <tr><td class="n">21</td><td>TooFewRecent</td><td>fewer recent headers than the anchor's height allows for</td></tr>
-    <tr><td class="n">22</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a recent header belongs elsewhere</td></tr>
-    <tr><td class="n">23</td><td>WrongVersion</td><td>a recent header carries a version other than the one its height requires</td></tr>
-    <tr><td class="n">24</td><td>RecentWithoutWork</td><td>a recent header carries no proof of work</td></tr>
-    <tr><td class="n">25</td><td>RecentWorkDoesNotAddUp</td><td>a recent header's total is not the one below it plus its own</td></tr>
-    <tr><td class="n">26</td><td>RecentNotConsecutive</td><td>the recent run is not one chain</td></tr>
-    <tr><td class="n">27</td><td>BuriedRunWrongLength</td><td>the buried run is not the height difference, or is past the ceiling</td></tr>
-    <tr><td class="n">28</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a buried header belongs elsewhere</td></tr>
-    <tr><td class="n">29</td><td>BuriedRunNotConsecutive</td><td>a buried header does not follow the one below it</td></tr>
-    <tr><td class="n">30</td><td>BuriedWithoutWork</td><td>a buried header carries no proof of work</td></tr>
-    <tr><td class="n">31</td><td>SoftwareTooOld</td><td>the rules at a buried header's height are past what this build knows</td></tr>
-    <tr><td class="n">32</td><td>WrongVersion</td><td>a buried header carries a version other than the one its height requires</td></tr>
-    <tr><td class="n">33</td><td>BuriedAtTheWrongDifficulty</td><td>not what the retarget demands of it</td></tr>
-    <tr><td class="n">34</td><td>BuriedOutOfTime</td><td>not later than the median of the window before it</td></tr>
-    <tr><td class="n">35</td><td>BuriedWorkDoesNotAddUp</td><td>not the work below it plus its own</td></tr>
-    <tr><td class="n">36</td><td>BuriedRunNotEndingAtTheTip</td><td>the run does not end at the tip</td></tr>
-    <tr><td class="n">37</td><td>NotOnTheWeighedChain</td><td>the forest rebuilt from the run is not the one the tip commits to</td></tr>
-    <tr><td class="n">38</td><td>StateRootMismatch</td><td>the ledger rebuilt from this does not produce the anchor's state root</td></tr>
-    <tr><td class="n">39</td><td>BadGraceProof</td><td>a path for a note in the grace window does not fold to the cold commitment</td></tr>
-    <tr><td class="n">40</td><td>MissingGraceProof</td><td>a note in the grace window has no path</td></tr>
+    <tr><td class="n">18</td><td>MaturityWindowOutOfOrder</td><td>the heights the window's coinbases mature at do not strictly rise</td></tr>
+    <tr><td class="n">19</td><td>CoinbaseMaturingTwice</td><td>the window names one coinbase twice</td></tr>
+    <tr><td class="n">20</td><td>SupplyAboveTheSchedule</td><td>more money than the schedule has paid by the anchor's height</td></tr>
+    <tr><td class="n">21</td><td>HistoryMismatch</td><td>the second forest is not the one the anchor commits to</td></tr>
+    <tr><td class="n">22</td><td>RecentNotEndingAtTip</td><td>the recent run is empty, or does not end at the anchor</td></tr>
+    <tr><td class="n">23</td><td>TooFewRecent</td><td>fewer recent headers than the anchor's height allows for</td></tr>
+    <tr><td class="n">24</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a recent header belongs elsewhere</td></tr>
+    <tr><td class="n">25</td><td>WrongVersion</td><td>a recent header carries a version other than the one its height requires</td></tr>
+    <tr><td class="n">26</td><td>RecentWithoutWork</td><td>a recent header carries no proof of work</td></tr>
+    <tr><td class="n">27</td><td>RecentWorkDoesNotAddUp</td><td>a recent header's total is not the one below it plus its own</td></tr>
+    <tr><td class="n">28</td><td>RecentOutOfTime</td><td>where the run holds the eleven headers below it, a recent header is not later than their median</td></tr>
+    <tr><td class="n">29</td><td>RecentNotConsecutive</td><td>the recent run is not one chain</td></tr>
+    <tr><td class="n">30</td><td>BuriedRunWrongLength</td><td>the buried run is not the height difference, or is past the ceiling</td></tr>
+    <tr><td class="n">31</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a buried header belongs elsewhere</td></tr>
+    <tr><td class="n">32</td><td>BuriedRunNotConsecutive</td><td>a buried header does not follow the one below it</td></tr>
+    <tr><td class="n">33</td><td>BuriedWithoutWork</td><td>a buried header carries no proof of work</td></tr>
+    <tr><td class="n">34</td><td>SoftwareTooOld</td><td>the rules at a buried header's height are past what this build knows</td></tr>
+    <tr><td class="n">35</td><td>WrongVersion</td><td>a buried header carries a version other than the one its height requires</td></tr>
+    <tr><td class="n">36</td><td>BuriedAtTheWrongDifficulty</td><td>not what the retarget demands of it</td></tr>
+    <tr><td class="n">37</td><td>BuriedOutOfTime</td><td>not later than the median of the window before it</td></tr>
+    <tr><td class="n">38</td><td>BuriedWorkDoesNotAddUp</td><td>not the work below it plus its own</td></tr>
+    <tr><td class="n">39</td><td>BuriedHistoryMismatch</td><td>a buried header below the tip does not commit to the forest the run has rebuilt below it</td></tr>
+    <tr><td class="n">40</td><td>BuriedRunNotEndingAtTheTip</td><td>the run does not end at the tip</td></tr>
+    <tr><td class="n">41</td><td>NotOnTheWeighedChain</td><td>the forest rebuilt from the run is not the one the tip commits to</td></tr>
+    <tr><td class="n">42</td><td>StateRootMismatch</td><td>the ledger rebuilt from this does not produce the anchor's state root</td></tr>
+    <tr><td class="n">43</td><td>BadGraceProof</td><td>a path for a note in the grace window does not fold to the cold commitment</td></tr>
+    <tr><td class="n">44</td><td>MissingGraceProof</td><td>a note in the grace window has no path</td></tr>
   </tbody>
 </table>
 
-Nine to eighteen come before the ledger is rebuilt because each of them needs
+Nine to twenty come before the ledger is rebuilt because each of them needs
 nothing but what arrived on the wire, and the size of what follows is otherwise
 decided by whoever sent it.
+
+**Seventeen, eighteen and nineteen ask the maturity window what a window a
+node built would be.** A block's coinbase matures a fixed depth above it and
+blocks come one height apart, so the heights rise strictly and every coinbase
+appears once. A node empties the window from the front and stops at the first
+entry still waiting, and keeps one height a coinbase beside it; a window out of
+order keeps a coinbase unspendable past its height, and one naming a coinbase
+twice leaves that record saying one thing and the window another. The state
+root does not settle either, because a sender who mined the burial computes it
+over the window it chose.
 
 **Ten is not covered by the state root and cannot be.** The hot set is
 committed to as a tree keyed by note identifier, so a list naming a note twice
@@ -2023,7 +2116,7 @@ free, past every check that ends at the header, and what it buys is not a note
 but a place in the eviction order, which is the one structure a receiver builds
 from the list rather than from the commitment.
 
-Thirty-seven is what a forest proof alone cannot say. A proof says a header sits
+Forty-one is what a forest proof alone cannot say. A proof says a header sits
 at a position in a forest; it does not say the forest is a chain, and the forest
 belongs to whoever made the tip. The header forest is append only, so the
 receiver does not have to take the proof's word for it: it holds the forest as
@@ -2033,12 +2126,28 @@ forest the tip commits to. Under a swap anywhere below the tip it does not, and
 it does not matter whether any draw would have looked there. The tip is not in
 its own history, so the tip's own leaf is the one leaf that MUST NOT be added.
 
-Twenty-five, twenty-six and twenty-seven are what make the burial cost
+Thirty-six, thirty-seven and thirty-eight are what make the burial cost
 something. Before them the sender chose those difficulties and could set them
 all to the floor, so a thousand blocks of burial were a thousand hashes. The
 window they are judged against starts as the recent headers that came with the
 ledger and moves forward with the run, so every step is judged by the rule a
-node applies to any block it is handed.
+node applies to any block it is handed. Thirty-nine is the same rule's last
+field: a block's `history` is the forest below it, which is the forest the walk
+holds when it reaches that header, so each header below the tip MUST be
+compared with it before its own leaf is added. Without it a sender who mined
+the burial could write anything there, and the newcomer would take the ledger
+and then refuse the first block above it for the field the handover let
+through.
+
+**Twenty-eight is asked only where the recent run holds the rule's whole
+window.** The median reads the eleven headers below a block, so from the
+twelfth recent header on it is exactly the rule each of them was accepted
+under, and a run that starts at the first block holds every header the rule
+read from its first. Below the twelfth entry of any other run a median over
+fewer headers is not the rule, and over timestamps that do not rise it can
+stand above the real one and refuse an honest handover, so a node MUST NOT ask
+it there. The retarget is not asked of the recent run at all: it reads ninety
+gaps, so no header of a run of ninety-one can be judged by it.
 
 ### What is pinned by a commitment, and what is not
 

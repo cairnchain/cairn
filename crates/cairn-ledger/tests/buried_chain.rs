@@ -125,9 +125,13 @@ fn an_honest_run_ties_the_ledger_to_the_tip() {
 
 /// The forgery the check exists for. A leaf somewhere below the anchor is a
 /// header from another chain, and nothing about the run itself is touched.
-/// Rebuilding the forest from the anchor upward arrives somewhere the tip does
+/// Rebuilding the forest from the anchor upward arrives somewhere the run does
 /// not commit to, and it does not matter where the swap was or whether any
 /// draw would ever have looked there.
+///
+/// The first header above the anchor is where it shows, now that every
+/// buried header is held to the forest below it as a block is; it used to
+/// show only at the tip.
 #[test]
 fn a_swapped_leaf_anywhere_below_the_anchor_is_caught() {
     let honest = built();
@@ -143,9 +147,42 @@ fn a_swapped_leaf_anywhere_below_the_anchor_is_caught() {
         &handed.recent,
         &params(),
     );
-    assert!(
-        matches!(refused, Err(HandoverError::NotOnTheWeighedChain)),
-        "the run is honest and the ground under it is not, and it said {refused:?}"
+    assert_eq!(
+        refused,
+        Err(HandoverError::BuriedHistoryMismatch {
+            at: handed.at.height + 1
+        }),
+        "the run is honest and the ground under it is not"
+    );
+}
+
+/// A tip committing to a forest the run does not rebuild is not on the chain
+/// the run is, even when every header below it is.
+///
+/// The tip is not in its own history, so it is the one header the walk does
+/// not hold to the forest below it; it is held to the forest the whole run
+/// rebuilds instead, once the walk is done. That is what a forger who mined
+/// one header on top of an honest run, committing to a forest with a leaf
+/// swapped, has to get past.
+#[test]
+fn a_tip_committing_to_a_forest_the_run_does_not_rebuild_is_caught() {
+    let chain = built();
+    let mut handed = handed(&chain);
+    let last = handed.buried.len() - 1;
+    handed.buried[last].history = chain.before(3).commitment();
+    handed.tip = handed.buried[last];
+
+    assert_eq!(
+        check_buried(
+            &handed.at,
+            &handed.tip,
+            &handed.before_at,
+            &handed.buried,
+            &handed.recent,
+            &params(),
+        ),
+        Err(HandoverError::NotOnTheWeighedChain),
+        "a tip committing to another forest was taken on top of an honest run"
     );
 }
 
@@ -181,7 +218,11 @@ fn an_anchor_from_another_chain_is_caught() {
 fn a_run_at_a_difficulty_nobody_demanded_is_refused() {
     let chain = built();
     let mut handed = handed(&chain);
-    for (step, header) in handed.recent.iter_mut().enumerate() {
+    // Every header of the window but the anchor, which the window has to end
+    // at: a window ending anywhere else is refused before any difficulty is
+    // asked.
+    let anchor = handed.recent.len() - 1;
+    for (step, header) in handed.recent[..anchor].iter_mut().enumerate() {
         header.timestamp = 1_000 + step as u64;
     }
     let refused = check_buried(
@@ -209,6 +250,8 @@ fn work_that_does_not_add_up_along_the_run_is_refused() {
     let chain = built();
     let mut handed = handed(&chain);
     handed.at.total_work = u128::MAX / 2;
+    let anchor = handed.recent.len() - 1;
+    handed.recent[anchor] = handed.at;
     handed.buried[0].previous = handed.at.id();
     let refused = check_buried(
         &handed.at,

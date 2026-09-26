@@ -375,10 +375,10 @@ pub const GRACE_BLOCKS: usize = 64;
 /// Measured, a run that should have held a window of a thousand held four and
 /// a half thousand and was still climbing.
 ///
-/// So there is a ceiling, and when it is reached the least valuable note held
-/// is the one let go of. That is what makes the ceiling worth having rather
-/// than merely true: displacing a note now costs more than the note is worth,
-/// times the ceiling, where before it cost a transfer.
+/// So there is a ceiling, and each block that finds the set past it lets go
+/// of the least valuable notes held. That is what makes the ceiling worth
+/// having rather than merely true: displacing a note now costs more than the
+/// note is worth, times the ceiling, where before it cost a transfer.
 ///
 /// What a wallet does when its note is the one let go of is what it does for
 /// any fallen note it cannot prove: it keeps its own record of what fell,
@@ -965,7 +965,8 @@ pub struct LedgerState {
     /// still current. A node that asked for nobody pays nothing.
     watching: BTreeSet<PublicKey>,
     /// Fallen notes belonging to a watched owner, at most [`WATCHED_NOTES`] of
-    /// them.
+    /// them once a block has been applied, and at most one grace window more
+    /// between a late [`Self::watch_owner`] and that block.
     ///
     /// The owners are bounded by what an operator typed and their notes are
     /// not, which was read for a long time as one bound rather than two: an
@@ -1106,16 +1107,26 @@ impl LedgerState {
         }
 
         // The grace window can hold as many notes as the ceiling allows, so a
-        // back-fill on top of a full set would put it over. The same trim
-        // brings it back, cheapest first, which is the policy that makes the
-        // ceiling worth having rather than a place a note is dropped at random.
+        // back-fill on top of a full set puts it over, and it is left over
+        // until the next block. That block's `commit` runs the same trim,
+        // cheapest first, and writes every path it lets go of into the
+        // block's own record, so undoing the block puts each one back.
         //
-        // Its record of what it let go of is dropped, because none of this is
-        // part of a block. Following a note is a fact about this node, not
-        // about the chain, and the worst an undo that cannot reach it can do
-        // is leave a cheap note unfollowed, which is where it started.
-        let mut nothing_to_undo = BlockUndo::default();
-        self.trim_followed(&mut nothing_to_undo);
+        // It used to trim here, with a record it threw away, on the grounds
+        // that following a note is a fact about this node and the worst a lost
+        // record could do was leave a cheap note unfollowed. That was true of
+        // the follow and not of the path. The cheapest notes are the ones the
+        // window has already run out, whose paths were kept only because the
+        // owner was followed, so the block that ran them out recorded nothing
+        // either. A reorganisation undoing that block put the note back into
+        // the committed window with no path anywhere, and this node refused a
+        // proofless spend of it that every other node took, with the same
+        // state root as all of them, and could not hand its ledger to anybody.
+        //
+        // What waiting costs is one back-fill: the set stands over its
+        // ceiling by at most the window's `GRACE_NOTES` until a block arrives.
+        // Asking again before then adds nothing, since the notes it takes up
+        // are the ones already followed.
     }
 
     pub fn is_watching(&self, owner: &PublicKey) -> bool {

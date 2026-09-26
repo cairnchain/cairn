@@ -163,6 +163,18 @@ pub fn median_time_past(recent: &[HeaderSummary]) -> Option<u64> {
 /// two blocks in a row could keep: it can drag the tip a ceiling further ahead
 /// with each block it holds, while the honest block that follows can only hand
 /// one ceiling back.
+///
+/// **An empty run is not a question any rule asks this.** It answers the
+/// floor, and the first block's difficulty is the network's opening one,
+/// which only [`crate::validation::expected_difficulty`] knows: that is where
+/// a first block is answered, and it does not call this with nothing. The
+/// other two callers are the walks over a run of headers, and neither can:
+/// `check_the_tail` asks only once a header is in its window, and
+/// `handover::check_buried` refuses a window that does not end at the anchor
+/// it starts from. A second implementation writing step one of the
+/// specification into this function would disagree with nobody; writing the
+/// floor into a caller that can reach an empty run would disagree with every
+/// node about the first block.
 pub fn next_difficulty(recent: &[HeaderSummary], target_block_time: u64) -> u64 {
     let last = match recent.last() {
         None => return MIN_DIFFICULTY,

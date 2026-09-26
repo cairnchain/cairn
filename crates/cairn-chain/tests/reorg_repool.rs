@@ -53,7 +53,9 @@ impl Source {
         Self {
             params: params(),
             state: LedgerState::new(),
-            clock: NOW,
+            // A day behind the node's clock, so no block this chain mines is
+            // dated ahead of it: the drift a node allows is ten blocks.
+            clock: NOW - 86_400,
         }
     }
 

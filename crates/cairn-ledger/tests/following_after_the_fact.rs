@@ -33,12 +33,16 @@
     clippy::cast_possible_truncation
 )]
 
+use cairn_accumulator::{Forest, ForestProof};
 use cairn_crypto::SecretKey;
 use cairn_ledger::note::{Note, NoteId};
-use cairn_ledger::state::HotEntry;
+use cairn_ledger::state::{HotEntry, GRACE_NOTES, WATCHED_NOTES};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
-use cairn_ledger::validation::{assemble_block, connect_block, disconnect_block, ConsensusParams};
+use cairn_ledger::validation::{
+    assemble_block, connect_block, disconnect_block, mine_block, ConsensusParams,
+};
 use cairn_ledger::{Block, ConnectedBlock, LedgerState};
+use cairn_primitives::Amount;
 
 const NOW: u64 = 2_000_000_000;
 
@@ -190,5 +194,302 @@ fn a_node_told_late_follows_what_a_node_told_from_the_start_follows() {
     assert!(
         followed(&late).iter().any(|(_, at)| *at >= before - 2),
         "the winning branch landed nothing, so the second half of this proves nothing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Told late on a node whose followed set is full.
+// ---------------------------------------------------------------------------
+
+/// Rules under which a single block can fill the grace window: a hot set of
+/// one, so everything a block pays falls at once, and room for four thousand
+/// outputs in a block.
+fn crowded() -> ConsensusParams {
+    ConsensusParams::testnet()
+        .with_hot_capacity(1)
+        .with_coinbase_maturity(0)
+        .with_max_evictions(1 << 20)
+        .with_max_block_bytes(8 << 20)
+}
+
+/// `max_outputs_per_transfer` on every network.
+const OUTPUTS: usize = 256;
+
+fn pebbles(value: u64) -> Amount {
+    Amount::from_pebbles(value).unwrap()
+}
+
+/// A coinbase paying `funder` sixteen equal notes.
+fn sixteen(height: u64, funder: &SecretKey, extra: &[u8]) -> CoinbaseTransaction {
+    let each = pebbles(crowded().reward_at(height).as_pebbles() / 16);
+    CoinbaseTransaction::with_extra(
+        height,
+        vec![Note::new(each, funder.public_key()); 16],
+        extra.to_vec(),
+    )
+}
+
+/// Spends one of `funder`'s notes, hot or in the grace window, into 256 notes
+/// of `value` for `payee`. A note in the window takes no proof from its
+/// spender, which is what the window is for.
+fn fan_out(
+    state: &LedgerState,
+    spent: NoteId,
+    funder: &SecretKey,
+    payee: &SecretKey,
+    value: u64,
+) -> Transfer {
+    let note = state
+        .hot_note(&spent)
+        .or_else(|| state.within_grace(&spent).map(|(_, note)| note))
+        .expect("a note this node holds in full");
+    let outputs = vec![Note::new(pebbles(value), payee.public_key()); OUTPUTS];
+    let mut transfer = Transfer::new(vec![Input::hot(spent)], outputs);
+    transfer.sign_input(crowded().network, 0, &note, funder);
+    transfer
+}
+
+fn crowded_block(
+    state: &LedgerState,
+    coinbase: CoinbaseTransaction,
+    transfers: Vec<Transfer>,
+) -> Block {
+    let height = state.next_height().unwrap();
+    let block = assemble_block(
+        state,
+        coinbase,
+        transfers,
+        &crowded(),
+        1_000 + height * 600,
+        0,
+    )
+    .expect("a block this chain would make");
+    mine_block(block, 1 << 20).expect("the floor accepts the first nonce")
+}
+
+/// Builds the next block on `state` and applies it there.
+fn extend(
+    state: &mut LedgerState,
+    coinbase: CoinbaseTransaction,
+    transfers: Vec<Transfer>,
+) -> ConnectedBlock {
+    let block = crowded_block(state, coinbase, transfers);
+    connect_block(state, &block, &crowded(), NOW).expect("a block assembled against this state")
+}
+
+/// A node following `owner` with a full set, asked to follow `other` as well,
+/// and a rival to the block that ran the owner's cheapest notes out of the
+/// grace window.
+struct Crowded {
+    follower: LedgerState,
+    after_one: LedgerState,
+    second: ConnectedBlock,
+    third: ConnectedBlock,
+    rival: Block,
+    cheapest: (NoteId, u64),
+}
+
+fn crowded_follower() -> Crowded {
+    let funder = wallet(11);
+    let owner = wallet(12);
+    let other = wallet(13);
+    let mut follower = LedgerState::new();
+    follower.watch_owner(owner.public_key());
+
+    let first_pay = sixteen(0, &funder, b"");
+    extend(&mut follower, first_pay.clone(), Vec::new());
+
+    // Four thousand notes to the owner, all falling at once into the window.
+    let second_pay = sixteen(1, &funder, b"");
+    let transfers = (0..16u32)
+        .map(|index| {
+            fan_out(
+                &follower,
+                NoteId::new(first_pay.id(), index),
+                &funder,
+                &owner,
+                100_000,
+            )
+        })
+        .collect();
+    extend(&mut follower, second_pay.clone(), transfers);
+    let after_one = follower.clone();
+
+    // Four thousand more, worth twice as much, which runs the first four
+    // thousand out of the window while the owner still wants their paths.
+    let third_pay = sixteen(2, &funder, b"");
+    let transfers = (0..16u32)
+        .map(|index| {
+            fan_out(
+                &follower,
+                NoteId::new(second_pay.id(), index),
+                &funder,
+                &owner,
+                200_000,
+            )
+        })
+        .collect();
+    let second = extend(&mut follower, third_pay.clone(), transfers);
+    assert!(
+        follower.watched_notes().count() <= WATCHED_NOTES,
+        "the followed set is at or under its ceiling, so no block has let anything go"
+    );
+
+    // The owner's cheapest note: out of the window now, and first in line
+    // when the ceiling bites.
+    let cheapest = after_one
+        .grace_window()
+        .into_iter()
+        .flatten()
+        .filter(|(_, _, note)| note.owner == owner.public_key())
+        .map(|(id, position, _)| (id, position))
+        .min_by_key(|(_, position)| *position)
+        .expect("the owner was paid in the first block");
+    assert!(
+        follower.within_grace(&cheapest.0).is_none()
+            && follower.cold().proof_of(cheapest.1).is_some(),
+        "the cheapest note left the window and its path was kept for the owner"
+    );
+
+    // Two hundred and fifty six notes to somebody else, in the window.
+    let to_other = fan_out(
+        &follower,
+        NoteId::new(third_pay.id(), 0),
+        &funder,
+        &other,
+        300_000,
+    );
+    let third = extend(&mut follower, sixteen(3, &funder, b""), vec![to_other]);
+
+    // A rival to the block that ran the cheapest note out of the window,
+    // spending it from the window with no proof, as the window allows.
+    let note = after_one
+        .within_grace(&cheapest.0)
+        .map(|(_, note)| note)
+        .unwrap();
+    let mut spend = Transfer::new(
+        vec![Input::hot(cheapest.0)],
+        vec![Note::new(pebbles(50_000), owner.public_key())],
+    );
+    spend.sign_input(crowded().network, 0, &note, &owner);
+    let rival = crowded_block(&after_one, sixteen(2, &funder, b"rival"), vec![spend]);
+    let mut bystander = after_one.clone();
+    connect_block(&mut bystander, &rival, &crowded(), NOW)
+        .expect("a node that follows nobody takes the rival");
+
+    // And the wallet asks the running node to follow `other`, whose notes
+    // the window holds: the set goes over its ceiling.
+    follower.watch_owner(other.public_key());
+
+    Crowded {
+        follower,
+        after_one,
+        second,
+        third,
+        rival,
+        cheapest,
+    }
+}
+
+/// A node asked to follow a second owner on a full set, and then carried back
+/// by a reorganisation, still takes a block every other node takes.
+///
+/// `watch_owner` trimmed the set back under its ceiling with a record it threw
+/// away, and let go of the path of the cheapest note it held: one the owner's
+/// block had already run out of the window, keeping the path only because the
+/// owner was followed. No record anywhere held that path, so undoing the block
+/// put the note back into the committed window with nothing behind it, and a
+/// proofless spend of it every other node takes was refused here as
+/// `MissingProof`, with the same state root as everyone. The node could not
+/// hand its ledger to a newcomer either.
+#[test]
+fn a_node_asked_to_follow_more_than_its_ceiling_takes_a_valid_block_after_a_reorganisation() {
+    let Crowded {
+        mut follower,
+        after_one,
+        second,
+        third,
+        rival,
+        cheapest,
+    } = crowded_follower();
+
+    assert!(
+        follower.watched_notes().count() <= WATCHED_NOTES + GRACE_NOTES,
+        "asking once put the set over its ceiling by more than one window"
+    );
+
+    disconnect_block(&mut follower, &third);
+    disconnect_block(&mut follower, &second);
+    assert_eq!(
+        follower.state_root(),
+        after_one.state_root(),
+        "back on the state every node agrees on"
+    );
+    assert!(
+        follower.within_grace(&cheapest.0).is_some(),
+        "the note is in the window again, as the commitment says"
+    );
+
+    let mut carried_on = follower.clone();
+    assert!(
+        connect_block(&mut carried_on, &rival, &crowded(), NOW).is_ok(),
+        "the same state root as every other node, and a block they all take was refused"
+    );
+    assert!(
+        follower
+            .handover(
+                rival.header,
+                rival.header,
+                Forest::default(),
+                ForestProof::default(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .is_ok(),
+        "a note in the window has no path, so this ledger cannot be handed to anybody"
+    );
+}
+
+/// The block after the ask brings the set back under its ceiling, and undoing
+/// that block puts back every path it let go of.
+///
+/// Letting go at the next block rather than at the ask is what makes the let
+/// go undoable: the block's own record holds each path it drops. Asked of the
+/// same scenario, with that block in between and undone first.
+#[test]
+fn the_block_after_the_ask_trims_the_set_and_its_undo_puts_the_paths_back() {
+    let Crowded {
+        mut follower,
+        after_one,
+        second,
+        third,
+        rival,
+        cheapest,
+    } = crowded_follower();
+
+    let funder = wallet(11);
+    let fourth = extend(&mut follower, sixteen(4, &funder, b""), Vec::new());
+    assert!(
+        follower.watched_notes().count() <= WATCHED_NOTES,
+        "a block went by and the set is still over its ceiling"
+    );
+    assert!(
+        follower.cold().proof_of(cheapest.1).is_none(),
+        "the cheapest note is the one the ceiling lets go of"
+    );
+
+    disconnect_block(&mut follower, &fourth);
+    assert!(
+        follower.cold().proof_of(cheapest.1).is_some(),
+        "undoing the block that let the path go did not put it back"
+    );
+    disconnect_block(&mut follower, &third);
+    disconnect_block(&mut follower, &second);
+    assert_eq!(follower.state_root(), after_one.state_root());
+
+    let taken = connect_block(&mut follower, &rival, &crowded(), NOW);
+    assert!(
+        taken.is_ok(),
+        "the same state root as every other node, and a block they all take was refused"
     );
 }

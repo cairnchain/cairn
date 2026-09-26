@@ -1770,7 +1770,7 @@ fn the_published_network_parameters_are_what_the_networks_carry() {
     assert_eq!(public.burial, 1_024);
     assert_eq!(public.target_block_time, 60);
     assert_eq!(public.genesis_difficulty, 1 << 27);
-    assert_eq!(public.max_timestamp_drift, 7_200);
+    assert_eq!(public.max_timestamp_drift, 600);
     assert_eq!(public.halving_interval, 1_051_200);
     assert_eq!(public.initial_reward.as_pebbles(), 5_000_000_000);
     assert_eq!(public.tail_reward.as_pebbles(), 1_000_000);
@@ -1788,8 +1788,8 @@ fn the_published_network_parameters_are_what_the_networks_carry() {
     assert_eq!(devnet.genesis_difficulty, 1 << 23);
     assert_eq!(devnet.target_block_time, 5);
     assert_eq!(
-        devnet.max_timestamp_drift, public.max_timestamp_drift,
-        "the drift allowance is the same everywhere"
+        devnet.max_timestamp_drift, 50,
+        "the drift allowance is ten of a network's own blocks"
     );
     assert_eq!(devnet.halving_interval, public.halving_interval);
 

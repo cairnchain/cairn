@@ -242,7 +242,7 @@ fn a_free_run_cannot_swallow_the_anchor_any_more() {
         history: archive.forest().roots_only(),
         samples,
     };
-    let refused = check_start(&start, SAMPLES, NOW, &params);
+    let refused = check_start(&start, NOW, &params);
     assert!(
         refused.is_err(),
         "AUDIT: the weighing took the forgery: {refused:?}"

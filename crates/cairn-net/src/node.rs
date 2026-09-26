@@ -4603,7 +4603,7 @@ fn weigh_what_was_shown(
         // out of, so it is the one worth placing.
         .map_err(|error| format!("it could not be read as a weighing at all ({error})"))
         .and_then(|start| {
-            check_start(&start, SAMPLES, now, &shared.params)
+            check_start(&start, now, &shared.params)
                 .map(|weighed| (weighed, start.tip))
                 .map_err(|error| error.to_string())
         });

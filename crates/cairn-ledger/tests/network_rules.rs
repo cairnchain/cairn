@@ -303,3 +303,66 @@ fn the_network_a_rule_set_names_is_the_one_its_first_block_belongs_to() {
         );
     }
 }
+
+/// Every network lets a timestamp run ten of its own blocks ahead of a
+/// reader's clock, and no further.
+///
+/// The allowance was two hours on every network, whatever its block time:
+/// twenty of the retarget's clamp ceilings on testnet and two hundred and
+/// forty on devnet. A minority dating its blocks that far ahead, or an honest
+/// miner an hour or two fast, pulled the median past real time and made the
+/// retarget read honest blocks as arriving in no time, which
+/// `retarget_timewarp.rs` measures. A number written once for every network
+/// was the shape of the defect, so the relation is asked of each of them.
+#[test]
+fn every_network_lets_a_timestamp_run_ten_blocks_ahead_and_no_further() {
+    for name in NAMED {
+        let Some(params) = ConsensusParams::for_network(name) else {
+            continue;
+        };
+        assert_eq!(
+            params.max_timestamp_drift,
+            10 * params.target_block_time,
+            "{name} lets a timestamp run {} s ahead on a {} s block",
+            params.max_timestamp_drift,
+            params.target_block_time
+        );
+    }
+    for params in [
+        ConsensusParams::testnet(),
+        ConsensusParams::mineable_network(8),
+    ] {
+        assert_eq!(
+            params.max_timestamp_drift,
+            10 * params.target_block_time,
+            "the rules the tests run under let a timestamp run {} s ahead",
+            params.max_timestamp_drift
+        );
+    }
+}
+
+/// Every network's ledger fits the handover's decoder.
+///
+/// A hot set a network's rules allow and the decoder refuses, or a maturity
+/// window longer than the decoder reads, is a ledger no node on that network
+/// can be handed: every join refuses it as malformed, and says nothing more.
+/// The transaction ceilings are held to the rules by the build; these two
+/// were held by nothing but the distance between the numbers.
+#[test]
+fn every_network_can_be_handed_the_ledger_its_rules_allow() {
+    use cairn_ledger::handover::{MAX_HOT, MAX_MATURING};
+
+    for name in NAMED {
+        let Some(params) = ConsensusParams::for_network(name) else {
+            continue;
+        };
+        assert!(
+            params.hot_capacity <= MAX_HOT,
+            "{name} allows a hot set the handover's decoder refuses"
+        );
+        assert!(
+            params.coinbase_maturity <= u64::try_from(MAX_MATURING).unwrap(),
+            "{name} keeps a maturity window the handover's decoder refuses"
+        );
+    }
+}

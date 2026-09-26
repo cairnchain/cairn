@@ -254,7 +254,8 @@ fn an_undo_puts_back_the_notes_the_ceiling_let_go_of() {
     assert!(trimmed > 0, "the ceiling never bit, so nothing was tested");
 }
 
-/// **Asking to follow an owner again does not climb over the ceiling.**
+/// **Asking to follow an owner again is brought back under the ceiling by the
+/// next block, and does not climb before it.**
 ///
 /// `watch_owner` takes up the notes for that owner already sitting in the
 /// grace window, which is what lets a node handed a ledger keep the paths the
@@ -264,11 +265,14 @@ fn an_undo_puts_back_the_notes_the_ceiling_let_go_of() {
 /// of them back and the set ends up over a bound that exists to stop a public
 /// address being a way to make somebody else's node grow for ever.
 ///
-/// A ceiling a supported path walks past is not a ceiling, so the same trim
-/// runs there, cheapest first, and the set comes back under it before the call
-/// returns.
+/// A ceiling a supported path walks past for good is not a ceiling, so the
+/// next block's trim brings the set back, cheapest first. It used to run
+/// inside the call, with a record nobody kept, and the paths it let go of were
+/// then lost to a reorganisation: see `following_after_the_fact.rs`. What
+/// this holds is the bound on the wait: one window over at most, however
+/// often the question is asked, and under again after one block.
 #[test]
-fn asking_to_follow_again_does_not_climb_over_the_ceiling() {
+fn asking_to_follow_again_is_brought_back_under_the_ceiling_by_the_next_block() {
     let params = params();
     let miner = wallet(1);
     let alice = wallet(2);
@@ -337,14 +341,44 @@ fn asking_to_follow_again_does_not_climb_over_the_ceiling() {
          longer testing what it says"
     );
 
-    for _ in 0..4 {
+    state.watch_owner(alice.public_key());
+    let asked = state.watched_notes().count();
+    assert!(
+        asked > WATCHED_NOTES && asked <= WATCHED_NOTES + GRACE_NOTES,
+        "asking again left {asked} followed notes, which is not the one window over the \
+         ceiling of {WATCHED_NOTES} the next block brings back"
+    );
+    for _ in 0..3 {
         state.watch_owner(alice.public_key());
-        assert!(
-            state.watched_notes().count() <= WATCHED_NOTES,
-            "asking again left {} followed notes, past the ceiling of {WATCHED_NOTES}",
-            state.watched_notes().count()
+        assert_eq!(
+            state.watched_notes().count(),
+            asked,
+            "asking once more climbed further over the ceiling"
         );
     }
+
+    let height = source.next_height().unwrap();
+    let coinbase = CoinbaseTransaction::new(
+        height,
+        vec![Note::new(params.reward_at(height), miner.public_key())],
+    );
+    let block = assemble_block(
+        &source,
+        coinbase,
+        Vec::new(),
+        &params,
+        1_000 + height * 600,
+        0,
+    )
+    .unwrap();
+    connect_block(&mut source, &block, &params, NOW).unwrap();
+    connect_block(&mut state, &block, &params, NOW).unwrap();
+    assert!(
+        state.watched_notes().count() <= WATCHED_NOTES,
+        "a block went by and {} notes are still followed, past the ceiling of \
+         {WATCHED_NOTES}",
+        state.watched_notes().count()
+    );
 }
 
 /// The paths a node keeps are the window's and the followed notes', and no
