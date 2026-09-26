@@ -1647,6 +1647,11 @@ struct Shared {
     /// cleared the moment one is let in, and a node refusing one visitor in ten
     /// would otherwise never show it.
     turned_away: AtomicU64,
+    /// Hosts turned away for misbehaving, by what they did.
+    ///
+    /// A leaf: it is written from the thread reading a peer once that
+    /// connection has ended, which holds nothing else then.
+    turning_away: Mutex<TurningAway>,
     /// When this node last dialled an address only to hear whether anybody
     /// answers there: see [`feel`].
     felt_at: AtomicU64,
@@ -2383,6 +2388,95 @@ fn keep_the_latest(left: &mut Vec<Standing>, at: impl Fn(&Standing) -> u64, coun
     left.drain(..kept);
 }
 
+/// Hosts this node turned away for misbehaving, by what they did, over its
+/// whole life.
+///
+/// A refusal used to be said nowhere. The only reader of why a peer was
+/// dropped was the question of whether to refuse it, so the three ways this
+/// node has refused honest peers in the past (a block from its own clock, a
+/// block from the other side of a rule change, a body forged ahead of the
+/// real one) were invisible while they were happening.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TurnedAway {
+    /// For sending more in one window than talking takes.
+    pub flooding: u64,
+    /// For a frame larger than the protocol allows, or one that did not
+    /// decode.
+    pub bad_frames: u64,
+    /// For speaking before introducing themselves.
+    pub unannounced: u64,
+    /// For introducing themselves twice.
+    pub introduced_twice: u64,
+    /// For a block this node rejects.
+    pub bad_blocks: u64,
+    /// Different machines turned away for a block this node rejects in the
+    /// last [`BAD_BLOCK_WINDOW`] seconds.
+    ///
+    /// One is a broken or hostile peer. Several at once is more often this
+    /// node disagreeing with the network than the network all misbehaving
+    /// together, which is worth an operator's attention the moment it starts.
+    pub bad_block_hosts_lately: usize,
+}
+
+/// Seconds over which [`TurnedAway::bad_block_hosts_lately`] counts.
+pub const BAD_BLOCK_WINDOW: u64 = 600;
+
+/// Refusals for a bad block remembered for [`TurnedAway::bad_block_hosts_lately`].
+///
+/// Fed by whoever sends a bad block, so it needs a ceiling; the question it
+/// answers is whether several machines are involved, and this is far above
+/// the number that settles it.
+const BAD_BLOCK_HOSTS: usize = 64;
+
+/// What [`TurnedAway`] is counted from.
+#[derive(Debug, Default)]
+struct TurningAway {
+    counted: TurnedAway,
+    /// When each recent refusal for a bad block was, and of which machine.
+    bad_blocks: std::collections::VecDeque<(u64, IpAddr)>,
+}
+
+impl TurningAway {
+    /// Counts one host turned away, for what `parting` says it did.
+    fn count(&mut self, host: IpAddr, parting: &Parting, now: u64) {
+        let counted = &mut self.counted;
+        let slot = if parting.flooded {
+            &mut counted.flooding
+        } else if parting.failure.as_ref().is_some_and(is_peer_fault) {
+            &mut counted.bad_frames
+        } else {
+            match parting.dropped {
+                Some(DropReason::Unannounced { .. }) => &mut counted.unannounced,
+                Some(DropReason::RepeatedHandshake) => &mut counted.introduced_twice,
+                Some(DropReason::BadBlock { .. }) => {
+                    if self.bad_blocks.len() >= BAD_BLOCK_HOSTS {
+                        self.bad_blocks.pop_front();
+                    }
+                    self.bad_blocks.push_back((now, machine_of(host)));
+                    &mut counted.bad_blocks
+                }
+                _ => return,
+            }
+        };
+        *slot = slot.saturating_add(1);
+    }
+
+    /// What has been counted, with the machines turned away for a bad block
+    /// within [`BAD_BLOCK_WINDOW`] of `now`.
+    fn said(&self, now: u64) -> TurnedAway {
+        let lately: HashSet<IpAddr> = self
+            .bad_blocks
+            .iter()
+            .filter(|(at, _)| now.saturating_sub(*at) < BAD_BLOCK_WINDOW)
+            .map(|(_, machine)| *machine)
+            .collect();
+        TurnedAway {
+            bad_block_hosts_lately: lately.len(),
+            ..self.counted
+        }
+    }
+}
+
 /// Whether an address's mark is still worth keeping: something holds it, or
 /// its window is the current one. Kept apart from the table it prunes so the
 /// rule can be held on its own.
@@ -2874,6 +2968,12 @@ impl Shared {
 
     fn refuses(&self, host: IpAddr, now: u64) -> bool {
         self.refusals().refuses(host, now)
+    }
+
+    fn turning_away(&self) -> MutexGuard<'_, TurningAway> {
+        self.turning_away
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Whether one more connection from `host` is welcome.
@@ -4467,6 +4567,7 @@ impl Node {
             unread: Mutex::new(unread),
             unanswered: Mutex::new(None),
             turned_away: AtomicU64::new(0),
+            turning_away: Mutex::new(TurningAway::default()),
             felt_at: AtomicU64::new(0),
             mended_nodes: AtomicU64::new(0),
             proofs_asked_for: AtomicU64::new(0),
@@ -5362,6 +5463,11 @@ impl Node {
     /// being is reachable, which is the one thing about itself it cannot see.
     pub fn unanswered(&self) -> Option<Unanswered> {
         self.shared.unanswered().clone()
+    }
+
+    /// Hosts this node turned away for misbehaving, by what they did.
+    pub fn refused_hosts(&self) -> TurnedAway {
+        self.shared.turning_away().said(unix_now())
     }
 
     /// Visitors this node could not take, over its whole life.
@@ -9347,7 +9453,7 @@ fn read_loop(
         }
     }
 
-    note_the_ending(shared, remote, dialled, &parting, peer.greeted);
+    note_the_ending(shared, remote, dialled, &parting, peer.greeted, unix_now());
     // Always, however the loop ended. It is what frees the writing thread: a
     // write on a socket just shut fails at once, wherever in a frame it was.
     let _ = stream.shutdown(Shutdown::Both);
@@ -9480,11 +9586,16 @@ fn note_the_ending(
     dialled: Option<SocketAddr>,
     parting: &Parting,
     greeted: bool,
+    now: u64,
 ) {
-    let now = unix_now();
     if parting.misbehaved() {
         if let Some(host) = remote {
             shared.refuse(host, now);
+            // Counted only where the refusal is real: the loopback is never
+            // turned away, so it is not counted as turned away either.
+            if can_be_refused(host) {
+                shared.turning_away().count(host, parting, now);
+            }
         }
     }
     if let Some(address) = dialled {
@@ -12670,6 +12781,125 @@ mod peers_and_loops {
             parting(false, false, None, None).reached(false),
             Reached::Nothing,
             "silence was taken for a node with no room"
+        );
+    }
+
+    /// Ends a connection from `198.51.100.<at>` the way `parting` says, at
+    /// `now`.
+    fn turn_away(node: &Node, at: u8, parting: &Parting, now: u64) {
+        let host = IpAddr::from([198, 51, 100, at]);
+        note_the_ending(&node.shared, Some(host), None, parting, true, now);
+    }
+
+    /// A connection dropped for `reason`.
+    fn dropped_for(reason: DropReason) -> Parting {
+        Parting {
+            dropped: Some(reason),
+            ..Parting::default()
+        }
+    }
+
+    /// A host turned away is counted by what it did.
+    ///
+    /// A refusal was said nowhere: why a peer was dropped was read only to
+    /// decide whether to refuse it. So a node refusing every honest peer that
+    /// offered it a block, which three defects in this codebase have done,
+    /// did it in silence. Nothing counted, so nothing asked.
+    #[test]
+    fn a_host_turned_away_is_counted_by_what_it_did() {
+        let node = quiet();
+        let now = unix_now();
+        let bad_block = dropped_for(DropReason::BadBlock { id: Hash32::ZERO });
+        let too_large = Parting {
+            failure: Some(WireError::FrameTooLarge {
+                declared: 9,
+                limit: 1,
+            }),
+            ..Parting::default()
+        };
+        let flood = Parting {
+            flooded: true,
+            ..Parting::default()
+        };
+        let endings = [
+            (1, &bad_block),
+            (2, &bad_block),
+            (3, &flood),
+            (4, &too_large),
+            (5, &too_large),
+            (6, &dropped_for(DropReason::RepeatedHandshake)),
+            (7, &dropped_for(DropReason::RepeatedHandshake)),
+            (8, &dropped_for(DropReason::RepeatedHandshake)),
+            (9, &dropped_for(DropReason::Unannounced { kind: "Ping" })),
+            (10, &dropped_for(DropReason::Unannounced { kind: "Ping" })),
+            (11, &dropped_for(DropReason::Unannounced { kind: "Ping" })),
+            (12, &dropped_for(DropReason::Unannounced { kind: "Ping" })),
+            // Let go without being turned away, so not counted.
+            (13, &dropped_for(DropReason::WrongVersion { theirs: 9 })),
+        ];
+        for (at, parting) in endings {
+            turn_away(&node, at, parting, now);
+        }
+        // The loopback is never turned away, so it is not counted as turned
+        // away either.
+        note_the_ending(
+            &node.shared,
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            None,
+            &flood,
+            true,
+            now,
+        );
+        let said = node.refused_hosts();
+        assert_eq!(
+            (
+                said.bad_blocks,
+                said.flooding,
+                said.bad_frames,
+                said.introduced_twice,
+                said.unannounced
+            ),
+            (2, 1, 2, 3, 4),
+            "hosts turned away were not counted, or were counted under something other \
+             than what they did"
+        );
+    }
+
+    /// Several machines turned away for a block this node rejects are
+    /// counted together while they are recent, once each.
+    ///
+    /// Several at once is more often this node disagreeing with the network
+    /// than the network all misbehaving together, and nothing counted it.
+    #[test]
+    fn machines_turned_away_for_bad_blocks_lately_are_counted_once_each() {
+        let node = quiet();
+        let now = unix_now();
+        let bad_block = dropped_for(DropReason::BadBlock { id: Hash32::ZERO });
+        for at in [1, 2, 3, 3] {
+            turn_away(&node, at, &bad_block, now);
+        }
+        assert_eq!(
+            node.refused_hosts().bad_block_hosts_lately,
+            3,
+            "the machines turned away for bad blocks lately were not counted once each"
+        );
+        let later = now + BAD_BLOCK_WINDOW;
+        turn_away(&node, 4, &bad_block, later);
+        assert_eq!(
+            node.shared
+                .turning_away()
+                .said(later)
+                .bad_block_hosts_lately,
+            1,
+            "machines turned away longer ago than the window were still counted as lately"
+        );
+        assert_eq!(
+            node.shared
+                .turning_away()
+                .said(later - 1)
+                .bad_block_hosts_lately,
+            4,
+            "machines turned away inside the window were forgotten early"
         );
     }
 
