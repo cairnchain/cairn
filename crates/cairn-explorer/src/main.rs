@@ -10,6 +10,7 @@ mod api;
 mod assets;
 mod index;
 mod options;
+mod said;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -26,18 +27,103 @@ use crate::api::Explorer;
 /// network, slow enough that a busy page cannot make the node wait on it.
 const REFRESH: Duration = Duration::from_millis(500);
 
+/// How often the explorer asks its node whether it has stopped itself, which
+/// is how often `cairnd` asks.
+const TICK: Duration = Duration::from_millis(100);
+
+/// Why this program is stopping, when it did not get as far as serving.
+///
+/// Two things, and they were one. A command line this program cannot read is
+/// the operator's to fix, and the usage text is what fixes it. A start that
+/// failed had a command line that was right: the directory is held by
+/// another explorer, the port is taken, the disk will not have it. The usage
+/// text at somebody in that position sends them looking for a mistake that is
+/// not there, and one exit code for both left whatever started this program
+/// unable to tell them apart. `cairnd` made this distinction first; this is
+/// its `Stopping`, for the same reasons.
+#[derive(Debug)]
+enum Stopping {
+    /// The command line, which the usage text is the answer to. Exits two.
+    Misread(String),
+    /// Everything after it, where the message is the whole answer. Exits one.
+    CouldNotStart(String),
+}
+
+impl std::fmt::Display for Stopping {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Misread(message) | Self::CouldNotStart(message) => formatter.write_str(message),
+        }
+    }
+}
+
 fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if let Err(message) = run(&arguments) {
         eprintln!("cairn-explorer: {message}");
-        eprintln!();
-        eprintln!("{}", options::HELP);
-        std::process::exit(2);
+        if let Stopping::Misread(_) = message {
+            eprintln!();
+            eprintln!("{}", options::HELP);
+            std::process::exit(2);
+        }
+        std::process::exit(1);
     }
 }
 
-fn run(arguments: &[String]) -> Result<(), String> {
-    let Some(options) = options::resolve_options(arguments)? else {
+/// Waits for the node to stop itself and says why, or for this program to be
+/// asked to stop.
+///
+/// `stopped` is the node's own account, asked every [`TICK`]. The node stops
+/// itself in three states and ends every loop it runs, and the explorer went
+/// on serving what it had for as long as the process lived: a frozen chain,
+/// nothing in the journal, and a `Restart=always` that never fired because
+/// the process never ended.
+fn watch(stopped: impl Fn() -> Option<String>, running: &AtomicBool) -> Option<String> {
+    loop {
+        if let Some(fault) = stopped() {
+            return Some(fault);
+        }
+        if !running.load(Ordering::SeqCst) {
+            return None;
+        }
+        thread::sleep(TICK);
+    }
+}
+
+/// What the open found on the disk, and the three things `cairnd` says before
+/// it has answered anybody.
+///
+/// Every way the disk was short when it opened, and not two of them. The
+/// explorer is the archivist `cairnd`'s paragraph about a set-aside log speaks
+/// to, and it was the one program that never printed it.
+fn say_what_the_start_found(
+    node: &Node,
+    restored: &cairn_net::Restored,
+    params: &cairn_ledger::validation::ConsensusParams,
+    directory: &str,
+) {
+    for line in said::what_was_restored(restored, directory) {
+        println!("{line}");
+    }
+    if let Some(unread) = node.unread() {
+        for line in said::wrapped(&said::will_not_read_back(&unread, directory)) {
+            println!("             {line}");
+        }
+    }
+    if let Some(probation) = node.probation() {
+        println!("probation    {probation}");
+        println!("             every page on the site says so until it has");
+    }
+    if let Some(ahead) = said::rules_running_out(params, node.height()) {
+        for line in said::wrapped(&ahead) {
+            println!("             {line}");
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn run(arguments: &[String]) -> Result<(), Stopping> {
+    let Some(options) = options::resolve_options(arguments).map_err(Stopping::Misread)? else {
         println!("{}", options::HELP);
         return Ok(());
     };
@@ -70,7 +156,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
     }
 
     let (node, restored) = Node::open_archiving(options.params, options.listen, &options.data)
-        .map_err(|error| format!("could not start: {error}"))?;
+        .map_err(|error| Stopping::CouldNotStart(format!("could not start: {error}")))?;
     // Before anything else this node does. A node's own budget is a gigabyte
     // and it drops the oldest blocks past it, which for an explorer is the
     // blocks it needs most: the index is built by walking from the first block
@@ -82,10 +168,8 @@ fn run(arguments: &[String]) -> Result<(), String> {
         "blocks       {}",
         options::kept(options.keep, &options.params)
     );
-    println!(
-        "restored     {} blocks, {} addresses",
-        restored.blocks, restored.addresses
-    );
+    let directory = options.data.display().to_string();
+    say_what_the_start_found(&node, &restored, &options.params, &directory);
 
     // The names, not just what they resolved to, so a machine that could not
     // look anything up at this moment asks again while it runs.
@@ -106,11 +190,11 @@ fn run(arguments: &[String]) -> Result<(), String> {
         }
     }
 
-    let listener =
-        cairn_http::bind(options.http).map_err(|error| format!("could not serve HTTP: {error}"))?;
-    let served = listener
-        .local_addr()
-        .map_err(|error| format!("could not read the HTTP address: {error}"))?;
+    let listener = cairn_http::bind(options.http)
+        .map_err(|error| Stopping::CouldNotStart(format!("could not serve HTTP: {error}")))?;
+    let served = listener.local_addr().map_err(|error| {
+        Stopping::CouldNotStart(format!("could not read the HTTP address: {error}"))
+    })?;
 
     let explorer = Arc::new(Explorer::new(node));
     let running = Arc::new(AtomicBool::new(true));
@@ -126,8 +210,50 @@ fn run(arguments: &[String]) -> Result<(), String> {
                     thread::sleep(REFRESH);
                 }
             })
-            .map_err(|error| format!("could not start the indexer: {error}"))?
+            .map_err(|error| {
+                Stopping::CouldNotStart(format!("could not start the indexer: {error}"))
+            })?
     };
+
+    // The node's own verdict on itself, read for the process and not only
+    // written into `/api/status`. When the node stops itself this program says
+    // why and ends on a code of one, which is what the unit reads. The server
+    // below looks at its flag only when somebody connects, so it is not asked
+    // to stop, it is stopped.
+    //
+    // Written here rather than in a function of its own, because nothing in
+    // the suite can put a running node in any of those three states: the
+    // decision is `watch`, which is held, and what is left is the glue.
+    {
+        let explorer = Arc::clone(&explorer);
+        let running = Arc::clone(&running);
+        thread::Builder::new()
+            .name("explorer-watch".to_owned())
+            .spawn(move || {
+                let node = explorer.node();
+                let fault = watch(
+                    || {
+                        said::stopped_itself(
+                            node.outdated(),
+                            node.stranded(),
+                            node.unwritten(),
+                            &directory,
+                        )
+                    },
+                    &running,
+                );
+                if let Some(fault) = fault {
+                    println!("stopping: {fault}");
+                    running.store(false, Ordering::SeqCst);
+                    node.shutdown();
+                    println!("stopped on the fault above");
+                    std::process::exit(1);
+                }
+            })
+            .map_err(|error| {
+                Stopping::CouldNotStart(format!("could not start the watch: {error}"))
+            })?;
+    }
 
     // The door opens now, and not after the first pass over the chain. It used
     // to wait for it: on a chain of any size that is minutes of a bound socket
@@ -148,8 +274,11 @@ fn run(arguments: &[String]) -> Result<(), String> {
     println!("open         http://{served}/");
     println!();
 
+    // Without bodies: no route here takes one, and a POST whose body never
+    // came held a slot for the whole deadline behind the proxy, where every
+    // reader shares the loopback address the per-address ceiling skips.
     let answering = Arc::clone(&explorer);
-    cairn_http::serve(&listener, &running, move |request| {
+    cairn_http::serve_without_bodies(&listener, &running, move |request| {
         answering
             .answer(request)
             .unwrap_or_else(|| assets::answer(request))
@@ -160,4 +289,48 @@ fn run(arguments: &[String]) -> Result<(), String> {
     let _ = indexer.join();
     println!("stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicBool;
+
+    use super::watch;
+
+    /// The explorer stops when its node stops itself, and says why.
+    ///
+    /// It read its node's three fatal states only to write them into
+    /// `/api/status`, and nothing read them for the process: an explorer whose
+    /// disk had filled went on serving a frozen chain for as long as it ran,
+    /// and nothing looked for them to fail on.
+    #[test]
+    fn the_explorer_stops_when_its_node_stops_itself() {
+        let running = AtomicBool::new(true);
+        let asked = std::cell::Cell::new(0u32);
+        let said = watch(
+            || {
+                asked.set(asked.get().saturating_add(1));
+                (asked.get() > 2).then(|| "the disk under here stopped".to_owned())
+            },
+            &running,
+        );
+        assert_eq!(
+            said.as_deref(),
+            Some("the disk under here stopped"),
+            "a node that stopped itself is not noticed"
+        );
+        assert_eq!(asked.get(), 3, "it is asked again until it says so");
+
+        let running = AtomicBool::new(false);
+        assert_eq!(
+            watch(|| None, &running),
+            None,
+            "an explorer asked to stop is stopped as asked, with no fault to say"
+        );
+        let running = AtomicBool::new(false);
+        assert!(
+            watch(|| Some("stopped".to_owned()), &running).is_some(),
+            "a fault is said even when the explorer was already stopping"
+        );
+    }
 }
