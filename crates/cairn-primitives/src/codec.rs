@@ -220,6 +220,13 @@ impl<T: Decode> Decode for Vec<T> {
 /// something to build. Where a rule already says how many there can be, the
 /// decoder is the cheapest place to read it, and `type_name` is what the
 /// refusal names.
+///
+/// The ceiling holds here too, whatever `most` is. It is the floor the format
+/// puts under every decoder, and this read the caller's cap alone, so a cap
+/// above it read a count no conforming decoder reads. No caller in this
+/// workspace names one; the function is public and says nothing to stop the
+/// next. A count past the caller's cap is refused as that, first, so every
+/// refusal a caller already sees stays the one it sees.
 pub fn take_at_most<T: Decode>(
     reader: &mut Reader<'_>,
     most: usize,
@@ -228,6 +235,9 @@ pub fn take_at_most<T: Decode>(
     let declared = usize::try_from(u32::decode_from(reader)?).unwrap_or(usize::MAX);
     if declared > most {
         return Err(CodecError::InvalidValue { type_name });
+    }
+    if declared > MAX_SEQUENCE_LEN {
+        return Err(CodecError::SequenceTooLong { declared });
     }
     let mut items = Vec::with_capacity(declared.min(INITIAL_SEQUENCE_CAPACITY));
     for _ in 0..declared {

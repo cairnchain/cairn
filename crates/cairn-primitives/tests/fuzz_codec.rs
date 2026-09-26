@@ -324,6 +324,98 @@ fn a_count_past_a_callers_cap_is_refused_where_it_is_read() {
     assert!(ran.cases >= 100, "the campaign ran {} cases", ran.cases);
 }
 
+/// A count past the format's floor is refused where it is read, whatever cap
+/// the caller names.
+///
+/// The campaign above draws its cap below 4 096, so it never asked what a cap
+/// past [`MAX_SEQUENCE_LEN`] does. Nothing did: the capped reader compared the
+/// count with the caller's cap alone, so a cap above the floor read a count
+/// the specification says a decoder MUST refuse before reading any item, and
+/// ran its loop until the bytes ran out, answering `UnexpectedEnd` where the
+/// generic decoder answers `SequenceTooLong`.
+#[test]
+fn a_count_past_the_floor_is_refused_whatever_cap_the_caller_names() {
+    let campaign = Campaign::named("codec: counts past the floor under a generous cap");
+    let floor = u32::try_from(MAX_SEQUENCE_LEN).unwrap();
+
+    let ran = campaign.run(4_000, |case, rng| {
+        let declared = floor
+            .saturating_add(1)
+            .saturating_add(rng.edgy_u32() % 4_096);
+        let at_least = usize::try_from(declared).unwrap();
+        // A cap the count does not pass, so the refusal can only be the
+        // floor's: sometimes exactly the count, sometimes anything above it.
+        let most = if rng.chance(8) {
+            usize::MAX
+        } else {
+            at_least.saturating_add(rng.below(1 << 20))
+        };
+        let mut bytes = declared.encode();
+        let body = rng.between(0, 64);
+        bytes.extend_from_slice(&rng.bytes(body));
+
+        let mut reader = Reader::new(&bytes);
+        let answer = take_at_most::<u8>(&mut reader, most, "under test").err();
+        assert_eq!(
+            answer,
+            Some(CodecError::SequenceTooLong { declared: at_least }),
+            "a cap of {most} let a count of {declared} past the floor of \
+             {MAX_SEQUENCE_LEN} be read (case {case})"
+        );
+    });
+
+    assert!(ran.cases >= 100, "the campaign ran {} cases", ran.cases);
+}
+
+/// A frame one element past the floor, with every element present, is refused
+/// by the capped reader as it is by the generic one.
+///
+/// The campaign above feeds a count with a few bytes behind it, so the loop
+/// that should never start ends early anyway. Here the frame pays for every
+/// element it declares, which is the case where a reader missing the floor
+/// builds all of them: it came back holding 1 048 577 elements.
+#[test]
+fn the_capped_reader_refuses_a_frame_past_the_floor_that_pays_for_every_element() {
+    let declared = MAX_SEQUENCE_LEN + 1;
+    let mut frame = u32::try_from(declared).unwrap().encode();
+    frame.extend_from_slice(&vec![7u8; declared]);
+
+    assert_eq!(
+        Vec::<u8>::decode(&frame).err(),
+        Some(CodecError::SequenceTooLong { declared }),
+        "the generic decoder read a count past the floor"
+    );
+    let mut reader = Reader::new(&frame);
+    assert_eq!(
+        take_at_most::<u8>(&mut reader, usize::MAX, "probe").err(),
+        Some(CodecError::SequenceTooLong { declared }),
+        "the capped reader built a sequence past the floor the specification sets \
+         under every decoder, where the generic decoder refuses the same frame"
+    );
+}
+
+/// A count of exactly the floor is read by the capped reader, under a cap
+/// above it and under a cap of exactly that count, as the generic decoder
+/// reads it.
+///
+/// The floor and the cap are ceilings a count may reach and not pass. A
+/// reader refusing at either would refuse a sequence its caller allows, and a
+/// refusal written with the comparison turned one step too far would pass
+/// every test that only ever reaches past it.
+#[test]
+fn a_count_of_exactly_the_floor_is_read_under_a_cap_above_it_or_equal_to_it() {
+    let mut frame = u32::try_from(MAX_SEQUENCE_LEN).unwrap().encode();
+    frame.extend_from_slice(&vec![7u8; MAX_SEQUENCE_LEN]);
+
+    for most in [MAX_SEQUENCE_LEN + 1, MAX_SEQUENCE_LEN] {
+        let mut reader = Reader::new(&frame);
+        let held = take_at_most::<u8>(&mut reader, most, "probe")
+            .expect("a count of exactly the floor, at or under the cap, is one the format allows");
+        assert_eq!(held.len(), MAX_SEQUENCE_LEN);
+        assert_eq!(reader.remaining(), 0, "and every element was read");
+    }
+}
+
 /// Nothing a sequence decodes to is larger than the bytes that paid for it.
 ///
 /// This is the observable form of "no declared length drives an allocation".
