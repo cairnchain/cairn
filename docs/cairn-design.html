@@ -1,3 +1,8 @@
+<!doctype html>
+<html lang="fr">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
 <title>Cairn</title>
 <link rel="stylesheet" href="cairn-design.css">
 <div class="paper" lang="fr">
@@ -18,7 +23,7 @@
 <section>
   <div class="num"><span>I</span>Le problème</div>
   <div class="body">
-    <h2>Toutes les cryptomonnaies se recentralisent en grandissant</h2>
+    <h2 id="toutes-les-cryptomonnaies-se-recentralisent-en-grandissant">Toutes les cryptomonnaies se recentralisent en grandissant</h2>
     <p class="lede">Ce n'est pas un accident de parcours. C'est une conséquence directe de leur conception, et personne ne l'a corrigée.</p>
 
     <p>
@@ -57,7 +62,7 @@
 <section>
   <div class="num"><span>II</span>La thèse</div>
   <div class="body">
-    <h2>Ne pas transporter le cahier. Transporter son sceau.</h2>
+    <h2 id="ne-pas-transporter-le-cahier-transporter-son-sceau">Ne pas transporter le cahier. Transporter son sceau.</h2>
     <p>
       Et si les nœuds ne gardaient pas le cahier ? À la place, chacun garde un
       <strong>sceau</strong> : un très petit code, quelques dizaines de caractères, calculé à
@@ -106,7 +111,7 @@
 <section>
   <div class="num"><span>III</span>Le mécanisme</div>
   <div class="body">
-    <h2>Deux températures : le tiroir et la cave</h2>
+    <h2 id="deux-températures-le-tiroir-et-la-cave">Deux températures : le tiroir et la cave</h2>
     <p>
       Cette inversion a un prix : elle déplace la charge sur l'utilisateur. Sa
       preuve se périme dès que quiconque transige, et s'il la perd, il ne peut plus
@@ -146,7 +151,7 @@
 <section>
   <div class="num"><span>IV</span><span class="chip locked">Verrouillé</span></div>
   <div class="body">
-    <h2>Les quatre décisions prises</h2>
+    <h2 id="les-quatre-décisions-prises">Les quatre décisions prises</h2>
     <p>
       Elles ne sont plus rouvertes sans raison majeure : tout le reste s'appuie
       dessus.
@@ -210,7 +215,7 @@
 <section>
   <div class="num"><span>V</span><span class="chip locked">Verrouillé</span></div>
   <div class="body">
-    <h2>Trois garanties gravées dans le protocole</h2>
+    <h2 id="trois-garanties-gravées-dans-le-protocole">Trois garanties gravées dans le protocole</h2>
     <p>
       Descendre à la cave n'est pas perdre son argent. La cave n'est pas une
       poubelle : un billet y vaut exactement ce qu'il vaut au tiroir. Ces trois
@@ -228,7 +233,7 @@
 <section>
   <div class="num"><span>VI</span>Raison d'être</div>
   <div class="body">
-    <h2>À quoi ça sert, concrètement</h2>
+    <h2 id="à-quoi-ça-sert-concrètement">À quoi ça sert, concrètement</h2>
     <p>
       Une monnaie sans raison d'exister est un support de spéculation, pas un
       projet. Mais cette raison n'a pas à être une application posée par-dessus :
@@ -256,7 +261,7 @@
 <section>
   <div class="num"><span>VII</span><span class="chip open">À trancher</span></div>
   <div class="body">
-    <h2>Ce qui reste ouvert</h2>
+    <h2 id="ce-qui-reste-ouvert">Ce qui reste ouvert</h2>
     <p>
       Les questions encore posées, par ordre d'urgence. Aucune ne bloque le
       démarrage du code.
@@ -273,7 +278,7 @@
 <section>
   <div class="num"><span>VIII</span>Le chemin</div>
   <div class="body">
-    <h2>L'ordre des choses</h2>
+    <h2 id="l-ordre-des-choses">L'ordre des choses</h2>
     <ol class="road">
       <li class="done"><div><b>Le cœur<span class="state">Fait</span></b><span>Billets, signatures, blocs, validation. Écrit en Rust, 50 tests au vert : une chaîne produit des blocs, les vérifie, refuse une double dépense, une signature falsifiée, une création de valeur, un bloc rattaché au mauvais parent.</span></div></li>
       <li class="done"><div><b>Le sceau<span class="state">Fait</span></b><span>L'accumulateur et les preuves d'appartenance et d'absence. Un million de billets tombés tiennent dans au plus soixante-quatre empreintes de 32 octets ; une preuve pèse 586 octets en moyenne. Une preuve périmée cesse de fonctionner, une preuve ne peut pas être rejouée pour un billet voisin, et l'empreinte ne dépend que du contenu, jamais de l'ordre des opérations.</span></div></li>

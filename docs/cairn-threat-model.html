@@ -1,3 +1,8 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
 <title>Cairn Threat Model</title>
 <link rel="stylesheet" href="cairn-whitepaper.css">
 <div class="paper" lang="en">
@@ -43,7 +48,7 @@
 <section>
   <div class="num">1</div>
   <div class="body">
-    <h2>What is defended</h2>
+    <h2 id="what-is-defended">What is defended</h2>
     <p>
       In order of how bad a failure would be.
     </p>
@@ -84,7 +89,7 @@
 <section>
   <div class="num">2</div>
   <div class="body">
-    <h2>Who acts</h2>
+    <h2 id="who-acts">Who acts</h2>
     <div class="scroll">
       <table>
         <thead><tr><th>Actor</th><th>What it can do</th><th>What stands in the way</th><th>Left open</th></tr></thead>
@@ -109,7 +114,7 @@
 <section>
   <div class="num">3</div>
   <div class="body">
-    <h2>What is assumed</h2>
+    <h2 id="what-is-assumed">What is assumed</h2>
     <div class="scroll">
       <table>
         <thead><tr><th>Assumption</th><th>If it is false</th><th>Held by</th><th>Left open</th></tr></thead>
@@ -127,7 +132,7 @@
       </table>
     </div>
 
-    <h3><span class="sub">3.1</span>The three assumptions that would stop the project</h3>
+    <h3 id="the-three-assumptions-that-would-stop-the-project"><span class="sub">3.1</span>The three assumptions that would stop the project</h3>
 
     <p>
       The 30 August model named three of these as the ones whose failure ends the
@@ -161,7 +166,7 @@
 <section>
   <div class="num">4</div>
   <div class="body">
-    <h2>Where it can be reached</h2>
+    <h2 id="where-it-can-be-reached">Where it can be reached</h2>
     <div class="scroll">
       <table>
         <thead><tr><th>Surface</th><th>What stands in the way</th><th>Held by</th><th>Left open</th></tr></thead>
@@ -186,7 +191,7 @@
 <section>
   <div class="num">5</div>
   <div class="body">
-    <h2>What makes this model unusual</h2>
+    <h2 id="what-makes-this-model-unusual">What makes this model unusual</h2>
     <p>
       There is no finality. A node will not undo more than <code>MAX_REORG_DEPTH</code>
       blocks, and that is its own policy, not a rule of the chain: two

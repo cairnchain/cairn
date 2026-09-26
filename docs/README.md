@@ -154,18 +154,29 @@ paragraph is a change, and the round-trip test will say so.
 where it sits on the page, indented to fit. That is the figures, the parameter
 list, the table, the reference list, and a paragraph carrying a class such as
 `claim` or `fig-note`: about a fifth of the whitepaper, and the rest of it is
-prose. Leave no blank line inside such a block or Markdown ends it early.
+prose. Leave no blank line inside such a block: Markdown ends it there, and
+the renderer refuses the page rather than publish what that leaves.
 
 A Markdown table is refused by name rather than rendered as a row of pipes, so
 you find out at once rather than in a diff. Anything else the renderer has no
-shape for is refused the same way: nothing is dropped quietly.
+shape for is refused the same way: nothing is dropped quietly. That includes a
+code block indented rather than fenced, and a list item holding two
+paragraphs.
+
+Every heading carries an anchor made from its words, so a section can be
+linked to as `#the-hot-set` and the link survives a section inserted above it.
+
+A rendered file is a whole page, from the doctype to the last line, with the
+language from the front matter and a character set, so it opens correctly from
+a checkout as well as from a node.
 
 ## Adding a document
 
 1. Write `docs/your-document.md`.
 2. Add it to `DOCUMENTS` in `crates/cairn-docs/src/lib.rs` so it is rendered.
 3. Add it to `PAPERS` in `crates/cairn-explorer/src/assets.rs` with the path it
-   is served at, so a node hands it out.
+   is served at, so a node hands it out. A test holds the two lists to each
+   other.
 4. Run `cargo run -p cairn-docs` to generate the HTML, and commit both files.
 5. If it names a number that comes from the code, write the guard first and the
    sentence second. It is much easier in that order.

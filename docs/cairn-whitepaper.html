@@ -1,3 +1,8 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
 <title>The Cairn Protocol</title>
 <link rel="stylesheet" href="cairn-whitepaper.css">
 <div class="paper" lang="en">
@@ -51,7 +56,7 @@
 <section>
   <div class="num">1</div>
   <div class="body">
-    <h2>The problem is the cost of verifying, not the cost of transacting</h2>
+    <h2 id="the-problem-is-the-cost-of-verifying-not-the-cost-of-transacting">The problem is the cost of verifying, not the cost of transacting</h2>
     <p>
       A permissionless currency works because many independent parties check
       it. Nobody is in charge, so the checking is what prevents cheating. The
@@ -87,7 +92,7 @@
 <section>
   <div class="num">2</div>
   <div class="body">
-    <h2>Notes, and why they are not balances</h2>
+    <h2 id="notes-and-why-they-are-not-balances">Notes, and why they are not balances</h2>
     <p>
       Cairn keeps notes rather than accounts. A note is a value locked to a
       public key, identified by the transaction that created it and its index
@@ -134,7 +139,7 @@
 <section>
   <div class="num">3</div>
   <div class="body">
-    <h2>Two tiers, and only one of them is held</h2>
+    <h2 id="two-tiers-and-only-one-of-them-is-held">Two tiers, and only one of them is held</h2>
     <p>
       Validation state is split in two by a consensus rule.
     </p>
@@ -171,7 +176,7 @@
       </p>
     </figure>
 
-    <h3><span class="sub">3.1</span>The hot set</h3>
+    <h3 id="the-hot-set"><span class="sub">3.1</span>The hot set</h3>
 
     <p>
       A sparse Merkle tree, persistent through structural sharing so that a
@@ -182,7 +187,7 @@
       tree the clearest remaining optimisation; it changes no rule.
     </p>
 
-    <h3><span class="sub">3.2</span>The cold set</h3>
+    <h3 id="the-cold-set"><span class="sub">3.2</span>The cold set</h3>
 
     <p>
       An append-only forest of perfect binary trees, held as one root per
@@ -206,7 +211,7 @@
       invalidate each other.
     </p>
 
-    <h3><span class="sub">3.3</span>Where Cairn differs from prior accumulator work</h3>
+    <h3 id="where-cairn-differs-from-prior-accumulator-work"><span class="sub">3.3</span>Where Cairn differs from prior accumulator work</h3>
 
     <p>
       Utreexo is a node-level optimisation. Any operator may adopt it
@@ -241,14 +246,14 @@
 <section>
   <div class="num">4</div>
   <div class="body">
-    <h2>Spending what nobody holds</h2>
+    <h2 id="spending-what-nobody-holds">Spending what nobody holds</h2>
     <p>
       A spender of a fallen note supplies an inclusion proof. The node verifies
       it against roots it already has and never needs the set. Two windows make
       this workable rather than merely correct.
     </p>
 
-    <h3><span class="sub">4.1</span>A proof is worth what it is worth now</h3>
+    <h3 id="a-proof-is-worth-what-it-is-worth-now"><span class="sub">4.1</span>A proof is worth what it is worth now</h3>
 
     <p>
       A proof is checked against the cold set as it stands, and against nothing
@@ -273,7 +278,7 @@
       and a wallet already keeps its own proofs current as the forest grows.
     </p>
 
-    <h3><span class="sub">4.2</span>The grace window</h3>
+    <h3 id="the-grace-window"><span class="sub">4.2</span>The grace window</h3>
 
     <p>
       A note that has just fallen remains spendable with no proof at all for
@@ -293,7 +298,7 @@
       into a guarantee for whoever is paying.
     </p>
 
-    <h3><span class="sub">4.3</span>Archivists</h3>
+    <h3 id="archivists"><span class="sub">4.3</span>Archivists</h3>
 
     <p>
       A wallet keeps its own proofs current from what every block already
@@ -390,8 +395,8 @@
 <section>
   <div class="num">5</div>
   <div class="body">
-    <h2>Consensus</h2>
-    <h3><span class="sub">5.1</span>Proof of work, and why not stake</h3>
+    <h2 id="consensus">Consensus</h2>
+    <h3 id="proof-of-work-and-why-not-stake"><span class="sub">5.1</span>Proof of work, and why not stake</h3>
 
     <p>
       The reason is the beginning rather than the steady state. Proof of stake
@@ -402,7 +407,7 @@
       privileged, the opening is exactly where that claim is tested.
     </p>
 
-    <h3><span class="sub">5.2</span>Difficulty and timestamps</h3>
+    <h3 id="difficulty-and-timestamps"><span class="sub">5.2</span>Difficulty and timestamps</h3>
 
     <p>
       Difficulty retargets every block over a linearly weighted moving average
@@ -441,7 +446,7 @@
       in the future and made the chain run half again as slowly as its target.
     </p>
 
-    <h3><span class="sub">5.3</span>Fork choice</h3>
+    <h3 id="fork-choice"><span class="sub">5.3</span>Fork choice</h3>
 
     <p>
       By cumulative work, not length. Ties keep the branch already followed, so
@@ -475,7 +480,7 @@
 <section>
   <div class="num">6</div>
   <div class="body">
-    <h2>Emission</h2>
+    <h2 id="emission">Emission</h2>
     <p>
       Nothing is allocated. There is no sale, no founder allocation and no
       reserve; on the day a network opens the supply is zero and every unit
@@ -528,13 +533,13 @@
 <section>
   <div class="num">7</div>
   <div class="body">
-    <h2>Joining a chain without downloading it</h2>
+    <h2 id="joining-a-chain-without-downloading-it">Joining a chain without downloading it</h2>
     <p>
       A bounded steady-state cost is not the whole promise if arrival is
       unbounded, and this is where the design was weakest.
     </p>
 
-    <h3><span class="sub">7.1</span>The measured cost of arrival</h3>
+    <h3 id="the-measured-cost-of-arrival"><span class="sub">7.1</span>The measured cost of arrival</h3>
 
     <p>
       On this implementation, at one block per minute with blocks carrying 64
@@ -543,7 +548,7 @@
       weighing 68 MB.
     </p>
 
-    <h3><span class="sub">7.2</span>What headers commit to</h3>
+    <h3 id="what-headers-commit-to"><span class="sub">7.2</span>What headers commit to</h3>
 
     <p>
       Every header carries two fields beyond its own block, for 48 bytes:
@@ -570,7 +575,7 @@
       later.
     </p>
 
-    <h3><span class="sub">7.3</span>What sampling does not settle</h3>
+    <h3 id="what-sampling-does-not-settle"><span class="sub">7.3</span>What sampling does not settle</h3>
 
     <p>
       Weighing settles which chain carries the most work. It settles nothing
@@ -611,7 +616,7 @@
       the chain: in thirty years it is still a thousand blocks.
     </p>
 
-    <h3><span class="sub">7.4</span>Sampled verification</h3>
+    <h3 id="sampled-verification"><span class="sub">7.4</span>Sampled verification</h3>
 
     <p>
       One assumption is load-bearing here and was not stated before: that at
@@ -910,7 +915,7 @@
 <section>
   <div class="num">8</div>
   <div class="body">
-    <h2>The limit that applies, and where Cairn falls</h2>
+    <h2 id="the-limit-that-applies-and-where-cairn-falls">The limit that applies, and where Cairn falls</h2>
     <p>
       Christ and Bonneau prove an information-theoretic result about any system
       of this shape <sup><a href="#r1">[1]</a></sup>: there is no useful
@@ -976,7 +981,7 @@
 <section>
   <div class="num">9</div>
   <div class="body">
-    <h2>What this borrows, stated plainly</h2>
+    <h2 id="what-this-borrows-stated-plainly">What this borrows, stated plainly</h2>
     <p>
       Overclaiming is the fastest way to lose the only readers whose opinion
       matters.
@@ -1017,7 +1022,7 @@
 <section>
   <div class="num">10</div>
   <div class="body">
-    <h2>Parameters and measurements</h2>
+    <h2 id="parameters-and-measurements">Parameters and measurements</h2>
     <p>
       Every figure below is measured on the implementation rather than
       estimated, on one core of an ordinary machine.
@@ -1165,7 +1170,7 @@
 <section>
   <div class="num">11</div>
   <div class="body">
-    <h2>Limitations</h2>
+    <h2 id="limitations">Limitations</h2>
     <p>
       <strong>Nothing here has been audited.</strong> No external review has
       taken place. The only network in existence is a test network whose
@@ -1296,7 +1301,7 @@
 <section>
   <div class="num">12</div>
   <div class="body">
-    <h2>References</h2>
+    <h2 id="references">References</h2>
     <ol class="refs">
       <li id="r1">
         M. Christ and J. Bonneau. <em>Limits on revocable proof systems, with

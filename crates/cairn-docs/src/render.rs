@@ -32,7 +32,9 @@
 //! table, the reference list and a paragraph that carries a class. Everything
 //! else, which is the great majority of every document, is prose.
 
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use std::collections::BTreeSet;
+
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use crate::front::{self, Front, Subsections};
 use crate::{Error, Result};
@@ -88,6 +90,8 @@ struct Page<'a> {
     /// Whether the next block opens a container, and so wants no blank line in
     /// front of it.
     fresh: bool,
+    /// The anchors handed out so far, so that no two headings share one.
+    anchors: BTreeSet<String>,
 }
 
 impl<'a> Page<'a> {
@@ -98,10 +102,30 @@ impl<'a> Page<'a> {
             section: 0,
             sub: 0,
             fresh: true,
+            anchors: BTreeSet::new(),
         }
     }
 
     fn run(&mut self, front: &Front) -> Result<()> {
+        // The whole shell, and not a fragment for somebody else to finish.
+        // The explorer used to glue the declaration, the character set and
+        // the viewport on in front of each file at compile time, with the
+        // language typed a second time beside it; opened from a checkout, as
+        // the README says a paper can be, a page had no character set at all,
+        // and a browser that does not guess read every accent in the French
+        // papers as two characters. Written here, the language is the front
+        // matter's and nobody else's, and a file is the page it is served as.
+        self.line(0, "<!doctype html>");
+        self.line(
+            0,
+            &format!("<html lang=\"{}\">", attribute(&front.language)),
+        );
+        self.line(0, "<meta charset=\"utf-8\">");
+        self.line(
+            0,
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+        );
+        self.line(0, "<meta name=\"color-scheme\" content=\"dark light\">");
         self.line(0, &format!("<title>{}</title>", escape(&front.title)));
         self.line(
             0,
@@ -207,11 +231,14 @@ impl<'a> Page<'a> {
                 "a document has one `# ` heading, at the top. A section is `## `",
             )),
             HeadingLevel::H2 => {
-                let written = self.inline(Some(TagEnd::Heading(HeadingLevel::H2)), 4)?;
-                let (label, text) = match written.split_once(" | ") {
-                    Some((label, heading)) => (Some(label), heading),
-                    None => (None, written.as_str()),
+                let events = self.gather(TagEnd::Heading(HeadingLevel::H2))?;
+                let (label, heading) = labelled(events);
+                let label = match label {
+                    Some(label) => Some(inline_of_events(label, 4)?),
+                    None => None,
                 };
+                let anchor = self.anchor(&heading);
+                let text = inline_of_events(heading, 4)?;
                 self.close(open);
                 self.blank();
                 self.section = self.section.saturating_add(1);
@@ -231,7 +258,7 @@ impl<'a> Page<'a> {
                     ),
                 }
                 self.line(2, "<div class=\"body\">");
-                self.line(4, &format!("<h2>{text}</h2>"));
+                self.line(4, &format!("<h2 id=\"{anchor}\">{text}</h2>"));
                 self.fresh = true;
                 Ok(Open::Section)
             }
@@ -242,16 +269,18 @@ impl<'a> Page<'a> {
                          before the first `## `",
                     ));
                 }
-                let text = self.inline(Some(TagEnd::Heading(HeadingLevel::H3)), 4)?;
+                let events = self.gather(TagEnd::Heading(HeadingLevel::H3))?;
+                let anchor = self.anchor(&events);
+                let text = inline_of_events(events, 4)?;
                 self.sub = self.sub.saturating_add(1);
                 self.space();
                 let written = match front.subsections {
                     Subsections::Numbered => format!(
-                        "<h3><span class=\"sub\">{}.{}</span>{text}</h3>",
+                        "<h3 id=\"{anchor}\"><span class=\"sub\">{}.{}</span>{text}</h3>",
                         front.numerals.of(self.section),
                         self.sub
                     ),
-                    Subsections::Unnumbered => format!("<h3>{text}</h3>"),
+                    Subsections::Unnumbered => format!("<h3 id=\"{anchor}\">{text}</h3>"),
                 };
                 self.line(4, &written);
                 Ok(Open::Section)
@@ -321,7 +350,14 @@ impl<'a> Page<'a> {
                 Ok(())
             }
             Event::Start(Tag::List(first)) => self.list(first, indent),
-            Event::Start(Tag::CodeBlock(_)) => {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Indented)) => Err(Error::new(
+                "a block indented four spaces is a code block in Markdown, and these \
+                 documents write code fenced. The usual way to get one without meaning \
+                 to is a blank line inside a block of HTML, which ends the block there \
+                 and turns the indented lines after it into code, its own closing tag \
+                 included",
+            )),
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_))) => {
                 let mut text = String::new();
                 loop {
                     match self.events.next() {
@@ -364,7 +400,20 @@ impl<'a> Page<'a> {
         loop {
             match self.events.next() {
                 Some(Event::Start(Tag::Item)) => {
-                    let text = self.inline(Some(TagEnd::Item), inside)?;
+                    let events = self.gather(TagEnd::Item)?;
+                    let paragraphs = events
+                        .iter()
+                        .filter(|event| matches!(event, Event::Start(Tag::Paragraph)))
+                        .count();
+                    if paragraphs > 1 {
+                        return Err(Error::new(
+                            "a list item holds more than one paragraph, and this \
+                             renderer takes plain items: the paragraphs would be \
+                             joined into one run with nothing between them. Write \
+                             the item as one paragraph, or the list as HTML",
+                        ));
+                    }
+                    let text = inline_of_events(events, inside)?;
                     self.line(inside, &format!("<li>{text}</li>"));
                 }
                 Some(Event::End(TagEnd::List(_))) => break,
@@ -396,7 +445,17 @@ impl<'a> Page<'a> {
                     out.push_str(&escape(&text));
                     out.push_str("</code>");
                 }
-                Event::InlineHtml(raw) => out.push_str(&raw),
+                Event::InlineHtml(raw) => {
+                    if closes_a_block(&raw) {
+                        return Err(Error::new(format!(
+                            "`{raw}` closes a block inside a line of prose. That is \
+                             what a blank line inside a block of HTML leaves behind: \
+                             the block ends at the blank line, and what follows is a \
+                             paragraph carrying the closing tag"
+                        )));
+                    }
+                    out.push_str(&raw);
+                }
                 Event::SoftBreak => {
                     out.push('\n');
                     out.push_str(&" ".repeat(indent));
@@ -405,9 +464,15 @@ impl<'a> Page<'a> {
                 Event::End(TagEnd::Emphasis) => out.push_str("</em>"),
                 Event::Start(Tag::Strong) => out.push_str("<strong>"),
                 Event::End(TagEnd::Strong) => out.push_str("</strong>"),
-                Event::Start(Tag::Link { dest_url, .. }) => {
+                Event::Start(Tag::Link {
+                    dest_url, title, ..
+                }) => {
                     out.push_str("<a href=\"");
                     out.push_str(&attribute(&dest_url));
+                    if !title.is_empty() {
+                        out.push_str("\" title=\"");
+                        out.push_str(&attribute(&title));
+                    }
                     out.push_str("\">");
                 }
                 Event::End(TagEnd::Link) => out.push_str("</a>"),
@@ -422,6 +487,54 @@ impl<'a> Page<'a> {
             return Ok(out);
         }
         Err(Error::new(format!("{until:?} was never reached")))
+    }
+
+    /// The events up to `until`, taken off the walk without being written.
+    fn gather(&mut self, until: TagEnd) -> Result<Vec<Event<'a>>> {
+        let mut gathered = Vec::new();
+        for event in self.events.by_ref() {
+            match event {
+                Event::End(end) if end == until => return Ok(gathered),
+                other => gathered.push(other),
+            }
+        }
+        Err(Error::new(format!("{until:?} was never reached")))
+    }
+
+    /// The anchor a heading is linked to by, from the words it says.
+    ///
+    /// No heading carried one, so no section of any paper could be linked to,
+    /// and a paper that sends a reader to "its section 8" could only give a
+    /// number. Taken from the text rather than the number, because the text
+    /// stays put when a section is inserted above it and the number does not.
+    fn anchor(&mut self, heading: &[Event<'_>]) -> String {
+        let mut words = String::new();
+        for event in heading {
+            if let Event::Text(text) | Event::Code(text) = event {
+                words.push_str(text);
+            }
+        }
+        let mut slug = String::new();
+        for character in words.chars().flat_map(char::to_lowercase) {
+            if character.is_alphanumeric() {
+                slug.push(character);
+            } else if !slug.ends_with('-') && !slug.is_empty() {
+                slug.push('-');
+            }
+        }
+        let slug = slug.trim_end_matches('-').to_owned();
+        let base = if slug.is_empty() {
+            "section".to_owned()
+        } else {
+            slug
+        };
+        let mut candidate = base.clone();
+        let mut count = 1usize;
+        while !self.anchors.insert(candidate.clone()) {
+            count = count.saturating_add(1);
+            candidate = format!("{base}-{count}");
+        }
+        candidate
     }
 
     /// A blank line between two blocks, unless a container has just opened.
@@ -447,7 +560,63 @@ impl<'a> Page<'a> {
 /// One fragment of Markdown, rendered as the inside of a line.
 fn inline_of(source: &str, indent: usize) -> Result<String> {
     let events: Vec<Event<'_>> = Parser::new_ext(source, options()).collect();
+    inline_of_events(events, indent)
+}
+
+/// Inline events already taken off a walk, rendered as the inside of a line.
+fn inline_of_events(events: Vec<Event<'_>>, indent: usize) -> Result<String> {
     Page::new(events).inline(None, indent)
+}
+
+/// A heading's label and its heading, split at the first ` | ` that stands in
+/// the heading's own words.
+///
+/// This split the rendered HTML, so a bar inside a code span, a link or an
+/// emphasis cut the element in two: a heading whose code span held a bar put
+/// an open `<code>` in the margin and its closing tag in the heading. It is decided on the events
+/// now, and only a bar in plain text at the top level is a label's.
+fn labelled(mut events: Vec<Event<'_>>) -> (Option<Vec<Event<'_>>>, Vec<Event<'_>>) {
+    let mut depth = 0usize;
+    let mut found = None;
+    for (index, event) in events.iter().enumerate() {
+        match event {
+            Event::Start(_) => depth = depth.saturating_add(1),
+            Event::End(_) => depth = depth.saturating_sub(1),
+            Event::Text(text) if depth == 0 => {
+                if let Some((before, after)) = text.split_once(" | ") {
+                    found = Some((index, before.to_owned(), after.to_owned()));
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some((index, before, after)) = found else {
+        return (None, events);
+    };
+    let rest: Vec<Event<'_>> = events.split_off(index).into_iter().skip(1).collect();
+    if !before.is_empty() {
+        events.push(Event::Text(before.into()));
+    }
+    let mut heading = Vec::with_capacity(rest.len().saturating_add(1));
+    if !after.is_empty() {
+        heading.push(Event::Text(after.into()));
+    }
+    heading.extend(rest);
+    (Some(events), heading)
+}
+
+/// Whether a piece of inline HTML closes an element that is a block.
+fn closes_a_block(raw: &str) -> bool {
+    const BLOCKS: [&str; 16] = [
+        "div", "p", "section", "table", "thead", "tbody", "tr", "td", "th", "ul", "ol", "li",
+        "figure", "footer", "header", "pre",
+    ];
+    let Some(name) = raw.trim().strip_prefix("</") else {
+        return false;
+    };
+    let name = name.trim_end_matches('>').trim().to_ascii_lowercase();
+    BLOCKS.contains(&name.as_str())
 }
 
 /// Moves a block of HTML to where it sits on the page, keeping the shape it
@@ -507,13 +676,27 @@ mod tests {
         render(&format!("{HEAD}{body}")).unwrap()
     }
 
+    /// A rendered file is a whole page: the declaration, the language from
+    /// the front matter, the character set and the viewport, then the title,
+    /// the stylesheet and the paper.
+    ///
+    /// It was a fragment the explorer finished at compile time, typing the
+    /// language a second time beside it. Opened from a checkout, as the README
+    /// says a paper can be, a page had no character set, and a browser that
+    /// does not guess showed the French papers' accents as two characters each.
     #[test]
     fn the_page_opens_with_a_title_a_stylesheet_and_the_paper() {
         let out = page("\n## One\n\nText.\n");
-        assert!(out.starts_with(
-            "<title>A paper</title>\n<link rel=\"stylesheet\" href=\"a.css\">\n\
-             <div class=\"paper\" lang=\"en\">\n"
-        ));
+        assert!(
+            out.starts_with(
+                "<!doctype html>\n<html lang=\"en\">\n<meta charset=\"utf-8\">\n\
+                 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+                 <meta name=\"color-scheme\" content=\"dark light\">\n\
+                 <title>A paper</title>\n<link rel=\"stylesheet\" href=\"a.css\">\n\
+                 <div class=\"paper\" lang=\"en\">\n"
+            ),
+            "{out}"
+        );
         assert!(out.ends_with("</section>\n\n</div>\n"), "{out}");
         assert!(out.contains("  <h1>A heading</h1>\n"), "{out}");
     }
@@ -585,7 +768,10 @@ mod tests {
             out.contains("<div class=\"num\"><span>1</span>Le problème</div>"),
             "{out}"
         );
-        assert!(out.contains("<h2>Toutes se recentralisent</h2>"), "{out}");
+        assert!(
+            out.contains("<h2 id=\"toutes-se-recentralisent\">Toutes se recentralisent</h2>"),
+            "{out}"
+        );
     }
 
     /// The label is inline like any other run of a document, so a paper whose
@@ -631,7 +817,10 @@ mod tests {
                       subsections: unnumbered\n---\n\
                       # A heading\n\n## One\n\n### La position\n";
         let out = render(source).unwrap();
-        assert!(out.contains("    <h3>La position</h3>\n"), "{out}");
+        assert!(
+            out.contains("    <h3 id=\"la-position\">La position</h3>\n"),
+            "{out}"
+        );
         assert!(!out.contains("class=\"sub\""), "{out}");
     }
 
@@ -706,5 +895,136 @@ mod tests {
         );
         assert!(out.contains("<a href=\"https://e/\">d</a>"), "{out}");
         assert!(out.contains("<sup><a href=\"#r1\">[1]</a></sup>"), "{out}");
+    }
+
+    /// A blank line inside a block of HTML is refused, whichever way the lines
+    /// after it are indented.
+    ///
+    /// Markdown ends an HTML block at a blank line. Indented four spaces, what
+    /// followed became a code block, its entities escaped a second time and
+    /// the block's own closing tag shown as text; indented less, it became a
+    /// paragraph carrying the closing tag. The round trip passed either way,
+    /// because the committed page was whatever this produced.
+    #[test]
+    fn a_blank_line_inside_a_block_of_html_is_refused_in_both_shapes() {
+        for body in [
+            "\n## One\n\n<div class=\"tiers\">\n  <div>\n\n    Notes, A &amp; B.</div>\n</div>\n",
+            "\n## One\n\n<div class=\"tiers\">\n  <div>\n\n  Notes, A &amp; B.</div>\n</div>\n",
+        ] {
+            let said = render(&format!("{HEAD}{body}")).unwrap_err().to_string();
+            assert!(
+                said.contains("blank line inside a block of HTML"),
+                "a broken block of HTML was not refused by name: {said}"
+            );
+        }
+    }
+
+    /// A bar inside a code span, a link or an emphasis in a heading is part of
+    /// the heading, not the line between a label and it.
+    #[test]
+    fn a_bar_inside_a_code_span_in_a_heading_stays_in_the_heading() {
+        let out = page("\n## `a | b`\n\nText.\n");
+        assert!(out.contains("<div class=\"num\">1</div>"), "{out}");
+        assert!(out.contains("><code>a | b</code></h2>"), "{out}");
+        let out = page("\n## Label | *a | b*\n\nText.\n");
+        assert!(
+            out.contains("<div class=\"num\"><span>1</span>Label</div>"),
+            "{out}"
+        );
+        assert!(out.contains("><em>a | b</em></h2>"), "{out}");
+    }
+
+    /// Two paragraphs in one list item are refused rather than glued into one
+    /// word.
+    #[test]
+    fn two_paragraphs_in_one_list_item_are_refused() {
+        let said = render(&format!(
+            "{HEAD}\n## One\n\n- first paragraph.\n\n  Second paragraph.\n- other\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(said.contains("more than one paragraph"), "{said}");
+    }
+
+    /// A link's title is written, not dropped.
+    #[test]
+    fn a_link_title_is_kept() {
+        let out = page("\n## One\n\n[the paper](https://b/ \"Draft \\\"one\\\"\")\n");
+        assert!(
+            out.contains("<a href=\"https://b/\" title=\"Draft &quot;one&quot;\">the paper</a>"),
+            "{out}"
+        );
+    }
+
+    /// Every heading can be linked to, by the words it says, and no two share
+    /// an anchor.
+    #[test]
+    fn every_heading_carries_an_anchor_of_its_own() {
+        let out =
+            page("\n## The state\n\n### The hot set\n\n## The state\n\n### Élan, `two` words\n");
+        assert!(out.contains("<h2 id=\"the-state\">The state</h2>"), "{out}");
+        assert!(out.contains("<h3 id=\"the-hot-set\">"), "{out}");
+        assert!(
+            out.contains("<h2 id=\"the-state-2\">The state</h2>"),
+            "{out}"
+        );
+        assert!(out.contains("<h3 id=\"élan-two-words\">"), "{out}");
+    }
+
+    /// The error arms, each asked for by name.
+    #[test]
+    fn what_has_no_shape_here_is_refused_by_name() {
+        let before = render(&format!("{HEAD}\n### Early\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(before.contains("before the first `## `"), "{before}");
+        let twice = render(&format!("{HEAD}\n## One\n\n# Again\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(twice.contains("one `# ` heading"), "{twice}");
+        let opening = render("---\ntitle: A\nlanguage: en\nstylesheet: a.css\n---\nText first.\n")
+            .unwrap_err()
+            .to_string();
+        assert!(opening.contains("opens with `# `"), "{opening}");
+        let nested = render(&format!("{HEAD}\n## One\n\n- first\n  - inner\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            nested.contains("not something this renderer writes inside a line"),
+            "{nested}"
+        );
+    }
+
+    /// An ordered list keeps where it starts, and a fenced block keeps its
+    /// text escaped once.
+    #[test]
+    fn an_ordered_list_keeps_its_start_and_a_fence_its_text() {
+        let out = page("\n## One\n\n3. third\n4. fourth\n\n```text\na < b & c\n```\n");
+        assert!(out.contains("<ol start=\"3\">"), "{out}");
+        assert!(out.contains("<li>third</li>"), "{out}");
+        assert!(
+            out.contains("<pre><code>a &lt; b &amp; c</code></pre>"),
+            "{out}"
+        );
+        let first = page("\n## One\n\n1. one\n");
+        assert!(first.contains("<ol>\n"), "{first}");
+    }
+
+    /// A block of HTML keeps its own shape at whatever margin it was written.
+    #[test]
+    fn html_written_at_a_small_margin_keeps_its_shape() {
+        assert_eq!(
+            super::reindent(" <a>\n   <b/>\n\n </a>", 2),
+            "  <a>\n    <b/>\n\n  </a>\n"
+        );
+    }
+
+    #[test]
+    fn text_and_attributes_are_escaped() {
+        assert_eq!(super::escape("a < b & c > d"), "a &lt; b &amp; c &gt; d");
+        assert_eq!(
+            super::attribute("say \"x\" & y"),
+            "say &quot;x&quot; &amp; y"
+        );
     }
 }
