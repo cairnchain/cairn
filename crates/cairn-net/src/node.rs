@@ -44,7 +44,7 @@ use cairn_store::{
     JoinFailed, StoreError, BLOCK_LOG, HANDED_LEDGER, HEADER_BYTES, HEADER_LOG, HEADER_TREE,
 };
 
-use crate::book::AddressBook;
+use crate::book::{machine_of, AddressBook};
 use crate::choosing::{self, Approach, Chooser, JoinProgress};
 use crate::joining::{most_join_bytes, Collecting, Joined, Progress};
 use crate::message::{
@@ -78,15 +78,19 @@ pub const MAX_PEERS: usize = 48;
 /// round asked the same question, so a table somebody else filled was a table
 /// this node could not dial out of, and filling it is not misbehaviour:
 /// forty eight connections that greet, are welcomed and speak every few
-/// seconds are never refused and never fall quiet. `MAX_PER_HOST` is two per
-/// exact address, so that is twenty four addresses, a quarter of a /24 or
-/// twenty four out of one machine's IPv6 /64.
+/// seconds are never refused and never fall quiet. `MAX_PER_HOST` was two per
+/// exact address, so that was twenty four addresses, a quarter of a /24 or
+/// twenty four out of one machine's IPv6 /64; it is two per machine now, and
+/// an IPv6 machine is its /64.
 pub const MOST_FROM_OUTSIDE: usize = MAX_PEERS - TARGET_PEERS;
 
-/// Connections accepted from any one address.
+/// Connections accepted from any one machine: one IPv4 address, or one IPv6
+/// /64. See [`machine_of`].
 ///
 /// A single machine opening every slot would leave a node surrounded by one
-/// peer wearing many hats, which is the cheapest way to isolate it.
+/// peer wearing many hats, which is the cheapest way to isolate it. Counted
+/// by the exact address, an IPv6 machine wore a fresh hat for every
+/// connection.
 const MAX_PER_HOST: usize = 2;
 
 /// Addresses whose allowance is counted separately at once.
@@ -348,7 +352,8 @@ const UNJUDGED_PEERS: usize = 2;
 ///
 /// Where the peer says it can be reached, which is its own port on the address
 /// the connection came from: the unit this codebase means by a peer everywhere
-/// else, and the one the address book keeps.
+/// else, and the one the address book keeps. The address is read as the
+/// machine it stands for, so an IPv6 one is its /64: see [`sender_of`].
 ///
 /// Both of these used to count [`PeerId`]s, which are handed out one per socket
 /// and never reused. A single machine at a single address therefore met the
@@ -367,8 +372,14 @@ const UNJUDGED_PEERS: usize = 2;
 type Sender = SocketAddr;
 
 /// How one connection counts towards those two.
+///
+/// By machine rather than by address: see [`machine_of`]. An IPv6 machine
+/// holds a whole /64, and counted by the exact address it met "two peers" by
+/// dialling from two of them.
 fn sender_of(advertised: Option<SocketAddr>, host: Option<IpAddr>) -> Option<Sender> {
-    advertised.or_else(|| host.map(|host| SocketAddr::new(host, 0)))
+    advertised
+        .map(|at| SocketAddr::new(machine_of(at.ip()), at.port()))
+        .or_else(|| host.map(|host| SocketAddr::new(machine_of(host), 0)))
 }
 
 /// Seconds the first and the last of them have to be apart.
@@ -2215,7 +2226,10 @@ struct Unweighed {
 /// cannot be built without a socket, so nothing asked it, and counting every
 /// other address against this one, or letting it one past its share, passed.
 fn room_beside(held: impl Iterator<Item = Option<IpAddr>>, host: IpAddr) -> bool {
-    held.filter(|from| *from == Some(host)).count() < MAX_PER_HOST
+    let machine = machine_of(host);
+    held.filter(|from| from.map(machine_of) == Some(machine))
+        .count()
+        < MAX_PER_HOST
 }
 
 /// Whether an address's mark is still worth keeping: something holds it, or
@@ -2670,6 +2684,9 @@ impl Shared {
         let Some(host) = host else {
             return Allowance::default();
         };
+        // By machine: an IPv6 one holds a whole /64, and a window per exact
+        // address was a fresh one at every connection it made.
+        let host = machine_of(host);
         let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(window) = windows.get(&host) {
             return Allowance::at(window);
@@ -2737,8 +2754,8 @@ impl Shared {
     ///
     /// Nothing about filling it is misbehaviour. Forty eight connections that
     /// greet, are welcomed and say a word every few seconds are never refused
-    /// and never fall quiet, and `MAX_PER_HOST` is two per exact address, so
-    /// that is twenty four addresses: a quarter of a /24, or twenty four out
+    /// and never fall quiet, and `MAX_PER_HOST` was two per exact address, so
+    /// that was twenty four addresses: a quarter of a /24, or twenty four out
     /// of one machine's IPv6 /64. Measured: the victim reported forty eight
     /// peers, knew thirty three addresses, and never dialled the one its
     /// operator gave it. For a node with no chain that hands the one
@@ -4335,6 +4352,10 @@ impl Node {
     /// and was printed as `reached`, and the wallet counted it as a seed it had
     /// got to. Everything that turns the connection away now says so.
     pub fn connect(&self, address: SocketAddr) -> Result<(), NodeError> {
+        // The spelling the book keeps, so the dial is filed against the entry
+        // it made: an IPv4 address named as `::ffff:a.b.c.d` is dialled and
+        // written down as the IPv4 address it is.
+        let address = SocketAddr::new(address.ip().to_canonical(), address.port());
         // Before the dial, which is where both of the other two ask it: the
         // accept loop asks before it takes the stream and the dial round
         // filters its candidates. Asking after would spend a `DIAL_TIMEOUT`
@@ -4352,7 +4373,7 @@ impl Node {
 
         let stream = TcpStream::connect_timeout(&address, DIAL_TIMEOUT)?;
         self.shared.book().insert(address);
-        let host = stream.peer_addr().ok().map(|at| at.ip());
+        let host = stream.peer_addr().ok().map(|at| at.ip().to_canonical());
         // And again on the host the socket actually reached. A refusal is
         // about a machine and one machine answers on more than one address,
         // so the address dialled and the host that answered are two questions
@@ -7199,7 +7220,9 @@ fn accept_loop(shared: &Arc<Shared>, listener: &TcpListener) {
                     let _ = stream.shutdown(Shutdown::Both);
                     break;
                 }
-                let host = from.ip();
+                // Without the IPv6 hat a dual stack listener puts on every IPv4
+                // peer, so every table after this reads one spelling.
+                let host = from.ip().to_canonical();
                 if shared.refuses(host, unix_now()) || !shared.has_room_to_accept(Some(host)) {
                     let _ = stream.shutdown(Shutdown::Both);
                     continue;
@@ -8467,7 +8490,12 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
     else {
         return false;
     };
-    let remote = stream.peer_addr().ok().map(|address| address.ip());
+    // Without the IPv6 hat, as in the accept loop: this is where the address
+    // a peer is written down at comes from.
+    let remote = stream
+        .peer_addr()
+        .ok()
+        .map(|address| address.ip().to_canonical());
     // Small messages benefit from going out immediately rather than waiting for
     // a larger packet to fill, and every message here is an answer someone is
     // blocked on.
@@ -13166,6 +13194,124 @@ mod tests {
         assert!(
             room_beside(held(MAX_PER_HOST), IpAddr::from([198, 51, 100, 4])),
             "and an address holding nothing has room whatever the others hold"
+        );
+    }
+
+    /// An address in one IPv6 /64, which is what a provider hands a single
+    /// customer.
+    fn within_one_machine(last: u16) -> IpAddr {
+        IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 1, 0, 0, 0, last))
+    }
+
+    /// An address in the next /64 along, which is somebody else.
+    fn next_door() -> IpAddr {
+        IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 2, 0, 0, 0, 1))
+    }
+
+    /// One machine gets one share of connections, whichever of its addresses
+    /// each comes from.
+    ///
+    /// An IPv6 /64 is 2^64 addresses on one machine, and a listener bound to
+    /// `[::]` hands an IPv4 caller over as `::ffff:a.b.c.d`. The share was
+    /// counted by the exact address, so one machine held every slot a node
+    /// gives outsiders from inside one /64, and an IPv4 host took a share
+    /// under each spelling of its address. Nothing asked about two addresses
+    /// of one machine, so that passed.
+    #[test]
+    fn one_machine_gets_one_share_whichever_of_its_addresses_it_uses() {
+        let full: Vec<Option<IpAddr>> = (1..=u16::try_from(MAX_PER_HOST).unwrap())
+            .map(|last| Some(within_one_machine(last)))
+            .collect();
+        assert!(
+            !room_beside(full.iter().copied(), within_one_machine(0xffff)),
+            "a machine past its share got another connection from another address in \
+             its own /64"
+        );
+        assert!(
+            room_beside(full.iter().copied(), next_door()),
+            "a machine in another /64 was counted with the first"
+        );
+
+        let plain = Ipv4Addr::new(203, 0, 113, 1);
+        let mapped = IpAddr::V6(plain.to_ipv6_mapped());
+        assert!(
+            !room_beside(
+                std::iter::repeat_n(Some(mapped), MAX_PER_HOST),
+                IpAddr::V4(plain)
+            ),
+            "an IPv4 host took a second share by arriving under the other spelling of \
+             its address"
+        );
+        assert!(
+            !room_beside(
+                std::iter::repeat_n(Some(IpAddr::V4(plain)), MAX_PER_HOST),
+                mapped
+            ),
+            "and the other way round"
+        );
+    }
+
+    /// One machine spends one allowance, whichever of its addresses it
+    /// connects from.
+    ///
+    /// The window was kept per exact address, so a machine with a /64 had a
+    /// fresh one for every connection, and hanging up and dialling back from
+    /// the next address refilled what the table exists to stop refilling.
+    #[test]
+    fn one_machine_spends_one_allowance_whichever_of_its_addresses_it_uses() {
+        let node = Node::bind(ConsensusParams::testnet(), loopback()).unwrap();
+        let plain = Ipv4Addr::new(203, 0, 113, 1);
+        let held = [
+            node.shared.allowance_for(Some(within_one_machine(1))),
+            node.shared.allowance_for(Some(within_one_machine(2))),
+            node.shared.allowance_for(Some(IpAddr::V4(plain))),
+            node.shared
+                .allowance_for(Some(IpAddr::V6(plain.to_ipv6_mapped()))),
+        ];
+        let marks = node
+            .shared
+            .windows
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len();
+        drop(held);
+        node.shutdown();
+        assert_eq!(
+            marks, 2,
+            "two machines, each arriving from two addresses, were given more than one \
+             allowance each"
+        );
+    }
+
+    /// One machine is one peer to the counts that ask whether more than one
+    /// peer is involved.
+    ///
+    /// The unit was the exact address, so a machine with a /64 met "two
+    /// peers" by dialling from two of its addresses.
+    #[test]
+    fn one_machine_is_one_sender_whichever_of_its_addresses_it_uses() {
+        let from = |host: IpAddr| sender_of(None, Some(host));
+        let at = |host: IpAddr| sender_of(Some(SocketAddr::new(host, 9_944)), None);
+        assert_eq!(
+            from(within_one_machine(1)),
+            from(within_one_machine(2)),
+            "two addresses in one /64 counted as two peers"
+        );
+        assert_eq!(
+            at(within_one_machine(1)),
+            at(within_one_machine(2)),
+            "two addresses in one /64, naming the same port, counted as two peers"
+        );
+        let plain = Ipv4Addr::new(203, 0, 113, 1);
+        assert_eq!(
+            from(IpAddr::V4(plain)),
+            from(IpAddr::V6(plain.to_ipv6_mapped())),
+            "one IPv4 host counted as two peers under two spellings"
+        );
+        assert_ne!(
+            from(within_one_machine(1)),
+            from(next_door()),
+            "two machines counted as one"
         );
     }
 

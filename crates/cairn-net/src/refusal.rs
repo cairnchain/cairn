@@ -10,6 +10,8 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
+use crate::book::machine_of;
+
 /// How long a peer that misbehaved is turned away for.
 const REFUSAL_SECONDS: u64 = 600;
 
@@ -39,11 +41,19 @@ const MAX_REFUSED: usize = 1_024;
 /// guess. Anything already running inside the machine has far more direct ways
 /// to interfere than connecting to a socket, so there is nothing to defend
 /// here anyway.
+///
+/// Read through the IPv6 hat, since a listener bound to `[::]` hands the
+/// loopback over as `::ffff:127.0.0.1`, which `is_loopback` says no to.
 pub(crate) fn can_be_refused(host: IpAddr) -> bool {
-    !host.is_loopback()
+    !host.to_canonical().is_loopback()
 }
 
-/// Addresses turned away, and until when.
+/// Machines turned away, and until when.
+///
+/// Keyed by [`machine_of`], so a refusal is of an IPv4 address or of an IPv6
+/// /64. Keyed by the exact address, it cost an IPv6 machine one of the 2^64
+/// addresses it holds, and the machine was back the next second from the
+/// next one.
 #[derive(Debug, Default)]
 pub(crate) struct Refusals {
     until: HashMap<IpAddr, u64>,
@@ -73,6 +83,7 @@ impl Refusals {
         if !can_be_refused(host) {
             return;
         }
+        let host = machine_of(host);
         // The same comparison `refuses` makes, and it has to be: an entry the
         // sweep keeps and `refuses` answers no to is a slot held by a refusal
         // that is over, which at a full table costs somebody a live one.
@@ -97,7 +108,9 @@ impl Refusals {
     }
 
     pub(crate) fn refuses(&self, host: IpAddr, now: u64) -> bool {
-        self.until.get(&host).is_some_and(|until| *until > now)
+        self.until
+            .get(&machine_of(host))
+            .is_some_and(|until| *until > now)
     }
 
     /// Forgets the refusals that are over, and brings back any that would
@@ -130,7 +143,7 @@ impl Refusals {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{Refusals, MAX_REFUSED, REFUSAL_SECONDS};
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     fn host(last: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(198, 51, 100, last))
@@ -328,6 +341,48 @@ mod tests {
             !refusals.is_empty(),
             "a table holding a refusal says it holds none"
         );
+    }
+
+    /// A refusal is of the machine, whichever of its addresses it comes back
+    /// from.
+    ///
+    /// Keyed by the exact address, a refusal cost an IPv6 machine one of the
+    /// 2^64 addresses in its /64, and it was back the next second from the
+    /// next one; an IPv4 host refused under one spelling of its address came
+    /// back under the other. And the loopback arriving as `::ffff:127.0.0.1`
+    /// was refused, which the rule below says it never is. Nothing asked about
+    /// two addresses of one machine, so all of that passed.
+    #[test]
+    fn a_refused_machine_is_refused_at_every_address_it_holds() {
+        let within = |last: u16| IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 1, 0, 0, 0, last));
+        let mut refusals = Refusals::new();
+        refusals.refuse(within(1), 1_000);
+        assert!(
+            refusals.refuses(within(2), 1_000),
+            "a refused machine came back from another address in its own /64"
+        );
+        assert!(
+            !refusals.refuses(
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 2, 0, 0, 0, 1)),
+                1_000
+            ),
+            "a machine in another /64 was refused with the first"
+        );
+
+        let plain = Ipv4Addr::new(198, 51, 100, 1);
+        refusals.refuse(IpAddr::V4(plain), 1_000);
+        assert!(
+            refusals.refuses(IpAddr::V6(plain.to_ipv6_mapped()), 1_000),
+            "a refused IPv4 host came back under the other spelling of its address"
+        );
+
+        let mapped_loopback = IpAddr::V6(Ipv4Addr::LOCALHOST.to_ipv6_mapped());
+        refusals.refuse(mapped_loopback, 1_000);
+        assert!(
+            !refusals.refuses(mapped_loopback, 1_000),
+            "the loopback was refused because it arrived spelt as IPv6"
+        );
+        assert!(!refusals.refuses(IpAddr::V6(Ipv6Addr::LOCALHOST), 1_000));
     }
 
     /// Otherwise a node, a wallet and an explorer on one machine would lock

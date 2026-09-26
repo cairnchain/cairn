@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
+use crate::book::machine_of;
 use crate::refusal::can_be_refused;
 use crate::sync::JOIN_RATHER_THAN_READ;
 
@@ -205,8 +206,10 @@ struct Claim {
     height: u64,
     /// Whether the peer can show the chain, which is what a join takes.
     shows_the_chain: bool,
-    /// The address the claim came from, so a failed one outlives the
-    /// connection that made it.
+    /// The machine the claim came from, so a failed one outlives the
+    /// connection that made it: see [`crate::book::machine_of`], which is
+    /// why a pause is not escaped by claiming again from the next address in
+    /// one IPv6 /64.
     host: Option<IpAddr>,
     /// Set when the peer was asked to show this claim and could not. Words
     /// that failed once are not waited on twice.
@@ -334,7 +337,7 @@ impl Chooser {
                 work,
                 height,
                 shows_the_chain,
-                host,
+                host: host.map(machine_of),
                 unbacked: false,
                 proved: false,
                 tried: None,
@@ -1143,6 +1146,53 @@ mod tests {
     ///
     /// Now there is a ceiling, and the whole set goes the moment the choice
     /// it exists for is made.
+    /// A claim that went unshown pauses the machine it came from, whichever
+    /// of its addresses that machine claims from next.
+    ///
+    /// The pause is what makes a turn cost a stranger anything before a
+    /// first proof lands, and it was kept per exact address: an IPv6 machine
+    /// has 2^64 of them in its /64, so every claim it made was fresh and the
+    /// honest peer beside it was never asked. Nothing asked about two
+    /// addresses of one machine, so that passed.
+    #[test]
+    fn a_claim_that_went_unshown_pauses_the_machine_and_not_only_the_address() {
+        let within = |last: u16| IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 1, 0, 0, 0, last));
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(within(1)), 900, LONG, true, 100);
+        chooser.failed(1, 100);
+        chooser.noted(2, Some(within(2)), 900, LONG, true, 101);
+        chooser.noted(3, Some(host(3)), 500, LONG, true, 101);
+        let paused = chooser
+            .claims
+            .get(&2)
+            .is_some_and(|claim| chooser.held_off(claim, 101));
+        assert!(
+            paused,
+            "a machine whose claim went unshown was asked again at once from the next \
+             address in its /64"
+        );
+        assert_eq!(
+            chooser.pick(None, 101).map(|(peer, _)| peer),
+            Some(3),
+            "the peer on another machine was not the one asked"
+        );
+
+        // And the loopback is still no identity, spelt either way: read as a
+        // /64 it would be the address `::`, which is somebody to pause.
+        let here = IpAddr::V6(Ipv6Addr::LOCALHOST);
+        let mut devnet = Chooser::new();
+        devnet.noted(1, Some(here), 900, LONG, true, 100);
+        devnet.failed(1, 100);
+        devnet.noted(2, Some(here), 900, LONG, true, 101);
+        assert!(
+            !devnet
+                .claims
+                .get(&2)
+                .is_some_and(|claim| devnet.held_off(claim, 101)),
+            "a claim from this machine's own IPv6 loopback was paused for another's"
+        );
+    }
+
     #[test]
     fn the_addresses_of_broken_claims_do_not_pile_up_without_limit() {
         let mut chooser = Chooser::new();

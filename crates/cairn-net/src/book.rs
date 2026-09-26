@@ -330,6 +330,39 @@ fn group_of(address: &SocketAddr) -> Group {
     }
 }
 
+/// The one machine an address stands for, to every rule that counts, pauses
+/// or turns away one party.
+///
+/// Two things are taken off. An IPv4 address wearing an IPv6 hat is that
+/// IPv4 address, for the reason [`realm_of`] gives: a listener bound to `[::]`
+/// hands every IPv4 peer over as `::ffff:a.b.c.d`, and a rule that read the
+/// two spellings apart was a rule with a spelling anybody could use. And an
+/// IPv6 address is its /64. Every home line and every rented machine is
+/// handed one at least, which is 2^64 addresses on one machine, so a rule
+/// keyed on the whole address was one that machine passed as often as it
+/// liked: its share of connections, its refusal, its allowance and its pause
+/// all came fresh with the next address. Only the book grouped addresses at
+/// all, and nothing beside it did.
+///
+/// The loopback is left whole. `::1` is inside nobody's /64, and it is the
+/// one address several rules exist to recognise.
+pub(crate) fn machine_of(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) if !v6.is_loopback() => {
+            let [a, b, c, d, ..] = v6.segments();
+            IpAddr::V6(Ipv6Addr::new(a, b, c, d, 0, 0, 0, 0))
+        }
+        other => other,
+    }
+}
+
+/// An address as the book keeps it: an IPv4 one wearing an IPv6 hat is
+/// written as the IPv4 address it is, so one machine is one entry and sits in
+/// its own neighbourhood.
+fn canonical(address: SocketAddr) -> SocketAddr {
+    SocketAddr::new(address.ip().to_canonical(), address.port())
+}
+
 impl AddressBook {
     pub fn new() -> Self {
         Self::default()
@@ -369,6 +402,7 @@ impl AddressBook {
     /// only ever an address this node has never heard a word from. A book
     /// full of peers that answered is a book a stranger cannot move.
     pub fn insert(&mut self, address: SocketAddr) -> bool {
+        let address = canonical(address);
         if !is_dialable(&address) || self.known.contains_key(&address) {
             return false;
         }
@@ -468,6 +502,7 @@ impl AddressBook {
     /// back from disk before the seeds are known, so the same addresses are
     /// usually already there as plain entries.
     pub(crate) fn insert_seed(&mut self, address: SocketAddr) -> bool {
+        let address = canonical(address);
         if !is_dialable(&address) {
             return false;
         }
@@ -2019,6 +2054,48 @@ mod tests {
         let mut book = AddressBook::new();
         assert!(!book.missed(&address(9, 9000), 0));
         assert!(book.is_empty());
+    }
+
+    /// An IPv4 address spelt as IPv6 is the same address in the book, and
+    /// sits in its own neighbourhood.
+    ///
+    /// A listener bound to `[::]` hands an IPv4 peer over as
+    /// `::ffff:a.b.c.d`. The book kept the two spellings as two addresses,
+    /// and put every mapped one in a single neighbourhood of its own, so one
+    /// machine was two entries and thirty two mapped addresses from anywhere
+    /// shut every other mapped one out. Nothing asked, so that passed.
+    #[test]
+    fn an_address_spelt_both_ways_is_one_address() {
+        let plain = Ipv4Addr::new(203, 0, 113, 1);
+        let as_v4 = SocketAddr::from((plain, 9_000));
+        let as_v6 = SocketAddr::from((plain.to_ipv6_mapped(), 9_000));
+        let mut book = AddressBook::new();
+        assert!(book.insert(as_v6));
+        assert!(
+            !book.insert(as_v4),
+            "one address went into the book twice, once under each spelling"
+        );
+        assert!(book.contains(&as_v4));
+        assert_eq!(book.len(), 1);
+        assert!(
+            !book.insert_seed(as_v6) || book.len() == 1,
+            "a seed spelt the other way went in beside the address it names"
+        );
+        assert_eq!(book.len(), 1);
+
+        // Mapped addresses from all over are as many neighbourhoods as their
+        // IPv4 selves.
+        let mut spread_out = AddressBook::new();
+        for index in 0..=MAX_PER_GROUP {
+            let far_apart = Ipv4Addr::new(203, u8::try_from(index).unwrap(), 0, 1);
+            spread_out.insert(SocketAddr::from((far_apart.to_ipv6_mapped(), 9_000)));
+        }
+        assert_eq!(
+            spread_out.len(),
+            MAX_PER_GROUP + 1,
+            "IPv4 addresses from different neighbourhoods were crowded into one because \
+             they arrived spelt as IPv6"
+        );
     }
 
     #[test]
