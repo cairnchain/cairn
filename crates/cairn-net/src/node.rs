@@ -8457,7 +8457,7 @@ fn dial_from_book_with<D>(shared: &Arc<Shared>, now: u64, dial: &D)
 where
     D: Fn(&SocketAddr) -> io::Result<TcpStream> + Sync,
 {
-    let (connected, count) = {
+    let (connected, count, held) = {
         let peers = shared.peers();
         // Both the address a peer introduced itself at and the address this
         // node dialled to reach it. Only the first was read here, and it is
@@ -8477,9 +8477,16 @@ where
         // stranger chose it. Counting those was enough to stop a node dialling
         // at all: hold eight connections open and it never looks for anybody
         // again, and then sees the world through whoever is holding them.
+        // The neighbourhoods this node already went out to.
+        let held: HashSet<Group> = peers
+            .values()
+            .filter_map(|peer| peer.dialled_to)
+            .map(|address| group_of_host(address.ip()))
+            .collect();
         (
             connected,
             peers.values().filter(|peer| peer.dialled).count(),
+            held,
         )
     };
     let wanted = TARGET_PEERS.saturating_sub(count);
@@ -8506,6 +8513,7 @@ where
         .into_iter()
         .filter(|address| *address != shared.address && !connected.contains(address))
         .collect();
+    let candidates = dial_order(candidates, &held);
 
     let dialling_since = Instant::now();
     let mut candidates = candidates.into_iter();
@@ -8597,6 +8605,27 @@ where
             })
             .collect()
     })
+}
+
+/// The order one round of dialling tries the book's candidates in: the
+/// first address from each neighbourhood `held` has no dialled connection in,
+/// in the book's order, and then everything else, in the book's order.
+///
+/// The book's order alone decided, and a book holding thirty two addresses in
+/// one /16 that answer beside a hundred honest ones spread out gave that /16
+/// a share of the eight dials by chance, and all eight when the honest ones
+/// were full. Bitcoin keeps its outbound connections to one per group for
+/// this reason: eight connections then need eight neighbourhoods that answer.
+///
+/// A preference and not a rule, which is what the second half is for. A
+/// devnet on one machine is a single neighbourhood, and so is a lab; a node
+/// there still dials every address it has, one neighbourhood deep.
+fn dial_order(candidates: Vec<SocketAddr>, held: &HashSet<Group>) -> Vec<SocketAddr> {
+    let mut reached = held.clone();
+    let (first, rest): (Vec<SocketAddr>, Vec<SocketAddr>) = candidates
+        .into_iter()
+        .partition(|address| reached.insert(group_of_host(address.ip())));
+    first.into_iter().chain(rest).collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13833,6 +13862,48 @@ mod tests {
             None,
             "a connection kept for its neighbourhood was let go of"
         );
+    }
+
+    /// A round of dialling tries one address from every neighbourhood it has
+    /// not reached yet before a second from any, and still tries them all.
+    ///
+    /// The eight connections a node goes out and opens were taken in the
+    /// book's order and nothing else, so thirty two addresses in one /16 that
+    /// answer took all eight from a hundred honest ones spread out, and a
+    /// node whose honest neighbours were full dialled only into one
+    /// neighbourhood. Bitcoin asks one outbound connection per group for this
+    /// reason. Nothing asked about neighbourhoods, so that passed.
+    #[test]
+    fn a_round_of_dialling_goes_to_every_neighbourhood_before_a_second_in_any() {
+        let crowded = |at: u8| SocketAddr::from((Ipv4Addr::new(10, 1, at, 1), 9_000));
+        let elsewhere = |at: u8| SocketAddr::from((Ipv4Addr::new(10, 2 + at, 0, 1), 9_000));
+        // The book's order: the crowd first, the others behind it.
+        let book: Vec<SocketAddr> = (0..32).map(crowded).chain((0..3).map(elsewhere)).collect();
+
+        let order = dial_order(book.clone(), &HashSet::new());
+        assert_eq!(
+            order.get(..4),
+            Some([crowded(0), elsewhere(0), elsewhere(1), elsewhere(2)].as_slice()),
+            "a second address in one neighbourhood was tried before the first in another"
+        );
+        assert_eq!(
+            order.len(),
+            book.len(),
+            "an address was left out of the round"
+        );
+
+        let held: HashSet<Group> = std::iter::once(group_of_host(crowded(0).ip())).collect();
+        assert_eq!(
+            dial_order(book.clone(), &held).get(..3),
+            Some([elsewhere(0), elsewhere(1), elsewhere(2)].as_slice()),
+            "a neighbourhood this node already reached was dialled again before one it had not"
+        );
+
+        // A devnet on one machine is one neighbourhood, and still dials.
+        let devnet: Vec<SocketAddr> = (1..=20u8)
+            .map(|at| SocketAddr::from((Ipv4Addr::new(127, 0, 0, at), 9_000)))
+            .collect();
+        assert_eq!(dial_order(devnet.clone(), &HashSet::new()), devnet);
     }
 
     /// A short valid chain, built off to the side.
