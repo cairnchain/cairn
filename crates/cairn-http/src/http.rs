@@ -4,7 +4,9 @@
 //! there is no upload path and no way to name a file outside what was
 //! compiled in. A body is read only for a POST and only up to
 //! [`MAX_BODY_BYTES`]; anything larger is refused with a 413 before a byte of
-//! it is taken. One thread per connection, the same choice the node makes for
+//! it is taken. And only by a server that takes bodies at all: one started
+//! with [`serve_without_bodies`], which is the explorer, refuses a POST with a
+//! 405 as soon as its head is read. One thread per connection, the same choice the node makes for
 //! its peers and for the same reason: a reader can hold the whole thing in
 //! their head.
 //!
@@ -302,6 +304,34 @@ impl Response {
     }
 }
 
+/// Whether a server reads the body a POST announces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Bodies {
+    /// Up to [`MAX_BODY_BYTES`], for an application with a form to take.
+    Read,
+    /// Never: a POST is refused once its head is read, before a byte of the
+    /// body is waited for.
+    Refused,
+}
+
+/// Serves like [`serve`], for an application that takes no request bodies.
+///
+/// A POST is answered 405 as soon as its head is in, and nothing it announces
+/// after that is waited for. The explorer serves no POST, and the server read
+/// a POST's body before the explorer ever saw the request: behind a proxy on
+/// the same machine every reader arrives from the loopback, which the
+/// per-address ceiling does not count, so one machine sending POST heads that
+/// announce a body and never send it held a slot each for the whole of
+/// [`REQUEST_DEADLINE`], and sixty four of them turned every other reader of
+/// the site away. A slot is now held only for a head, which a proxy delivers
+/// whole.
+pub fn serve_without_bodies<F>(listener: &TcpListener, running: &Arc<AtomicBool>, answer: F)
+where
+    F: Fn(&Request) -> Response + Send + Sync + 'static,
+{
+    serve_as(listener, running, Bodies::Refused, answer);
+}
+
 /// Serves `listener` until `running` is cleared, handing every request to
 /// `answer`.
 ///
@@ -312,6 +342,13 @@ impl Response {
 /// is stopped by stopping the process, and the explorer keeps nothing in
 /// memory that is not already on disk.
 pub fn serve<F>(listener: &TcpListener, running: &Arc<AtomicBool>, answer: F)
+where
+    F: Fn(&Request) -> Response + Send + Sync + 'static,
+{
+    serve_as(listener, running, Bodies::Read, answer);
+}
+
+fn serve_as<F>(listener: &TcpListener, running: &Arc<AtomicBool>, bodies: Bodies, answer: F)
 where
     F: Fn(&Request) -> Response + Send + Sync + 'static,
 {
@@ -362,7 +399,7 @@ where
         let _ = thread::Builder::new()
             .name("explorer-http".to_owned())
             .spawn(move || {
-                handle(&stream, answer.as_ref(), accepted);
+                handle(&stream, answer.as_ref(), accepted, bodies);
                 // Mentioned so the closure owns the slot, which is what
                 // gives it back on the ways out that never reach this line.
                 drop(slot);
@@ -485,15 +522,18 @@ impl Drop for Held {
     }
 }
 
-fn handle<F>(stream: &TcpStream, answer: &F, accepted: Instant)
+fn handle<F>(stream: &TcpStream, answer: &F, accepted: Instant, bodies: Bodies)
 where
     F: Fn(&Request) -> Response,
 {
     let asking = deadline(accepted, Duration::ZERO);
-    let response = match read_request(&mut BufReader::new(Timed {
-        stream,
-        until: asking,
-    })) {
+    let response = match read_request_as(
+        &mut BufReader::new(Timed {
+            stream,
+            until: asking,
+        }),
+        bodies,
+    ) {
         Ok(Some(request)) => {
             let head_only = request.head_only;
             (answer(&request), head_only)
@@ -924,6 +964,11 @@ impl Write for Timed<'_> {
 ///
 /// `crates/cairn-http/tests/fuzz_request.rs` is the caller this is for.
 pub fn read_request<R: io::Read>(reader: &mut R) -> Result<Option<Request>, u16> {
+    read_request_as(reader, Bodies::Read)
+}
+
+/// [`read_request`], for a server that reads bodies or does not.
+fn read_request_as<R: io::Read>(reader: &mut R, bodies: Bodies) -> Result<Option<Request>, u16> {
     let mut consumed = 0usize;
     let start = read_line(reader, &mut consumed)?;
 
@@ -991,7 +1036,11 @@ pub fn read_request<R: io::Read>(reader: &mut R) -> Result<Option<Request>, u16>
     }
 
     // Read only for a POST, and only up to what the cap allows, so a caller
-    // announcing a body it never sends costs a timeout rather than memory.
+    // announcing a body it never sends costs a timeout rather than memory. On
+    // a server that takes no bodies it costs nothing past the head.
+    if post && bodies == Bodies::Refused {
+        return Err(405);
+    }
     let mut body = String::new();
     if post {
         if length > MAX_BODY_BYTES {
@@ -1098,6 +1147,12 @@ fn write_response<W: Write>(out: &mut W, response: &Response, head_only: bool) -
 /// remote font, no analytics. A page about a chain that asks you to trust
 /// nobody should not itself call out to four companies to render a heading.
 ///
+/// Written for the browser to receive as it is written here. A proxy in front
+/// that sets a policy of its own replaces this one, and then a tightening made
+/// here reaches nobody while this comment goes on saying every answer carries
+/// it; a proxy should pass these through and add only what is about the
+/// transport.
+///
 /// `cross-origin-resource-policy` is the one that is not about this page. The
 /// wallet holds everything about itself behind a secret and lets its own look
 /// and script through without one, on the grounds that "the look and the
@@ -1157,6 +1212,7 @@ fn reason(status: u16) -> &'static str {
 fn refusal(status: u16) -> &'static str {
     match status {
         408 => "the request did not arrive in time",
+        405 => "only GET and HEAD are served here",
         413 => "the form body is larger than this server takes",
         431 => "the request head is larger than this server takes",
         _ => "malformed request",

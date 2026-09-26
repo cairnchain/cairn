@@ -269,3 +269,57 @@ fn every_answer_says_it_is_not_for_a_page_somewhere_else() {
         );
     }
 }
+
+/// A server on the loopback for an application that takes no bodies.
+fn start_without_bodies() -> SocketAddr {
+    let listener = cairn_http::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+    let address = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let running = Arc::new(AtomicBool::new(true));
+        cairn_http::serve_without_bodies(&listener, &running, |_| {
+            Response::asset("text/plain; charset=utf-8", BODY)
+        });
+    });
+    address
+}
+
+/// **A server that takes no bodies answers a POST before its body, and does
+/// not wait for one that never comes.**
+///
+/// The explorer serves no POST at all, and the server read a POST's body
+/// before the explorer saw the request. Behind the proxy every reader arrives
+/// from the loopback, which the per-address ceiling does not count, so one
+/// machine sending POST heads with a length and no body held a slot each for
+/// the whole deadline: sixty four of them, renewed every ten seconds, and
+/// every other reader of the site was turned away. The flood test above holds
+/// that the deadline releases such a slot; nothing held that a server with no
+/// use for a body never takes one on in the first place.
+#[test]
+fn a_server_that_takes_no_bodies_answers_a_post_before_its_body() {
+    let address = start_without_bodies();
+
+    let mut stream = TcpStream::connect(address).unwrap();
+    // Half the deadline: an answer that waited for the body would come at the
+    // deadline, and this read gives up long before that.
+    stream.set_read_timeout(Some(REQUEST_DEADLINE / 2)).unwrap();
+    stream
+        .write_all(b"POST / HTTP/1.1\r\nhost: x\r\ncontent-length: 4096\r\n\r\n")
+        .unwrap();
+    let said = reply(&mut stream);
+    assert!(
+        said.starts_with("HTTP/1.1 405"),
+        "a POST with a body that never comes held its slot waiting for it, on a \
+         server that takes no bodies: {said:?}"
+    );
+    assert!(
+        said.contains("only GET and HEAD are served here"),
+        "the refusal does not say what this server takes: {said:?}"
+    );
+
+    // And everything it does serve is served as it was.
+    let said = ask(address, "GET / HTTP/1.1\r\nhost: x\r\n\r\n");
+    assert!(
+        said.starts_with("HTTP/1.1 200") && said.ends_with(BODY),
+        "{said}"
+    );
+}

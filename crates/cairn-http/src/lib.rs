@@ -14,5 +14,5 @@
 pub mod http;
 mod json;
 
-pub use http::{bind, most_one_answer_carries, serve, Request, Response};
+pub use http::{bind, most_one_answer_carries, serve, serve_without_bodies, Request, Response};
 pub use json::{Mark, Writer};
