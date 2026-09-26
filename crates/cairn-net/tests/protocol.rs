@@ -50,6 +50,16 @@ impl Forge {
     }
 
     fn mine(&mut self) -> Block {
+        self.mine_judged_at(NOW)
+    }
+
+    /// The next block, checked against a clock that agrees with its own date,
+    /// so a block can be dated further ahead than a node at `NOW` allows.
+    fn mine_by_its_own_clock(&mut self) -> Block {
+        self.mine_judged_at(self.clock + 600)
+    }
+
+    fn mine_judged_at(&mut self, now: u64) -> Block {
         let miner = SecretKey::from_bytes(&[1; 32]);
         let height = self.state.next_height().unwrap();
         self.clock += 600;
@@ -67,12 +77,23 @@ impl Forge {
         )
         .unwrap();
         let block = mine_block(block, ATTEMPTS).unwrap();
-        connect_block(&mut self.state, &block, &self.params, NOW).unwrap();
+        connect_block(&mut self.state, &block, &self.params, now).unwrap();
         block
     }
 
     fn mine_many(&mut self, count: usize) -> Vec<Block> {
         (0..count).map(|_| self.mine()).collect()
+    }
+
+    /// A second miner starting from the same ledger, whose next block is
+    /// dated a few seconds apart, so it is a different block at the same
+    /// height.
+    fn fork(&self) -> Self {
+        Self {
+            params: self.params,
+            state: self.state.clone(),
+            clock: self.clock + 7,
+        }
     }
 }
 
@@ -161,6 +182,19 @@ fn greeted_peer(work: u128, height: u64) -> PeerState {
         total_work: work,
         ..PeerState::default()
     }
+}
+
+/// A peer that introduced itself when it stood exactly where this node
+/// stands, so the greeting asked it for nothing. It is the state every
+/// long-lived connection of a node at the tip is in.
+fn greeted_as_equal(chain: &ChainStore) -> PeerState {
+    greeted_peer(chain.total_work(), chain.height().unwrap())
+}
+
+fn asks_for_the_chain(reply: &[Message]) -> bool {
+    reply
+        .iter()
+        .any(|said| matches!(said, Message::GetChain { .. }))
 }
 
 #[test]
@@ -580,6 +614,163 @@ fn a_block_whose_parent_is_missing_is_not_held_against_the_peer() {
     assert!(
         matches!(reaction.reply.first(), Some(Message::GetChain { .. })),
         "it asks again from where it actually stands"
+    );
+}
+
+/// A block delivered above this node's tip says the peer that delivered it
+/// is ahead, whatever the peer said when it introduced itself.
+///
+/// The test above holds the same promise for a peer that greeted as ahead,
+/// and that was the only fixture there was. Nothing asked it of a peer that
+/// greeted as an equal, which is every long-lived connection of a node at
+/// the tip: the work a peer wrote in its greeting was the only figure the
+/// asking read, and nothing revised it, so a node that missed one
+/// announcement asked nothing and stayed behind for as long as its
+/// connections lived.
+#[test]
+fn a_block_above_the_tip_from_a_peer_greeted_as_an_equal_asks_for_the_chain() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(6);
+    let mut node = store_with(params, &blocks[..3]);
+    let mut peer = greeted_as_equal(&node);
+
+    // The peer has since applied 3, 4 and 5, and this node heard only of 5.
+    let announced = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Announce(vec![Located::new(5, blocks[5].id())]),
+        NOW,
+    );
+    assert!(
+        matches!(announced.reply.first(), Some(Message::GetBlocks(_))),
+        "the announced block is asked for"
+    );
+    let arrived = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Block(Box::new(blocks[5].clone())),
+        NOW + 1,
+    );
+
+    assert!(arrived.drop_peer.is_none(), "the peer did nothing wrong");
+    assert_eq!(
+        node.height(),
+        Some(2),
+        "the block hangs on a missing parent"
+    );
+    assert!(
+        asks_for_the_chain(&arrived.reply),
+        "a block three heights above this node's tip, from the peer that announced it, is \
+         evidence the peer is ahead, and nothing was asked of it: the asking read only the \
+         work the peer wrote in its greeting"
+    );
+}
+
+/// A tie at one height that the network resolved the other way is followed
+/// onto the branch that won.
+///
+/// A block that lands as a side branch is announced by nobody, so this node
+/// hears of the winning branch only through the block that settles the tie,
+/// and that block's parent is the side of the tie it never saw. Nothing
+/// asked for the chain there from a peer greeted as an equal, so a node that
+/// took the losing block first kept the branch the network had left.
+#[test]
+fn a_tie_resolved_the_other_way_asks_for_the_branch_that_won() {
+    let params = params();
+    let mut miner_a = Forge::new(params);
+    let shared = miner_a.mine_many(3);
+    let mut miner_b = miner_a.fork();
+    let a3 = miner_a.mine();
+    let b3 = miner_b.mine();
+    let b4 = miner_b.mine();
+    assert_ne!(a3.id(), b3.id(), "two different blocks at height 3");
+
+    let mut node = store_with(params, &shared);
+    node.add_block(a3, NOW).unwrap();
+    // Greeted while both stood on the same height, before the tie resolved.
+    let mut peer = greeted_as_equal(&node);
+
+    on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Announce(vec![Located::new(4, b4.id())]),
+        NOW + 60,
+    );
+    let arrived = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Block(Box::new(b4)),
+        NOW + 61,
+    );
+
+    assert!(arrived.drop_peer.is_none());
+    assert_eq!(
+        node.height(),
+        Some(3),
+        "B4 hangs on B3, which this node never saw"
+    );
+    assert!(
+        asks_for_the_chain(&arrived.reply),
+        "the network settled a tie on the other branch, and the one message that would bring \
+         the block this node missed is a request for the chain, which was not sent"
+    );
+}
+
+/// A block refused for being dated ahead of this node's clock is asked for
+/// again once the clock allows it.
+///
+/// The refusal said "the block is offered again by whoever announces the
+/// next one". What the next announcement offers is the next block, whose
+/// parent is the refused one, and a missing parent from a peer greeted as an
+/// equal asked for nothing, so the refused block was never named again.
+#[test]
+fn a_block_refused_for_its_timestamp_is_asked_for_again_once_the_clock_allows_it() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let settled = forge.mine_many(3);
+    forge.clock = NOW + params.max_timestamp_drift + 600;
+    let ahead = forge.mine_by_its_own_clock();
+    let next = forge.mine_by_its_own_clock();
+
+    let mut node = store_with(params, &settled);
+    let mut peer = greeted_as_equal(&node);
+    let refused = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Block(Box::new(ahead)),
+        NOW,
+    );
+    assert!(
+        refused.ahead_of_the_clock.is_some(),
+        "the fixture has to reach the timestamp refusal"
+    );
+
+    // Later, with this node's clock past the refused block's date less the
+    // drift, the peer announces the block after it.
+    let later = NOW + params.max_timestamp_drift + 1_800;
+    on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Announce(vec![Located::new(4, next.id())]),
+        later,
+    );
+    let arrived = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Block(Box::new(next)),
+        later + 1,
+    );
+
+    assert!(arrived.drop_peer.is_none());
+    assert_eq!(
+        node.height(),
+        Some(2),
+        "block 4 hangs on the refused block 3"
+    );
+    assert!(
+        asks_for_the_chain(&arrived.reply),
+        "the refused block only comes back through a request for the chain, and none was sent"
     );
 }
 

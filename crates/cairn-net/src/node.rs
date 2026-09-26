@@ -169,7 +169,8 @@ const FLOOD_WINDOW: u64 = 10;
 ///
 /// A peer this far behind is not keeping up, and queueing without limit would
 /// let it decide how much memory this node spends. Dropped announcements cost
-/// it nothing lasting: it asks for what it is missing on the next exchange.
+/// it nothing lasting: the next block it hears of hangs on the ones it missed,
+/// and a block above its tip is what makes it ask for the chain.
 const OUTBOUND_QUEUE: usize = 256;
 /// Bytes queued for one peer before further messages are dropped.
 ///
@@ -3540,8 +3541,10 @@ impl Shared {
                 continue;
             }
             // A full queue and a gone peer are both left alone: the first
-            // catches up by asking, and the second is already being cleared up
-            // by the thread that was reading from it.
+            // catches up by asking, since the next block it hears of hangs on
+            // what it missed and a block above its tip asks for the chain, and
+            // the second is already being cleared up by the thread that was
+            // reading from it.
             if peer.outbound.try_send(message.clone()).is_ok() {
                 taken = taken.saturating_add(1);
             }

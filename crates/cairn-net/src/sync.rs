@@ -50,6 +50,16 @@ pub struct PeerState {
     /// it has.
     pub greeted: bool,
     pub height: u64,
+    /// The most work this peer has claimed for its chain: what it wrote in
+    /// its greeting, raised by any block it delivers above what this node
+    /// holds that claims more.
+    ///
+    /// It was the greeting and nothing else, and nothing revised it. Every
+    /// long-lived connection of a node at the tip was greeted at equal work,
+    /// so a node that missed one block, lost a tie at one height, or refused
+    /// a block for its timestamp heard the next block from that peer, found
+    /// its parent missing, and asked for nothing, for as long as the
+    /// connection lived.
     pub total_work: u128,
     /// What the peer said it kept. Choosing whom to join has to know the
     /// first about everyone who spoke, and a wallet looking for somebody to
@@ -102,10 +112,10 @@ pub struct PeerState {
     /// This said "nothing a peer says sets it", which was true of the
     /// assignment and false of what causes it. `follow_up` asks again whenever
     /// nothing is outstanding and `total_work` says the peer is ahead, and
-    /// `total_work` is a number the peer wrote in its own greeting and nothing
-    /// ever revises. So a peer claiming the most work there is kept the gate
-    /// open for good, and emptied `awaiting` itself by sending a block at each
-    /// height it had named: every block it pushed, fully decoded and never
+    /// `total_work` is a number the peer writes, in its greeting and in the
+    /// blocks it delivers. So a peer claiming the most work there is kept the
+    /// gate open for good, and emptied `awaiting` itself by sending a block at
+    /// each height it had named: every block it pushed, fully decoded and never
     /// applied because its parent was invented, re-armed the discount for the
     /// next hundred and twenty eight. One unit a block, against a frame
     /// ceiling two thousand times larger than a unit pays for.
@@ -1344,6 +1354,7 @@ fn below_everything_held(chain: &ChainStore, height: u64) -> bool {
 fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64) -> Reaction {
     let id = block.id();
     let height = block.header.height;
+    let claimed = block.header.total_work;
     peer.awaiting.remove(&height);
     peer.offered.remove(&height);
     // Whether a body is already held under this identifier, in which case the
@@ -1369,12 +1380,27 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
         // simply has not caught up to where it hangs. Asking again from a fresh
         // locator resolves it.
         //
+        // Asked of this peer because this peer sent it. A block claiming more
+        // work than this node's whole chain says the peer that delivered it is
+        // ahead, whatever it said when it introduced itself, and the greeting
+        // used to be the only figure `follow_up` read. Every connection a node
+        // at the tip keeps was greeted at equal work, so a missed announcement,
+        // a tie at one height settled the other way, or a block refused for
+        // its timestamp left the next block hanging on a parent nobody would
+        // ever name again. The claim is the peer's word, as its greeting was,
+        // and the price of the batch that answers is kept by
+        // [`PeerState::work_when_asked`] rather than by it.
+        //
         // Unless it hangs below everything this node holds, which is not
         // history it is missing but history it can never have. Nothing is held
         // against the peer there either; the difference is only that waiting
-        // will not fix it, and that used to go unrecorded.
+        // will not fix it, and that used to go unrecorded. Nor is the chain
+        // asked for there: its answer would be the same branch, refused again.
         Err(ChainError::UnknownParent(_) | ChainError::NotGenesis) => {
             let out_of_reach = below_everything_held(chain, height);
+            if !out_of_reach {
+                peer.total_work = peer.total_work.max(claimed);
+            }
             let mut reaction = follow_up(chain, peer, now);
             if out_of_reach {
                 reaction.unreachable = Some(height);
@@ -1467,9 +1493,13 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
         // back, be offered the same block, and refuse it again, which is a
         // loop that costs both ends a connection each time round; and there is
         // nothing to end the connection for, since the peer is right and this
-        // node is the one that has to wait. The block is offered again by
-        // whoever announces the next one, and by then the wait is usually
-        // over.
+        // node is the one that has to wait.
+        //
+        // What brings the block back is the next one. This said "the block is
+        // offered again by whoever announces the next one", and what is
+        // offered is the next block, whose parent is this one: it arrives
+        // hanging on a parent this node lacks, and that is what asks the peer
+        // for the chain, which names this height again.
         //
         // Said, though, because this is the only place in the node that can
         // see a clock is wrong. See [`Reaction::ahead_of_the_clock`].
