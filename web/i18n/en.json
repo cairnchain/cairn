@@ -95,13 +95,13 @@
     "eyebrow": "{network}, live",
     "title": {
       "plain": "Money you can check |yourself|, on an ordinary computer, forever.",
-      "curious": "A full node that costs |the same in thirty years| as it does today.",
+      "curious": "A full node whose validation state is |capped by rule|, however old the chain.",
       "technical": "Constant validation cost |by construction|, not by policy."
     },
     "lede": {
       "plain": [
         "Every cryptocurrency has a problem it does not talk about much: the more people use it, the more expensive it becomes to check it yourself. Checking is what keeps it honest. So the more successful it gets, the fewer people can hold it to account, and the more everyone has to take someone else at their word.",
-        "Cairn is built so that never happens. Whatever the chain does, however many people use it, checking it costs the same. Not less than today, not more. The same."
+        "Cairn is built so that never happens. Whatever the chain does, however many people use it, what a node must hold to check it has a ceiling written into the rules. The one thing that grows is the chain of block headers a node keeps so that newcomers can join through it, and it grows slowly: 129 MB a year."
       ],
       "curious": [
         "On existing chains, running a full node means holding the entire set of unspent outputs, and that set grows with adoption. Bitcoin sits at gigabytes, Ethereum needs a machine most people do not own. The cost of verification rises with usage, so success quietly pushes verification into data centres.",
@@ -675,8 +675,8 @@
       "title": "Mine",
       "body": {
         "plain": ["This is how you get CAIRN on a test network. Your computer starts looking for blocks, and when it finds one the reward goes to your address. There is no other way to get any: nobody has a stock to hand out."],
-        "curious": ["Single-threaded mining inside the node, which is enough for a test network. Rewards go to the key you name, and that key can live anywhere: the node is told an address and never sees the secret behind it."],
-        "technical": ["The opening difficulty of testnet-6 is 2^27, calibrated so the first block takes roughly the target block time on one ordinary core, at a measured 2.29 million hashes per second."]
+        "curious": ["Mining inside the node, on every core but one, which is enough for a test network. Rewards go to the key you name, and that key can live anywhere: the node is told an address and never sees the secret behind it."],
+        "technical": ["The opening difficulty of testnet-6 is 2^27, calibrated so the first block takes roughly the target block time on one ordinary core."]
       }
     },
     "server": {
@@ -692,7 +692,7 @@
       "body": {
         "plain": ["This website is one of the three programs in the folder you downloaded. It serves these exact pages from your own machine, reading your own node. Nothing here needs to be taken on trust either."],
         "curious": ["The explorer is a node that also builds an index and serves the site. The index is a cost that grows with the chain, which is precisely why it lives here and not in the node everybody runs."],
-        "technical": ["The site is compiled into the binary; nothing is read from disk at runtime. The HTTP layer is standard library only, one thread per connection, GET and HEAD, no request body.", "Unlike a node, the explorer keeps every block on disk by default rather than a gigabyte of them. It builds its index by walking the chain from the first block up, so blocks dropped off the bottom are the ones it needs most. Use --keep to bound it anyway; the site then says on every page that it has only read the chain from the oldest block it still holds."]
+        "technical": ["The site is compiled into the binary; nothing is read from disk at runtime. The HTTP layer is standard library only, one thread per connection, GET, HEAD and POST, with a body read only for a POST and capped.", "Unlike a node, the explorer keeps every block on disk by default rather than a gigabyte of them. It builds its index by walking the chain from the first block up, so blocks dropped off the bottom are the ones it needs most. Use --keep to bound it anyway; the site then says on every page that it has only read the chain from the oldest block it still holds."]
       }
     },
     "build": {
@@ -740,6 +740,8 @@
 
   "foot": {
     "whitepaper": "The paper",
+    "specification": "The rules, byte by byte",
+    "threatModel": "What it defends",
     "design": "How it is built",
     "openQuestions": "What is not settled",
     "priorArt": "What came before",

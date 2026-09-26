@@ -1,10 +1,13 @@
 # Contributing
 
-Cairn is a proof-of-work chain built on one claim: **a full validating node
-costs the same to run in thirty years as it does today**. Every design decision
-here answers to that, and it is the first thing a change is judged against. A
-patch that makes something faster or smaller but puts a cost in proportion to
-the chain's age is not an improvement here, however good it looks in isolation.
+Cairn is a proof-of-work chain built on one claim: **the state a validating
+node must hold is capped by consensus rule, so checking the chain does not get
+dearer as it ages**. What does grow is named and small: the header chain a node
+keeps so that newcomers can join through it, at 129 MB a year. Every design
+decision here answers to that claim, and it is the first thing a change is
+judged against. A patch that makes something faster or smaller but puts a cost
+in proportion to the chain's age is not an improvement here, however good it
+looks in isolation.
 
 Read [README.md](README.md) for what the design actually is, and
 [SECURITY.md](SECURITY.md) before reporting anything that lets money be created,
@@ -13,8 +16,11 @@ spent twice, or frozen. Security flaws do not go in public issues.
 ## Getting it built
 
 The toolchain is pinned in `rust-toolchain.toml`, so `rustup` picks it up on
-its own. Nothing else is needed: there is no build script, no code generator,
-and the whole dependency list is six crates.
+its own. Nothing else is needed: there is no build script and no code
+generator. The programs that ship pull in five crates from outside the
+workspace: `blake3`, `ed25519-dalek`, `getrandom`, `thiserror` and `zeroize`.
+The tests add `curve25519-dalek` and `hex`, and the document renderer adds
+`pulldown-cmark`, and none of the three is in anything a person downloads.
 
 ```
 cargo test --workspace
@@ -44,8 +50,9 @@ are denied in shipped code and allowed inside `#[cfg(test)]` modules, which is
 the only escape any of them has. If you find yourself wanting one outside a
 test, the answer is almost always a different shape rather than an `#[allow]`.
 
-**Green on your machine is not green.** CI runs the suite on Linux, macOS and
-Windows, in both profiles, and the differences that catch people are the ones
+**Green on your machine is not green.** CI runs the release profile on Linux,
+macOS and Windows and the debug profile, where `debug_assert!` is live, on
+Linux, and the differences that catch people are the ones
 nobody thought to look for: file locks, path separators, socket behaviour,
 timer granularity. This project spent twelve consecutive pushes red while being
 green on one laptop.
@@ -121,12 +128,12 @@ not add one here.
 
 ## What is most wanted
 
-From [SECURITY.md](SECURITY.md): the sampling bound that lets a newcomer join
-by opening 512 headers is **a conjecture, not a theorem**. It is our own
-derivation, unreviewed, and known not to account for adversarial placement
-under moving difficulty or for grinding the Fiat-Shamir seed. Work that proves
-it, or breaks it, is the single most useful thing anyone outside this project
-could do.
+The sampling bound that lets a newcomer join without reading the chain,
+derived and measured in `crates/cairn-ledger/src/sampling.rs`, is **a
+conjecture, not a theorem**. [SECURITY.md](SECURITY.md) says what has been
+measured about it, what has not, and how it was broken once already. Work that
+proves it, or breaks it, is the single most useful thing anyone outside this
+project could do.
 
 After that: anything that makes a node's cost grow with the chain, anywhere. It
 is the one claim everything else rests on, and it has been quietly broken and

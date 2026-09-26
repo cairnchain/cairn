@@ -148,6 +148,10 @@ thing it exists for.
   </tbody>
 </table>
 
+One of them, `state entry`, is reserved: nothing on the network is hashed
+under it. It is published so that its string cannot come to mean one thing to
+one implementation and another to a second.
+
 Two consequences follow and both are load-bearing.
 
 Adding a field to a structure changes every identifier that structure ever had,

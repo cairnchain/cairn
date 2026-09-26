@@ -95,13 +95,13 @@
     "eyebrow": "{network}, en direct",
     "title": {
       "plain": "Une monnaie que vous pouvez vérifier |vous-même|, sur un ordinateur ordinaire, pour toujours.",
-      "curious": "Un nœud complet qui coûtera |dans trente ans| ce qu'il coûte aujourd'hui.",
+      "curious": "Un nœud complet dont l'état à valider est |plafonné par règle|, quel que soit l'âge de la chaîne.",
       "technical": "Un coût de validation constant |par construction|, pas par politique."
     },
     "lede": {
       "plain": [
         "Toutes les cryptomonnaies ont un problème dont on parle peu : plus elles sont utilisées, plus il devient cher de les vérifier soi-même. Or c'est la vérification qui les tient honnêtes. Donc plus elles réussissent, moins il reste de gens capables de leur demander des comptes, et plus il faut croire quelqu'un d'autre sur parole.",
-        "Cairn est construite pour que ça n'arrive jamais. Quoi que fasse la chaîne, quel que soit le nombre d'utilisateurs, la vérifier coûte la même chose. Pas moins qu'aujourd'hui, pas plus. La même chose."
+        "Cairn est construite pour que ça n'arrive jamais. Quoi que fasse la chaîne, quel que soit le nombre d'utilisateurs, ce qu'un nœud doit tenir pour la vérifier a un plafond écrit dans les règles. La seule chose qui grandit est la chaîne des en-têtes de blocs qu'un nœud garde pour que les nouveaux venus puissent la rejoindre par lui, et elle grandit lentement : 129 Mo par an."
       ],
       "curious": [
         "Sur les chaînes existantes, faire tourner un nœud complet signifie détenir l'intégralité des sorties non dépensées, et cet ensemble grandit avec l'adoption. Bitcoin en est à plusieurs gigaoctets, Ethereum demande une machine que peu de gens possèdent. Le coût de la vérification monte avec l'usage, donc le succès pousse discrètement la vérification vers les centres de données.",
@@ -675,8 +675,8 @@
       "title": "Miner",
       "body": {
         "plain": ["C'est ainsi qu'on obtient des CAIRN sur un réseau de test. Votre ordinateur se met à chercher des blocs, et quand il en trouve un, la récompense va à votre adresse. Il n'y a aucun autre moyen d'en obtenir : personne n'a de stock à distribuer."],
-        "curious": ["Minage sur un seul fil d'exécution dans le nœud, ce qui suffit pour un réseau de test. Les récompenses vont à la clé que vous indiquez, et cette clé peut vivre n'importe où : le nœud reçoit une adresse et ne voit jamais le secret qui est derrière."],
-        "technical": ["La difficulté d'ouverture de testnet-6 est 2^27, calibrée pour que le premier bloc prenne à peu près le temps de bloc visé sur un cœur ordinaire, à 2,29 millions d'empreintes par seconde mesurées."]
+        "curious": ["Minage dans le nœud, sur tous les cœurs sauf un, ce qui suffit pour un réseau de test. Les récompenses vont à la clé que vous indiquez, et cette clé peut vivre n'importe où : le nœud reçoit une adresse et ne voit jamais le secret qui est derrière."],
+        "technical": ["La difficulté d'ouverture de testnet-6 est 2^27, calibrée pour que le premier bloc prenne à peu près le temps de bloc visé sur un cœur ordinaire."]
       }
     },
     "server": {
@@ -692,7 +692,7 @@
       "body": {
         "plain": ["Ce site est l'un des trois programmes du dossier que vous avez téléchargé. Il sert exactement ces pages depuis votre machine, en lisant votre propre nœud. Rien ici non plus n'a besoin d'être pris sur parole."],
         "curious": ["L'explorateur est un nœud qui construit en plus un index et sert le site. Cet index est un coût qui grandit avec la chaîne, et c'est précisément pour cela qu'il vit ici et pas dans le nœud que tout le monde fait tourner."],
-        "technical": ["Le site est compilé dans le binaire, rien n'est lu sur le disque à l'exécution. La couche HTTP n'utilise que la bibliothèque standard, un fil par connexion, GET et HEAD, sans corps de requête.", "Contrairement à un nœud, l'explorateur garde par défaut tous les blocs sur le disque, et non un gigaoctet. Il construit son index en parcourant la chaîne depuis le premier bloc : les blocs abandonnés par le bas sont donc précisément ceux dont il a le plus besoin. On peut malgré tout le borner avec --keep, et le site indique alors sur chaque page qu'il n'a lu la chaîne qu'à partir du plus ancien bloc qu'il détient encore."]
+        "technical": ["Le site est compilé dans le binaire, rien n'est lu sur le disque à l'exécution. La couche HTTP n'utilise que la bibliothèque standard, un fil par connexion, GET, HEAD et POST, avec un corps de requête lu seulement pour un POST, et plafonné.", "Contrairement à un nœud, l'explorateur garde par défaut tous les blocs sur le disque, et non un gigaoctet. Il construit son index en parcourant la chaîne depuis le premier bloc : les blocs abandonnés par le bas sont donc précisément ceux dont il a le plus besoin. On peut malgré tout le borner avec --keep, et le site indique alors sur chaque page qu'il n'a lu la chaîne qu'à partir du plus ancien bloc qu'il détient encore."]
       }
     },
     "build": {
@@ -740,6 +740,8 @@
 
   "foot": {
     "whitepaper": "Le papier",
+    "specification": "Les règles, octet par octet",
+    "threatModel": "Ce qu’il défend",
     "design": "Comment c’est construit",
     "openQuestions": "Ce qui n’est pas tranché",
     "priorArt": "Ce qui existait avant",

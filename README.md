@@ -19,8 +19,11 @@ everything that has not moved recently lives only in the commitment and
 is spent by presenting a proof. Nothing is ever destroyed, expired, or charged
 rent.
 
-The paper is `docs/cairn-whitepaper.html`. What the field has already done
-with this problem, and where Cairn stands against it, is in
+The paper is `docs/cairn-whitepaper.html`. What a node must do, byte for byte,
+so that a second implementation could be written without reading this one, is
+`docs/cairn-specification.html`, and what the project defends, against whom,
+and what it leaves open is `docs/cairn-threat-model.html`. What the field has
+already done with this problem, and where Cairn stands against it, is in
 `docs/cairn-prior-art.html`; the working design notes are in
 `docs/cairn-design.html`.
 
@@ -29,9 +32,9 @@ what it borrows and what limit it accepts.
 
 ## Status
 
-Pre-alpha, and running in public. `testnet-6` opened on 1 September 2026, on
-three machines at three hosts. Its money is worth nothing, is meant to be
-worth nothing, and the network will be reset.
+Pre-alpha, and running in public. `testnet-6` opened on 1 September 2026. Its
+money is worth nothing, is meant to be worth nothing, and the network will be
+reset.
 
 It is the sixth because three audit passes in one day found three things, and
 the last of them was not a hole an attacker exploits but the central mechanism
@@ -222,6 +225,8 @@ sh /usr/local/src/cairn/deploy/install.sh
 | `cairn-wallet` | the wallet: a library that holds the key, and `cairn-wallet` on top of it |
 | `cairn-http` | the small HTTP server and JSON writer the wallet and the explorer share |
 | `cairn-explorer` | `cairn-explorer`, a node that indexes the chain and serves `web/` |
+| `cairn-docs` | renders `docs/` into the HTML a node serves; ships in nothing |
+| `cairn-fuzz` | the generators and shrinker the fuzz tests share; ships in nothing |
 
 The website itself is in `web/`, kept out of the protocol crates. It is plain
 HTML, CSS and JavaScript with no build step and no framework, compiled into the

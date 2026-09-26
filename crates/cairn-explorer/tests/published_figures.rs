@@ -54,6 +54,10 @@ const PRIOR_ART: &str = include_str!("../../../docs/cairn-prior-art.html");
 /// an archivist holds.
 const QUESTIONS: &str = include_str!("../../../docs/cairn-open-questions.html");
 const SITE_EN: &str = include_str!("../../../web/i18n/en.json");
+/// The site's page, whose description is what a search engine shows.
+const SITE_PAGE: &str = include_str!("../../../web/index.html");
+/// What a contributor reads first, which opens on the claim the project makes.
+const CONTRIBUTING: &str = include_str!("../../../CONTRIBUTING.md");
 const SITE_FR: &str = include_str!("../../../web/i18n/fr.json");
 /// The source that acts on the cap, which quotes the same two figures in the
 /// comment explaining why it reports what it reports. Included here because
@@ -118,7 +122,7 @@ fn in_french(value: usize) -> &'static str {
 /// section carries can part company.
 fn section_number(page: &str, heading: &str) -> String {
     let above = page
-        .split_once(&format!("<h2>{heading}</h2>"))
+        .split_once(&format!(">{heading}</h2>"))
         .unwrap_or_else(|| panic!("no section of this page is headed `{heading}`"))
         .0;
     let rail = above
@@ -365,6 +369,42 @@ fn the_headers_a_year_figure_counts_the_forest_the_headers_make() {
         )),
         "the paper has to say what the 129 MB is made of"
     );
+
+    // And the places that used to make the slogan the README refuses, which
+    // say instead what grows and by how much. The site's headline and its
+    // first paragraph, the page's description and the first sentence of
+    // CONTRIBUTING all said a node costs the same in thirty years, while the
+    // header chain grows by this every year.
+    for (page, text, said) in [
+        ("English site", SITE_EN, format!("{megabytes:.0} MB a year")),
+        ("French site", SITE_FR, format!("{megabytes:.0} Mo par an")),
+        ("CONTRIBUTING", CONTRIBUTING, format!("{megabytes:.0} MB a year")),
+    ] {
+        assert!(
+            text.contains(&said),
+            "{page} does not say what grows: `{said}`"
+        );
+    }
+    for (page, text) in [
+        ("English site", SITE_EN),
+        ("French site", SITE_FR),
+        ("CONTRIBUTING", CONTRIBUTING),
+        ("site page", SITE_PAGE),
+    ] {
+        for slogan in [
+            "the same in thirty years",
+            "costs the same to run in thirty years",
+            "checking it costs the same",
+            "dans trente ans| ce qu'il coûte",
+            "la vérifier coûte la même chose",
+        ] {
+            assert!(
+                !text.contains(slogan),
+                "{page} still says `{slogan}`, which the README says is a slogan the \
+                 paper corrects"
+            );
+        }
+    }
 }
 
 /// The record a node keeps for one block of `payments` ordinary payments, on a
@@ -901,6 +941,14 @@ fn the_readme_quotes_the_draw_count_this_build_uses() {
         !README.contains("draws 512 old headers"),
         "512 is the count the README itself says was wrong"
     );
+    // CONTRIBUTING quoted SECURITY.md as saying a newcomer opens 512 headers
+    // and that the derivation ignored placement and grinding, a week after
+    // SECURITY.md had retracted both. It points at the two files now and
+    // restates neither.
+    assert!(
+        !CONTRIBUTING.contains("512 headers") && !CONTRIBUTING.contains("known not to account"),
+        "CONTRIBUTING restates a count and two gaps SECURITY.md retracted"
+    );
 }
 
 /// The paper's limitations do not name an omission this build has closed.
@@ -1232,7 +1280,14 @@ fn the_survey_papers_headers_are_eight_times_smaller_because_this_build_encodes_
     }
 }
 
-/// What the survey paper's tables say Cairn bounds is what this build bounds.
+/// What the survey paper's tables say Cairn bounds is what this build bounds,
+/// and what it says Cairn borrowed is what the code says it borrowed.
+///
+/// The comparison table marked Cairn's trustless start as planned, three weeks
+/// after it shipped, and the text said the draw was implemented with
+/// `FlyClient`'s proven parameters and a 2026 adversary model saving 37 per cent
+/// of samples. The count is the project's own derivation, measured and
+/// unproven, and nothing in the code cites such a model.
 ///
 /// The tables and the ledger set Cairn beside what everybody else built, and
 /// every Cairn cell in them is a rule this build applies: the size of the hot
@@ -1247,7 +1302,9 @@ fn the_survey_papers_tables_bound_what_this_build_bounds() {
     let grace = cairn_ledger::state::GRACE_BLOCKS;
     println!("{notes} hot notes, {roots} roots, {grace} blocks of grace");
 
+    let draws = grouped(SAMPLES as u64);
     for said in [
+        format!("Oui, {draws} en-têtes ouverts"),
         format!("Le tiroir : {notes} billets, un nombre"),
         format!("Oui, {notes} billets"),
         format!("{notes} est un effectif"),
@@ -1260,6 +1317,16 @@ fn the_survey_papers_tables_bound_what_this_build_bounds() {
             PRIOR_ART.contains(&said),
             "the survey paper does not say `{said}`, which is what this build \
              holds a node to"
+        );
+    }
+    for claim in [
+        "Prévu, en-têtes gravés",
+        "paramètres démontrés, non réinventé",
+        "37 % d'échantillons",
+    ] {
+        assert!(
+            !PRIOR_ART.contains(claim),
+            "the survey paper still says `{claim}`"
         );
     }
 }
