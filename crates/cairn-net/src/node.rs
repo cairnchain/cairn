@@ -8804,7 +8804,13 @@ fn read_loop(
         // hundred bytes long. Before it arrives, a megabyte of notes bought
         // one and a third seconds of this node's processor, because decoding
         // one decompresses a curve point for every owner in it.
-        let frame = match read_frame(&mut stream, network, most_from(announced)) {
+        //
+        // Lifted by the introduction and not by the port it names. It was
+        // lifted once the peer had an address worth writing down, which a
+        // handshake saying it listens nowhere never gives it, so a peer that
+        // does not listen was a stranger for life and its first block cost it
+        // the connection and a refusal.
+        let frame = match read_frame(&mut stream, network, most_from(peer.greeted)) {
             Ok(Framed::Frame(frame)) => {
                 last_heard = unix_now();
                 if window_is_over(window_start, last_heard) {
