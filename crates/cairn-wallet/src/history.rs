@@ -748,6 +748,25 @@ impl History {
         }
     }
 
+    /// Takes up a note of this key's that its node's ledger holds, with the
+    /// height of the block that paid it, which this account may never read.
+    ///
+    /// Which notes are this key's is built up from the blocks read, and an
+    /// account moved past blocks it cannot read never learns the notes they
+    /// paid. The balance counts them all the same, from the ledger, and a
+    /// payment spends them; the account, which tells this key's inputs from a
+    /// stranger's by the notes it knows, recorded that payment as the change
+    /// coming back against the few notes it did know, or as money received.
+    /// `Wallet::follow` calls this for the notes the ledger holds each time it
+    /// moves the account past blocks, the way `fell_at` takes up the ones that
+    /// fell.
+    ///
+    /// A note already held keeps what the account knew of it.
+    pub(crate) fn paid_before(&mut self, id: NoteId, value: Amount, height: u64) {
+        self.held.entry(id).or_insert(value);
+        self.paid_at.entry(id).or_insert(height);
+    }
+
     /// Moves the reading point forward, for a wallet that cannot see what
     /// came before.
     ///

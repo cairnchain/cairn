@@ -1634,9 +1634,25 @@ impl Wallet {
                     .into_iter()
                     .chain(self.node.with_chain(cairn_chain::ChainStore::branch_start))
                     .max();
-                match first {
-                    Some(first) if first > height => history.skip_to(first),
-                    _ => break,
+                let Some(first) = first.filter(|first| *first > height) else {
+                    break;
+                };
+                history.skip_to(first);
+                // And the notes the blocks stepped over paid this key, which
+                // the ledger holds and the account would otherwise never
+                // learn: a payment spending one of them was recorded as the
+                // change coming back. The ones still in the hot set; a fallen
+                // one is taken up with its place below, as the node answers.
+                let paid: Vec<(NoteId, Amount, u64)> = self.node.with_chain(|chain| {
+                    chain
+                        .state()
+                        .hot_notes()
+                        .filter(|(_, entry)| entry.note.owner == mine)
+                        .map(|(id, entry)| (id, entry.note.value, entry.height))
+                        .collect()
+                });
+                for (id, value, height) in paid {
+                    history.paid_before(id, value, height);
                 }
                 continue;
             };
