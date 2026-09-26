@@ -68,9 +68,14 @@
 //! worth measuring and is not what it was being read as.
 //!
 //! **The mutation arm is what reaches**, and how far depends on how close the
-//! corpus already is. The deepest target in the suite is the one that bends
-//! three bytes of a real twelve kilobyte handover: 87 to 98 per cent of those
-//! decode, and they go on into `handover::accept` and `check_start`.
+//! corpus already is. The deepest targets in the suite go past the decoder.
+//! `cairn-net/tests/fuzz_join_answers.rs` bends a real twelve kilobyte
+//! handover and the weighing before it with every operator here: about one in
+//! five of those decode, and they go on into `handover::accept` and
+//! `check_start`, which have to refuse them or take exactly what was bent
+//! from. `cairn-ledger/tests/fuzz_connect_block.rs` does the same to a block
+//! and `connect_block`. The first of them was a fixed loop bending three
+//! bytes, whose results nothing read, and the nightly run never reached it.
 //!
 //! **What had no target at all** was named here so it would be a gap and not
 //! an omission, and all four are closed: `cairn-http`'s request reader, the
