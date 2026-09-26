@@ -4,7 +4,8 @@
   "a11y": {
     "skip": "Skip to content",
     "level": "Reading level",
-    "language": "Language"
+    "language": "Language",
+    "sections": "Sections"
   },
 
   "nav": {
@@ -65,7 +66,14 @@
     "notRead": "This site does not have that, and it has not finished reading the chain: it has read up to block {through}, with {blocks} still to go. What you asked for may be in the part it has not reached. It reads as it goes, so it is worth asking again in a minute.",
     "notReadAny": "This site does not have that, and it has not read any of the chain yet: {blocks} blocks are waiting. What you asked for may well be there. It reads as it goes, so it is worth asking again in a minute.",
     "unreachable": "The node behind this page did not answer. It may be restarting, or still catching up.",
-    "noPage": "No page lives at this address."
+    "noPage": "No page lives at this address.",
+    "malformed": "That is not something this chain names. Check what was pasted: the line below says what was wrong with it.",
+    "server": "This site could not give that answer. The line below says why.",
+    "notKept": "Block {height} is on the chain, but this site no longer keeps it: it keeps blocks from {from} up. Whoever runs this site can fix it by keeping every block.",
+    "unreadable": "Block {height} is on this site's disk, and the disk would not read it back. Ask again in a minute; if it goes on, the disk under this site is failing.",
+    "notWritten": "Block {height} is on the chain and has not reached this site's disk yet. Ask again in a minute.",
+    "aboveTip": "The chain reaches block {tip}. There is no block {height} yet.",
+    "stale": "This page has not heard from the site's node for {ago}. Every figure on it is the last answer it had, and may be out of date."
   },
 
   "coverage": {
@@ -239,7 +247,7 @@
     "direction": "Direction", "madeBy": "Created by", "madeAt": "Created in block",
     "spentBy": "Spent by", "spentAt": "Spent in block", "position": "Position in the cave",
     "position.note": "where its proof points",
-    "none": "None", "pending": "Not mined yet", "unknown": "Not indexed",
+    "none": "None", "pending": "Not mined yet", "nextUnavailable": "Mined, and this site cannot read it right now", "unknown": "Not indexed",
     "indexNotes": "Notes it remembers",
     "indexTransactions": "Transactions it can find",
     "indexOwners": "Addresses it has seen",
@@ -264,7 +272,10 @@
     "drift.note": "how far ahead of a node a block may be dated"
   },
 
-  "blocks": { "title": "Blocks" },
+  "blocks": {
+    "title": "Blocks",
+    "notKept": "Blocks {from} to {through} are on the chain, but this site no longer keeps them."
+  },
 
   "block": {
     "eyebrow": "Block",
@@ -293,7 +304,8 @@
 
   "note": { "eyebrow": "Note", "title": "One note" },
 
-  "pool": { "eyebrow": "Waiting room", "title": "Transfers waiting for a block", "empty": "Nothing is waiting." },
+  "pool": { "eyebrow": "Waiting room", "title": "Transfers waiting for a block", "empty": "Nothing is waiting.",
+    "count": { "one": "{n} transfer is waiting.", "other": "{n} transfers are waiting." } },
 
   "holders": { "eyebrow": "Distribution", "title": "Largest holders", "countedAt": "Worked out at block {n}. The distribution is reckoned once every sixteen blocks, because doing it costs the whole index rather than the block just read." },
 
@@ -378,7 +390,7 @@
     "holders": {
       "plain": "Who holds the most. On a test network this says very little: it is mostly whoever left a computer mining the longest.",
       "curious": "Computed from the explorer index, counting unspent notes per owner. An owner can hold any number of addresses, so this is a view of addresses, not of people.",
-      "technical": "Balances are the sum of unspent notes per public key over the followed branch. Reorganisations rebuild the index rather than unwinding it."
+      "technical": "Balances are the sum of unspent notes per public key over the followed branch. A reorganisation is unwound block by block; only one deeper than the 128 blocks the index keeps the means to take back makes it read the chain again."
     },
     "emission": {
       "plain": "New money appears only as payment for the work of finding blocks. The amount halves every so often, then stops falling and stays at a small figure forever, so there is always a reason to keep the network running.",
@@ -707,6 +719,22 @@
     "indexPartial": "This site cannot see the whole chain. It has only read from block {from} upwards, because the computer behind it no longer keeps the blocks below that. Every balance and every total here is about that part of the chain and not about the chain: an address that was paid earlier and has spent nothing since will show as empty. Whoever runs this site can fix it by keeping every block.",
     "indexBehind": "This site is {blocks} blocks behind the chain. What is below was true a while ago. Anything paid or spent since is not here yet.",
     "alone": "The computer behind this page is not connected to anybody. It is showing you the chain as it last saw it, and it will not learn about a new block until somebody reaches it again.",
+    "unwritten": {
+      "stopped": "The disk under the node behind this page stopped taking what it writes, and the node has stopped itself rather than fall further behind. The chain had reached block {reached} and the disk holds {kept}, so {blocks} blocks were accepted and not kept. Nothing on this page will move again until whoever runs this site frees room on that disk and starts it again: what you see is the chain as it stood when it stopped.",
+      "behind": "The disk under the node behind this page is not taking what it writes. The chain has reached block {reached} and the disk holds {kept}, so {blocks} blocks have been accepted and not kept. The figures here are right for the chain as it stands; if the disk does not recover, the node will stop, and whoever runs this site has to give it room."
+    },
+    "disk": { "empty": "no block at all", "holds": "blocks up to {height}" },
+    "clockBehind": {
+      "certain": "The clock of the computer behind this page is about {gap} behind the network's: it refused the first block of its own network as dated in the future. It cannot follow the chain until its clock is right, so nothing here is current. Whoever runs this site has to set the time on that machine.",
+      "likely": "The clock of the computer behind this page looks about {gap} behind the network's: it refused {blocks} blocks from {peers} peers as dated in the future. A node on a slow clock refuses every honest block, so the height here may have stopped. Whoever runs this site should check the time on that machine."
+    },
+    "unread": "The disk under the node behind this page will not give back block {height}. Nothing has been deleted, but this site cannot show that block, and everything it says about who owns what stops at it until the disk reads it again. If it goes on, that disk is failing.",
+    "unjudged": "The program behind this page looks too old for the chain it is on: it has met {blocks} blocks built under rules it does not have, from {peers} peers, the newest written for version {version} where it knows version {known}. Anyone can write a version number into a block, so this is a reason to look rather than a verdict. If the height here has also stopped moving, whoever runs this site has to install a newer version.",
+    "unweighable": "Nobody the node behind this page has asked could show it which chain carries the most work: {showings} showings from {peers} peers would not weigh. It is reading the chain block by block instead, which takes hours, and until it is done this page shows a chain shorter than the real one.",
+    "filling": {
+      "within": "The node behind this page cannot yet show the chain to a computer joining the network. It holds the headers from block {from} up to block {through} and the chain is at block {tip}; it collects the rest from its peers as it runs. Nothing on this page is affected.",
+      "over": "The node behind this page cannot yet show the chain to a computer joining the network, and until it can it cannot drop old blocks either: its disk holds {bytes} of blocks against the {keep} it was asked to keep, and grows with the chain. It holds the headers from block {from} up to block {through} and the chain is at block {tip}. Nothing on this page is affected; whoever runs this site should make sure it can reach a peer that keeps the older part of the chain."
+    },
     "supply": "The two ways this site counts the money in existence do not agree: the chain's own accounts say {issued} CAIRN and adding up the notes gives {counted} CAIRN. They are worked out from different things and should be the same number. One of them is wrong and this page cannot tell you which."
   },
 

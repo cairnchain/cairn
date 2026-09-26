@@ -165,13 +165,20 @@ function cairn(pebbles) {
   return (negative ? '-' : '') + text;
 }
 
+/*
+  A size in the units the papers count in, which are thousands.
+
+  It divided by 1024 and said MB, so the home page printed the drawer at
+  capacity as 65 MB three panels above a lesson, and a design paper, that say
+  68. The figure is the thesis, and it was two numbers on one site.
+*/
 function bytes(value) {
   const size = Number(value);
   if (!Number.isFinite(size)) return '-';
-  if (size < 1024) return count(size) + ' B';
-  if (size < 1024 * 1024) return (size / 1024).toFixed(size < 10240 ? 1 : 0) + ' kB';
-  if (size < 1024 * 1024 * 1024) return (size / 1048576).toFixed(size < 10485760 ? 1 : 0) + ' MB';
-  return (size / 1073741824).toFixed(2) + ' GB';
+  if (size < 1000) return count(size) + ' B';
+  if (size < 1000000) return (size / 1000).toFixed(size < 10000 ? 1 : 0) + ' kB';
+  if (size < 1000000000) return (size / 1000000).toFixed(size < 10000000 ? 1 : 0) + ' MB';
+  return (size / 1000000000).toFixed(2) + ' GB';
 }
 
 function moment(seconds) {
@@ -359,7 +366,7 @@ function table(headers, rows) {
       el(
         'thead',
         null,
-        el('tr', null, headers.map((header) => el('th', { class: header.numeric ? 'numeric' : null, text: header.label })))
+        el('tr', null, headers.map((header) => el('th', { class: header.numeric ? 'numeric' : null, scope: 'col', text: header.label })))
       ),
       el('tbody', null, rows)
     )
@@ -383,6 +390,9 @@ async function api(path) {
     // answer as one from a site that has read all of it, and the page says
     // different words for the two.
     error.coverage = body && body.coverage;
+    // And the rest of the answer: a "not here" says why, at what height, and
+    // how far the chain reaches.
+    error.body = body || {};
     throw error;
   }
   return body;
@@ -420,6 +430,21 @@ function coverageLine(coverage) {
 
 const view = document.getElementById('view');
 
+/*
+  Which navigation is the current one.
+
+  Two in flight drew whichever answer arrived last, so a block could be drawn
+  under /blocks with Explore marked as the current section. Every render takes
+  a number before it waits, and one that comes back to find a newer number
+  draws nothing.
+*/
+let rendering = 0;
+
+/* The tab's title, for the view on screen: a screen reader reads it first. */
+function setTitle(text) {
+  document.title = text ? text + ' \u00b7 ' + t('site.title') : t('site.title');
+}
+
 function showLoading() {
   clear(view);
   view.append(el('div', { class: 'loading', text: t('common.loading') }));
@@ -433,18 +458,48 @@ function showLoading() {
   about a transaction while it was still reading, it said exactly that about a
   transfer it was printing on another page at the same moment.
 */
-function showError(error) {
-  const missing = error && error.status === 404;
+function showError(error, mine) {
+  // A failure that arrives after another page was asked for is about a page
+  // nobody is looking at any more.
+  if (mine !== undefined && mine !== rendering) return;
+  const status = error && error.status;
   const coverage = error && error.coverage;
+  const body = (error && error.body) || {};
+  const kept = coverage && coverage.kept;
+  const height = count(body.height);
+  // Everything that was not a 404 used to be the node not answering, so a
+  // malformed address in the bar was announced as the node being down.
   let said = t('error.unreachable');
-  if (missing) {
-    const partial = coverage && coverage.whole === false;
-    if (partial && (coverage.through === null || coverage.through === undefined)) {
-      said = t('error.notReadAny', { blocks: count(coverage.behind) });
-    } else if (partial) {
-      said = t('error.notRead', { through: count(coverage.through), blocks: count(coverage.behind) });
-    } else {
-      said = t('error.missing');
+  if (status === 400) {
+    said = t('error.malformed');
+  } else if (status === 500) {
+    said = t('error.server');
+  } else if (status === 404) {
+    // On the chain and not here: the API says which of four things it is,
+    // and none of them is "there is nothing on this chain with that name".
+    switch (body.error) {
+      case 'not kept':
+        said = t('error.notKept', { height, from: kept ? count(kept.from) : '-' });
+        break;
+      case 'unreadable':
+        said = t('error.unreadable', { height });
+        break;
+      case 'not written yet':
+        said = t('error.notWritten', { height });
+        break;
+      case 'above the tip':
+        said = t('error.aboveTip', { height, tip: count(body.tip) });
+        break;
+      default: {
+        const partial = coverage && coverage.whole === false;
+        if (partial && (coverage.through === null || coverage.through === undefined)) {
+          said = t('error.notReadAny', { blocks: count(coverage.behind) });
+        } else if (partial) {
+          said = t('error.notRead', { through: count(coverage.through), blocks: count(coverage.behind) });
+        } else {
+          said = t('error.missing');
+        }
+      }
     }
   }
   clear(view);
@@ -458,6 +513,7 @@ function showError(error) {
 }
 
 async function home() {
+  const mine = rendering;
   // One read of the window serves the chart and the table under it, and the
   // three go out together rather than one after another: the page is not
   // waiting on the rules to know what a block is.
@@ -466,8 +522,10 @@ async function home() {
     api('blocks?limit=' + CHART_WINDOW),
     chainRules(),
   ]);
+  if (mine !== rendering) return;
   state.status = status;
 
+  setTitle(null);
   clear(view);
   const hotShare = status.hot.capacity ? Math.min(100, (status.hot.notes / status.hot.capacity) * 100) : 0;
 
@@ -493,7 +551,7 @@ async function home() {
         'div',
         { class: 'stats' },
         stat(t('stat.height'), count(status.tip ? status.tip.height : 0), status.tip ? ago(status.tip.timestamp) : ''),
-        stat(t('stat.difficulty'), count(BigInt(status.tip ? status.tip.difficulty : '0'))),
+        stat(t('stat.difficulty'), status.tip && status.tip.difficulty ? count(BigInt(status.tip.difficulty)) : '-'),
         stat(t('stat.supply'), cairn(status.supply.issued) + ' CAIRN', t('stat.supply.note', { reward: cairn(status.supply.nextReward) })),
         stat(t('stat.holders'), count(status.chain.holders)),
         stat(t('stat.pool'), count(status.pool), t('stat.pool.note')),
@@ -1095,14 +1153,23 @@ async function chainRules() {
 }
 
 async function blocks(parameters) {
+  const mine = rendering;
   const from = parameters.get('from');
   const page = await api('blocks?limit=25' + (from ? '&from=' + encodeURIComponent(from) : ''));
+  if (mine !== rendering) return;
+  setTitle(t('blocks.title'));
   clear(view);
+  // A run of heights this site no longer keeps is said as that. The page used
+  // to list nothing over it and say nothing, which is what a shorter chain
+  // looks like.
+  const notKept = page.notKept
+    ? el('p', { class: 'small dim', text: t('blocks.notKept', { from: count(page.notKept.from), through: count(page.notKept.through) }) })
+    : null;
   view.append(
     el(
       'div',
       { class: 'stack' },
-      panel(t('blocks.title'), explainer('explain.blocks'), blocksTable(page.blocks),
+      panel(t('blocks.title'), explainer('explain.blocks'), blocksTable(page.blocks), notKept,
         page.next !== null && page.next !== undefined
           ? el('div', { class: 'more' }, el('a', { class: 'action', href: '/blocks?from=' + page.next, 'data-link': true, text: t('common.older') }))
           : null
@@ -1111,9 +1178,16 @@ async function blocks(parameters) {
   );
 }
 
-async function block(reference) {
-  const data = await api('block/' + encodeURIComponent(reference));
+async function block(reference, parameters) {
+  const mine = rendering;
+  const from = parameters.get('from');
+  const data = await api('block/' + encodeURIComponent(reference) + (from ? '?from=' + encodeURIComponent(from) : ''));
+  if (mine !== rendering) return;
+  setTitle(t('block.title', { height: count(data.height) }));
   clear(view);
+  // Only the tip has nothing mined on it. A block whose successor this site
+  // cannot read printed "Not mined yet" too, a hundred blocks deep.
+  const isTip = data.confirmations === 1;
 
   const rows = el(
     'div',
@@ -1125,7 +1199,7 @@ async function block(reference) {
     row(t('field.work'), count(BigInt(data.work))),
     row(t('field.nonce'), count(BigInt(data.nonce))),
     row(t('field.previous'), data.height > 0 ? hashLink(data.previous, '/block/' + (data.height - 1)) : t('field.none')),
-    row(t('field.next'), data.next ? hashLink(data.next, '/block/' + (data.height + 1)) : t('field.pending')),
+    row(t('field.next'), data.next ? hashLink(data.next, '/block/' + (data.height + 1)) : isTip ? t('field.pending') : t('field.nextUnavailable')),
     row(t('field.size'), bytes(data.size)),
     row(t('field.reward'), cairn(data.reward) + ' CAIRN'),
     row(t('field.fees'), data.fees === null ? t('field.unknown') : cairn(data.fees) + ' CAIRN'),
@@ -1169,7 +1243,7 @@ async function block(reference) {
       { class: 'rows' },
       row(t('field.transaction'), hashLink(coinbase.id, '/tx/' + coinbase.id)),
       row(t('field.paid'), cairn(coinbase.total) + ' CAIRN'),
-      coinbase.extraText ? row(t('field.message'), el('span', { text: coinbase.extraText })) : null,
+      coinbase.extraText ? row(t('field.message'), el('bdi', { text: coinbase.extraText })) : null,
       coinbase.extra && !coinbase.extraText ? row(t('field.extra'), el('span', { class: 'hash', text: coinbase.extra })) : null
     ),
     outputsTable(coinbase.outputs)
@@ -1294,8 +1368,11 @@ function transferCard(transfer) {
 }
 
 async function transaction(id) {
+  const mine = rendering;
   const data = await api('tx/' + encodeURIComponent(id));
+  if (mine !== rendering) return;
   const it = data.transaction;
+  setTitle(t('tx.title'));
   clear(view);
 
   const rows = el(
@@ -1312,7 +1389,7 @@ async function transaction(id) {
     row(t('field.totalOut'), amountOrUnknown(it.totalOut)),
     row(t('field.fee'), feeValue(it)),
     row(t('field.size'), bytes(it.size)),
-    it.extraText ? row(t('field.message'), el('span', { text: it.extraText })) : null
+    it.extraText ? row(t('field.message'), el('bdi', { text: it.extraText })) : null
   );
 
   view.append(
@@ -1320,7 +1397,9 @@ async function transaction(id) {
       'div',
       { class: 'stack' },
       el('section', null, el('p', { class: 'eyebrow', text: t('tx.eyebrow') }), el('h1', { text: t('tx.title') })),
-      panel(null, explainer('explain.transaction'), rows),
+      // Whether its outputs have been spent comes off the index, which may
+      // not have read that far.
+      panel(null, explainer('explain.transaction'), rows, coverageLine(data.coverage)),
       panel(
         t('transfer.spends', { n: count(it.inputs.length) }),
         explainer('explain.inputs'),
@@ -1353,10 +1432,35 @@ function atLeast(data, text) {
   return data.counted === false ? '\u2265\u202f' + text : text;
 }
 
+/*
+  What an address was paid, or paid out, as far as this site can tell.
+
+  Both only grow, so a figure off part of the chain is at least the real one,
+  and so is one that has passed what a count of pebbles holds, which the API
+  says with `turnoverCounted`. Both were printed bare beside a note count that
+  already carried the sign.
+*/
+function turnover(data, pebbles) {
+  const floor = data.turnoverCounted === false || (data.coverage && data.coverage.whole === false);
+  return (floor ? '\u2265\u202f' : '') + cairn(pebbles) + ' CAIRN';
+}
+
 async function address(owner, parameters) {
+  const mine = rendering;
   const from = parameters.get('from');
-  const data = await api('address/' + encodeURIComponent(owner) + (from ? '?from=' + encodeURIComponent(from) : ''));
+  const notes = parameters.get('notes');
+  const asked = [from ? 'from=' + encodeURIComponent(from) : null, notes ? 'notes=' + encodeURIComponent(notes) : null].filter(Boolean);
+  const data = await api('address/' + encodeURIComponent(owner) + (asked.length ? '?' + asked.join('&') : ''));
+  if (mine !== rendering) return;
+  setTitle(shorten(data.address, 10, 6));
   clear(view);
+  // The next page of notes keeps the page of history the reader is on, and the
+  // next page of history keeps the notes.
+  const here = (name, value) => {
+    const kept = new URLSearchParams(parameters);
+    kept.set(name, value);
+    return '/address/' + data.address + '?' + kept.toString();
+  };
 
   view.append(
     el(
@@ -1374,10 +1478,11 @@ async function address(owner, parameters) {
         'div',
         { class: 'stats' },
         stat(t('stat.balance'), cairn(data.balance) + ' CAIRN'),
-        stat(t('stat.received'), cairn(data.received) + ' CAIRN'),
-        stat(t('stat.sent'), cairn(data.spent) + ' CAIRN'),
+        stat(t('stat.received'), turnover(data, data.received)),
+        stat(t('stat.sent'), turnover(data, data.spent)),
         stat(t('stat.notesHeld'), atLeast(data, count(data.unspentNotes)), t('stat.notesHeld.note', { total: count(data.notes) }))
       ),
+      coverageLine(data.coverage),
       panel(
         t('address.holdings'),
         explainer('explain.holdings'),
@@ -1396,7 +1501,10 @@ async function address(owner, parameters) {
               cell(tierChip(note.tier))
             )
           )
-        )
+        ),
+        data.notesNext !== null && data.notesNext !== undefined
+          ? el('div', { class: 'more' }, el('a', { class: 'action', href: here('notes', data.notesNext), 'data-link': true, text: t('common.more') }))
+          : null
       ),
       panel(
         t('address.history'),
@@ -1415,7 +1523,7 @@ async function address(owner, parameters) {
           )
         ),
         data.next !== null && data.next !== undefined
-          ? el('div', { class: 'more' }, el('a', { class: 'action', href: '/address/' + data.address + '?from=' + data.next, 'data-link': true, text: t('common.older') }))
+          ? el('div', { class: 'more' }, el('a', { class: 'action', href: here('from', data.next), 'data-link': true, text: t('common.older') }))
           : null
       )
     )
@@ -1423,7 +1531,10 @@ async function address(owner, parameters) {
 }
 
 async function note(reference) {
+  const mine = rendering;
   const data = await api('note/' + encodeURIComponent(reference));
+  if (mine !== rendering) return;
+  setTitle(t('note.title'));
   clear(view);
   view.append(
     el(
@@ -1453,31 +1564,52 @@ async function note(reference) {
                 el('div', { class: 'row-value' }, count(BigInt(data.position)), el('span', { class: 'row-note', text: ' ' + t('field.position.note') }))
               )
             : null
-        )
+        ),
+        // Whether it has been spent comes off the index, which may not have
+        // read as far as the block that spent it.
+        coverageLine(data.coverage)
       )
     )
   );
 }
 
-async function pool() {
-  const data = await api('pool');
+async function pool(parameters) {
+  const mine = rendering;
+  const from = parameters.get('from');
+  const data = await api('pool' + (from ? '?from=' + encodeURIComponent(from) : ''));
+  if (mine !== rendering) return;
+  setTitle(t('pool.title'));
   clear(view);
   view.append(
     el(
       'div',
       { class: 'stack' },
-      el('section', null, el('p', { class: 'eyebrow', text: t('pool.eyebrow') }), el('h1', { text: t('pool.title') })),
+      el(
+        'section',
+        null,
+        el('p', { class: 'eyebrow', text: t('pool.eyebrow') }),
+        el('h1', { text: t('pool.title') }),
+        // The whole of it, which a page of it is not: the ticker above said
+        // forty while this said nothing and showed twenty five.
+        el('p', { class: 'small dim', text: plural('pool.count', data.count) })
+      ),
       panel(
         null,
         explainer('explain.pool'),
-        data.transfers.length ? el('div', { class: 'stack' }, data.transfers.map((transfer) => transferCard(transfer))) : el('div', { class: 'empty', text: t('pool.empty') })
+        data.transfers.length ? el('div', { class: 'stack' }, data.transfers.map((transfer) => transferCard(transfer))) : el('div', { class: 'empty', text: t('pool.empty') }),
+        data.next !== null && data.next !== undefined
+          ? el('div', { class: 'more' }, el('a', { class: 'action', href: '/pool?from=' + data.next, 'data-link': true, text: t('common.more') }))
+          : null
       )
     )
   );
 }
 
 async function holders() {
+  const mine = rendering;
   const data = await api('holders');
+  if (mine !== rendering) return;
+  setTitle(t('holders.title'));
   clear(view);
   view.append(
     el(
@@ -1518,7 +1650,10 @@ async function holders() {
 }
 
 async function rules() {
+  const mine = rendering;
   const data = await api('params');
+  if (mine !== rendering) return;
+  setTitle(t('rules.title'));
   clear(view);
   view.append(
     el(
@@ -1578,6 +1713,7 @@ async function rules() {
 }
 
 function learn() {
+  setTitle(t('learn.title'));
   clear(view);
   const lessons = ['problem', 'notes', 'drawer', 'cave', 'proof', 'work', 'money', 'trust'];
   view.append(
@@ -1678,6 +1814,7 @@ function unpack(build) {
 }
 
 function download() {
+  setTitle(t('nav.run'));
   clear(view);
   const network = state.status && state.status.network ? state.status.network.name : 'testnet-6';
   const here = thisMachine();
@@ -1791,11 +1928,11 @@ function download() {
 const routes = [
   [/^\/$/, () => home()],
   [/^\/blocks$/, (match, parameters) => blocks(parameters)],
-  [/^\/block\/(.+)$/, (match) => block(match[1])],
+  [/^\/block\/(.+)$/, (match, parameters) => block(match[1], parameters)],
   [/^\/tx\/(.+)$/, (match) => transaction(match[1])],
   [/^\/address\/(.+)$/, (match, parameters) => address(match[1], parameters)],
   [/^\/note\/(.+)$/, (match) => note(match[1])],
-  [/^\/pool$/, () => pool()],
+  [/^\/pool$/, (match, parameters) => pool(parameters)],
   [/^\/holders$/, () => holders()],
   [/^\/learn$/, () => learn()],
   [/^\/rules$/, () => rules()],
@@ -1805,6 +1942,7 @@ const routes = [
 async function render() {
   const path = window.location.pathname;
   const parameters = new URLSearchParams(window.location.search);
+  const mine = ++rendering;
   markCurrent(path);
 
   for (const [pattern, handler] of routes) {
@@ -1814,11 +1952,16 @@ async function render() {
     try {
       await handler(match, parameters);
     } catch (error) {
-      showError(error);
+      showError(error, mine);
     }
+    if (mine !== rendering) return;
+    // Where a screen reader goes on, and where the keyboard does: a view
+    // drawn without moving either leaves both on the link that was followed.
+    view.focus({ preventScroll: true });
     return;
   }
 
+  setTitle(null);
   clear(view);
   view.append(panel(t('error.title'), el('div', { class: 'prose' }, el('p', { text: t('error.noPage') }))));
 }
@@ -1826,7 +1969,10 @@ async function render() {
 function markCurrent(path) {
   for (const link of document.querySelectorAll('.links a')) {
     const target = link.getAttribute('href');
-    const current = target === '/' ? path === '/' : path.startsWith(target) || (target === '/blocks' && /^\/(block|tx|address|note|pool|holders)/.test(path));
+    // A section's own address or one under it, and not any path that happens
+    // to begin with the same letters: `/learnx` used to light up Learn.
+    const own = path === target || path.startsWith(target + '/');
+    const current = target === '/' ? path === '/' : own || (target === '/blocks' && /^\/(block|tx|address|note|pool|holders)(\/|$)/.test(path));
     if (current) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
   }
@@ -1880,7 +2026,18 @@ searchForm.addEventListener('submit', async (event) => {
         searchNote.hidden = false;
       }
     } else {
-      searchNote.textContent = t('search.nothing');
+      // Nothing matched, which is a statement about the chain only once the
+      // whole chain has been read. During every first pass and every rebuild
+      // a transaction the index had not reached was denied here.
+      const coverage = answer.coverage;
+      const partial = coverage && coverage.whole === false;
+      if (partial && (coverage.through === null || coverage.through === undefined)) {
+        searchNote.textContent = t('error.notReadAny', { blocks: count(coverage.behind) });
+      } else if (partial) {
+        searchNote.textContent = t('error.notRead', { through: count(coverage.through), blocks: count(coverage.behind) });
+      } else {
+        searchNote.textContent = t('search.nothing');
+      }
       searchNote.hidden = false;
     }
   } catch (error) {
@@ -1911,10 +2068,23 @@ const BEHIND_ENOUGH = 8;
   rather than about the chain.
 
   In order of what it costs a reader to be wrong about.
+
+  It read six of the twelve states the node reports. A node whose disk had
+  filled switched itself off, had no peers left, and was shown under the
+  sentence for a node that is merely alone and will catch up when somebody
+  reaches it; a disk that would not read back, a build too old for its chain,
+  a node nobody could show the chain to and one whose disk was growing past
+  its budget all looked healthy. The order below is the wallet's, which puts
+  the clock first among the causes because it produces the symptoms of the
+  others.
 */
 function trouble(status) {
   const node = status.node || {};
   const index = status.index || {};
+  const onDisk = (unwritten) =>
+    unwritten.writtenThrough === null || unwritten.writtenThrough === undefined
+      ? t('warn.disk.empty')
+      : t('warn.disk.holds', { height: count(unwritten.writtenThrough) });
 
   if (node.outdated) {
     return t('warn.outdated', {
@@ -1929,11 +2099,61 @@ function trouble(status) {
       settlesAt: count(node.stranded.settlesAt),
     });
   }
+  // The third way a node stops itself, beside the two above. It has no peers
+  // either, so every line below it would be false about it.
+  if (node.unwritten && node.unwritten.withinReach === false) {
+    return t('warn.unwritten.stopped', {
+      reached: count(node.unwritten.reached),
+      kept: onDisk(node.unwritten),
+      blocks: count(node.unwritten.blocks),
+    });
+  }
   if (node.probation) {
     return t('warn.probation', {
       checked: count(node.probation.checked),
       owed: count(node.probation.owed),
     });
+  }
+  if (node.clockBehind) {
+    const behind = node.clockBehind;
+    const said = {
+      gap: duration(Math.max(0, Number(behind.seconds) - Number(behind.drift))),
+      blocks: count(behind.blocks),
+      peers: count(behind.peers),
+    };
+    return behind.ownFirstBlock ? t('warn.clockBehind.certain', said) : t('warn.clockBehind.likely', said);
+  }
+  if (node.unwritten) {
+    return t('warn.unwritten.behind', {
+      reached: count(node.unwritten.reached),
+      kept: onDisk(node.unwritten),
+      blocks: count(node.unwritten.blocks),
+    });
+  }
+  if (node.unread) {
+    return t('warn.unread', { height: count(node.unread.height) });
+  }
+  if (node.unjudged) {
+    return t('warn.unjudged', {
+      blocks: count(node.unjudged.blocks),
+      peers: count(node.unjudged.peers),
+      version: count(node.unjudged.version),
+      known: count(node.unjudged.known),
+    });
+  }
+  if (node.unweighable) {
+    return t('warn.unweighable', { showings: count(node.unweighable.showings), peers: count(node.unweighable.peers) });
+  }
+  if (node.filling) {
+    const filling = node.filling;
+    const said = {
+      from: count(filling.from),
+      through: count(Math.max(0, Number(filling.through) - 1)),
+      tip: count(Math.max(0, Number(filling.reaches) - 1)),
+      bytes: bytes(filling.bytes),
+      keep: bytes(filling.keep),
+    };
+    return filling.overTheKeep ? t('warn.filling.over', said) : t('warn.filling.within', said);
   }
   if (node.joining && node.joining !== 'no' && node.joining !== 'done') {
     return t('warn.joining');
@@ -1984,13 +2204,58 @@ const ticker = document.getElementById('ticker');
 const footNode = document.getElementById('foot-node');
 const notice = document.getElementById('notice');
 
+/*
+  Whether a read of the status is out, and how many in a row have failed.
+
+  One at a time: on a site answering slowly, a fixed interval with nothing in
+  flight checked queued another request every five seconds from every open
+  tab, into a server with sixty four connections for everybody.
+
+  And a failure is said. Every one used to be caught and dropped, so the
+  height, the footer and the banner went on showing the last answer for as
+  long as the tab stayed open, and a site that was down looked like a chain
+  that was quiet.
+*/
+let ticking = false;
+let misses = 0;
+let answeredAt = 0;
+
+/* How many failed reads in a row before the page says its figures are old. */
+const MISSES_ENOUGH = 2;
+
 async function refreshTicker() {
+  if (ticking) return;
+  ticking = true;
+  try {
+    await readStatus();
+  } finally {
+    ticking = false;
+  }
+}
+
+async function readStatus() {
   let status;
   try {
     status = await api('status');
   } catch (error) {
+    misses += 1;
+    if (misses >= MISSES_ENOUGH) {
+      clear(notice);
+      notice.append(
+        el('p', {
+          text: answeredAt
+            ? t('error.stale', { ago: duration(Math.round((Date.now() - answeredAt) / 1000)) })
+            : t('error.unreachable'),
+        })
+      );
+      notice.hidden = false;
+      ticker.classList.add('stale');
+    }
     return;
   }
+  misses = 0;
+  answeredAt = Date.now();
+  ticker.classList.remove('stale');
   state.status = status;
 
   const said = trouble(status);
@@ -2069,6 +2334,10 @@ function translateStatic() {
     const value = t(node.getAttribute('data-t-placeholder'));
     if (typeof value === 'string') node.setAttribute('placeholder', value);
   }
+  for (const node of document.querySelectorAll('[data-t-label]')) {
+    const value = t(node.getAttribute('data-t-label'));
+    if (typeof value === 'string') node.setAttribute('aria-label', value);
+  }
   document.title = t('site.title');
 }
 
@@ -2085,14 +2354,33 @@ languageSelect.addEventListener('change', async () => {
   refreshTicker();
 });
 
-for (const button of document.querySelectorAll('[data-choose]')) {
-  button.addEventListener('click', () => {
-    applyLevel(button.getAttribute('data-choose'), true);
-    welcome.hidden = true;
-    translateStatic();
-    render();
-  });
+/*
+  The panel that asks how much a reader already knows.
+
+  It is a dialog, and it was one only in its markup: focus stayed on the page
+  behind it and Escape did nothing, so a keyboard or a screen reader met a
+  modal it could neither find nor leave.
+*/
+function showWelcome() {
+  welcome.hidden = false;
+  const first = welcome.querySelector('[data-choose]');
+  if (first) first.focus();
 }
+
+function closeWelcome(level) {
+  applyLevel(level, true);
+  welcome.hidden = true;
+  translateStatic();
+  render();
+}
+
+for (const button of document.querySelectorAll('[data-choose]')) {
+  button.addEventListener('click', () => closeWelcome(button.getAttribute('data-choose')));
+}
+
+welcome.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') closeWelcome(state.level);
+});
 
 /* ---------- start ---------- */
 
@@ -2127,7 +2415,7 @@ async function start() {
 
   const level = recall(STORE_LEVEL);
   applyLevel(level || 'curious', false);
-  if (!level) welcome.hidden = false;
+  if (!level) showWelcome();
 
   await render();
   await refreshTicker();

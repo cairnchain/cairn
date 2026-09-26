@@ -292,14 +292,15 @@ fn a_switch_inside_one_turn_leaves_the_index_on_the_branch_that_lost() {
     );
     assert_eq!(switched.get(), 3, "heights eight, nine and ten came off B");
     // The turn ran to the tip it was given, so it says so. What it does not
-    // do any more is keep what it read: the check at the end asks the chain
-    // about every height the turn relied on, and the ones it read off A
-    // disagree.
+    // do any more is keep what it read off A: the check at the end asks the
+    // chain about every height the turn relied on, and the ones it read off A
+    // disagree. It takes back everything down to where A and B part, which
+    // is under where the turn began, and keeps the three blocks both carry.
     assert_eq!(reading, Reading::Done);
     assert_eq!(
         walk.covers(),
-        None,
-        "an index that read part of a turn off a branch that lost holds none of it"
+        Some((0, 2)),
+        "an index that read part of a turn off a branch that lost holds any of it"
     );
 
     // Every turn after it, on the branch the node now follows.
@@ -495,12 +496,16 @@ fn a_branch_that_got_shorter_inside_a_turn_is_not_agreed_with() {
 
     assert_eq!(
         walk.covers(),
-        None,
+        Some((0, 7)),
         "the index kept heights eight, nine and ten off a branch the chain no longer \
          reaches, and every one of them read as agreeing because it sat under the tip \
          the turn started with"
     );
-    assert_eq!(walk.blocks_read(), 0, "and it starts again from nothing");
+    assert_eq!(
+        walk.blocks_read(),
+        8,
+        "and it keeps the eight blocks the shorter branch still carries"
+    );
 }
 
 /// A branch's blocks from its first up to and including `tip`.

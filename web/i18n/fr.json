@@ -4,7 +4,8 @@
   "a11y": {
     "skip": "Aller au contenu",
     "level": "Niveau de lecture",
-    "language": "Langue"
+    "language": "Langue",
+    "sections": "Rubriques"
   },
 
   "nav": {
@@ -65,7 +66,14 @@
     "notRead": "Ce site n'a pas cela, et il n'a pas fini de lire la chaîne : il l'a lue jusqu'au bloc {through}, et il lui en reste {blocks}. Ce que vous cherchez est peut-être dans la partie qu'il n'a pas encore atteinte. Il lit au fur et à mesure : cela vaut la peine de redemander dans une minute.",
     "notReadAny": "Ce site n'a pas cela, et il n'a encore rien lu de la chaîne : {blocks} blocs l'attendent. Ce que vous cherchez s'y trouve sans doute. Il lit au fur et à mesure : cela vaut la peine de redemander dans une minute.",
     "unreachable": "Le nœud derrière cette page n'a pas répondu. Il redémarre peut-être, ou il rattrape encore son retard.",
-    "noPage": "Aucune page à cette adresse."
+    "noPage": "Aucune page à cette adresse.",
+    "malformed": "Ce n'est pas quelque chose que cette chaîne nomme. Vérifiez ce qui a été collé : la ligne ci-dessous dit ce qui n'allait pas.",
+    "server": "Ce site n'a pas pu donner cette réponse. La ligne ci-dessous dit pourquoi.",
+    "notKept": "Le bloc {height} est sur la chaîne, mais ce site ne le garde plus : il garde les blocs à partir du {from}. La personne qui tient ce site peut y remédier en gardant tous les blocs.",
+    "unreadable": "Le bloc {height} est sur le disque de ce site, et le disque ne l'a pas rendu. Redemandez dans une minute ; si cela continue, le disque sous ce site est en train de lâcher.",
+    "notWritten": "Le bloc {height} est sur la chaîne et n'a pas encore atteint le disque de ce site. Redemandez dans une minute.",
+    "aboveTip": "La chaîne atteint le bloc {tip}. Il n'y a pas encore de bloc {height}.",
+    "stale": "Cette page n'a pas de nouvelles du nœud du site depuis {ago}. Chaque chiffre affiché est la dernière réponse reçue, et n'est peut-être plus à jour."
   },
 
   "coverage": {
@@ -239,7 +247,7 @@
     "direction": "Sens", "madeBy": "Créé par", "madeAt": "Créé au bloc",
     "spentBy": "Dépensé par", "spentAt": "Dépensé au bloc", "position": "Position dans la cave",
     "position.note": "là où pointe sa preuve",
-    "none": "Aucun", "pending": "Pas encore miné", "unknown": "Pas indexé",
+    "none": "Aucun", "pending": "Pas encore miné", "nextUnavailable": "Miné, et ce site ne peut pas le lire pour l'instant", "unknown": "Pas indexé",
     "indexNotes": "Billets mémorisés",
     "indexTransactions": "Transactions retrouvables",
     "indexOwners": "Adresses rencontrées",
@@ -264,7 +272,10 @@
     "drift.note": "de combien un bloc peut devancer l'horloge d'un nœud"
   },
 
-  "blocks": { "title": "Blocs" },
+  "blocks": {
+    "title": "Blocs",
+    "notKept": "Les blocs {from} à {through} sont sur la chaîne, mais ce site ne les garde plus."
+  },
 
   "block": {
     "eyebrow": "Bloc",
@@ -293,7 +304,8 @@
 
   "note": { "eyebrow": "Billet", "title": "Un billet" },
 
-  "pool": { "eyebrow": "Salle d'attente", "title": "Transferts en attente d'un bloc", "empty": "Rien n'attend." },
+  "pool": { "eyebrow": "Salle d'attente", "title": "Transferts en attente d'un bloc", "empty": "Rien n'attend.",
+    "count": { "one": "{n} transfert attend.", "other": "{n} transferts attendent." } },
 
   "holders": { "eyebrow": "Répartition", "title": "Plus gros détenteurs", "countedAt": "Calculée au bloc {n}. La répartition est établie un bloc sur seize, parce que la calculer coûte l'index entier et non le seul bloc qui vient d'être lu." },
 
@@ -378,7 +390,7 @@
     "holders": {
       "plain": "Qui détient le plus. Sur un réseau de test, cela ne dit pas grand-chose : c'est surtout celui qui a laissé un ordinateur miner le plus longtemps.",
       "curious": "Calculé depuis l'index de l'explorateur, en comptant les billets non dépensés par propriétaire. Un propriétaire peut détenir autant d'adresses qu'il veut : c'est donc une vue des adresses, pas des personnes.",
-      "technical": "Les soldes sont la somme des billets non dépensés par clé publique sur la branche suivie. Une réorganisation reconstruit l'index plutôt que de le dérouler à l'envers."
+      "technical": "Les soldes sont la somme des billets non dépensés par clé publique sur la branche suivie. Une réorganisation est défaite bloc par bloc ; seule une réorganisation plus profonde que les 128 blocs que l'index sait défaire l'oblige à relire la chaîne."
     },
     "emission": {
       "plain": "L'argent neuf n'apparaît qu'en paiement du travail de recherche des blocs. Le montant est divisé par deux régulièrement, puis cesse de baisser et reste à un petit chiffre pour toujours, afin qu'il y ait toujours une raison de faire tourner le réseau.",
@@ -707,6 +719,22 @@
     "indexPartial": "Ce site ne voit pas toute la chaîne. Il n'a lu qu'à partir du bloc {from}, parce que l'ordinateur qui le fait tourner ne garde plus les blocs situés en dessous. Chaque solde et chaque total ici porte sur cette portion de la chaîne et non sur la chaîne : une adresse payée plus tôt et qui n'a rien dépensé depuis apparaîtra vide. La personne qui tient ce site peut y remédier en gardant tous les blocs.",
     "indexBehind": "Ce site a {blocks} blocs de retard sur la chaîne. Ce qui suit était vrai il y a un moment. Ce qui a été payé ou dépensé depuis n'y figure pas encore.",
     "alone": "L'ordinateur derrière cette page n'est connecté à personne. Il vous montre la chaîne telle qu'il l'a vue en dernier, et il n'apprendra l'existence d'un nouveau bloc que quand quelqu'un le joindra de nouveau.",
+    "unwritten": {
+      "stopped": "Le disque sous le nœud derrière cette page n'accepte plus ce qu'il écrit, et le nœud s'est arrêté de lui-même plutôt que de prendre davantage de retard. La chaîne avait atteint le bloc {reached} et le disque contient {kept} : {blocks} blocs ont été acceptés sans être gardés. Plus rien sur cette page ne bougera tant que la personne qui tient ce site n'aura pas libéré de la place sur ce disque et relancé le nœud : ce que vous voyez est la chaîne telle qu'elle était au moment de l'arrêt.",
+      "behind": "Le disque sous le nœud derrière cette page n'accepte plus ce qu'il écrit. La chaîne a atteint le bloc {reached} et le disque contient {kept} : {blocks} blocs ont été acceptés sans être gardés. Les chiffres affichés sont justes pour la chaîne telle qu'elle est ; si le disque ne se rétablit pas, le nœud s'arrêtera, et la personne qui tient ce site doit lui faire de la place."
+    },
+    "disk": { "empty": "aucun bloc", "holds": "les blocs jusqu'au {height}" },
+    "clockBehind": {
+      "certain": "L'horloge de l'ordinateur derrière cette page retarde d'environ {gap} sur celle du réseau : il a refusé le premier bloc de son propre réseau comme daté dans le futur. Il ne peut pas suivre la chaîne tant que son horloge n'est pas juste, donc rien ici n'est à jour. La personne qui tient ce site doit régler l'heure de cette machine.",
+      "likely": "L'horloge de l'ordinateur derrière cette page semble retarder d'environ {gap} sur celle du réseau : il a refusé {blocks} blocs venant de {peers} pairs comme datés dans le futur. Un nœud dont l'horloge retarde refuse tous les blocs honnêtes, donc la hauteur affichée s'est peut-être arrêtée. La personne qui tient ce site devrait vérifier l'heure de cette machine."
+    },
+    "unread": "Le disque sous le nœud derrière cette page ne rend plus le bloc {height}. Rien n'a été effacé, mais ce site ne peut pas montrer ce bloc, et tout ce qu'il dit de qui possède quoi s'arrête à ce bloc tant que le disque ne le relit pas. Si cela continue, ce disque est en train de lâcher.",
+    "unjudged": "Le programme derrière cette page semble trop ancien pour la chaîne qu'il suit : il a reçu {blocks} blocs construits selon des règles qu'il n'a pas, venant de {peers} pairs, le plus récent écrit pour la version {version} alors qu'il connaît la version {known}. N'importe qui peut écrire un numéro de version dans un bloc : c'est une raison de regarder, pas un verdict. Si la hauteur affichée a aussi cessé d'avancer, la personne qui tient ce site doit installer une version plus récente.",
+    "unweighable": "Personne parmi ceux que le nœud derrière cette page a interrogés n'a pu lui montrer quelle chaîne porte le plus de travail : {showings} présentations venant de {peers} pairs n'ont pas pu être pesées. Il lit donc la chaîne bloc par bloc, ce qui prend des heures, et d'ici là cette page montre une chaîne plus courte que la vraie.",
+    "filling": {
+      "within": "Le nœud derrière cette page ne peut pas encore montrer la chaîne à un ordinateur qui rejoint le réseau. Il détient les en-têtes du bloc {from} au bloc {through}, et la chaîne en est au bloc {tip} ; il récupère le reste auprès de ses pairs au fil de l'eau. Rien sur cette page n'en est affecté.",
+      "over": "Le nœud derrière cette page ne peut pas encore montrer la chaîne à un ordinateur qui rejoint le réseau, et tant qu'il ne le peut pas il ne peut pas non plus abandonner ses vieux blocs : son disque contient {bytes} de blocs pour les {keep} qu'on lui a demandé de garder, et grossit avec la chaîne. Il détient les en-têtes du bloc {from} au bloc {through}, et la chaîne en est au bloc {tip}. Rien sur cette page n'en est affecté ; la personne qui tient ce site devrait s'assurer qu'il peut joindre un pair qui garde la partie ancienne de la chaîne."
+    },
     "supply": "Les deux façons dont ce site compte l'argent en circulation ne concordent pas : la comptabilité de la chaîne donne {issued} CAIRN, et l'addition des billets donne {counted} CAIRN. Elles sont calculées à partir de choses différentes et devraient donner le même nombre. L'une des deux est fausse, et cette page ne peut pas vous dire laquelle."
   },
 

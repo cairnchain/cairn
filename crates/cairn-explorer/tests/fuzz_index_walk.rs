@@ -31,6 +31,7 @@
     clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation,
     clippy::map_unwrap_or,
+    clippy::too_many_lines,
     dead_code
 )]
 
@@ -334,6 +335,24 @@ fn the_walk_never_settles_holding_a_branch_the_node_left() {
                 campaign.seed(),
             );
         }
+        // And the whole of what it holds is what a read of the settled branch
+        // from nothing holds. A switch is taken back block by block now,
+        // rather than answered by throwing the index away, and an undo that
+        // left a note spent, an owner paid or a movement listed from the
+        // branch the node left would pass every check above it: they ask
+        // where transfers sit and what one address holds.
+        let mut fresh = Index::new();
+        turn_to_the_end(&mut fresh, settled, settled, settled.tip(), |height| {
+            settled.held(height)
+        });
+        assert_eq!(
+            walk.contents(),
+            fresh.contents(),
+            "case {case} of seed {:#x}: the index that followed the switches holds \
+             something a fresh read of the branch it settled on does not",
+            campaign.seed(),
+        );
+
         // And the balances follow from that.
         let theirs = walk
             .owner(&left.payee)
