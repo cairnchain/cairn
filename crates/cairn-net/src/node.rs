@@ -2415,17 +2415,28 @@ impl Undertaking {
 ///
 /// Separated from everything that holds a lock so the rule can be read, and
 /// tested, on its own: it is three deadlines and their order matters.
+///
+/// `away` is whether the round found the machine was away since the last one:
+/// see [`was_away`].
 fn owed_this_round(
     held: &mut Undertaking,
     reached: u64,
     peers: usize,
     patience: u64,
     now: u64,
+    away: bool,
 ) -> Owed {
     // A clock that went backwards says nothing about how long this has been
     // waiting, so the waiting starts again rather than counting a negative.
     // The same reading [`has_gone_quiet`] takes of one.
-    if reached > held.reached || now < held.moved {
+    //
+    // And nor does a machine that was away: nobody was asked while it slept,
+    // so the gap is not time spent waiting with somebody to ask. It used to
+    // be read as that, and a laptop closed for an hour on a node on probation
+    // woke to the stranding patience spent, stopped, and told its operator to
+    // delete the data directory. The round that saw the gap forgave the
+    // address book and nothing else.
+    if reached > held.reached || now < held.moved || away {
         held.reached = held.reached.max(reached);
         held.moved = now;
         return Owed::Waiting;
@@ -2813,13 +2824,19 @@ impl Shared {
 
     /// One round of the undertaking: where the chain has got to, and what to
     /// do about it having got no further.
-    fn probation_round(&self, height: Option<u64>, peers: usize, now: u64) -> Option<Owed> {
+    fn probation_round(
+        &self,
+        height: Option<u64>,
+        peers: usize,
+        now: u64,
+        away: bool,
+    ) -> Option<Owed> {
         self.probation_at(height)?;
         let patience = self.stranding_patience.load(Ordering::Relaxed);
         let mut undertaking = self.undertaking();
         let held = undertaking.as_mut()?;
         let reached = height.unwrap_or(held.anchor);
-        let mut owed = owed_this_round(held, reached, peers, patience, now);
+        let mut owed = owed_this_round(held, reached, peers, patience, now, away);
         if let Owed::GivenUp(stranded) = &mut owed {
             stranded.out_of_reach = self.out_of_reach.load(Ordering::Relaxed);
         }
@@ -6175,7 +6192,17 @@ impl Shared {
         // on: a node that has filled its headers in would otherwise throw away
         // an empty collection once a round for the rest of its life.
         let asking = self.wants_headers()?;
-        let previous = *self.filling_from();
+        // A clock that went backwards restarts the turn's patience from the
+        // present, rather than reading nought until the clock climbs back
+        // past the moment it was last renewed: read that way, a peer that had
+        // stopped delivering held the turn for as long as the step.
+        let previous = {
+            let mut held = self.filling_from();
+            if let Some(turn) = held.as_mut() {
+                turn.moved = turn.moved.min(now);
+            }
+            *held
+        };
         let keeps_turn = previous.is_some_and(|turn| {
             !turn.spoiled
                 && connected.contains(&turn.peer)
@@ -7100,11 +7127,16 @@ fn maintenance_loop(shared: &Arc<Shared>) {
             return;
         }
         let now = unix_now();
-        // A machine that was away comes back holding nothing against anyone.
-        // Without this a laptop closed for a night wakes with an empty book
-        // and no way back onto the network: every address it knew failed while
-        // it slept, and an address that fails enough times is dropped.
-        if was_away(last_round, now) {
+        // A machine that was away comes back holding nothing against anyone
+        // for having been away. Without this a laptop closed for a night wakes
+        // with an empty book and no way back onto the network: every address
+        // it knew failed while it slept, and an address that fails enough
+        // times is dropped. The undertaking's wait starts again too, below.
+        // A refusal a host earned is kept, and no longer than a refusal lasts
+        // counted from now however the clock moved: see
+        // `Refusals::forget_expired`.
+        let away = was_away(last_round, now);
+        if away {
             shared.book().forgive_all();
         }
         last_round = now;
@@ -7136,7 +7168,7 @@ fn maintenance_loop(shared: &Arc<Shared>) {
         if let Some((peer, asking)) = shared.asks_headers_of(&connected, now) {
             shared.send_to(peer, asking);
         }
-        keep_the_undertaking(shared, &connected, now);
+        keep_the_undertaking(shared, &connected, now, away);
         ask_again_for_the_join(shared, now);
         drive_choosing(shared, now);
         shared.refusals().forget_expired(now);
@@ -7159,9 +7191,9 @@ fn maintenance_loop(shared: &Arc<Shared>) {
 /// a node already following a chain cannot adopt another, and the anchor was
 /// never the part in doubt. What is missing is the blocks above it, and anyone
 /// on that chain has them.
-fn keep_the_undertaking(shared: &Arc<Shared>, connected: &[PeerId], now: u64) {
+fn keep_the_undertaking(shared: &Arc<Shared>, connected: &[PeerId], now: u64, away: bool) {
     let height = shared.chain().height();
-    let Some(owed) = shared.probation_round(height, connected.len(), now) else {
+    let Some(owed) = shared.probation_round(height, connected.len(), now, away) else {
         return;
     };
     match owed {
@@ -7903,6 +7935,29 @@ fn drive_choosing(shared: &Arc<Shared>, now: u64) {
     }
 }
 
+/// Whether a peer last heard from at `last_heard` has been silent for
+/// [`PEER_SILENCE`] by `now`.
+///
+/// A clock that went backwards restarts the silence from the present rather
+/// than reading nought until the clock climbs back past the last word. Read
+/// the other way, a connection that died just before a step back of an hour
+/// was kept for that hour, and counted among the peers this node has, so
+/// nobody was dialled in its place.
+fn has_gone_silent(last_heard: &mut u64, now: u64) -> bool {
+    *last_heard = (*last_heard).min(now);
+    now.saturating_sub(*last_heard) >= PEER_SILENCE.as_secs()
+}
+
+/// Whether the names a node starts from are due to be looked up, given when
+/// they last were, nought for never.
+///
+/// A clock that went backwards counts as due, the reading [`has_gone_quiet`]
+/// takes of one: without it a node with no seed address and a clock put back
+/// an hour looked nobody up for that hour.
+fn a_lookup_is_due(last: u64, now: u64) -> bool {
+    last == 0 || now < last || now.saturating_sub(last) >= NAME_LOOKUP_PERIOD
+}
+
 /// Whether a join that last moved at `moved` has been quiet long enough to be
 /// given up on.
 ///
@@ -7968,7 +8023,7 @@ where
         return;
     }
     let last = shared.names_looked_up_at.load(Ordering::Relaxed);
-    if last > 0 && now.saturating_sub(last) < NAME_LOOKUP_PERIOD {
+    if !a_lookup_is_due(last, now) {
         return;
     }
     // Out until the lookup comes back, which no period ever reaches, so a
@@ -8632,7 +8687,7 @@ fn read_loop(
                 frame
             }
             Ok(Framed::Quiet) => {
-                if !still_there_after_a_quiet_read(shared, &mut peer, outbound, last_heard) {
+                if !still_there_after_a_quiet_read(shared, &mut peer, outbound, &mut last_heard) {
                     break;
                 }
                 continue;
@@ -8766,10 +8821,10 @@ fn still_there_after_a_quiet_read(
     shared: &Arc<Shared>,
     peer: &mut PeerState,
     outbound: &Outbound,
-    last_heard: u64,
+    last_heard: &mut u64,
 ) -> bool {
     let now = unix_now();
-    if now.saturating_sub(last_heard) >= PEER_SILENCE.as_secs() {
+    if has_gone_silent(last_heard, now) {
         return false;
     }
     let due = tick(&shared.chain(), peer, now);
@@ -10474,19 +10529,19 @@ mod peers_and_loops {
     fn the_burial_is_asked_for_once_a_second_and_again_after_the_clock_steps_back() {
         let mut held = Undertaking::resumed(100, 1_124, Some(100), 1_000).unwrap();
         assert!(matches!(
-            owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, 1_040),
+            owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, 1_040, false),
             Owed::AskAgain
         ));
         assert!(
             matches!(
-                owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, 1_040),
+                owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, 1_040, false),
                 Owed::Waiting
             ),
             "the burial was asked for twice in one second"
         );
         assert!(
             matches!(
-                owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, 1_020),
+                owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, 1_020, false),
                 Owed::AskAgain
             ),
             "a clock put back behind the last question left the node waiting on it"
@@ -10643,6 +10698,41 @@ mod peers_and_loops {
             "the turn was taken away inside its patience"
         );
         assert_eq!(after, Some(2), "the turn was kept past its patience");
+    }
+
+    /// The turn to fill the headers in passes on one patience after the clock
+    /// steps back, and not one patience after the clock climbs back past the
+    /// moment it was last renewed.
+    ///
+    /// The patience read nought while the clock stood behind that moment, so
+    /// a step back of an hour let a peer that had stopped delivering hold the
+    /// one exchange that lets this node take a newcomer in for that hour.
+    #[test]
+    fn the_turn_to_fill_the_headers_in_passes_on_one_patience_after_the_clock_steps_back() {
+        let (node, directory) = holding_headers(10, 3, "turn-back");
+        *node.shared.filling_from() = Some(Turn {
+            peer: 1,
+            moved: 10_000,
+            marked: 0,
+            spoiled: false,
+        });
+        let stepped_back = 10_000 - 3_600;
+        let at_the_step = node
+            .shared
+            .asks_headers_of(&[1, 2], stepped_back)
+            .map(|(peer, _)| peer);
+        let one_patience_on = node
+            .shared
+            .asks_headers_of(&[1, 2], stepped_back + HEADER_PATIENCE)
+            .map(|(peer, _)| peer);
+        drop(node);
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(at_the_step, Some(1), "the step itself took the turn away");
+        assert_eq!(
+            one_patience_on,
+            Some(2),
+            "a patience after the clock stepped back an hour, the turn was still held"
+        );
     }
 
     /// A ledger in two pieces is taken whole, and a piece naming another
@@ -11934,12 +12024,12 @@ mod undertaking_tests {
     fn the_blocks_above_the_anchor_are_asked_for_at_once_and_then_again() {
         let mut held = taken(1_000);
         assert!(matches!(
-            owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, 1_000),
+            owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, 1_000, false),
             Owed::AskAgain
         ));
         assert!(
             matches!(
-                owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, 1_001),
+                owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, 1_001, false),
                 Owed::Waiting
             ),
             "and not again a second later"
@@ -11951,7 +12041,8 @@ mod undertaking_tests {
                     100,
                     1,
                     STRANDING_PATIENCE,
-                    1_000 + BURIAL_PATIENCE
+                    1_000 + BURIAL_PATIENCE,
+                    false
                 ),
                 Owed::AskAgain
             ),
@@ -11965,7 +12056,7 @@ mod undertaking_tests {
     fn a_node_with_no_peers_is_neither_asked_nor_given_up_on() {
         let mut held = taken(1_000);
         assert!(matches!(
-            owed_this_round(&mut held, 100, 0, 0, 1_000 + STRANDING_PATIENCE),
+            owed_this_round(&mut held, 100, 0, 0, 1_000 + STRANDING_PATIENCE, false),
             Owed::Waiting
         ));
     }
@@ -11977,12 +12068,12 @@ mod undertaking_tests {
         let mut held = taken(1_000);
         let nearly = 1_000 + STRANDING_PATIENCE - 1;
         assert!(matches!(
-            owed_this_round(&mut held, 400, 1, STRANDING_PATIENCE, nearly),
+            owed_this_round(&mut held, 400, 1, STRANDING_PATIENCE, nearly, false),
             Owed::Waiting
         ));
         assert!(
             matches!(
-                owed_this_round(&mut held, 400, 1, STRANDING_PATIENCE, nearly + 1),
+                owed_this_round(&mut held, 400, 1, STRANDING_PATIENCE, nearly + 1, false),
                 Owed::AskAgain
             ),
             "one block arrived, so the hour is counted from there"
@@ -11996,11 +12087,11 @@ mod undertaking_tests {
         let mut held = taken(1_000);
         let waited = 1_000 + STRANDING_PATIENCE;
         assert!(matches!(
-            owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, waited - 1),
+            owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, waited - 1, false),
             Owed::AskAgain | Owed::Waiting
         ));
         let Owed::GivenUp(stranded) =
-            owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, waited)
+            owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, waited, false)
         else {
             panic!("an hour of nothing, with peers to ask, is not something to wait out");
         };
@@ -12015,8 +12106,50 @@ mod undertaking_tests {
     fn a_clock_that_went_backwards_starts_the_waiting_again() {
         let mut held = taken(1_000);
         assert!(matches!(
-            owed_this_round(&mut held, 100, 1, 0, 900),
+            owed_this_round(&mut held, 100, 1, 0, 900, false),
             Owed::Waiting
+        ));
+    }
+
+    /// A machine that was away comes back to a wait that starts again, not to
+    /// a wait as long as its absence.
+    ///
+    /// The round that saw the gap forgave the address book and nothing else,
+    /// so a laptop closed for an hour on a node on probation woke, counted the
+    /// hour as waiting with peers to ask, stopped, and told its operator to
+    /// delete the data directory. The same round without the mark still gives
+    /// up, which is the claim above kept.
+    #[test]
+    fn a_node_that_was_away_for_an_hour_starts_its_wait_again() {
+        let woke = 1_000 + STRANDING_PATIENCE;
+        let mut away = taken(1_000);
+        assert!(
+            matches!(
+                owed_this_round(&mut away, 100, 1, STRANDING_PATIENCE, woke, true),
+                Owed::Waiting
+            ),
+            "an hour the machine was away was counted as an hour of waiting"
+        );
+        assert_eq!(away.moved, woke, "the wait starts again from waking");
+        assert!(
+            matches!(
+                owed_this_round(
+                    &mut away,
+                    100,
+                    1,
+                    STRANDING_PATIENCE,
+                    woke + STRANDING_PATIENCE,
+                    false
+                ),
+                Owed::GivenUp(_)
+            ),
+            "and an hour of nothing after waking is still an hour of nothing"
+        );
+
+        let mut here = taken(1_000);
+        assert!(matches!(
+            owed_this_round(&mut here, 100, 1, STRANDING_PATIENCE, woke, false),
+            Owed::GivenUp(_)
         ));
     }
 }
@@ -12024,7 +12157,10 @@ mod undertaking_tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod quiet_tests {
-    use super::{has_gone_quiet, JOIN_PATIENCE};
+    use super::{
+        a_lookup_is_due, has_gone_quiet, has_gone_silent, JOIN_PATIENCE, NAME_LOOKUP_PERIOD,
+        PEER_SILENCE,
+    };
 
     #[test]
     fn a_join_is_given_up_on_only_once_it_has_gone_quiet() {
@@ -12044,6 +12180,47 @@ mod quiet_tests {
         assert!(
             has_gone_quiet(Some(1_000), 900),
             "a clock that went backwards says how long it waited is worthless"
+        );
+    }
+
+    /// A connection is given up for silence one silence after the clock steps
+    /// back, and not one silence after the clock climbs back past the last
+    /// word.
+    ///
+    /// The silence read nought while the clock stood behind that word, so a
+    /// connection that died just before a step back of an hour was kept for
+    /// that hour, and counted among the peers this node has, so nobody was
+    /// dialled in its place.
+    #[test]
+    fn a_silence_is_counted_from_the_step_when_the_clock_goes_back() {
+        let silence = PEER_SILENCE.as_secs();
+        let mut last_heard = 10_000;
+        let stepped_back = 10_000 - 3_600;
+        assert!(!has_gone_silent(&mut last_heard, stepped_back));
+        assert!(
+            has_gone_silent(&mut last_heard, stepped_back + silence),
+            "a silence after the clock stepped back an hour, the connection was still kept"
+        );
+
+        let mut last_heard = 10_000;
+        assert!(!has_gone_silent(&mut last_heard, 10_000 + silence - 1));
+        assert!(has_gone_silent(&mut last_heard, 10_000 + silence));
+    }
+
+    /// The names a node starts from are looked up once a period, and at once
+    /// when the clock has gone back behind the last lookup.
+    ///
+    /// The period read nought while the clock stood behind the last lookup, so
+    /// a node with no seed address and a clock put back an hour looked nobody
+    /// up for that hour.
+    #[test]
+    fn a_name_is_looked_up_again_once_the_clock_has_gone_back() {
+        assert!(a_lookup_is_due(0, 10_000), "a node that never looked looks");
+        assert!(!a_lookup_is_due(10_000, 10_000 + NAME_LOOKUP_PERIOD - 1));
+        assert!(a_lookup_is_due(10_000, 10_000 + NAME_LOOKUP_PERIOD));
+        assert!(
+            a_lookup_is_due(10_000, 10_000 - 3_600),
+            "a clock put back an hour held the next lookup off for that hour"
         );
     }
 }
