@@ -439,6 +439,9 @@ difference is destroyed rather than held anywhere.
   </tbody>
 </table>
 
+A first block names thirty two zero bytes as `previous`, since there is no
+block before it to name.
+
 The header is a fixed 182 bytes. Nothing in it is optional and nothing is
 variable-length, which is what lets a header log store them at a fixed stride
 and what makes extending the header a different problem from extending anything
@@ -463,6 +466,16 @@ case does not arise here.
 This order is normative. Several of these rules are cheap and decisive and the
 ones after them are not, so applying them out of order lets a sender spend a
 node's time for nothing.
+
+What the order binds is the rules a block is judged by. Before it begins, a
+node MAY refuse a block on a fact about the block's own bytes that the order
+would refuse it for anyway, such as a header that does not meet even the
+difficulty it claims, or a first block that names a parent; and on a fact
+about what the node holds, such as an identifier it already knows to be bad, a
+height below the deepest block it would switch to, or a parent it does not
+have. None of those turns a block the order accepts into one it refuses. They
+change only which refusal is named, and what the node does about the peer that
+sent it.
 
 <table>
   <thead><tr><th class="n">#</th><th>Refusal</th><th>What it means</th></tr></thead>
@@ -495,13 +508,19 @@ comes after the header's own arithmetic, which costs nothing, and before the
 body is looked at, which costs a great deal. A forged block therefore costs its
 sender the work or costs the reader one hash.
 
-**Sixteen is the one refusal in this list that two honest nodes can disagree
-about.** It is measured against the reading node's own clock, so the same block
-is refused by one node and taken by another, and the same node reverses its
-verdict by waiting. A node MUST NOT remember this verdict as a property of the
-block, and MUST NOT hold it against the peer that offered it. Every other
-refusal here is a fact about the block that any node reaches from the same
-bytes.
+**Sixteen is the one refusal in this list that two honest nodes on the same
+build can disagree about.** It is measured against the reading node's own
+clock, so the same block is refused by one node and taken by another, and the
+same node reverses its verdict by waiting. A node MUST NOT remember this
+verdict as a property of the block, and MUST NOT hold it against the peer that
+offered it.
+
+**Four and five are judgements about the reader's build, not about the
+block.** Two honest nodes on different builds disagree about them by
+construction, and *Rules that activate at a height* says what a node MUST NOT
+do with them: remember them against the block or hold them against the peer.
+Every other refusal here is a fact about the block that any node reaches from
+the same bytes.
 
 **The body is evaluated between nineteen and twenty**, and in this order. Four
 of these were made by the implementation and stated nowhere here until this
@@ -547,9 +566,11 @@ once afterwards on any chain that can exist.
 A block MUST NOT both spend a note and evict it.
 
 The four limits in that table are the network's rather than the format's, and
-the format holds a ceiling above each so that a decoder refuses what no network
-allows before any rule has read the frame: 256 inputs, 256 outputs, 16 coinbase
-outputs and 4 096 transfers. A build whose rules asked for more than its own
+the format holds a ceiling at or above each so that a decoder refuses what no
+network allows before any rule has read the frame: 256 inputs, 256 outputs, 16 coinbase
+outputs and 4 096 transfers. The decoder holds the coinbase's extra to its 64
+bytes too, so row two of the body table is reached only by a block built
+beside the rules that judge it, never by one read off the wire. A build whose rules asked for more than its own
 decoder accepts would refuse blocks its rules allow, which is a fork with
 nobody at fault, so the two are checked against each other at compile time.
 
@@ -707,6 +728,9 @@ spent under the grace window is not one of these: it had already fallen, and
 it comes out of the cold set. Let *created* be every note this block creates,
 in this order: the transfers in the order they appear in the block, each
 transfer's outputs in index order, then the coinbase's outputs in index order.
+That order decides nothing a rule reads: the hot tree is a set, and the
+shortfall below sorts by identifier. It is given so that a block's notes have
+one order to be described in.
 
 Let `surviving` be the hot count less the number of notes in *spent*, and let
 `overflow` be `surviving` plus the number of notes in *created*, less
@@ -752,13 +776,21 @@ order is part of the rule rather than an implementation's convenience:
 1. every note the block spends out of the cold set is emptied from the
    accumulator, all of them proved against the roots as they stood at the
    parent before any of them is applied;
-2. the accumulator is checked to have room for the notes about to fall;
+2. the accumulator is checked to have room for the notes about to fall,
+   which on any chain these rules produce it has, since its positions are
+   counted in 64 bits;
 3. every note the block spends out of the hot set is removed from the hot
    tree;
 4. every note the block creates is inserted into the hot tree, carrying this
    block's height;
 5. each note in the eviction list, in eviction order, is removed from the hot
    tree and appended to the accumulator at the next free position.
+
+A node that finds, applying a block it has already judged valid, that step 1
+or step 2 cannot be done, has found itself holding a state it disagrees with.
+That is not a refusal a peer can cause and not one another implementation has
+to reproduce; the reference names it `NoteNotWhereProved` and refuses the
+block rather than carry on with a root that describes nothing.
 
 Step 4 before step 5 is what lets a note created by this very block fall
 straight through to the cold set, which is the case the shortfall rule above
@@ -806,10 +838,12 @@ accumulator as it currently stands.** A node that cannot produce one cannot
 validate a proofless spend the rest of the network accepts, and cannot hand
 its state to a newcomer.
 
-Under the block bound, a note that fell in the block at height *f* is in the
-window from the block at height *f* + 1 through the block at height *f* + 64
-inclusive, and is out of it from *f* + 65. The note bound moves that edge
-earlier whenever more than 128 notes a block are falling.
+Under the block bound, a note that fell in the block at height *f* may be spent
+without a proof by the blocks at heights *f* + 1 through *f* + 64 inclusive,
+and not by the block at *f* + 65. Said of the window rather than of the note:
+after the block at height *h* it holds the landings of the blocks at heights
+*h* - 63 through *h*, and the block at *h* + 1 is judged against that. The note
+bound moves that edge earlier whenever more than 128 notes a block are falling.
 
 ### Which witness a spend must carry
 
@@ -991,7 +1025,9 @@ After the block at height *h* the window is the parent's window with:
 2. an entry appended, holding *h* + `coinbase_maturity` and this block's
    coinbase identifier, unless the coinbase paid no outputs, or unless
    *h* + `coinbase_maturity` is not above *h*. A coinbase whose notes are
-   spendable on the block that pays them never enters the window at all.
+   spendable from the very next block, which is as soon as any note is, since
+   nothing is spent in the block that creates it, never enters the window at
+   all.
 
 A transfer in a block at height *H* MUST NOT spend a note whose source names a
 coinbase in the window whose height is above *H*. The refusal is
@@ -1368,7 +1404,7 @@ median, and a block refused for either is refused everywhere and for good. The
 drift bound is measured against a clock the block knows nothing about: the
 same block is refused by one node and taken by another, and the same node
 reverses its verdict by waiting. It is the only refusal in the whole of the
-block rules that two honest nodes can disagree about.
+block rules that two honest nodes on the same build can disagree about.
 
 Three obligations follow, and a node that gets any of them wrong harms itself
 rather than the network, which is why they must be written down.

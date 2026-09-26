@@ -559,6 +559,11 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
     </table>
 
     <p>
+      A first block names thirty two zero bytes as <code>previous</code>, since there is no
+      block before it to name.
+    </p>
+
+    <p>
       The header is a fixed 182 bytes. Nothing in it is optional and nothing is
       variable-length, which is what lets a header log store them at a fixed stride
       and what makes extending the header a different problem from extending anything
@@ -589,6 +594,18 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
       This order is normative. Several of these rules are cheap and decisive and the
       ones after them are not, so applying them out of order lets a sender spend a
       node's time for nothing.
+    </p>
+
+    <p>
+      What the order binds is the rules a block is judged by. Before it begins, a
+      node MAY refuse a block on a fact about the block's own bytes that the order
+      would refuse it for anyway, such as a header that does not meet even the
+      difficulty it claims, or a first block that names a parent; and on a fact
+      about what the node holds, such as an identifier it already knows to be bad, a
+      height below the deepest block it would switch to, or a parent it does not
+      have. None of those turns a block the order accepts into one it refuses. They
+      change only which refusal is named, and what the node does about the peer that
+      sent it.
     </p>
 
     <table>
@@ -625,13 +642,21 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
     </p>
 
     <p>
-      <strong>Sixteen is the one refusal in this list that two honest nodes can disagree
-      about.</strong> It is measured against the reading node's own clock, so the same block
-      is refused by one node and taken by another, and the same node reverses its
-      verdict by waiting. A node MUST NOT remember this verdict as a property of the
-      block, and MUST NOT hold it against the peer that offered it. Every other
-      refusal here is a fact about the block that any node reaches from the same
-      bytes.
+      <strong>Sixteen is the one refusal in this list that two honest nodes on the same
+      build can disagree about.</strong> It is measured against the reading node's own
+      clock, so the same block is refused by one node and taken by another, and the
+      same node reverses its verdict by waiting. A node MUST NOT remember this
+      verdict as a property of the block, and MUST NOT hold it against the peer that
+      offered it.
+    </p>
+
+    <p>
+      <strong>Four and five are judgements about the reader's build, not about the
+      block.</strong> Two honest nodes on different builds disagree about them by
+      construction, and <em>Rules that activate at a height</em> says what a node MUST NOT
+      do with them: remember them against the block or hold them against the peer.
+      Every other refusal here is a fact about the block that any node reaches from
+      the same bytes.
     </p>
 
     <p>
@@ -687,9 +712,11 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
 
     <p>
       The four limits in that table are the network's rather than the format's, and
-      the format holds a ceiling above each so that a decoder refuses what no network
-      allows before any rule has read the frame: 256 inputs, 256 outputs, 16 coinbase
-      outputs and 4 096 transfers. A build whose rules asked for more than its own
+      the format holds a ceiling at or above each so that a decoder refuses what no
+      network allows before any rule has read the frame: 256 inputs, 256 outputs, 16 coinbase
+      outputs and 4 096 transfers. The decoder holds the coinbase's extra to its 64
+      bytes too, so row two of the body table is reached only by a block built
+      beside the rules that judge it, never by one read off the wire. A build whose rules asked for more than its own
       decoder accepts would refuse blocks its rules allow, which is a fork with
       nobody at fault, so the two are checked against each other at compile time.
     </p>
@@ -893,6 +920,9 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
       it comes out of the cold set. Let <em>created</em> be every note this block creates,
       in this order: the transfers in the order they appear in the block, each
       transfer's outputs in index order, then the coinbase's outputs in index order.
+      That order decides nothing a rule reads: the hot tree is a set, and the
+      shortfall below sorts by identifier. It is given so that a block's notes have
+      one order to be described in.
     </p>
 
     <p>
@@ -956,7 +986,9 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
       <li>every note the block spends out of the cold set is emptied from the
       accumulator, all of them proved against the roots as they stood at the
       parent before any of them is applied;</li>
-      <li>the accumulator is checked to have room for the notes about to fall;</li>
+      <li>the accumulator is checked to have room for the notes about to fall,
+      which on any chain these rules produce it has, since its positions are
+      counted in 64 bits;</li>
       <li>every note the block spends out of the hot set is removed from the hot
       tree;</li>
       <li>every note the block creates is inserted into the hot tree, carrying this
@@ -964,6 +996,14 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
       <li>each note in the eviction list, in eviction order, is removed from the hot
       tree and appended to the accumulator at the next free position.</li>
     </ol>
+
+    <p>
+      A node that finds, applying a block it has already judged valid, that step 1
+      or step 2 cannot be done, has found itself holding a state it disagrees with.
+      That is not a refusal a peer can cause and not one another implementation has
+      to reproduce; the reference names it <code>NoteNotWhereProved</code> and refuses the
+      block rather than carry on with a root that describes nothing.
+    </p>
 
     <p>
       Step 4 before step 5 is what lets a note created by this very block fall
@@ -1028,10 +1068,12 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
     </p>
 
     <p>
-      Under the block bound, a note that fell in the block at height <em>f</em> is in the
-      window from the block at height <em>f</em> + 1 through the block at height <em>f</em> + 64
-      inclusive, and is out of it from <em>f</em> + 65. The note bound moves that edge
-      earlier whenever more than 128 notes a block are falling.
+      Under the block bound, a note that fell in the block at height <em>f</em> may be spent
+      without a proof by the blocks at heights <em>f</em> + 1 through <em>f</em> + 64 inclusive,
+      and not by the block at <em>f</em> + 65. Said of the window rather than of the note:
+      after the block at height <em>h</em> it holds the landings of the blocks at heights
+      <em>h</em> - 63 through <em>h</em>, and the block at <em>h</em> + 1 is judged against that. The note
+      bound moves that edge earlier whenever more than 128 notes a block are falling.
     </p>
 
     <h3><span class="sub">7.6</span>Which witness a spend must carry</h3>
@@ -1265,7 +1307,9 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
       <li>an entry appended, holding <em>h</em> + <code>coinbase_maturity</code> and this block's
       coinbase identifier, unless the coinbase paid no outputs, or unless
       <em>h</em> + <code>coinbase_maturity</code> is not above <em>h</em>. A coinbase whose notes are
-      spendable on the block that pays them never enters the window at all.</li>
+      spendable from the very next block, which is as soon as any note is, since
+      nothing is spent in the block that creates it, never enters the window at
+      all.</li>
     </ol>
 
     <p>
@@ -1745,7 +1789,7 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
       drift bound is measured against a clock the block knows nothing about: the
       same block is refused by one node and taken by another, and the same node
       reverses its verdict by waiting. It is the only refusal in the whole of the
-      block rules that two honest nodes can disagree about.
+      block rules that two honest nodes on the same build can disagree about.
     </p>
 
     <p>

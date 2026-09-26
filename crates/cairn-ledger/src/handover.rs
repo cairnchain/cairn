@@ -1060,8 +1060,8 @@ fn check_recent(handover: &Handover, params: &ConsensusParams) -> Result<(), Han
         // Consecutive, so the run really is the tail of one chain rather than
         // headers gathered from wherever they suited. Each one names what it
         // was built on, and the last one is the header the sampling accepted,
-        // so following the chain back from there is enough: nothing else needs
-        // proving about them.
+        // so following the chain back from there is what makes the two checks
+        // above sound; the function's doc says why they are asked anyway.
         if let Some(next) = handover.recent.get(index.saturating_add(1)) {
             if Some(next.height) != header.height.checked_add(1) || next.previous != header.id() {
                 return Err(HandoverError::RecentNotConsecutive);

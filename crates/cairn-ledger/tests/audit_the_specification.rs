@@ -3222,6 +3222,34 @@ fn there_is_no_chaining_inside_a_block() {
     );
 }
 
+/// **A first block names thirty two zero bytes as its parent, and any other
+/// parent is refused.**
+///
+/// The document never said what `previous` a first block carries. On a
+/// network that pins its first block the pinned identifier settles it, and on
+/// any other a second implementation had to guess, and a wrong guess is a
+/// first block every reference node refuses.
+#[test]
+fn a_first_block_names_zero_as_its_parent_and_nothing_else() {
+    let params = ConsensusParams::testnet();
+    let mut state = LedgerState::new();
+    let coinbase = CoinbaseTransaction::new(0, vec![note(1_000, 1)]);
+    let mut block = assemble_block(&state, coinbase, Vec::new(), &params, 1_000, 0).unwrap();
+    assert_eq!(
+        block.header.previous,
+        Hash32::ZERO,
+        "a first block is not built on thirty two zero bytes"
+    );
+    block.header.previous = Hash32::from_bytes([1; 32]);
+    assert!(
+        matches!(
+            connect_block(&mut state, &block, &params, u64::MAX / 2),
+            Err(BlockError::WrongParent { .. })
+        ),
+        "a first block naming a parent is not refused as a wrong parent"
+    );
+}
+
 #[test]
 fn the_block_at_height_one_carries_the_genesis_difficulty_unchanged() {
     let params = ConsensusParams::testnet();
