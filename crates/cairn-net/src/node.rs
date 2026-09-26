@@ -480,6 +480,23 @@ pub enum NodeError {
         "{file} was written under rules this build does not have: {because}. Nothing on          the disk has been changed. Start it again with a build that has the rules for          that height, and the chain here is picked up where it was left; deleting          anything would not help, because this build refuses the same blocks from the          network"
     )]
     OtherRules { file: &'static str, because: String },
+    /// A node asked to keep the whole cold set, over blocks that do not begin
+    /// at the first one.
+    ///
+    /// The archive is built by reading every block from the first, at every
+    /// start, and the ones below `from` are not on this disk. Such a node used
+    /// to start from its ledger instead, holding the cold set's roots and none
+    /// of its leaves, and to tell every peer and its operator that it kept the
+    /// whole set.
+    #[error(
+        "this node was asked to keep the whole cold set, and the blocks on its disk begin \
+         at height {from}. The archive is built by reading every block from the first at \
+         every start, and those below {from} are not here, so nothing has been changed \
+         and it has not started. An archivist keeps every block it reads: give it a \
+         directory of its own, where it reads the chain from the first block, or start \
+         this one without keeping the cold set"
+    )]
+    CannotArchive { from: u64 },
     /// What is on this disk is another network's chain.
     ///
     /// The same shape as [`NodeError::OtherRules`], about the command line
@@ -3345,7 +3362,25 @@ impl Node {
         for name in [HEADER_LOG, FILLING_LOG] {
             let _ = std::fs::remove_file(directory.join(format!("{name}.hold")));
         }
-        let handed = read_handed_ledger(&directory, &params)?;
+        // An archivist does not start from a ledger. The archive, every leaf of
+        // the cold set, is held in memory and built by reading blocks as they
+        // are applied, and a ledger carries the cold set as sixty four roots:
+        // adopting one left a node holding the roots and none of the leaves,
+        // which it then said on every handshake while its operator was told
+        // at every start that it kept the whole set. So it reads every block
+        // from the first, whatever ledger lies beside them, and where its
+        // blocks do not begin at the first it cannot build the archive at all
+        // and says so rather than starting as something else.
+        let handed = if archiving {
+            if !log.is_empty() && log.first_height() > 0 {
+                return Err(NodeError::CannotArchive {
+                    from: log.first_height(),
+                });
+            }
+            None
+        } else {
+            read_handed_ledger(&directory, &params)?
+        };
         let handed = match handed {
             Some((state, recent, anchor, promised)) => {
                 chain
@@ -6412,6 +6447,12 @@ fn keep_the_undertaking(shared: &Arc<Shared>, connected: &[PeerId], now: u64) {
 /// Asked of the same peer, because a collection belongs to the peer it was
 /// started from and a piece from anybody else is refused.
 fn ask_again_for_the_join(shared: &Arc<Shared>, now: u64) {
+    // An archivist reads rather than joins (see `drive_choosing`), and the
+    // chooser still has the turn down as a join. Asking again here is what
+    // started the join it had not asked for.
+    if shared.chain().is_archiving() {
+        return;
+    }
     let Some((peer, asked_at)) = shared.choosing().asking_join() else {
         return;
     };
@@ -6939,13 +6980,22 @@ fn drive_choosing(shared: &Arc<Shared>, now: u64) {
         }
     };
     let connected: Vec<PeerId> = shared.peers().keys().copied().collect();
-    let (empty, work) = {
+    let (empty, work, archiving) = {
         let chain = shared.chain();
-        (chain.is_empty(), chain.total_work())
+        (chain.is_empty(), chain.total_work(), chain.is_archiving())
     };
     let step = shared.choosing().step(now, empty, work, join, &connected);
     match step {
         choosing::Step::Quiet => {}
+        // An archivist reads the chain rather than being handed it. A ledger
+        // carries the cold set as sixty four roots, so an archivist that took
+        // one held none of its leaves and never archived anything from then
+        // on. Reading is asked of the same peer, and the chooser's patience
+        // for a first answer is the same for both.
+        choosing::Step::Ask(peer, Approach::Join | Approach::Read) if archiving => {
+            let locator = shared.chain().locator();
+            shared.send_to(peer, Message::GetChain { locator });
+        }
         choosing::Step::Ask(peer, Approach::Join) => {
             // A fresh attempt starts from nothing: pieces of an old one
             // would not fit it, and noticing that used to cost the attempt.

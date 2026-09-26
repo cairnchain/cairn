@@ -651,8 +651,12 @@ fn a_node_that_cannot_hold_its_disk_budget_serves_both_numbers() {
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
     let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    // A node that does not archive. An archivist whose blocks no longer begin
+    // at the first one refuses to start, since the archive is built from
+    // them, so the state asked about here is an ordinary node's; what the page
+    // serves about the disk is the same for both.
     {
-        let (node, _) = Node::open_archiving(params, address, &directory).unwrap();
+        let (node, _) = Node::open(params, address, &directory).unwrap();
         node.keep_blocks(1);
         for block in &blocks {
             node.submit_block(block.clone()).unwrap();
@@ -679,7 +683,7 @@ fn a_node_that_cannot_hold_its_disk_budget_serves_both_numbers() {
     bytes[2 + 4 + 8] ^= 0xFF;
     std::fs::write(&path, &bytes).unwrap();
 
-    let (node, _) = Node::open_archiving(params, address, &directory).unwrap();
+    let (node, _) = Node::open(params, address, &directory).unwrap();
     node.keep_blocks(1);
     let filling = node
         .filling()
