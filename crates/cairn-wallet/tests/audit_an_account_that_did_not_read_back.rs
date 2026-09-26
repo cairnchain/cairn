@@ -266,8 +266,8 @@ fn an_account_set_aside_never_takes_the_name_of_one_set_aside_before() {
 /// it.
 ///
 /// The key is paid in forty blocks of a hundred and twenty, a hundred more go
-/// to a stranger, the node writes its ledger, and one byte of the account
-/// changes. The balance then reads nought, nothing is named as stranded, and
+/// to a stranger, the node writes its ledger and drops the blocks below it,
+/// and one byte of the account changes. The balance then reads nought, nothing is named as stranded, and
 /// the wallet said "the balance beside this becomes right on its own". Only
 /// that some warning came back was ever asked.
 #[test]
@@ -294,6 +294,18 @@ fn an_account_that_did_not_read_back_does_not_promise_the_balance_comes_right() 
         wallet.follow_to_the_tip();
         assert!(wallet.holdings().total() > Amount::ZERO, "it was paid");
         assert!(wallet.node().write_ledger(), "the ledger went down");
+        // The blocks below the ledger dropped by the budget, which is what
+        // drops blocks: a start no longer cuts the log at the ledger. Every
+        // block that paid this key is below 120.
+        wallet.node().keep_blocks(1);
+        let started = std::time::Instant::now();
+        while wallet.node().blocks_from().unwrap_or(0) < 120 {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(120),
+                "the node never dropped the blocks that paid this key"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         wallet.shutdown();
     }
 
