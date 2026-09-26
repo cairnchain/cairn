@@ -303,3 +303,29 @@ fn the_network_a_rule_set_names_is_the_one_its_first_block_belongs_to() {
         );
     }
 }
+
+/// Every network's ledger fits the handover's decoder.
+///
+/// A hot set a network's rules allow and the decoder refuses, or a maturity
+/// window longer than the decoder reads, is a ledger no node on that network
+/// can be handed: every join refuses it as malformed, and says nothing more.
+/// The transaction ceilings are held to the rules by the build; these two
+/// were held by nothing but the distance between the numbers.
+#[test]
+fn every_network_can_be_handed_the_ledger_its_rules_allow() {
+    use cairn_ledger::handover::{MAX_HOT, MAX_MATURING};
+
+    for name in NAMED {
+        let Some(params) = ConsensusParams::for_network(name) else {
+            continue;
+        };
+        assert!(
+            params.hot_capacity <= MAX_HOT,
+            "{name} allows a hot set the handover's decoder refuses"
+        );
+        assert!(
+            params.coinbase_maturity <= u64::try_from(MAX_MATURING).unwrap(),
+            "{name} keeps a maturity window the handover's decoder refuses"
+        );
+    }
+}

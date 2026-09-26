@@ -283,7 +283,7 @@ const _: () = assert!(
 /// has been built and every public key in it decompressed. That is only sound
 /// while they sit at or above what the rules allow. Every shipped network is
 /// [`ConsensusParams::testnet`] with a few fields replaced, and none of the
-/// replacements is one of these, so checking it covers all of them.
+/// replacements raises one of these, so checking it covers all of them.
 ///
 /// Raising a limit here without raising the ceiling would leave a transfer
 /// that consensus accepts and the wire cannot carry: valid, unrelayable, and
@@ -305,6 +305,20 @@ const _: () = {
     assert!(
         rules.max_transfers_per_block <= crate::block::MOST_TRANSFERS,
         "the decoder would refuse a block the rules allow"
+    );
+    // A handover is the same shape of pair. `decode_hot` and
+    // `decode_maturing` refuse a count past these before reserving for it,
+    // and a network whose rules allow more holds a ledger no node on it can
+    // be handed: every join refuses it as malformed and says nothing more.
+    // Devnet lowers both, which only widens the room; `tests/network_rules.rs`
+    // asks every named network as well.
+    assert!(
+        rules.hot_capacity <= crate::handover::MAX_HOT,
+        "the handover's decoder would refuse a hot set the rules allow"
+    );
+    assert!(
+        rules.coinbase_maturity <= crate::handover::MAX_MATURING as u64,
+        "the handover's decoder would refuse a maturity window the rules allow"
     );
 };
 

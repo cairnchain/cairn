@@ -9,7 +9,7 @@
     clippy::arithmetic_side_effects
 )]
 
-use cairn_accumulator::{Archive, ForestProof};
+use cairn_accumulator::{Archive, Forest, ForestProof};
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::handover::{accept, Handover, HandoverError};
@@ -17,7 +17,7 @@ use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::pow::RECENT_HEADERS;
 use cairn_ledger::state::{GRACE_BLOCKS, GRACE_NOTES};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
-use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
+use cairn_ledger::validation::{assemble_block, connect_block, BlockError, ConsensusParams};
 use cairn_ledger::LedgerState;
 use cairn_primitives::codec::{CodecError, Decode, Encode};
 use cairn_primitives::{Amount, Hash32};
@@ -351,8 +351,13 @@ fn a_maturity_window_the_header_does_not_commit_to_is_refused() {
 
     // And one that says a reward matures later than it does, which is the lie
     // in the other direction: a newcomer refusing what everyone else takes.
+    // Told by swapping the first two coinbases between their heights, since
+    // the heights of a window this chain made are every height it can hold
+    // and moving one alone breaks the order the window is asked for first.
     let mut delayed = node.handover();
-    delayed.maturing[0].0 += 1;
+    let first = delayed.maturing[0].1;
+    delayed.maturing[0].1 = delayed.maturing[1].1;
+    delayed.maturing[1].1 = first;
     assert_eq!(
         accept(&delayed, &params).err(),
         Some(HandoverError::StateRootMismatch)
@@ -1163,5 +1168,164 @@ fn a_grace_window_at_its_ceiling_crosses_the_wire_and_one_more_does_not() {
             type_name: "Handover grace proofs"
         }),
         "paths one past what the window can hold were read"
+    );
+}
+
+/// A maturity window out of order, or naming one coinbase twice, is refused by
+/// name before the ledger is rebuilt.
+///
+/// `advance_maturing` empties the window from the front and stops at the first
+/// entry that has not matured, because a window a node builds from its own
+/// blocks only rises, and the index beside it keeps one height a coinbase. The
+/// window was held to a length and to a range and to neither of those. Two
+/// entries swapped passed both, and so did one coinbase named at two heights;
+/// what stood between them and a node was the state root, which a sender who
+/// mined the burial computes over the window it chose. A node that took the
+/// swap kept the second coinbase unspendable past its height, and one that
+/// took the repeat held an index that no longer said what the window did.
+///
+/// The root over each window is deliberately not recomputed: the refusal has
+/// to come before the root is compared, which is what catches a sender who
+/// did recompute it.
+#[test]
+fn a_maturity_window_out_of_order_or_naming_a_coinbase_twice_is_refused() {
+    let params = params();
+    let miner = wallet(1);
+    let mut node = Node::new();
+    node.mine_empty(&miner, RECENT_HEADERS + 8);
+
+    let honest = node.handover();
+    accept(&honest, &params).expect("the window this chain really has");
+    assert!(
+        honest.maturing.len() >= 2,
+        "a window of fewer than two entries has no order to break"
+    );
+    let (first, second) = (honest.maturing[0], honest.maturing[1]);
+
+    let mut swapped = honest.clone();
+    swapped.maturing.swap(0, 1);
+    assert_eq!(
+        accept(&swapped, &params).err(),
+        Some(HandoverError::MaturityWindowOutOfOrder {
+            matures_at: first.0,
+            after: second.0,
+        }),
+        "a window whose entries do not rise was taken as far as the state root"
+    );
+
+    let mut repeated = honest.clone();
+    repeated.maturing[1] = first;
+    assert_eq!(
+        accept(&repeated, &params).err(),
+        Some(HandoverError::MaturityWindowOutOfOrder {
+            matures_at: first.0,
+            after: first.0,
+        }),
+        "a window naming one height twice was taken as far as the state root"
+    );
+
+    let mut named_twice = honest.clone();
+    named_twice.maturing[1].1 = first.1;
+    assert_eq!(
+        accept(&named_twice, &params).err(),
+        Some(HandoverError::CoinbaseMaturingTwice(first.1)),
+        "a window naming one coinbase at two heights was taken as far as the state root"
+    );
+}
+
+/// A buried header committing to a history no chain produced is refused where
+/// it sits in the run.
+///
+/// The run above the anchor is walked under the rules a node applies to any
+/// block it is handed, and the rebuilt forest was compared only with the
+/// tip's. Each header's own `history` was never read, so a sender who mined
+/// the burial could put anything in it, and the newcomer adopted the ledger,
+/// asked for the first block above it, and refused it for the very field the
+/// handover had let through: `connect_block` compares it with the forest the
+/// node holds.
+///
+/// Bent in the first header of the run and in a later one, since the forest
+/// grows as the run is walked and each header has its own forest to answer to.
+#[test]
+fn a_buried_header_committing_to_a_history_no_chain_produced_is_refused() {
+    let params = params();
+    let miner = wallet(1);
+    let mut node = Node::new();
+    node.mine_empty(&miner, RECENT_HEADERS + BURIAL as usize + 8);
+
+    let honest = node.handover();
+    let rebuilt = accept(&honest, &params).expect("the run this chain really has");
+    let anchor = honest.at.height as usize;
+
+    for bent_at in [0usize, 3] {
+        // The run re-made by a sender that mined it: every header names the
+        // one below it, states the difficulty the retarget demands (the
+        // windows are the same summaries), adds its own work, and commits to
+        // the forest below it, except one, whose `history` no forest
+        // produced. The tip commits to the forest the run rebuilds, so the
+        // comparison with the tip's has nothing to find. At the fixture's
+        // difficulty every identifier meets its target, so nothing needs
+        // solving.
+        let mut forest: Forest = node.past[anchor].headers_before_tip();
+        forest.add(cairn_ledger::state::header_leaf(&honest.at.id()));
+        let mut archive = Archive::new();
+        for header in &node.headers[..=anchor] {
+            archive
+                .add(cairn_ledger::state::header_leaf(&header.id()))
+                .unwrap();
+        }
+        let mut previous = honest.at;
+        let mut forged: Vec<Block> = Vec::new();
+        for (offset, block) in node.blocks[anchor + 1..].iter().enumerate() {
+            let mut block = block.clone();
+            block.header.previous = previous.id();
+            block.header.history = if offset == bent_at {
+                Hash32::from_bytes([0xab; 32])
+            } else {
+                forest.commitment()
+            };
+            let leaf = cairn_ledger::state::header_leaf(&block.header.id());
+            if offset + 1 < node.blocks.len() - anchor - 1 {
+                forest.add(leaf);
+            }
+            archive.add(leaf).unwrap();
+            previous = block.header;
+            forged.push(block);
+        }
+        let tip = previous;
+        assert_eq!(
+            forest.commitment(),
+            tip.history,
+            "the forged tip commits to the forest the run rebuilds, as the honest one does"
+        );
+
+        let mut handover = honest.clone();
+        handover.tip = tip;
+        handover.tip_history = forest.clone();
+        handover.anchor = archive
+            .prove_in(anchor as u64, tip.height)
+            .expect("the anchor sits in the forged forest too");
+        handover.buried = forged.iter().map(|block| block.header).collect();
+
+        let bent = forged[bent_at].header.height;
+        assert_eq!(
+            accept(&handover, &params).err(),
+            Some(HandoverError::BuriedHistoryMismatch { at: bent }),
+            "a buried run whose header at {bent} commits to a history no forest produced \
+             was taken"
+        );
+    }
+
+    // What the same header gets as a block, on the ledger the honest
+    // handover built: the rule the run is now held to.
+    let mut block = node.blocks[anchor + 1].clone();
+    block.header.history = Hash32::from_bytes([0xab; 32]);
+    let mut state = rebuilt;
+    assert!(
+        matches!(
+            connect_block(&mut state, &block, &params, NOW),
+            Err(BlockError::HistoryMismatch { .. })
+        ),
+        "the block path refuses a header whose history is not the forest below it"
     );
 }

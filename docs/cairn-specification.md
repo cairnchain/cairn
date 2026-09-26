@@ -1986,35 +1986,49 @@ This order is normative.
     <tr><td class="n">15</td><td>GracePositionTwice</td><td>the window names one cold position twice, which is one leaf offered as two notes</td></tr>
     <tr><td class="n">16</td><td>MaturityWindowTooLarge</td><td>more waiting coinbases than the maturity depth</td></tr>
     <tr><td class="n">17</td><td>MaturityOutsideTheWindow</td><td>a coinbase maturing at a height the window does not cover</td></tr>
-    <tr><td class="n">18</td><td>SupplyAboveTheSchedule</td><td>more money than the schedule has paid by the anchor's height</td></tr>
-    <tr><td class="n">19</td><td>HistoryMismatch</td><td>the second forest is not the one the anchor commits to</td></tr>
-    <tr><td class="n">20</td><td>RecentNotEndingAtTip</td><td>the recent run is empty, or does not end at the anchor</td></tr>
-    <tr><td class="n">21</td><td>TooFewRecent</td><td>fewer recent headers than the anchor's height allows for</td></tr>
-    <tr><td class="n">22</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a recent header belongs elsewhere</td></tr>
-    <tr><td class="n">23</td><td>WrongVersion</td><td>a recent header carries a version other than the one its height requires</td></tr>
-    <tr><td class="n">24</td><td>RecentWithoutWork</td><td>a recent header carries no proof of work</td></tr>
-    <tr><td class="n">25</td><td>RecentWorkDoesNotAddUp</td><td>a recent header's total is not the one below it plus its own</td></tr>
-    <tr><td class="n">26</td><td>RecentNotConsecutive</td><td>the recent run is not one chain</td></tr>
-    <tr><td class="n">27</td><td>BuriedRunWrongLength</td><td>the buried run is not the height difference, or is past the ceiling</td></tr>
-    <tr><td class="n">28</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a buried header belongs elsewhere</td></tr>
-    <tr><td class="n">29</td><td>BuriedRunNotConsecutive</td><td>a buried header does not follow the one below it</td></tr>
-    <tr><td class="n">30</td><td>BuriedWithoutWork</td><td>a buried header carries no proof of work</td></tr>
-    <tr><td class="n">31</td><td>SoftwareTooOld</td><td>the rules at a buried header's height are past what this build knows</td></tr>
-    <tr><td class="n">32</td><td>WrongVersion</td><td>a buried header carries a version other than the one its height requires</td></tr>
-    <tr><td class="n">33</td><td>BuriedAtTheWrongDifficulty</td><td>not what the retarget demands of it</td></tr>
-    <tr><td class="n">34</td><td>BuriedOutOfTime</td><td>not later than the median of the window before it</td></tr>
-    <tr><td class="n">35</td><td>BuriedWorkDoesNotAddUp</td><td>not the work below it plus its own</td></tr>
-    <tr><td class="n">36</td><td>BuriedRunNotEndingAtTheTip</td><td>the run does not end at the tip</td></tr>
-    <tr><td class="n">37</td><td>NotOnTheWeighedChain</td><td>the forest rebuilt from the run is not the one the tip commits to</td></tr>
-    <tr><td class="n">38</td><td>StateRootMismatch</td><td>the ledger rebuilt from this does not produce the anchor's state root</td></tr>
-    <tr><td class="n">39</td><td>BadGraceProof</td><td>a path for a note in the grace window does not fold to the cold commitment</td></tr>
-    <tr><td class="n">40</td><td>MissingGraceProof</td><td>a note in the grace window has no path</td></tr>
+    <tr><td class="n">18</td><td>MaturityWindowOutOfOrder</td><td>the heights the window's coinbases mature at do not strictly rise</td></tr>
+    <tr><td class="n">19</td><td>CoinbaseMaturingTwice</td><td>the window names one coinbase twice</td></tr>
+    <tr><td class="n">20</td><td>SupplyAboveTheSchedule</td><td>more money than the schedule has paid by the anchor's height</td></tr>
+    <tr><td class="n">21</td><td>HistoryMismatch</td><td>the second forest is not the one the anchor commits to</td></tr>
+    <tr><td class="n">22</td><td>RecentNotEndingAtTip</td><td>the recent run is empty, or does not end at the anchor</td></tr>
+    <tr><td class="n">23</td><td>TooFewRecent</td><td>fewer recent headers than the anchor's height allows for</td></tr>
+    <tr><td class="n">24</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a recent header belongs elsewhere</td></tr>
+    <tr><td class="n">25</td><td>WrongVersion</td><td>a recent header carries a version other than the one its height requires</td></tr>
+    <tr><td class="n">26</td><td>RecentWithoutWork</td><td>a recent header carries no proof of work</td></tr>
+    <tr><td class="n">27</td><td>RecentWorkDoesNotAddUp</td><td>a recent header's total is not the one below it plus its own</td></tr>
+    <tr><td class="n">28</td><td>RecentOutOfTime</td><td>where the run holds the eleven headers below it, a recent header is not later than their median</td></tr>
+    <tr><td class="n">29</td><td>RecentNotConsecutive</td><td>the recent run is not one chain</td></tr>
+    <tr><td class="n">30</td><td>BuriedRunWrongLength</td><td>the buried run is not the height difference, or is past the ceiling</td></tr>
+    <tr><td class="n">31</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a buried header belongs elsewhere</td></tr>
+    <tr><td class="n">32</td><td>BuriedRunNotConsecutive</td><td>a buried header does not follow the one below it</td></tr>
+    <tr><td class="n">33</td><td>BuriedWithoutWork</td><td>a buried header carries no proof of work</td></tr>
+    <tr><td class="n">34</td><td>SoftwareTooOld</td><td>the rules at a buried header's height are past what this build knows</td></tr>
+    <tr><td class="n">35</td><td>WrongVersion</td><td>a buried header carries a version other than the one its height requires</td></tr>
+    <tr><td class="n">36</td><td>BuriedAtTheWrongDifficulty</td><td>not what the retarget demands of it</td></tr>
+    <tr><td class="n">37</td><td>BuriedOutOfTime</td><td>not later than the median of the window before it</td></tr>
+    <tr><td class="n">38</td><td>BuriedWorkDoesNotAddUp</td><td>not the work below it plus its own</td></tr>
+    <tr><td class="n">39</td><td>BuriedHistoryMismatch</td><td>a buried header below the tip does not commit to the forest the run has rebuilt below it</td></tr>
+    <tr><td class="n">40</td><td>BuriedRunNotEndingAtTheTip</td><td>the run does not end at the tip</td></tr>
+    <tr><td class="n">41</td><td>NotOnTheWeighedChain</td><td>the forest rebuilt from the run is not the one the tip commits to</td></tr>
+    <tr><td class="n">42</td><td>StateRootMismatch</td><td>the ledger rebuilt from this does not produce the anchor's state root</td></tr>
+    <tr><td class="n">43</td><td>BadGraceProof</td><td>a path for a note in the grace window does not fold to the cold commitment</td></tr>
+    <tr><td class="n">44</td><td>MissingGraceProof</td><td>a note in the grace window has no path</td></tr>
   </tbody>
 </table>
 
-Nine to eighteen come before the ledger is rebuilt because each of them needs
+Nine to twenty come before the ledger is rebuilt because each of them needs
 nothing but what arrived on the wire, and the size of what follows is otherwise
 decided by whoever sent it.
+
+**Seventeen, eighteen and nineteen ask the maturity window what a window a
+node built would be.** A block's coinbase matures a fixed depth above it and
+blocks come one height apart, so the heights rise strictly and every coinbase
+appears once. A node empties the window from the front and stops at the first
+entry still waiting, and keeps one height a coinbase beside it; a window out of
+order keeps a coinbase unspendable past its height, and one naming a coinbase
+twice leaves that record saying one thing and the window another. The state
+root does not settle either, because a sender who mined the burial computes it
+over the window it chose.
 
 **Ten is not covered by the state root and cannot be.** The hot set is
 committed to as a tree keyed by note identifier, so a list naming a note twice
@@ -2023,7 +2037,7 @@ free, past every check that ends at the header, and what it buys is not a note
 but a place in the eviction order, which is the one structure a receiver builds
 from the list rather than from the commitment.
 
-Thirty-seven is what a forest proof alone cannot say. A proof says a header sits
+Forty-one is what a forest proof alone cannot say. A proof says a header sits
 at a position in a forest; it does not say the forest is a chain, and the forest
 belongs to whoever made the tip. The header forest is append only, so the
 receiver does not have to take the proof's word for it: it holds the forest as
@@ -2033,12 +2047,28 @@ forest the tip commits to. Under a swap anywhere below the tip it does not, and
 it does not matter whether any draw would have looked there. The tip is not in
 its own history, so the tip's own leaf is the one leaf that MUST NOT be added.
 
-Twenty-five, twenty-six and twenty-seven are what make the burial cost
+Thirty-six, thirty-seven and thirty-eight are what make the burial cost
 something. Before them the sender chose those difficulties and could set them
 all to the floor, so a thousand blocks of burial were a thousand hashes. The
 window they are judged against starts as the recent headers that came with the
 ledger and moves forward with the run, so every step is judged by the rule a
-node applies to any block it is handed.
+node applies to any block it is handed. Thirty-nine is the same rule's last
+field: a block's `history` is the forest below it, which is the forest the walk
+holds when it reaches that header, so each header below the tip MUST be
+compared with it before its own leaf is added. Without it a sender who mined
+the burial could write anything there, and the newcomer would take the ledger
+and then refuse the first block above it for the field the handover let
+through.
+
+**Twenty-eight is asked only where the recent run holds the rule's whole
+window.** The median reads the eleven headers below a block, so from the
+twelfth recent header on it is exactly the rule each of them was accepted
+under, and a run that starts at the first block holds every header the rule
+read from its first. Below the twelfth entry of any other run a median over
+fewer headers is not the rule, and over timestamps that do not rise it can
+stand above the real one and refuse an honest handover, so a node MUST NOT ask
+it there. The retarget is not asked of the recent run at all: it reads ninety
+gaps, so no header of a run of ninety-one can be judged by it.
 
 ### What is pinned by a commitment, and what is not
 

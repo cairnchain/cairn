@@ -48,7 +48,9 @@ use cairn_primitives::{Amount, Hash32};
 
 use crate::block::{BlockHeader, HeaderSummary, BLOCK_VERSION};
 use crate::note::{NetworkId, Note, NoteId};
-use crate::pow::{median_time_past, meets_target, next_difficulty, work_of, RECENT_HEADERS};
+use crate::pow::{
+    median_time_past, meets_target, next_difficulty, work_of, MEDIAN_TIME_WINDOW, RECENT_HEADERS,
+};
 use crate::state::{
     header_leaf, HotEntry, LedgerState, Maturing, Pieces, GRACE_BLOCKS, GRACE_NOTES,
 };
@@ -216,6 +218,13 @@ pub enum HandoverError {
         limit: u64,
     },
     #[error(
+        "the maturity window lists a coinbase maturing at {matures_at} after one maturing at \
+         {after}, and a window runs oldest first"
+    )]
+    MaturityWindowOutOfOrder { matures_at: u64, after: u64 },
+    #[error("the maturity window names coinbase {0:?} twice")]
+    CoinbaseMaturingTwice(Hash32),
+    #[error(
         "this ledger holds {supply} at height {height}, and the schedule has paid at most \
          {ceiling} by then"
     )]
@@ -253,6 +262,8 @@ pub enum HandoverError {
     RecentWithoutWork,
     #[error("the work at {at} in the recent run does not add up")]
     RecentWorkDoesNotAddUp { at: u64 },
+    #[error("the recent header at {at} is not later than the median of the window before it")]
+    RecentOutOfTime { at: u64 },
     #[error("too few recent headers: {given}, and a chain at height {height} has more")]
     TooFewRecent { given: usize, height: u64 },
     #[error("the proof for the note at {position} is not one the cold set gives")]
@@ -273,6 +284,8 @@ pub enum HandoverError {
     BuriedOutOfTime { at: u64 },
     #[error("the work stated at {at} is not the work below it plus its own")]
     BuriedWorkDoesNotAddUp { at: u64 },
+    #[error("the header at {at} commits to a history that is not the forest below it")]
+    BuriedHistoryMismatch { at: u64 },
     #[error("the headers handed over do not run up to the tip that was weighed")]
     BuriedRunNotEndingAtTheTip,
     #[error(
@@ -367,10 +380,11 @@ impl LedgerState {
 /// `take_grace_proofs`, where the leaves are already in hand.
 /// Whether the maturity window is one this chain could have produced.
 ///
-/// Two questions, and for a long time only the first was asked. A window
+/// Four questions, and for a long time only the first was asked. A window
 /// longer than the maturity depth is not one this network ever made, which is
 /// true; what it was standing in for is whether the heights inside it are ones
-/// this window could hold.
+/// this window could hold, whether they rise, and whether each coinbase is
+/// named once.
 ///
 /// They have to be, and the reason is in `advance_maturing`: it empties the
 /// window from the front and stops at the first entry that has not matured,
@@ -445,6 +459,32 @@ fn the_window_this_chain_would_have(
             height: handover.at.height,
             limit: params.coinbase_maturity,
         });
+    }
+    // And in the order `advance_maturing` relies on, which the range does not
+    // ask. A block's coinbase matures a fixed depth above it and blocks come
+    // one height apart, so a window a node built rises strictly. Two entries
+    // swapped passed both questions above; a node that took them kept the
+    // second coinbase unspendable past its height, because the window is
+    // emptied from the front and stops at the first entry still waiting.
+    for pair in handover.maturing.windows(2) {
+        if let [(after, _), (matures_at, _)] = pair {
+            if matures_at <= after {
+                return Err(HandoverError::MaturityWindowOutOfOrder {
+                    matures_at: *matures_at,
+                    after: *after,
+                });
+            }
+        }
+    }
+    // And each coinbase once. Every block pays its own, so no window a node
+    // built names one twice, and the index beside the window keeps one height
+    // a coinbase: a coinbase named at two heights leaves the index saying one
+    // thing and the window another as soon as the first entry matures.
+    let mut named = BTreeSet::new();
+    for (_, coinbase) in &handover.maturing {
+        if !named.insert(*coinbase) {
+            return Err(HandoverError::CoinbaseMaturingTwice(*coinbase));
+        }
     }
     Ok(())
 }
@@ -680,12 +720,7 @@ pub fn accept(handover: &Handover, params: &ConsensusParams) -> Result<LedgerSta
     // thousand blocks over it, and be the heaviest chain the whole time. That
     // is what a newcomer gets instead of the ability to check the ledger
     // itself, which it has no way to do.
-    if at.height.saturating_add(burial) > tip.height {
-        return Err(HandoverError::NotBuried {
-            at: at.height,
-            tip: tip.height,
-        });
-    }
+    buried_deep_enough(at, tip, burial)?;
 
     // And it is that tip's own chain. The forest is the one the tip vouches
     // for, and the header this ledger belongs to sits in it at the height it
@@ -832,6 +867,27 @@ pub fn accept(handover: &Handover, params: &ConsensusParams) -> Result<LedgerSta
     Ok(state)
 }
 
+/// Whether the anchor sits at least `burial` blocks below the tip.
+///
+/// Asked without saturating. At the ceiling a saturated sum stops at
+/// `u64::MAX` and a tip there is not above it, so any anchor within a burial
+/// of the last height passed. No chain reaches that height, and this does not
+/// have to borrow the argument from anywhere.
+fn buried_deep_enough(
+    at: &BlockHeader,
+    tip: &BlockHeader,
+    burial: u64,
+) -> Result<(), HandoverError> {
+    let deep_enough = at.height.checked_add(burial);
+    if deep_enough.is_none_or(|height| height > tip.height) {
+        return Err(HandoverError::NotBuried {
+            at: at.height,
+            tip: tip.height,
+        });
+    }
+    Ok(())
+}
+
 /// The same question `sampling::belongs_to_this_network` asks, in the errors
 /// this exchange reports.
 fn belongs_to_this_network(
@@ -887,14 +943,20 @@ fn belongs_to_this_network(
 /// burial above it is judged against, which makes it the wrong place to leave
 /// an argument borrowed from the forest.
 ///
-/// **What is not checked, and why not.** The median time past reads eleven
-/// headers, so it is the chain's own rule from the eleventh entry on and is
-/// *not* the rule below that: `median_time_past` silently shortens its window,
-/// and a shortened median over timestamps that are not monotone can exceed the
-/// full one and refuse an honest handover. It belongs here with a guard and a
-/// measurement, not without them.
+/// **The median, where the run holds its window.** The median time past reads
+/// eleven headers, so it is the chain's own rule from the twelfth entry on and
+/// is *not* the rule below that: `median_time_past` silently shortens its
+/// window, and a shortened median over timestamps that are not monotone can
+/// exceed the full one and refuse an honest handover. So it is asked from the
+/// twelfth entry on, and from the first when the run starts at the first
+/// block, where the chain had no more headers than these. The test holding
+/// the guard is
+/// `tests::only_a_run_from_the_first_block_is_judged_before_its_twelfth_header`.
+/// It was not asked at all, and this run seeds the window the buried run is
+/// judged by.
 ///
-/// The difficulty is worse than circular. The retarget reads ninety gaps, so
+/// **What is not checked, and why not.** The difficulty is worse than
+/// circular. The retarget reads ninety gaps, so
 /// judging a header needs ninety one below it, and the run carries ninety
 /// below the anchor. `check_buried` escapes that by starting one above the
 /// anchor, where the message does hold ninety one. No header inside this run
@@ -963,8 +1025,35 @@ fn check_recent(handover: &Handover, params: &ConsensusParams) -> Result<(), Han
         // can act on; "not consecutive" is the same fact with the reason taken
         // out.
         if let Some(behind) = behind {
-            if header.total_work != behind.total_work.saturating_add(work_of(header.difficulty)) {
+            if Some(header.total_work) != behind.total_work.checked_add(work_of(header.difficulty))
+            {
                 return Err(HandoverError::RecentWorkDoesNotAddUp { at: header.height });
+            }
+        }
+
+        // Later than the median of the eleven below it, which is the rule
+        // every node applied to this header as a block, and the window the
+        // buried run is judged by starts from these timestamps.
+        //
+        // Only where the run holds the whole window the rule read. From the
+        // twelfth header on it does. Below that it does when the run starts at
+        // the first block, since the chain then had no more headers than
+        // these and the rule read exactly them. Anywhere else a median taken
+        // over part of the window is not the rule: over timestamps that do
+        // not rise it can stand above the real one and refuse an honest run.
+        let whole = index >= MEDIAN_TIME_WINDOW
+            || handover
+                .recent
+                .first()
+                .is_some_and(|first| first.height == 0);
+        if whole {
+            let below = handover
+                .recent
+                .get(index.saturating_sub(MEDIAN_TIME_WINDOW)..index)
+                .unwrap_or_default();
+            if median_time_past(&summaries(below)).is_some_and(|median| header.timestamp <= median)
+            {
+                return Err(HandoverError::RecentOutOfTime { at: header.height });
             }
         }
 
@@ -974,7 +1063,7 @@ fn check_recent(handover: &Handover, params: &ConsensusParams) -> Result<(), Han
         // so following the chain back from there is enough: nothing else needs
         // proving about them.
         if let Some(next) = handover.recent.get(index.saturating_add(1)) {
-            if next.height != header.height.saturating_add(1) || next.previous != header.id() {
+            if Some(next.height) != header.height.checked_add(1) || next.previous != header.id() {
                 return Err(HandoverError::RecentNotConsecutive);
             }
         }
@@ -1015,10 +1104,11 @@ pub const MOST_BURIED: u64 = 4 * BURIAL;
 ///
 /// The second is that the run has to have been mined. Each header names the
 /// one before it, carries the difficulty the retarget demands of it, states a
-/// timestamp past the median of its window, and adds its own work to the
-/// total. The window starts as the headers that come with the ledger and moves
-/// forward with the run, so every step is judged by the same rule a node
-/// applies to a block it is handed. That is what makes the burial cost
+/// timestamp past the median of its window, adds its own work to the total,
+/// and commits to the forest below it. The window starts as the headers that
+/// come with the ledger, which have to end at the anchor, and moves forward
+/// with the run, so every step is judged by the same rule a node applies to a
+/// block it is handed. That is what makes the burial cost
 /// something: before this, the sender chose those difficulties and could set
 /// them all to the floor, so a thousand blocks of burial were a thousand
 /// hashes and the phrase "buried a thousand deep" bought nothing at all.
@@ -1047,6 +1137,16 @@ pub fn check_buried(
             given,
             wanted: claimed,
         });
+    }
+
+    // The window the first header is judged against is the recent run, and it
+    // has to be the anchor's. `accept` asks this in `check_recent` before it
+    // gets here; this function is public and asked nothing of the window it
+    // was handed, so an empty one judged the first header against no history
+    // at all, where the retarget answers the floor: the difficulty of a first
+    // block, answered a second way.
+    if recent.last().map(BlockHeader::id) != Some(at.id()) {
+        return Err(HandoverError::RecentNotEndingAtTip);
     }
 
     // The forest the anchor commits to, which the caller has already checked
@@ -1097,17 +1197,26 @@ pub fn check_buried(
         if median_time_past(&window).is_some_and(|median| header.timestamp <= median) {
             return Err(HandoverError::BuriedOutOfTime { at: header.height });
         }
-        if header.total_work
-            != previous
-                .total_work
-                .saturating_add(work_of(header.difficulty))
-        {
+        if Some(header.total_work) != previous.total_work.checked_add(work_of(header.difficulty)) {
             return Err(HandoverError::BuriedWorkDoesNotAddUp { at: header.height });
         }
 
         // The tip is not in its own history, so its leaf is the one leaf the
         // rebuilt forest must not have.
+        //
+        // And every header below the tip commits to the forest below it, which
+        // is the forest this walk holds at that moment. A node handed the
+        // header as a block compares the two, so a run judged "by the rule a
+        // node applies to any block" has to as well. It did not: the rebuilt
+        // forest was compared only with the tip's, and a sender who mined the
+        // burial could write anything in a buried header's `history`. The
+        // newcomer took the ledger, asked for the first block above it and
+        // refused that block for the field this let through. The tip's own is
+        // the comparison after the loop.
         if header.height < tip.height {
+            if header.history != forest.commitment() {
+                return Err(HandoverError::BuriedHistoryMismatch { at: header.height });
+            }
             forest.add(header_leaf(&header.id()));
         }
         window.push(HeaderSummary {
@@ -1367,4 +1476,276 @@ fn decode_recent(reader: &mut Reader<'_>) -> Result<Vec<BlockHeader>, CodecError
         recent.push(BlockHeader::decode_from(reader)?);
     }
     Ok(recent)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+mod tests {
+    use super::*;
+    use crate::pow::MIN_DIFFICULTY;
+
+    fn params() -> ConsensusParams {
+        ConsensusParams::testnet()
+    }
+
+    /// A header of this network at the difficulty floor, where every
+    /// identifier meets its target and nothing has to be mined.
+    fn header(height: u64, previous: Hash32, total_work: u128, timestamp: u64) -> BlockHeader {
+        BlockHeader {
+            version: params().version_at(height),
+            network: params().network,
+            height,
+            previous,
+            transactions_root: Hash32::from_bytes([0; 32]),
+            state_root: Hash32::from_bytes([0; 32]),
+            history: Hash32::from_bytes([0; 32]),
+            timestamp,
+            difficulty: MIN_DIFFICULTY,
+            total_work,
+            nonce: 0,
+        }
+    }
+
+    /// A run of headers, one chain, each a minute after the last, at the
+    /// heights and totals the caller names.
+    fn chained(heights: &[u64], works: &[u128], timestamps: &[u64]) -> Vec<BlockHeader> {
+        let mut run: Vec<BlockHeader> = Vec::new();
+        for ((height, work), timestamp) in heights.iter().zip(works).zip(timestamps) {
+            let previous = run
+                .last()
+                .map_or(Hash32::from_bytes([0; 32]), BlockHeader::id);
+            run.push(header(*height, previous, *work, *timestamp));
+        }
+        run
+    }
+
+    fn minutes(count: usize) -> Vec<u64> {
+        (0..count)
+            .map(|index| 1_000 + 60 * u64::try_from(index).unwrap())
+            .collect()
+    }
+
+    /// A handover carrying nothing but a recent run, whose last header is the
+    /// anchor, which is all `check_recent` reads.
+    fn handing(recent: Vec<BlockHeader>) -> Handover {
+        let at = *recent.last().unwrap();
+        Handover {
+            at,
+            tip: at,
+            tip_history: Forest::default(),
+            anchor: ForestProof::default(),
+            hot: Vec::new(),
+            cold: Forest::default(),
+            grace: Vec::new(),
+            grace_proofs: Vec::new(),
+            maturing: Vec::new(),
+            supply: Amount::ZERO,
+            headers: Forest::default(),
+            buried: Vec::new(),
+            recent,
+        }
+    }
+
+    /// Two recent headers both at the last height there is are refused as not
+    /// consecutive.
+    ///
+    /// Each height was compared with the one below plus one, and the sum
+    /// saturated, so a run whose last two headers both stated `u64::MAX`
+    /// passed as one chain: the sum stops at the ceiling and meets the second
+    /// header there. Nothing asked, so a run no chain produced passed on an
+    /// arithmetic shortcut.
+    #[test]
+    fn two_recent_headers_at_the_last_height_there_is_are_not_consecutive() {
+        let heights: Vec<u64> = (u64::MAX - 89..=u64::MAX)
+            .chain(std::iter::once(u64::MAX))
+            .collect();
+        let works: Vec<u128> = (1..=91).collect();
+        let recent = chained(&heights, &works, &minutes(RECENT_HEADERS));
+        assert_eq!(recent.len(), RECENT_HEADERS);
+
+        assert_eq!(
+            check_recent(&handing(recent), &params()),
+            Err(HandoverError::RecentNotConsecutive),
+            "two headers at the same height were taken as one following the other"
+        );
+    }
+
+    /// A recent header whose total is its parent's, at the most work a total
+    /// can state, is refused as not adding up.
+    ///
+    /// The total was compared with the parent's plus the header's own work,
+    /// saturated, so at `u128::MAX` a header adding nothing passed: the sum
+    /// stops at the ceiling and meets it. Nothing asked.
+    #[test]
+    fn a_recent_header_adding_nothing_at_the_most_work_there_is_does_not_add_up() {
+        let heights: Vec<u64> = (1_000..1_091).collect();
+        let works: Vec<u128> = (u128::MAX - 89..=u128::MAX)
+            .chain(std::iter::once(u128::MAX))
+            .collect();
+        let recent = chained(&heights, &works, &minutes(RECENT_HEADERS));
+
+        assert_eq!(
+            check_recent(&handing(recent), &params()),
+            Err(HandoverError::RecentWorkDoesNotAddUp { at: 1_090 }),
+            "a header stating no work of its own was taken because the sum saturated"
+        );
+    }
+
+    /// A recent header dated at or before the median of the eleven below it is
+    /// refused, where those eleven are in the run.
+    ///
+    /// The recent run seeds the window the buried run is judged by, and was
+    /// held to its version, its work and its chaining but not to the timestamp
+    /// rule every node applied to each of its blocks. Nothing asked, so a run
+    /// carrying a header no node would have accepted was taken.
+    #[test]
+    fn a_recent_header_not_later_than_the_median_below_it_is_refused() {
+        let heights: Vec<u64> = (1_000..1_091).collect();
+        let works: Vec<u128> = (1..=91).collect();
+        let honest = chained(&heights, &works, &minutes(RECENT_HEADERS));
+        assert_eq!(
+            check_recent(&handing(honest), &params()),
+            Ok(()),
+            "the control: a run a minute a block is one every node took"
+        );
+
+        // The twelfth header, the first with the whole window below it in a
+        // run that does not start at the first block.
+        let bent_at = MEDIAN_TIME_WINDOW;
+        let mut timestamps = minutes(RECENT_HEADERS);
+        let mut window = timestamps[bent_at - MEDIAN_TIME_WINDOW..bent_at].to_vec();
+        window.sort_unstable();
+        timestamps[bent_at] = window[window.len() / 2];
+        let bent = chained(&heights, &works, &timestamps);
+
+        assert_eq!(
+            check_recent(&handing(bent), &params()),
+            Err(HandoverError::RecentOutOfTime {
+                at: heights[bent_at]
+            }),
+            "a header dated at the median of the eleven below it was taken"
+        );
+    }
+
+    /// The first eleven headers of a run that does not start at the first
+    /// block are not judged against a median, and those of one that does are.
+    ///
+    /// Below the twelfth header the run holds fewer than the eleven the rule
+    /// reads. Where the run starts at the first block the shorter window is
+    /// exactly what the rule read, since the chain had no more; elsewhere it
+    /// is not, and a median over part of the window can stand above the real
+    /// one and refuse an honest run.
+    #[test]
+    fn only_a_run_from_the_first_block_is_judged_before_its_twelfth_header() {
+        let works: Vec<u128> = (1..=91).collect();
+        let mut timestamps = minutes(RECENT_HEADERS);
+        // One header an hour ahead, and the next back on schedule: under the
+        // eleven headers this run does not carry, the next one clears the
+        // median, and over the one below it alone it does not.
+        timestamps[1] += 3_600;
+
+        let heights: Vec<u64> = (1_000..1_091).collect();
+        let mid_chain = chained(&heights, &works, &timestamps);
+        assert_eq!(
+            check_recent(&handing(mid_chain), &params()),
+            Ok(()),
+            "a run judged against a median of fewer headers than the rule reads"
+        );
+
+        let heights: Vec<u64> = (0..91).collect();
+        let from_the_start = chained(&heights, &works, &timestamps);
+        assert_eq!(
+            check_recent(&handing(from_the_start), &params()),
+            Err(HandoverError::RecentOutOfTime { at: 2 }),
+            "a run from the first block was not judged by the median its blocks were"
+        );
+    }
+
+    /// `check_buried` refuses a recent run that does not end at the anchor,
+    /// empty included, rather than judging the first buried header against a
+    /// window of nothing.
+    ///
+    /// The retarget answers the floor for an empty window, where a first
+    /// block's difficulty is the network's opening one, so the same header had
+    /// two answers. `accept` never reached it, because `check_recent` refuses
+    /// an empty run first; `check_buried` is public and asked nothing of the
+    /// window it was handed, so a run at the floor above an anchor passed with
+    /// no window at all.
+    #[test]
+    fn a_buried_run_is_not_judged_against_a_window_that_does_not_end_at_the_anchor() {
+        let at = header(5, Hash32::from_bytes([1; 32]), 6, 1_000);
+        let before_at = Forest::default();
+        let mut forest = before_at.clone();
+        forest.add(header_leaf(&at.id()));
+        let mut tip = header(6, at.id(), 7, 1_060);
+        tip.history = forest.commitment();
+
+        assert_eq!(
+            check_buried(&at, &tip, &before_at, &[tip], &[at], &params()),
+            Ok(()),
+            "the control: a window ending at the anchor"
+        );
+        assert_eq!(
+            check_buried(&at, &tip, &before_at, &[tip], &[], &params()),
+            Err(HandoverError::RecentNotEndingAtTip),
+            "a buried run was judged against no window at all"
+        );
+        let elsewhere = header(5, Hash32::from_bytes([2; 32]), 6, 1_000);
+        assert_eq!(
+            check_buried(&at, &tip, &before_at, &[tip], &[elsewhere], &params()),
+            Err(HandoverError::RecentNotEndingAtTip),
+            "a buried run was judged against another chain's window"
+        );
+    }
+
+    /// A buried header adding nothing, at the most work a total can state, is
+    /// refused as not adding up.
+    ///
+    /// The same saturated sum as the recent run's: at `u128::MAX` the parent's
+    /// total plus the header's own work stops at the ceiling and meets a
+    /// header that states no work of its own. Nothing asked.
+    #[test]
+    fn a_buried_header_adding_nothing_at_the_most_work_there_is_does_not_add_up() {
+        let at = header(5, Hash32::from_bytes([1; 32]), u128::MAX, 1_000);
+        let before_at = Forest::default();
+        let mut forest = before_at.clone();
+        forest.add(header_leaf(&at.id()));
+        let mut tip = header(6, at.id(), u128::MAX, 1_060);
+        tip.history = forest.commitment();
+
+        assert_eq!(
+            check_buried(&at, &tip, &before_at, &[tip], &[at], &params()),
+            Err(HandoverError::BuriedWorkDoesNotAddUp { at: 6 }),
+            "a buried header stating no work of its own was taken because the sum saturated"
+        );
+    }
+
+    /// An anchor one block below a tip at the last height there is is not
+    /// buried.
+    ///
+    /// The depth was asked as the anchor's height plus the burial, saturated,
+    /// against the tip's, so within a burial of `u64::MAX` any anchor passed:
+    /// the sum stops at the ceiling and a tip there is not below it. Nothing
+    /// asked.
+    #[test]
+    fn an_anchor_a_block_below_the_last_height_there_is_is_not_buried() {
+        let at = header(u64::MAX - 1, Hash32::from_bytes([1; 32]), 1, 1_000);
+        let tip = header(u64::MAX, at.id(), 2, 1_060);
+        let mut handover = handing(vec![at]);
+        handover.tip = tip;
+
+        assert_eq!(
+            accept(&handover, &params()).err(),
+            Some(HandoverError::NotBuried {
+                at: u64::MAX - 1,
+                tip: u64::MAX
+            }),
+            "an anchor one block below the tip passed for buried because the sum saturated"
+        );
+    }
 }
