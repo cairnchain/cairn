@@ -192,7 +192,7 @@ fn pinned_to(first: Hash32) -> ConsensusParams {
 fn the_chain_these_rules_mined_is_still_taken() {
     let joined = honest_join();
     let params = mined_under();
-    check_start(&joined.start, SAMPLES, NOW, &params).expect("its own rules weigh it");
+    check_start(&joined.start, NOW, &params).expect("its own rules weigh it");
     accept(&joined.handover, &params).expect("its own rules take its ledger");
 }
 
@@ -207,7 +207,7 @@ fn a_chain_from_another_network_is_refused_by_both_halves_of_a_join() {
     let mut ours = mined_under();
     ours.network = FOREIGN;
 
-    let weighed = check_start(&joined.start, SAMPLES, NOW, &ours);
+    let weighed = check_start(&joined.start, NOW, &ours);
     assert!(
         matches!(weighed, Err(StartError::WrongNetwork { .. })),
         "the weighing took another network's chain: {weighed:?}"
@@ -236,7 +236,7 @@ fn a_chain_mined_before_the_network_opened_is_refused_by_both_halves_of_a_join()
         "the chain has to predate the opening for this to be measuring anything"
     );
 
-    let weighed = check_start(&joined.start, SAMPLES, NOW, &ours);
+    let weighed = check_start(&joined.start, NOW, &ours);
     assert!(
         matches!(weighed, Err(StartError::BeforeTheNetworkOpened { .. })),
         "the weighing took a chain mined before the network opened: {weighed:?}"
@@ -253,7 +253,7 @@ fn a_chain_mined_before_the_network_opened_is_refused_by_both_halves_of_a_join()
 #[test]
 fn a_chain_from_the_pinned_block_is_taken() {
     let joined = honest_join();
-    check_start(&joined.start, SAMPLES, NOW, &pinned_to(joined.first.id()))
+    check_start(&joined.start, NOW, &pinned_to(joined.first.id()))
         .expect("the pin is this chain's first block");
 }
 
@@ -268,7 +268,7 @@ fn a_chain_from_another_first_block_is_refused() {
     let elsewhere = Hash32::from_bytes([0xA5; 32]);
     assert_ne!(elsewhere, joined.first.id());
     assert_eq!(
-        check_start(&joined.start, SAMPLES, NOW, &pinned_to(elsewhere)),
+        check_start(&joined.start, NOW, &pinned_to(elsewhere)),
         Err(StartError::NotThisNetworksGenesis)
     );
 }
@@ -280,7 +280,7 @@ fn a_path_to_some_other_block_does_not_open_the_first() {
     let mut joined = honest_join();
     joined.start.genesis = joined.start.parent.clone().unwrap().proof;
     assert_eq!(
-        check_start(&joined.start, SAMPLES, NOW, &pinned_to(joined.first.id())),
+        check_start(&joined.start, NOW, &pinned_to(joined.first.id())),
         Err(StartError::NotThisNetworksGenesis)
     );
 }
@@ -303,16 +303,11 @@ fn a_chain_of_one_block_is_compared_as_it_stands() {
     alone.genesis = ForestProof::default();
 
     assert_eq!(
-        check_start(&alone, SAMPLES, NOW, &pinned_to(joined.first.id())),
+        check_start(&alone, NOW, &pinned_to(joined.first.id())),
         Err(StartError::NothingOpened)
     );
     assert_eq!(
-        check_start(
-            &alone,
-            SAMPLES,
-            NOW,
-            &pinned_to(Hash32::from_bytes([0xA5; 32]))
-        ),
+        check_start(&alone, NOW, &pinned_to(Hash32::from_bytes([0xA5; 32]))),
         Err(StartError::NotThisNetworksGenesis)
     );
 }
@@ -339,7 +334,7 @@ fn a_header_dated_at_the_opening_itself_is_weighed() {
 
     let mut opening = mined_under();
     opening.opens_at = earliest;
-    check_start(&joined.start, SAMPLES, NOW, &opening)
+    check_start(&joined.start, NOW, &opening)
         .expect("a chain whose earliest header opens the network");
 }
 
@@ -356,11 +351,11 @@ fn a_tip_at_the_drift_is_read_and_one_second_past_it_is_not() {
     let tip = joined.start.tip.timestamp;
 
     let at_the_edge = tip.saturating_sub(params.max_timestamp_drift);
-    check_start(&joined.start, SAMPLES, at_the_edge, &params)
+    check_start(&joined.start, at_the_edge, &params)
         .expect("a tip exactly as far ahead as the drift allows");
 
     assert_eq!(
-        check_start(&joined.start, SAMPLES, at_the_edge - 1, &params),
+        check_start(&joined.start, at_the_edge - 1, &params),
         Err(StartError::TipFromTheFuture { timestamp: tip })
     );
 }
@@ -388,7 +383,7 @@ fn the_tip_opened_as_its_own_sample_is_refused_for_where_it_sits() {
     };
 
     assert_eq!(
-        check_start(&joined.start, SAMPLES, NOW, &mined_under()),
+        check_start(&joined.start, NOW, &mined_under()),
         Err(StartError::WrongPlace { index: 0 })
     );
 }

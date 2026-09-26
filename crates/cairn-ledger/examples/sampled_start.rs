@@ -40,8 +40,8 @@ use cairn_crypto::SecretKey;
 use cairn_ledger::block::BlockHeader;
 use cairn_ledger::note::Note;
 use cairn_ledger::sampling::{
-    check_start, covering, draw, levels_for, levels_of, sample_bytes, seed_of, work_before, Sample,
-    SampledStart, SAMPLES,
+    check_start_with_count, covering, draw, levels_for, levels_of, sample_bytes, seed_of,
+    work_before, Sample, SampledStart, SAMPLES,
 };
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
@@ -399,7 +399,7 @@ fn caught_out(honest: &[BlockHeader], claim: f64, count: usize, salt: u64, lie: 
         history: before_tip.forest().roots_only(),
         samples,
     };
-    check_start(&start, count, NOW, &ConsensusParams::testnet()).is_err()
+    check_start_with_count(&start, count, NOW, &ConsensusParams::testnet()).is_err()
 }
 
 /// An honest chain of `count` blocks.

@@ -24,7 +24,8 @@ use cairn_crypto::SecretKey;
 use cairn_ledger::block::{BlockHeader, BLOCK_VERSION};
 use cairn_ledger::note::Note;
 use cairn_ledger::sampling::{
-    check_start, draw, levels_for, levels_of, seed_of, work_before, Sample, SampledStart, SAMPLES,
+    check_start, check_start_with_count, draw, levels_for, levels_of, seed_of, work_before, Sample,
+    SampledStart, SAMPLES,
 };
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
@@ -295,7 +296,8 @@ fn the_honest_chain_still_checks_out() {
         history: archive.forest().roots_only(),
         samples,
     };
-    let weighed = check_start(&start, 512, NOW, &params()).expect("an honest chain checks out");
+    let weighed =
+        check_start_with_count(&start, 512, NOW, &params()).expect("an honest chain checks out");
     assert_eq!(weighed.total_work, tip.total_work);
     let _ = honest.states;
 }
@@ -330,7 +332,7 @@ fn a_run_of_free_headers_inflates_the_claimed_work_and_is_accepted() {
         "the forgery has to outweigh the chain it copied, or there is nothing \
          to refuse"
     );
-    let refused = check_start(&forgery.start, SAMPLES, NOW, &params());
+    let refused = check_start(&forgery.start, NOW, &params());
     assert!(
         refused.is_err(),
         "a run of free headers in the unresolved band is no longer bought for \
@@ -357,7 +359,7 @@ fn the_size_of_the_lie_is_no_longer_a_free_parameter() {
     for share in [1u128, 2, 4, 8] {
         let delta = last.total_work / share;
         let forgery = forge(&honest, 40, delta);
-        let accepted = check_start(&forgery.start, SAMPLES, NOW, &params()).is_ok();
+        let accepted = check_start(&forgery.start, NOW, &params()).is_ok();
         println!(
             "AUDIT: delta {delta} (1/{share} of the honest work) -> {}",
             if accepted { "accepted" } else { "refused" }

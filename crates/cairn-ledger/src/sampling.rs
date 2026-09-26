@@ -32,7 +32,7 @@ use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
 use cairn_primitives::hash::{hash, Domain};
 use cairn_primitives::Hash32;
 
-use crate::block::{BlockHeader, HeaderSummary};
+use crate::block::{BlockHeader, HeaderSummary, BLOCK_VERSION};
 use crate::note::NetworkId;
 use crate::pow::{
     median_time_past, meets_target, next_difficulty, work_of, DIFFICULTY_WINDOW,
@@ -296,7 +296,8 @@ pub struct SampledStart {
     /// anybody could check. The run below fixes that by starting at a header
     /// the draw actually landed on, and walking upward under the retarget:
     /// each header carries the difficulty the window demands of it, dates
-    /// after that window's median, and adds its own work to the total. The
+    /// after that window's median, adds its own work to the total, and
+    /// carries the version its height requires. The
     /// window below the pinned header comes along too, and is honest because
     /// those headers have to chain into it: a forger cannot swap them without
     /// having mined the pinned header on top of its own.
@@ -419,7 +420,7 @@ pub enum StartError {
     #[error("work runs backwards between height {from} and height {to}")]
     WorkRunsBackwards { from: u64, to: u64 },
     #[error("the first {blocks} blocks of the chain state only {stated} work")]
-    OpeningWorthLessThanItCost { blocks: u64, stated: u128 },
+    OpeningWorthLessThanItCost { blocks: u128, stated: u128 },
     #[error("the header the tip was built on was not opened")]
     ParentNotOpened,
     #[error("the header opened for the tip's parent is not the one the tip names")]
@@ -432,6 +433,11 @@ pub enum StartError {
     TailNotConsecutive { at: u64 },
     #[error("the header at {at} in the run up to the tip carries no work")]
     TailWithoutWork { at: u64 },
+    #[error(
+        "the header at {at} in the run up to the tip carries version {found}, and the rules \
+         there are block version {required}"
+    )]
+    TailWrongVersion { at: u64, found: u16, required: u16 },
     #[error("the header at {at} states difficulty {stated}, and the rules demand {demanded}")]
     TailAtTheWrongDifficulty { at: u64, stated: u64, demanded: u64 },
     #[error("the header at {at} is not later than the median of the window before it")]
@@ -901,7 +907,31 @@ fn belongs_to_this_network(
 ///
 /// This is what the height and the work being separate claims used to cost.
 /// They are now tied to each other by the one rule that governs both.
+///
+/// **The count is [`SAMPLES`], and it is not the caller's.** Every figure
+/// published for this draw is for that many questions, and the count is the
+/// one security parameter the draw exists for. It used to be an argument, so a
+/// caller naming fewer weighed a chain against a weaker bar and nothing said
+/// so; every caller in this workspace named the right one, and nothing made
+/// the next one. The measuring instruments that need fewer, to make a forgery
+/// likely enough to see, call [`check_start_with_count`] by name.
 pub fn check_start(
+    start: &SampledStart,
+    now: u64,
+    params: &ConsensusParams,
+) -> Result<Weighed, StartError> {
+    check_start_with_count(start, SAMPLES, now, params)
+}
+
+/// The same weighing, drawing `count` questions rather than [`SAMPLES`].
+///
+/// For the instruments that measure the draw and nothing else. A forgery that
+/// 4 096 questions catch with certainty is invisible to a measurement, so the
+/// tests and examples that count how often a forgery gets through ask fewer
+/// on purpose. A node deciding which chain to join calls [`check_start`], and
+/// a weighing checked here at any other count than [`SAMPLES`] has cleared a
+/// bar no published figure describes.
+pub fn check_start_with_count(
     start: &SampledStart,
     count: usize,
     now: u64,
@@ -1033,7 +1063,16 @@ const _: () = assert!(crate::pow::MEDIAN_TIME_WINDOW <= DIFFICULTY_WINDOW + 1);
 /// would have had to mine that header on top of. From there every header is
 /// held to the rules a node applies to any block it is handed: the difficulty
 /// the window demands, a timestamp past that window's median, its own work
-/// added to the total, and real work behind its own identifier.
+/// added to the total, and real work behind its own identifier. The version
+/// its height requires needs no window, so every header of the run is held to
+/// that, below the pinned header too.
+///
+/// Not the drift. A header of the run dated far past the reader's clock is
+/// refused by the block path when its block arrives, and taken once the clock
+/// catches up, which is what a rule about the reader should do; a refusal
+/// here is a weighing failed against the peer that offered it, and the one
+/// clock refusal this exchange has, the tip's, is already more than the
+/// specification says a peer may be held to.
 ///
 /// The tip's timestamp is measured against the reader's own clock rather than
 /// left to the forward validation that comes later, because this is where the
@@ -1088,13 +1127,38 @@ fn check_the_tail(start: &SampledStart, params: &ConsensusParams) -> Result<(), 
     let mut summaries: Vec<HeaderSummary> = Vec::with_capacity(DIFFICULTY_WINDOW.saturating_add(1));
     let mut previous: Option<&BlockHeader> = None;
     let mut carried_the_pinned = false;
+    // Whether this build can judge a version at all is settled once, against
+    // the tip, the highest header here: a schedule rises in both height and
+    // version, so no header below it is asked for more. A chain past this
+    // build's rules is not refused for its versions, since that would hold
+    // an honest peer to rules this node lacks; the handover that follows
+    // says the node is too old, and stops it.
+    let judges_versions =
+        params.version_at(tip.height) <= BLOCK_VERSION && tip.version <= BLOCK_VERSION;
     for header in &start.tail {
         belongs_to_this_network(header, params)?;
         if !meets_target(&header.id(), header.difficulty) {
             return Err(StartError::TailWithoutWork { at: header.height });
         }
+        // Each of these is a block, so each carries exactly the version the
+        // rules require where it sits, and that needs no window: it holds
+        // below the pinned header as well as above it. Unasked, a run the
+        // handover and the block path both refuse was weighed and taken, and
+        // the attempt failed a step later against the same peer.
+        if judges_versions {
+            let required = params.version_at(header.height);
+            if header.version != required {
+                return Err(StartError::TailWrongVersion {
+                    at: header.height,
+                    found: header.version,
+                    required,
+                });
+            }
+        }
         if let Some(below) = previous {
-            if header.height != below.height.saturating_add(1) || header.previous != below.id() {
+            // Without saturating: a run ending in two headers at `u64::MAX`
+            // walked as one chain, the sum stopping at the ceiling.
+            if Some(header.height) != below.height.checked_add(1) || header.previous != below.id() {
                 return Err(StartError::TailNotConsecutive { at: header.height });
             }
             // Below the pinned header nothing can be checked but the chain
@@ -1113,7 +1177,8 @@ fn check_the_tail(start: &SampledStart, params: &ConsensusParams) -> Result<(), 
                 if median_time_past(&summaries).is_some_and(|median| header.timestamp <= median) {
                     return Err(StartError::TailOutOfTime { at: header.height });
                 }
-                if header.total_work != below.total_work.saturating_add(work_of(header.difficulty))
+                if Some(header.total_work)
+                    != below.total_work.checked_add(work_of(header.difficulty))
                 {
                     return Err(StartError::TailWorkDoesNotAddUp { at: header.height });
                 }
@@ -1176,7 +1241,10 @@ fn check_the_parent(start: &SampledStart, params: &ConsensusParams) -> Result<()
     {
         return Err(StartError::NotInHistory { index: usize::MAX });
     }
-    if header.total_work.saturating_add(work_of(tip.difficulty)) != tip.total_work {
+    // Without saturating, so that this holds on its own: at `u128::MAX` a
+    // parent claiming the tip's whole total passed, and only the stretch
+    // check after this refused the weighing.
+    if header.total_work.checked_add(work_of(tip.difficulty)) != Some(tip.total_work) {
         return Err(StartError::ParentNotTheTipsOwn);
     }
     Ok(())
@@ -1207,9 +1275,12 @@ fn check_the_gaps(start: &SampledStart) -> Result<(), StartError> {
     // Below the lowest point the chain is not pinned at all, so all that can
     // be said is that every block down there is a block: the floor is the
     // least any of them is worth.
+    //
+    // Counted in `u128`, where a height plus one cannot saturate: at
+    // `u64::MAX` the count came out one block short.
     if let Some(first) = points.first() {
-        let blocks = first.height.saturating_add(1);
-        let least = u128::from(blocks).saturating_mul(u128::from(MIN_DIFFICULTY));
+        let blocks = u128::from(first.height).saturating_add(1);
+        let least = blocks.saturating_mul(u128::from(MIN_DIFFICULTY));
         if first.total_work < least {
             return Err(StartError::OpeningWorthLessThanItCost {
                 blocks,
@@ -1399,7 +1470,12 @@ pub fn covering(headers: &[(u64, u128, u64)], work: u128) -> Option<u64> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 
@@ -1841,5 +1917,300 @@ mod tests {
         assert_eq!(covering(&headers, unit), Some(1));
         assert_eq!(covering(&headers, unit * 2), Some(2));
         assert_eq!(covering(&headers, unit * 3), None, "past the end");
+    }
+
+    /// A header of this network at the difficulty floor, where every
+    /// identifier meets its target and nothing has to be mined.
+    fn floor_header(
+        height: u64,
+        previous: Hash32,
+        total_work: u128,
+        timestamp: u64,
+    ) -> BlockHeader {
+        let params = ConsensusParams::testnet();
+        BlockHeader {
+            version: params.version_at(height),
+            network: params.network,
+            height,
+            previous,
+            transactions_root: Hash32::from_bytes([0; 32]),
+            state_root: Hash32::from_bytes([0; 32]),
+            history: Hash32::from_bytes([0; 32]),
+            timestamp,
+            difficulty: MIN_DIFFICULTY,
+            total_work,
+            nonce: 0,
+        }
+    }
+
+    /// One chain at the floor, a target apart, at the heights and totals
+    /// given; `bend` changes a header before the next one names it.
+    fn floor_run(
+        heights: &[u64],
+        works: &[u128],
+        bend: impl Fn(&mut BlockHeader),
+    ) -> Vec<BlockHeader> {
+        let mut run: Vec<BlockHeader> = Vec::new();
+        for (index, (height, work)) in heights.iter().zip(works).enumerate() {
+            let previous = run
+                .last()
+                .map_or(Hash32::from_bytes([0; 32]), BlockHeader::id);
+            let timestamp = 1_000 + 60 * u64::try_from(index).unwrap();
+            let mut header = floor_header(*height, previous, *work, timestamp);
+            bend(&mut header);
+            run.push(header);
+        }
+        run
+    }
+
+    /// A weighing carrying only what `check_the_tail` reads: the run, the tip
+    /// at its end, and one sample pinning the header at `pinned` in the run.
+    fn tail_only(tail: Vec<BlockHeader>, pinned: usize) -> SampledStart {
+        SampledStart {
+            tip: *tail.last().unwrap(),
+            samples: vec![Sample {
+                header: tail[pinned],
+                proof: ForestProof::default(),
+            }],
+            tail,
+            parent: None,
+            genesis: ForestProof::default(),
+            history: Forest::default(),
+        }
+    }
+
+    /// A header in the run up to the tip is held to the version its height
+    /// requires, below the pinned header as well as above it, unless this
+    /// build cannot judge the tip at all.
+    ///
+    /// The run was walked for its chaining, its work and, above the pinned
+    /// header, its difficulty and time, and never for its version. So a run
+    /// the handover and the block path both refuse was weighed and taken,
+    /// and the attempt failed a step later against a peer. Nothing asked.
+    #[test]
+    fn a_header_in_the_run_carrying_a_version_its_height_does_not_require_is_refused() {
+        let params = ConsensusParams::testnet();
+        let heights: Vec<u64> = (0..=100).collect();
+        let works: Vec<u128> = (1..=101).collect();
+
+        let honest = floor_run(&heights, &works, |_| {});
+        assert_eq!(
+            check_the_tail(&tail_only(honest, 90), &params),
+            Ok(()),
+            "the control: a run at the floor a target a block"
+        );
+
+        for bent in [95u64, 40] {
+            let understated = floor_run(&heights, &works, |header| {
+                if header.height == bent {
+                    header.version = 0;
+                }
+            });
+            assert_eq!(
+                check_the_tail(&tail_only(understated, 90), &params),
+                Err(StartError::TailWrongVersion {
+                    at: bent,
+                    found: 0,
+                    required: params.version_at(bent),
+                }),
+                "a run header at {bent} carrying a version below the schedule's was weighed"
+            );
+        }
+
+        // A chain past this build's rules is one it cannot judge, and the
+        // handover that follows says so and stops the node; the weighing
+        // does not turn that into a refusal of the peer who showed it.
+        let past_this_build = floor_run(&heights, &works, |header| {
+            header.version = BLOCK_VERSION + 1;
+        });
+        assert_eq!(
+            check_the_tail(&tail_only(past_this_build, 90), &params),
+            Ok(()),
+            "a run this build cannot judge was refused as though it had judged it"
+        );
+
+        // And a schedule asking at the tip for a version this build lacks,
+        // which is the other way a build meets rules it cannot judge.
+        let ahead = ConsensusParams {
+            activations: Box::leak(Box::new([
+                crate::block::Activation {
+                    height: 0,
+                    version: BLOCK_VERSION,
+                },
+                crate::block::Activation {
+                    height: 95,
+                    version: BLOCK_VERSION + 1,
+                },
+            ])),
+            ..params
+        };
+        let honest = floor_run(&heights, &works, |_| {});
+        assert_eq!(
+            check_the_tail(&tail_only(honest, 90), &ahead),
+            Ok(()),
+            "a run under a schedule this build cannot follow was refused as though it could"
+        );
+    }
+
+    /// Two headers of the run both at the last height there is are refused as
+    /// not consecutive.
+    ///
+    /// Each height was compared with the one below plus one, and the sum
+    /// saturated, so a run ending in two headers at `u64::MAX` walked as one
+    /// chain. The run's first height is not tied to anything, so nothing else
+    /// stood in the way. Nothing asked.
+    #[test]
+    fn two_run_headers_at_the_last_height_there_is_are_not_consecutive() {
+        let params = ConsensusParams::testnet();
+        let heights: Vec<u64> = (u64::MAX - 99..=u64::MAX)
+            .chain(std::iter::once(u64::MAX))
+            .collect();
+        let works: Vec<u128> = (1..=101).collect();
+        let run = floor_run(&heights, &works, |_| {});
+
+        assert_eq!(
+            check_the_tail(&tail_only(run, 89), &params),
+            Err(StartError::TailNotConsecutive { at: u64::MAX }),
+            "two headers at the same height were walked as one following the other"
+        );
+    }
+
+    /// A header of the run adding nothing, at the most work a total can
+    /// state, is refused as not adding up.
+    ///
+    /// The total was compared with the parent's plus the header's own work,
+    /// saturated, so at `u128::MAX` the sum stops at the ceiling and meets a
+    /// header that states no work of its own. Nothing asked.
+    #[test]
+    fn a_run_header_adding_nothing_at_the_most_work_there_is_does_not_add_up() {
+        let params = ConsensusParams::testnet();
+        let heights: Vec<u64> = (0..=100).collect();
+        let works: Vec<u128> = (u128::MAX - 99..=u128::MAX)
+            .chain(std::iter::once(u128::MAX))
+            .collect();
+        let run = floor_run(&heights, &works, |_| {});
+
+        assert_eq!(
+            check_the_tail(&tail_only(run, 90), &params),
+            Err(StartError::TailWorkDoesNotAddUp { at: 100 }),
+            "a header stating no work of its own was walked because the sum saturated"
+        );
+    }
+
+    /// A parent stating the tip's whole total, at the most work a total can
+    /// state, is not the tip's own.
+    ///
+    /// The parent's total plus the tip's own work was compared with the tip's
+    /// total, saturated, so at `u128::MAX` a parent claiming everything the
+    /// tip claims passed. `check_the_gaps` refuses the same weighing later;
+    /// this check held only because that one did. Nothing asked.
+    #[test]
+    fn a_parent_stating_the_tips_whole_total_at_the_ceiling_is_not_the_tips_own() {
+        let params = ConsensusParams::testnet();
+        let parent = floor_header(0, Hash32::from_bytes([0; 32]), u128::MAX, 1_000);
+        let mut history = Forest::default();
+        let (_, proof) = history.add(header_leaf(&parent.id())).unwrap();
+        let mut tip = floor_header(1, parent.id(), u128::MAX, 1_060);
+        tip.history = history.commitment();
+        let start = SampledStart {
+            tip,
+            tail: Vec::new(),
+            parent: Some(Sample {
+                header: parent,
+                proof,
+            }),
+            genesis: ForestProof::default(),
+            history,
+            samples: Vec::new(),
+        };
+
+        assert_eq!(
+            check_the_parent(&start, &params),
+            Err(StartError::ParentNotTheTipsOwn),
+            "a parent claiming the tip's whole total was taken because the sum saturated"
+        );
+    }
+
+    /// A chain whose lowest pinned point is at the last height there is has
+    /// that many blocks and one more below it, and is priced for all of them.
+    ///
+    /// The count of blocks was the height plus one, saturated, so at
+    /// `u64::MAX` it came out one short and a total one unit short of the
+    /// floor's price was taken. Nothing asked.
+    #[test]
+    fn the_opening_of_a_chain_at_the_last_height_there_is_is_priced_for_every_block() {
+        let tip = floor_header(
+            u64::MAX,
+            Hash32::from_bytes([0; 32]),
+            u128::from(u64::MAX),
+            1_000,
+        );
+        let start = SampledStart {
+            tip,
+            tail: Vec::new(),
+            parent: None,
+            genesis: ForestProof::default(),
+            history: Forest::default(),
+            samples: Vec::new(),
+        };
+
+        assert_eq!(
+            check_the_gaps(&start),
+            Err(StartError::OpeningWorthLessThanItCost {
+                blocks: u128::from(u64::MAX) + 1,
+                stated: u128::from(u64::MAX),
+            }),
+            "a chain of 2^64 blocks stating 2^64 - 1 units was priced one block short"
+        );
+    }
+
+    /// The prover's search and the linear answer beside it name the same
+    /// block for every work value on either side of every block's edges.
+    ///
+    /// `height_covering` is what `open_start` answers a draw with, and it
+    /// halves; `covering` walks, and is the one the tests read. Nothing drove
+    /// the two over one chain, so the prover's answer was held only through
+    /// its twin.
+    #[test]
+    fn the_prover_and_the_linear_answer_agree_at_every_block_edge() {
+        let difficulties = [1u64, 3, 2, 7, 1, 1, 4, 9, 2, 5, 1, 8, 3];
+        let mut headers: Vec<BlockHeader> = Vec::new();
+        let mut total: u128 = 0;
+        for (height, difficulty) in (0u64..).zip(difficulties) {
+            total += work_of(difficulty);
+            let previous = headers
+                .last()
+                .map_or(Hash32::from_bytes([0; 32]), BlockHeader::id);
+            let mut header = floor_header(height, previous, total, 1_000 + height);
+            header.difficulty = difficulty;
+            headers.push(header);
+        }
+        let tip = *headers.last().unwrap();
+        let below: Vec<(u64, u128, u64)> = headers[..headers.len() - 1]
+            .iter()
+            .map(|header| (header.height, header.total_work, header.difficulty))
+            .collect();
+        let header_at = |height: u64| headers.get(usize::try_from(height).ok()?).copied();
+
+        let mut asked = 0usize;
+        for header in &headers {
+            let before = work_before(header);
+            for work in [
+                before.saturating_sub(1),
+                before,
+                before + 1,
+                header.total_work - 1,
+                header.total_work,
+                header.total_work + 1,
+            ] {
+                assert_eq!(
+                    height_covering(&tip, work, &header_at),
+                    covering(&below, work),
+                    "the two answers differ at work {work}"
+                );
+                asked += 1;
+            }
+        }
+        assert_eq!(asked, 6 * difficulties.len());
     }
 }

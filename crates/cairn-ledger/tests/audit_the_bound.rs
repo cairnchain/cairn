@@ -277,7 +277,7 @@ fn the_level_count_is_not_read_from_a_number_the_prover_writes_down() {
     // in this process is not a weighing a peer can send.
     let wire = start.encode();
     let start = SampledStart::decode(&wire).expect("a forged weighing has to survive its own wire");
-    check_start(&start, SAMPLES, now, &params())
+    check_start(&start, now, &params())
         .expect("a chain whose work and age are both real has to be accepted");
 
     let params = params();
@@ -338,7 +338,7 @@ fn a_tip_dated_past_the_reader_is_refused_before_a_question_is_asked() {
     assert!(tip.timestamp > honestly + params.max_timestamp_drift);
 
     start.samples.clear();
-    let refusal = check_start(&start, SAMPLES, honestly, &params);
+    let refusal = check_start(&start, honestly, &params);
     assert!(
         matches!(refusal, Err(StartError::TipFromTheFuture { .. })),
         "a tip from the future was refused for {refusal:?} instead"
@@ -371,7 +371,7 @@ fn the_stated_height_is_priced_at_one_unit_a_block_and_not_less() {
     let short = build(false);
     let start = short.present(SAMPLES);
     let now = short.tip().timestamp;
-    let refusal = check_start(&start, SAMPLES, now, &params());
+    let refusal = check_start(&start, now, &params());
     assert!(
         matches!(refusal, Err(StartError::BlocksWorthLessThanTheyCost { .. })),
         "a run worth less than the descent allows was refused for {refusal:?}"

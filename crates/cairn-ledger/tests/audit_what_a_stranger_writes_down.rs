@@ -38,7 +38,8 @@ use cairn_ledger::note::Note;
 use cairn_ledger::pow::RECENT_HEADERS;
 use cairn_ledger::pow::{meets_target, DIFFICULTY_WINDOW};
 use cairn_ledger::sampling::{
-    check_start, covering, draw, levels_of, seed_of, work_before, Sample, SampledStart, StartError,
+    check_start_with_count, covering, draw, levels_of, seed_of, work_before, Sample, SampledStart,
+    StartError,
 };
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
@@ -188,7 +189,7 @@ fn every_field_of_a_tip_is_read_by_some_rule_or_named_as_read_by_none() {
     let tip = keeper.tip();
     let params = params();
 
-    check_start(&keeper.open_around(tip, COUNT), COUNT, NOW, &params)
+    check_start_with_count(&keeper.open_around(tip, COUNT), COUNT, NOW, &params)
         .expect("the honest chain has to pass, or every row below is meaningless");
 
     let rewritten = |what: &str, change: fn(&mut BlockHeader)| {
@@ -196,7 +197,8 @@ fn every_field_of_a_tip_is_read_by_some_rule_or_named_as_read_by_none() {
         change(&mut forged);
         assert_ne!(forged, tip, "the change to {what} changed nothing");
         let forged = re_mined(forged);
-        let refusal = check_start(&keeper.open_around(forged, COUNT), COUNT, NOW, &params);
+        let refusal =
+            check_start_with_count(&keeper.open_around(forged, COUNT), COUNT, NOW, &params);
         println!(
             "  {what:<19} {}",
             match &refusal {

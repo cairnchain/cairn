@@ -217,7 +217,7 @@ fn a_tip_on_no_chain_has_no_parent_to_open() {
         samples,
     };
 
-    let refused = check_start(&start, SAMPLES, NOW, &params());
+    let refused = check_start(&start, NOW, &params());
     assert!(
         matches!(refused, Err(StartError::ParentNotTheTipsOwn)),
         "a tip standing on nothing has no parent to open, and it said {refused:?}"
@@ -323,7 +323,7 @@ fn an_invented_ledger_cannot_borrow_a_weight_it_did_not_earn() {
         history: forest.forest().roots_only(),
         samples,
     };
-    let refused = check_start(&start, SAMPLES, NOW, &params());
+    let refused = check_start(&start, NOW, &params());
     assert!(
         matches!(refused, Err(StartError::ParentNotTheTipsOwn)),
         "the weighing now asks the tip for its own parent, and it said {refused:?}"
@@ -497,7 +497,7 @@ fn padding_a_forest_out_to_the_burial_depth_is_refused() {
     // the last header opened and the tip: a great many blocks stating almost
     // no work, and a run that cannot be shown because most of it is not
     // headers at all.
-    let refused = check_start(&start, SAMPLES, NOW, &params());
+    let refused = check_start(&start, NOW, &params());
     assert!(
         refused.is_err(),
         "the padding cost nothing and must not weigh anything, but the weighing said {refused:?}"

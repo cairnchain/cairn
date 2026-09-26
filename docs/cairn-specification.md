@@ -1645,6 +1645,13 @@ was no second price either. Measured on a thirty year chain, a forger holding
 40 per cent of the world's work went from missing all 4 096 draws with 2^-207 to
 missing them with 2^-58, against a figure published as 2^-128.
 
+`count` is 4 096, and it is not the reader's to choose. It is the one
+parameter every figure published for this draw is computed at, so a node MUST
+ask exactly 4 096 questions of every weighing it takes; a weighing checked at
+any other count has cleared a bar nothing here describes. The reference
+implementation's measuring instruments ask fewer, to make a forgery likely
+enough to see, through a function named for it.
+
 The draw is empty when `total` is zero or when no samples are asked for.
 Otherwise, for each index `i` from `0` to `count - 1`, in order:
 
@@ -1769,18 +1776,31 @@ rather than drawn and so a forger chooses it. The window below the pinned
 header comes along because those headers have to chain into it, and a forger
 cannot swap them without having mined the pinned header on top of its own.
 
-Below the pinned header, only the chaining is checked, since the window that
-would judge those difficulties is not present. At and above it, each header is
-held to the same rules a node applies to any block it is handed: the difficulty
-the retarget demands of it, a timestamp later than the median of its window,
-and its own work added to its parent's total.
+Below the pinned header, only the chaining and the version are checked, since
+the window that would judge those difficulties is not present and the version
+needs none. At and above it, each header is held to the same rules a node
+applies to any block it is handed: the difficulty the retarget demands of it, a
+timestamp later than the median of its window, and its own work added to its
+parent's total.
+
+The version is asked of every header in the run: each MUST carry exactly the
+version the rules require at its height. It is asked only when the build can
+judge the tip at all, meaning the rules at the tip's height and the tip's own
+version are both within what the build knows. A chain past that is one the
+build cannot judge, and the handover that follows says so and stops the node;
+a weighing refused for it would be an honest peer held to rules the reader
+lacks. The drift allowance is not asked of the run's headers. A block dated
+past the reader's clock is refused when it arrives and taken once the clock
+catches up, and a refusal here would be held against the peer who showed the
+weighing.
 
 The tip's own timestamp is measured against the reading node's clock, against
-the same drift the block rules allow, which is two hours on every network here.
+the same drift the block rules allow, which is ten target block times on every
+network here.
 It is checked before the draw rather than left to the validation that follows,
 for two reasons. It is where the decision is made: without it a forger hands
 over a chain whose cheap blocks are spaced across days it never waited, since
-blocks at the difficulty floor have to be spaced past half the target or the
+blocks at the difficulty floor have to average about half the target or the
 retarget demands more of them, so a run of them states far more time than a
 reader will take in advance and the forger has to sit through the difference in
 real time. And the same timestamp is what the number of halvings is counted
@@ -1828,12 +1848,13 @@ to the tip.
     <tr><td class="n">25</td><td>TailWrongLength</td><td>the run is not the length the pinned header and the tip demand, or that length is past the ceiling</td></tr>
     <tr><td class="n">26</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a header in the run belongs elsewhere</td></tr>
     <tr><td class="n">27</td><td>TailWithoutWork</td><td>a header in the run carries no proof of work</td></tr>
-    <tr><td class="n">28</td><td>TailNotConsecutive</td><td>a header in the run does not follow the one below it</td></tr>
-    <tr><td class="n">29</td><td>TailAtTheWrongDifficulty</td><td>above the pinned header, not the difficulty the retarget demands</td></tr>
-    <tr><td class="n">30</td><td>TailOutOfTime</td><td>above the pinned header, not later than the median of its window</td></tr>
-    <tr><td class="n">31</td><td>TailWorkDoesNotAddUp</td><td>above the pinned header, not the work below it plus its own</td></tr>
-    <tr><td class="n">32</td><td>TailMissesWhatWasOpened</td><td>the run does not carry the pinned header, or carries a different one at its height</td></tr>
-    <tr><td class="n">33</td><td>TailNotConsecutive</td><td>the run does not end at the tip</td></tr>
+    <tr><td class="n">28</td><td>TailWrongVersion</td><td>a header in the run carries a version other than the one its height requires, where the build can judge the tip</td></tr>
+    <tr><td class="n">29</td><td>TailNotConsecutive</td><td>a header in the run does not follow the one below it</td></tr>
+    <tr><td class="n">30</td><td>TailAtTheWrongDifficulty</td><td>above the pinned header, not the difficulty the retarget demands</td></tr>
+    <tr><td class="n">31</td><td>TailOutOfTime</td><td>above the pinned header, not later than the median of its window</td></tr>
+    <tr><td class="n">32</td><td>TailWorkDoesNotAddUp</td><td>above the pinned header, not the work below it plus its own</td></tr>
+    <tr><td class="n">33</td><td>TailMissesWhatWasOpened</td><td>the run does not carry the pinned header, or carries a different one at its height</td></tr>
+    <tr><td class="n">34</td><td>TailNotConsecutive</td><td>the run does not end at the tip</td></tr>
   </tbody>
 </table>
 

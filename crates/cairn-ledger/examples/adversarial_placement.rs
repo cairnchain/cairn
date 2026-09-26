@@ -66,8 +66,8 @@ use cairn_ledger::block::{BlockHeader, HeaderSummary};
 use cairn_ledger::note::Note;
 use cairn_ledger::pow::{meets_target, next_difficulty, work_of, DIFFICULTY_WINDOW};
 use cairn_ledger::sampling::{
-    check_start, covering, draw, levels_of, seed_of, work_before, Sample, SampledStart, StartError,
-    SAMPLES, SHALLOWEST,
+    check_start_with_count, covering, draw, levels_of, seed_of, work_before, Sample, SampledStart,
+    StartError, SAMPLES, SHALLOWEST,
 };
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
@@ -292,7 +292,7 @@ fn one_chain(name: &str, moving: bool) {
             tally.note(
                 reaches,
                 start.tail.len(),
-                check_start(&start, COUNT, NOW, &params()).err(),
+                check_start_with_count(&start, COUNT, NOW, &params()).err(),
             );
         }
 
@@ -335,7 +335,7 @@ fn control_and_calibration(honest: &[BlockHeader], levels: u32) {
     let mut accepted = 0usize;
     for tip in ground_tips(control.shown.last().unwrap(), TIPS) {
         let start = control.present(tip, COUNT);
-        if check_start(&start, COUNT, NOW, &params()).is_ok() {
+        if check_start_with_count(&start, COUNT, NOW, &params()).is_ok() {
             accepted += 1;
         }
     }
