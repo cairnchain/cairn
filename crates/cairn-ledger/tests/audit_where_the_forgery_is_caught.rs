@@ -387,6 +387,7 @@ fn the_draw_refuses_a_lie_it_reaches_and_never_one_it_does_not() {
     println!(
         "\n  a lie of 200 work at 2000 blocks deep: {caught} of {TIPS} tips caught by the\n  \
          draw, {through} through. A forger that grinds tips asks again for the price of\n  \
-         a tip, which is the tip's own work.\n"
+         a tip, which is the tip's own work until the run is walked to the floor, and\n  \
+         a draw's hashes after that.\n"
     );
 }

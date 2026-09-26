@@ -54,7 +54,8 @@ fn a_twin_with_its_signatures_removed_does_not_lock_the_real_one_out() {
 
     let mut state = LedgerState::new();
     let mut store = ChainStore::new(params);
-    let mut clock = NOW;
+    // A day behind the node's clock, so no block here is dated ahead of it.
+    let mut clock = NOW - 86_400;
     for _ in 0..3 {
         let height = state.next_height().unwrap();
         clock += 600;

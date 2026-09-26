@@ -49,6 +49,18 @@ claim from 45.7% to 40%. And it said the derivation accounted for neither
 adversarial placement under moving difficulty nor grinding of the Fiat-Shamir
 seed. Both are measured now, in `crates/cairn-ledger/examples/adversarial_placement.rs`.
 
+The grinding measurement counts tips and was first priced wrong. A tip was
+said to cost the tip's own work, which on a chain of real difficulty put 2^80
+tips out of reach. The run up to the tip is held to the retarget, and the
+retarget lets a forger walk that run down to the difficulty floor in a few
+hundred blocks of long stated gaps, paid once; after that every nonce is a tip
+and a tip costs the 4 096 hashes of its own draw. So the 40% figure is quoted
+against a budget: 2^-161.9 a tip, which holds under 2^-128 against 2^33 tips
+and not 2^34, and nothing at all at the measured 42.96%. The specification's
+section on what the bound is worth says so, and
+`crates/cairn-ledger/tests/grinding_at_the_floor.rs` holds the walk and the
+budget.
+
 What is worth knowing about that measurement is that it was itself wrong until
 recently, and in a way no test caught: it built a forgery by re-mining headers
 without rebuilding the links between them, so every attempt was refused for a

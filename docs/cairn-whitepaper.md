@@ -327,9 +327,12 @@ a half, the fastest a liar can now make the chain run is the target.
 Timestamps are validated against the median of the previous 11 blocks
 rather than against the parent. A miner writes its own timestamp but holds
 one vote in a median, which removes the single-block manipulation that a
-later-than-parent rule permits. A block may not be dated more than two
-hours ahead of the receiving node's clock, nor before the moment the
-network opened.
+later-than-parent rule permits. A block may not be dated more than ten
+blocks ahead of the receiving node's clock, ten minutes on the public
+networks, nor before the moment the network opened. The allowance is
+counted in blocks because the retarget's clamp is: at two hours, which is
+what it was, a minority dating its blocks at the allowance held the median
+in the future and made the chain run half again as slowly as its target.
 
 ### Fork choice
 
@@ -541,12 +544,13 @@ them would mean having mined the pinned header on top of one's own.
 
 The tip's timestamp is then measured against the reader's own clock,
 which is what turns the whole thing into a cost. Blocks at the
-difficulty floor have to be spaced at the target or the retarget demands
-more of them, so the thousand cheap blocks a forger needs span most of a
-day of stated time, and they cannot be backdated because they have to
-date after the honest window they descend from. More than two hours
-ahead of the reader is refused. What the attack costs is therefore real
-waiting, and the honest chain out-mines it while it waits.
+difficulty floor have to average about half the target or the retarget
+demands more of them, so the thousand cheap blocks a forger needs span
+more than eight hours of stated time, and they cannot be backdated
+because they have to date after the honest window they descend from.
+More than ten blocks ahead of the reader is refused. What the attack
+costs is therefore real waiting, and the honest chain out-mines it while
+it waits.
 
 How much work stands behind a tip is not the only question a newcomer
 has to ask. Which chain this is has three answers, and all three are
@@ -607,7 +611,7 @@ fifty odd halvings against the fifteen the count is set for, and it took a
 forger at 40% from missing every draw with 2^-207 to missing them with
 2^-58, against the 2^-128 this paper publishes. The count now comes from
 how old the tip says its chain is, over the block time the network aims at,
-and never past its height. A node refuses a tip more than two hours ahead
+and never past its height. A node refuses a tip more than ten blocks ahead
 of its own clock and the opening moment is written into the software, so no
 chain can say it is older than the network: a prover reaches the honest
 count rather than passing it. Understating it is left open and buys

@@ -677,7 +677,7 @@ enum Lie {
 
 /// A miner holding `share` of the hash rate dates its own blocks forward. Its
 /// blocks are valid: they clear the median, and they sit only a ceiling ahead
-/// of the wall clock, far inside the two hours the rules allow. Every other
+/// of the wall clock, inside the ten blocks the rules allow. Every other
 /// block is dated the way `cairn-node`'s miner dates one, which is the wall
 /// clock raised to the median plus one.
 ///
@@ -960,9 +960,14 @@ fn no_share_short_of_a_majority_takes_the_difficulty_to_the_floor() {
 /// Measuring against a timeline that only moves by what was counted removes it:
 /// the window telescopes to the distance between its two ends, so the run gives
 /// back over the blocks that follow exactly what it took.
+///
+/// Measured at the two hour drift the rules allowed when this was found. The
+/// runs drag the tip forward only as far as the drift lets them, so the ten
+/// block drift the rules allow now narrows the leak as well; what this is
+/// about is which timeline the rule reads, and the drift that shows it best.
 #[test]
 fn clamping_against_the_parent_would_have_left_a_share_of_it() {
-    let drift = ConsensusParams::testnet().max_timestamp_drift;
+    let drift = 7_200;
     let mut out = String::new();
     let leaky = table(
         &mut out,
@@ -1002,31 +1007,33 @@ fn clamping_against_the_parent_would_have_left_a_share_of_it() {
     }
 }
 
-/// The lie never has to leave the two hour drift the rules allow, and never
-/// has to run ahead of the wall clock by more than the ceiling.
+/// The lie these tables measure stays inside the drift the rules allow, and
+/// the drift is now smaller than the window the retarget measures it against.
+///
+/// The drift was two hours on every network, which was more than the whole
+/// retarget window on testnet and sixteen of them on devnet: the mismatch
+/// `a_minority_dating_its_blocks_at_the_drift_ceiling_does_not_slow_the_chain`
+/// measures. It is ten blocks now, so a timestamp can sit one clamp ceiling
+/// and a little more ahead of the wall clock, and no further.
 #[test]
-fn the_lie_stays_well_inside_the_drift_the_rules_allow() {
-    let params = ConsensusParams::testnet();
-    assert_eq!(params.max_timestamp_drift, 7_200);
-    // The whole retarget window is worth less than the drift a single block
-    // is allowed. That is the mismatch the attack lives in.
-    assert!(
-        params.max_timestamp_drift > DIFFICULTY_WINDOW as u64 * params.target_block_time,
-        "drift {} vs window {}",
-        params.max_timestamp_drift,
-        DIFFICULTY_WINDOW as u64 * params.target_block_time
-    );
-    // The push the attack uses is a twentieth of what it is allowed.
-    assert!(CEILING * 20 <= params.max_timestamp_drift);
-
-    let devnet = ConsensusParams::for_network("devnet").unwrap();
-    assert_eq!(devnet.target_block_time, 5);
-    assert_eq!(devnet.max_timestamp_drift, 7_200);
-    assert_eq!(
-        devnet.max_timestamp_drift,
-        16 * DIFFICULTY_WINDOW as u64 * devnet.target_block_time,
-        "on devnet the drift is sixteen whole retarget windows wide"
-    );
+fn the_lie_stays_inside_the_drift_the_rules_allow() {
+    for (name, params) in both_networks() {
+        let ceiling = 6 * params.target_block_time;
+        assert_eq!(
+            params.max_timestamp_drift,
+            10 * params.target_block_time,
+            "{name}: the drift is ten of the network's blocks"
+        );
+        assert!(
+            ceiling < params.max_timestamp_drift,
+            "{name}: the lie of one ceiling these tables measure is valid"
+        );
+        assert!(
+            params.max_timestamp_drift < DIFFICULTY_WINDOW as u64 * params.target_block_time,
+            "{name}: one block's allowance is worth more than the whole window"
+        );
+    }
+    assert_eq!(CEILING, 6 * ConsensusParams::testnet().target_block_time);
 }
 
 /// A miner that holds every block (a private branch, or a network it has
@@ -1097,8 +1104,9 @@ fn a_private_branch_pays_to_lie_about_its_own_solve_times() {
     println!("  difficulty 1 in {blocks} blocks, its timestamps having advanced");
     println!("  {advanced} s in all, about a second a block");
     assert!(blocks < 800, "it took {blocks} blocks");
-    // The drift budget is two hours and the whole run never asked for more
-    // than a second a block, so no node ever had to wait for its clock.
+    // The whole run never asked for more than a second a block, so its
+    // timestamps never ran ahead of the wall clock and no node, whatever
+    // drift it allowed, ever had to wait for its clock.
     assert!(advanced < 2_100);
 
     // What it comes to now. A hundred blocks is already past anything the
@@ -1559,25 +1567,28 @@ fn the_floor_holds_from_thirty_one_seconds_and_not_from_thirty() {
 /// hashes. The saw used to buy that: five spikes in every eleven blocks held a
 /// chain at the floor while its timestamps advanced a second a block, so the
 /// whole window fitted in twenty minutes of chain time, inside the two hour
-/// drift, and a node whose clock stood at the fork took the entire branch at
-/// once.
+/// drift of the time, and a node whose clock stood at the fork took the entire
+/// branch at once.
 ///
 /// Time is what it costs now. Holding a chain at the floor takes a timeline
 /// that really advances, because the retarget measures what the timestamps say
 /// and no longer forgets the half of it that runs backwards.
 ///
-/// How much it has to advance is [`CHEAPEST_AT_THE_FLOOR`] and not the target,
+/// How much it has to advance is about half the target and not the target,
 /// which is where this used to be wrong. It said the branch had to advance a
 /// target a block and priced the window at seventeen hours. At the floor the
 /// rule asks for `floor(target / gap)`, which is already the floor at 31
-/// seconds, so the branch below is built at 31 and spans 8 h 49 m. That is the
-/// duration the argument is entitled to, and it is half what was claimed.
+/// seconds, so the branch below, spaced evenly, is built at 31 and spans
+/// 8 h 49 m. Spaced unevenly a branch does about five percent better, and
+/// [`a_floor_branch_of_the_burial_depth_spans_the_figure_the_documents_publish`]
+/// pins the tightest one found at 8 h 21 m: that is the duration an argument
+/// is entitled to, and it is under half what was claimed.
 ///
-/// The conclusion survives the halving, and it is the same conclusion: a node
-/// refuses anything more than two hours ahead of its own clock, so the branch
-/// still cannot arrive at once and the attacker still sits through the
-/// difference in real time while the honest chain keeps working. What changed
-/// is that the difference is six hours and three quarters rather than fifteen.
+/// The conclusion survives, and it is the same conclusion: a node refuses
+/// anything more than ten blocks ahead of its own clock, so the branch still
+/// cannot arrive at once and the attacker still sits through the difference
+/// in real time while the honest chain keeps working. The difference is all
+/// but the whole span now, the drift being ten minutes rather than two hours.
 #[test]
 fn the_reorg_window_can_no_longer_be_had_for_a_thousand_hashes() {
     let params = ConsensusParams::testnet();
@@ -1663,10 +1674,9 @@ fn the_reorg_window_can_no_longer_be_had_for_a_thousand_hashes() {
         accepted <= (params.max_timestamp_drift / CHEAPEST_AT_THE_FLOOR + 1) as usize,
         "it took {accepted} blocks at once"
     );
-    // Four times the drift and not eight, which is what the spacing this used
-    // to assume was quietly worth.
-    assert!(span > params.max_timestamp_drift * 4);
-    assert!(span < params.max_timestamp_drift * 5);
+    // Fifty drifts and more: what a node takes in advance is a sliver of what
+    // the branch states, and the rest is waited out.
+    assert!(span > params.max_timestamp_drift * 50);
 }
 
 /// A brand new network, from its opening difficulty down, driven by a miner
@@ -1674,8 +1684,9 @@ fn the_reorg_window_can_no_longer_be_had_for_a_thousand_hashes() {
 ///
 /// `testnet-6` opens at 2^27 and `devnet` at 2^23. The opening difficulty is
 /// described as what makes the first seconds of a launch fair, and the saw used
-/// to take either of them to the floor inside a single drift budget: a few
-/// hundred blocks, an hour of chain time, and a few blocks' worth of hashes.
+/// to take either of them to the floor inside the two hour drift budget of the
+/// time: a few hundred blocks, an hour of chain time, and a few blocks' worth
+/// of hashes.
 ///
 /// The same saw now walks the difficulty the other way on both networks, which
 /// is the whole of the repair seen from a launch: a network's opening
@@ -1726,7 +1737,10 @@ fn an_opening_difficulty_no_longer_falls_to_the_saw() {
             "    which cost {spent} hashes, or {} blocks' work at the opening difficulty",
             spent / u128::from(start)
         );
-        assert!(advanced < 7_200, "{name}: inside one drift budget");
+        assert!(
+            advanced < 7_200,
+            "{name}: inside the two hour drift budget of the time"
+        );
 
         let (repaired, blocks, refused, _, _) = saw(next_difficulty, 200);
         assert_eq!(refused, 0, "{name}: every block clears the median");
@@ -1738,4 +1752,235 @@ fn an_opening_difficulty_no_longer_falls_to_the_saw() {
         println!("    it now climbs to {repaired} over two hundred blocks instead");
     }
     println!();
+}
+
+// ---------------------------------------------------------------------------
+// 7. Timestamps at the drift ceiling.
+// ---------------------------------------------------------------------------
+
+/// The difficulty a steady chain carries in the simulations below.
+const STEADY: u64 = 1_000_000;
+
+/// The two networks this repository runs, as the rules name them.
+fn both_networks() -> [(&'static str, ConsensusParams); 2] {
+    [
+        ("testnet", ConsensusParams::for_network("testnet").unwrap()),
+        ("devnet", ConsensusParams::for_network("devnet").unwrap()),
+    ]
+}
+
+/// A chain of `count` summaries exactly on schedule.
+fn on_schedule(count: u64, target: u64, difficulty: u64) -> Vec<HeaderSummary> {
+    (0..count)
+        .map(|height| HeaderSummary {
+            height,
+            timestamp: 100_000 + height * target,
+            difficulty,
+        })
+        .collect()
+}
+
+/// A draw in `0..1` that is the same on every machine.
+struct Lcg(u64);
+
+impl Lcg {
+    fn unit(&mut self) -> f64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+/// Two miners. One holds `share` of the hash rate and dates its blocks at the
+/// drift ceiling, never past what the rules accept and always past the
+/// median, so every block it writes is valid to every node. The other dates
+/// its blocks the way `cairn-node` does, the wall clock raised to the median
+/// plus one. Each block takes exactly what its difficulty demands of the
+/// whole hash rate.
+///
+/// Returns the mean block time as a multiple of the target and the highest
+/// difficulty any block was asked for.
+fn a_minority_at_the_ceiling(share: f64, params: &ConsensusParams, blocks: usize) -> (f64, u64) {
+    let target = params.target_block_time;
+    let drift = params.max_timestamp_drift;
+    let mut rng = Lcg(7);
+    let mut window = on_schedule(RECENT_HEADERS as u64, target, STEADY);
+    let mut real = window.last().unwrap().timestamp;
+    let mut height = RECENT_HEADERS as u64;
+    let mut solved: u128 = 0;
+    let mut highest = 0u64;
+    for _ in 0..blocks {
+        let difficulty = next_difficulty(&window, target);
+        let solve = ((u128::from(difficulty) * u128::from(target) + u128::from(STEADY) / 2)
+            / u128::from(STEADY))
+        .max(1) as u64;
+        real += solve;
+        let earliest = median_time_past(&window).unwrap() + 1;
+        let wanted = if rng.unit() < share {
+            real + drift
+        } else {
+            real
+        };
+        window.push(HeaderSummary {
+            height,
+            timestamp: wanted.max(earliest).min(real + drift),
+            difficulty,
+        });
+        if window.len() > RECENT_HEADERS {
+            window.remove(0);
+        }
+        height += 1;
+        solved += u128::from(solve);
+        highest = highest.max(difficulty);
+    }
+    (solved as f64 / blocks as f64 / target as f64, highest)
+}
+
+/// A minority dating its blocks at the drift ceiling leaves the chain at its
+/// target and the difficulty near where it was.
+///
+/// The drift was two hours on every network: twenty clamp ceilings on
+/// testnet and two hundred and forty on devnet. Once six of eleven blocks in a
+/// row sat that far ahead, the median sat there too, and an honest miner
+/// dating its blocks at the median plus one moved the retarget's timeline a
+/// second a block while real time moved a minute. The retarget saw blocks
+/// arriving in no time and answered the steepest rise it allows, block after
+/// block. Measured on this model: a thirty percent miner, or an honest one
+/// whose clock was two hours fast, made testnet run at 1.53 times its target
+/// with single blocks asked for 115 times the steady difficulty, and devnet at
+/// fourteen times its target. The timewarp tests above bound only how much
+/// faster a lie can make the chain run, with a lie of one ceiling, so nothing
+/// asked about slower.
+#[test]
+fn a_minority_dating_its_blocks_at_the_drift_ceiling_does_not_slow_the_chain() {
+    for (name, params) in both_networks() {
+        let (mean, highest) = a_minority_at_the_ceiling(0.3, &params, 4_000);
+        println!(
+            "\n  {name}, a 30% share at +{} s: blocks at x{mean:.3} of the target, the \
+             hardest block x{:.2} of steady",
+            params.max_timestamp_drift,
+            highest as f64 / STEADY as f64
+        );
+        assert!(
+            mean <= 1.10,
+            "{name}: a minority writing valid timestamps made the chain run at x{mean:.3} \
+             of its target block time"
+        );
+        assert!(
+            highest <= 2 * STEADY,
+            "{name}: a minority writing valid timestamps made one block ask for x{:.1} of \
+             the steady difficulty",
+            highest as f64 / STEADY as f64
+        );
+    }
+}
+
+/// A header dated at the drift ceiling is given back in full while it is
+/// inside the window, and costs at most a tenth when it becomes the anchor.
+///
+/// The retarget opens its timeline at the anchor's own timestamp, so the
+/// excess a header was clamped out of inside the window is counted in full,
+/// once, when that header is the oldest of the ninety one. At a drift of two
+/// hours that one retarget asked for 1.36 times the steady difficulty on
+/// testnet and four times on devnet, whose whole window can give back less
+/// than two hours.
+#[test]
+fn a_header_at_the_drift_ceiling_costs_at_most_a_tenth_as_the_anchor() {
+    for (name, params) in both_networks() {
+        let target = params.target_block_time;
+        let mut chain = on_schedule(200, target, STEADY);
+        let ahead = 100usize;
+        chain[ahead].timestamp += params.max_timestamp_drift;
+
+        let inside = next_difficulty(&chain[ahead - 89..ahead + 2], target);
+        let anchor = next_difficulty(&chain[ahead..ahead + 91], target);
+        let gone = next_difficulty(&chain[ahead + 1..ahead + 92], target);
+        println!(
+            "\n  {name}: one header +{} s asks x{:.3} inside the window, x{:.3} as the \
+             anchor, x{:.3} once it has left",
+            params.max_timestamp_drift,
+            inside as f64 / STEADY as f64,
+            anchor as f64 / STEADY as f64,
+            gone as f64 / STEADY as f64
+        );
+        assert!(
+            inside <= STEADY + STEADY / 10 && anchor <= STEADY + STEADY / 10,
+            "{name}: a header at the drift ceiling moved the difficulty to x{:.3} as the \
+             anchor",
+            anchor as f64 / STEADY as f64
+        );
+        assert_eq!(gone, STEADY, "{name}: and nothing is left once it has gone");
+    }
+}
+
+/// The shortest a branch of the burial depth held at the floor can span, as
+/// the documents publish it.
+///
+/// Each timestamp is taken as low as the median rule and a retarget of one
+/// allow, block by block, off an honest window on schedule. Spacing need not
+/// be uniform: ninety gaps of 30 seconds and one of 31 keep the weighted sum
+/// above what the floor needs, and the first window's gaps are the honest
+/// chain's, which buys more at the start. The uniform tests above pin 31
+/// seconds a block for a chain spaced evenly and are right about that chain;
+/// the documents priced every branch at 31 seconds a block, 31 744 seconds,
+/// which is five percent more time than this one spans, in the direction that
+/// favours whoever builds it.
+///
+/// Pinned exactly, so that a change to the retarget moving the figure either
+/// way fails here and sends whoever made it to the documents that quote it.
+#[test]
+fn a_floor_branch_of_the_burial_depth_spans_the_figure_the_documents_publish() {
+    let mut window = on_schedule(200, TARGET, MIN_DIFFICULTY);
+    let forked_at = window.last().unwrap().timestamp;
+    let mut height = 200u64;
+    let mut highest = forked_at;
+    let keeps_the_floor = |window: &[HeaderSummary], height: u64, timestamp: u64| {
+        let mut probe = window.to_vec();
+        probe.push(HeaderSummary {
+            height,
+            timestamp,
+            difficulty: MIN_DIFFICULTY,
+        });
+        next_difficulty(&probe, TARGET) == MIN_DIFFICULTY
+    };
+    for _ in 0..REORG_WINDOW {
+        assert_eq!(next_difficulty(&window, TARGET), MIN_DIFFICULTY);
+        let mut low = median_time_past(&window).unwrap() + 1;
+        let mut high = window.last().unwrap().timestamp + CEILING + 1;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if keeps_the_floor(&window, height, middle) {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        assert!(keeps_the_floor(&window, height, low));
+        window.push(HeaderSummary {
+            height,
+            timestamp: low,
+            difficulty: MIN_DIFFICULTY,
+        });
+        if window.len() > RECENT_HEADERS {
+            window.remove(0);
+        }
+        highest = highest.max(low);
+        height += 1;
+    }
+    let span = highest - forked_at;
+    println!(
+        "\n  1 024 blocks at the floor span {span} s, {} h {:02} m, against {} s spaced \
+         evenly at {CHEAPEST_AT_THE_FLOOR} s\n",
+        span / 3_600,
+        span % 3_600 / 60,
+        REORG_WINDOW * CHEAPEST_AT_THE_FLOOR
+    );
+    assert_eq!(
+        span, 30_069,
+        "the tightest floor branch found moved, and the specification, the whitepaper \
+         and `sampling.rs` quote it"
+    );
+    assert!(span < REORG_WINDOW * CHEAPEST_AT_THE_FLOOR);
 }

@@ -99,10 +99,12 @@ const PER_BLOCK: u128 = 1 << 40;
 /// Seeds per placement.
 ///
 /// The seed comes from the forger's own tip, so choosing it means finding
-/// another tip and paying the tip's work for it. That is a price rather than a
-/// bar, so what a placement is worth is the average over seeds and what
-/// grinding buys is measured separately, against forgeries that were built,
-/// under 'tips to get one' below.
+/// another tip. That is a price rather than a bar, so what a placement is
+/// worth is the average over seeds and what grinding buys is measured
+/// separately, against forgeries that were built, under 'tips to get one'
+/// below. The price is the tip's work only until the run up to the tip has
+/// been walked to the difficulty floor, and a draw's hashes after that: see
+/// `tests/grinding_at_the_floor.rs`.
 const SEEDS: u64 = 400;
 
 fn main() {
@@ -218,13 +220,17 @@ fn built_and_checked() {
          and forks that the draw would have caught fall to the run instead.\n\n  \
          'tips to get one' is the cost of grinding, which the model used to leave out\n  \
          by treating the seed as unchooseable. It is not: the seed is the forger's own\n  \
-         tip, so it buys another tip and asks again. What that buys is bounded by what\n  \
-         a tip costs, which is the tip's own work, and by how far the odds have to be\n  \
-         moved. At the {SAMPLES} draws this build ships, the rows above become the\n  \
-         depth table further up, where a forgery deep enough misses with at most\n  \
-         2^-128: a forger would have to grind 2^128 tips to expect one through, at a\n  \
-         tip's work apiece. The rows here run at {COUNT} draws precisely so that the\n  \
-         number is small enough to measure.\n"
+         tip, so it buys another tip and asks again. What that buys is bounded by how\n  \
+         many tips it can buy and by how far the odds have to be moved. A tip costs\n  \
+         its own work only until the forger has walked the run up to it to the\n  \
+         difficulty floor, which the retarget allows in a few hundred blocks of long\n  \
+         stated gaps; after that every nonce is a tip, and a tip costs the hashes of\n  \
+         its own draw. So the per-tip figure is quoted against a budget: at the\n  \
+         {SAMPLES} draws this build ships, the published 2^-161.9 at forty per cent\n  \
+         holds under 2^-128 against 2^33 tips. The tips below are rolled at this\n  \
+         chain's own difficulty, which prices them at the old, higher figure; the\n  \
+         count of them is what the column measures. The rows here run at {COUNT}\n  \
+         draws precisely so that the number is small enough to measure.\n"
     );
 }
 
@@ -697,10 +703,11 @@ impl Forgery {
 ///
 /// The seed is the tip's own identifier, so a forger that does not like the
 /// questions it drew pays for another tip and asks again. Rolling the nonce on
-/// past the first solution is exactly that purchase and nothing else changes:
-/// one tip's worth of work per attempt, which is what makes grinding a cost
-/// rather than a free choice. Treating the seed as unchooseable is what this
-/// example used to do.
+/// past the first solution is exactly that purchase and nothing else changes.
+/// Here each attempt costs one tip's worth of work at this chain's difficulty;
+/// a forger that first walked the run to the difficulty floor pays one hash a
+/// tip instead, which changes the price of the column and not its count.
+/// Treating the seed as unchooseable is what this example used to do.
 fn ground_tips(tip: &BlockHeader, attempts: usize) -> Vec<BlockHeader> {
     let mut tips = Vec::with_capacity(attempts);
     let mut candidate = *tip;

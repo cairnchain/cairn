@@ -344,10 +344,10 @@ fn a_tip_dated_past_the_reader_is_refused_before_a_question_is_asked() {
         "a tip from the future was refused for {refusal:?} instead"
     );
 
-    // A drift's worth of slack and no more, which is 120 blocks at a block a
-    // minute against a chain of {STATED}.
+    // A drift's worth of slack and no more, which is ten blocks on every
+    // network against a chain of {STATED}.
     let blocks_of_slack = params.max_timestamp_drift / params.target_block_time;
-    assert_eq!(blocks_of_slack, 120);
+    assert_eq!(blocks_of_slack, 10);
     let accepted = levels_for((tip.timestamp - OPENS) / params.target_block_time);
     let honest_count = levels_for(CARRYING + blocks_of_slack);
     assert!(

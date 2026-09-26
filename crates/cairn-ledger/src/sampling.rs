@@ -176,9 +176,9 @@ use crate::validation::ConsensusParams;
 ///
 /// Ten hours at a block a minute, and the depth is the part that is
 /// guaranteed. A branch sitting at the difficulty floor may state the same
-/// depth in half that time, since the retarget stops asking for more once the
-/// gaps pass half the target, so any argument that wants a duration has to say
-/// which of the two chains it is timing.
+/// depth in under half that time, since the retarget stops asking for more
+/// once the gaps average about half the target, so any argument that wants a
+/// duration has to say which of the two chains it is timing.
 ///
 /// Past 50% nothing here helps, and nothing anywhere else does either: a
 /// forger at half the work has nothing left to invent and can mine the chain.
@@ -186,12 +186,28 @@ use crate::validation::ConsensusParams;
 /// **The bound is per tip, and a forger may buy more than one.** The seed is
 /// the tip's own identifier, so a forger that dislikes the questions it drew
 /// finds another tip and asks again, and a forger with `g` tips faces `g`
-/// times the chance of getting one through. That is a cost rather than a bar:
-/// a tip costs the tip's own work, so reaching even 2^80 tips is out of the
-/// question on a chain of any real difficulty, and 2^80 against 2^-128 is
-/// still 2^-48. The margin absorbs it, but the figure is a per-tip figure and
-/// saying so is the difference between a bound and a hope. Grinding is
-/// measured against forgeries that were built, in `adversarial_placement`.
+/// times the chance of getting one through.
+///
+/// A tip is cheaper than this paragraph used to say. It said a tip costs the
+/// tip's own work, so that even 2^80 tips were out of the question on a chain
+/// of any real difficulty. The run up to the tip is held to the difficulty the
+/// retarget demands, and the retarget lets a run whose stated gaps sit at the
+/// clamp ceiling walk that demand down to [`MIN_DIFFICULTY`], where every
+/// nonce is a valid tip. The walk is paid once: from 2^40, 826 blocks, 82
+/// hours of stated time, and about twenty one blocks' work at the difficulty
+/// it leaves, which a forger that forked deep has to spare. After it, a fresh
+/// tip costs one hash and the [`SAMPLES`] hashes of its own draw, 2^12, and
+/// nothing more.
+///
+/// So the figure is stated against a budget. At 40% the inequality above
+/// leaves 2^-161.9 a tip, which holds under 2^-128 against 2^33 tips, that is
+/// 2^45 hashes of grinding, and not against 2^34. The staircase the draw
+/// really is is worth more per question than the inequality, so that budget
+/// is a floor and not the budget; at the measured 42.96% there is none at
+/// all, since that is where one tip alone reaches 2^-128.
+/// `tests/grinding_at_the_floor.rs` holds the walk, the tip at the floor and
+/// the budget, and `adversarial_placement` measures grinding against
+/// forgeries that were built.
 ///
 /// `cargo run --release -p cairn-ledger --example sampled_start` prints the
 /// derivation and forges chains against it;
@@ -304,23 +320,28 @@ pub struct SampledStart {
     ///
     /// Held together with the tip's timestamp being near the reader's own
     /// clock, that makes the cheap run cost the one thing a forger cannot
-    /// manufacture. Blocks at the floor have to be spaced past half the
-    /// target or the retarget demands more of them, so a thousand of them
-    /// span eight hours and a half, and a reader
-    /// refuses a tip more than two hours ahead of its own
-    /// clock. Two hours is [`ConsensusParams::max_timestamp_drift`], and this
-    /// used to say a day: true, and twelve times looser than the rule it
-    /// stands in for, inside the one argument that rule is load-bearing for.
+    /// manufacture. Blocks at the floor have to average about half the target
+    /// or the retarget demands more of them, so a thousand and twenty four of
+    /// them span at least 8 h 21 m, and a reader
+    /// refuses a tip more than ten blocks ahead of its own
+    /// clock. Ten blocks is [`ConsensusParams::max_timestamp_drift`], ten
+    /// minutes on the public networks. This used to say a day, and then two
+    /// hours, which was the rule until a minority dating its blocks two hours
+    /// ahead was measured slowing the chain by half.
     ///
     /// Half the target rather than the target, and the difference is a factor
     /// of two on the waiting. At the floor the retarget answers
-    /// `floor(target / gap)`, which is already one at 31 seconds a block, so a
-    /// thousand cheap blocks span 8 h 49 m and not the 17 h 04 m this used to
-    /// claim. The argument survives halved: the run still has to state more
-    /// time than the drift lets a reader take in advance, so the forger still
-    /// sits through the difference in real time. The boundary is pinned at
-    /// exactly 30 and 31 seconds in
-    /// `tests/retarget_timewarp.rs::the_floor_holds_from_thirty_one_seconds_and_not_from_thirty`.
+    /// `floor(target / gap)` over an evenly spaced window, which is already
+    /// one at 31 seconds a block, so a thousand and twenty four evenly spaced
+    /// cheap blocks span 8 h 49 m and not the 17 h 04 m this used to claim.
+    /// Spaced unevenly they do about five percent better: the tightest branch
+    /// found spans 30 069 seconds, 8 h 21 m, and that is the figure an
+    /// argument is entitled to. The argument survives: the run still has to
+    /// state far more time than the drift lets a reader take in advance, so
+    /// the forger still sits through the difference in real time. The even
+    /// boundary is pinned at exactly 30 and 31 seconds in
+    /// `tests/retarget_timewarp.rs::the_floor_holds_from_thirty_one_seconds_and_not_from_thirty`,
+    /// and the uneven branch beside it.
     pub tail: Vec<BlockHeader>,
     /// The header the tip was built on, opened in the tip's own history.
     ///
@@ -619,7 +640,10 @@ pub fn work_before(header: &BlockHeader) -> u128 {
 /// The seed the draw comes from.
 ///
 /// The tip's own identifier, which a prover can only choose by finding another
-/// tip, and finding a tip costs the work the tip states. This is Fiat-Shamir:
+/// tip. Finding one costs the work the tip states, which on a run the
+/// retarget has walked down to the floor is one hash: see [`SAMPLES`] for what
+/// a seed really costs and the budget the bound is stated against. This is
+/// Fiat-Shamir:
 /// the questions are settled by the thing being questioned, so nobody has to
 /// be trusted to ask them honestly and no round trip is needed to agree on
 /// them.

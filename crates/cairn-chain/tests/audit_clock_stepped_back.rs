@@ -231,9 +231,9 @@ fn assert_branch_is_whole(store: &ChainStore, branch: &[Block], when: &str) {
     );
 }
 
-/// The finding. The clock has gone back most of two hours, which leaves the
-/// rival's first block inside the drift and every block this node would have
-/// to put back outside it.
+/// The finding. The clock has gone back by the drift, which leaves the rival's
+/// first block inside the drift and every block this node would have to put
+/// back outside it.
 #[test]
 fn a_failed_switch_under_a_clock_that_stepped_back_leaves_the_branch_whole() {
     let (mut store, branch, rival) = ready();

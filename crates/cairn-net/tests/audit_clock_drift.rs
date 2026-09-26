@@ -14,8 +14,8 @@
 //! the host was refused for ten minutes.
 //!
 //! The arithmetic, which is the whole of why it matters. A miner whose clock
-//! is an hour and fifty eight minutes fast publishes a block that is valid to
-//! everybody whose clock is right. A node two minutes slow refuses it, and
+//! is eight minutes fast, on a network that allows ten, publishes a block that
+//! is valid to everybody whose clock is right. A node two minutes slow refuses it, and
 //! then refuses every peer that offers it, and `dial_from_book` will not dial
 //! a refused host back either. It needed to wait a hundred and twenty seconds.
 //! It bought six hundred seconds of having no peers at all and charged them to
@@ -395,7 +395,7 @@ fn a_block_that_is_merely_invalid_still_costs_the_peer_the_connection() {
 /// The node's own clock is the real one, so the block is dated past it by more
 /// than the drift and the node is the one running behind. That is the honest
 /// shape of the scenario: nobody has to move a clock for this to happen, a
-/// miner two hours fast is enough.
+/// miner a little more than the drift fast is enough.
 #[test]
 fn a_real_node_keeps_the_peer_that_offered_a_block_its_clock_is_behind() {
     let mut miner = Miner::new();

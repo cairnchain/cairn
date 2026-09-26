@@ -62,6 +62,36 @@ const DEFAULT_HOT_CAPACITY: usize = 1 << 17;
 /// Seconds a block is meant to take. Provisional.
 const DEFAULT_TARGET_BLOCK_TIME: u64 = 60;
 
+/// How many of a network's own blocks a timestamp may run ahead of a reader's
+/// clock.
+///
+/// Counted in blocks because what it is measured against is counted in
+/// blocks. The retarget clamps each gap to six targets, and the median it
+/// reads is eleven blocks wide, so an allowance written in seconds for every
+/// network was twenty clamp ceilings on testnet and two hundred and forty on
+/// devnet. At that width a minority dating its blocks at the allowance, or an
+/// honest miner whose clock is an hour or two fast, holds the median in the
+/// future; honest blocks dated at the median plus one then advance the
+/// retarget's timeline a second at a time, and the retarget reads a chain
+/// producing blocks in no time. Measured with a thirty percent share at two
+/// hours: testnet ran at 1.53 times its target with single blocks asked for
+/// 115 times the steady difficulty, devnet at fourteen times its target.
+/// `tests/retarget_timewarp.rs` holds the chain within a tenth of its target
+/// at this width.
+///
+/// Ten blocks is ten minutes on the public networks, which a clock kept by NTP
+/// meets with room, and it is a rule about the reader rather than about the
+/// block: a block refused for it is not remembered, not held against whoever
+/// sent it, and taken once the clock has caught up. So moving it forks
+/// nothing. A node allowing less than its peers waits for a block they took at
+/// once, for at most the difference.
+const DRIFT_IN_BLOCKS: u64 = 10;
+
+/// The drift a network with this target block time allows.
+const fn drift_allowance(target_block_time: u64) -> u64 {
+    target_block_time.saturating_mul(DRIFT_IN_BLOCKS)
+}
+
 /// The difficulty [`ConsensusParams::mineable_network`] opens at.
 ///
 /// Four thousand and ninety six hashes for a block, which is about a
@@ -212,7 +242,8 @@ pub struct ConsensusParams {
     /// fallen note really lasts. And it decides how many people can be paid in
     /// a minute, which is the only one of the three anybody asks about.
     pub max_block_bytes: usize,
-    /// How far ahead of the receiving node's clock a timestamp may sit.
+    /// How far ahead of the receiving node's clock a timestamp may sit, in
+    /// seconds: ten of this network's blocks. See [`DRIFT_IN_BLOCKS`].
     pub max_timestamp_drift: u64,
     /// The rule changes this network has scheduled, oldest first.
     ///
@@ -385,6 +416,14 @@ impl ConsensusParams {
                 opens_at: crate::genesis::opens_at(NetworkId::DEVNET),
                 genesis_difficulty: 1 << 23,
                 target_block_time: 5,
+                // Ten of the blocks above. Written beside the block time
+                // because it is the block time's: an allowance inherited from
+                // a network with twelve times the block was two hundred and
+                // forty clamp ceilings here, and the chain ran at a
+                // fourteenth of its speed under a minority dating its blocks
+                // at it. `tests/network_rules.rs` holds the relation on every
+                // network.
+                max_timestamp_drift: drift_allowance(5),
                 hot_capacity: 64,
                 // A throwaway network reaches this in minutes rather than in
                 // most of a day, which is the whole point of having one.
@@ -434,7 +473,7 @@ impl ConsensusParams {
             max_outputs_per_transfer: 256,
             max_coinbase_outputs: 16,
             max_block_bytes: 128 * 1024,
-            max_timestamp_drift: 2 * 60 * 60,
+            max_timestamp_drift: drift_allowance(DEFAULT_TARGET_BLOCK_TIME),
             // Nothing has changed yet, so the schedule says only what the
             // network opened under. A rule that changes appends to this.
             activations: OPENED,

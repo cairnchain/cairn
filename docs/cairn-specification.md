@@ -937,7 +937,7 @@ at a time by whoever starts a node.
   <tbody>
     <tr><td>target block time</td><td class="n">60 s</td><td>the retarget and the solve-time clamp</td></tr>
     <tr><td>genesis difficulty</td><td class="n">2<sup>27</sup></td><td>the first block, before any history exists</td></tr>
-    <tr><td>drift allowance</td><td class="n">7 200 s</td><td>how far ahead of a reader a timestamp may sit</td></tr>
+    <tr><td>drift allowance</td><td class="n">600 s</td><td>how far ahead of a reader a timestamp may sit: ten target block times</td></tr>
     <tr><td>halving interval</td><td class="n">1 051 200</td><td>the emission schedule</td></tr>
     <tr><td>initial reward</td><td class="n">5 000 000 000 pebbles</td><td>the emission schedule</td></tr>
     <tr><td>tail reward</td><td class="n">1 000 000 pebbles</td><td>the emission schedule</td></tr>
@@ -949,8 +949,12 @@ at a time by whoever starts a node.
 
 A throwaway network may set some of them far lower, and the reference
 implementation's does: a five second block, a genesis difficulty of
-2<sup>23</sup>, and a burial and maturity of 32. The emission schedule and the
-drift allowance are the same everywhere.
+2<sup>23</sup>, and a burial and maturity of 32. The emission schedule is the
+same everywhere. The drift allowance is ten of the network's own target block
+times everywhere, so the throwaway network's is 50 seconds: it is measured
+against the retarget's clamp, which is counted in blocks, and a number of
+seconds shared by networks whose blocks differ twelvefold is what the
+timestamp rules below were once wrong about.
 
 ### Proof of work
 
@@ -1068,9 +1072,19 @@ timeline the retarget keeps for itself: it opens at the anchor's timestamp and
 then moves only by what the retarget actually counted, so a header thrown
 forward past the clamp advances the timeline by the clamp and no more, and the
 headers after it have their gaps measured from where the timeline really
-stands. The excess comes back in full. Measuring each gap against its own
-parent instead leaves the give-back short by whatever the clamp cut off, which
-is exactly the difference a miner holding two blocks in a row keeps.
+stands. The excess comes back in full while the header is inside the window.
+Measuring each gap against its own parent instead leaves the give-back short
+by whatever the clamp cut off, which is exactly the difference a miner holding
+two blocks in a row keeps.
+
+The anchor's timestamp is taken raw, and that is the one place the excess is
+counted a second time. When a header thrown forward becomes `w[0]`, the
+timeline opens at the time it claimed, so the gaps after it measure short by
+what it claimed beyond the clamp, once, for the retarget that has it as its
+anchor. At a drift allowance of ten target block times that is under a
+hundredth of the steady difficulty on either network, measured; it was 1.36
+times the steady difficulty on a sixty second chain and four times on a five
+second one when the allowance was two hours.
 
 Three edge cases the rule answers explicitly, and each is a case a second
 implementation reaches by accident before it reaches it on purpose.
@@ -1117,11 +1131,12 @@ over two hours. A tenfold loss reaches ninety per cent after 64 blocks and
 13 080 seconds. The damping is what a miner writing its own timestamps cannot
 get past, and it is the same damping that makes an honest answer take hours.
 
-**At the floor the rule reduces to a division, and the floor is held from 31
-seconds a block and not from 60.** When `previous` is 1 and every difficulty
-in the window is 1, `average` is 1 and steps 10 to 12 collapse: with a window
-spaced `g` seconds apart, `expected` is `4095 * T`, `weighted` is `4095 * g`,
-and the answer is `T / g` clamped into 1 … 4. At a sixty second target:
+**At the floor the rule reduces to a division, and the floor is held from
+about half the target and not from the target.** When `previous` is 1 and every
+difficulty in the window is 1, `average` is 1 and steps 10 to 12 collapse: with
+a window spaced evenly `g` seconds apart, `expected` is `4095 * T`, `weighted`
+is `4095 * g`, and the answer is `T / g` clamped into 1 … 4. At a sixty second
+target, for an evenly spaced window:
 
 <table>
   <thead><tr><th class="n">Spacing</th><th class="n">Next difficulty</th></tr></thead>
@@ -1135,12 +1150,23 @@ and the answer is `T / g` clamped into 1 … 4. At a sixty second target:
   </tbody>
 </table>
 
-So a chain at the floor spaced 31 seconds apart holds the floor for as long as
-anyone cares to keep it, and one spaced 30 apart leaves it at the second
-block. Any argument that prices a run of blocks at the floor MUST price it at
-31 seconds a block and not at the target, or it prices it at twice what it
-costs. Off a real difficulty the same spacing is not free: 31 seconds a block
-off 2<sup>20</sup> asks for very nearly twice the difficulty a block.
+So a chain at the floor spaced evenly 31 seconds apart holds the floor for as
+long as anyone cares to keep it, and one spaced evenly 30 apart leaves it at
+the second block. A chain need not be spaced evenly. The floor holds while
+`weighted` stays above `4095 * T / 2`, and ninety gaps of 30 seconds with one
+of 31 among them keep it there for ever, at a mean just over 30 seconds; the
+first window after a fork holds the honest chain's gaps, which buys a little
+more at the start. The tightest branch of 1 024 blocks found, taking each
+timestamp as low as the median rule and a retarget of 1 allow, spans 30 069
+seconds, 8 h 21 m, against the 31 744 an even 31 seconds gives.
+
+Any argument that prices a run of blocks at the floor MUST price it by what
+such a run can span and not at a per-block spacing: a run of 1 024 at 30 069
+seconds or less, and never at the target, which is twice what it costs. The
+figure is measured rather than derived, and an implementation that finds a
+tighter branch has found a smaller number that arguments are then bound by.
+Off a real difficulty the same spacing is not free: 31 seconds a block off
+2<sup>20</sup> asks for very nearly twice the difficulty a block.
 
 ### Timestamps
 
@@ -1171,7 +1197,21 @@ block to claim an easier difficulty stops working.
 
 **Not further ahead than the reader allows.** A node MUST refuse a block whose
 timestamp is greater than the node's own clock, read as seconds since the Unix
-epoch, plus the network's drift allowance of 7 200 seconds.
+epoch, plus the network's drift allowance, which is ten of its target block
+times: 600 seconds on the public networks.
+
+The allowance is counted in blocks because what it is measured against is. It
+was 7 200 seconds on every network, which is twenty of the retarget's clamp
+ceilings at a sixty second block. A minority dating its blocks that far ahead,
+or an honest miner whose clock was an hour or two fast, held the median time
+past in the future; an honest block dated at the median plus one then moved the
+retarget's timeline a second while real time moved a minute, and the retarget
+read a chain producing blocks in no time and asked for its steepest rise, block
+after block. Measured with a thirty per cent share, a sixty second chain ran at
+1.53 times its target with single blocks asked for 115 times the steady
+difficulty, and a five second one at fourteen times its target. At ten target
+block times the same share leaves both within a tenth of their target. A
+clock kept by NTP meets ten minutes with room.
 
 **The first two are facts about the block. The third is a fact about the
 reader, and that distinction is load-bearing.** Two nodes given the same bytes
@@ -1347,13 +1387,14 @@ equal.
 
 What burial costs is chain time. At a sixty second block, 1 024 blocks on
 schedule is 61 440 seconds, 17 h 04 m. At the difficulty floor a branch can be
-held with gaps of 31 seconds, as the retarget section shows, so the same 1 024
-blocks span 31 744 seconds, 8 h 49 m. **The second figure is the one any
-argument about how long an attacker must sit is entitled to**, and it is half
-the first. The drift bound is what keeps that time real: a node refuses a
-block more than two hours ahead of its own clock, so a branch spanning nearly
-nine hours cannot be handed over all at once, and its author waits out the
-difference while everybody else keeps working.
+held at a little over 30 seconds a block, as the retarget section shows, and
+the tightest such branch of 1 024 blocks found spans 30 069 seconds, 8 h 21 m.
+**The second figure is the one any argument about how long an attacker must
+sit is entitled to**, and it is under half the first. The drift bound is what
+keeps that time real: a node refuses a block more than ten blocks ahead of its
+own clock, ten minutes on the public networks, so a branch spanning more than
+eight hours cannot be handed over all at once, and its author waits out the
+difference, all of it but ten minutes, while everybody else keeps working.
 
 **The third rule in the table is not a consensus rule. It is a local retention
 policy, and the difference has a consequence a second implementation must
@@ -1907,10 +1948,27 @@ can be carried back out of by the ordinary rule. Any argument that wants a
 duration instead has to say which chain it is timing, because a branch sitting
 at the difficulty floor states the same depth in a fraction of the time.
 
-It is per tip. The seed is the tip's own identifier, so a forger that dislikes
-the questions it drew can find another tip and ask again, and a forger with `g`
-tips faces `g` times the chance. A tip costs the tip's own work, which is what
-makes that a cost rather than a bar, but the figure is a per-tip figure.
+It is per tip, and a tip can be cheap. The seed is the tip's own identifier,
+so a forger that dislikes the questions it drew can find another tip and ask
+again, and a forger with `g` tips faces `g` times the chance. A tip does not
+cost the chain's work. The run up to the tip is held to the difficulty the
+retarget demands, and a run whose stated gaps sit at the clamp ceiling walks
+that demand down to the floor, where every nonce is a valid tip: from
+2<sup>40</sup> the walk is 826 blocks, 82 hours of stated time and about
+twenty-one blocks' work, paid once, and a forger that forked deep has the time.
+After it a fresh tip costs one hash and the 4 096 of its own draw, which is
+2<sup>12</sup> hashes, and nothing else.
+
+So the figure MUST be quoted against a grinding budget. At 40 per cent the
+inequality above gives 2^-161.9 a tip, which stays under 2^-128 against
+2<sup>33</sup> tips, 2<sup>45</sup> hashes of grinding, and not against
+2<sup>34</sup>. The staircase the draw really is is worth more per question
+than the inequality, so that budget is a floor under the real one and not the
+real one; at the measured 42.96 per cent there is no budget at all, since that
+is the share at which one tip alone reaches 2^-128. Tying the tip's difficulty
+to the pinned header's would make a fresh seed cost work again, and would
+refuse honest chains after a collapse deeper than the tie; it is not a rule
+here.
 
 Past half the world's work nothing here helps, and nothing anywhere else does
 either: a forger at half has nothing left to invent and can mine the chain.
