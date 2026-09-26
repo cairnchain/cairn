@@ -140,7 +140,7 @@ fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
 /// Reads its way to the end of the chain, which is what fills the wallet's own
 /// account of what it was paid and where each note landed.
 fn catch_the_history_up(wallet: &Wallet) {
-    while wallet.follow() > 0 {}
+    wallet.follow_to_the_tip();
 }
 
 /// A wallet holding money it cannot move, and somebody who could tell it how.

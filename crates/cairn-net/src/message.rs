@@ -191,6 +191,10 @@ pub struct Handshake {
     /// The first block of the branch this node follows. Two nodes that
     /// disagree here are on unrelated chains and have nothing to exchange.
     pub genesis: Hash32,
+    /// The tip the sender follows. Sent, and read by nothing: a node judges a
+    /// peer's chain by what it serves, not by what it says here. Kept rather
+    /// than dropped because removing a field is a change to the handshake,
+    /// which waits for the next `PROTOCOL_VERSION`.
     pub tip: Hash32,
     pub height: u64,
     /// Work behind the tip, which is what decides who is behind whom.

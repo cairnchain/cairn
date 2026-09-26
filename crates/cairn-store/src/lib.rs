@@ -1343,8 +1343,8 @@ impl BlockLog {
         // itself instead.
         match self.height_of_first() {
             // A log that does not know where it starts is a log that holds
-            // nothing, which is what `HeaderLog::join` answers to the same
-            // question. Reporting a height its own records disagree with is
+            // nothing, which is what `HeaderLog::head` answers to the same
+            // question when `HeaderLog::open_named` asks it. Reporting a height its own records disagree with is
             // the one answer that loses blocks.
             Ok(None) => return Ok(self.forget_what_it_cannot_place()),
             Ok(Some(first)) => self.first = first,
@@ -1362,10 +1362,10 @@ impl BlockLog {
     /// Reads back the height the log starts at, if the log agrees with itself
     /// about it.
     ///
-    /// One record decoded when a node starts, which is what it costs not to
-    /// keep this written down anywhere it could disagree with the log itself.
-    /// Two records, because one cannot be asked to confirm the number it is
-    /// the source of and its neighbour can: the record after it carries its
+    /// Two records decoded when a node starts, which is what it costs not to
+    /// keep this written down anywhere it could disagree with the log itself:
+    /// one cannot be asked to confirm the number it is the source of, and its
+    /// neighbour can. The record after it carries its
     /// height and its identifier, so a byte changed anywhere in record zero
     /// moves one of the two.
     ///
@@ -1417,8 +1417,9 @@ impl BlockLog {
     /// and the bytes stay on the disk: a person can look at record zero, and a
     /// node that fetches the chain again writes over them.
     ///
-    /// The shape `HeaderLog::join` uses for the same answer, which sets its
-    /// count and first to nought and leaves the file alone.
+    /// The shape the header log gives the same answer in, in
+    /// `HeaderLog::open_named` from what `HeaderLog::head` reports: count and
+    /// first set to nought, and the file left alone.
     fn forget_what_it_cannot_place(&mut self) -> Recovered {
         let set_aside = self.count;
         self.count = 0;

@@ -59,7 +59,8 @@ const TAIL_REWARD: Amount = reward_of(emission::TAIL_REWARD_PEBBLES);
 /// raise this.
 const DEFAULT_HOT_CAPACITY: usize = 1 << 17;
 
-/// Seconds a block is meant to take. Provisional.
+/// Seconds a block is meant to take, which is the network's value and the
+/// one the specification states.
 const DEFAULT_TARGET_BLOCK_TIME: u64 = 60;
 
 /// How many of a network's own blocks a timestamp may run ahead of a reader's
@@ -670,6 +671,9 @@ pub enum TransferError {
     TooManyInputs { count: usize, limit: usize },
     #[error("transfer creates {count} notes, limit is {limit}")]
     TooManyOutputs { count: usize, limit: usize },
+    /// Raised by the pool, never by a block rule: a transfer no block could
+    /// carry is one the pool will not hold, and a block that carried it would
+    /// be refused as `BlockTooLarge` instead.
     #[error("transfer takes {bytes} bytes, more than the {limit} a block carries")]
     TooLargeForABlock { bytes: usize, limit: usize },
     /// Raised by the pool, never by a block rule: what a block may carry is
@@ -1653,9 +1657,11 @@ pub fn connect_block(
     }
 
     // What a peer has to carry, a node has to hold while it validates, and a
-    // disk has to keep. Checked once here, on the encoding a node received
-    // rather than on a count of parts, because bytes are what the limit is
-    // about and counting parts is how the two drifted apart.
+    // disk has to keep. Checked once here, on the block's encoding rather than
+    // on a count of parts, because bytes are what the limit is about and
+    // counting parts is how the two drifted apart. The encoding is made again
+    // from the decoded block, and it is the bytes the node received because
+    // the format is canonical: a decoder accepts one spelling of each value.
     let bytes = block.encode().len();
     if bytes > params.max_block_bytes {
         return Err(BlockError::BlockTooLarge {

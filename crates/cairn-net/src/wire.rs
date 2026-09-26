@@ -238,8 +238,12 @@ fn fill<R: Read>(
 
 /// The moment a frame started now runs out of patience.
 ///
-/// Saturating, because a clock far enough along that adding twenty seconds
-/// overflows is not a reason to stop framing messages.
+/// A clock far enough along that adding the patience overflows is answered
+/// with `now` itself, which is not saturating: it is a deadline already
+/// reached, and every frame read under it would run out at once. No `Instant`
+/// a machine can hold is that close to the end of its range, so this is a
+/// fallback that cannot be reached rather than a policy; saying it saturates
+/// described a kinder answer than the code gives.
 fn patience_from(now: Instant) -> Instant {
     now.checked_add(FRAME_PATIENCE).unwrap_or(now)
 }

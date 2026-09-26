@@ -378,7 +378,11 @@ fn the_headers_a_year_figure_counts_the_forest_the_headers_make() {
     for (page, text, said) in [
         ("English site", SITE_EN, format!("{megabytes:.0} MB a year")),
         ("French site", SITE_FR, format!("{megabytes:.0} Mo par an")),
-        ("CONTRIBUTING", CONTRIBUTING, format!("{megabytes:.0} MB a year")),
+        (
+            "CONTRIBUTING",
+            CONTRIBUTING,
+            format!("{megabytes:.0} MB a year"),
+        ),
     ] {
         assert!(
             text.contains(&said),

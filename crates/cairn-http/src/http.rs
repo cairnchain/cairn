@@ -102,8 +102,9 @@ const SLOWEST_LINK: u64 = 4 * 1024;
 /// It was thirty seconds, which is a hundred and twenty kilobytes at that
 /// rate, and the reason given was that "the biggest document compiled in is
 /// some fifty kilobytes, and the API pages are capped at a couple of hundred
-/// rows". Both halves had stopped being true. The specification is 167 016
-/// bytes and was cut off about three thousand short of its end, which is not a
+/// rows". Both halves had stopped being true. The specification was 167 016
+/// bytes at the time and was cut off about three thousand short of its end,
+/// which is not a
 /// partial paper but an incomplete message: a body under its own
 /// `content-length` gives the reader a transport error. And a page capped in
 /// rows is not capped in bytes, which is the whole of what this ceiling
@@ -179,7 +180,7 @@ const DRAIN_POLL: Duration = Duration::from_millis(5);
 const REFUSAL_PATIENCE: Duration = Duration::from_millis(250);
 /// Refusals waiting to be written at once.
 ///
-/// A floor under how many sockets that thread holds open. Past it a connection
+/// A ceiling on how many sockets that thread holds open. Past it a connection
 /// is dropped without a refusal, which is what happened to every one of them
 /// before the thread existed.
 const REFUSALS_QUEUED: usize = 64;
@@ -567,7 +568,7 @@ where
 /// caller is queued, at the moment every caller is being refused. So a refused
 /// connection is handed here, and the waiting happens on a thread of its own.
 ///
-/// One thread and a queue with a floor under it. Past [`REFUSALS_QUEUED`] a
+/// One thread and a queue with a ceiling on it. Past [`REFUSALS_QUEUED`] a
 /// connection is dropped without a refusal, which is what happened to every
 /// one of them before, so a full queue is this server's old behaviour rather
 /// than a new failure. If the thread cannot be started at all, the receiving
@@ -747,41 +748,32 @@ fn write_refusal(stream: &TcpStream, accepted: Instant) {
 /// it on the machines this was written on and losing it on the Windows
 /// runner.
 ///
-/// The refusal a full server sends is the path that always leaves bytes
-/// unread, because it answers before reading any. The ordinary path leaves
-/// them whenever a caller sent more than its request head, which is any caller
-/// that sent a body this server did not want.
+/// The path that leaves them is the ordinary one, whenever a caller sent more
+/// than its request head, which is any caller that sent a body this server did
+/// not want. That is the one caller in the program: [`hang_up`], after an
+/// answer has been written to a request already read, and it passes no
+/// patience, because whatever is left came with the request and is there to
+/// be taken now, and waiting would add that wait to every connection this
+/// server closes.
 ///
-/// Bounded, and never waiting on anything. The socket is non-blocking by the
-/// time this runs, so a read with nothing in the buffer comes back rather than
-/// blocking, and the refusal path runs in the accept loop, where waiting would
-/// stop every other caller. What it has to clear is a request head and at most
-/// a body, both of which are already capped, and a caller that goes on sending
-/// past that is one this is right to stop reading.
+/// Bounded, and never waiting on anything it was not told to. The socket is
+/// non-blocking by the time this runs, so a read with nothing in the buffer
+/// comes back rather than blocking. What it has to clear is a request head and
+/// at most a body, both of which are already capped, and a caller that goes on
+/// sending past that is one this is right to stop reading.
 ///
-/// `patience` is how long to wait for bytes that have not arrived yet, and it
-/// is the whole of what separates the two callers. The ordinary path has read
-/// the request already, so whatever is left came with it and is there to be
-/// taken now; waiting would add that wait to every connection this server
-/// closes, for nothing. The refusal path answers before the request has
-/// necessarily arrived at all, so the bytes it has to clear are usually still
-/// in flight, and not waiting for them is not clearing anything.
-///
-/// It used to wait for nobody, and what that cost was measured. Server full,
-/// an honest caller posting a head inside the cap and a body of exactly
-/// [`MAX_BODY_BYTES`]: sent in one piece with no gap, twelve of twelve read
-/// the whole 503; sent thirty milliseconds after the head, seven of twelve;
-/// sent in eight pieces twenty milliseconds apart, none of twelve. Every loss
-/// the same, a reset after the response head and none of its body, which
-/// reaches a reader as a transport error rather than as the refusal this
-/// server meant to give. On a real link it was not intermittent: the refusal
-/// is written the moment `accept` returns, a round trip before the caller's
-/// body can arrive.
-///
-/// Waiting was impossible while this ran in the accept loop, where every
-/// millisecond of patience is a millisecond no other caller is accepted, at
-/// the one moment every caller is being refused. It does not run there any
-/// more: see [`refusals`].
+/// The refusal a full server sends does not come through here. It answers
+/// before the request has necessarily arrived at all, so the bytes it has to
+/// clear are usually still in flight, and it waited for nobody while it ran in
+/// the accept loop. What that cost was measured. Server full, an honest caller
+/// posting a head inside the cap and a body of exactly [`MAX_BODY_BYTES`]: sent
+/// in one piece with no gap, twelve of twelve read the whole 503; sent thirty
+/// milliseconds after the head, seven of twelve; sent in eight pieces twenty
+/// milliseconds apart, none of twelve. Every loss the same, a reset after the
+/// response head and none of its body. It runs on a thread of its own now,
+/// [`refusals`], which clears what each refused caller sends as it arrives, in
+/// `Waiting::done`, across every refused caller at once. `patience` is here
+/// for the tests that measure what waiting buys, and the program passes none.
 /// Returns what it cleared, which is what a test can ask it. Whether the
 /// answer survives the close after it depends on the host's own timing and
 /// cannot be asked here; how many of the caller's bytes were taken off the

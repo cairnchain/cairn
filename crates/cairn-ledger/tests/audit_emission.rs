@@ -1238,14 +1238,44 @@ fn a_block_that_overflows_the_tier_loses_nothing_on_the_way_down() {
     );
 }
 
-/// The ledger is never asked what the supply is, because it cannot say.
+/// **The ledger states the supply itself, and a block moves it by what its
+/// coinbase claimed.**
+///
+/// This test said the opposite, by name and in its comment: that nothing in
+/// the ledger carried a running total and no node could notice a chain that
+/// had drifted from its schedule. The total has been in the state root since
+/// testnet-6, and the test went on passing, because all it asserted was that a
+/// fresh ledger was empty, which is true of both ledgers.
 #[test]
-fn the_ledger_states_no_supply_of_its_own() {
-    // Recorded as a finding rather than as a wish: nothing in `LedgerState`,
-    // `StateTransition` or the state root carries a running total, so no node
-    // can notice a chain that has drifted from its schedule. The books above
-    // are this test's own, kept outside the ledger.
-    let state = LedgerState::new();
-    assert_eq!(state.hot_len(), 0);
-    assert_eq!(state.cold().len(), 0);
+fn the_ledger_states_the_supply_and_a_block_moves_it_by_what_it_claimed() {
+    let params = ConsensusParams::testnet();
+    let mut state = LedgerState::new();
+    assert_eq!(
+        state.supply().as_pebbles(),
+        0,
+        "a ledger with no blocks in it says some money exists"
+    );
+    let before = state.state_root();
+    let claimed = params.reward_at(0);
+    let miner = SecretKey::from_bytes(&[9; 32]).public_key();
+    let block = assemble_block(
+        &state,
+        CoinbaseTransaction::new(0, vec![Note::new(claimed, miner)]),
+        Vec::<Transfer>::new(),
+        &params,
+        1_000,
+        0,
+    )
+    .unwrap();
+    connect_block(&mut state, &block, &params, u64::MAX / 2).unwrap();
+    assert_eq!(
+        state.supply(),
+        claimed,
+        "the supply after a first block is not what its coinbase claimed"
+    );
+    assert_ne!(
+        state.state_root(),
+        before,
+        "the state root does not move with it"
+    );
 }
