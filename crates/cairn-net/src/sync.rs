@@ -1166,7 +1166,15 @@ pub const BATCH_PATIENCE: u64 = 60;
 /// with nothing cannot back out of once it follows it. That is why a
 /// newcomer facing a chain past this length does not ask on the handshake,
 /// and lets [`crate::choosing`] decide whom to ask instead.
+///
+/// Held to that by the build below rather than by this sentence alone, as the
+/// other two numbers tied to the same depth are (`MAX_BEHIND` and the
+/// handover's burial): a change to either end that forgot the other would
+/// leave a newcomer committing, on a handshake, to a chain it can no longer
+/// back out of.
 pub const JOIN_RATHER_THAN_READ: u64 = 1_024;
+
+const _: () = assert!(JOIN_RATHER_THAN_READ == cairn_chain::MAX_REORG_DEPTH as u64);
 
 /// Heights one peer may have outstanding at any moment.
 ///
