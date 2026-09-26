@@ -7,7 +7,7 @@
 //! refuses to put on validators. Keeping the two apart is not tidiness. It is
 //! the claim: this file is what the chain does not make anyone carry.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use cairn_crypto::PublicKey;
 use cairn_ledger::block::Block;
@@ -63,26 +63,47 @@ pub(crate) struct OwnerRecord {
     /// rebuilding that list to answer one page was work an anonymous caller
     /// could ask for as often as they liked.
     pub(crate) movements: Vec<Movement>,
-    /// Everything paid to this owner, and everything it paid out, in pebbles.
+    /// Everything paid to this owner, in pebbles.
     ///
-    /// Not amounts, on purpose. An amount stops at the most money there will
-    /// ever be, which bounds what an owner holds and not what has passed
+    /// Not an amount, on purpose. An amount stops at the most money there
+    /// will ever be, which bounds what an owner holds and not what has passed
     /// through it: change comes back to the key that spent, so an address
     /// holding a hundred thousand that pays ten thousand times has been paid
-    /// a billion. Kept as amounts, both stopped at the ceiling, every payment
-    /// in was dropped whole while every payment out still counted, and the
-    /// balance slid to nothing. A `u64` of pebbles reaches about a hundred and
-    /// eighty times the ceiling before it saturates, in the same eight bytes,
-    /// so what the index costs a note does not move.
+    /// a billion. A `u64` of pebbles reaches about a hundred and eighty times
+    /// the ceiling, and past that it stops, which [`OwnerRecord::turnover_counted`]
+    /// says: an exchange paying withdrawals out of one large note with the
+    /// change back to itself gets there in months.
     pub(crate) received: u64,
-    pub(crate) spent: u64,
+    /// What this owner's unspent notes come to, in pebbles.
+    ///
+    /// Kept rather than worked out as what came in less what went out. That
+    /// was the balance for a while, both halves counted in pebbles and both
+    /// stopping at the top of a `u64`, and past that point every payment in
+    /// was dropped whole while every payment out still counted: the balance
+    /// slid to nothing with the notes that made it still unspent in this same
+    /// index. What an owner holds is a sum of notes that exist, so it is under
+    /// the most money there will ever be and cannot stop counting. The record
+    /// is the same sixteen bytes it was, so what the index costs a note does
+    /// not move.
+    pub(crate) held: u64,
 }
 
 impl OwnerRecord {
     pub(crate) fn balance(&self) -> Amount {
-        // What was paid in and not out again is what this owner's unspent
-        // notes come to, which is below the ceiling on any sum of amounts.
-        Amount::from_pebbles(self.received.saturating_sub(self.spent)).unwrap_or(Amount::MAX_MONEY)
+        Amount::from_pebbles(self.held).unwrap_or(Amount::MAX_MONEY)
+    }
+
+    /// Everything this owner paid out: what came in, less what is still here.
+    ///
+    /// A floor rather than a total once what came in has stopped counting.
+    pub(crate) fn spent(&self) -> u64 {
+        self.received.saturating_sub(self.held)
+    }
+
+    /// Whether what came in and what went out are totals, or floors because
+    /// what came in has passed what a count of pebbles can hold.
+    pub(crate) fn turnover_counted(&self) -> bool {
+        self.received < u64::MAX
     }
 }
 
@@ -100,8 +121,13 @@ pub(crate) struct Totals {
 }
 
 impl Totals {
-    /// Money in existence: everything ever paid out, minus nothing, because
-    /// Cairn burns nothing.
+    /// Money in existence: everything paid to miners less the fees, since a
+    /// fee is money that already existed.
+    ///
+    /// What a coinbase declines to claim, of its reward or of the fees, is
+    /// destroyed and never appears here, so this can sit below the schedule
+    /// without the index being wrong. It said Cairn burns nothing, which is
+    /// the one case that makes the total fall.
     pub(crate) fn issued(&self) -> Amount {
         self.paid_to_miners
             .checked_sub(self.fees)
@@ -122,6 +148,25 @@ pub(crate) struct Index {
     /// transaction from years ago, and [`Index::size`] is where an operator
     /// reads what it has come to.
     at: HashMap<Hash32, Location>,
+    /// Block identifier to the height it was read at, one entry a block.
+    ///
+    /// The branch names identifiers for the last [`cairn_chain::HELD_WINDOW`]
+    /// heights and no further, so a block older than about seventeen hours
+    /// was served by its height and was "no such block" by its identifier,
+    /// and the search box sent whoever pasted one to an address holding
+    /// nothing. Forty bytes of content a block, which is about twenty one
+    /// megabytes a year at a block a minute, beside the six hundred and
+    /// twenty seven a note; [`BYTES_PER_BLOCK`] counts it.
+    blocks: HashMap<Hash32, u64>,
+    /// The time each block read carries in its header, from the lowest height
+    /// read up.
+    ///
+    /// Eight bytes a block, so that a page listing what moved through an
+    /// address can say when without the blocks: it read up to a hundred whole
+    /// blocks off the disk, with the log's lock taken for each, to print a
+    /// hundred timestamps, and a block the disk would not give back was a
+    /// movement with no date.
+    times: Vec<u64>,
     notes: BTreeMap<NoteId, NoteRecord>,
     owners: HashMap<PublicKey, OwnerRecord>,
     totals: Totals,
@@ -159,6 +204,30 @@ pub(crate) struct Index {
     /// left the span empty at the end of every turn, and every turn would have
     /// started again at height zero.
     resume: u64,
+    /// What the newest blocks read did, oldest first, for [`UNDO_DEPTH`] of
+    /// them, so that a switch of branch can be taken back rather than answered
+    /// by reading the chain again.
+    undo: VecDeque<Undo>,
+}
+
+/// What one block did to the index, kept so a switch can take it back.
+///
+/// Not the block. What taking a block back needs is which transactions it
+/// carried and which notes it spent; the notes it made are named by the
+/// transactions and the number of outputs each had, and every other table is
+/// either keyed by those or appended to in the order of the chain.
+#[derive(Clone, Debug)]
+struct Undo {
+    height: u64,
+    id: Hash32,
+    /// Every transaction the block carried, coinbase first, with how many
+    /// notes each one made.
+    made: Vec<(Hash32, u32)>,
+    /// The notes it spent that this index knew, in the order it spent them.
+    spent: Vec<NoteId>,
+    /// What went onto the two money totals for it, which is what comes off.
+    paid: Amount,
+    fees: Amount,
 }
 
 /// The run of blocks the index has read, and what stood at the top of it.
@@ -230,6 +299,12 @@ fn still_the_branch(
     }
 }
 
+/// How many notes a transaction with `outputs` outputs makes, as note
+/// identifiers count them.
+fn outputs_of(outputs: usize) -> u32 {
+    u32::try_from(outputs).unwrap_or(u32::MAX)
+}
+
 /// What a node could produce for one height of the branch it follows.
 ///
 /// Four answers and not two. A node keeps one run of blocks and drops the
@@ -285,6 +360,26 @@ const STOCK_EVERY: u64 = 16;
 /// the chain.
 const BATCH: u64 = 64;
 
+/// Blocks the index can take back one at a time, newest first.
+///
+/// A switch of branch used to be answered by throwing the whole index away
+/// and reading the chain again, and the chain calls the switch that ends an
+/// ordinary tie between two miners ordinary: it happens on some node every
+/// time two blocks are found at once. On an explorer that was every block the
+/// node holds read back off the disk, a seek and a decode each, with every
+/// page saying the index was partial for as long as it took.
+///
+/// What taking a block back needs is kept for this many of the newest blocks
+/// read: a few dozen bytes for an ordinary block, and some fifty kilobytes for
+/// one at the byte ceiling full of spends, so the whole of it stays a few
+/// megabytes however long the chain grows. A switch deeper than this is read
+/// again from the start, which is what every switch cost before.
+///
+/// More than a turn of the walk, because the check at the bottom of a turn
+/// relies on every height the turn read and on the one it started from, and a
+/// switch landing inside a turn can reach below all of them.
+pub(crate) const UNDO_DEPTH: usize = 128;
+
 /// How far one turn of the walk got.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Reading {
@@ -339,6 +434,9 @@ pub(crate) fn read_to_the_end(reach: u64, mut turn: impl FnMut() -> Reading) -> 
 /// index also holds an entry per transaction, a movement per side of every
 /// note, and an entry per owner with two lists hanging off it. None of those
 /// is fixed per note, so the figure is a function of two things and not one.
+/// It holds an entry per block as well, which is counted apart, at
+/// [`BYTES_PER_BLOCK`], because it is the one table whose size is the chain's
+/// length rather than what the chain carries.
 ///
 /// **The shape of the traffic.** `audit_index_cost.rs` weighs three, one test
 /// each. The dearest is the ordinary payment, one note to the payee and one
@@ -374,6 +472,16 @@ pub(crate) fn read_to_the_end(reach: u64, mut turn: impl FnMut() -> Reading) -> 
 /// this, and that is what a machine actually has to have.
 pub(crate) const BYTES_PER_NOTE: u64 = 627;
 
+/// Bytes one block costs the index beside its notes: its identifier and the
+/// height it sits at, so that it can be found by the one as it is by the
+/// other, and the time in its header, so that a page can date a movement
+/// without the block.
+///
+/// Content, like [`BYTES_PER_NOTE`], and counted apart from it because it is
+/// a cost of the chain's length and not of what the chain carries: a chain of
+/// empty blocks pays it and nothing else.
+pub(crate) const BYTES_PER_BLOCK: u64 = 48;
+
 /// What the index is made of, for the operator who has to pay for it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Size {
@@ -381,7 +489,9 @@ pub(crate) struct Size {
     pub(crate) transactions: u64,
     pub(crate) owners: u64,
     pub(crate) movements: u64,
-    /// What that comes to, at [`BYTES_PER_NOTE`].
+    /// Blocks it can find by their identifier.
+    pub(crate) blocks: u64,
+    /// What that comes to, at [`BYTES_PER_NOTE`] and [`BYTES_PER_BLOCK`].
     pub(crate) bytes: u64,
 }
 
@@ -392,10 +502,14 @@ impl Index {
 
     /// Reads whatever the chain has added since the last call.
     ///
-    /// A reorganisation drops the whole index and reads the branch again.
-    /// Unwinding block by block would be faster and is not worth its own set
-    /// of bugs here: reorganisations are short and rare, and the rebuild no
-    /// longer holds anything the rest of the node needs while it runs.
+    /// A reorganisation takes back the blocks it undid, newest first, and
+    /// reads the ones it applied. This used to drop the whole index and read
+    /// the branch again, on the grounds that reorganisations are short and
+    /// rare. They are short; they are not rare, because the chain calls a tie
+    /// between two miners ordinary and every tie resolves as a switch on some
+    /// node, and on an explorer that switch cost every block the node holds
+    /// read back off the disk. A switch deeper than [`UNDO_DEPTH`] is still
+    /// answered that way, and so is a log cut from under the walk.
     ///
     /// `block_at` reads one block of the followed branch from wherever it is.
     /// A node lets go of the bodies of blocks too deep to be undone, and an
@@ -412,7 +526,7 @@ impl Index {
     /// the next turn works it out again: `at_last_read` is the identifier the
     /// branch carries at the highest height read, and after a turn that is a
     /// different height. Handing the same one back says the branch changed
-    /// under the index, and the whole of it is read again.
+    /// under the index, and it is taken back to where the branch parted.
     pub(crate) fn refresh(
         &mut self,
         head: &Head,
@@ -437,7 +551,17 @@ impl Index {
                 None => span.through <= head.tip,
             };
             if !agrees {
-                *self = Self::new();
+                // The branch moved, and what is left to find out is how far
+                // down. That is a question about the chain as it stands, so it
+                // is asked of the chain rather than of the head: the highest
+                // block read that the branch still carries is where the two
+                // part, and everything above it is taken back. Everything
+                // under it was one branch when it was read, and a branch is a
+                // chain, so a block the branch still carries has under it only
+                // blocks the branch still carries.
+                if !self.back_to_the_branch(span.through, &id_at) {
+                    *self = Self::new();
+                }
             }
         }
         // Every height this turn ends up relying on, and the identifier it
@@ -465,7 +589,7 @@ impl Index {
                 Held::Block(block) => {
                     let id = block.id();
                     relies_on.push((height, id));
-                    self.apply(&block);
+                    self.apply(&block, id);
                     self.stock_due = true;
                     self.span = Some(match self.span {
                         Some(span) => Span {
@@ -545,13 +669,25 @@ impl Index {
         // head is the tip this turn began with and the whole of this check is
         // about what happened since. A branch that got shorter inside the turn
         // is invisible to the head's own number.
+        //
+        // What it does about a height that moved is take it back, with
+        // everything read above it and whatever under it the branch no longer
+        // carries either: the switch may have landed below where the turn
+        // began, and the check at the top made what is under the turn one
+        // branch, which is not yet saying it is this one.
         let reaches = tip_now();
-        let started_over = relies_on
+        let still = |height, id| still_the_branch(height, id, reaches, &id_at);
+        let moved = relies_on
             .iter()
-            .any(|(height, id)| !still_the_branch(*height, *id, reaches, &id_at));
-        if started_over {
-            *self = Self::new();
-            self.stock_due = true;
+            .filter(|(height, id)| !still(*height, *id))
+            .map(|(height, _)| *height)
+            .min();
+        let started_over = moved.is_some();
+        if let Some(height) = moved {
+            if !self.back_to_the_branch(height.saturating_sub(1), &id_at) {
+                *self = Self::new();
+                self.stock_due = true;
+            }
         }
         // Not between batches: reckoning the distribution is the one thing here
         // that costs the whole index rather than the block just read, and a
@@ -570,9 +706,19 @@ impl Index {
         reading
     }
 
-    fn apply(&mut self, block: &Block) {
+    fn apply(&mut self, block: &Block, id: Hash32) {
         let height = block.header.height;
         self.totals.blocks = self.totals.blocks.saturating_add(1);
+        self.blocks.insert(id, height);
+        self.times.push(block.header.timestamp);
+        let mut undo = Undo {
+            height,
+            id,
+            made: Vec::with_capacity(block.transfers.len().saturating_add(1)),
+            spent: Vec::new(),
+            paid: Amount::ZERO,
+            fees: Amount::ZERO,
+        };
 
         let coinbase = block.coinbase.id();
         self.at.insert(
@@ -582,15 +728,16 @@ impl Index {
                 position: 0,
             },
         );
+        undo.made
+            .push((coinbase, outputs_of(block.coinbase.outputs.len())));
         for (id, note) in block.coinbase.created_notes() {
             self.credit(id, note.value, note.owner, height);
         }
         let paid = block.coinbase.total_output().unwrap_or(Amount::ZERO);
-        self.totals.paid_to_miners = self
-            .totals
-            .paid_to_miners
-            .checked_add(paid)
-            .unwrap_or(self.totals.paid_to_miners);
+        if let Some(total) = self.totals.paid_to_miners.checked_add(paid) {
+            self.totals.paid_to_miners = total;
+            undo.paid = paid;
+        }
 
         for (index, transfer) in block.transfers.iter().enumerate() {
             let position = u32::try_from(index)
@@ -600,11 +747,13 @@ impl Index {
             let id = transfer.id();
             self.at.insert(id, Location { height, position });
             self.totals.transfers = self.totals.transfers.saturating_add(1);
+            undo.made.push((id, outputs_of(transfer.outputs.len())));
 
             let mut consumed = Amount::ZERO;
             for input in &transfer.inputs {
                 if let Some(value) = self.debit(&input.note_id, height, id) {
                     consumed = consumed.checked_add(value).unwrap_or(consumed);
+                    undo.spent.push(input.note_id);
                 }
             }
             for (note_id, note) in transfer.created_notes() {
@@ -614,13 +763,169 @@ impl Index {
             // A transfer can never produce more than it consumes; consensus
             // refuses one that does, so the difference is the fee.
             if let Some(fee) = consumed.checked_sub(produced) {
-                self.totals.fees = self
-                    .totals
-                    .fees
-                    .checked_add(fee)
-                    .unwrap_or(self.totals.fees);
+                if let Some(total) = self.totals.fees.checked_add(fee) {
+                    self.totals.fees = total;
+                    undo.fees = undo.fees.checked_add(fee).unwrap_or(undo.fees);
+                }
             }
         }
+
+        self.undo.push_back(undo);
+        if self.undo.len() > UNDO_DEPTH {
+            self.undo.pop_front();
+        }
+    }
+
+    /// Takes back every block read above where the branch parted from what
+    /// this index holds, looking no higher than `highest`, and says whether it
+    /// could.
+    ///
+    /// Where they parted is the highest block read that the branch still
+    /// carries, and a block the branch carries has under it only blocks the
+    /// branch carries, because a branch is a chain: every identifier names
+    /// the one below it.
+    ///
+    /// Carries, said by the chain naming the same identifier at that height.
+    /// A chain that names nothing there is not taken as agreeing here, the
+    /// way the checks above take it for a height too deep to have changed:
+    /// the branch has already moved, and what is being looked for is proof of
+    /// where it still stands.
+    fn back_to_the_branch(&mut self, highest: u64, id_at: &impl Fn(u64) -> Option<Hash32>) -> bool {
+        let parted = self
+            .undo
+            .iter()
+            .rev()
+            .filter(|undo| undo.height <= highest)
+            .find(|undo| id_at(undo.height) == Some(undo.id))
+            .map(|undo| undo.height.saturating_add(1));
+        parted.is_some_and(|height| self.unwind_from(height))
+    }
+
+    /// Takes back every block read at `height` and above, newest first, and
+    /// says whether it could.
+    ///
+    /// It cannot when a block that has to go is older than what this index
+    /// kept the means to take back, or when nothing it read would be left
+    /// under `height` to stand on. The caller then starts again from nothing,
+    /// which is what every switch used to cost.
+    fn unwind_from(&mut self, height: u64) -> bool {
+        let Some(span) = self.span else {
+            return false;
+        };
+        if height > span.through {
+            return true;
+        }
+        while let Some(undo) = self.undo.pop_back() {
+            if undo.height < height {
+                self.undo.push_back(undo);
+                break;
+            }
+            self.take_back(&undo);
+        }
+        // The block under `height` is the new top, and its identifier is the
+        // one the next turn compares, so it has to be one this index kept.
+        // Where it is not, the caller starts again, and what was taken back on
+        // the way here goes with the rest.
+        let Some(top) = self.undo.back() else {
+            return false;
+        };
+        self.span = Some(Span {
+            through: top.height,
+            id: top.id,
+            ..span
+        });
+        self.resume = top.height.saturating_add(1);
+        // The table of the largest holders was worked out on the branch that
+        // lost, and it says the height it was worked out at, which is now a
+        // height on another branch. It is worked out again rather than left
+        // to its usual sixteen blocks.
+        self.stock_due = true;
+        self.stock_at = None;
+        true
+    }
+
+    /// Takes back the newest block this index read, which `undo` describes.
+    fn take_back(&mut self, undo: &Undo) {
+        let mut touched: Vec<PublicKey> = Vec::new();
+        for id in undo.spent.iter().rev() {
+            let Some(record) = self.notes.get_mut(id) else {
+                continue;
+            };
+            record.spent_at = None;
+            record.spent_by = None;
+            let (value, owner) = (record.value, record.owner);
+            if let Some(record) = self.owners.get_mut(&owner) {
+                record.held = record.held.saturating_add(value.as_pebbles());
+            }
+            self.totals.notes_spent = self.totals.notes_spent.saturating_sub(1);
+            touched.push(owner);
+        }
+        for (source, outputs) in undo.made.iter().rev() {
+            for index in (0..*outputs).rev() {
+                let Some(record) = self.notes.remove(&NoteId::new(*source, index)) else {
+                    continue;
+                };
+                if let Some(owner) = self.owners.get_mut(&record.owner) {
+                    owner.held = owner.held.saturating_sub(record.value.as_pebbles());
+                    // Once what came in has stopped counting it stays stopped.
+                    // Taking a payment off a figure that is already a floor
+                    // would make the floor read as a total.
+                    if owner.turnover_counted() {
+                        owner.received = owner.received.saturating_sub(record.value.as_pebbles());
+                    }
+                }
+                self.totals.notes_created = self.totals.notes_created.saturating_sub(1);
+                touched.push(record.owner);
+            }
+            self.at.remove(source);
+        }
+        // An owner's two lists are in the order of the chain and this block is
+        // the newest read, so what it added to them is at their ends.
+        let made: HashSet<Hash32> = undo.made.iter().map(|(id, _)| *id).collect();
+        touched.sort_unstable();
+        touched.dedup();
+        for owner in touched {
+            let Some(record) = self.owners.get_mut(&owner) else {
+                continue;
+            };
+            while record
+                .notes
+                .last()
+                .is_some_and(|id| made.contains(&id.source))
+            {
+                record.notes.pop();
+            }
+            while record
+                .movements
+                .last()
+                .is_some_and(|movement| movement.height == undo.height)
+            {
+                record.movements.pop();
+                self.movements = self.movements.saturating_sub(1);
+            }
+            // Paid only on the branch that lost, which a fresh read of the
+            // winning one would never have met. Every movement is a note of
+            // this owner's arriving or leaving, so an owner with no notes left
+            // has no movements left either.
+            if record.notes.is_empty() {
+                self.owners.remove(&owner);
+            }
+        }
+        self.blocks.remove(&undo.id);
+        self.times.pop();
+        let transfers = u64::try_from(undo.made.len().saturating_sub(1)).unwrap_or(u64::MAX);
+        self.totals.transfers = self.totals.transfers.saturating_sub(transfers);
+        self.totals.blocks = self.totals.blocks.saturating_sub(1);
+        self.totals.paid_to_miners = self
+            .totals
+            .paid_to_miners
+            .checked_sub(undo.paid)
+            .unwrap_or(Amount::ZERO);
+        self.totals.fees = self
+            .totals
+            .fees
+            .checked_sub(undo.fees)
+            .unwrap_or(Amount::ZERO);
     }
 
     fn credit(&mut self, id: NoteId, value: Amount, owner: PublicKey, height: u64) {
@@ -644,6 +949,7 @@ impl Index {
         });
         self.movements = self.movements.saturating_add(1);
         record.received = record.received.saturating_add(value.as_pebbles());
+        record.held = record.held.saturating_add(value.as_pebbles());
         self.totals.notes_created = self.totals.notes_created.saturating_add(1);
     }
 
@@ -655,7 +961,7 @@ impl Index {
         let value = record.value;
         let owner = record.owner;
         if let Some(owner) = self.owners.get_mut(&owner) {
-            owner.spent = owner.spent.saturating_add(value.as_pebbles());
+            owner.held = owner.held.saturating_sub(value.as_pebbles());
             owner.movements.push(Movement {
                 height,
                 incoming: false,
@@ -696,13 +1002,29 @@ impl Index {
     /// What this index is made of.
     pub(crate) fn size(&self) -> Size {
         let notes = u64::try_from(self.notes.len()).unwrap_or(u64::MAX);
+        let blocks = u64::try_from(self.blocks.len()).unwrap_or(u64::MAX);
         Size {
             notes,
             transactions: u64::try_from(self.at.len()).unwrap_or(u64::MAX),
             owners: u64::try_from(self.owners.len()).unwrap_or(u64::MAX),
             movements: self.movements,
-            bytes: notes.saturating_mul(BYTES_PER_NOTE),
+            blocks,
+            bytes: notes
+                .saturating_mul(BYTES_PER_NOTE)
+                .saturating_add(blocks.saturating_mul(BYTES_PER_BLOCK)),
         }
+    }
+
+    /// The height a block this index read sits at, by its identifier.
+    pub(crate) fn height_of(&self, block: &Hash32) -> Option<u64> {
+        self.blocks.get(block).copied()
+    }
+
+    /// The time in the header of the block this index read at `height`.
+    pub(crate) fn timestamp_at(&self, height: u64) -> Option<u64> {
+        let from = self.span?.from;
+        let at = usize::try_from(height.checked_sub(from)?).ok()?;
+        self.times.get(at).copied()
     }
 
     pub(crate) fn locate(&self, transaction: &Hash32) -> Option<Location> {
@@ -789,6 +1111,24 @@ impl Index {
     pub(crate) fn stock_at(&self) -> Option<u64> {
         self.stock_at
     }
+
+    /// Everything this index says about the chain, written out in one order,
+    /// so a test can ask whether two indexes reached by different roads say
+    /// the same thing.
+    ///
+    /// Read by the suites that include this file, and not by the unit tests
+    /// beside it.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn contents(&self) -> String {
+        let at: BTreeMap<_, _> = self.at.iter().collect();
+        let owners: BTreeMap<_, _> = self.owners.iter().collect();
+        let blocks: BTreeMap<_, _> = self.blocks.iter().collect();
+        format!(
+            "{:?}\n{at:?}\n{blocks:?}\n{:?}\n{:?}\n{owners:?}\n{:?}\n{}",
+            self.span, self.times, self.notes, self.totals, self.movements
+        )
+    }
 }
 
 #[cfg(test)]
@@ -839,9 +1179,64 @@ mod tests {
         );
         let pebbles = half.as_pebbles();
         assert_eq!(
-            (record.received, record.spent),
+            (record.received, record.spent()),
             (pebbles * 3, pebbles * 2),
             "what the owner was paid and paid out stopped counting at the ceiling"
+        );
+        assert!(
+            record.turnover_counted(),
+            "a turnover well inside what a count of pebbles holds is called a floor"
+        );
+    }
+
+    /// What an owner holds is told right past the point where a count of
+    /// pebbles stops, and the two turnover figures say they have become
+    /// floors.
+    ///
+    /// The balance was what came in less what went out, both counted in
+    /// pebbles and both saturating. Change comes back to the key that spent,
+    /// so an address paying out of one large note counts that note in and out
+    /// again on every payment, and past `u64::MAX` pebbles every payment in was
+    /// dropped whole while every payment out still counted: the balance slid
+    /// to nought with the notes that made it still unspent in the same index.
+    /// Nothing drove that much through one owner, so a balance worked out that
+    /// way passed.
+    #[test]
+    fn an_owner_whose_turnover_passes_what_a_count_can_hold_keeps_its_balance() {
+        let owner = SecretKey::generate().unwrap().public_key();
+        let half = Amount::from_pebbles(Amount::MAX_MONEY.as_pebbles() / 2).unwrap();
+        let mut index = Index::new();
+
+        // Half of everything there can be, paid back to the same key over and
+        // over: past u64::MAX pebbles by a couple of payments.
+        let payments = u64::MAX / half.as_pebbles() + 2;
+        let mut held = NoteId::new(Hash32::from_bytes([0; 32]), 0);
+        index.credit(held, half, owner, 0);
+        for payment in 1..=payments {
+            let mut source = [0u8; 32];
+            source[..8].copy_from_slice(&payment.to_le_bytes());
+            let spender = Hash32::from_bytes(source);
+            index.debit(&held, payment, spender);
+            held = NoteId::new(spender, 0);
+            index.credit(held, half, owner, payment);
+        }
+
+        let record = index.owner(&owner).unwrap();
+        assert_eq!(
+            record.balance(),
+            half,
+            "an owner still holding one note worth half of all the money there can \
+             be was told it held another figure, because what had passed through it \
+             stopped counting and what went out did not"
+        );
+        assert!(
+            !record.turnover_counted(),
+            "what came in stopped counting, and nothing says that the two turnover \
+             figures are now floors rather than totals"
+        );
+        assert!(
+            record.spent() > 0 && record.spent() < record.received,
+            "what went out is published as a floor below what came in"
         );
     }
 }

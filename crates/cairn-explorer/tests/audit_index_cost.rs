@@ -75,11 +75,22 @@ fn read_all(
     head: impl Fn(&Index) -> Option<Head>,
     block_at: impl Fn(u64) -> Held,
 ) {
+    read_all_on(index, head, block_at, |_| None);
+}
+
+/// The same, with the chain answering what it carries at each height, which
+/// is what the index asks to find where a switch parted from what it read.
+fn read_all_on(
+    index: &mut Index,
+    head: impl Fn(&Index) -> Option<Head>,
+    block_at: impl Fn(u64) -> Held,
+    id_at: impl Fn(u64) -> Option<cairn_primitives::Hash32>,
+) {
     loop {
         let Some(now) = head(index) else {
             return;
         };
-        if index.refresh(&now, &block_at, |_| None, || Some(now.tip)) == Reading::Done {
+        if index.refresh(&now, &block_at, &id_at, || Some(now.tip)) == Reading::Done {
             return;
         }
     }
@@ -237,14 +248,16 @@ fn rss_kb() -> u64 {
         .unwrap_or(0)
 }
 
-/// A reorganisation makes the index read the whole chain again, not the part
-/// that changed. That much is deliberate. What it used to do besides, and no
-/// longer does, is hold the chain while it happened.
+/// A reorganisation makes the index read what the switch applied, and past
+/// the depth the index can take back, the whole chain again. What it used to
+/// do besides, and no longer does, is hold the chain while it happened.
 ///
-/// The claim under test is the one in `Index::refresh`'s own comment:
-/// "A reorganisation drops the whole index and reads the branch again."
-/// Unwinding would be faster and is not worth its own set of bugs. What was
-/// wrong was never the re-reading: it was that `Explorer::refresh` took the
+/// `Index::refresh`'s comment used to say "a reorganisation drops the whole
+/// index and reads the branch again", and this test held it: every switch,
+/// the tie between two miners included, read every block the node holds. It
+/// now takes the undone blocks back and reads the applied ones, and only a
+/// switch deeper than `UNDO_DEPTH` is read again from the start, which is the
+/// last case below. What was also wrong was that `Explorer::refresh` took the
 /// index lock, then the node's single chain lock, and then called
 /// `archived_at` once per block inside it. `answer`'s doc comment two lines
 /// below says why that must not happen, and `refresh` did exactly that for
@@ -262,7 +275,7 @@ fn rss_kb() -> u64 {
 /// So the times below are a floor: every shelf read is a file seek and a
 /// decode on the real thing.
 #[test]
-fn a_reorganisation_rereads_the_whole_chain_and_holds_nothing_while_it_does() {
+fn a_reorganisation_reads_what_it_applied_and_holds_nothing_while_it_does() {
     for (length, depth) in [
         (1_000usize, 1usize),
         (3_000, 1),
@@ -294,7 +307,7 @@ fn a_reorganisation_rereads_the_whole_chain_and_holds_nothing_while_it_does() {
         let mut index = Index::new();
         let head = head_of(&store, &index).unwrap();
         let started = Instant::now();
-        read_all(
+        read_all_on(
             &mut index,
             |_| Some(head),
             |height| {
@@ -304,6 +317,7 @@ fn a_reorganisation_rereads_the_whole_chain_and_holds_nothing_while_it_does() {
                 }
                 shelf.held(&store, height)
             },
+            |height| store.id_at(height),
         );
         let first = started.elapsed();
         let first_reads = reads.get();
@@ -315,13 +329,14 @@ fn a_reorganisation_rereads_the_whole_chain_and_holds_nothing_while_it_does() {
         feed(&mut store, std::slice::from_ref(&extra));
         reads.set(0);
         let started = Instant::now();
-        read_all(
+        read_all_on(
             &mut index,
             |index| head_of(&store, index),
             |height| {
                 reads.set(reads.get() + 1);
                 shelf.held(&store, height)
             },
+            |height| store.id_at(height),
         );
         let extend = started.elapsed();
         let extend_reads = reads.get();
@@ -340,7 +355,7 @@ fn a_reorganisation_rereads_the_whole_chain_and_holds_nothing_while_it_does() {
         reads.set(0);
         off_shelf.set(0);
         let started = Instant::now();
-        read_all(
+        read_all_on(
             &mut index,
             |index| head_of(&store, index),
             |height| {
@@ -350,6 +365,7 @@ fn a_reorganisation_rereads_the_whole_chain_and_holds_nothing_while_it_does() {
                 }
                 shelf.held(&store, height)
             },
+            |height| store.id_at(height),
         );
         let after = started.elapsed();
         let after_reads = reads.get();
@@ -363,11 +379,22 @@ fn a_reorganisation_rereads_the_whole_chain_and_holds_nothing_while_it_does() {
         );
 
         assert_eq!(extend_reads, 1, "an ordinary new block reads one block");
-        assert_eq!(
-            after_reads,
-            index.blocks_read(),
-            "and a reorganisation of {depth} reads the whole branch again"
-        );
+        // The good branch lost `depth` blocks and the one mined on top of it.
+        if depth < 128 {
+            assert_eq!(
+                after_reads,
+                bad.len(),
+                "a reorganisation of {} reads the {} blocks it applied",
+                depth + 1,
+                bad.len()
+            );
+        } else {
+            assert_eq!(
+                after_reads,
+                index.blocks_read(),
+                "and one deeper than the index can take back reads the branch again"
+            );
+        }
     }
 }
 
@@ -506,8 +533,12 @@ fn a_trimmed_log_costs_the_index_only_the_blocks_that_were_trimmed() {
         .is_some_and(|record| record.balance() > cairn_primitives::Amount::ZERO));
 }
 
-/// The same, reached without a restart: a reorganisation resets the index, and
-/// the walk that follows starts again from where the node's blocks start.
+/// The same, reached without a restart: a reorganisation deeper than the index
+/// can take back resets it, and the walk that follows starts again from where
+/// the node's blocks start.
+///
+/// Deeper than `UNDO_DEPTH`, because a shallower one is taken back block by
+/// block now and never reaches the reset this is about.
 ///
 /// This is the shape that mattered. The index survived a trim while the
 /// process ran, because it only ever asked for heights above what it already
@@ -520,11 +551,11 @@ fn a_reorganisation_on_a_trimmed_log_rebuilds_from_where_the_blocks_start() {
     let rival = wallet(9);
 
     let mut base = Forge::new(params());
-    let common = base.mine_many(&miner, 1_400);
+    let common = base.mine_many(&miner, 1_300);
     let mut good = base.fork();
-    let good_blocks = good.mine_many(&miner, 100);
+    let good_blocks = good.mine_many(&miner, 200);
     let mut bad = base.fork();
-    let bad_blocks = bad.mine_many(&rival, 101);
+    let bad_blocks = bad.mine_many(&rival, 201);
 
     let mut store = ChainStore::archiving(params());
     feed(&mut store, &common);
@@ -536,10 +567,11 @@ fn a_reorganisation_on_a_trimmed_log_rebuilds_from_where_the_blocks_start() {
         shelf.add(block);
     }
     let mut index = Index::new();
-    read_all(
+    read_all_on(
         &mut index,
         |index| head_of(&store, index),
         |height| shelf.held(&store, height),
+        |height| store.id_at(height),
     );
     assert_eq!(index.blocks_read(), 1_500);
     assert!(index.reads_from_the_start());
@@ -552,10 +584,11 @@ fn a_reorganisation_on_a_trimmed_log_rebuilds_from_where_the_blocks_start() {
     // Upkeep trims the log to its budget. Nothing breaks: the index only ever
     // asks for heights above what it has.
     shelf.trim_to(100);
-    read_all(
+    read_all_on(
         &mut index,
         |index| head_of(&store, index),
         |height| shelf.held(&store, height),
+        |height| store.id_at(height),
     );
     assert_eq!(
         index.blocks_read(),
@@ -570,10 +603,11 @@ fn a_reorganisation_on_a_trimmed_log_rebuilds_from_where_the_blocks_start() {
     feed(&mut store, &bad_blocks);
     assert_eq!(store.tip(), bad_blocks.last().map(Block::id));
 
-    read_all(
+    read_all_on(
         &mut index,
         |index| head_of(&store, index),
         |height| shelf.held(&store, height),
+        |height| store.id_at(height),
     );
 
     assert_eq!(
@@ -585,11 +619,11 @@ fn a_reorganisation_on_a_trimmed_log_rebuilds_from_where_the_blocks_start() {
     );
     assert_eq!(index.covers(), Some((100, 1_500)));
     assert!(!index.reads_from_the_start());
-    // It held 1,500 rewards. It now holds the 1,300 it was paid in blocks
+    // It held 1,500 rewards. It now holds the 1,200 it was paid in blocks
     // this node still has: the hundred under the cut are gone with the blocks,
-    // and the hundred above the fork went with the branch. Both are real
+    // and the two hundred above the fork went with the branch. Both are real
     // subtractions and neither is the index giving up.
-    let kept = cairn_primitives::Amount::from_pebbles(params().initial_reward.as_pebbles() * 1_300)
+    let kept = cairn_primitives::Amount::from_pebbles(params().initial_reward.as_pebbles() * 1_200)
         .unwrap();
     assert_eq!(
         index.owner(&miner.public_key()).map(|r| r.balance()),
@@ -601,10 +635,11 @@ fn a_reorganisation_on_a_trimmed_log_rebuilds_from_where_the_blocks_start() {
 
     // And it stays there, however long the site runs.
     for _ in 0..20 {
-        read_all(
+        read_all_on(
             &mut index,
             |index| head_of(&store, index),
             |height| shelf.held(&store, height),
+            |height| store.id_at(height),
         );
     }
     assert_eq!(index.blocks_read(), 1_401);

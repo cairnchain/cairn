@@ -225,12 +225,12 @@ fn feed(explorer: &Explorer, blocks: &[Block]) {
     }
 }
 
-fn ask(explorer: &Explorer, rest: &str) -> Response {
+fn asking(rest: &str) -> Request {
     let (path, query) = match rest.split_once('?') {
         Some((path, query)) => (path, query),
         None => (rest, ""),
     };
-    let request = Request {
+    Request {
         path: format!("/api/{path}"),
         query: query.to_owned(),
         head_only: false,
@@ -238,8 +238,13 @@ fn ask(explorer: &Explorer, rest: &str) -> Response {
         body: String::new(),
         host: String::new(),
         origin: String::new(),
-    };
-    explorer.answer(&request).expect("an API route answered")
+    }
+}
+
+fn ask(explorer: &Explorer, rest: &str) -> Response {
+    explorer
+        .answer(&asking(rest))
+        .expect("an API route answered")
 }
 
 fn body(answer: &Response) -> String {
@@ -1214,8 +1219,13 @@ fn a_route_is_answered_while_the_index_is_being_built() {
                 // The one route whose whole purpose is saying how far the
                 // index has got. Timed around the call, so a request that is
                 // blocked and then completes records the wait.
+                //
+                // Asked without `ask`, which fails on a route that answers
+                // nothing: failing here ended this thread, and the loop below
+                // waited for ever for the tenth answer. Every other test in
+                // this file fails on such a route; this one only times it.
                 let began = Instant::now();
-                let _ = ask(&explorer, "status");
+                let _ = explorer.answer(&asking("status"));
                 longest.fetch_max(began.elapsed().as_micros() as u64, Ordering::Relaxed);
                 asked.fetch_add(1, Ordering::Relaxed);
             }
@@ -1978,5 +1988,370 @@ fn holders_hold_something_and_the_table_of_the_largest_keeps_fifty() {
     assert_eq!(
         listed, 50,
         "the table of the largest holds fifty and no more"
+    );
+}
+
+/// The text of `field` in an answer, up to the next comma or brace.
+fn field_of(answer: &Response, field: &str) -> String {
+    body(answer)
+        .split(&format!("\"{field}\":"))
+        .nth(1)
+        .map_or_else(
+            || "<absent>".to_owned(),
+            |rest| rest.split([',', '}']).next().unwrap_or_default().to_owned(),
+        )
+}
+
+/// **A block held only on disk names the block mined on top of it.**
+///
+/// `/api/block/N` carries `next`, and the page prints "Not mined yet" when it
+/// is null. An archiving node lets go of the bodies of blocks more than sixty
+/// four below the tip, and `block()` looked the block up before it named the
+/// height after it: in the reading that names what to fetch, the block was not
+/// in memory, the route answered 404 there, and `N + 1` was never fetched. So
+/// every block older than about an hour said its successor was not mined yet,
+/// on a page that also said it had seventy seven confirmations. The test that
+/// serves a block off disk checked its identifier and its size, and not
+/// `next`.
+#[test]
+fn a_block_held_only_on_disk_names_the_block_after_it() {
+    let params = params();
+    let miner = wallet(1);
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(&miner, 80);
+
+    let held = Archiving::open(params, "next-on-disk");
+    let explorer = &held.explorer;
+    feed(explorer, &blocks);
+    assert!(
+        explorer
+            .node()
+            .with_chain(|chain| chain.block_at(3).is_none() && chain.block_at(4).is_none()),
+        "the node still holds these bodies in memory, so this tests nothing"
+    );
+    explorer.refresh();
+
+    let expected = format!("\"{}\"", blocks[4].id());
+    for reference in [3.to_string(), blocks[3].id().to_string()] {
+        let answer = ask(explorer, &format!("block/{reference}"));
+        assert_eq!(answer.status, 200, "block 3 is served off the disk");
+        assert_eq!(
+            field_of(&answer, "next"),
+            expected,
+            "a block held only on disk says no block was mined on top of it, which \
+             the page prints as `Not mined yet` seventy six blocks below the tip"
+        );
+    }
+
+    // A block still in memory names its successor, which is the control.
+    let warm = ask(explorer, "block/70");
+    assert_eq!(field_of(&warm, "next"), format!("\"{}\"", blocks[71].id()));
+}
+
+/// Every place this explorer keeps blocks, as the log reports it.
+fn kept_range(explorer: &Explorer) -> (u64, u64) {
+    (
+        explorer.node().blocks_from().unwrap(),
+        explorer.node().written_through().unwrap(),
+    )
+}
+
+/// **A transaction or a block this explorer no longer keeps is not called
+/// absent from the chain.**
+///
+/// The index reads the chain once and keeps what it read, and under `--keep`
+/// the log is then trimmed to its budget. A transaction the index still
+/// located, in a block no longer held in memory or on disk, was answered "no
+/// such transaction" with `coverage.whole` true, which the page prints as
+/// "There is nothing on this chain with that name". `/api/block` answered the
+/// same block with a bare 404 carrying no coverage at all, and `/api/blocks`
+/// listed nothing over the gap and said nothing about why. The coverage an
+/// answer carried was the index's, which had read the block; nothing said
+/// what the disk held.
+#[test]
+fn a_transaction_in_a_block_this_explorer_no_longer_keeps_is_not_called_absent() {
+    let params = params().with_burial(8);
+    let miner = wallet(1);
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(&miner, 200);
+
+    let held = Archiving::open(params, "trimmed-tx");
+    let explorer = &held.explorer;
+    feed(explorer, &blocks);
+    explorer.refresh();
+    assert!(
+        says(&ask(explorer, "status"), "through", "199"),
+        "the index read the whole chain before anything was trimmed"
+    );
+
+    // Then the operator's budget applies, and upkeep drops the oldest blocks.
+    explorer.node().keep_blocks(1);
+    let mut from = 0;
+    for _ in 0..150 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        from = explorer.node().blocks_from().unwrap_or(0);
+        if from > 7 {
+            break;
+        }
+    }
+    assert!(
+        from > 7,
+        "the log was never trimmed above block 7, so this proves nothing"
+    );
+    explorer.refresh();
+    assert!(
+        explorer.node().archived_at(2).is_none(),
+        "block 2 is still on the disk, so this tests nothing"
+    );
+    let (kept_from, kept_through) = kept_range(explorer);
+
+    let coinbase = blocks[2].coinbase.id();
+    let answer = ask(explorer, &format!("tx/{coinbase}"));
+    assert_eq!(answer.status, 404, "the transaction cannot be shown");
+    assert!(
+        says(&answer, "error", "\"not kept\""),
+        "a transaction on the chain, in a block this site no longer keeps, is answered \
+         as though there were no such transaction"
+    );
+    for (field, value) in [
+        ("height", "2".to_owned()),
+        ("position", "0".to_owned()),
+        ("confirmations", "198".to_owned()),
+    ] {
+        assert_eq!(
+            field_of(&answer, field),
+            value,
+            "the answer does not say where the transaction sits"
+        );
+    }
+    let kept = format!("\"kept\":{{\"from\":{kept_from},\"through\":{kept_through}}}");
+    assert!(
+        body(&answer).contains(&kept),
+        "the answer does not say which blocks this site keeps"
+    );
+
+    let answer = ask(explorer, "block/2");
+    assert_eq!(answer.status, 404);
+    assert!(
+        says(&answer, "error", "\"not kept\"") && says(&answer, "height", "2"),
+        "a block on the chain that this site no longer keeps is a bare `no such block`"
+    );
+    assert!(
+        body(&answer).contains(&kept),
+        "a 404 about a block carries no coverage and no kept range"
+    );
+
+    let answer = ask(explorer, "block/100000");
+    assert_eq!(answer.status, 404);
+    assert!(
+        says(&answer, "error", "\"above the tip\"") && says(&answer, "tip", "199"),
+        "a height the chain has not reached is not said to be above the tip"
+    );
+
+    let answer = ask(explorer, "blocks?from=6&limit=5");
+    assert!(
+        body(&answer).contains("\"notKept\":{\"from\":2,\"through\":6}"),
+        "a page of blocks over the gap lists nothing and says nothing about why: {}",
+        body(&answer)
+    );
+}
+
+/// Changes one byte of the state root of the block at `height`, under the
+/// running node. The record after it no longer names it, which is what the log
+/// refuses on, so the block will not read back.
+fn damage(held: &Archiving, height: usize) {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let index = std::fs::read(held.directory.join(cairn_store::BLOCK_INDEX)).unwrap();
+    let start = u64::from_le_bytes(index[(height - 1) * 8..height * 8].try_into().unwrap());
+    let state_root = 4 + 2 + 4 + 8 + 32 + 32;
+    let mut log = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(held.directory.join(cairn_store::BLOCK_LOG))
+        .unwrap();
+    log.seek(SeekFrom::Start(start + state_root)).unwrap();
+    let mut byte = [0u8; 1];
+    log.read_exact(&mut byte).unwrap();
+    log.seek(SeekFrom::Start(start + state_root)).unwrap();
+    log.write_all(&[byte[0] ^ 1]).unwrap();
+    log.sync_all().unwrap();
+    drop(log);
+    assert!(
+        held.explorer.node().archived_at(height as u64).is_none(),
+        "the damaged record still reads, so this tests nothing"
+    );
+}
+
+/// **A block the disk will not read back is said to be that, and not
+/// absent.**
+///
+/// The same path as a block let go of, reached on an explorer keeping every
+/// block: the log records the refusal, `archived_at` answers nothing, and
+/// every route called the block and every transaction in it absent from the
+/// chain while `/api/status` said the disk had refused.
+#[test]
+fn a_block_the_disk_will_not_read_back_is_not_called_absent() {
+    let params = params();
+    let miner = wallet(1);
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(&miner, 80);
+
+    let held = Archiving::open(params, "unreadable");
+    let explorer = &held.explorer;
+    feed(explorer, &blocks);
+    explorer.refresh();
+
+    damage(&held, 3);
+
+    let answer = ask(explorer, "block/3");
+    assert_eq!(answer.status, 404);
+    assert!(
+        says(&answer, "error", "\"unreadable\"") && says(&answer, "height", "3"),
+        "a block the disk would not read back is answered as though the chain had none"
+    );
+    let answer = ask(explorer, &format!("tx/{}", blocks[3].coinbase.id()));
+    assert!(
+        says(&answer, "error", "\"unreadable\"") && says(&answer, "height", "3"),
+        "a transaction in a block the disk would not read back is answered as though \
+         there were no such transaction"
+    );
+}
+
+/// **A block older than the window is found by its identifier as it is by
+/// its height.**
+///
+/// The branch names identifiers for the last 1 025 heights and no further,
+/// and `/api/block/{id}` asked the branch and nothing else. So a block older
+/// than about seventeen hours was served by height and was "no such block" by
+/// identifier, and the search box called the identifier unknown or, about one
+/// time in twelve when the bytes decode as a key, an address holding nothing,
+/// exactly. The test of the branch question held the window and nothing below
+/// it.
+#[test]
+fn a_block_older_than_the_window_is_found_by_its_identifier() {
+    let params = params();
+    let miner = wallet(1);
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(&miner, 1_100);
+
+    let held = Archiving::open(params, "old-id");
+    let explorer = &held.explorer;
+    feed(explorer, &blocks);
+    explorer.refresh();
+    assert!(
+        explorer
+            .node()
+            .with_chain(|chain| chain.height_of(&blocks[5].id()).is_none()),
+        "the branch still names block 5, so this tests nothing"
+    );
+
+    let by_height = ask(explorer, "block/5");
+    assert_eq!(by_height.status, 200, "block 5 is served by height");
+    let by_id = ask(explorer, &format!("block/{}", blocks[5].id()));
+    assert_eq!(
+        by_id.status, 200,
+        "block 5 is served by height and is `no such block` by its identifier"
+    );
+    assert!(says(&by_id, "height", "5"));
+
+    let search = ask(explorer, &format!("search?q={}", blocks[5].id()));
+    assert!(
+        says(&search, "kind", "\"block\"") && says(&search, "target", "\"\\/block\\/5\""),
+        "the search box does not find an old block by its identifier"
+    );
+
+    // A height is a block for as far as the chain reaches, whether or not the
+    // body is at hand, and not a step past it.
+    let search = ask(explorer, "search?q=1099");
+    assert!(
+        says(&search, "kind", "\"block\""),
+        "the tip is not found by its height"
+    );
+    let search = ask(explorer, "search?q=1100");
+    assert!(
+        says(&search, "kind", "\"unknown\""),
+        "a height past the tip is announced as a block"
+    );
+
+    // An identifier that decodes as a key, which search used to announce as an
+    // address holding nothing.
+    let as_key = blocks
+        .iter()
+        .take(200)
+        .find(|block| PublicKey::from_bytes(block.id().as_bytes()).is_ok())
+        .expect("about one identifier in twelve decodes as a key");
+    let search = ask(explorer, &format!("search?q={}", as_key.id()));
+    assert!(
+        says(&search, "kind", "\"block\""),
+        "an old block whose identifier decodes as a key is announced as an address"
+    );
+}
+
+/// **The site reports the two states only `cairnd` read.**
+///
+/// A node nobody can connect in to, and a node whose list of peers will not
+/// write, look exactly like working ones: the height climbs and every figure
+/// is right. `cairnd` says both on its status lines. The explorer is a node
+/// others connect to and prints no status line at all, so `/api/status` is
+/// the one place its operator can read them, and it carried neither. A
+/// healthy node answers them in as many words, which is what is held: that
+/// the answer asks, not that a disk or a listener can be broken here.
+#[test]
+fn the_site_reports_what_only_cairnd_read() {
+    let params = params();
+    let miner = wallet(1);
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(&miner, 2);
+
+    let explorer = explorer(params);
+    feed(&explorer, &blocks);
+    explorer.refresh();
+
+    let status = ask(&explorer, "status");
+    for (field, healthy) in [
+        ("unanswered", "null"),
+        ("turnedAway", "0"),
+        ("unsavedAddresses", "null"),
+    ] {
+        assert!(
+            says(&status, field, healthy),
+            "the site's status does not carry `{field}`, which only cairnd reads: {}",
+            body(&status)
+        );
+    }
+}
+
+/// **An address page dates its movements without reading their blocks.**
+///
+/// The history of an address is a hundred movements, each with the age of the
+/// block it happened in, and the age came off the block: one page read up to
+/// a hundred whole blocks off the disk, with the log's lock taken for each,
+/// to print a hundred timestamps. A movement in a block the disk would not
+/// give back was printed with no age at all. Nothing counted what the page
+/// read.
+#[test]
+fn an_address_page_dates_its_movements_without_reading_their_blocks() {
+    let params = params();
+    let miner = wallet(1);
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(&miner, 80);
+
+    let held = Archiving::open(params, "dated");
+    feed(&held.explorer, &blocks);
+    held.explorer.refresh();
+    damage(&held, 3);
+
+    let answer = ask(&held.explorer, &format!("address/{}", miner.public_key()));
+    let dated = format!(
+        "\"height\":3,\"direction\":\"in\",\"transaction\":\"{}\",\"value\":\"{}\",\"timestamp\":{}",
+        blocks[3].coinbase.id(),
+        params.initial_reward.as_pebbles(),
+        blocks[3].header.timestamp
+    );
+    assert!(
+        body(&answer).contains(&dated),
+        "the page dates a movement by reading its block, so a block the disk will \
+         not give back is a movement with no date"
     );
 }

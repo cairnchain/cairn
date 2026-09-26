@@ -18,7 +18,7 @@ use cairn_ledger::transaction::{Transfer, Witness};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_net::joining::Joined;
 use cairn_net::node::{
-    Behind, Filling, Probation, Stranded, Unjudged, Unread, Unweighable, Unwritten,
+    Behind, Filling, Probation, Stranded, Unanswered, Unjudged, Unread, Unweighable, Unwritten,
 };
 use cairn_net::Node;
 use cairn_primitives::codec::Encode;
@@ -36,6 +36,10 @@ const PAGE: usize = 25;
 /// and a block runs to `max_block_bytes`, so the ceiling on a page is a ceiling
 /// on what one stranger can make this node carry. It is the same order as the
 /// number of blocks a peer may ask for in one message, for the same reason.
+///
+/// A ceiling in rows, and rows do not weigh the same: a hundred and twenty
+/// eight blocks at the byte ceiling are sixteen megabytes. [`fetch_budget`] is
+/// the ceiling in bytes, and a page stops at whichever comes first.
 const MAX_PAGE: usize = 128;
 /// Bytes one answer may reach before a list stops adding to it.
 ///
@@ -361,14 +365,13 @@ impl Explorer {
         // waiting on itself.
         let health = Health::of(&self.node);
 
-        let (_, wanted) = self.read(request, &[], Pass::Naming, &health);
-        let fetched: Vec<Block> = wanted
-            .iter()
-            .filter_map(|height| self.node.archived_at(*height))
-            .collect();
+        let (_, wanted) = self.read(request, &[], None, Pass::Naming, &health);
+        let (fetched, cut) = fetch(&wanted, fetch_budget(), |height| {
+            self.node.archived_at(height)
+        });
         // Whatever the second reading still wants is a block this node does
         // not hold, and it is answered around rather than asked for again.
-        self.read(request, &fetched, Pass::Answering, &health)
+        self.read(request, &fetched, cut, Pass::Answering, &health)
             .0
             .map(deliverable)
     }
@@ -379,6 +382,7 @@ impl Explorer {
         &self,
         request: &Request,
         fetched: &[Block],
+        cut: Option<u64>,
         pass: Pass,
         health: &Health,
     ) -> (Option<Response>, Vec<u64>) {
@@ -389,6 +393,7 @@ impl Explorer {
                 index: &index,
                 health,
                 fetched,
+                cut,
                 pass,
                 wanted: RefCell::new(Vec::new()),
             };
@@ -396,6 +401,41 @@ impl Explorer {
             (answer, context.wanted.into_inner())
         })
     }
+}
+
+/// Bytes of blocks one answer may fetch off the log before it stops asking.
+///
+/// Every block an answer names is fetched and held decoded while the answer is
+/// written, and what bounded that was rows: a page of a hundred and twenty
+/// eight blocks at the rules' byte ceiling is sixteen megabytes a request, and
+/// about a gigabyte across the sixty four connections this server takes, on a
+/// testnet whose blocks are a few hundred bytes so that nothing had ever seen
+/// it. Twice what one answer can carry is more than any page needs to fill
+/// itself, since a block summary is a few hundred bytes; the list ends where
+/// the fetch stopped, with `next` pointing on.
+fn fetch_budget() -> usize {
+    most_one_answer_carries().saturating_mul(2)
+}
+
+/// Reads `wanted` off the log in the order the answer named it, until what was
+/// read passes `budget` bytes, and says the first height it left unread.
+fn fetch(
+    wanted: &[u64],
+    budget: usize,
+    read: impl Fn(u64) -> Option<Block>,
+) -> (Vec<Block>, Option<u64>) {
+    let mut fetched = Vec::new();
+    let mut carried = 0usize;
+    for height in wanted {
+        if carried > budget {
+            return (fetched, Some(*height));
+        }
+        if let Some(block) = read(*height) {
+            carried = carried.saturating_add(block.encode().len());
+            fetched.push(block);
+        }
+    }
+    (fetched, None)
 }
 
 /// Which kind of nothing a height is, when the node would not produce a block
@@ -426,6 +466,28 @@ pub(crate) fn nothing_at(height: u64, from: Option<u64>, through: Option<u64>) -
         // A node keeping no blocks at all has nothing under the window its
         // chain holds in memory, and nothing is coming.
         _ => Held::Dropped,
+    }
+}
+
+/// Why a block the chain reaches, or does not, is not in an answer.
+///
+/// Four reasons and not one, and none of them is "there is no such block".
+/// Past the tip is the chain's answer. The other three are this site's
+/// disk's, told apart the way the walk tells them apart: under the run the
+/// log holds the block has been let go of, inside it the disk would not give
+/// it back, over it the block has not been written yet.
+///
+/// Apart from the route, like [`nothing_at`], so that every edge of it can be
+/// asked: the tip itself is always in memory, so no route ever reaches here
+/// for it.
+fn why_not(height: u64, tip: Option<u64>, from: Option<u64>, through: Option<u64>) -> &'static str {
+    if tip.is_none_or(|tip| height > tip) {
+        return "above the tip";
+    }
+    match nothing_at(height, from, through) {
+        Held::Refused => "unreadable",
+        Held::Waiting => "not written yet",
+        Held::Dropped | Held::Block(_) => "not kept",
     }
 }
 
@@ -497,6 +559,14 @@ struct Health {
     filling: Option<Filling>,
     /// The height its disk actually holds, against the tip it is serving.
     written_through: Option<u64>,
+    /// The lowest height its disk holds: the other end of the same run.
+    ///
+    /// What tells a block this site has let go of from one it never had.
+    /// Every answer carried what the index had read and nothing about what
+    /// the disk held, so a transaction the index had located, in a block
+    /// trimmed off under `--keep`, was "no such transaction" with the
+    /// coverage saying the whole chain had been read.
+    blocks_from: Option<u64>,
     /// Places in its header history this node found torn and built again.
     ///
     /// Zero on a disk that kept what it was given. Anything else is a disk
@@ -507,6 +577,20 @@ struct Health {
     /// node's own status line. So the one machine that most needed a new disk
     /// was shown a clean bill of health by both of the things that look.
     mended: u64,
+    /// Why nobody can connect to this node, if nobody can.
+    ///
+    /// For whoever runs the site rather than whoever reads it: a node in this
+    /// state still dials out and follows the chain, and every figure on the
+    /// page is as right as it was. What it has stopped being is somewhere
+    /// anybody else can reach, which `cairnd` says on its status line and
+    /// this program, which prints none, said nowhere.
+    unanswered: Option<Unanswered>,
+    /// Callers turned away since the node started.
+    turned_away: u64,
+    /// Why the list of peers is not being written, if it is not: nothing on
+    /// the chain depends on it, and the next start comes back knowing only
+    /// its seeds.
+    unsaved_addresses: Option<String>,
 }
 
 impl Health {
@@ -528,6 +612,10 @@ impl Health {
             mended: node.mended_nodes(),
             filling: node.filling(),
             written_through: node.written_through(),
+            blocks_from: node.blocks_from(),
+            unanswered: node.unanswered(),
+            turned_away: node.turned_away(),
+            unsaved_addresses: node.unsaved_addresses(),
         }
     }
 }
@@ -550,9 +638,13 @@ struct Context<'a> {
     chain: &'a ChainStore,
     index: &'a Index,
     health: &'a Health,
-    /// Blocks already fetched off the log for this request. A page's worth at
-    /// most, which is what bounds the memory one answer stands for.
+    /// Blocks already fetched off the log for this request, which is at most
+    /// [`fetch_budget`] bytes of them and what bounds the memory one answer
+    /// stands for.
     fetched: &'a [Block],
+    /// The first height named and left unread because the fetch had reached
+    /// its budget. A list stops there rather than answering around it.
+    cut: Option<u64>,
     pass: Pass,
     /// Heights this reading wanted and did not have, for the one after it.
     wanted: RefCell<Vec<u64>>,
@@ -598,6 +690,17 @@ impl Context<'_> {
         None
     }
 
+    /// Why the block at `height` is not in this answer, when the reading that
+    /// fetches found nothing there.
+    fn why_not(&self, height: u64) -> &'static str {
+        why_not(
+            height,
+            self.height(),
+            self.health.blocks_from,
+            self.health.written_through,
+        )
+    }
+
     /// The same, found by identifier.
     ///
     /// The branch is asked first, and it used to be asked second. Holding a
@@ -623,6 +726,21 @@ impl Context<'_> {
             return Some(block.clone());
         }
         self.block_at(height)
+    }
+
+    /// Where the block `id` sits on the followed branch: the branch's own
+    /// answer inside the window it names, the index's below it.
+    ///
+    /// The branch names identifiers for the last [`cairn_chain::HELD_WINDOW`]
+    /// heights and no further, so a block older than about seventeen hours
+    /// was served by its height and was "no such block" by its identifier.
+    /// The index can be half a second behind a switch, so whoever asks this
+    /// checks that the block at the height it gives is the one asked for, the
+    /// way `/api/tx` checks the transaction at a position.
+    fn height_of(&self, id: &Hash32) -> Option<u64> {
+        self.chain
+            .height_of(id)
+            .or_else(|| self.index.height_of(id))
     }
 
     fn height(&self) -> Option<u64> {
@@ -888,6 +1006,20 @@ fn coverage(json: &mut Writer, context: &Context<'_>) {
     // chain, which is the difference between "there is no such thing" and "I
     // have not got there yet".
     json.field_bool("whole", context.index.reads_from_the_start() && behind == 0);
+    // And what this site's disk holds, which is a different run. The index
+    // keeps what it read after the log lets the blocks under it go, so an
+    // index that read the whole chain says nothing about which blocks can
+    // still be shown, and a block that cannot is not a block the chain lacks.
+    match (context.health.blocks_from, context.health.written_through) {
+        (Some(from), Some(through)) => {
+            json.key("kept");
+            json.begin_object();
+            json.field_u64("from", from);
+            json.field_u64("through", through);
+            json.end_object();
+        }
+        _ => json.field_null("kept"),
+    }
     json.end_object();
 }
 
@@ -913,9 +1045,25 @@ fn has_read_it_all(context: &Context<'_>) -> bool {
 /// a tenth of the chain reads as "no such transaction" and means "not yet",
 /// and the page says different words for the two.
 fn not_found(context: &Context<'_>, message: &str) -> Response {
+    not_here(context, message, |_| {})
+}
+
+/// A four hundred and four about something this site knows is on the chain
+/// and cannot show: the reason, the height, and whatever `said` adds.
+///
+/// Every "not here" goes out in this one shape. `/api/block` had a bare
+/// `no such block` of its own with no coverage in it, and `/api/tx` used the
+/// sentence for a transaction nothing knew and for one the index had placed
+/// in a block this site had let go of, so the page told a person looking for
+/// their payment that the chain did not carry it.
+fn not_here(context: &Context<'_>, why: &str, said: impl FnOnce(&mut Writer)) -> Response {
     let mut json = Writer::new();
     json.begin_object();
-    json.field_str("error", message);
+    json.field_str("error", why);
+    said(&mut json);
+    if let Some(tip) = context.height() {
+        json.field_u64("tip", tip);
+    }
     coverage(&mut json, context);
     json.end_object();
     Response {
@@ -932,6 +1080,8 @@ fn index_cost(json: &mut Writer, size: Size) {
     json.field_str("owners", &size.owners.to_string());
     json.field_str("movements", &size.movements.to_string());
     json.field_u64("bytesPerNote", INDEX_BYTES_PER_NOTE);
+    json.field_str("blocksById", &size.blocks.to_string());
+    json.field_u64("bytesPerBlock", crate::index::BYTES_PER_BLOCK);
     json.field_str("bytes", &size.bytes.to_string());
 }
 
@@ -1116,7 +1266,28 @@ fn node_object(json: &mut Writer, context: &Context<'_>) {
     // Beside the other ways a disk can be failing, because it is one of them
     // and it was the only one nothing anywhere reported.
     json.field_u64("mended", node.mended);
+    unanswered_field(json, node.unanswered.as_ref(), node.turned_away);
+    match &node.unsaved_addresses {
+        Some(because) => json.field_str("unsavedAddresses", because),
+        None => json.field_null("unsavedAddresses"),
+    }
     json.end_object();
+}
+
+/// Whether anybody can connect to this node, which is its operator's question
+/// and not its readers'.
+fn unanswered_field(json: &mut Writer, unanswered: Option<&Unanswered>, turned_away: u64) {
+    match unanswered {
+        Some(unanswered) => {
+            json.key("unanswered");
+            json.begin_object();
+            json.field_str("because", &unanswered.because);
+            json.field_u64("refusals", unanswered.refusals);
+            json.end_object();
+        }
+        None => json.field_null("unanswered"),
+    }
+    json.field_u64("turnedAway", turned_away);
 }
 
 /// Blocks left before the reward halves.
@@ -1249,7 +1420,16 @@ fn blocks(context: &Context<'_>, request: &Request) -> Response {
     // decide. A page is what is there in that run, which may be less.
     let mut height = from;
     let mut walked = 0usize;
+    // The run of heights on this page the site no longer keeps, lowest and
+    // highest. A page over them used to list nothing and say nothing, which
+    // is the shape of a chain that is shorter than it is.
+    let mut not_kept: Option<(u64, u64)> = None;
     while walked < limit {
+        // Where the fetch stopped for want of budget. The page ends here and
+        // `next` is this height, so the reader asks for the rest.
+        if context.answering() && context.cut == Some(height) {
+            break;
+        }
         let before = json.mark();
         // The naming reading wants the heights and nothing else, and this is
         // the page where that is the whole of the difference: a hundred and
@@ -1264,6 +1444,8 @@ fn blocks(context: &Context<'_>, request: &Request) -> Response {
                     break;
                 }
             }
+        } else if context.why_not(height) == "not kept" {
+            not_kept = Some(not_kept.map_or((height, height), |(_, top)| (height, top)));
         }
         walked = walked.saturating_add(1);
         let Some(under) = height.checked_sub(1) else {
@@ -1275,6 +1457,16 @@ fn blocks(context: &Context<'_>, request: &Request) -> Response {
     match from.checked_sub(u64::try_from(walked).unwrap_or(u64::MAX)) {
         Some(next) => json.field_u64("next", next),
         None => json.field_null("next"),
+    }
+    match not_kept {
+        Some((lowest, highest)) => {
+            json.key("notKept");
+            json.begin_object();
+            json.field_u64("from", lowest);
+            json.field_u64("through", highest);
+            json.end_object();
+        }
+        None => json.field_null("notKept"),
     }
     json.end_object();
     Response::json(json.finish())
@@ -1360,11 +1552,32 @@ fn block_fees(context: &Context<'_>, block: &Block) -> Option<Amount> {
 /// `max_block_bytes` bounds the block and not what this writes: every hash
 /// becomes sixty six bytes of text and every note carries four fields about
 /// where it stands, so no ceiling on the chain's side is a ceiling here.
+///
+/// The height is worked out before the body is asked for, and the body and the
+/// one after it are named in the same reading. Asked the other way round, the
+/// reading that names what to fetch found no body in memory for any block an
+/// archiving node had let go of, answered 404 on the spot, and never named the
+/// height after it: every block more than an hour deep said its successor was
+/// "Not mined yet".
 fn block(context: &Context<'_>, request: &Request, reference: &str) -> Response {
-    let Some(block) = resolve_block(context, reference) else {
-        return Response::error(404, "no such block");
+    let asked = parse_hash(reference);
+    let Some(height) = block_height(context, reference) else {
+        return not_found(context, "no such block");
     };
-    let height = block.header.height;
+    let body = context.block_at(height);
+    let after = height
+        .checked_add(1)
+        .and_then(|next| context.block_at(next));
+    let Some(block) = body else {
+        return not_here(context, context.why_not(height), |json| {
+            json.field_u64("height", height);
+        });
+    };
+    // The index can be half a second behind a switch, and a height it gave
+    // for an identifier is then a height on the branch the node left.
+    if asked.is_some_and(|id| id != block.id()) {
+        return not_found(context, "no such block");
+    }
     let params = context.params();
 
     let mut json = Writer::new();
@@ -1387,10 +1600,7 @@ fn block(context: &Context<'_>, request: &Request, reference: &str) -> Response 
     json.field_str("stateRoot", &block.header.state_root.to_string());
     field_size(&mut json, context, || block.encode().len());
     json.field_u64("confirmations", context.confirmations(height));
-    match height
-        .checked_add(1)
-        .and_then(|next| context.block_at(next))
-    {
+    match after {
         Some(next) => json.field_str("next", &next.id().to_string()),
         None => json.field_null("next"),
     }
@@ -1412,31 +1622,7 @@ fn block(context: &Context<'_>, request: &Request, reference: &str) -> Response 
     );
 
     json.key("coinbase");
-    json.begin_object();
-    let coinbase = block.coinbase.id();
-    json.field_str("id", &coinbase.to_string());
-    json.field_str(
-        "total",
-        &block
-            .coinbase
-            .total_output()
-            .unwrap_or(Amount::ZERO)
-            .as_pebbles()
-            .to_string(),
-    );
-    json.field_str("extra", &hex::encode(&block.coinbase.extra));
-    match readable(&block.coinbase.extra) {
-        Some(text) => json.field_str("extraText", &text),
-        None => json.field_null("extraText"),
-    }
-    json.key("outputs");
-    json.begin_array();
-    for (index, output) in block.coinbase.outputs.iter().enumerate() {
-        let id = NoteId::new(coinbase, u32::try_from(index).unwrap_or(u32::MAX));
-        output_object(&mut json, context, &id, output);
-    }
-    json.end_array();
-    json.end_object();
+    block_coinbase(&mut json, context, &block);
 
     let carried = block.transfers.len();
     let offset = offset_of(request);
@@ -1467,12 +1653,43 @@ fn block(context: &Context<'_>, request: &Request, reference: &str) -> Response 
     Response::json(json.finish())
 }
 
-fn resolve_block(context: &Context<'_>, reference: &str) -> Option<Block> {
-    if let Ok(height) = reference.parse::<u64>() {
-        return context.block_at(height);
+/// The coinbase of a block, as the block page writes it: what it paid, to
+/// whom, and what its miner wrote in it.
+fn block_coinbase(json: &mut Writer, context: &Context<'_>, block: &Block) {
+    json.begin_object();
+    let coinbase = block.coinbase.id();
+    json.field_str("id", &coinbase.to_string());
+    json.field_str(
+        "total",
+        &block
+            .coinbase
+            .total_output()
+            .unwrap_or(Amount::ZERO)
+            .as_pebbles()
+            .to_string(),
+    );
+    json.field_str("extra", &hex::encode(&block.coinbase.extra));
+    match readable(&block.coinbase.extra) {
+        Some(text) => json.field_str("extraText", &text),
+        None => json.field_null("extraText"),
     }
-    let id = parse_hash(reference)?;
-    context.block(&id)
+    json.key("outputs");
+    json.begin_array();
+    for (index, output) in block.coinbase.outputs.iter().enumerate() {
+        let id = NoteId::new(coinbase, u32::try_from(index).unwrap_or(u32::MAX));
+        output_object(json, context, &id, output);
+    }
+    json.end_array();
+    json.end_object();
+}
+
+/// The height a block reference names: a height as written, or where the
+/// block with that identifier sits on the followed branch.
+fn block_height(context: &Context<'_>, reference: &str) -> Option<u64> {
+    if let Ok(height) = reference.parse::<u64>() {
+        return Some(height);
+    }
+    context.height_of(&parse_hash(reference)?)
 }
 
 fn output_object(json: &mut Writer, context: &Context<'_>, id: &NoteId, note: &Note) {
@@ -1655,8 +1872,15 @@ fn transaction(context: &Context<'_>, reference: &str) -> Response {
     let Some(location) = context.index.locate(&id) else {
         return not_found(context, "no such transaction");
     };
+    // Placed by the index in a block this site cannot show. That is not a
+    // transaction the chain lacks, and saying so told somebody looking for
+    // their payment that it was not on the chain.
     let Some(block) = context.block_at(location.height) else {
-        return not_found(context, "no such transaction");
+        return not_here(context, context.why_not(location.height), |json| {
+            json.field_u64("height", location.height);
+            json.field_u64("position", u64::from(location.position));
+            json.field_u64("confirmations", context.confirmations(location.height));
+        });
     };
 
     // Whatever sits at that position has to be the transaction that was asked
@@ -1791,6 +2015,7 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
         json.field_str("balance", "0");
         json.field_str("received", "0");
         json.field_str("spent", "0");
+        json.field_bool("turnoverCounted", true);
         json.field_usize("notes", 0);
         json.field_usize("unspentNotes", 0);
         json.field_bool("moreNotes", false);
@@ -1816,7 +2041,12 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
 
     json.field_str("balance", &record.balance().as_pebbles().to_string());
     json.field_str("received", &record.received.to_string());
-    json.field_str("spent", &record.spent.to_string());
+    json.field_str("spent", &record.spent().to_string());
+    // Both of those only grow, and past what a count of pebbles holds they
+    // stop: an address paying out of one large note with its change back to
+    // itself gets there. The balance above is kept apart and stays exact;
+    // these two become floors, and the page is told which they are.
+    json.field_bool("turnoverCounted", record.turnover_counted());
     json.field_usize("notes", record.notes.len());
 
     let notes_from = note_offset_of(request);
@@ -1890,8 +2120,11 @@ fn address(context: &Context<'_>, reference: &str, request: &Request) -> Respons
         json.field_str("direction", if movement.incoming { "in" } else { "out" });
         json.field_str("transaction", &movement.transaction.to_string());
         json.field_str("value", &movement.value.as_pebbles().to_string());
-        match context.block_at(movement.height) {
-            Some(block) => json.field_u64("timestamp", block.header.timestamp),
+        // Off the index, which kept the time when it read the block, and not
+        // off the block: a page of history used to read a hundred blocks off
+        // the disk to print a hundred timestamps.
+        match context.index.timestamp_at(movement.height) {
+            Some(timestamp) => json.field_u64("timestamp", timestamp),
             None => json.field_null("timestamp"),
         }
         json.end_object();
@@ -2053,8 +2286,11 @@ fn search(context: &Context<'_>, request: &Request) -> Response {
 /// turn and the first that exists wins; an address is last because it is the
 /// only one that needs nothing to exist.
 fn matched(context: &Context<'_>, query: &str) -> Option<(&'static str, String)> {
+    // Any height the chain reaches is a block, whether or not this site can
+    // still show it; the block page says which. Asking for the body here was a
+    // read off the disk to decide something the tip already says.
     if let Ok(height) = query.parse::<u64>() {
-        if context.block_at(height).is_some() {
+        if context.height().is_some_and(|tip| height <= tip) {
             return Some(("block", format!("/block/{height}")));
         }
     }
@@ -2066,8 +2302,16 @@ fn matched(context: &Context<'_>, query: &str) -> Option<(&'static str, String)>
     }
 
     if let Some(hash) = parse_hash(query) {
-        if let Some(block) = context.block(&hash) {
-            return Some(("block", format!("/block/{}", block.header.height)));
+        // By where it sits rather than by its body, so a block this site no
+        // longer keeps is still found, and the block page says why it cannot
+        // show it. Where the body is here it has to be the block asked for.
+        if let Some(height) = context.height_of(&hash) {
+            if context
+                .block_at(height)
+                .is_none_or(|block| block.id() == hash)
+            {
+                return Some(("block", format!("/block/{height}")));
+            }
         }
         if context.index.locate(&hash).is_some() || context.chain.pooled(&hash).is_some() {
             return Some(("transaction", format!("/tx/{hash}")));
@@ -2101,14 +2345,29 @@ fn parse_note(text: &str) -> Option<NoteId> {
 ///
 /// Miners put arbitrary bytes here as search space, so anything that is not
 /// printable text is left as hexadecimal rather than shown as mojibake.
+///
+/// Printable and also inert: a character that reorders or hides the text
+/// around it is refused as well as a control. A right to left override in a
+/// miner's sixty four bytes reversed the message on the page and could reorder
+/// the row it sat in, and a stranger's text is the last thing that should
+/// decide how the page around it reads.
 fn readable(bytes: &[u8]) -> Option<String> {
     if bytes.is_empty() {
         return None;
     }
     let text = std::str::from_utf8(bytes).ok()?;
     text.chars()
-        .all(|character| !character.is_control())
+        .all(|character| !character.is_control() && !moves_text(character))
         .then(|| text.to_owned())
+}
+
+/// The zero width and directional formatting characters: the marks, the
+/// embeddings and overrides, and the isolates.
+fn moves_text(character: char) -> bool {
+    matches!(
+        character,
+        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
 }
 
 #[cfg(test)]
@@ -2182,7 +2441,11 @@ mod tests {
             unweighable: None,
             filling: None,
             written_through: None,
+            blocks_from: None,
             mended: 0,
+            unanswered: None,
+            turned_away: 0,
+            unsaved_addresses: None,
         }
     }
 
@@ -2210,6 +2473,7 @@ mod tests {
                 index: &index,
                 health: &health,
                 fetched: &[],
+                cut: None,
                 pass,
                 wanted: std::cell::RefCell::new(Vec::new()),
             };
@@ -2259,6 +2523,123 @@ mod tests {
             readable(&[0xff, 0xfe]),
             None,
             "nor are bytes that are not UTF-8"
+        );
+    }
+
+    /// Each reason a block is not in an answer, at the edge of each.
+    ///
+    /// The routes reach this only for a block that is not in memory, and the
+    /// tip always is, so a route cannot ask about the tip: nothing there could
+    /// tell `past the tip` from `at or past it`.
+    #[test]
+    fn a_block_not_here_is_said_for_its_own_reason() {
+        use super::why_not;
+        let (tip, from, through) = (Some(100), Some(10), Some(90));
+        assert_eq!(why_not(101, tip, from, through), "above the tip");
+        assert_eq!(
+            why_not(100, tip, from, through),
+            "not written yet",
+            "the tip is on the chain"
+        );
+        assert_eq!(why_not(95, tip, from, through), "not written yet");
+        assert_eq!(why_not(90, tip, from, through), "unreadable");
+        assert_eq!(why_not(10, tip, from, through), "unreadable");
+        assert_eq!(why_not(9, tip, from, through), "not kept");
+        assert_eq!(
+            why_not(0, None, from, through),
+            "above the tip",
+            "a chain with no tip reaches nothing"
+        );
+    }
+
+    /// A block at `height` that carries nothing but a coinbase of `notes`
+    /// outputs, for weighing.
+    fn built(height: u64, notes: usize) -> cairn_ledger::block::Block {
+        let owner = SecretKey::from_bytes(&[7; 32]).public_key();
+        let coinbase = cairn_ledger::transaction::CoinbaseTransaction::new(
+            height,
+            vec![cairn_ledger::note::Note::new(Amount::from_pebbles(1).unwrap(), owner); notes],
+        );
+        cairn_ledger::block::Block {
+            header: cairn_ledger::block::BlockHeader {
+                version: 1,
+                network: cairn_ledger::validation::ConsensusParams::testnet().network,
+                height,
+                previous: Hash32::ZERO,
+                transactions_root: Hash32::ZERO,
+                state_root: Hash32::ZERO,
+                history: Hash32::ZERO,
+                timestamp: height,
+                difficulty: 1,
+                total_work: u128::from(height),
+                nonce: height,
+            },
+            coinbase,
+            transfers: Vec::new(),
+        }
+    }
+
+    /// What one answer fetches off the log stops at a budget in bytes, and
+    /// says where it stopped.
+    ///
+    /// The fetch was bounded by rows alone, a hundred and twenty eight blocks
+    /// held decoded for one anonymous request whatever each of them weighed.
+    /// Nothing weighed what was fetched.
+    #[test]
+    fn what_one_answer_fetches_stops_at_a_budget_in_bytes() {
+        use cairn_primitives::codec::Encode;
+
+        let one = built(0, 40).encode().len();
+        let wanted: Vec<u64> = (10..20).rev().collect();
+        let read = |height| Some(built(height, 40));
+
+        // Two blocks' worth: the third is read because the budget is not yet
+        // passed after two, and the fourth is not.
+        let (fetched, cut) = super::fetch(&wanted, one * 2, read);
+        assert_eq!(fetched.len(), 3, "the fetch went past its budget");
+        assert_eq!(cut, Some(16), "the fetch does not say where it stopped");
+
+        let (fetched, cut) = super::fetch(&wanted, one * 100, read);
+        assert_eq!(
+            (fetched.len(), cut),
+            (10, None),
+            "a page under the budget is read whole"
+        );
+
+        let (fetched, cut) = super::fetch(&wanted, one * 2, |_| None);
+        assert_eq!(
+            (fetched.len(), cut),
+            (0, None),
+            "a block the log would not give weighs nothing"
+        );
+    }
+
+    /// A coinbase message carrying a character that moves or hides the text
+    /// around it is not shown as text.
+    ///
+    /// Control characters were refused and format characters were not, so a
+    /// right to left override in a miner's sixty four bytes reversed the
+    /// message on the page, and a zero width space made two messages that
+    /// read the same compare different. Nothing asked about any character
+    /// that is not a control.
+    #[test]
+    fn a_coinbase_message_that_moves_the_text_around_it_is_not_shown_as_text() {
+        for (bytes, what) in [
+            ("mined in a shed\u{200F}", "a right to left mark"),
+            ("\u{202E}dehs a ni denim", "a right to left override"),
+            ("mined\u{2066}in a shed", "a directional isolate"),
+            ("mined\u{200B}in a shed", "a zero width space"),
+        ] {
+            assert_eq!(
+                readable(bytes.as_bytes()),
+                None,
+                "a message carrying {what} is shown as text"
+            );
+        }
+        assert_eq!(
+            readable("miné dans une remise".as_bytes()).as_deref(),
+            Some("miné dans une remise"),
+            "text that is only letters, in any script, is still text"
         );
     }
 

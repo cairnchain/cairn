@@ -40,9 +40,12 @@ cairn-explorer, a Cairn node that also serves a website
                          explorer does need them, and this is the one program
                          whose whole job is answering about every block ever,
                          so it keeps every block unless an operator says
-                         otherwise. Below `all` the index starts wherever the
-                         oldest kept block is, and every page says so rather
-                         than reporting a shorter chain as the whole of it.
+                         otherwise. Below `all` the oldest blocks are let
+                         go of: the index keeps what it read of them, a
+                         restart reads only what is kept, and a page that
+                         needs a block no longer kept says it is on the
+                         chain and not kept here, rather than reporting a
+                         shorter chain as the whole of it.
                          Accepts suffixes: 512MB, 8GB
   --check                work out what this explorer would do and print it,
                          then stop without starting anything. Exits with an
@@ -215,7 +218,9 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
 /// purpose is the opposite service, answering about every block ever, and it
 /// reads its index by walking the chain from the first block up. Left on a
 /// node's default it passed a gigabyte, dropped the oldest blocks, and then
-/// the first reorganisation left it with an index it could not rebuild.
+/// the first reorganisation left it with an index it could not rebuild. The
+/// index takes a shallow one back block by block now; one deeper than it keeps
+/// the means for is still a rebuild, from the first block up.
 pub(crate) const KEEP_EVERYTHING: u64 = u64::MAX;
 
 /// A size as an operator writes one.
@@ -358,9 +363,9 @@ mod tests {
     }
 
     /// An explorer left on a node's block budget passes it, drops the oldest
-    /// blocks, and then cannot rebuild its index after the next
-    /// reorganisation: it walks from the first block up, and the first block
-    /// is the one it no longer has. So the default here is the opposite of
+    /// blocks, and then cannot rebuild its index after a reorganisation too
+    /// deep to take back: it walks from the first block up, and the first
+    /// block is the one it no longer has. So the default here is the opposite of
     /// the node's, and an operator who cannot afford it says so.
     #[test]
     fn an_explorer_keeps_every_block_unless_told_otherwise() {
