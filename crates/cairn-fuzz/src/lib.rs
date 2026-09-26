@@ -35,7 +35,9 @@
 //!
 //! - `CAIRN_FUZZ_SEED` picks the run. Absent, it is [`DEFAULT_SEED`], so the
 //!   suite runs the same cases every time and a regression cannot hide behind
-//!   a lucky seed.
+//!   a lucky seed. It is read as a campaign prints it, `0x` and hexadecimal
+//!   digits, or in decimal, and a value that is neither stops the run: a
+//!   replay that quietly ran the default seed would pass and prove nothing.
 //! - `CAIRN_FUZZ_CASES` replaces the small count each test asks for.
 //! - `CAIRN_FUZZ_SECONDS` turns the count into a time budget and runs until it
 //!   is spent. This is the long campaign, and it is out of `cargo test` by
@@ -86,6 +88,11 @@
 //!
 //! There is still no corpus on disk: every campaign rebuilds its seeds in
 //! process, so a case found today is not a case tomorrow's run starts from.
+//! What is kept is the failure: a case whose body panics is written to
+//! `target/fuzz/<campaign>/` at the root of the workspace, with its seed, its
+//! number, what it said, and the two variables that run it again, before the
+//! panic goes on to fail the test. Nothing reduces it: a campaign draws values
+//! rather than a byte string, so [`shrink::smallest`] is still run by hand.
 //!
 //! Each case gets its own generator, seeded from the run seed and the case
 //! number, so case 91 941 of a two-minute campaign is reachable in a
