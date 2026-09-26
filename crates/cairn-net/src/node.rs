@@ -6112,8 +6112,22 @@ fn write_blocks(log: &mut BlockLog, accepted: &Accepted, chain: &ChainStore) -> 
     // was handed rather than zero. Counting from the log's own length instead
     // would look for a block at position zero, which such a node has never had
     // and never will, and it would write nothing for the rest of its life.
+    //
+    // The first block it can still produce, and not the block just applied.
+    // Those are the same only while every earlier write landed: a first write
+    // the disk refused, which is the network's first block appended when the
+    // node opens and never checked, left a log beginning partway up the chain,
+    // and the next start read that as a node that had joined above its own
+    // disk and cut every block in it.
     let mut height = if log.is_empty() {
-        reaches.saturating_sub(added as u64)
+        let mut lowest = reaches.saturating_sub(added as u64);
+        while let Some(below) = lowest.checked_sub(1) {
+            if chain.block_at(below).is_none() {
+                break;
+            }
+            lowest = below;
+        }
+        lowest
     } else {
         log.reaches()
     };
@@ -10856,6 +10870,50 @@ mod tests {
             whole.len(),
             4,
             "and a run that did not move comes back whole"
+        );
+    }
+
+    /// A log that never took the first block the chain holds starts at that
+    /// block, and not at whichever block came next.
+    ///
+    /// Nothing asked this, so the rule for an empty log, start at the block
+    /// just applied, wrote a log beginning partway up the chain whenever the
+    /// first write had failed: the network's first block, appended when a
+    /// node opens and never checked, or any first block a full disk refused.
+    /// The next start read that log as a node that had joined above its own
+    /// disk, set it aside as rejoining and cut every block in it.
+    #[test]
+    fn a_log_that_never_took_the_first_block_starts_at_the_first_block_held() {
+        let params = ConsensusParams::testnet();
+        let blocks = chain_of(6, params);
+
+        let directory =
+            std::env::temp_dir().join(format!("cairn-first-missed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let (blocks_log, _) = BlockLog::open(&directory).unwrap();
+        let mut store = Store {
+            blocks: blocks_log,
+            headers: HeaderLog::open(&directory).unwrap(),
+            forest: HeaderTree::open(&directory).unwrap(),
+            filling: HeaderLog::open_named(&directory, FILLING_LOG).unwrap(),
+            filling_epoch: 0,
+        };
+
+        // What a refused first write leaves: a chain of five and a log of
+        // nothing at all.
+        let mut chain = ChainStore::new(params);
+        for block in &blocks[..5] {
+            chain.add_block(block.clone(), 2_000_000_000).unwrap();
+        }
+        let accepted = chain.add_block(blocks[5].clone(), 2_000_000_000).unwrap();
+        let wrote = write_branch(&mut store, &accepted, &chain);
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert!(wrote.refusing.is_none(), "nothing was refused");
+        assert_eq!(
+            (store.blocks.first_height(), store.blocks.len()),
+            (0, 6),
+            "a log that missed its first block was started partway up the chain"
         );
     }
 
