@@ -248,15 +248,16 @@ fn key(seed: u8) -> PublicKey {
     SecretKey::from_bytes(&[seed; 32]).public_key()
 }
 
-/// One block paying `to`, with no work done on it. `History::take` reads a
-/// block rather than judging one, so nothing here has to be mined.
-fn paying(height: u64, to: PublicKey) -> Block {
+/// One block paying `to`, built on `previous`, with no work done on it.
+/// `History::take` reads a block rather than judging one, so nothing here has
+/// to be mined.
+fn paying(height: u64, previous: Hash32, to: PublicKey) -> Block {
     Block {
         header: BlockHeader {
             version: 1,
             network: NetworkId::TESTNET,
             height,
-            previous: Hash32::ZERO,
+            previous,
             state_root: Hash32::ZERO,
             transactions_root: Hash32::ZERO,
             history: Hash32::ZERO,
@@ -290,8 +291,11 @@ fn how_far_back_a_list_reaches_is_not_where_the_account_started() {
     let mine = key(1);
     let mut history = History::new();
     // Comfortably past the bound, one payment in each block.
+    let mut previous = Hash32::ZERO;
     for height in 0..4_200u64 {
-        history.take(&paying(height, mine), mine);
+        let block = paying(height, previous, mine);
+        previous = block.id();
+        history.take(&block, mine);
     }
 
     let movements: Vec<_> = history.movements().copied().collect();

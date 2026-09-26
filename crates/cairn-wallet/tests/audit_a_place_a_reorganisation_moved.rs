@@ -9,8 +9,9 @@
 //! Fixed for as long as the block the note fell in stands, and no longer. A
 //! note falls when the hot set runs out of room, which can be long after the
 //! block that paid it, so a note paid below the reach of any reorganisation
-//! can still fall inside it. `forget` keeps the place of every note paid below
-//! that reach, and the branch that wins can put the note somewhere else: here,
+//! can still fall inside it. Undoing a switch keeps the place of every note
+//! paid at or below its fork, and the branch that wins can put the note
+//! somewhere else: here,
 //! by spending an older note the losing branch let fall first, so the note
 //! falls one place earlier.
 //!
@@ -54,7 +55,8 @@ const ATTEMPTS: u64 = 1 << 22;
 const FORK: u64 = 20;
 /// Blocks on the branch that loses. Enough that the tip sits more than the
 /// reach of a reorganisation above the block that paid this key's note, so
-/// `forget` keeps its place, and few enough to be undone.
+/// its place is kept however the account judges what a switch can reach, and
+/// few enough to be undone.
 const LOSING: u64 = 6;
 
 /// A hot set of four, so a note falls four blocks after it is paid, and a

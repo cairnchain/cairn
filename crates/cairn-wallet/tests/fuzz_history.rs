@@ -95,13 +95,16 @@ fn written_with(held: &[(u8, u32, u64)], fell: &[(u8, u64)], paid_at: &[(u8, u64
         bytes.extend_from_slice(&height.encode());
     }
 
-    // The notes the account has stopped answering for, empty, and the height
-    // below which its list may be short, absent. This is the format a wallet
-    // writes today, and the round trip below is written on that: a file that
-    // ends before either is read and is what an older wallet left, but it is
-    // not what this one would write back.
+    // The notes the account has stopped answering for, empty, the height
+    // below which its list may be short, absent, and the blocks it remembers
+    // and what they spent, none. This is the format a wallet writes today,
+    // and the round trip below is written on that: a file that ends before
+    // any of them is read and is what an older wallet left, but it is not
+    // what this one would write back.
     bytes.extend_from_slice(&0u32.encode());
     bytes.extend_from_slice(&u64::MAX.encode());
+    bytes.extend_from_slice(&0u32.encode());
+    bytes.extend_from_slice(&0u32.encode());
     bytes
 }
 
@@ -155,12 +158,12 @@ fn arbitrary_bytes_are_refused_or_read_and_settle() {
 
 /// The documented exception, stated, once for each time this file has grown.
 ///
-/// Four fields have been added to the end of it since wallets started writing
+/// Six fields have been added to the end of it since wallets started writing
 /// one, each read as absent when the bytes end before it: the places fallen
 /// notes landed at, the heights those notes were paid at, the notes the
-/// account has stopped answering for, and the height below which its list of
-/// movements may be short. Every one of those older shapes is still an
-/// account.
+/// account has stopped answering for, the height below which its list of
+/// movements may be short, the blocks it remembers, and the notes those
+/// blocks spent. Every one of those older shapes is still an account.
 ///
 /// Counted from the end, which is where a field is added, so every offset here
 /// moves when one is. Adding the third and leaving the offsets alone left this
@@ -176,12 +179,22 @@ fn a_history_from_before_any_of_the_fields_reads_and_grows_by_one_empty_field_ea
     const HEIGHT: usize = 8;
 
     let full = History::new().encode();
-    let before_the_gap = &full[..full.len() - HEIGHT];
-    let before_the_unanswered = &full[..full.len() - HEIGHT - LIST];
-    let before_the_heights = &full[..full.len() - HEIGHT - LIST * 2];
-    let before_the_places = &full[..full.len() - HEIGHT - LIST * 3];
+    let before_the_spent = &full[..full.len() - LIST];
+    let before_the_remembered = &full[..full.len() - LIST * 2];
+    let before_the_gap = &full[..full.len() - LIST * 2 - HEIGHT];
+    let before_the_unanswered = &full[..full.len() - LIST * 3 - HEIGHT];
+    let before_the_heights = &full[..full.len() - LIST * 4 - HEIGHT];
+    let before_the_places = &full[..full.len() - LIST * 5 - HEIGHT];
 
     for (older, what) in [
+        (
+            before_the_spent,
+            "before the notes a block spent were kept for undoing it",
+        ),
+        (
+            before_the_remembered,
+            "before the blocks read were remembered",
+        ),
         (before_the_gap, "before a gap in the list was written down"),
         (
             before_the_unanswered,
@@ -239,6 +252,18 @@ fn a_history_from_before_any_of_the_fields_reads_and_grows_by_one_empty_field_ea
     assert!(
         History::decode(&with_more).is_err(),
         "a height one byte short of a height has to be refused"
+    );
+    let mut with_more = before_the_remembered.to_vec();
+    with_more.extend_from_slice(&1u32.encode());
+    assert!(
+        History::decode(&with_more).is_err(),
+        "a list of one block remembered with no block behind it has to be refused"
+    );
+    let mut with_more = before_the_spent.to_vec();
+    with_more.extend_from_slice(&1u32.encode());
+    assert!(
+        History::decode(&with_more).is_err(),
+        "a list of one spent note with no note behind it has to be refused"
     );
 }
 

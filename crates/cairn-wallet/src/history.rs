@@ -19,7 +19,7 @@
 //! has no way to know what happened before that, and says so rather than
 //! showing a history that starts nowhere in particular.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -38,6 +38,22 @@ const MAX_MOVEMENTS: usize = 4096;
 /// is not something anybody has seen, and the record is worth having a bound
 /// on all the same.
 const MAX_UNDONE: usize = 256;
+
+/// Blocks whose identifiers the account remembers.
+///
+/// One more than the deepest reorganisation any node follows, so the block a
+/// switch of that depth lands on is still among them and the fork is found at
+/// every depth a switch can reach.
+const RECENT: usize = cairn_chain::HELD_WINDOW;
+
+/// Spent notes the account remembers, so that undoing the block that spent
+/// them can put them back.
+///
+/// A bound on the file rather than on anything a switch does. A wallet that
+/// spends more of its own notes than this within the reach of a
+/// reorganisation lets go of its oldest blocks until they fit, and a switch
+/// below what it still remembers is answered by starting again.
+const MAX_SPENT: usize = 4096;
 
 /// Which way money went.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,6 +212,65 @@ impl Decode for PaidAt {
     }
 }
 
+/// One of this key's notes that a block this account read spent, with
+/// everything the account knew of it, so that undoing the block can put it
+/// back.
+#[derive(Clone, Copy, Debug)]
+struct Spent {
+    /// The block that spent it.
+    height: u64,
+    id: NoteId,
+    value: Amount,
+    fell: Option<u64>,
+    paid_at: Option<u64>,
+    unaccounted: bool,
+}
+
+impl Encode for Spent {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        self.height.encode_to(out);
+        self.id.encode_to(out);
+        self.value.encode_to(out);
+        // `u64::MAX` for nothing, the way the account writes `from`.
+        self.fell.unwrap_or(u64::MAX).encode_to(out);
+        self.paid_at.unwrap_or(u64::MAX).encode_to(out);
+        u8::from(self.unaccounted).encode_to(out);
+    }
+}
+
+impl Decode for Spent {
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        let height = u64::decode_from(reader)?;
+        let id = NoteId::decode_from(reader)?;
+        let value = Amount::decode_from(reader)?;
+        let fell = u64::decode_from(reader)?;
+        let paid_at = u64::decode_from(reader)?;
+        let unaccounted = match u8::decode_from(reader)? {
+            0 => false,
+            1 => true,
+            _ => return Err(CodecError::InvalidValue { type_name: "Spent" }),
+        };
+        Ok(Self {
+            height,
+            id,
+            value,
+            fell: (fell != u64::MAX).then_some(fell),
+            paid_at: (paid_at != u64::MAX).then_some(paid_at),
+            unaccounted,
+        })
+    }
+}
+
+/// Where what an account read and the chain part company.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fork {
+    /// The highest height at which the block the account read is still the
+    /// chain's. Everything at or below it stands.
+    At(u64),
+    /// Below every block the account remembers.
+    Deeper,
+}
+
 /// This key's own account of its money.
 #[derive(Clone, Debug, Default)]
 pub struct History {
@@ -223,19 +298,18 @@ pub struct History {
     /// The height of the block that paid each of those notes, for the ones
     /// this account read the block for.
     ///
-    /// What it is for is [`History::forget`]. Starting again is the whole
-    /// answer to a reorganisation, and it has to throw away the map of which
-    /// notes are this key's, because that map was built up as blocks went
-    /// past and there is nothing to invert it with. What it must not throw
-    /// away with it is a place, which is the one thing in this file the chain
-    /// cannot give back: a place comes from the node's watch list, and a node
-    /// restarted from a written ledger comes back without one.
+    /// What it is for is undoing a block. [`History::rewind_to`] takes out of
+    /// the account every note paid above the fork, because the branch that
+    /// paid it lost, and keeps every note paid at or below it with its place,
+    /// which is the one thing in this file the chain cannot give back: a place
+    /// comes from the node's watch list, and a node restarted from a written
+    /// ledger comes back without one. [`History::forget`], for a fork below
+    /// everything the account remembers, judges the same heights against a
+    /// line instead.
     ///
-    /// A note paid by a block deeper than any reorganisation this node will
-    /// follow is a note no reorganisation can take away, so its place is kept.
     /// A note with no height here was never read in any block by this account:
     /// it came out of the window a handover carried, which sits below the
-    /// anchor, so it is settled for the same reason.
+    /// anchor, so no reorganisation this node follows can take it away.
     paid_at: BTreeMap<NoteId, u64>,
     /// The height below which this account's list of movements may be missing
     /// entries, because it was moved past blocks it could not read.
@@ -305,12 +379,34 @@ pub struct History {
     /// The first height this history could see, so it never claims to cover
     /// what it never read.
     from: Option<u64>,
-    /// The identifier of the newest block read.
+    /// The identifiers of the blocks this account read most recently, oldest
+    /// first, one for each height up to the newest read, at most [`RECENT`].
     ///
-    /// Kept so a branch that was undone can be noticed. A reorganisation
-    /// replaces every block above the fork, so this one is enough to detect
-    /// one: if it is still where it was, nothing below it moved either.
-    last: Option<Hash32>,
+    /// Kept so a branch that was undone can be noticed, and so the account can
+    /// say where. A reorganisation replaces every block above the fork, so the
+    /// newest of these is enough to notice one: if it is still where it was,
+    /// nothing below it moved either. The rest is for finding the fork: the
+    /// highest of them still on the chain is where the branch this account
+    /// read and the branch the chain follows part, everything at or below it
+    /// stands, and only what is above it has to be undone.
+    ///
+    /// It used to be the newest identifier alone. A reorganisation of any
+    /// depth could be noticed and not located, so the account started again
+    /// from height zero every time: a one block tie cost a read of every block
+    /// the node keeps, on a node that had trimmed its log every movement below
+    /// the log's first block was left on the list of what the chain took back,
+    /// and which notes to keep was judged by a line drawn from the tip as it
+    /// stood when the wallet looked rather than from where the switch was.
+    recent: VecDeque<Hash32>,
+    /// The notes of this key's that the blocks among `recent` spent, oldest
+    /// first, with everything the account knew of each.
+    ///
+    /// A block read takes the notes it spends out of the account, and undoing
+    /// the block has to put them back: the branch that wins may not spend
+    /// them, and a note the account has let go of is one whose next payment it
+    /// records as the change coming back rather than as what left. Kept for as
+    /// long as the block that spent it could still be undone, and no longer.
+    spent: Vec<Spent>,
 }
 
 /// Why a history file that was there was not used.
@@ -404,17 +500,32 @@ impl History {
     }
 
     /// Reads one block, in order, and records what it did to this key.
+    /// Returns whether it took the block.
     ///
     /// Blocks have to arrive in order and without gaps, because which notes
     /// are ours is built up as they go past: a block read out of turn would
     /// spend notes this has not seen created and record a stranger's transfer
     /// as ours, or miss ours entirely.
-    pub fn take(&mut self, block: &Block, mine: PublicKey) {
+    ///
+    /// And each on top of the one read before it. A block at the right height
+    /// on another branch is the chain having switched between two reads, and
+    /// taking it stacked the winning branch on the losing one: the next look
+    /// found the newest block read in place, and the losing blocks under it
+    /// stayed in the account for good. Refused, the next look finds where the
+    /// two branches part.
+    pub fn take(&mut self, block: &Block, mine: PublicKey) -> bool {
         if block.header.height != self.next {
-            return;
+            return false;
+        }
+        if self
+            .recent
+            .back()
+            .is_some_and(|last| block.header.previous != *last)
+        {
+            return false;
         }
         self.next = self.next.saturating_add(1);
-        self.last = Some(block.id());
+        self.recent.push_back(block.id());
         if self.from.is_none() {
             self.from = Some(block.header.height);
         }
@@ -445,6 +556,39 @@ impl History {
         for transfer in &block.transfers {
             self.take_transfer(transfer, mine, height, at);
         }
+        self.settle();
+        true
+    }
+
+    /// The height of the oldest block whose identifier this account
+    /// remembers, or the next height to read when it remembers none.
+    fn oldest_remembered(&self) -> u64 {
+        self.next
+            .saturating_sub(u64::try_from(self.recent.len()).unwrap_or(u64::MAX))
+    }
+
+    /// Lets go of what no reorganisation this account can locate will undo.
+    ///
+    /// A spent note is kept for undoing the block that spent it, and a switch
+    /// found among the blocks remembered lands on one of them and undoes what
+    /// is above it, so a note spent at or below the oldest of them will never
+    /// be put back. Past [`MAX_SPENT`] the oldest blocks are let go of until
+    /// the notes fit.
+    fn settle(&mut self) {
+        let over = self.recent.len().saturating_sub(RECENT);
+        self.recent.drain(..over);
+        self.let_go_of_settled_spends();
+        while self.spent.len() > MAX_SPENT && !self.recent.is_empty() {
+            self.recent.pop_front();
+            self.let_go_of_settled_spends();
+        }
+    }
+
+    /// Lets go of the notes spent at or below the oldest block remembered.
+    fn let_go_of_settled_spends(&mut self) {
+        let oldest = self.oldest_remembered();
+        let settled = self.spent.partition_point(|spent| spent.height <= oldest);
+        self.spent.drain(..settled);
     }
 
     fn take_transfer(
@@ -458,9 +602,14 @@ impl History {
         let mut gave = Amount::ZERO;
         for input in &transfer.inputs {
             if let Some(value) = self.held.remove(&input.note_id) {
-                self.fell.remove(&input.note_id);
-                self.paid_at.remove(&input.note_id);
-                self.unaccounted.remove(&input.note_id);
+                self.spent.push(Spent {
+                    height,
+                    id: input.note_id,
+                    value,
+                    fell: self.fell.remove(&input.note_id),
+                    paid_at: self.paid_at.remove(&input.note_id),
+                    unaccounted: self.unaccounted.remove(&input.note_id),
+                });
                 gave = gave.checked_add(value).unwrap_or(gave);
             }
         }
@@ -622,52 +771,130 @@ impl History {
         );
         self.next = height;
         // Nothing read is adjacent to what comes next, so there is no block to
-        // compare against any more.
-        self.last = None;
+        // compare against any more, and no block below here that a switch
+        // this account can locate would undo.
+        self.recent.clear();
+        self.spent.clear();
         if self.from.is_none() {
             self.from = Some(height);
         }
     }
 
-    /// Whether the chain no longer holds the block this last read.
+    /// Where what this account read and the chain part company, if they do.
     ///
-    /// `tip` is how far the chain reaches now and `chain` answers what block
-    /// sits at a height. A reorganisation replaces every block above the fork
-    /// it happened at, so asking about the newest one read is enough to
-    /// notice: if that block is still there, no block below it moved.
+    /// `tip` is how far the chain reaches now and `chain` answers which block
+    /// sits at a height, `None` where it cannot say. A reorganisation replaces
+    /// every block above the fork it happened at, so asking about the newest
+    /// block read is enough to notice one: if that block is still there, no
+    /// block below it moved. Walking down the blocks this account remembers
+    /// until one is still in place is enough to find where.
     ///
-    /// A height the wallet can no longer read is not a divergence. A node that
-    /// dropped an old block has not changed its mind about it. A chain that no
-    /// longer reaches that height is a different matter, and it is why the tip
-    /// is asked for as well as the block: work decides which branch wins, not
-    /// length, so the branch that won can end below the one it replaced. Read
-    /// from the block alone that case answers "nothing there", which is
-    /// indistinguishable from a block dropped for age and is the opposite of
-    /// the truth.
-    pub fn diverged(&self, tip: Option<u64>, chain: impl Fn(u64) -> Option<Hash32>) -> bool {
-        let (Some(last), Some(newest)) = (self.last, self.next.checked_sub(1)) else {
-            return false;
-        };
-        if matches!(tip, Some(reaches) if reaches < newest) {
-            return true;
+    /// A height the chain cannot answer for is not a divergence: nothing this
+    /// account read from its node can sit there, and nothing the node follows
+    /// can change it. It used to be asked of the block log, where "cannot say"
+    /// also meant a block the node had trimmed away, so a block replaced by a
+    /// reorganisation and then trimmed read as a block nobody had changed.
+    ///
+    /// A chain that no longer reaches a height is a different matter, and it
+    /// is why the tip is asked for as well as the blocks: work decides which
+    /// branch wins, not length, so the branch that won can end below the one
+    /// it replaced. Read from the blocks alone that case answers "nothing
+    /// there", which is the opposite of the truth.
+    pub fn fork(&self, tip: Option<u64>, chain: impl Fn(u64) -> Option<Hash32>) -> Option<Fork> {
+        let newest = self.next.checked_sub(1)?;
+        let mut height = newest;
+        for read in self.recent.iter().rev() {
+            let reached = !matches!(tip, Some(reaches) if reaches < height);
+            if reached && chain(height).is_none_or(|now| now == *read) {
+                return (height < newest).then_some(Fork::At(height));
+            }
+            height = height.saturating_sub(1);
         }
-        matches!(chain(newest), Some(now) if now != last)
+        (!self.recent.is_empty()).then_some(Fork::Deeper)
+    }
+
+    /// Undoes what this account read above `fork`, the highest height at
+    /// which what it read is still the chain, as [`History::fork`] finds it.
+    ///
+    /// Everything at or below the fork stands, so none of it is touched: the
+    /// movements, the notes, and where they fell. What the blocks above it did
+    /// is taken back. The movements they recorded are set aside as undone,
+    /// the notes they paid leave the account, and the notes they spent come
+    /// back into it with everything that was known of them. Reading goes on
+    /// from the block above the fork, and a movement the winning branch
+    /// carries again is taken back out of `undone` as it is read.
+    ///
+    /// Nothing changes when the fork is not among the blocks this account
+    /// remembers.
+    pub fn rewind_to(&mut self, fork: u64) {
+        let remembered = self.recent.len();
+        let Some(above) = self
+            .next
+            .checked_sub(fork.saturating_add(1))
+            .and_then(|above| usize::try_from(above).ok())
+        else {
+            return;
+        };
+        if above >= remembered {
+            return;
+        }
+        self.recent.truncate(remembered.saturating_sub(above));
+        self.next = fork.saturating_add(1);
+
+        let kept = self
+            .movements
+            .partition_point(|movement| movement.height <= fork);
+        self.undone.extend(self.movements.drain(kept..));
+        let over = self.undone.len().saturating_sub(MAX_UNDONE);
+        self.undone.drain(..over);
+
+        // Back before taken out, because a note paid above the fork and spent
+        // above it too is in both, and was never this key's at all.
+        let kept = self.spent.partition_point(|spent| spent.height <= fork);
+        for spent in self.spent.drain(kept..) {
+            self.held.insert(spent.id, spent.value);
+            if let Some(position) = spent.fell {
+                self.fell.insert(spent.id, position);
+            }
+            if let Some(height) = spent.paid_at {
+                self.paid_at.insert(spent.id, height);
+            }
+            if spent.unaccounted {
+                self.unaccounted.insert(spent.id);
+            }
+        }
+        let unpaid: Vec<NoteId> = self
+            .paid_at
+            .iter()
+            .filter(|(_, paid_at)| **paid_at > fork)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in unpaid {
+            self.held.remove(&id);
+            self.fell.remove(&id);
+            self.paid_at.remove(&id);
+            self.unaccounted.remove(&id);
+        }
     }
 
     /// Starts again from nothing, keeping what the branch that lost said.
     ///
-    /// Starting again is the whole answer to a reorganisation, and dropping
-    /// the movements above the fork is not. Which notes are this key's is
-    /// built up as blocks go past, so a history that kept that map while
-    /// forgetting some of the blocks that filled it would go on calling a
-    /// stranger's transfer ours. There is nothing to invert it with, and
-    /// reading the chain again is what the file exists to be cheaper than, not
-    /// a thing that cannot be done.
+    /// The answer to a reorganisation whose fork is below every block this
+    /// account remembers, which one switch cannot reach: [`History::rewind_to`]
+    /// answers every other. It used to be the answer to all of them.
+    ///
+    /// Without the fork, dropping the movements above it is not on offer.
+    /// Which notes are this key's is built up as blocks go past, so a history
+    /// that kept that map while forgetting some of the blocks that filled it
+    /// would go on calling a stranger's transfer ours, and reading the chain
+    /// again is what the file exists to be cheaper than, not a thing that
+    /// cannot be done.
     ///
     /// What is not thrown away is the account itself. It is set aside as
     /// undone, and every movement the chain still carries is taken back out of
-    /// it as the blocks are read again, so what is left at the end is exactly
-    /// what the chain took away.
+    /// it as the blocks are read again, so what is left at the end is what the
+    /// chain took away, less whatever sits below the first block the node can
+    /// still be read from, which is never read again and stays on the list.
     pub fn forget(&mut self, settled_below: Option<u64>) {
         let mut undone = std::mem::take(&mut self.undone);
         undone.append(&mut self.movements);
@@ -900,7 +1127,13 @@ impl Encode for History {
         self.next.encode_to(out);
         self.from.unwrap_or(u64::MAX).encode_to(out);
         self.movements.encode_to(out);
-        self.last.unwrap_or(Hash32::ZERO).encode_to(out);
+        // The newest block read, where every release has written it; the
+        // rest of what the account remembers is at the end.
+        self.recent
+            .back()
+            .copied()
+            .unwrap_or(Hash32::ZERO)
+            .encode_to(out);
         let held: Vec<Owned> = self
             .held
             .iter()
@@ -934,6 +1167,9 @@ impl Encode for History {
         // `u64::MAX` for "no gap", the way `from` is written above, so the
         // field is one fixed width whatever it holds.
         self.missed_below.unwrap_or(u64::MAX).encode_to(out);
+        let recent: Vec<Hash32> = self.recent.iter().copied().collect();
+        recent.encode_to(out);
+        self.spent.encode_to(out);
     }
 }
 
@@ -1017,6 +1253,36 @@ impl Decode for History {
         } else {
             u64::MAX
         };
+        // The blocks the account remembers, and what they spent. A file
+        // written before this wallet learned to keep them ends here, and is
+        // read as remembering the newest block alone, which is what it did
+        // remember: the first reorganisation after it finds no fork among one
+        // block unless it undid nothing below it, and starts again, as every
+        // reorganisation used to.
+        let recent = if reader.remaining() > 0 {
+            Vec::<Hash32>::decode_from(reader)?
+        } else {
+            Vec::new()
+        };
+        let spent = if reader.remaining() > 0 {
+            Vec::<Spent>::decode_from(reader)?
+        } else {
+            Vec::new()
+        };
+        let last = (last != Hash32::ZERO).then_some(last);
+        let recent: VecDeque<Hash32> = if recent.is_empty() {
+            last.into_iter().collect()
+        } else {
+            recent.into()
+        };
+        // Two records of the newest block read that disagree are not an
+        // account this wallet wrote, and either one believed would be the
+        // other one wrong.
+        if recent.back().copied() != last {
+            return Err(CodecError::InvalidValue {
+                type_name: "History",
+            });
+        }
         if !each_note_once(&held, |owned| owned.id)
             || !each_note_once(&fell, |fell| fell.id)
             || !each_note_once(&paid_at, |paid| paid.id)
@@ -1041,8 +1307,9 @@ impl Decode for History {
             movements,
             next,
             from: (from != u64::MAX).then_some(from),
-            last: (last != Hash32::ZERO).then_some(last),
+            recent,
             undone,
+            spent,
         })
     }
 }
@@ -1102,6 +1369,19 @@ mod tests {
         Amount::from_cairn(text).unwrap()
     }
 
+    /// [`block`], built on whatever `history` read last, the way a chain
+    /// builds it.
+    fn next_block(
+        history: &History,
+        height: u64,
+        to: PublicKey,
+        transfers: Vec<Transfer>,
+    ) -> Block {
+        let mut block = block(height, to, transfers);
+        block.header.previous = history.recent.back().copied().unwrap_or(Hash32::ZERO);
+        block
+    }
+
     fn block(height: u64, to: PublicKey, transfers: Vec<Transfer>) -> Block {
         Block {
             header: BlockHeader {
@@ -1128,8 +1408,8 @@ mod tests {
     fn moving_past_a_block_gives_up_on_what_was_held() {
         let mine = key(1);
         let mut history = History::new();
-        history.take(&block(0, mine, Vec::new()), mine);
-        history.take(&block(1, mine, Vec::new()), mine);
+        history.take(&next_block(&history, 0, mine, Vec::new()), mine);
+        history.take(&next_block(&history, 1, mine, Vec::new()), mine);
         let held: Vec<NoteId> = history.held().map(|(id, _)| id).collect();
         assert_eq!(held.len(), 2);
         assert_eq!(history.unaccounted().count(), 0, "nothing has been missed");
@@ -1181,7 +1461,7 @@ mod tests {
         assert_eq!(history.len(), 0);
         assert!(history.is_empty(), "a history that has read nothing");
 
-        history.take(&block(0, mine, Vec::new()), mine);
+        history.take(&next_block(&history, 0, mine, Vec::new()), mine);
         assert_eq!(history.len(), 1);
         assert!(
             !history.is_empty(),
@@ -1193,8 +1473,8 @@ mod tests {
     fn mining_a_block_is_money_arriving() {
         let mine = key(1);
         let mut history = History::new();
-        history.take(&block(0, mine, Vec::new()), mine);
-        history.take(&block(1, key(2), Vec::new()), mine);
+        history.take(&next_block(&history, 0, mine, Vec::new()), mine);
+        history.take(&next_block(&history, 1, key(2), Vec::new()), mine);
 
         assert_eq!(history.len(), 1, "one of the two paid this key");
         let movement = history.movements().next().unwrap();
@@ -1220,7 +1500,7 @@ mod tests {
             vec![Input::hot(held)],
             vec![Note::new(amount("20"), them), Note::new(amount("29"), mine)],
         );
-        history.take(&block(1, them, vec![transfer]), mine);
+        history.take(&next_block(&history, 1, them, vec![transfer]), mine);
 
         assert_eq!(history.len(), 2);
         let latest = history.movements().next().unwrap();
@@ -1248,7 +1528,7 @@ mod tests {
         let held = first.coinbase.created_notes()[0].0;
 
         let whole = Transfer::new(vec![Input::hot(held)], vec![Note::new(amount("49"), them)]);
-        history.take(&block(1, them, vec![whole]), mine);
+        history.take(&next_block(&history, 1, them, vec![whole]), mine);
 
         assert_eq!(
             history.len(),
@@ -1282,11 +1562,11 @@ mod tests {
 
         // The first block pays somebody else, so where this account begins
         // and where its oldest payment sits are different numbers.
-        history.take(&block(0, them, Vec::new()), mine);
+        history.take(&next_block(&history, 0, them, Vec::new()), mine);
         assert_eq!(history.from(), Some(0), "it began at the first block");
 
         for height in 1..=MAX_MOVEMENTS as u64 {
-            history.take(&block(height, mine, Vec::new()), mine);
+            history.take(&next_block(&history, height, mine, Vec::new()), mine);
         }
         assert_eq!(
             history.len(),
@@ -1300,7 +1580,10 @@ mod tests {
         );
 
         // One more, and the oldest goes: what it can answer for moves with it.
-        history.take(&block(MAX_MOVEMENTS as u64 + 1, mine, Vec::new()), mine);
+        history.take(
+            &next_block(&history, MAX_MOVEMENTS as u64 + 1, mine, Vec::new()),
+            mine,
+        );
         assert_eq!(history.len(), MAX_MOVEMENTS);
         assert_eq!(
             history.from(),
@@ -1330,7 +1613,7 @@ mod tests {
         // Gathered and handed straight back, whole: nothing left and nothing
         // arrived.
         let round_trip = Transfer::new(vec![Input::hot(held)], vec![Note::new(amount("50"), mine)]);
-        history.take(&block(1, them, vec![round_trip]), mine);
+        history.take(&next_block(&history, 1, them, vec![round_trip]), mine);
 
         assert_eq!(
             history.len(),
@@ -1358,7 +1641,7 @@ mod tests {
             vec![Input::hot(their_note)],
             vec![Note::new(amount("12"), mine), Note::new(amount("38"), them)],
         );
-        history.take(&block(1, them, vec![paying]), mine);
+        history.take(&next_block(&history, 1, them, vec![paying]), mine);
         assert_eq!(history.len(), 1);
         let movement = history.movements().next().unwrap();
         assert_eq!(movement.direction, Direction::Received);
@@ -1369,7 +1652,7 @@ mod tests {
             vec![Input::hot(NoteId::new(Hash32::from_bytes([3; 32]), 0))],
             vec![Note::new(amount("5"), key(3))],
         );
-        history.take(&block(2, them, vec![elsewhere]), mine);
+        history.take(&next_block(&history, 2, them, vec![elsewhere]), mine);
         assert_eq!(history.len(), 1, "nothing of ours happened");
     }
 
@@ -1379,14 +1662,379 @@ mod tests {
     fn a_block_out_of_turn_is_not_taken() {
         let mine = key(1);
         let mut history = History::new();
-        history.take(&block(5, mine, Vec::new()), mine);
+        history.take(&next_block(&history, 5, mine, Vec::new()), mine);
         assert!(history.is_empty(), "the history starts at nought");
         assert_eq!(history.next(), 0);
 
-        history.take(&block(0, mine, Vec::new()), mine);
+        history.take(&next_block(&history, 0, mine, Vec::new()), mine);
         assert_eq!(history.len(), 1);
-        history.take(&block(2, mine, Vec::new()), mine);
+        history.take(&next_block(&history, 2, mine, Vec::new()), mine);
         assert_eq!(history.len(), 1, "one was skipped, so it is refused");
+    }
+
+    /// A block at the next height that is not built on the block read before
+    /// it is not taken.
+    ///
+    /// `take` compared the height alone. A reorganisation landing between two
+    /// reads of one catch-up batch put the winning branch's next block on top
+    /// of the losing branch's, the account read on, and its next look compared
+    /// the newest block read, which was the winning branch's, and found it in
+    /// place. The losing blocks below it stayed in the account for good, and
+    /// the notes they paid were counted as stranded money. No test offered the
+    /// account a block of another branch at the right height, so an account
+    /// that stacked one branch on another passed.
+    #[test]
+    fn a_block_not_built_on_the_last_one_read_is_not_taken() {
+        let mine = key(1);
+        let mut history = History::new();
+        let first = block(0, mine, Vec::new());
+        history.take(&first, mine);
+
+        let mut elsewhere = block(1, mine, Vec::new());
+        elsewhere.header.previous = Hash32::from_bytes([9; 32]);
+        history.take(&elsewhere, mine);
+        assert_eq!(
+            history.next(),
+            1,
+            "a block of another branch at the next height was read as the next block"
+        );
+        assert_eq!(history.len(), 1, "and what it paid was recorded");
+
+        let mut built_on_it = block(1, mine, Vec::new());
+        built_on_it.header.previous = first.id();
+        history.take(&built_on_it, mine);
+        assert_eq!(history.next(), 2, "the block built on it is taken");
+    }
+
+    /// Three blocks: the first pays this key a note, the second spends it
+    /// and pays change back, the third pays this key again. The note spent
+    /// had fallen and had been given up on, so every record of it is in play.
+    fn spend_and_be_paid() -> (History, NoteId, NoteId, NoteId) {
+        let mine = key(1);
+        let them = key(2);
+        let mut history = History::new();
+        let first = next_block(&history, 0, mine, Vec::new());
+        history.take(&first, mine);
+        let spent = first.coinbase.created_notes()[0].0;
+        assert!(history.fell_at(spent, amount("50"), 7));
+        history.unaccounted.insert(spent);
+
+        let paying = Transfer::new(
+            vec![Input::hot(spent)],
+            vec![Note::new(amount("20"), them), Note::new(amount("29"), mine)],
+        );
+        let second = next_block(&history, 1, them, vec![paying.clone()]);
+        history.take(&second, mine);
+        let change = paying.created_notes()[1].0;
+
+        let third = next_block(&history, 2, mine, Vec::new());
+        history.take(&third, mine);
+        let mined = third.coinbase.created_notes()[0].0;
+        assert_eq!(history.len(), 3, "mined, sent, mined");
+        (history, spent, change, mined)
+    }
+
+    fn holds(history: &History, id: &NoteId) -> bool {
+        history.held().any(|(held, _)| held == *id)
+    }
+
+    /// Rewinding to a fork undoes what the blocks above it did to the account,
+    /// and nothing the blocks at or below it did.
+    ///
+    /// Nothing did this before: a divergence threw the whole account away and
+    /// read the chain again from height zero, which on a node that trimmed its
+    /// log never gave back what sat below the log's first block.
+    #[test]
+    fn rewinding_undoes_what_the_blocks_above_the_fork_did_and_nothing_below_it() {
+        let (mut history, spent, change, mined) = spend_and_be_paid();
+
+        history.rewind_to(1);
+        assert_eq!(history.next(), 2, "reading goes on above the fork");
+        assert_eq!(
+            history.recent.len(),
+            2,
+            "and the fork is the newest block remembered"
+        );
+        assert_eq!(
+            history
+                .movements()
+                .map(|movement| movement.height)
+                .collect::<Vec<_>>(),
+            vec![1, 0],
+            "the movement at the fork is not undone"
+        );
+        assert_eq!(
+            history
+                .undone()
+                .map(|movement| movement.height)
+                .collect::<Vec<_>>(),
+            vec![2],
+            "the one above it is"
+        );
+        assert!(
+            !holds(&history, &mined),
+            "a note paid above the fork was never paid"
+        );
+        assert!(holds(&history, &change), "a note paid at the fork stands");
+        assert!(
+            !holds(&history, &spent),
+            "a note spent at the fork stays spent"
+        );
+
+        history.rewind_to(0);
+        assert_eq!(history.next(), 1);
+        assert_eq!(history.len(), 1, "only the first block's movement stands");
+        assert_eq!(
+            history
+                .undone()
+                .map(|movement| movement.height)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "newest first, and both taken back"
+        );
+        assert!(
+            !holds(&history, &change),
+            "the change came from a block that lost"
+        );
+        assert!(
+            holds(&history, &spent),
+            "the note it spent is this key's again"
+        );
+        assert_eq!(
+            history.where_it_fell(&spent),
+            Some(7),
+            "with where it fell, which the chain cannot give back"
+        );
+        assert_eq!(
+            history.paid_at.get(&spent),
+            Some(&0),
+            "and when it was paid"
+        );
+        assert!(
+            history.unaccounted().any(|id| id == spent),
+            "and given up on, as it was before the block spent it"
+        );
+        assert!(history.spent.is_empty(), "nothing is left to put back");
+    }
+
+    /// A rewind to a block the account does not remember changes nothing.
+    ///
+    /// Below the blocks remembered, the notes spent at the oldest of them
+    /// have been let go of, so a rewind there would put back an account that
+    /// never was. The caller starts again instead.
+    #[test]
+    fn a_rewind_to_a_block_the_account_does_not_remember_changes_nothing() {
+        let mine = key(1);
+        let mut history = History::new();
+        history.skip_to(10);
+        for height in 10..13 {
+            history.take(&next_block(&history, height, mine, Vec::new()), mine);
+        }
+        assert_eq!(history.recent.len(), 3);
+        let before = history.encode();
+        for fork in [3, 9, 12, 13, u64::MAX] {
+            history.rewind_to(fork);
+            assert_eq!(
+                history.encode(),
+                before,
+                "a rewind to {fork}, outside the blocks remembered from 10 to 12 or at the \
+                 newest of them, changed the account"
+            );
+        }
+        history.rewind_to(10);
+        assert_eq!(
+            history.next(),
+            11,
+            "and the oldest of them is a fork like any other"
+        );
+    }
+
+    /// The fork is found at every depth a switch can reach, and not below.
+    ///
+    /// The account used to remember the newest block alone, so a switch of
+    /// any depth could be noticed and not located.
+    #[test]
+    fn the_account_remembers_as_many_blocks_as_a_switch_can_reach() {
+        let mine = key(1);
+        let mut history = History::new();
+        let mut ids = Vec::new();
+        let read = RECENT as u64 + 5;
+        for height in 0..read {
+            let block = next_block(&history, height, mine, Vec::new());
+            ids.push(block.id());
+            history.take(&block, mine);
+        }
+        assert_eq!(
+            history.recent.len(),
+            RECENT,
+            "no more than a switch can reach"
+        );
+        let oldest = read - RECENT as u64;
+        let tip = Some(read - 1);
+        let ids = &ids;
+        let parted_above = |fork: u64| {
+            move |height: u64| {
+                if height > fork {
+                    Some(Hash32::from_bytes([7; 32]))
+                } else {
+                    usize::try_from(height)
+                        .ok()
+                        .and_then(|at| ids.get(at))
+                        .copied()
+                }
+            }
+        };
+        assert_eq!(
+            history.fork(tip, parted_above(oldest)),
+            Some(Fork::At(oldest)),
+            "a switch as deep as any node follows lands on the oldest block remembered"
+        );
+        assert_eq!(
+            history.fork(tip, parted_above(oldest - 1)),
+            Some(Fork::Deeper),
+            "and one deeper is below all of them"
+        );
+
+        // And after a gap there is nothing to compare with.
+        history.skip_to(read + 10);
+        assert_eq!(history.fork(Some(read + 20), |_| None), None);
+        assert!(history.spent.is_empty() && history.recent.is_empty());
+    }
+
+    /// A note spent at or below the oldest block remembered is let go of.
+    ///
+    /// No rewind the account can locate lands below that block, so the note
+    /// will never be put back, and keeping it would grow the file for nothing.
+    #[test]
+    fn a_spend_below_what_the_account_remembers_is_let_go_of() {
+        let mine = key(1);
+        let mut history = History::new();
+        let first = next_block(&history, 0, mine, Vec::new());
+        history.take(&first, mine);
+        let paid = first.coinbase.created_notes()[0].0;
+        let spending = Transfer::new(
+            vec![Input::hot(paid)],
+            vec![Note::new(amount("49"), key(2))],
+        );
+        history.take(&next_block(&history, 1, key(2), vec![spending]), mine);
+        for height in 2..RECENT as u64 {
+            history.take(&next_block(&history, height, key(2), Vec::new()), mine);
+        }
+        assert_eq!(history.oldest_remembered(), 0);
+        assert_eq!(
+            history.spent.len(),
+            1,
+            "a switch landing on block 0 would still undo the spend at 1"
+        );
+
+        history.take(
+            &next_block(&history, RECENT as u64, key(2), Vec::new()),
+            mine,
+        );
+        assert_eq!(history.oldest_remembered(), 1);
+        assert!(
+            history.spent.is_empty(),
+            "no switch the account can locate lands below block 1 now"
+        );
+    }
+
+    /// Past the bound on spent notes, the oldest blocks are let go of until
+    /// what they spent fits, and not before.
+    #[test]
+    fn past_the_bound_on_spent_notes_the_oldest_blocks_go_first() {
+        let mine = key(1);
+        let them = key(2);
+        let mut history = History::new();
+        let mut first = next_block(&history, 0, them, Vec::new());
+        first.coinbase = CoinbaseTransaction::new(
+            0,
+            (0..=MAX_SPENT)
+                .map(|_| Note::new(amount("1"), mine))
+                .collect(),
+        );
+        history.take(&first, mine);
+        let notes: Vec<NoteId> = first
+            .coinbase
+            .created_notes()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let (most, last) = notes.split_at(MAX_SPENT);
+
+        let spend = |ids: &[NoteId]| {
+            Transfer::new(
+                ids.iter().map(|id| Input::hot(*id)).collect(),
+                vec![Note::new(amount("1"), them)],
+            )
+        };
+        history.take(&next_block(&history, 1, them, vec![spend(most)]), mine);
+        assert_eq!(history.spent.len(), MAX_SPENT, "exactly the bound is kept");
+        assert_eq!(history.recent.len(), 2, "and every block with it");
+
+        history.take(&next_block(&history, 2, them, vec![spend(last)]), mine);
+        assert_eq!(
+            history.recent.len(),
+            2,
+            "one past it lets go of the oldest block"
+        );
+        assert_eq!(
+            history.spent.len(),
+            1,
+            "and of what the block above it spent, which no rewind reaches now"
+        );
+    }
+
+    /// What the account remembers is written down and read back, and a
+    /// file whose two records of the newest block read disagree is refused.
+    #[test]
+    fn the_blocks_remembered_and_what_they_spent_are_written_down() {
+        let (history, spent, _, _) = spend_and_be_paid();
+        let bytes = history.encode();
+        let mut read = History::decode(&bytes).unwrap();
+        assert_eq!(read.recent, history.recent, "the blocks remembered");
+        assert_eq!(read.spent.len(), 1, "and the note spent");
+        assert_eq!(read.encode(), bytes, "and the writing is canonical");
+        read.rewind_to(0);
+        assert!(
+            holds(&read, &spent) && read.where_it_fell(&spent) == Some(7),
+            "and the account read back rewinds as the one written did"
+        );
+        assert_eq!(read.paid_at.get(&spent), Some(&0));
+        assert!(read.unaccounted().any(|id| id == spent));
+
+        // The newest identifier is written twice, where every release has
+        // written it and at the end with the others. The end is the list of
+        // three and then the empty list of what they spent.
+        let mut bent = bytes.clone();
+        let newest_ends = bent.len() - history.spent.encode().len();
+        bent[newest_ends - 1] ^= 1;
+        assert!(
+            History::decode(&bent).is_err(),
+            "a file whose two records of the newest block disagree was read"
+        );
+    }
+
+    /// A spent note's record says whether it had been given up on in one byte,
+    /// and nothing but nought and one is read as an answer.
+    #[test]
+    fn a_spent_note_that_was_given_up_on_is_read_as_such_and_nothing_else_is() {
+        let spent = Spent {
+            height: 3,
+            id: NoteId::new(Hash32::from_bytes([4; 32]), 0),
+            value: amount("1"),
+            fell: None,
+            paid_at: Some(2),
+            unaccounted: true,
+        };
+        let mut bytes = spent.encode();
+        let read = Spent::decode(&bytes).unwrap();
+        assert!(read.unaccounted && read.fell.is_none() && read.paid_at == Some(2));
+        let last = bytes.len() - 1;
+        bytes[last] = 2;
+        assert!(
+            Spent::decode(&bytes).is_err(),
+            "a two was read as a yes or a no"
+        );
     }
 
     #[test]
@@ -1395,33 +2043,39 @@ mod tests {
         let mut history = History::new();
         let mut ids = Vec::new();
         for height in 0..5 {
-            let block = block(height, mine, Vec::new());
+            let block = next_block(&history, height, mine, Vec::new());
             ids.push(block.id());
             history.take(&block, mine);
         }
         assert_eq!(history.len(), 5);
-
-        // The chain still holds what was read: nothing moved.
-        assert!(
-            !history.diverged(Some(4), |height| usize::try_from(height)
+        let chain = |height: u64| {
+            usize::try_from(height)
                 .ok()
                 .and_then(|at| ids.get(at))
-                .copied()),
+                .copied()
+        };
+
+        // The chain still holds what was read: nothing moved.
+        assert_eq!(
+            history.fork(Some(4), chain),
+            None,
             "every block is where it was read"
         );
 
-        // A height the wallet can no longer read is not a branch being undone.
-        assert!(
-            !history.diverged(Some(4), |_| None),
-            "a block that was dropped is not a block that changed"
+        // A height the chain cannot answer for is not a branch being undone.
+        assert_eq!(
+            history.fork(Some(4), |_| None),
+            None,
+            "a block the chain cannot say anything about is not a block that changed"
         );
 
         // A chain that no longer reaches that height is, whatever it answers
         // about the block: work decides the branch, so the one that won can
         // end lower than the one it replaced.
-        assert!(
-            history.diverged(Some(2), |_| None),
-            "the chain stops below what this read, so what it read is gone"
+        assert_eq!(
+            history.fork(Some(2), |_| None),
+            Some(Fork::At(2)),
+            "the chain stops below what this read, so what it read above that is gone"
         );
 
         // The newest block is now a different one, which is what a
@@ -1429,20 +2083,26 @@ mod tests {
         // header, because that is what an identifier is taken over: two blocks
         // paying different people are the same block to this check unless
         // their headers differ, which on a real chain they always do.
-        let mut rival = block(4, key(2), Vec::new());
+        let mut rival = next_block(&history, 4, key(2), Vec::new());
+        rival.header.previous = ids[3];
         rival.header.nonce = 7;
         let elsewhere = rival.id();
         assert_ne!(elsewhere, ids[4], "the rival really is another block");
-        assert!(
-            history.diverged(Some(4), |height| if height == 4 {
+        assert_eq!(
+            history.fork(Some(4), |height| if height == 4 {
                 Some(elsewhere)
             } else {
-                usize::try_from(height)
-                    .ok()
-                    .and_then(|at| ids.get(at))
-                    .copied()
+                chain(height)
             }),
-            "the block at the top is not the one that was read"
+            Some(Fork::At(3)),
+            "the block at the top is not the one that was read, and the one below it is"
+        );
+
+        // And nothing it remembers is still there.
+        assert_eq!(
+            history.fork(Some(4), |_| Some(elsewhere)),
+            Some(Fork::Deeper),
+            "a fork below every block remembered is said to be one"
         );
 
         history.forget(None);
@@ -1478,7 +2138,7 @@ mod tests {
              read more than are kept"
         );
         for height in 0..over as u64 {
-            history.take(&block(height, mine, Vec::new()), mine);
+            history.take(&next_block(&history, height, mine, Vec::new()), mine);
         }
         assert_eq!(history.len(), over, "every block paid this key");
 
@@ -1517,7 +2177,7 @@ mod tests {
         let mine = key(1);
         let mut history = History::new();
         for height in 0..10 {
-            history.take(&block(height, mine, Vec::new()), mine);
+            history.take(&next_block(&history, height, mine, Vec::new()), mine);
         }
 
         let settled = NoteId::new(block(2, mine, Vec::new()).coinbase.id(), 0);
@@ -1560,7 +2220,7 @@ mod tests {
         let mine = key(1);
         let mut history = History::new();
         for height in 0..10 {
-            history.take(&block(height, mine, Vec::new()), mine);
+            history.take(&next_block(&history, height, mine, Vec::new()), mine);
         }
 
         let settled = NoteId::new(block(2, mine, Vec::new()).coinbase.id(), 0);
@@ -1596,7 +2256,7 @@ mod tests {
     fn forgetting_with_nothing_settled_keeps_no_place() {
         let mine = key(1);
         let mut history = History::new();
-        history.take(&block(0, mine, Vec::new()), mine);
+        history.take(&next_block(&history, 0, mine, Vec::new()), mine);
         let paid = NoteId::new(block(0, mine, Vec::new()).coinbase.id(), 0);
         assert!(history.fell_at(paid, amount("50"), 3));
 
@@ -1614,14 +2274,14 @@ mod tests {
         let mine = key(1);
         let mut history = History::new();
         for height in 0..3 {
-            history.take(&block(height, mine, Vec::new()), mine);
+            history.take(&next_block(&history, height, mine, Vec::new()), mine);
         }
         history.forget(None);
         assert_eq!(history.undone().count(), 3);
 
         // Two of the three blocks are on the branch that won.
         for height in 0..2 {
-            history.take(&block(height, mine, Vec::new()), mine);
+            history.take(&next_block(&history, height, mine, Vec::new()), mine);
         }
         assert_eq!(history.len(), 2, "read again from the chain");
         assert_eq!(
@@ -1639,7 +2299,8 @@ mod tests {
         history.take(&first, mine);
         let held = first.coinbase.created_notes()[0].0;
         history.take(
-            &block(
+            &next_block(
+                &history,
                 1,
                 key(2),
                 vec![Transfer::new(
@@ -1666,7 +2327,7 @@ mod tests {
     fn where_a_note_landed_is_written_down_and_read_back() {
         let mine = key(1);
         let mut history = History::new();
-        history.take(&block(0, mine, Vec::new()), mine);
+        history.take(&next_block(&history, 0, mine, Vec::new()), mine);
         let (id, _) = history.held().next().unwrap();
 
         assert_eq!(history.where_it_fell(&id), None, "it has not fallen yet");
@@ -1711,11 +2372,11 @@ mod tests {
 
         // And a note that is spent takes its place with it, so the account
         // never carries a handle to money it no longer holds.
-        history.take(&block(0, mine, Vec::new()), mine);
+        history.take(&next_block(&history, 0, mine, Vec::new()), mine);
         let (id, _) = history.held().find(|(id, _)| *id != unseen).unwrap();
         assert!(history.fell_at(id, amount("50"), 5));
         let spend = Transfer::new(vec![Input::hot(id)], vec![Note::new(amount("49"), key(2))]);
-        history.take(&block(1, key(2), vec![spend]), mine);
+        history.take(&next_block(&history, 1, key(2), vec![spend]), mine);
         assert_eq!(history.where_it_fell(&id), None);
     }
 
@@ -1723,7 +2384,7 @@ mod tests {
     fn an_account_written_before_places_were_kept_is_still_read() {
         let mine = key(1);
         let mut history = History::new();
-        history.take(&block(0, mine, Vec::new()), mine);
+        history.take(&next_block(&history, 0, mine, Vec::new()), mine);
 
         // What the file looked like before: everything up to the undone list
         // and nothing after it.
@@ -1731,7 +2392,12 @@ mod tests {
         history.next.encode_to(&mut older);
         history.from.unwrap_or(u64::MAX).encode_to(&mut older);
         history.movements.encode_to(&mut older);
-        history.last.unwrap_or(Hash32::ZERO).encode_to(&mut older);
+        history
+            .recent
+            .back()
+            .copied()
+            .unwrap_or(Hash32::ZERO)
+            .encode_to(&mut older);
         let held: Vec<Owned> = history
             .held
             .iter()
@@ -1746,6 +2412,10 @@ mod tests {
         let read = History::decode(&older).unwrap();
         assert_eq!(read.len(), history.len());
         assert_eq!(read.held().count(), 1);
+        assert_eq!(
+            read.recent, history.recent,
+            "it remembers the newest block it read, which is the one block it wrote down"
+        );
         assert_eq!(
             read.where_it_fell(&history.held().next().unwrap().0),
             None,

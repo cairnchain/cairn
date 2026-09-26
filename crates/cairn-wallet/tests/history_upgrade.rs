@@ -27,13 +27,13 @@ fn key(seed: u8) -> PublicKey {
     SecretKey::from_bytes(&[seed; 32]).public_key()
 }
 
-fn block(height: u64, to: PublicKey) -> Block {
+fn block(height: u64, previous: Hash32, to: PublicKey) -> Block {
     Block {
         header: BlockHeader {
             version: 1,
             network: NetworkId::TESTNET,
             height,
-            previous: Hash32::ZERO,
+            previous,
             state_root: Hash32::ZERO,
             transactions_root: Hash32::ZERO,
             history: Hash32::ZERO,
@@ -52,8 +52,11 @@ fn block(height: u64, to: PublicKey) -> Block {
 
 fn an_account(mine: PublicKey) -> History {
     let mut history = History::new();
+    let mut previous = Hash32::ZERO;
     for height in 0..40 {
-        history.take(&block(height, mine), mine);
+        let block = block(height, previous, mine);
+        previous = block.id();
+        history.take(&block, mine);
     }
     history
 }

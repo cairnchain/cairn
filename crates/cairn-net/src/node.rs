@@ -3738,6 +3738,31 @@ impl Node {
         }
     }
 
+    /// The identifier of the block the followed branch carries at `height`.
+    ///
+    /// From memory where the chain holds it, which is every height a
+    /// reorganisation can reach, and off the header log below that. The header
+    /// log holds every header on the branch back to where this node began, is
+    /// cut and written again on every switch, and is never trimmed for room.
+    ///
+    /// For somebody asking whether a block they read is still on the branch.
+    /// [`Node::archived_at`] answers that too and is the wrong way to ask: it
+    /// reads and decodes the whole block to learn thirty two bytes the chain
+    /// holds in memory, and it reads the block log, which a node trims from
+    /// the front, so a block replaced and then trimmed away read as a block
+    /// nobody had changed.
+    ///
+    /// Above the tip the chain has nothing, and the header log may still hold
+    /// a header the branch has just left if the disk has not taken the cut:
+    /// ask the tip first.
+    pub fn id_at(&self, height: u64) -> Option<Hash32> {
+        self.with_chain(|chain| chain.id_at(height)).or_else(|| {
+            self.shared
+                .header_off_disk(height)
+                .map(|header| header.id())
+        })
+    }
+
     pub fn height(&self) -> Option<u64> {
         self.with_chain(ChainStore::height)
     }

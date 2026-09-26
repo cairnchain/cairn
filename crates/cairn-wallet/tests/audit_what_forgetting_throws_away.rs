@@ -1,6 +1,7 @@
 //! What starting over throws away that the chain cannot give back.
 //!
-//! `forget` is the whole of the wallet's answer to a reorganisation, and its
+//! `forget` was the whole of the wallet's answer to a reorganisation, and is
+//! still its answer to one below every block the account remembers. Its
 //! justification is this sentence: "reading the chain again is what the file
 //! exists to be cheaper than, not a thing that cannot be done." True of the
 //! movements, and true of `held` while the blocks are still on the disk. The
