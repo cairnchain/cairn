@@ -8458,6 +8458,7 @@ where
                 let Ok(addresses) = resolve(&name) else {
                     continue;
                 };
+                let addresses = crate::seeds::taken_from(&name, addresses);
                 let Some(shared) = node.upgrade() else {
                     return;
                 };

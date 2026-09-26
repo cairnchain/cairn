@@ -31,6 +31,8 @@ use std::net::{SocketAddr, ToSocketAddrs};
 
 use cairn_ledger::note::NetworkId;
 
+use crate::book::{realm_of, Realm};
+
 /// The default port a node listens on, and so the one a seed is named with.
 ///
 /// Both halves of that sentence were false. `cairnd` listened on
@@ -58,6 +60,36 @@ pub fn written_in(network: NetworkId) -> &'static [&'static str] {
         NetworkId::TESTNET_6 => &TESTNET_6,
         _ => &[],
     }
+}
+
+/// Every name written into the program, whatever network it is for.
+const EVERY_WRITTEN_IN: [&[&str]; 1] = [&TESTNET_6];
+
+/// What a name's answer is taken for: everything, for a name the operator
+/// typed, and only addresses out in the world for a name written in here.
+///
+/// A written-in name is the network's front door, and every machine behind
+/// it is a public one. Whoever answers for it, the zone or anybody between
+/// this machine and the zone, chose addresses that became seeds: never
+/// dropped, outside the book's ceilings, dialled first on every start. The
+/// count was capped at [`MOST_PER_NAME`] and the realm was not, so an answer
+/// could have a node knock on `169.254.169.254`, where a rented machine keeps
+/// its credentials, or on its own loopback, once a minute for as long as it
+/// ran. [`crate::book::worth_hearing_about`] refuses a stranger's private
+/// address for the same reason; this is a stranger's answer with the
+/// program's name on it.
+///
+/// A name the operator typed is the operator's, and a lab on `10/8` or a
+/// devnet named `localhost` is somebody's real network: it is taken whole.
+pub(crate) fn taken_from(name: &str, found: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    let written = EVERY_WRITTEN_IN.iter().any(|names| names.contains(&name));
+    if !written {
+        return found;
+    }
+    found
+        .into_iter()
+        .filter(|address| realm_of(address.ip()) == Realm::Open)
+        .collect()
 }
 
 /// The most addresses one name may put in front of a node.
@@ -156,7 +188,7 @@ fn gather(
 
     for name in names {
         let addresses = match resolve(name) {
-            Ok(addresses) => addresses,
+            Ok(addresses) => taken_from(name, addresses),
             Err(error) if strict => return Err(error),
             Err(_) => continue,
         };
@@ -329,6 +361,47 @@ mod tests {
             gather(&names, true, answer).is_err(),
             "a name the operator asked for and that will not resolve was \
              passed over in silence"
+        );
+    }
+
+    /// A name written into the program is taken only for addresses out in
+    /// the world, and a name the operator typed for whatever it answers.
+    ///
+    /// Whoever answers a written-in name, which is the zone or anybody
+    /// between this machine and it, chose addresses that became seeds: never
+    /// dropped, outside the book's ceilings, dialled first on every start. The
+    /// count was capped and the realm was not, so an answer could have a node
+    /// knock on `169.254.169.254` or its own loopback once a minute for as
+    /// long as it ran. Nothing answered a written-in name with a private
+    /// address, so that passed.
+    #[test]
+    fn a_written_in_name_is_taken_only_for_addresses_out_in_the_world() {
+        let written = written_in(NetworkId::TESTNET_6)
+            .first()
+            .map(|name| (*name).to_owned())
+            .unwrap();
+        let open: SocketAddr = "93.184.216.34:9944".parse().unwrap();
+        let inside: Vec<SocketAddr> = [
+            "10.0.0.5:9944",
+            "127.0.0.1:9944",
+            "169.254.169.254:9944",
+            "[fe80::1]:9944",
+        ]
+        .iter()
+        .map(|text| text.parse().unwrap())
+        .collect();
+        let answer = |_: &str| Ok(inside.iter().copied().chain([open]).collect::<Vec<_>>());
+        assert_eq!(
+            gather(std::slice::from_ref(&written), false, answer),
+            Ok(vec![open]),
+            "a written-in name was taken for an address inside a network, whoever \
+             answered for it"
+        );
+        let typed = vec!["seeds.lab.example:9944".to_owned()];
+        assert_eq!(
+            gather(&typed, true, answer).map(|found| found.len()),
+            Ok(inside.len() + 1),
+            "a name the operator typed was second-guessed"
         );
     }
 
