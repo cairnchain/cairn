@@ -1,9 +1,11 @@
 [Unit]
 Description=Cairn explorer
 Documentation=https://github.com/cairnchain/cairn
-After=network-online.target
+After=network-online.target nss-lookup.target
 Wants=network-online.target
-StartLimitIntervalSec=300
+# The same limits as cairnd.service, for the reasons written there: two minutes
+# of trying, for a resolver slow to come up after a reboot, counted over ten.
+StartLimitIntervalSec=600
 StartLimitBurst=5
 
 [Service]
@@ -21,11 +23,14 @@ ExecStart=/usr/local/bin/cairn-explorer \
     --http 127.0.0.1:8080
 
 Restart=always
-RestartSec=5s
+RestartSec=30s
 
 # It holds no key and signs nothing. What it needs is one directory, one
 # inbound port for peers, and one loopback port for the proxy.
+CapabilityBoundingSet=
+AmbientCapabilities=
 NoNewPrivileges=yes
+RestrictSUIDSGID=yes
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectSystem=strict
@@ -33,12 +38,19 @@ ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
 RestrictAddressFamilies=AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictRealtime=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0027
+LimitNOFILE=1024
 ReadWritePaths=/var/lib/cairn-explorer
 
 [Install]

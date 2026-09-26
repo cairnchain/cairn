@@ -30,8 +30,9 @@
 # So the number is worked out here too, once a day, from the one thing that
 # decides whether a release is worth making: whether what people download
 # would be different. That is a fact about files, and it is checked against
-# the crates the three programs are actually built from, so a change to the
-# documents or the fuzzing harness moves nothing.
+# the crates the three programs are actually built from and the pages the
+# explorer serves, so a change to the markdown sources of the documents or to
+# the fuzzing harness moves nothing.
 #
 # Deliberately not from the words in commit messages. `fix:` and `feat:` say
 # what an author meant, and a signed artifact anybody can download should turn
@@ -68,6 +69,18 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+
+# One run at a time, the rest waiting rather than cancelled. Two runs that
+# overlapped both found the same tag missing, both built, both recorded an
+# attestation in the public log, and the second failed at the tag; and a
+# scheduled run's version commit could meet a push on its way to the branch.
+# Waiting, the second run decides after the first has tagged, and finds the
+# work done. What it costs: GitHub keeps one run waiting and replaces it with
+# a newer one, so a scheduled run still waiting when a push arrives is not
+# made, and the day's release waits for the next day's.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   # Whether this push publishes anything, and under what number.
@@ -160,8 +173,19 @@ jobs:
             paths="$paths crates/$crate/src crates/$crate/Cargo.toml crates/$crate/build.rs"
           done
           # The lock file and the toolchain as well: neither is a crate of ours
-          # and a change to either changes the programs.
-          paths="$paths Cargo.lock rust-toolchain.toml"
+          # and a change to either changes the programs. And the root manifest,
+          # which holds the release profile and every dependency's features,
+          # neither of which the lock records.
+          #
+          # And the files the explorer serves, which are compiled into it: its
+          # own header says the binary is the site. A fix to the script every
+          # explorer hands the public, or to a paper it serves, changed what
+          # people download while this said that nothing had. The papers are
+          # the rendered pages and their stylesheets, not the markdown they are
+          # rendered from, which is in no program.
+          # `release_decision_sees_every_file_a_program_is_built_from` in the
+          # explorer's tests holds this list against what the sources include.
+          paths="$paths Cargo.lock rust-toolchain.toml Cargo.toml web docs/*.html docs/*.css"
           echo "built from:" $built
 
           # Unquoted on purpose: this is a list of paths and not one path.
@@ -333,20 +357,25 @@ jobs:
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      # A release has to be one commit built five times, and the default ref is
-      # whatever the branch holds at the moment each of these five machines
-      # gets round to asking. So the commit the number was written in is
-      # checked rather than asked for: anything else stops this machine instead
-      # of shipping a binary built from a tree nobody else built.
+      # A release has to be one commit built five times, and it is the commit
+      # the number was written in when `bump` wrote one. The default ref is
+      # not that: it is the commit this run was started for, and a scheduled
+      # run's version commit is made on top of it a minute before. Every
+      # scheduled build checked out the commit before the number, refused it
+      # as foreign, and built nothing; the release then waited for the next
+      # push and was tagged on a later commit its notes did not describe.
       #
-      # Checked rather than named, because naming a commit worked out while the
-      # run is going and then building it is a checkout of code this file
-      # cannot vouch for, and building is running it. The value here is one
-      # this workflow made a minute ago out of its own branch, so the risk is
-      # not real, but the shape is, and a shape like that on the thing that
-      # signs downloads is not worth keeping for the convenience.
+      # Named, then, and vouched for below: the one commit above the tree
+      # `verify` passed, changing nothing in it but version numbers.
+      # `fetch-depth: 2` so that tree is here to compare with.
+      #
+      # A dry run cannot show any of this, since it makes no version commit:
+      # only a scheduled run that bumps goes down this road.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.bump.outputs.sha || github.sha }}
+          fetch-depth: 2
+
       - name: The commit this release is
         if: needs.bump.outputs.sha != ''
         shell: bash
@@ -355,11 +384,27 @@ jobs:
           here=$(git rev-parse HEAD)
           want="${{ needs.bump.outputs.sha }}"
           if [ "$here" != "$want" ]; then
-            echo "this machine has $here and the release is $want" >&2
+            echo "this machine has $here and the release is $want; nothing is built" >&2
+            exit 1
+          fi
+          if [ "$(git rev-parse HEAD^)" != "$GITHUB_SHA" ]; then
+            echo "$want is not the one commit above $GITHUB_SHA, which the checks passed;" >&2
             echo "something else reached the branch between the two; nothing is built" >&2
             exit 1
           fi
-          echo "building $here"
+          if ! git diff --quiet "$GITHUB_SHA" HEAD -- . ':(exclude)Cargo.toml' ':(exclude)Cargo.lock'; then
+            echo "$want changes more than Cargo.toml and Cargo.lock; nothing is built" >&2
+            exit 1
+          fi
+          other=$(git diff -U0 "$GITHUB_SHA" HEAD -- Cargo.toml Cargo.lock \
+            | grep -E '^[-+]' | grep -vE '^(\+\+\+|---) ' \
+            | grep -vE '^[-+]version = "[0-9]+\.[0-9]+\.[0-9]+"$' || true)
+          if [ -n "$other" ]; then
+            echo "$want changes more than version numbers; nothing is built:" >&2
+            echo "$other" >&2
+            exit 1
+          fi
+          echo "building $here, the version written on $GITHUB_SHA"
 
       - name: Install the toolchain this repository pins
         run: rustup show
@@ -434,14 +479,16 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      # The commit the machines built, for the same reason they build it: what
+      # is tagged and published has to be what was built, and the notes have
+      # to describe what is tagged.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ needs.bump.outputs.sha || github.sha }}
           # The commit that changed the version becomes the release notes and
           # the tag's message, so the whole history has to be here.
           fetch-depth: 0
 
-      # And the same check the machines that built it made, for the same
-      # reason: what is tagged and published has to be what was built.
       - name: The commit this release is
         if: needs.bump.outputs.sha != ''
         shell: bash
@@ -450,7 +497,7 @@ jobs:
           here=$(git rev-parse HEAD)
           want="${{ needs.bump.outputs.sha }}"
           if [ "$here" != "$want" ]; then
-            echo "the branch holds $here and the release is $want" >&2
+            echo "this machine has $here and the release is $want" >&2
             exit 1
           fi
 
@@ -471,10 +518,14 @@ jobs:
       # Verified with:
       #   gh attestation verify <file> --repo ${{ github.repository }}
       # Recorded in a public transparency log, so only for a real release.
+      #
+      # The list of hashes as well. It is uploaded with the same token as the
+      # archives, so unattested it caught a download that went wrong and not
+      # one that was swapped, while the notes offered it as the same check.
       - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         if: needs.decide.outputs.release == 'true'
         with:
-          subject-path: "downloads/*.tar.gz, downloads/*.zip"
+          subject-path: "downloads/*.tar.gz, downloads/*.zip, downloads/SHA256SUMS"
 
       # The commit that changed the version, followed by the same closing note
       # every time: how to check these files without having to believe anyone.

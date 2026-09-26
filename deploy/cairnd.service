@@ -1,12 +1,22 @@
 [Unit]
 Description=Cairn node
 Documentation=https://github.com/cairnchain/cairn
-After=network-online.target
+# After the resolver as well as the network: a seed named rather than
+# numbered is looked up as the node starts, and a name that does not resolve
+# refuses the start.
+After=network-online.target nss-lookup.target
 Wants=network-online.target
 # These two belong to the unit rather than the service. systemd ignores them
 # in [Service] and says so only in the journal, so a restart loop would have
 # run unbounded while the file looked right.
-StartLimitIntervalSec=300
+#
+# Five starts thirty seconds apart is two minutes of trying, counted over ten.
+# It was five seconds apart, and a seed machine whose resolver answered later
+# than twenty five seconds after a reboot used up its five starts and stayed
+# down until somebody started it by hand. The interval has to stay longer than
+# the trying, or the limit is never reached and a node that cannot start
+# restarts for ever.
+StartLimitIntervalSec=600
 StartLimitBurst=5
 
 [Service]
@@ -27,11 +37,14 @@ ExecStart=/usr/local/bin/cairnd \
 # Give up only if it fails to hold, five times running, which means something
 # is wrong that restarting will not fix. The limit itself is in [Unit].
 Restart=always
-RestartSec=5s
+RestartSec=30s
 
 # Nothing here holds a key or signs anything, so it needs almost no access to
 # the machine it runs on. What it does need is one directory and one port.
+CapabilityBoundingSet=
+AmbientCapabilities=
 NoNewPrivileges=yes
+RestrictSUIDSGID=yes
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectSystem=strict
@@ -39,12 +52,28 @@ ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
 RestrictAddressFamilies=AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictRealtime=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
+# Anything outside what a service calls is answered with a refusal rather than
+# the end of the process, so a call this list is wrong about is an error the
+# node reports and not a node that vanishes.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# Nothing in the directory is secret, but it is this machine's business and
+# not every account's on it.
+UMask=0027
+# A peer is a socket and every file under the directory is a file. The number
+# systemd would give anyway, written out because the node, when it runs short
+# of them, says to raise the limit on open files for whatever starts it, and
+# under systemd this is that limit.
+LimitNOFILE=1024
 ReadWritePaths=/var/lib/cairn
 
 [Install]

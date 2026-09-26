@@ -98,6 +98,11 @@ it. Set `MINE` to a public key and the node will mine to it:
 MINE="<public key>" sh /usr/local/src/cairn/deploy/install.sh
 ```
 
+A node set to mine waits until it has a peer, and until the chain has stopped
+arriving, before it builds a block, and says so in the journal. A block mined
+with nobody to hand it to starts a chain of that machine's own, and past the
+depth a node will undo, that machine could never follow the network again.
+
 On a test network at least one machine has to keep mining, or the chain
 stands still and nobody can try anything. On a real network this would be a
 poor arrangement, because the entry points people start from would also be
@@ -142,6 +147,17 @@ file, so an update takes none of them with it: `NETWORK`, `PORT`, `SEED` and
 `MINE` come back as they were. It prints what it kept, so a setting that went
 missing on its way through `sudo` is visible before anything is built.
 
+Every other argument on the unit's command line is carried as it stands, so a
+`--keep all`, an `--archive`, a `--data` on another disk or a `--listen` on one
+address survives an update, and the unit is allowed to write wherever `--data`
+points. What is not carried is a directive added to the unit itself, because
+the unit is written fresh from the one in this directory: put such a directive
+in a drop-in with `systemctl edit cairnd`, which an update never touches.
+
+Before anything on the machine changes, the new build is asked whether it
+would run the line the update is about to install. A line it refuses is
+printed with the reason and nothing is installed.
+
 Naming a setting changes it. Naming it empty puts it back to the default it
 ships with, which is the one way a setting goes back on its own:
 
@@ -155,9 +171,19 @@ A node that was mining therefore keeps mining, which is what a test network
 lives on: a miner that quietly stopped is how one goes still without anybody
 noticing. Stopping it is `MINE=`, said out loud, and nothing else.
 
+When the network changes, because it was named or because the new build no
+longer has the old one, the old network's chain is moved aside to
+`/var/lib/cairn.<old network>` and the new network starts from an empty
+directory, with the same `cairn.conf`. A chain from one network is of no use
+to a node on another, and starting on it either discards it block by block or
+does not start at all. Delete the old directory once nobody wants it.
+
 A node killed outright, or a server that loses power, comes back on its own:
 the data directory lock is held by the kernel on an open file and is released
 when the process dies, however it dies. Nothing has to be cleaned up by hand.
+A node that cannot start is tried five times, thirty seconds apart, which is
+long enough for a name server that is slow to answer after a reboot, and then
+left stopped; `journalctl -u cairnd` says why.
 
 ## Putting the explorer on a public address
 
@@ -180,8 +206,10 @@ with no `DOMAIN` the site is served over plain HTTP, which is fine for looking
 at and wrong for publishing.
 
 `explorer.sh` keeps its settings the way `install.sh` does, the domain among
-them: running it again for a new build leaves the certificate where it is, and
-`DOMAIN=` is what takes a site back to plain HTTP.
+them and every other argument on its unit's command line: running it again for
+a new build leaves the certificate where it is, and `DOMAIN=` is what takes a
+site back to plain HTTP. A change of network moves the old chain and index
+aside to `/var/lib/cairn-explorer.<old network>` the same way.
 
 No seed has to be named: the addresses a node starts from are written into
 the program.

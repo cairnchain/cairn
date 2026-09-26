@@ -93,13 +93,22 @@ cairnd, a Cairn node
                          error if a setting is one this build does not
                          accept, which is how a script can find out that a
                          network it was told to use has been retired
-  --mine <public key>    produce blocks, paying rewards to this key
-  --archive              keep the cold set, so this node can answer a wallet
+  --mine <public key|off>
+                         produce blocks, paying rewards to this key. `off`
+                         mines nothing, whatever cairn.conf says. It waits
+                         for a peer, and for the chain to stop arriving,
+                         before it builds anything: a chain mined alone
+                         cannot rejoin the network once it is deep enough.
+                         A node with no seed on a network with none written
+                         in, such as devnet, is its whole network, and mines
+                         at once
+  --archive [yes|no]     keep the cold set, so this node can answer a wallet
                          that asks where one of its put-away notes sits and
                          cannot work it out for itself. Says so on the
                          handshake, so wallets can find this node. Costs a set
                          that grows with every note ever spent; without it a
-                         node keeps sixty four hashes
+                         node keeps sixty four hashes. `--archive no` keeps
+                         the hashes only, whatever cairn.conf says
   --keep <size|all>      how much of the chain to keep on disk, in bytes, or
                          `all` to keep every block ever accepted (default:
                          1GB). A node does not need old blocks: it keeps the
@@ -183,11 +192,12 @@ impl Given {
         self.values.contains_key(name)
     }
 
-    /// A yes or a no written in the file, or nothing where the setting is not
+    /// A yes or a no written as the value, or nothing where the setting is not
     /// there at all.
     ///
-    /// On a command line `--archive` is the whole of what it says, so its
-    /// presence is the answer. A file does not work that way: a file says
+    /// On a command line `--archive` alone is the whole of what it says, so
+    /// its presence is the answer, and a yes or a no after it is asked here
+    /// like a file's. A file does not work that way: a file says
     /// `name = value`, and the value is the answer. Asking `has` of a file
     /// asks whether the word appeared, so `archive = no` turned archiving on
     /// and said nothing about it, which costs the operator a set that grows
@@ -260,8 +270,27 @@ fn parse_arguments(arguments: &[String]) -> Result<Given, String> {
         }
         index = index.saturating_add(1);
 
-        if name == "help" || name == "archive" || name == "check" {
+        if name == "help" || name == "check" {
             given.push(name, String::new());
+            continue;
+        }
+        // A switch that may carry a yes or a no. Its word alone is a yes, as
+        // it always was, and a no is how the command line answers a file that
+        // says yes: without one, the file could turn archiving on and nothing
+        // typed could turn it off, under a help that says the command line
+        // wins. What follows is taken only when it is not another option, so
+        // `--archive --status 3` reads as it did.
+        if name == "archive" {
+            match arguments
+                .get(index)
+                .filter(|value| !value.starts_with("--"))
+            {
+                Some(value) => {
+                    index = index.saturating_add(1);
+                    given.push(name, value.clone());
+                }
+                None => given.push(name, String::new()),
+            }
             continue;
         }
         let Some(value) = arguments.get(index) else {
@@ -397,8 +426,11 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
     // twenty five seconds and stays down.
     let seeds = seeds::start_from(&asked, params.network).map_err(Stopping::CouldNotStart)?;
 
+    // `off` for the same reason `--archive no` exists: a key in the file was
+    // otherwise a miner nothing typed could stop for a run.
     let mine_to = match setting("mine") {
         None => None,
+        Some(text) if text.trim().eq_ignore_ascii_case("off") => None,
         Some(text) => Some(parse_key(&text).map_err(misread)?),
     };
 
@@ -417,13 +449,19 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         ),
     };
 
-    // The command line carries the word alone and the file carries a value, so
-    // the two are asked different questions. Asking the file whether the word
-    // appeared made `archive = no` an instruction to archive.
-    let archive = command_line.has("archive")
-        || config
+    // The command line carries the word, alone or with a yes or a no, and the
+    // file carries a value, so the two are asked different questions. Asking
+    // the file whether the word appeared made `archive = no` an instruction to
+    // archive. The command line answers first, as it does for every setting.
+    let archive = match command_line.first("archive") {
+        Some("") => true,
+        Some(_) => command_line
+            .says_yes("archive", "on the command line")
+            .map_err(misread)?,
+        None => config
             .says_yes("archive", &format!("in {CONFIG_FILE}"))
-            .map_err(misread)?;
+            .map_err(misread)?,
+    };
 
     let keep = match setting("keep") {
         None => KEEP_BLOCK_BYTES,
@@ -674,7 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn archiving_is_asked_for_and_takes_no_value() {
+    fn archiving_is_asked_for_by_the_word_alone() {
         let options = resolve_options(&args(&["--archive"])).unwrap().unwrap();
         assert!(options.archive);
         // It is a switch, so what follows it is not swallowed as its value.
@@ -683,6 +721,63 @@ mod tests {
             .unwrap();
         assert!(options.archive);
         assert_eq!(options.status_period, 3);
+    }
+
+    /// What the file turns on, the command line can turn off for a run.
+    ///
+    /// The help says the command line wins over the file, and for these two
+    /// it could not: `--archive` was a word with no value, so its absence was
+    /// the only way to say no and a file saying yes could not be answered;
+    /// `--mine` took only a key. A run without archiving, or a seed that must
+    /// stop mining for one restart, meant editing the file and editing it
+    /// back. Nothing asked for either.
+    #[test]
+    fn what_the_file_turns_on_the_command_line_can_turn_off() {
+        let directory =
+            std::env::temp_dir().join(format!("cairn-turned-off-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let key = cairn_crypto::SecretKey::generate().unwrap().public_key();
+        std::fs::write(
+            directory.join(CONFIG_FILE),
+            format!("archive = yes\nmine = {key}\n"),
+        )
+        .unwrap();
+        let data = directory.to_string_lossy().to_string();
+
+        let options = resolve_options(&args(&["--data", &data])).unwrap().unwrap();
+        assert!(options.archive, "the file's yes is read");
+        assert!(options.mine_to.is_some(), "and so is its key");
+
+        let options = resolve_options(&args(&["--data", &data, "--archive", "no"]))
+            .unwrap()
+            .unwrap();
+        assert!(
+            !options.archive,
+            "--archive no did not turn off what the file turned on"
+        );
+        let options = resolve_options(&args(&["--data", &data, "--mine", "off"]))
+            .unwrap()
+            .unwrap();
+        assert!(
+            options.mine_to.is_none(),
+            "--mine off did not stop the mining the file asked for"
+        );
+
+        let options = resolve_options(&args(&["--archive", "yes", "--status", "3"]))
+            .unwrap()
+            .unwrap();
+        assert!(options.archive, "--archive yes is a yes");
+        assert!(
+            resolve_options(&args(&["--archive", "maybe"])).is_err(),
+            "and anything but a yes or a no after it is refused rather than guessed at"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert!(
+            HELP.contains("--archive [yes|no]") && HELP.contains("--mine <public key|off>"),
+            "the help does not say how to turn either off"
+        );
     }
 
     #[test]

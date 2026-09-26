@@ -60,10 +60,6 @@ Windows will say an unrecognised app was blocked. Both are saying the same
 true thing: these programs are not signed by a certificate their maker paid
 for, so the operating system has no name to show you.
 
-On macOS, tell it you know where the files came from:
-
-  xattr -d com.apple.quarantine cairnd cairn-wallet cairn-explorer
-
 There is a better check than a certificate, and you can run it yourself.
 Every release is built in public by GitHub, from a commit you can read, with
 a log you can read, and each file is signed with an attestation saying which
@@ -71,11 +67,22 @@ commit produced it. To verify:
 
   gh attestation verify <the archive you downloaded> --repo cairnchain/cairn
 
-That asks GitHub, not us. Or compare the hash of what you downloaded against
-the SHA256SUMS file published beside it:
+That asks GitHub, not us. The SHA256SUMS file published beside the archives
+is signed the same way, and once it has passed that check it vouches for
+every archive it lists:
 
-  shasum -a 256 <the archive you downloaded>        macOS and Linux
-  certutil -hashfile <the archive> SHA256           Windows
+  gh attestation verify SHA256SUMS --repo cairnchain/cairn
+  shasum -a 256 -c SHA256SUMS --ignore-missing     macOS and Linux
+  certutil -hashfile <the archive> SHA256          Windows: compare it with
+                                                   the line in SHA256SUMS
+
+Comparing hashes without the first of those lines shows only that the
+download arrived whole. Whoever could replace an archive could replace the
+list beside it.
+
+Then, on macOS, tell it you know where the files came from:
+
+  xattr -d com.apple.quarantine cairnd cairn-wallet cairn-explorer
 
 If you would rather not run a binary at all, the source is at
 https://github.com/cairnchain/cairn and builds with one command.

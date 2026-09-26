@@ -28,6 +28,12 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Which cargo-audit. It was whatever was newest the morning it ran, so the
+  # tool deciding whether the lock is clean could change between two Mondays
+  # with nothing in this repository changing, which is the reason
+  # `mutants.yml` pins its own tool. The version the last run before this pin
+  # installed; moving it is a change somebody can read.
+  CARGO_AUDIT: 0.22.2
 
 jobs:
   advisories:
@@ -40,5 +46,5 @@ jobs:
       # job exists to say something about supply chain, and reaching for one
       # more action to do it would be answering the question with the problem.
       - name: Install cargo-audit
-        run: cargo install --locked cargo-audit
+        run: cargo install --locked "cargo-audit@$CARGO_AUDIT"
       - run: cargo audit
