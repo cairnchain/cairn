@@ -1,6 +1,6 @@
 //! What a person is told about a payment that has just left.
 //!
-//! "Handed to the network, and waiting for a block" is the sentence somebody
+//! "Written to N peers; only a block confirms it" is the sentence somebody
 //! reads before they hand over goods. `Sent::handed_on` is the whole of what
 //! it rests on, and it used to be read off the peer count five seconds after
 //! the fact: a wallet's node broadcasts a transfer once, at the instant its

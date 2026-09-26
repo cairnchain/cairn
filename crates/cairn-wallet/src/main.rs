@@ -6,18 +6,20 @@
 //! ordinary hardware, so it would be strange to build the wallet any other way.
 
 use std::collections::BTreeMap;
-use std::io::IsTerminal as _;
+use std::io::{IsTerminal as _, Write};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cairn_crypto::SecretKey;
+use cairn_crypto::{PublicKey, SecretKey};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_net::seeds;
 use cairn_primitives::Amount;
 use cairn_wallet::history::{Direction, Movement};
-use cairn_wallet::{keyfile, serve, Covered, Holdings, Wallet, WalletError};
+use cairn_wallet::{
+    keyfile, serve, Covered, Holdings, NotCarried, Sent, Waited, Waiting, Wallet, WalletError,
+};
 
 const HELP: &str = "\
 cairn-wallet, a Cairn wallet that is itself a node
@@ -32,7 +34,8 @@ cairn-wallet, a Cairn wallet that is itself a node
       join the network, verify the chain, and add up what this key holds
 
   cairn-wallet send <key file> --to <public key> --amount <cairn> [options]
-      spend, and hand the transfer to the network
+      spend, and offer the transfer to the network's peers; only a block
+      confirms it
 
   cairn-wallet open <key file> [network options]
       open the wallet as a page on this machine, and print its address
@@ -54,12 +57,19 @@ Network options
                        be the same network the node is on
   --wait <seconds>     how long to spend catching up (default: 30)
   --fee <cairn>        what to pay to be carried. Without one, the least
-                       the network will carry, worked out from the transfer
+                       the network will carry, worked out from the transfer,
+                       and a little over it so that a note of it falling out
+                       of the hot set before a block carries it does not
+                       leave it paying too little
   --fee-anyway         pay a fee out of all proportion to the amount. Without
                        this the wallet stops and asks, because a fee larger
                        than the payment is usually a decimal point in the
                        wrong place. Paying over the odds on purpose is what
                        this is for
+  --yes                send without asking. At a terminal `send` says who
+                       is paid, how much, the fee and the total, and asks
+                       before paying; where its input is not a terminal,
+                       as in a script, it does not ask
 
 Options for `open`
 
@@ -116,13 +126,14 @@ fn run(arguments: &[String]) -> Result<(), String> {
 /// `cairnd` and the explorer. Taken and ignored, `--netwrok devnet` read a
 /// balance on the default network and printed it as the answer, and `--fees`
 /// paid the least the network carries instead of what its sender had priced.
-const KNOWN: [&str; 10] = [
+const KNOWN: [&str; 11] = [
     "data",
     "seed",
     "network",
     "wait",
     "fee",
     "fee-anyway",
+    "yes",
     "to",
     "amount",
     "port",
@@ -130,7 +141,7 @@ const KNOWN: [&str; 10] = [
 ];
 
 /// Options that are the whole of what they say, with nothing after them.
-const BARE: [&str; 1] = ["fee-anyway"];
+const BARE: [&str; 2] = ["fee-anyway", "yes"];
 
 /// Options that are a list rather than a setting, where every value is used.
 const REPEATED: [&str; 1] = ["seed"];
@@ -401,7 +412,19 @@ fn show_balance(arguments: &[String]) -> Result<(), String> {
         }
     }
 
-    show_waiting(&wallet);
+    // Payments handed over that no block carries yet, and the ones this
+    // wallet stopped waiting on without a block carrying them. The one thing
+    // somebody staring at a balance that has not moved needs told, and the
+    // reason they do not send a second time. It was read out of the pool,
+    // which dies with the process, so on this face, where every payment is
+    // made by a process that then exits, it could never print.
+    for line in what_is_waiting(
+        &wallet.waiting(),
+        &wallet.not_carried(),
+        wallet.payments_unkept(),
+    ) {
+        println!("{line}");
+    }
     show_undone(&wallet);
 
     for line in beside_the_balance(&holdings, recovery.words(), &wallet.history_covers()) {
@@ -535,27 +558,12 @@ fn beside_the_balance(
     // that fell out of the set before that is missing, with nothing to name it
     // by. Sending that person to check their connection sends them the wrong
     // way.
+    //
+    // The sentence is the library's, so the page says the same one: it told
+    // the same person to check the height above, which no height answers.
     if holdings.empty_handed() {
         lines.push(String::new());
-        match covered.from {
-            Some(from) if from > 0 => lines.extend(wrapped(&format!(
-                "Nothing here yet. This wallet's account of this key begins at block {from}. \
-                 If this key was paid before that, money that has since fallen out of the set \
-                 every node holds may be missing here, and only a history.dat that recorded it \
-                 can find it: close the wallet, put a backup of that file in its data \
-                 directory, and run this again. Otherwise, check that the wallet reached a \
-                 peer and caught up to the height you expect."
-            ))),
-            _ => {
-                lines.push(
-                    "Nothing here yet. If this key should hold something, check that the"
-                        .to_owned(),
-                );
-                lines.push(
-                    "wallet reached a peer and caught up to the height you expect.".to_owned(),
-                );
-            }
-        }
+        lines.extend(wrapped(&cairn_wallet::nothing_here_yet(covered)));
     }
     lines
 }
@@ -564,24 +572,67 @@ fn beside_the_balance(
 /// and how many were left out is said instead.
 const MOVEMENTS_SHOWN: usize = 20;
 
-/// Payments handed over that no block carries yet.
-///
-/// The one thing somebody staring at a balance that has not moved needs told,
-/// and the reason they do not press Send a second time.
-fn show_waiting(wallet: &Wallet) {
-    let payments = wallet.waiting();
-    if payments.is_empty() {
-        return;
+/// What `balance` says about the payments this wallet handed over.
+fn what_is_waiting(
+    payments: &[Waiting],
+    not_carried: &[NotCarried],
+    unkept: Option<String>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(unkept) = unkept {
+        lines.push(String::new());
+        lines.extend(wrapped(&unkept));
     }
-    println!();
-    println!("Waiting for a block, so not paid to anybody yet:");
-    println!();
-    for payment in &payments {
-        println!("  -{:<22} {}", payment.amount.to_string(), payment.id);
+    if !payments.is_empty() {
+        lines.push(String::new());
+        lines.push("Waiting for a block, so not paid to anybody yet:".to_owned());
+        lines.push(String::new());
+        for payment in payments {
+            lines.push(format!(
+                "  -{:<22} {}",
+                payment.amount.to_string(),
+                payment.id
+            ));
+            if let Some(why) = &payment.why {
+                let held = payment.held_until.map_or_else(String::new, |until| {
+                    format!(" Its notes stay held until block {until}.")
+                });
+                for line in wrapped(&format!("Not held by this wallet's node: {why}.{held}")) {
+                    lines.push(format!("    {line}"));
+                }
+            }
+        }
+        lines.push(String::new());
+        lines.extend(wrapped(
+            "The notes they are made of are out of the balance above: the network will not \
+             carry them twice. A block takes a few minutes, and only a block confirms a \
+             payment. Do not send one again while it is listed here.",
+        ));
     }
-    println!();
-    println!("The notes they are made of are out of the balance above: the network will");
-    println!("not carry them twice. A block takes a few minutes.");
+    if !not_carried.is_empty() {
+        lines.push(String::new());
+        lines.push("Not carried by any block, so nobody was paid by them:".to_owned());
+        lines.push(String::new());
+        for payment in not_carried {
+            lines.push(format!(
+                "  {:<23} {}",
+                payment.amount.to_string(),
+                payment.id
+            ));
+            for line in wrapped(&format!(
+                "Stopped waiting on at block {}: {}.",
+                payment.at, payment.why
+            )) {
+                lines.push(format!("    {line}"));
+            }
+        }
+        lines.push(String::new());
+        lines.extend(wrapped(
+            "Their money is back in the balance above. If one of them should still be paid, \
+             send it again.",
+        ));
+    }
+    lines
 }
 
 /// What the chain took back.
@@ -655,10 +706,26 @@ fn spend(arguments: &[String]) -> Result<(), String> {
         }
     };
 
-    let wallet = join(&flags)?;
-    // Without one named, what the network asks for. Nothing is not an option
-    // any more and defaulting to it would send transfers nobody carries.
-    let fee = asked.unwrap_or_else(|| wallet.floor_for(recipient, amount));
+    let (wallet, waited) = joined(&flags)?;
+    // Not built from a chain still on its way. A payment spending a note
+    // that has since fallen, or one another copy of this key has since spent,
+    // is refused by every peer that has followed the chain, while this
+    // wallet's own node, still behind, pools it and reports it offered.
+    if waited == Waited::StillMoving {
+        wallet.shutdown();
+        return Err(
+            "nothing was sent: this wallet had not finished catching up, so the payment would \
+             have been built from a chain the network may have moved past. Run this again \
+             with a longer --wait."
+                .to_owned(),
+        );
+    }
+    // Without one named, what the network asks for, with a margin for the
+    // floor moving before a block carries it. Nothing is not an option any
+    // more and defaulting to it would send transfers nobody carries; the floor
+    // exactly was a payment the pool let go of the block after one of its
+    // notes fell.
+    let fee = asked.unwrap_or_else(|| wallet.fee_for(recipient, amount));
     // Refused before a fee is named for it, as the page's quote is. For money
     // this wallet does not have there is no transfer to price, and the line
     // below used to name a fee of nothing for it.
@@ -667,12 +734,27 @@ fn spend(arguments: &[String]) -> Result<(), String> {
         return Err(error.to_string());
     }
 
-    // Said before it is paid rather than only after. A fee is the one number
-    // on this command line a person can get wrong by a factor of a hundred
-    // thousand with one keystroke.
-    println!();
-    println!("paying    {amount} to {recipient}");
-    println!("fee       {fee} to carry it");
+    // Said before it is paid rather than only after, and at a terminal asked
+    // about before it is paid. A fee is the one number on this command line a
+    // person can get wrong by a factor of a hundred thousand with one
+    // keystroke, and the amount and the recipient have no guard at all:
+    // `12.5` against `125` is the same one keystroke. The saying and the
+    // paying used to be consecutive statements, so nobody could act on what
+    // was said.
+    for line in about_to_pay(recipient, amount, fee, wallet.address()) {
+        println!("{line}");
+    }
+    let asking = must_ask(std::io::stdin().is_terminal(), flags.given("yes"));
+    if stop_before_paying(asking, || {
+        ask(
+            "Send? [y/N] ",
+            &mut std::io::stdin().lock(),
+            &mut std::io::stdout(),
+        )
+    }) {
+        wallet.shutdown();
+        return Err("nothing was sent.".to_owned());
+    }
 
     let outcome = if flags.given("fee-anyway") {
         wallet.send_over_the_odds(recipient, amount, fee)
@@ -695,6 +777,10 @@ fn spend(arguments: &[String]) -> Result<(), String> {
         sent.notes, sent.from_cold
     );
     println!("transfer  {}", sent.id);
+    // Nobody was offered it, and this process is about to take the pool with
+    // it: the payment is nowhere, and is said to be nowhere below. Left on the
+    // record, the next start would hand it over as well as the one sent again.
+    wallet.forget_if_unoffered(&sent);
     wallet.shutdown();
 
     println!();
@@ -711,11 +797,91 @@ fn spend(arguments: &[String]) -> Result<(), String> {
             sent.id
         ));
     }
-    println!("Handed to the network, and waiting for a block. Nobody has been paid yet:");
-    println!("that happens when a block carries it, which takes a few minutes, and it is");
-    println!("settled once enough work is piled on top of that block. Until then this");
-    println!("wallet's balance does not move and the notes it used cannot be spent again.");
+    for line in after_sending(&sent) {
+        println!("{line}");
+    }
     Ok(())
+}
+
+/// What `send` says before it pays: who, how much, what carrying it costs,
+/// and what that comes to.
+///
+/// The total was never said on this face, and the page said it as the person
+/// typed. And a payment to this wallet's own address, which is what pasting
+/// the output of `cairn-wallet address` in place of the recipient's does,
+/// went without a word and showed in the history as the fee sent.
+fn about_to_pay(recipient: PublicKey, amount: Amount, fee: Amount, own: PublicKey) -> Vec<String> {
+    let mut lines = vec![
+        String::new(),
+        format!("paying    {amount} to {recipient}"),
+        format!("fee       {fee} to carry it"),
+    ];
+    match amount.checked_add(fee) {
+        Some(total) => lines.push(format!("total     {total}")),
+        None => lines.push("total     more than there is".to_owned()),
+    }
+    if recipient == own {
+        lines.push(String::new());
+        lines.extend(wrapped(
+            "That is this wallet's own address: nothing leaves it but the fee. If you meant to \
+             pay somebody else, answer no and check the address.",
+        ));
+    }
+    lines
+}
+
+/// Whether `send` asks before it pays.
+///
+/// At a terminal, unless told `--yes`. Anywhere else there is nobody to ask:
+/// the README gives this face to scripts and servers, and a prompt nobody
+/// reads is a script that hangs.
+const fn must_ask(stdin_is_a_terminal: bool, yes: bool) -> bool {
+    stdin_is_a_terminal && !yes
+}
+
+/// Whether to stop rather than pay: when asking, and the answer `answer`
+/// reads is not a yes. The question is put only when asking.
+fn stop_before_paying(asking: bool, answer: impl FnOnce() -> String) -> bool {
+    asking && !answered_yes(&answer())
+}
+
+/// Whether an answer to the question is yes. Anything but a yes is a no,
+/// including nothing at all.
+fn answered_yes(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// Puts `question` and reads the answer, the question flushed first so it is
+/// on the screen before anything waits for a reply.
+fn ask(question: &str, input: &mut impl std::io::BufRead, output: &mut impl Write) -> String {
+    let _ = write!(output, "{question}");
+    let _ = output.flush();
+    let mut answer = String::new();
+    let _ = input.read_line(&mut answer);
+    answer
+}
+
+/// What `send` says once a payment has been offered to a peer.
+///
+/// "Handed to the network" was what it said, and what it rested on is a
+/// socket write: no message in the protocol answers a transfer, so a peer
+/// that refused it counted exactly as one that kept it. It says what was
+/// measured now, and that only a block confirms anything.
+fn after_sending(sent: &Sent) -> Vec<String> {
+    let peers = if sent.offered == 1 {
+        "1 peer".to_owned()
+    } else {
+        format!("{} peers", sent.offered)
+    };
+    wrapped(&format!(
+        "Written to {peers}; only a block confirms it. Whether a peer kept it, nothing in the \
+         network says, and nobody has been paid yet: that happens when a block carries it, \
+         which takes a few minutes, and it is settled once enough work is piled on top of that \
+         block. This wallet has written it down and offers it again every time it runs until a \
+         block carries it or it says it will not be carried. Until then the balance does not \
+         move and the notes it used cannot be spent again: `cairn-wallet balance` shows it \
+         waiting. Do not send it again."
+    ))
 }
 
 /// Where this wallet keeps its copy of the chain, and now its link as well.
@@ -788,8 +954,9 @@ fn open_page(arguments: &[String]) -> Result<(), String> {
 
     // Ctrl+C ends the process, as it does for the node and the explorer.
     // Nothing is lost by that: every block this wallet accepted was written
-    // as it arrived, and a transfer it handed over is with the network rather
-    // than here.
+    // as it arrived, and every payment it handed over was written down beside
+    // them the moment the pool took it, and is handed back to the pool and
+    // offered again the next time the wallet opens.
     serve::run(&wallet, &listener, &opened, &running);
     serve::Opened::let_the_link_go(&data);
     wallet.shutdown();
@@ -798,6 +965,11 @@ fn open_page(arguments: &[String]) -> Result<(), String> {
 
 /// Opens the wallet and brings it up to the chain the network is on.
 fn join(flags: &Flags) -> Result<Wallet, String> {
+    joined(flags).map(|(wallet, _)| wallet)
+}
+
+/// The same, and what the wait came to, for a command that acts on it.
+fn joined(flags: &Flags) -> Result<(Wallet, Waited), String> {
     let params = rules_of(flags)?;
     let data = data_directory(flags);
     let (wallet, blocks) =
@@ -832,31 +1004,63 @@ fn join(flags: &Flags) -> Result<Wallet, String> {
 
     println!("wallet    {blocks} blocks on disk, {reached} seed(s) reached");
     print!("catching up");
-    wallet.catch_up(Duration::from_secs(patience));
+    // Flushed, because a standard output holds a line until it ends, and this
+    // one ends when the wait does: the word meant to say the wallet is working
+    // arrived once there was nothing left to wait for.
+    let _ = std::io::stdout().flush();
+    let waited = wallet.catch_up(Duration::from_secs(patience));
     println!();
 
-    // A wallet with no chain has nothing to add up, and the balance it would
-    // print is nought. Said here so it does not read as an empty key.
-    let progress = wallet.progress();
-    if progress.height.is_none() {
-        println!();
-        println!("No chain arrived in {patience} seconds, so there is nothing to read a balance");
-        if progress.peers == 0 {
-            println!("out of. This wallet reached no peer: check the network and the --seed");
-            println!("addresses, and that this machine can make outgoing connections.");
-        } else {
-            println!("out of. This wallet is connected but nothing has been sent to it yet. A");
-            println!("first start takes a while; try again with a longer --wait, or with a");
-            println!("--seed you trust.");
-        }
+    for line in how_the_wait_ended(waited, patience) {
+        println!("{line}");
     }
-    Ok(wallet)
+    Ok((wallet, waited))
+}
+
+/// What is said when the wait for the chain did not end with the chain
+/// settled.
+///
+/// Keyed on what the wait came to rather than on the height. The paragraph
+/// for a wallet that reached nobody asked whether there was a height at all,
+/// and on both networks that exist there always is, block nought, written
+/// into the program: so it never printed, and a wallet alone with its disk
+/// printed a height and a balance with no word about being alone.
+fn how_the_wait_ended(waited: Waited, patience: u64) -> Vec<String> {
+    let said = match waited {
+        Waited::Settled => return Vec::new(),
+        Waited::Alone => format!(
+            "This wallet reached no peer in {patience} seconds, so what follows is read from \
+             whatever chain it already had. Check the network and the --seed addresses, and \
+             that this machine can make outgoing connections."
+        ),
+        Waited::StillMoving => format!(
+            "This wallet had not finished catching up when its {patience} seconds ran out: the \
+             chain was still arriving. What follows is as far as it had got. Run it again with \
+             a longer --wait to read the chain as it stands."
+        ),
+        Waited::Behind { ours, theirs } => format!(
+            "A peer said its chain is at block {theirs} and has more work behind it than this \
+             wallet's, which stands at {} and has not moved for a while. That is a number \
+             anybody can write, so it is a reason to look rather than a verdict: if it is true, \
+             what follows is out of date, and a longer --wait reads the rest.",
+            ours.map_or_else(
+                || "nothing yet".to_owned(),
+                |height| format!("block {height}")
+            )
+        ),
+    };
+    let mut lines = vec![String::new()];
+    lines.extend(wrapped(&said));
+    lines
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
-    use super::{beside_the_balance, what_happened, what_was_not_read, wrapped, Flags};
+    use super::{about_to_pay, answered_yes, ask, how_the_wait_ended, must_ask};
+    use super::{after_sending, beside_the_balance, what_happened, what_is_waiting};
+    use super::{stop_before_paying, Waited};
+    use super::{what_was_not_read, wrapped, Flags, NotCarried, Sent, Waiting};
     use super::{Amount, Covered, Direction, Holdings, Movement, MOVEMENTS_SHOWN};
     use cairn_primitives::Hash32;
 
@@ -1216,5 +1420,217 @@ mod tests {
             says(&lines, "could not read every block up to 40"),
             "{lines:?}"
         );
+    }
+
+    fn sent(offered: usize) -> Sent {
+        Sent {
+            id: Hash32::ZERO,
+            amount: pebbles(700),
+            fee: pebbles(7),
+            change: pebbles(0),
+            notes: 1,
+            from_cold: 0,
+            handed_on: offered > 0,
+            offered,
+        }
+    }
+
+    /// What `send` says once a payment has left is what was measured, and
+    /// only that.
+    ///
+    /// It said "Handed to the network, and waiting for a block" for a socket
+    /// write: nothing in the protocol answers a transfer, so a peer that
+    /// refused it counted as one that kept it. Nothing read the sentence, so
+    /// it passed.
+    #[test]
+    fn a_sent_payment_is_said_as_written_to_peers_and_confirmed_by_a_block() {
+        let said = after_sending(&sent(2)).join(" ");
+        assert!(
+            said.contains("Written to 2 peers; only a block confirms it."),
+            "what was measured is not what is said"
+        );
+        assert!(!said.contains("Handed to the network"), "{said}");
+        assert!(said.contains("Do not send it again"), "{said}");
+        assert!(
+            after_sending(&sent(1))
+                .join(" ")
+                .contains("Written to 1 peer;"),
+            "one peer is one peer"
+        );
+    }
+
+    fn waiting(why: Option<&str>, held_until: Option<u64>) -> Waiting {
+        Waiting {
+            id: Hash32::ZERO,
+            amount: pebbles(707),
+            committed: pebbles(5_000),
+            pooled: why.is_none(),
+            why: why.map(str::to_owned),
+            held_until,
+        }
+    }
+
+    /// `balance` names every payment it is waiting on, says why one its node
+    /// does not hold is not held and until when its notes are, and names the
+    /// payments no block carried.
+    ///
+    /// The section was read out of the pool, which dies with the process that
+    /// sent the payment, so on this face it could never print; and a payment
+    /// the pool let go of was said nowhere at all.
+    #[test]
+    fn what_is_waiting_and_what_was_not_carried_are_said() {
+        assert!(
+            what_is_waiting(&[], &[], None).is_empty(),
+            "nothing waiting is nothing to say"
+        );
+        let lines = what_is_waiting(&[waiting(None, None)], &[], None);
+        assert!(says(&lines, "Waiting for a block"), "{lines:?}");
+        assert!(!says(&lines, "Not held by"), "{lines:?}");
+
+        let lines = what_is_waiting(&[waiting(Some("it pays too little"), Some(40))], &[], None);
+        assert!(
+            says(
+                &lines,
+                "Not held by this wallet's node: it pays too little."
+            ),
+            "{lines:?}"
+        );
+        let flat = lines
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(flat.contains("held until block 40."), "{lines:?}");
+
+        let gone = NotCarried {
+            id: Hash32::ZERO,
+            amount: pebbles(707),
+            why: "it pays too little".to_owned(),
+            at: 46,
+        };
+        let lines = what_is_waiting(&[], &[gone], Some("Not kept.".to_owned()));
+        assert!(says(&lines, "Not carried by any block"), "{lines:?}");
+        let flat = lines
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            flat.contains("at block 46: it pays too little."),
+            "{lines:?}"
+        );
+        assert!(says(&lines, "Not kept."), "{lines:?}");
+        assert!(!says(&lines, "Waiting for a block"), "{lines:?}");
+    }
+
+    /// `send` says who is paid, how much, the fee and the total before it
+    /// pays, and says so when the address is this wallet's own.
+    ///
+    /// The total was never said on this face, and a payment to this wallet's
+    /// own address went without a word. Nothing read these lines, which were
+    /// printed in the middle of sending.
+    #[test]
+    fn what_is_about_to_be_paid_is_said_whole() {
+        let somebody = cairn_crypto::SecretKey::generate().unwrap().public_key();
+        let me = cairn_crypto::SecretKey::generate().unwrap().public_key();
+        let lines = about_to_pay(somebody, pebbles(700), pebbles(7), me);
+        assert!(says(
+            &lines,
+            &format!("paying    {} to {somebody}", pebbles(700))
+        ));
+        assert!(says(
+            &lines,
+            &format!("fee       {} to carry it", pebbles(7))
+        ));
+        assert!(
+            says(&lines, &format!("total     {}", pebbles(707))),
+            "the total is not said before paying"
+        );
+        assert!(!says(&lines, "own address"), "{lines:?}");
+        let lines = about_to_pay(me, pebbles(700), pebbles(7), me);
+        assert!(
+            says(&lines, "That is this wallet's own address"),
+            "a payment to this wallet's own address is not said to be one"
+        );
+    }
+
+    /// `send` asks at a terminal unless told `--yes`, never anywhere else,
+    /// and takes only a yes for a yes.
+    ///
+    /// It asked nothing anywhere: an irreversible payment went on one
+    /// command with no chance to read what it was about to do.
+    #[test]
+    fn a_payment_is_asked_about_at_a_terminal_and_only_a_yes_sends_it() {
+        assert!(
+            must_ask(true, false),
+            "a terminal without --yes is not asked"
+        );
+        assert!(!must_ask(true, true), "--yes is asked anyway");
+        assert!(!must_ask(false, false), "a script is asked, and hangs");
+        assert!(!must_ask(false, true));
+        for yes in ["y", "Y", "yes", "YES", " y\n"] {
+            assert!(answered_yes(yes), "{yes:?} is a yes");
+        }
+        for no in ["", "\n", "n", "no", "yess", "sure", "y y"] {
+            assert!(!answered_yes(no), "{no:?} is not a yes");
+        }
+        assert!(
+            parsed(&["key.json", "--yes", "--to", "somebody"]).given("yes"),
+            "--yes is not an option send knows"
+        );
+
+        let mut shown = Vec::new();
+        let answer = ask("Send? [y/N] ", &mut "y\nmore".as_bytes(), &mut shown);
+        assert_eq!(answer, "y\n", "the answer read is not the line typed");
+        assert_eq!(shown, b"Send? [y/N] ", "the question is not what was put");
+
+        assert!(
+            !stop_before_paying(true, || "y".to_owned()),
+            "a yes stopped it"
+        );
+        assert!(stop_before_paying(true, || "n".to_owned()), "a no paid");
+        let asked = std::cell::Cell::new(false);
+        assert!(
+            !stop_before_paying(false, || {
+                asked.set(true);
+                "n".to_owned()
+            }),
+            "not asking stopped it"
+        );
+        assert!(!asked.get(), "the question was put when not asking");
+    }
+
+    /// A wait that ran out says what it came to, and a wait that settled
+    /// says nothing.
+    ///
+    /// The one paragraph for this asked whether there was a height, and on
+    /// both networks that exist there always is: so a wallet alone, or one
+    /// still catching up, printed a height and a balance and said nothing.
+    #[test]
+    fn a_wait_that_ran_out_says_what_it_came_to() {
+        assert!(how_the_wait_ended(Waited::Settled, 30).is_empty());
+        let alone = how_the_wait_ended(Waited::Alone, 30).join(" ");
+        assert!(alone.contains("reached no peer in 30 seconds"), "{alone}");
+        let moving = how_the_wait_ended(Waited::StillMoving, 30).join(" ");
+        assert!(moving.contains("had not finished catching up"), "{moving}");
+        let behind = how_the_wait_ended(
+            Waited::Behind {
+                ours: Some(4),
+                theirs: 90,
+            },
+            30,
+        )
+        .join(" ");
+        assert!(behind.contains("at block 90"), "{behind}");
+        assert!(behind.contains("stands at block 4"), "{behind}");
+        let nothing = how_the_wait_ended(
+            Waited::Behind {
+                ours: None,
+                theirs: 90,
+            },
+            30,
+        )
+        .join(" ");
+        assert!(nothing.contains("stands at nothing yet"), "{nothing}");
     }
 }

@@ -263,6 +263,14 @@ The same things without a browser, for scripts and for servers:
     --network devnet --data wallet --seed 127.0.0.1:9944
 ```
 
+At a terminal `send` says who is paid, how much, the fee and the total, and asks
+before it pays; `--yes` answers for a script that wants it not to ask, and one
+whose input is not a terminal is not asked. A payment is written down beside the
+wallet's chain the moment it leaves, and every later run offers it again until a
+block carries it: `balance` lists it as waiting until then, and says so if no
+block will. "Sent" means written to that many peers; only a block confirms a
+payment.
+
 Everything that touches money lives in the library, and both of those are faces
 on top of it. That is what makes a native application on a phone a matter of
 writing a face rather than writing spending a second time.
