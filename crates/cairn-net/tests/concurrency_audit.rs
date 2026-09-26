@@ -926,13 +926,17 @@ fn a_node_that_stopped_itself_lets_go_of_its_directory() {
     // handed and not one block above it.
     let (directory, handover) = directory_holding_a_handover("selfstop");
     let (node, _) = Node::open(params(), loopback(), &directory).unwrap();
-    node.wait_for_the_burial(0);
     assert!(node.probation().is_some(), "it is holding a handed ledger");
 
     // Somebody to ask, who has nothing to give, which is what turns waiting
     // into being stranded.
     let bystander = Node::bind(params(), loopback()).unwrap();
     node.connect(bystander.address()).unwrap();
+    // The patience goes to nought only once the connection is set up. Before
+    // it, a round of upkeep could dial the bystander from the book `connect`
+    // had just written it into, stop the node for being stranded, and leave
+    // `connect` to report a node that was stopping.
+    node.wait_for_the_burial(0);
     wait_for(
         "the node to say it is stranded",
         Duration::from_secs(20),
@@ -1087,7 +1091,6 @@ fn a_peer_that_will_not_close_does_not_hold_a_shutdown_up() {
 fn a_dribbling_peer_does_not_outlive_a_node_that_stopped_itself() {
     let (directory, handover) = directory_holding_a_handover("dribble");
     let (node, _) = Node::open(params(), loopback(), &directory).unwrap();
-    node.wait_for_the_burial(0);
     drop(handover);
 
     // Somebody to ask, which the dribbler is not and never was. A node that
@@ -1112,6 +1115,13 @@ fn a_dribbling_peer_does_not_outlive_a_node_that_stopped_itself() {
         Duration::from_secs(10),
         || node.peer_count() == 2,
     );
+    // Only now, with both connections held. With no patience from the start,
+    // the round after the witness arrived stopped the node, and whether the
+    // dribbler was in by then was a race: on a slow runner it was not, and
+    // the node never took it. And `connect` itself raced the same round,
+    // which could dial the witness from the book and stop the node before the
+    // connection above was set up.
+    node.wait_for_the_burial(0);
     wait_for(
         "the node to say it is stranded",
         Duration::from_secs(20),
@@ -1155,6 +1165,16 @@ fn a_dribbling_peer_does_not_outlive_a_node_that_stopped_itself() {
 /// that skips it, was never asked anything. So one stranger holding one open
 /// connection to a joining node was enough to turn the hour of waiting into
 /// that sentence, an exit code, and a person deleting their chain.
+///
+/// Counted in rounds of upkeep rather than in seconds. It slept five seconds
+/// and called that five rounds, and on a loaded Windows runner a round has
+/// taken seven, so the assertion could hold of a node that had not looked
+/// once. And the peer that ends it dials in rather than being dialled: the
+/// node holds a peer it dialled as somebody to ask from the moment the socket
+/// is in its table, so with the patience at nought the next round could stop
+/// the node while `connect` was still setting the connection up, and `connect`
+/// reported the node stopping. That was the node doing what this test asks of
+/// it, read as a failure, on the Windows runner of pull request 233.
 #[test]
 fn a_node_with_nobody_to_ask_does_not_tell_its_operator_to_wipe_the_disk() {
     let (directory, handover) = directory_holding_a_handover("nobody-to-ask");
@@ -1180,23 +1200,53 @@ fn a_node_with_nobody_to_ask_does_not_tell_its_operator_to_wipe_the_disk() {
         "the socket has said nothing, so there is nobody here to ask"
     );
 
-    // Five rounds of upkeep with the patience at nought. Every one of them
-    // used to be enough.
-    thread::sleep(Duration::from_secs(5));
+    // Three whole rounds of upkeep with the patience at nought, and any one of
+    // them used to be enough. A round writes the address book when an address
+    // in it has changed, and keeps the undertaking after that write, so an
+    // address handed to the node and then found in the file is a round that
+    // got that far: four seen are three that finished. The addresses are in
+    // the range set aside for documentation, which nothing answers, so the
+    // node's dial to one cannot give it a peer; a loopback port found free a
+    // moment ago could be bound by the next test before the node dialled it.
+    let book = directory.join(cairn_net::book::PEER_FILE);
+    // A node that strands itself stops, and its upkeep stops writing, so the
+    // wait ends on that too and the assertion below says why.
+    for round in 0..4u8 {
+        let nobody = SocketAddr::from((Ipv4Addr::new(192, 0, 2, round + 1), 8_333));
+        node.remember_seed(nobody);
+        wait_for(
+            &format!("round {round} of upkeep to write the address book"),
+            Duration::from_secs(120),
+            || {
+                node.stranded().is_some()
+                    || std::fs::read_to_string(&book)
+                        .is_ok_and(|held| held.contains(&nobody.to_string()))
+            },
+        );
+        if node.stranded().is_some() {
+            break;
+        }
+    }
     assert!(
         node.stranded().is_none(),
         "a node with nobody to ask was told to delete its own chain on the \
          strength of a stranger's open socket: {:?}",
         node.stranded()
     );
+    assert_eq!(
+        node.peer_count(),
+        1,
+        "the stranger's socket was let go of before the rounds were counted, so \
+         they were rounds with nobody connected at all"
+    );
 
     // And with one peer that has actually spoken, it says so at once, so this
     // is the condition being read rather than the reading being switched off.
     let witness = Node::bind(params(), loopback()).unwrap();
-    node.connect(witness.address()).unwrap();
+    witness.connect(node.address()).unwrap();
     wait_for(
         "the node to say it is stranded once it has somebody to ask",
-        Duration::from_secs(20),
+        Duration::from_secs(60),
         || node.stranded().is_some(),
     );
 

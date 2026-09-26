@@ -388,7 +388,6 @@ fn a_chain_forking_below_the_anchor_is_refused_and_now_says_so() {
 fn a_node_that_never_gets_the_burial_says_it_is_stranded_and_stops() {
     let (directory, _source) = directory_holding_a_handover("stranded");
     let (node, _restored) = Node::open(params(), loopback(), &directory).unwrap();
-    node.wait_for_the_burial(0);
     assert!(node.probation().is_some());
     assert!(node.stranded().is_none(), "nothing has gone wrong yet");
 
@@ -396,6 +395,11 @@ fn a_node_that_never_gets_the_burial_says_it_is_stranded_and_stops() {
     // and no amount of waiting will change that.
     let bystander = Node::bind(params(), loopback()).unwrap();
     node.connect(bystander.address()).unwrap();
+    // The patience goes to nought only once the connection is set up. Before
+    // it, a round of upkeep could dial the bystander from the book `connect`
+    // had just written it into, stop the node for being stranded, and leave
+    // `connect` to report a node that was stopping.
+    node.wait_for_the_burial(0);
 
     wait_for("the node to say it is stranded", || {
         node.stranded().is_some()
