@@ -173,6 +173,9 @@ fn run(arguments: &[String]) -> Result<Ending, Stopping> {
     for line in what_was_restored(&restored, &options.data.display().to_string()) {
         say!("{line}");
     }
+    if let Some(aside) = node.addresses_set_aside() {
+        println!("{}", addresses_set_aside(&aside.display().to_string()));
+    }
     // Before the node has answered anybody, because filling the headers in
     // from the blocks is the first thing that reads them back, and a refusal
     // there used to come out of the open as a failure to start.
@@ -476,6 +479,14 @@ fn say_what_the_numbers_do_not(node: &Node, directory: &str) {
     if let Some(because) = node.unsaved_addresses() {
         say(&addresses_not_written(&because, directory));
     }
+}
+
+/// What an operator is told when the list of peers did not read at start.
+fn addresses_set_aside(aside: &str) -> String {
+    format!(
+        "             the list of peers did not read as a whole, so it was moved to \
+         {aside} rather than written over; what did read is in use"
+    )
 }
 
 /// What an operator is told when the list of peers will not write.
@@ -1970,8 +1981,9 @@ mod what_the_exit_code_says {
 #[allow(clippy::unwrap_used)]
 mod what_an_operator_is_told {
     use super::{
-        addresses_not_written, cannot_switch_to, clock, further_behind_than_peers_keep,
-        nobody_can_get_in, probation_line, short, stamp, will_not_read_back, wrapped,
+        addresses_not_written, addresses_set_aside, cannot_switch_to, clock,
+        further_behind_than_peers_keep, nobody_can_get_in, probation_line, short, stamp,
+        will_not_read_back, wrapped,
     };
     use cairn_net::node::{Probation, Reading, Unread};
     use cairn_net::Unanswered;
@@ -1988,6 +2000,9 @@ mod what_an_operator_is_told {
     fn each_message_carries_what_it_was_given() {
         let said = addresses_not_written("no space left on device", "/var/lib/cairn");
         assert!(said.contains("no space left on device") && said.contains("/var/lib/cairn"));
+
+        let said = addresses_set_aside("/var/lib/cairn/peers.txt.unread-1");
+        assert!(said.contains("/var/lib/cairn/peers.txt.unread-1"), "{said}");
 
         let refused = Unanswered {
             because: "too many open files".to_owned(),

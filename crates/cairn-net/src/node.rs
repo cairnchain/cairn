@@ -1341,9 +1341,9 @@ impl Outbound {
 }
 
 /// One live connection, as the rest of the node sees it.
-// Four facts about one connection that do not depend on each other: who
-// opened it, whether it has introduced itself, what it keeps, and whether it
-// is on its way out. An enum would have to name all sixteen combinations.
+// Facts about one connection that do not depend on each other: who opened it
+// and why, whether it has introduced itself, what it keeps, and whether it is
+// on its way out. An enum would have to name every combination of them.
 #[allow(clippy::struct_excessive_bools)]
 struct Peer {
     outbound: Outbound,
@@ -1422,6 +1422,9 @@ struct Peer {
     took_block_at: u64,
     /// When this peer last handed over a transfer this node took, or nought.
     took_transfer_at: u64,
+    /// Whether this node dialled it only to hear whether anybody answers at
+    /// the address, and lets it go once it has: see [`feel`].
+    feeler: bool,
 }
 
 impl Peer {
@@ -1644,6 +1647,9 @@ struct Shared {
     /// cleared the moment one is let in, and a node refusing one visitor in ten
     /// would otherwise never show it.
     turned_away: AtomicU64,
+    /// When this node last dialled an address only to hear whether anybody
+    /// answers there: see [`feel`].
+    felt_at: AtomicU64,
     /// Forest nodes built again from the leaves beneath them, over this
     /// node's whole life.
     ///
@@ -2975,6 +2981,26 @@ impl Shared {
         peer.leaving = true;
         let _ = peer.stream.shutdown(Shutdown::Both);
         true
+    }
+
+    /// Writes down the peers this node went out to and is still talking to as
+    /// heard from now, so they are the first it dials at the next start.
+    ///
+    /// A restart is the moment an attacker who filled the book waits for: the
+    /// book is read back and dialled in its order, and that order is when each
+    /// address last answered a dial, which for a peer held for a month is a
+    /// month ago. Bitcoin dials its anchors first for this reason.
+    fn anchor(&self, now: u64) {
+        let anchors: Vec<SocketAddr> = self
+            .peers()
+            .values()
+            .filter(|peer| peer.dialled && peer.greeted && !peer.feeler)
+            .filter_map(|peer| peer.dialled_to)
+            .collect();
+        let mut book = self.book();
+        for address in anchors {
+            book.answered(&address, now);
+        }
     }
 
     /// Writes down that a peer handed over a block or a transfer this node
@@ -4441,6 +4467,7 @@ impl Node {
             unread: Mutex::new(unread),
             unanswered: Mutex::new(None),
             turned_away: AtomicU64::new(0),
+            felt_at: AtomicU64::new(0),
             mended_nodes: AtomicU64::new(0),
             proofs_asked_for: AtomicU64::new(0),
             unsaved_book: Mutex::new(None),
@@ -4843,6 +4870,15 @@ impl Node {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Where the list of peers read at start was moved to because it did not
+    /// read, whole or in part, if it did not.
+    ///
+    /// What did read is in use; the file is set aside rather than written over
+    /// by the first round of upkeep, which is what used to happen to it.
+    pub fn addresses_set_aside(&self) -> Option<PathBuf> {
+        self.shared.book().set_aside().map(Path::to_path_buf)
     }
 
     /// The lowest block on the disk.
@@ -5370,6 +5406,7 @@ impl Node {
         if self.shared.winding_down.swap(true, Ordering::SeqCst) {
             return;
         }
+        self.shared.anchor(unix_now());
         save_book(&self.shared);
         // Until the table stays empty. Nothing has to be woken: the accept
         // loop polls, and every peer thread is either reading with a deadline
@@ -8457,7 +8494,7 @@ fn dial_from_book_with<D>(shared: &Arc<Shared>, now: u64, dial: &D)
 where
     D: Fn(&SocketAddr) -> io::Result<TcpStream> + Sync,
 {
-    let (connected, count, held) = {
+    let (connected, count, held, felt) = {
         let peers = shared.peers();
         // Both the address a peer introduced itself at and the address this
         // node dialled to reach it. Only the first was read here, and it is
@@ -8483,14 +8520,28 @@ where
             .filter_map(|peer| peer.dialled_to)
             .map(|address| group_of_host(address.ip()))
             .collect();
+        // A feeler that has answered has done what it was for.
+        let felt: Vec<PeerId> = peers
+            .iter()
+            .filter(|(_, peer)| peer.feeler && peer.greeted)
+            .map(|(id, _)| *id)
+            .collect();
         (
             connected,
-            peers.values().filter(|peer| peer.dialled).count(),
+            peers
+                .values()
+                .filter(|peer| peer.dialled && !peer.feeler)
+                .count(),
             held,
+            felt,
         )
     };
+    for id in felt {
+        shared.hang_up(id);
+    }
     let wanted = TARGET_PEERS.saturating_sub(count);
     if wanted == 0 {
+        feel(shared, &connected, now);
         return;
     }
 
@@ -8605,6 +8656,59 @@ where
             })
             .collect()
     })
+}
+
+/// Seconds between two feelers: see [`feel`].
+///
+/// Bitcoin's pace. One short connection every two minutes reaches every
+/// address a book full of strangers' names can hold in under six days, and
+/// the ones a node is likely to need, which are the ones it heard of most
+/// recently, far sooner.
+const FEELER_PERIOD: u64 = 120;
+
+/// Dials one address nothing has been heard from, while this node holds
+/// every connection it dials for, and lets it go once it has answered.
+///
+/// A node holding its eight dialled peers dialled nobody else, so the marks
+/// that say which addresses answer were earned by those eight and by nothing
+/// in the rest of the book. The book's guard against a stranger, that only an
+/// address never heard from gives way to one, then protected eight addresses
+/// and no others, and the dead in the book were only found out when they were
+/// needed. A feeler earns the mark, or the miss, one address at a time, and
+/// what it comes to is filed by the same ending every dial is.
+fn feel(shared: &Arc<Shared>, connected: &HashSet<SocketAddr>, now: u64) {
+    let last = shared.felt_at.load(Ordering::Relaxed);
+    if last > 0 && now.saturating_sub(last) < FEELER_PERIOD {
+        return;
+    }
+    shared.felt_at.store(now, Ordering::Relaxed);
+    let unheard = shared.book().not_yet_heard(now);
+    let Some(address) = unheard.into_iter().find(|address| {
+        *address != shared.address
+            && !connected.contains(address)
+            && !shared.refuses(address.ip(), now)
+    }) else {
+        return;
+    };
+    if !shared.running.load(Ordering::SeqCst) || !shared.has_room_for(Some(address.ip())) {
+        return;
+    }
+    match TcpStream::connect_timeout(&address, DIAL_TIMEOUT) {
+        Ok(stream) => {
+            if attach_peer(shared, stream, Some(address)) {
+                if let Some(peer) = shared
+                    .peers()
+                    .values_mut()
+                    .find(|peer| peer.dialled_to == Some(address))
+                {
+                    peer.feeler = true;
+                }
+            }
+        }
+        Err(_) => {
+            shared.book().missed(&address, now);
+        }
+    }
 }
 
 /// The order one round of dialling tries the book's candidates in: the
@@ -8799,6 +8903,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
             leaving: false,
             took_block_at: 0,
             took_transfer_at: 0,
+            feeler: false,
         },
     );
 
@@ -10830,6 +10935,7 @@ mod peers_and_loops {
             leaving: false,
             took_block_at: 0,
             took_transfer_at: 0,
+            feeler: false,
         }
     }
 
@@ -12071,6 +12177,125 @@ mod peers_and_loops {
             return;
         }
         panic!("three attempts in a row straddled an allowance window");
+    }
+
+    /// A node holding every connection it dials for still reaches, now and
+    /// then, an address in its book it has never heard from, and lets it go
+    /// once it has answered.
+    ///
+    /// Such a node dialled nobody else, so the marks that say which
+    /// addresses answer were earned by the eight it held and by nothing in
+    /// the rest of the book: the guard that lets only an address never heard
+    /// from give way to a stranger's protected those eight and no others.
+    /// Nothing asked a full node to dial, so that passed.
+    #[test]
+    fn a_node_holding_its_dials_still_reaches_an_address_it_never_heard_from() {
+        let node = quiet();
+        let far = Node::bind(ConsensusParams::testnet(), local()).unwrap();
+        let (socket, _other) = a_socket();
+        {
+            // Numbered clear of what the node hands out to its own dials.
+            let mut peers = node.shared.peers();
+            for id in 0..TARGET_PEERS {
+                peers.insert(1_000 + u64::try_from(id).unwrap(), stand_in(&socket, true));
+            }
+        }
+        node.shared.book().insert(far.address());
+        node.shared.running.store(true, Ordering::SeqCst);
+        dial_from_book(&node.shared, 1_000);
+        // Each wait below is for something the node does, bounded only so a
+        // node that never does it fails rather than hangs.
+        let waiting = |ready: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !ready() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            ready()
+        };
+        let reached = waiting(&|| far.peer_count() >= 1);
+        let answered = waiting(&|| node.shared.book().heard_from(&far.address()) > 0);
+        let greeted = waiting(&|| {
+            node.shared
+                .peers()
+                .values()
+                .any(|peer| peer.feeler && peer.greeted)
+        });
+
+        // Once it has answered it is let go of, and the next is not dialled
+        // before its time.
+        let door = a_door();
+        node.shared.book().insert(door.local_addr().unwrap());
+        dial_from_book(&node.shared, 1_001);
+        let let_go = waiting(&|| node.shared.peers().len() == TARGET_PEERS);
+        let early = node.shared.peers().len();
+        dial_from_book(&node.shared, 1_000 + FEELER_PERIOD);
+        let on_time = node.shared.peers().len();
+        stop_all(&node);
+        far.shutdown();
+
+        assert!(
+            reached,
+            "a node holding the connections it dials for never reached an address it had \
+             not heard from"
+        );
+        assert!(
+            answered,
+            "the address that answered was not marked as heard from"
+        );
+        assert!(
+            greeted,
+            "the connection that answered was not held as a feeler"
+        );
+        assert!(let_go, "a feeler that had answered was kept");
+        assert_eq!(
+            early, TARGET_PEERS,
+            "another feeler was dialled before its period was up"
+        );
+        assert_eq!(
+            on_time,
+            TARGET_PEERS + 1,
+            "no feeler was dialled once its period was up"
+        );
+    }
+
+    /// The peers a node went out to and was still talking to when it stopped
+    /// are the first it dials when it starts again.
+    ///
+    /// A restart is the moment an attacker who filled a book waits for: the
+    /// book is read back and dialled in its order, and that order was when
+    /// each address last answered a dial, which for a peer held for a month
+    /// is a month ago. Bitcoin dials its anchors first for this reason.
+    /// Nothing asked what order a stopped node's book was in, so that passed.
+    #[test]
+    fn the_peers_a_node_stopped_talking_to_are_dialled_first_at_the_next_start() {
+        let node = Node::bind(ConsensusParams::testnet(), local()).unwrap();
+        // Closed ports, so the node's own rounds reach neither.
+        let held = SocketAddr::from((Ipv4Addr::LOCALHOST, 1));
+        let gone = SocketAddr::from((Ipv4Addr::LOCALHOST, 2));
+        {
+            let mut book = node.shared.book();
+            book.insert(held);
+            book.insert(gone);
+            book.answered(&held, 500);
+            book.answered(&gone, 900);
+        }
+        let (socket, _far) = a_socket();
+        node.shared.peers().insert(
+            1_000,
+            Peer {
+                dialled_to: Some(held),
+                greeted: true,
+                ..stand_in(&socket, true)
+            },
+        );
+        node.shutdown();
+        let first = node.shared.book().ready(u64::MAX).first().copied();
+        assert_eq!(
+            first,
+            Some(held),
+            "a peer the node was still talking to when it stopped was not the first it \
+             would dial at the next start"
+        );
     }
 
     /// A peer may send as many messages as a window allows, and the next one
