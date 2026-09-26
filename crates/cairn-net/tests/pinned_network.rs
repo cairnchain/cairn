@@ -23,13 +23,17 @@ use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use cairn_chain::ChainStore;
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::Block;
 use cairn_ledger::note::Note;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
+use cairn_net::message::{Handshake, Keeps, Message, PROTOCOL_VERSION};
+use cairn_net::sync::{on_message, Local, PeerState, JOIN_RATHER_THAN_READ};
 use cairn_net::{Joined, Node};
+use cairn_primitives::Hash32;
 
 /// A liveness bound, far past what the work takes on a loaded runner. Every
 /// wait here is for something to happen.
@@ -120,6 +124,89 @@ fn scratch(name: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!("cairn-pinned-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     root
+}
+
+/// Whether `chain`, meeting a peer that says it has a chain long enough to be
+/// final and heavier than its own, asks that peer for it at the handshake.
+fn asks_at_the_handshake(chain: &mut ChainStore) -> bool {
+    let network = chain.params().network;
+    let theirs = Handshake {
+        version: PROTOCOL_VERSION,
+        network,
+        genesis: Hash32::ZERO,
+        tip: Hash32::from_bytes([1; 32]),
+        height: JOIN_RATHER_THAN_READ + 40,
+        total_work: chain.total_work().saturating_mul(1_000).max(1_000_000),
+        listen: 0,
+        nonce: 99,
+        keeps: Keeps {
+            headers: true,
+            cold_set: false,
+        },
+    };
+    let mut local = Local {
+        chain,
+        keeps: Keeps {
+            headers: false,
+            cold_set: false,
+        },
+        listen: 4242,
+        nonce: 1,
+    };
+    on_message(
+        &mut local,
+        &mut PeerState::default(),
+        Message::Welcome(theirs),
+        wall_clock(),
+    )
+    .reply
+    .iter()
+    .any(|message| matches!(message, Message::GetChain { .. }))
+}
+
+/// A node holding only the first block its network pins leaves a long chain
+/// to the choice at the handshake, and a node with a chain of its own asks for
+/// it there.
+///
+/// The handshake is where a node decides whether to ask a peer for its chain
+/// at once or leave the choice of whom to follow to the chooser. It asked
+/// whether the chain was empty, which on a named network it never is, so a
+/// newcomer asked the first long chain it met for its blocks and read it.
+/// Nothing asked this on a network that pins its first block, so that
+/// newcomer passed.
+#[test]
+fn a_node_holding_only_the_first_block_leaves_a_long_chain_to_the_choice() {
+    let params = params();
+    let first = cairn_ledger::genesis::block(params.network).unwrap();
+    let mut newcomer = ChainStore::new(params);
+    newcomer.add_block(first, wall_clock()).unwrap();
+    assert!(
+        !asks_at_the_handshake(&mut newcomer),
+        "a node holding only its network's first block asked the first long chain it met \
+         for its blocks, which reads that chain rather than choosing whom to be handed one by"
+    );
+
+    // Rules that pin nothing, so a first block of the test's own is a chain.
+    let unpinned = ConsensusParams::testnet();
+    let miner = SecretKey::from_bytes(&[1; 32]).public_key();
+    let coinbase = CoinbaseTransaction::new(0, vec![Note::new(unpinned.initial_reward, miner)]);
+    let block = assemble_block(
+        &LedgerState::new(),
+        coinbase,
+        Vec::<Transfer>::new(),
+        &unpinned,
+        1_000,
+        0,
+    )
+    .unwrap();
+    let mut started = ChainStore::new(unpinned);
+    started
+        .add_block(mine_block(block, 1 << 20).unwrap(), wall_clock())
+        .unwrap();
+    assert!(
+        asks_at_the_handshake(&mut started),
+        "a node with a chain of its own left a heavier chain to a choice it no longer has"
+    );
 }
 
 /// A newcomer on a network that pins its first block is handed a ledger, and
