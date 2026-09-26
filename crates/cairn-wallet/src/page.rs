@@ -469,8 +469,8 @@ async function refresh() {
   if (state.history_missed_below !== null) {
     said.push("Could not read every block up to " + state.history_missed_below +
       ": the node had let go of them. Anything that happened to this key in the " +
-      "ones it missed is not listed. The balance is counted from the chain, not " +
-      "from this list.");
+      "ones it missed is not listed. What can be spent is counted from the chain, " +
+      "not from this list; notes this wallet lost track of there are named apart.");
   }
   if (state.movements_held > state.movements.length) {
     said.push("Showing the newest " + state.movements.length + " of " + state.movements_held + ".");
