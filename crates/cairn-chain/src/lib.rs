@@ -1112,6 +1112,22 @@ impl ChainStore {
         self.branch.is_empty()
     }
 
+    /// Whether this node holds nothing that would be lost by being handed a
+    /// ledger: no chain at all, or only the first block its network pins.
+    ///
+    /// A node on a named network lays that block down the moment it starts,
+    /// so one that has spoken to nobody still knows where the story starts.
+    /// Every chain on the network begins with it, so holding it chooses none
+    /// of them. Asking [`ChainStore::is_empty`] instead is what kept every
+    /// newcomer on the real networks from being handed a ledger: its chain was
+    /// never empty, so it never held off for the choice, never took a ledger
+    /// that arrived, and read the whole chain block by block. Every test of
+    /// the handover ran on rules that pin nothing, where the two questions
+    /// have the same answer.
+    pub fn holds_nothing_of_its_own(&self) -> bool {
+        self.branch.is_empty() || self.branch.tip() == self.params.genesis
+    }
+
     /// Whether `id` is on the part of the followed branch held in full.
     ///
     /// False for a block further back than a reorganisation could reach, which
@@ -1841,10 +1857,12 @@ impl ChainStore {
     /// that header against the work behind it, so what is left here is putting
     /// it in place.
     ///
-    /// Only onto a node with no chain at all. Replacing a chain a node already
-    /// follows would be a reorganisation of unbounded depth, decided by
-    /// whoever offered the replacement, which is the one thing the depth limit
-    /// exists to refuse.
+    /// Only onto a node with no chain of its own: none at all, or only the
+    /// first block its network pins, which every chain of that network starts
+    /// from and which replacing therefore undoes nothing. Replacing a chain a
+    /// node already follows would be a reorganisation of unbounded depth,
+    /// decided by whoever offered the replacement, which is the one thing the
+    /// depth limit exists to refuse.
     ///
     /// The branch starts from the headers that came with the ledger, so this
     /// node knows where it is and can be reorganised as far back as those go.
@@ -1852,7 +1870,7 @@ impl ChainStore {
     /// what it is following and cannot answer about what came before, which is
     /// the honest position for a node that was not there.
     pub fn adopt(&mut self, state: LedgerState, recent: &[BlockHeader]) -> Result<(), ChainError> {
-        if !self.branch.is_empty() {
+        if !self.holds_nothing_of_its_own() {
             return Err(ChainError::AlreadyFollowing);
         }
         let Some(tip) = state.tip() else {

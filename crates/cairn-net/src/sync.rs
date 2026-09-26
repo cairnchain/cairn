@@ -944,14 +944,20 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
         )));
     }
     if theirs.total_work > local.chain.total_work() {
-        // A node with no chain facing one long enough to be final does not
-        // ask here at all. Whatever it starts following first is what it
-        // keeps, so the choice of whom to ask is made once, by the node,
-        // against every claim it has heard, rather than by whichever
+        // A node with no chain of its own facing one long enough to be final
+        // does not ask here at all. Whatever it starts following first is
+        // what it keeps, so the choice of whom to ask is made once, by the
+        // node, against every claim it has heard, rather than by whichever
         // handshake this happens to be. A short chain carries no such
         // weight: following the wrong one is undone by the fork choice like
         // any other branch, so it is simply asked for.
-        let held_for_the_choice = local.chain.is_empty() && theirs.height >= JOIN_RATHER_THAN_READ;
+        //
+        // No chain of its own includes the first block a named network pins,
+        // which a node lays down the moment it starts. Asking whether the
+        // chain was empty instead meant no newcomer on a real network ever
+        // held off here, so every one of them read the chain block by block.
+        let held_for_the_choice =
+            local.chain.holds_nothing_of_its_own() && theirs.height >= JOIN_RATHER_THAN_READ;
         if !held_for_the_choice {
             peer.chain_asked = true;
             peer.work_when_asked = Some(local.chain.total_work());

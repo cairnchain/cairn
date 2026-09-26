@@ -3168,6 +3168,13 @@ impl Shared {
 /// A network without one pinned leaves this alone, which is what tests and
 /// unnamed networks do.
 ///
+/// It chooses no chain: every chain on the network starts from it, so a node
+/// holding only this block is still one that can be handed a ledger (see
+/// `ChainStore::holds_nothing_of_its_own`), and one that is has it taken back
+/// off its disk by [`Shared::forget_the_first_block`]. Every door into the
+/// handover used to ask whether the chain was empty, which after this it
+/// never is on a named network.
+///
 /// It goes into the log as well as into memory. The log is the followed branch
 /// in order of height with nothing left out, and a first block held only in
 /// memory breaks that on the very first restart: the log would start at height
@@ -4133,12 +4140,13 @@ impl Node {
     /// default budget can and cannot serve.
     ///
     /// And `None` again the moment a chain arrives, however it arrived.
-    /// Showings are only ever weighed while a node has nothing, so the count
+    /// Showings are only ever weighed while a node has no chain of its own,
+    /// which the first block a named network pins is not, so the count
     /// is frozen from then on, and left ungated it would follow a node that
     /// had long since read its chain for the rest of its life, telling its
     /// owner to wait for something that had already happened.
     pub fn unweighable(&self) -> Option<Unweighable> {
-        if !self.shared.chain().is_empty() {
+        if !self.shared.chain().holds_nothing_of_its_own() {
             return None;
         }
         let met = self
@@ -4671,7 +4679,9 @@ fn take_join_part(
 
         // A node that already has a chain is not joining one. This arrives
         // when an answer outlived the question, which costs nothing to ignore.
-        if !shared.chain().is_empty() {
+        // The first block a named network pins is not a chain of its own:
+        // every node on that network lays it down at start.
+        if !shared.chain().holds_nothing_of_its_own() {
             *joining = Progress::Landed;
             return None;
         }
@@ -4950,8 +4960,20 @@ fn take_the_ledger(shared: &Arc<Shared>, whole: &[u8], tip: &BlockHeader, now: u
     // Asked again on the way in, because the ledger is checked against the
     // rules and adopting it is checked against this node's own chain, and the
     // two refuse for different reasons.
-    if let Err(error) = shared.chain().adopt(state, &handover.recent) {
-        return error.outdated().map_or(Landed::Refused, Landed::TooOld);
+    let forgotten = {
+        let mut chain = shared.chain();
+        // Anything a chain holds when a ledger can still be adopted over it is
+        // the first block its network pins, laid down at start.
+        let over_the_first_block = !chain.is_empty();
+        if let Err(error) = chain.adopt(state, &handover.recent) {
+            return error.outdated().map_or(Landed::Refused, Landed::TooOld);
+        }
+        // Chain first and log second, and the chain still held, so no block
+        // taken meanwhile is written behind a first block that is gone.
+        over_the_first_block.then(|| shared.forget_the_first_block())
+    };
+    if let Some(Some(refusing)) = forgotten {
+        shared.note_refusal(refusing);
     }
     // What the anchor was taken on: the blocks between it and the tip it
     // names, which `accept` asks nothing about. Written down before anything
@@ -5418,6 +5440,38 @@ impl Shared {
         let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
         log.as_ref()
             .is_some_and(|store| store.can_show_the_chain(reaches))
+    }
+
+    /// Takes off the disk the first block a node laid down at start, once it
+    /// has been handed a ledger in its place.
+    ///
+    /// A node on a named network writes that block to its block log, its
+    /// header to the header log, and a leaf for it to the forest, before it
+    /// has spoken to anybody. A handed ledger starts its branch far above it,
+    /// and each of the three is a run in order of height: left in place, the
+    /// block log was a record at height nought that nothing validated since
+    /// could follow, so every block this node applied after the ledger was a
+    /// write it could not make, and the headers the ledger came with had
+    /// nowhere to go. Emptied, the three are what a node on rules that pin
+    /// nothing has at this moment, and they are written from here as its are.
+    ///
+    /// Takes the log, so it is called with the chain held and never the other
+    /// way round. What the disk refused comes back to be said once both are
+    /// let go of.
+    fn forget_the_first_block(&self) -> Option<Refusing> {
+        let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        let store = log.as_mut()?;
+        if let Err(error) = store.blocks.clear() {
+            return Some(Refusing::at(Writing::Blocks, &error));
+        }
+        if let Err(error) = store.headers.clear() {
+            return Some(Refusing::at(Writing::Headers, &error));
+        }
+        store
+            .forest
+            .keep_first(0)
+            .err()
+            .map(|error| Refusing::at(Writing::Headers, &error))
     }
 
     /// Writes down the headers a handover came with.
@@ -7050,14 +7104,15 @@ fn was_away(previous: u64, now: u64) -> bool {
 }
 
 /// Notes what a peer introduced itself as having, for the choice a node
-/// with no chain has in front of it.
+/// with no chain of its own has in front of it.
 ///
 /// Only such a node has that choice: one with a chain weighs branches by
 /// their work as they arrive, and what anyone claims is neither here nor
-/// there.
+/// there. The first block a named network pins is not a chain of its own,
+/// since every chain on that network starts with it.
 fn note_claim(shared: &Arc<Shared>, id: PeerId, peer: &PeerState) {
-    let empty = shared.chain().is_empty();
-    if !empty {
+    let choosing = shared.chain().holds_nothing_of_its_own();
+    if !choosing {
         return;
     }
     shared.choosing().noted(
@@ -7088,11 +7143,17 @@ fn drive_choosing(shared: &Arc<Shared>, now: u64) {
         }
     };
     let connected: Vec<PeerId> = shared.peers().keys().copied().collect();
-    let (empty, work, archiving) = {
+    let (choosing, work, archiving) = {
         let chain = shared.chain();
-        (chain.is_empty(), chain.total_work(), chain.is_archiving())
+        (
+            chain.holds_nothing_of_its_own(),
+            chain.total_work(),
+            chain.is_archiving(),
+        )
     };
-    let step = shared.choosing().step(now, empty, work, join, &connected);
+    let step = shared
+        .choosing()
+        .step(now, choosing, work, join, &connected);
     match step {
         choosing::Step::Quiet => {}
         // An archivist reads the chain rather than being handed it. A ledger

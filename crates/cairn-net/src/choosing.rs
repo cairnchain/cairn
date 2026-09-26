@@ -534,10 +534,14 @@ impl Chooser {
     }
 
     /// One round of the choice.
+    ///
+    /// `without_a_chain` is whether the node holds no chain of its own: none
+    /// at all, or only the first block its network pins, which every chain on
+    /// that network starts from.
     pub fn step(
         &mut self,
         now: u64,
-        chain_is_empty: bool,
+        without_a_chain: bool,
         chain_work: u128,
         join: JoinProgress,
         connected: &[u64],
@@ -545,7 +549,7 @@ impl Chooser {
         if self.done {
             return Step::Quiet;
         }
-        if !chain_is_empty {
+        if !without_a_chain {
             return self.finish(chain_work, connected);
         }
         self.clock_went_back(now);
