@@ -288,11 +288,12 @@ fn money_sent_from_the_page_leaves_the_wallet() {
     assert_eq!(holdings.total(), before, "and none of it has gone anywhere");
 
     // What a person mistypes has to come back as something they can act on
-    // rather than as a failure.
+    // rather than as a failure, and in the reader's own words, which say what
+    // is wrong with it: the command line's words for the same string.
     let (status, answer) = running.ask(&head, &format!("k={secret}&to=nonsense&amount=1"));
     assert_eq!(status, 200);
     assert!(answer.contains("\"sent\":false"), "{answer}");
-    assert!(answer.contains("64 hexadecimal"), "{answer}");
+    assert!(answer.contains("not 32 bytes of hexadecimal"), "{answer}");
 
     let (status, answer) = running.ask(&head, &format!("k={secret}&to={recipient}&amount=99999"));
     assert!(answer.contains("\"sent\":false"), "{answer}");

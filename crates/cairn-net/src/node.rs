@@ -1176,6 +1176,15 @@ struct Peer {
     /// claim saves is asking every peer in turn and waiting on the ones that
     /// were never going to answer.
     archives: bool,
+    /// The height and the work this peer said its chain had when it
+    /// introduced itself, once it has.
+    ///
+    /// A claim, written by the peer and never revised, and read as no more
+    /// than that: a reason for a wallet to go on waiting before it answers,
+    /// never a reason to believe anything. An honest peer's chain only grows
+    /// after it has said this, so a node that has not reached it is behind
+    /// that peer, and one that has may still be.
+    claims: Option<(u64, u128)>,
 }
 
 impl Peer {
@@ -2937,6 +2946,14 @@ impl Shared {
         }
     }
 
+    /// Writes down the height and work a peer said it had when it introduced
+    /// itself. See [`Peer::claims`].
+    fn note_what_it_claims(&self, id: PeerId, height: u64, work: u128) {
+        if let Some(peer) = self.peers().get_mut(&id) {
+            peer.claims = Some((height, work));
+        }
+    }
+
     /// Connections worth asking where a fallen note sits, and how many of them
     /// said they keep the whole set.
     ///
@@ -4142,6 +4159,24 @@ impl Node {
     /// Whether this node can rebuild a proof for someone who lost theirs.
     pub fn is_archiving(&self) -> bool {
         self.with_chain(ChainStore::is_archiving)
+    }
+
+    /// The most work any connected peer said its chain had when it introduced
+    /// itself, with the height it gave beside it, or `None` with nobody
+    /// introduced.
+    ///
+    /// For a wallet deciding whether to go on waiting before it answers. A
+    /// chain that has stopped moving is not the same thing as the network's
+    /// tip, and this is the one number that tells the two apart. Anyone can
+    /// write it into a handshake, so it is a reason to wait and never a
+    /// verdict: a liar can make a wallet wait out its patience, and nothing
+    /// more.
+    pub fn best_claim(&self) -> Option<(u64, u128)> {
+        self.shared
+            .peers()
+            .values()
+            .filter_map(|peer| peer.claims)
+            .max_by_key(|&(_, work)| work)
     }
 
     /// Connected peers that say they keep the whole cold set.
@@ -7066,6 +7101,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
             advertised: None,
             dialled_to: dialled,
             archives: false,
+            claims: None,
         },
     );
 
@@ -7407,6 +7443,7 @@ fn read_loop(
         shared.remember(&reaction.learned);
         if introduction && peer.greeted {
             shared.note_what_it_keeps(id, peer.advertised, peer.keeps.cold_set);
+            shared.note_what_it_claims(id, peer.height, peer.total_work);
         }
         shared.forget(&reaction.forget);
         if !announced && peer.advertised.is_some() {
@@ -8727,6 +8764,7 @@ mod peers_and_loops {
             dialled,
             greeted: false,
             archives: false,
+            claims: None,
         }
     }
 
