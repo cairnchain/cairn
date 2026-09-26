@@ -30,6 +30,7 @@
 )]
 
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use cairn_chain::ChainStore;
@@ -41,7 +42,7 @@ use cairn_ledger::validation::{assemble_block, connect_block, mine_block, Consen
 use cairn_ledger::LedgerState;
 use cairn_net::message::{Handshake, Message, PROTOCOL_VERSION};
 use cairn_net::sync::{on_message, Local, PeerState};
-use cairn_net::wire::write_message;
+use cairn_net::wire::{read_message, write_message, Incoming, MAX_FRAME_BYTES};
 use cairn_net::Keeps;
 use cairn_net::Node;
 use cairn_primitives::Hash32;
@@ -203,6 +204,45 @@ fn wait_until(patience: Duration, mut ready: impl FnMut() -> bool) -> bool {
         std::thread::sleep(Duration::from_millis(20));
     }
     ready()
+}
+
+/// Reads everything a node sends down `socket`, as [`drain`] does, and hands
+/// on the number of every pong.
+///
+/// For a test asserting that a node did not hang up over a message: a ping
+/// written behind that message on the same connection is read after it, so
+/// its pong is the node saying it has read the message and dealt with it, and
+/// a node that hung up over the message never reads the ping. Waiting for the
+/// peer count to fall and asserting it did not could not tell a node that kept
+/// the peer from one that had not read the block yet.
+fn pongs(socket: &TcpStream) -> mpsc::Receiver<u64> {
+    let (heard, pongs) = mpsc::channel();
+    let Ok(mut reading) = socket.try_clone() else {
+        return pongs;
+    };
+    std::thread::spawn(move || {
+        while let Ok(incoming) = read_message(&mut reading, params().network, MAX_FRAME_BYTES) {
+            if let Incoming::Message(Message::Pong(number)) = incoming {
+                if heard.send(number).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    pongs
+}
+
+/// Whether the pong numbered `number` arrives within `patience`.
+fn ponged(pongs: &mpsc::Receiver<u64>, number: u64, patience: Duration) -> bool {
+    let deadline = Instant::now() + patience;
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        match pongs.recv_timeout(left) {
+            Ok(heard) if heard == number => return true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    false
 }
 
 /// A settled chain, and one more block dated past what a node running slightly
@@ -412,7 +452,7 @@ fn a_real_node_keeps_the_peer_that_offered_a_block_its_clock_is_behind() {
     let future = mine_block(future, ATTEMPTS).expect("a nonce exists");
 
     let mut socket = TcpStream::connect(node.address()).unwrap();
-    drain(&socket);
+    let pongs = pongs(&socket);
     write_message(&mut socket, params().network, &hello(4_711, 4_242)).unwrap();
     assert!(
         wait_until(Duration::from_secs(60), || node.peer_count() == 1),
@@ -425,34 +465,27 @@ fn a_real_node_keeps_the_peer_that_offered_a_block_its_clock_is_behind() {
         &Message::Block(Box::new(future)),
     )
     .unwrap();
-
-    // Long enough that a connection being torn down would have been, and no
-    // longer. This is the one shape of deadline where more is worse: what is
-    // being asserted is that nothing happened, so every second added is
-    // another second in which something unrelated may. A drop caused by this
-    // block is worked out in the peer's own thread as the message is read,
-    // which is milliseconds, so ten seconds is three orders of magnitude of
-    // margin.
-    //
-    // It was three seconds, and a sweep that raised fifteen liveness
-    // deadlines raised it too. That sweep was right about the fourteen: a
-    // deadline waiting for something to happen costs nothing when it happens,
-    // so a short one only buys a failure that says nothing. It is exactly
-    // wrong about this one.
-    let dropped = wait_until(Duration::from_secs(10), || node.peer_count() == 0);
+    // Behind the block on the same connection, so its answer says the block
+    // was read. This used to wait ten seconds for the peer count to fall and
+    // assert that it had not, which a node that had not read the block yet
+    // passed as well as one that had kept the peer over it: on a runner whose
+    // rounds took seven seconds, a regression was green.
+    write_message(&mut socket, params().network, &Message::Ping(0xc10c)).unwrap();
+    let read = ponged(&pongs, 0xc10c, Duration::from_secs(120));
     let held = node.peer_count();
     let height = node.height();
     node.shutdown();
 
     assert!(
-        !dropped,
-        "the connection was closed over a block this node itself would accept \
-         two minutes later. As `BadBlock` that also refused the host for ten \
-         minutes, so the node refused its whole address book within seconds \
-         and could not dial any of it back; as any other close it dials back \
-         and is offered the same block again, which is a loop"
+        read,
+        "the ping behind the block was never answered: the connection was closed \
+         over a block this node itself would accept two minutes later. As \
+         `BadBlock` that also refused the host for ten minutes, so the node \
+         refused its whole address book within seconds and could not dial any \
+         of it back; as any other close it dials back and is offered the same \
+         block again, which is a loop"
     );
-    assert_eq!(held, 1);
+    assert_eq!(held, 1, "the peer was let go of after its block was read");
     assert_eq!(height, Some(4), "and the block is still not followed");
 }
 

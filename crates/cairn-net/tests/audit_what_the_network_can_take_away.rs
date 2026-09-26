@@ -53,17 +53,6 @@ fn seed() -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, 1))
 }
 
-fn wait_until(patience: Duration, mut ready: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + patience;
-    while Instant::now() < deadline {
-        if ready() {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    ready()
-}
-
 fn hello(nonce: u64, listen: u16) -> Message {
     Message::Hello(cairn_net::message::Handshake {
         version: cairn_net::message::PROTOCOL_VERSION,
@@ -96,6 +85,25 @@ fn nonce_of(at: SocketAddr) -> Option<u64> {
     }
     let _ = socket.shutdown(Shutdown::Both);
     None
+}
+
+/// Whether the node ends the connection within `patience`, reading and
+/// setting aside whatever it says before it does.
+fn hung_up(socket: &mut TcpStream, patience: Duration) -> bool {
+    let deadline = Instant::now() + patience;
+    if socket
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .is_err()
+    {
+        return false;
+    }
+    while Instant::now() < deadline {
+        match read_message(socket, params().network, MAX_FRAME_BYTES) {
+            Ok(_) => {}
+            Err(_) => return true,
+        }
+    }
+    false
 }
 
 /// **A stranger says a node's own nonce back to it and takes the operator's
@@ -144,13 +152,23 @@ fn a_seed_is_not_something_a_stranger_can_say_away() {
     let mut forger = TcpStream::connect(victim.address()).unwrap();
     write_message(&mut forger, params().network, &hello(nonce, seed().port())).unwrap();
 
-    let taken = wait_until(Duration::from_secs(20), || {
-        !victim.known_addresses().contains(&seed())
-    });
+    // The node takes a hello carrying its own nonce for itself and hangs up,
+    // after whatever it does to the book. So the connection closing is the
+    // node saying it has read the hello and acted on it. This used to wait
+    // twenty seconds for the seed to go and assert that it had not, which a
+    // node that had not read the hello yet passed as well as one that had
+    // read it and kept the seed.
+    let read = hung_up(&mut forger, Duration::from_secs(120));
+    let taken = !victim.known_addresses().contains(&seed());
     let left = victim.known_addresses().len();
     let _ = forger.shutdown(Shutdown::Both);
     victim.shutdown();
 
+    assert!(
+        read,
+        "the node never hung up on a hello carrying its own nonce, so whether it \
+         takes the seed away on one was never asked"
+    );
     assert!(
         !taken,
         "one stranger, holding nothing but a nonce the node had handed it, took the \
