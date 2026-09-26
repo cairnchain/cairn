@@ -222,40 +222,29 @@ fn start_mining(
         let node = Arc::clone(node);
         let running = Arc::clone(running);
         let params = options.params;
+        // Nowhere to start from: no seed given and none written in for the
+        // network. Such a node is its own network, and mines alone.
+        let alone = options.seed_names.is_empty();
         let started = Instant::now();
         let asked = thread::Builder::new().name("cairn-mine".to_owned()).spawn(
             move || {
             // A node on probation would have every block it made refused, and
-            // would spend every core it has finding them. Waiting here is the
-            // same rule stated where it costs nothing: what the node will not
-            // do is settled by `submit_block`, and this only keeps the machine
-            // from doing it pointlessly.
-            let mut said = false;
-            while running.load(Ordering::SeqCst) && node.probation().is_some() {
-                if !said {
-                    said = true;
+            // would spend every core it has finding them. The miner waits for
+            // that itself, as it waits for a peer, and says so.
+            mining::run(&node, &params, key, alone, &running, |report| match report {
+                mining::Report::Found(block, landed) => {
+                    let (verdict, aside) = what_the_chain_did(landed);
                     println!(
-                        "[{:>8}] mining waits until this node has checked the blocks \
-                         above the ledger it was handed",
+                        "[{:>8}] {:<6} height {:<6} difficulty {:<10} {}{}",
                         stamp(started),
+                        verdict,
+                        block.header.height,
+                        block.header.difficulty,
+                        short(&block.id().to_string()),
+                        aside,
                     );
                 }
-                thread::sleep(TICK);
-            }
-            if !running.load(Ordering::SeqCst) {
-                return;
-            }
-            mining::run(&node, &params, key, &running, |block, landed| {
-                let (verdict, aside) = what_the_chain_did(landed);
-                println!(
-                    "[{:>8}] {:<6} height {:<6} difficulty {:<10} {}{}",
-                    stamp(started),
-                    verdict,
-                    block.header.height,
-                    block.header.difficulty,
-                    short(&block.id().to_string()),
-                    aside,
-                );
+                mining::Report::Says(saying) => println!("[{:>8}] {saying}", stamp(started)),
             });
             },
         );

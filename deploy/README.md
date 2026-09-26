@@ -98,6 +98,11 @@ it. Set `MINE` to a public key and the node will mine to it:
 MINE="<public key>" sh /usr/local/src/cairn/deploy/install.sh
 ```
 
+A node set to mine waits until it has a peer, and until the chain has stopped
+arriving, before it builds a block, and says so in the journal. A block mined
+with nobody to hand it to starts a chain of that machine's own, and past the
+depth a node will undo, that machine could never follow the network again.
+
 On a test network at least one machine has to keep mining, or the chain
 stands still and nobody can try anything. On a real network this would be a
 poor arrangement, because the entry points people start from would also be
