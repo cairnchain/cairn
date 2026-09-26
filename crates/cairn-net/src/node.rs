@@ -51,7 +51,8 @@ use crate::message::{
 };
 use crate::refusal::{can_be_refused, Refusals};
 use crate::sync::{
-    a_window_has_turned, local_handshake, on_message, Allowance, Local, PeerState, Reaction, Window,
+    a_window_has_turned, local_handshake, on_message, tick, Allowance, Local, PeerState, Reaction,
+    Window,
 };
 use crate::wire::{most_from, read_frame, write_message, Framed, WireError};
 
@@ -8579,7 +8580,7 @@ fn read_loop(
                 frame
             }
             Ok(Framed::Quiet) => {
-                if unix_now().saturating_sub(last_heard) >= PEER_SILENCE.as_secs() {
+                if !still_there_after_a_quiet_read(shared, &mut peer, outbound, last_heard) {
                     break;
                 }
                 continue;
@@ -8698,6 +8699,30 @@ fn read_loop(
     // Always, however the loop ended. It is what frees the writing thread: a
     // write on a socket just shut fails at once, wherever in a frame it was.
     let _ = stream.shutdown(Shutdown::Both);
+}
+
+/// Whether a connection goes on after a read that came back with nothing to
+/// read.
+///
+/// Two things are owed to the clock here rather than to anything the peer
+/// says. A peer silent for [`PEER_SILENCE`] is not quiet but gone. And a batch
+/// it owes is given up on at its patience, and the chain asked for again,
+/// rather than at the peer's next word about its chain, which may never come:
+/// see [`tick`].
+fn still_there_after_a_quiet_read(
+    shared: &Arc<Shared>,
+    peer: &mut PeerState,
+    outbound: &Outbound,
+    last_heard: u64,
+) -> bool {
+    let now = unix_now();
+    if now.saturating_sub(last_heard) >= PEER_SILENCE.as_secs() {
+        return false;
+    }
+    let due = tick(&shared.chain(), peer, now);
+    due.reply
+        .into_iter()
+        .all(|reply| outbound.try_send(reply).is_ok())
 }
 
 /// What the node holds against an address once its connection has ended.

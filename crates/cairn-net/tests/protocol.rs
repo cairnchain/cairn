@@ -18,7 +18,9 @@ use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
 use cairn_net::message::{Handshake, Message, PeerAddress, Placed, MAX_CHAIN, PROTOCOL_VERSION};
-use cairn_net::sync::{local_handshake, on_message, DropReason, Local, PeerState};
+use cairn_net::sync::{
+    local_handshake, on_message, tick, DropReason, Local, PeerState, BATCH_PATIENCE,
+};
 use cairn_net::wire::{read_message, write_message, Incoming, WireError, MAX_FRAME_BYTES};
 use cairn_net::Keeps;
 use cairn_primitives::codec::{Decode, Encode};
@@ -771,6 +773,227 @@ fn a_block_refused_for_its_timestamp_is_asked_for_again_once_the_clock_allows_it
     assert!(
         asks_for_the_chain(&arrived.reply),
         "the refused block only comes back through a request for the chain, and none was sent"
+    );
+}
+
+/// A peer whose block this node's clock refused is not asked for the chain
+/// again until the clock allows that block, and is asked the moment it does.
+///
+/// Every block above the refused one hangs on it, so each arrives with its
+/// parent missing and asks for the chain, and the answer names the refused
+/// block again, to be refused again: a batch a round trip for as long as
+/// the clock is behind. Nothing held a peer greeted as ahead back from that,
+/// and nothing asked again once the wait was over except the peer's next
+/// announcement.
+#[test]
+fn a_peer_whose_block_the_clock_refused_is_asked_again_when_the_clock_allows_it() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let settled = forge.mine_many(3);
+    forge.clock = NOW + params.max_timestamp_drift + 600;
+    let ahead = forge.mine_by_its_own_clock();
+    let next = forge.mine_by_its_own_clock();
+    let allowed = ahead.header.timestamp - params.max_timestamp_drift;
+
+    let mut node = store_with(params, &settled);
+    let mut peer = greeted_as_equal(&node);
+    let refused = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Block(Box::new(ahead)),
+        NOW,
+    );
+    assert!(refused.ahead_of_the_clock.is_some());
+    let hanging = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Block(Box::new(next)),
+        NOW + 1,
+    );
+    assert!(
+        !asks_for_the_chain(&hanging.reply),
+        "the block this one hangs on is still ahead of the clock, so asking for the chain \
+         brings it back only to be refused again"
+    );
+    let early = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Ping(1),
+        allowed - 1,
+    );
+    assert!(
+        !asks_for_the_chain(&early.reply),
+        "one second before the clock allows the refused block, the chain was asked for"
+    );
+
+    let on_time = on_message(&mut solo(&mut node), &mut peer, Message::Ping(2), allowed);
+    assert!(
+        asks_for_the_chain(&on_time.reply),
+        "the clock allows the refused block now, and nothing asked for it again"
+    );
+}
+
+/// A batch past its patience is given up on, and the chain asked for again,
+/// on whatever the peer says next.
+///
+/// The patience was read where a `Chain`, an `Announce` or a `Block` arrived
+/// and nowhere else, so a peer that had answered everything it was asked and
+/// went on talking about anything else held this node mid batch until its
+/// next announcement, a block interval away whatever the patience said.
+#[test]
+fn a_batch_past_its_patience_is_asked_again_on_the_next_word_from_the_peer() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(4);
+    let mut node = store_with(params, &blocks[..1]);
+    let mut peer = greeted_peer(blocks[3].header.total_work, 3);
+    let asked = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Chain { from: 1, count: 3 },
+        NOW,
+    );
+    assert!(matches!(asked.reply.first(), Some(Message::GetBlocks(_))));
+
+    let inside = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Ping(1),
+        NOW + BATCH_PATIENCE - 1,
+    );
+    assert!(
+        !asks_for_the_chain(&inside.reply) && peer.awaiting.len() == 3,
+        "a batch inside its patience was given up on"
+    );
+
+    let past = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Ping(2),
+        NOW + BATCH_PATIENCE,
+    );
+    assert!(
+        matches!(past.reply.first(), Some(Message::Pong(2))),
+        "the ping is still answered first"
+    );
+    assert!(
+        asks_for_the_chain(&past.reply) && peer.awaiting.is_empty(),
+        "a batch past its patience is still held against a peer that keeps talking, because \
+         the patience is read only when the peer speaks of its chain"
+    );
+}
+
+/// The same with nothing said at all: the loop that reads a quiet
+/// connection gives the batch its patience too.
+///
+/// Nothing ran the patience without a message to run it, so a peer that went
+/// silent owing a batch held it until the connection was dropped for
+/// silence, a minute and a half later, and nobody was asked meanwhile.
+#[test]
+fn a_batch_past_its_patience_is_asked_again_when_the_peer_says_nothing() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(4);
+    let mut node = store_with(params, &blocks[..1]);
+    let mut peer = greeted_peer(blocks[3].header.total_work, 3);
+    on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Chain { from: 1, count: 3 },
+        NOW,
+    );
+
+    let inside = tick(&node, &mut peer, NOW + BATCH_PATIENCE - 1);
+    assert!(
+        inside.reply.is_empty() && peer.awaiting.len() == 3,
+        "a batch inside its patience was given up on"
+    );
+    let past = tick(&node, &mut peer, NOW + BATCH_PATIENCE);
+    assert!(
+        asks_for_the_chain(&past.reply) && peer.awaiting.is_empty(),
+        "a batch past its patience is held for as long as the peer says nothing"
+    );
+}
+
+/// A batch whose blocks keep arriving is not given up on, however long the
+/// whole of it takes.
+///
+/// The patience ran from the ask, so a peer delivering a long batch more
+/// slowly than one batch a patience was asked for the chain again while
+/// still sending, and sent everything twice. The wire's own patience renews
+/// on progress for that reason, and this one now does the same.
+#[test]
+fn a_peer_still_delivering_its_batch_is_not_asked_for_the_chain_again() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(6);
+    let mut node = store_with(params, &blocks[..1]);
+    let mut peer = greeted_peer(blocks[5].header.total_work, 5);
+    on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Chain { from: 1, count: 5 },
+        NOW,
+    );
+    assert_eq!(peer.awaiting.len(), 5, "five heights outstanding");
+
+    // One block every fifty seconds, each well inside the patience measured
+    // from the one before it.
+    let mut now = NOW;
+    for block in &blocks[1..5] {
+        now += BATCH_PATIENCE - 10;
+        let before = peer.awaiting.len();
+        let landed = on_message(
+            &mut solo(&mut node),
+            &mut peer,
+            Message::Block(Box::new(block.clone())),
+            now,
+        );
+        assert_eq!(node.height(), Some(block.header.height), "the block landed");
+        assert!(
+            !asks_for_the_chain(&landed.reply) && peer.awaiting.len() == before - 1,
+            "a peer delivering its batch a block every fifty seconds was given up on in the \
+             middle of it: the patience ran from the ask rather than from the last block"
+        );
+    }
+}
+
+/// A batch owed by a quiet peer is given up on one patience after the clock
+/// steps back, and not one patience after the clock climbs back past the ask.
+///
+/// The chooser pulls every moment it holds to the present when the clock
+/// steps back, and the probation restarts its wait. The batch patience did
+/// neither, so an hour's step was an hour added to the sixty seconds.
+#[test]
+fn a_batch_owed_by_a_quiet_peer_is_asked_again_one_patience_after_the_clock_stepped_back() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(4);
+    let mut node = store_with(params, &blocks[..1]);
+    let mut peer = greeted_peer(blocks[3].header.total_work, 3);
+    on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Chain { from: 1, count: 3 },
+        NOW,
+    );
+    assert_eq!(peer.awaiting.len(), 3);
+
+    // A `Chain` naming nothing this node lacks reaches the patience whatever
+    // else does.
+    let nothing_new = || Message::Chain { from: 0, count: 1 };
+    let stepped_back = NOW - 3_600;
+    on_message(&mut solo(&mut node), &mut peer, nothing_new(), stepped_back);
+    let later = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        nothing_new(),
+        stepped_back + BATCH_PATIENCE + 1,
+    );
+    assert!(
+        asks_for_the_chain(&later.reply) && peer.awaiting.is_empty(),
+        "sixty one seconds after the clock stepped back an hour, the quiet peer still holds \
+         the batch: the wait read nought until the clock climbed back past the ask"
     );
 }
 
