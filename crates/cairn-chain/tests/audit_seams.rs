@@ -942,9 +942,9 @@ fn a_switch_as_deep_as_the_rules_allow_finds_every_body_it_needs() {
 
     // A rival forking one block deeper than the rules allow is turned away by
     // the rule, before anything asks a disk for anything. Its first block sits
-    // at exactly the floor `add_block` refuses below, so it is held; what
-    // refuses it is the depth, and the two guards meet with nothing between
-    // them.
+    // at exactly the floor, the block a switch would land on, and is refused
+    // there as too old. It used to be held, the floor refusing only below
+    // itself, and refused by the depth once its branch outweighed this one.
     let mut too_deep = Source::new();
     let mut ignored = Vec::new();
     too_deep.run(&miner, 80, &mut ignored);
@@ -957,10 +957,10 @@ fn a_switch_as_deep_as_the_rules_allow_finds_every_body_it_needs() {
     assert!(
         matches!(
             refused,
-            Some(Err(ChainError::ForkTooDeep { depth, limit }))
-                if depth as u64 == burial + 1 && limit == burial
+            Some(Err(ChainError::TooOld { height, floor }))
+                if height == tip - burial && floor == tip - burial
         ),
-        "one deeper than the rules allow is refused by the rule: {refused:?}"
+        "one deeper than the rules allow is refused at its first block: {refused:?}"
     );
     assert_eq!(store.height(), Some(tip), "and the branch did not move");
 
