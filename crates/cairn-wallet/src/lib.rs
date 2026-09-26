@@ -358,14 +358,19 @@ pub struct Holdings {
     /// somebody who kept the whole record needs to be asked.
     pub unprovable: Vec<Unprovable>,
     /// Notes this wallet's own account still names, and has stopped answering
-    /// for, because it was moved past the blocks that would have said.
+    /// for, because it was moved past the blocks that would have said, or has
+    /// not read them yet.
     ///
     /// Not counted into anything. A note leaves the account when this wallet
     /// reads the block that spent it, and when the node has let go of a block
     /// this wallet still needed, that reading never happens: what became of
     /// this key over that range is simply not in the account. So every note it
     /// held at that moment is one it can no longer stand behind, and on an
-    /// ordinary wallet most of them turn out to have been spent.
+    /// ordinary wallet most of them turn out to have been spent. The same holds
+    /// while the account is behind the chain, which is what a block the disk
+    /// will not give back, or has not taken yet, leaves it: a note this key
+    /// paid away after that block is one the node no longer holds and the
+    /// account has not seen go, and it was counted as stranded money.
     ///
     /// Kept apart from [`Holdings::unprovable`] rather than folded into it,
     /// because the two say opposite things. A note there is money, and what it
@@ -431,10 +436,10 @@ impl Holdings {
         };
         Some(format!(
             "This wallet's account still names {notes}, worth {worth} if they are all still \
-             yours, that it has stopped answering for. The node had let go of blocks \
-             this wallet had not read yet, so what became of them over that range was \
-             never read, and on a wallet that has paid anybody most of them are notes \
-             that were paid away. They are left out of the balance rather than counted \
+             yours, that it has stopped answering for. It has not read the blocks that \
+             would say what became of them, because the node had let go of them or cannot \
+             give them back yet, and on a wallet that has paid anybody most of them are \
+             notes that were paid away. They are left out of the balance rather than counted \
              into it, and out of what any archivist is asked about, since the places on \
              that list would be places this key no longer owns."
         ))
@@ -725,9 +730,12 @@ pub struct Progress {
     /// disk, and a block it will not give back stops the reading there and
     /// leaves it there: skipping over it is not on offer, because which notes
     /// are this key's is built up as the blocks go past, and a history with a
-    /// hole in it would go on calling a stranger's transfer ours. The balance
-    /// beside it stays right, because it is counted from the chain and not
-    /// from this account.
+    /// hole in it would go on calling a stranger's transfer ours. What can be
+    /// spent is counted from the chain and stays right. What is held back as
+    /// stranded is counted from this account, which has not seen the payments
+    /// made since that block, so the notes they spent are named apart while
+    /// it is behind rather than counted, and the line above the balance does
+    /// not vouch for it.
     ///
     /// So what it looks like is a page saying "still reading" about blocks it
     /// is not going to read, next to a height that keeps climbing, for ever.
@@ -863,13 +871,15 @@ impl Progress {
     /// wallet has stopped following the chain and will not start again. Then
     /// the one that means the number is not this wallet's own reading at all,
     /// and then the one that means it is this wallet's reading of a chain the
-    /// network has left. Then the ones that mean the number is right and
-    /// something else is at risk, and last the two about this wallet's own
-    /// account. Those can mean money missing from the number, which by that
-    /// ranking would put them higher. They stay last because each can sit
-    /// there a long time, the lost account's for the whole run, and above the
-    /// others it would hide a full disk or a slow clock, each mended by doing
-    /// something now, for as long as it sat there.
+    /// network has left. Then the ones that mean the chain the number is
+    /// counted from is sound and something else is at risk, the disk first
+    /// because it can leave what is held back as stranded behind the chain,
+    /// and last the two about this wallet's own account. Those can mean money
+    /// missing from the number, which by that ranking would put them higher.
+    /// They stay last because each can sit there a long time, the lost
+    /// account's for the whole run, and above the others it would hide a full
+    /// disk or a slow clock, each mended by doing something now, for as long
+    /// as it sat there.
     ///
     /// Probation used to be last of all, under three lines that say in as many
     /// words that the balance is right. It is set whenever the node under this
@@ -934,17 +944,20 @@ impl Progress {
                 "The disk under the node this wallet runs is not taking what it writes. \
                  It said: {}. The chain has reached block {} and the disk holds {}, so {} \
                  blocks have been accepted and not kept, and a restart begins at the \
-                 disk's number. {} The balance beside this is right for the chain as it \
-                 stands; what is at risk is having to read it all again.",
+                 disk's number. {} This wallet reads its own payments off that disk, so \
+                 until it catches up, what the balance beside this holds back as stranded \
+                 may include money this key has paid away since; what is at risk besides \
+                 is having to read it all again.",
                 unwritten.because, unwritten.reached, kept, unwritten.blocks, lost
             ));
         }
         if let Some(unread) = &self.unread {
             return Some(format!(
                 "The disk under the node this wallet runs will not give back the block at \
-                 {}. It said: {}. Nothing has been deleted, and the amount beside this is \
-                 still right: it is counted from the chain rather than from the list of \
-                 payments below. The list is what stops. It is read one block at a time and \
+                 {}. It said: {}. Nothing has been deleted. What can be spent is counted \
+                 from the chain, and what is held back as stranded may include money this \
+                 key has paid away since that block, because that is counted from the list \
+                 of payments below, and the list is what stops. It is read one block at a time and \
                  it cannot step over one, so it will sit where it is however long the page \
                  says it is still reading, and payments made after that block will not \
                  appear in it. Close this wallet and start it again: that reads the disk \
@@ -2380,10 +2393,11 @@ impl Wallet {
         // This wallet's own account of what it has been paid, which is what
         // lets it notice a note the node has stopped following, and where each
         // one landed, which is what lets it ask about one.
-        let (recorded, landed, unanswered): (
+        let (recorded, landed, unanswered, reading): (
             BTreeMap<NoteId, Amount>,
             BTreeMap<NoteId, u64>,
             BTreeSet<NoteId>,
+            u64,
         ) = {
             let history = self
                 .history
@@ -2395,7 +2409,7 @@ impl Wallet {
                 .filter_map(|id| Some((*id, history.where_it_fell(id)?)))
                 .collect();
             let unanswered: BTreeSet<NoteId> = history.unaccounted().collect();
-            (held, landed, unanswered)
+            (held, landed, unanswered, history.next())
         };
         // Paths somebody else rebuilt for this wallet. Each is checked below
         // against the set as it stands rather than remembered as good, because
@@ -2418,6 +2432,7 @@ impl Wallet {
             .collect();
         let (holdings, waiting, answered, gone, promised_notes) = self.node.with_chain(|chain| {
             let state = chain.state();
+            let behind = chain.height().is_some_and(|tip| reading <= tip);
             let mut held: Vec<Held> = state
                 .hot_notes()
                 .filter(|(_, entry)| entry.note.owner == mine)
@@ -2515,7 +2530,14 @@ impl Wallet {
                     // been spent and a balance that quietly goes down, this
                     // project has already said which is worse, and
                     // `audit_what_forgetting_throws_away` holds it to that.
-                    Err(one) if unanswered.contains(id) && one.fell_at.is_none() => {
+                    //
+                    // An account behind the chain is in the same position over
+                    // the blocks it has not read yet: a block the disk will not
+                    // give back, or has not taken, stops it, and every note
+                    // this key pays away after that looked like this. Asked of
+                    // the chain as it is counted here, so a block that landed
+                    // since the account last read is not one it has seen.
+                    Err(one) if (behind || unanswered.contains(id)) && one.fell_at.is_none() => {
                         unanswered_for.push(one);
                     }
                     Err(one) => unprovable.push(one),
@@ -4165,8 +4187,8 @@ mod tests {
             "in the words the store used, which is what tells damage from a full disk: {said}"
         );
         assert!(
-            said.contains("still right"),
-            "and says the amount is not what is wrong, because it is not: {said}"
+            !said.contains("still right"),
+            "and vouches for an amount that counts from a list it says has stopped: {said}"
         );
         assert!(
             said.contains("still reading"),

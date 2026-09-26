@@ -357,8 +357,9 @@ fn what_was_not_read(covered: &Covered, listed: usize) -> Vec<String> {
         lines.extend(wrapped(&format!(
             "This wallet could not read every block up to {missed}, because the node had let \
              go of them by the time it looked. Anything that happened to this key in the ones \
-             it missed is not in the list above. The balance is counted from the chain rather \
-             than from the list, so it is right whatever the list is missing."
+             it missed is not in the list above. What can be spent is counted from the chain \
+             rather than from the list, so it is right whatever the list is missing; notes \
+             this wallet lost track of in those blocks are named apart rather than counted."
         )));
     }
     lines
