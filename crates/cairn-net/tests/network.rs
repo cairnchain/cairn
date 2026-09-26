@@ -1150,9 +1150,19 @@ fn a_node_stopped_between_writing_its_ledger_and_dropping_blocks_comes_back() {
         root_before,
         "on exactly the ledger it had"
     );
+    // Kept, and not walked again. They were dropped here once, on the reading
+    // that a log reaching below the ledger was a node stopped before it could
+    // drop them; the trim keeps what the budget affords now, so that start was
+    // cutting blocks the node kept on purpose. The replay starts at the ledger
+    // and reads only what lies above it.
     assert!(
-        again.archived_at(0).is_none(),
-        "and the blocks the ledger stands for are dropped rather than walked again"
+        again.archived_at(0).is_some(),
+        "and the blocks the ledger stands for were dropped, which only the budget decides"
+    );
+    assert_eq!(
+        restored.blocks,
+        usize::try_from(BURIAL).unwrap(),
+        "and more than the blocks above the ledger were replayed"
     );
 
     again.shutdown();

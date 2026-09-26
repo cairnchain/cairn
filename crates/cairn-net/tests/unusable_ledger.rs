@@ -151,9 +151,12 @@ fn a_ledger_the_rules_refuse_does_not_cost_the_block_log() {
         ..params()
     };
 
+    // Refused as rules this build does not have rather than as a damaged
+    // file: the cure is a build, and the file is fine
+    // (`a_start_and_its_disk.rs` holds what each is told).
     let refused = Node::open(elsewhere, loopback(), &directory);
     assert!(
-        matches!(refused, Err(NodeError::UnusableLedger { .. })),
+        matches!(refused, Err(NodeError::OtherRules { .. })),
         "a ledger the rules refuse is not a node that never had one: {:?}",
         refused.map(|_| ())
     );

@@ -583,7 +583,7 @@ fn what_was_restored(restored: &Restored, directory: &str) -> Vec<String> {
     }
     if restored.refused > 0 {
         said.push(format!(
-            "             {} stored blocks were set aside; they will be asked for again",
+            "             {} stored blocks were cut from the log; they will be asked for again",
             restored.refused
         ));
     }
@@ -611,11 +611,12 @@ fn what_was_restored(restored: &Restored, directory: &str) -> Vec<String> {
         for line in wrapped(&format!(
             "{} stored blocks were set aside because the first of them could not be \
              checked against the one after it, so this node does not know what height \
-             its own log begins at. Nothing was deleted and the bytes are still on the \
-             disk to look at. This node fetches the chain again from the network; an \
-             archivist should look at the first record before letting it, because that \
-             is the copy nobody else has. If this happens again after a clean restart, \
-             the disk under {directory} is the thing to check.",
+             its own log begins at. Nothing was cut, but the first record is written \
+             over by the first block this node writes, which on a network that pins its \
+             first block is this start; the records after it stay on the disk until the \
+             log grows over them. This node fetches the chain again from the network. If \
+             this happens again after a clean restart, the disk under {directory} is the \
+             thing to check.",
             restored.blocks_set_aside
         )) {
             said.push(format!("             {line}"));
@@ -624,11 +625,12 @@ fn what_was_restored(restored: &Restored, directory: &str) -> Vec<String> {
     if restored.headers_set_aside > 0 {
         for line in wrapped(&format!(
             "{} stored headers were set aside because the first of them could not be \
-             checked against the one after it. Nothing was deleted and the bytes are \
-             still on the disk to look at. This node writes the headers again from the \
-             blocks it kept and asks the network for the rest, and until it has them it \
-             cannot show the chain to anybody arriving new. If this happens again after \
-             a clean restart, the disk under {directory} is the thing to check.",
+             checked against the one after it. The header log is written again from the \
+             blocks this node kept, and the first of those writes cuts the file, so it \
+             begins at the oldest block this node holds and the headers below that are \
+             gone until a peer hands them back. Until it has them it cannot show the \
+             chain to anybody arriving new. If this happens again after a clean restart, \
+             the disk under {directory} is the thing to check.",
             restored.headers_set_aside
         )) {
             said.push(format!("             {line}"));
@@ -654,10 +656,10 @@ fn what_was_restored(restored: &Restored, directory: &str) -> Vec<String> {
     if let Some(record) = restored.unreadable {
         for line in wrapped(&format!(
             "stored block {record} will not read back. That is damage to the file rather \
-             than an unfinished write, so nothing was cut for it and the bytes are still on \
-             the disk to look at. This node starts from the blocks before it and asks the \
-             network for the rest. If it happens again after a clean restart, the disk under \
-             {directory} is the thing to check."
+             than an unfinished write, so nothing was cut for it: the bytes stay on the disk \
+             until the first block this node writes past them. This node starts from the \
+             blocks before it and asks the network for the rest. If it happens again after \
+             a clean restart, the disk under {directory} is the thing to check."
         )) {
             said.push(format!("             {line}"));
         }
@@ -1209,10 +1211,16 @@ mod said_out_loud {
 
         let cases: [Case; 7] = [
             ("rejoining", |r| r.rejoining = true, "partway"),
-            ("refused", |r| r.refused = 4, "asked for again"),
+            // "Cut", because that is what happened to them. The line said
+            // "set aside", which is this report's word for bytes it kept.
+            ("refused", |r| r.refused = 4, "cut from the log"),
             ("discarded_bytes", |r| r.discarded_bytes = 96, "unfinished"),
             ("left_in_place", |r| r.left_in_place = 96, "unread"),
-            ("blocks_set_aside", |r| r.blocks_set_aside = 12, "archivist"),
+            (
+                "blocks_set_aside",
+                |r| r.blocks_set_aside = 12,
+                "written over",
+            ),
             (
                 "headers_set_aside",
                 |r| r.headers_set_aside = 12,
@@ -1249,6 +1257,56 @@ mod said_out_loud {
             said.contains("block 7") && said.contains("/var/lib/cairn"),
             "a record that will not read names itself and the disk to look at: \
              {said}"
+        );
+    }
+
+    /// Neither sentence about records set aside sends an operator to look at
+    /// bytes the same node writes over.
+    ///
+    /// Nothing asked this, so both said "Nothing was deleted and the bytes are
+    /// still on the disk to look at". For headers, the same start wrote the log
+    /// again from the blocks, and the first of those writes cut the file, so a
+    /// node that had trimmed its blocks had deleted every header below them.
+    /// For blocks, the first block the node writes goes over the first record,
+    /// and on a network that pins its first block that is the start itself.
+    /// An operator sent to look found a healthy file and concluded the disk
+    /// was fine.
+    #[test]
+    fn records_set_aside_are_not_said_to_be_on_the_disk_to_look_at() {
+        let headers = Restored {
+            headers_set_aside: 12,
+            ..Restored::default()
+        };
+        // One run of words, since the lines are wrapped where they fall.
+        let words = |restored: &Restored| {
+            what_was_restored(restored, "/var/lib/cairn")
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let said = words(&headers);
+        assert!(
+            !said.contains("still on the disk"),
+            "headers the start writes over are said to be on the disk: {said}"
+        );
+        assert!(
+            said.contains("gone until a peer"),
+            "and it is not said that the headers below the oldest block are gone: {said}"
+        );
+
+        let blocks = Restored {
+            blocks_set_aside: 12,
+            ..Restored::default()
+        };
+        let said = words(&blocks);
+        assert!(
+            !said.contains("to look at"),
+            "a first record the node writes over is said to be there to look at: {said}"
+        );
+        assert!(
+            said.contains("written over"),
+            "and it is not said that the first record is written over: {said}"
         );
     }
 

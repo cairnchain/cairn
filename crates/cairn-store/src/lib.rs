@@ -119,7 +119,15 @@ fn max_record_on_disk() -> u64 {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("could not reach the block log: {0}")]
+    /// A read or a write the file system refused, in the file system's words.
+    ///
+    /// Naming no file, because five files come through here: the block log,
+    /// its index, the header log, the header forest and the lock. It used to
+    /// read "could not reach the block log" for all of them, so a header log
+    /// that would not open was the block log twice over and a directory
+    /// another node held was a block log nobody could reach. The file is
+    /// named by whoever knows which one it was.
+    #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("record {index} declares {declared} bytes, the limit is {MAX_RECORD_BYTES}")]
     RecordTooLarge { index: usize, declared: usize },
@@ -1152,8 +1160,46 @@ impl BlockLog {
             index: 0,
             total: self.count,
             started: false,
+            from: 0,
             left: self.end,
         }
+    }
+
+    /// The same, starting at the block at `height` rather than at the first.
+    ///
+    /// For a node that starts from a ledger it wrote: the blocks below it are
+    /// already in the ledger, and walking them only to pass over them made a
+    /// start read every block a node keeps, which on a node keeping all of
+    /// them is a start that grows with the chain.
+    ///
+    /// Where the record is found is the index's word, and the index is
+    /// derived, so the record there is asked for its height before anything
+    /// starts from it. If the index cannot say, or says wrongly, this is the
+    /// replay from the first record: the caller already passes over what it
+    /// does not need, so the answer is slower and never different.
+    pub fn replay_from(&self, height: u64) -> Replay<'_> {
+        let mut replay = self.replay();
+        // Every record is below the height asked for, so there is nothing to
+        // read, and a replay from the front would read all of them to say so.
+        if height >= self.reaches() {
+            replay.index = self.count;
+            return replay;
+        }
+        let Some(index) = height
+            .checked_sub(self.first)
+            .and_then(|index| usize::try_from(index).ok())
+        else {
+            return replay;
+        };
+        if !matches!(self.read_at(height), Ok(Some(_))) {
+            return replay;
+        }
+        if let Ok(Some((start, _))) = self.bounds(index) {
+            replay.index = index;
+            replay.from = start;
+            replay.left = self.end.saturating_sub(start);
+        }
+        replay
     }
 
     /// Cuts the log back to its first `count` records.
@@ -1383,6 +1429,20 @@ impl BlockLog {
         }
     }
 
+    /// Reads every record again, for a replay that met one it could not read.
+    ///
+    /// The start reads sixteen bytes of the log and decodes two records, so a
+    /// record damaged in the middle of a log whose index is in line is first
+    /// met by the replay, not by recovery. What recovery does with the same
+    /// record is leave it and everything after it on the disk, unread, and
+    /// this is that, asked for by whoever met it: the walk stops where the
+    /// replay did, the index is written again up to there, and the bytes past
+    /// it stay where they are until the log grows over them.
+    pub fn read_again(&mut self) -> Result<Recovered, StoreError> {
+        self.still_on_its_files()?;
+        self.rebuild()
+    }
+
     /// Reads every record the log holds and writes the index out again from
     /// what it found.
     fn rebuild(&mut self) -> Result<Recovered, StoreError> {
@@ -1601,6 +1661,9 @@ pub struct Replay<'a> {
     index: usize,
     total: usize,
     started: bool,
+    /// Where the first record read begins: nought, or where
+    /// [`BlockLog::replay_from`] found the record it was asked for.
+    from: u64,
     /// Bytes of records still ahead of the cursor.
     ///
     /// The second of the two questions a length off a disk has to answer, and
@@ -1622,7 +1685,7 @@ impl Iterator for Replay<'_> {
         }
         if !self.started {
             self.started = true;
-            if let Err(error) = self.reader.seek(SeekFrom::Start(0)) {
+            if let Err(error) = self.reader.seek(SeekFrom::Start(self.from)) {
                 self.index = self.total;
                 return Some(Err(error.into()));
             }

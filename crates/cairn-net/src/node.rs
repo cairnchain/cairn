@@ -39,7 +39,7 @@ use cairn_primitives::codec::{Decode, Encode};
 use cairn_primitives::Hash32;
 use cairn_store::{
     staged_beside, write_beside_and_move, BlockLog, DirectoryLock, HeaderLog, HeaderTree,
-    JoinFailed, StoreError, HANDED_LEDGER, HEADER_BYTES, HEADER_LOG,
+    JoinFailed, StoreError, BLOCK_LOG, HANDED_LEDGER, HEADER_BYTES, HEADER_LOG, HEADER_TREE,
 };
 
 use crate::book::AddressBook;
@@ -449,8 +449,48 @@ const REACH_FOR_ARCHIVISTS: usize = 4;
 pub enum NodeError {
     #[error("could not open the connection: {0}")]
     Io(#[from] io::Error),
-    #[error("could not reach the block log: {0}")]
+    /// The store refused, in its own words, which name the file where they
+    /// know it.
+    ///
+    /// This had a prefix of its own, "could not reach the block log", on top
+    /// of a store error that said the same, so every file of the store was the
+    /// block log: a header log that would not open, and a directory another
+    /// node held.
+    #[error(transparent)]
     Store(#[from] StoreError),
+    /// One file of this node's directory, named, and what the store said
+    /// about it.
+    #[error("could not use {file}: {source}")]
+    File {
+        file: &'static str,
+        #[source]
+        source: StoreError,
+    },
+    /// What is on this disk was written under rules this build does not have.
+    ///
+    /// Deliberately fatal, before anything is written, and deliberately not
+    /// [`NodeError::UnusableLedger`]. That one is a file to put back or
+    /// delete. This one is about the reader: a build one release behind the
+    /// rules, started on a disk a newer one wrote, which is what a rollback
+    /// looks like. The replay used to count every block from the activation
+    /// height as refused and cut it, and the ledger was answered with the
+    /// remedy for a damaged file; the same build refuses the same blocks from
+    /// the network, so neither cured anything and both cost blocks.
+    #[error(
+        "{file} was written under rules this build does not have: {because}. Nothing on          the disk has been changed. Start it again with a build that has the rules for          that height, and the chain here is picked up where it was left; deleting          anything would not help, because this build refuses the same blocks from the          network"
+    )]
+    OtherRules { file: &'static str, because: String },
+    /// What is on this disk is another network's chain.
+    ///
+    /// The same shape as [`NodeError::OtherRules`], about the command line
+    /// rather than the build: one start under a mistyped `--network` on a
+    /// directory another network's node wrote. The replay used to refuse its
+    /// first record, cut the log to nothing and write this network's first
+    /// block in its place.
+    #[error(
+        "{file} holds another network's chain: {because}. Nothing on the disk has been          changed. If that is the network meant, start this node for it; if not, this          node needs a directory of its own, because this one is that network's"
+    )]
+    OtherNetwork { file: &'static str, because: String },
     /// The ledger this node starts from is there and cannot be used.
     ///
     /// Deliberately fatal, and deliberately before anything is written. The
@@ -680,14 +720,22 @@ pub struct Restored {
     pub blocks: usize,
     /// Blocks read back but not replayed, and therefore cut from the log.
     ///
-    /// Two things end a replay. A block that no longer applies, which means
-    /// the file changed underneath the node or the rules did. And a block that
+    /// Two things end a replay with a cut. A block that no longer applies,
+    /// which means the bytes changed underneath the node. And a block that
     /// applies but does not extend the branch, which means the log is not the
     /// followed branch in order of height: a log written before that was the
     /// rule, or one left mid reorganisation by a machine that stopped.
     ///
     /// Neither loses anything but time. What was cut is asked for again, and
     /// a node that was following the heaviest branch still is.
+    ///
+    /// Two things that used to be counted here are not. A refusal about the
+    /// reader, a build without the rules for a height or a node started for
+    /// another network, stops the start with nothing cut
+    /// ([`NodeError::OtherRules`], [`NodeError::OtherNetwork`]): the same
+    /// build refuses the same blocks from the network, so nothing cut for it
+    /// ever came back. And a record that will not decode is left on the disk
+    /// and reported through `unreadable`, as recovery reports it.
     pub refused: usize,
     /// Bytes cut off the end of the log because a write never finished.
     ///
@@ -708,8 +756,13 @@ pub struct Restored {
     /// to whoever is running the node. Bytes at the end are the ordinary trace
     /// of a machine that stopped mid write, and they cost one block. A whole
     /// record the store cannot read is damage, and nothing was cut for it: the
-    /// bytes are still on the disk to be looked at, and a node that read them
-    /// wrongly once can read them again.
+    /// bytes stay on the disk until the log grows over them, which is the
+    /// first block this node writes, and a start that read them wrongly once
+    /// can read them again before then.
+    ///
+    /// Met by the store when the index beside the log was out of line, and by
+    /// the replay when it was not. The replay used to cut the log there, so
+    /// the same byte met two policies depending on a derived file.
     pub unreadable: Option<usize>,
     /// Header records the store would not stand behind, left on the disk and
     /// counted here.
@@ -720,14 +773,18 @@ pub struct Restored {
     /// made up, and deliberately leaves the bytes exactly where they are so
     /// that somebody can look at them.
     ///
-    /// What used to happen next is that the log was written again from the
-    /// blocks this node still had, and the first of those writes cut the file
-    /// to nothing. A node keeps a gigabyte of blocks and every header ever, so
-    /// what the blocks can replace is the recent end and what they cannot is
-    /// most of it. Measured: a node holding headers 0 to 59 with blocks 52 to
-    /// 59 came back holding headers 52 to 59, could no longer show a newcomer
-    /// the chain, could no longer write the ledger that lets it drop old
-    /// blocks, and reported a clean start with nothing set aside at all.
+    /// Left on the disk by the store, and not for long. What happens next is
+    /// that the log is written again from the blocks this node still has, and
+    /// the first of those writes cuts the file to nothing, at this start when
+    /// there are blocks and at the first block accepted when there are none. A
+    /// node keeps a gigabyte of blocks and every header ever, so what the
+    /// blocks can replace is the recent end and what they cannot is most of
+    /// it. Measured: a node holding headers 0 to 59 with blocks 52 to 59 came
+    /// back holding headers 52 to 59, could no longer show a newcomer the
+    /// chain, and could no longer write the ledger that lets it drop old
+    /// blocks. Before this count it reported a clean start with nothing set
+    /// aside at all, and after it the operator was told the bytes were still
+    /// on the disk to look at, which the same start had written over.
     ///
     /// Told apart from `unreadable`, which is the same kind of news about the
     /// block log. Both are damage rather than an interrupted write, and this
@@ -767,6 +824,10 @@ pub struct Restored {
     /// Told apart from `unreadable`, which is a record that would not decode.
     /// These decode perfectly and disagree with each other, which is why the
     /// count is the whole log rather than a position in it.
+    ///
+    /// The bytes are left alone by the store and not by the node: the first
+    /// block this node writes goes over the first record, and on a network
+    /// that pins its first block that is this start, which writes it there.
     ///
     /// Before the store asked, one bit of record zero's height field moved the
     /// whole log: a node opened reporting nothing wrong, denied holding the
@@ -2610,8 +2671,9 @@ impl Shared {
     ///
     /// The ledger goes down first, and is on the disk before the blocks go. A
     /// machine that stops between the two leaves a log longer than it needed
-    /// to be, which costs a slower start; the other order would leave a node
-    /// with neither the blocks nor the ledger that replaces them.
+    /// to be, which the first round of upkeep after the next start trims; the
+    /// other order would leave a node with neither the blocks nor the ledger
+    /// that replaces them.
     ///
     /// First in the order the disk sees, which is what [`Shared::keep_ledger`]
     /// is careful about and did not used to be: the ledger's bytes sat in the
@@ -3217,7 +3279,7 @@ impl Node {
     ) -> Result<(Self, Restored), NodeError> {
         let directory = directory.into();
         let lock = DirectoryLock::acquire(&directory)?;
-        let (mut log, recovered) = BlockLog::open(&directory)?;
+        let (mut log, recovered) = BlockLog::open(&directory).map_err(in_file(BLOCK_LOG))?;
 
         let mut chain = if archiving {
             ChainStore::archiving(params)
@@ -3241,6 +3303,11 @@ impl Node {
         // the log is cut there and the rest is asked for again. It costs a
         // partial resync once, on a node whose log was written before this
         // rule existed or interrupted in the middle of a reorganisation.
+        //
+        // Not every end is a cut. A refusal about this build or this command
+        // line stops the start with the disk as it was, a record that will
+        // not decode is left where it is, and a read the disk refuses stops
+        // the start; each is said where it is met below.
         //
         // A node handed a ledger cannot read its way back to it, because the
         // blocks it holds build on a ledger it never applied. So it keeps the
@@ -3278,10 +3345,7 @@ impl Node {
         for name in [HEADER_LOG, FILLING_LOG] {
             let _ = std::fs::remove_file(directory.join(format!("{name}.hold")));
         }
-        let handed = match read_handed_ledger(&directory, &params) {
-            Ok(handed) => handed,
-            Err(because) => return Err(NodeError::UnusableLedger { because }),
-        };
+        let handed = read_handed_ledger(&directory, &params)?;
         let handed = match handed {
             Some((state, recent, anchor, promised)) => {
                 chain
@@ -3309,9 +3373,36 @@ impl Node {
         // joins the two and there is no chain to be had.
         let rejoining = !log.is_empty() && log.first_height() > start;
         let mut applied = 0usize;
+        let mut unreadable = false;
         if !rejoining {
-            for block in log.replay() {
-                let Ok(block) = block else { break };
+            // From the ledger's tip rather than from the first record: what
+            // is below it is in the ledger already, and on a node that keeps
+            // every block, reading them to pass them over was a start that
+            // grew with the chain.
+            for block in log.replay_from(start) {
+                let block = match block {
+                    Ok(block) => block,
+                    // The disk refusing a read says nothing about what is
+                    // written there, and cutting the log for it deleted every
+                    // block past a read that might have worked a second later.
+                    // The same answer `BlockLog::open` gives: a start fails
+                    // only over a file it could not reach.
+                    Err(StoreError::Io(source)) => {
+                        return Err(NodeError::File {
+                            file: BLOCK_LOG,
+                            source: StoreError::Io(source),
+                        })
+                    }
+                    // A record that will not decode. Recovery leaves such a
+                    // record and everything after it on the disk, unread, and
+                    // this was the one place the same byte was met by a cut
+                    // instead: which of the two it met depended on whether the
+                    // index beside the log happened to be in line.
+                    Err(_) => {
+                        unreadable = true;
+                        break;
+                    }
+                };
                 // Already in the ledger this node started from.
                 if block.header.height < start {
                     continue;
@@ -3336,15 +3427,30 @@ impl Node {
                 // was stuck at that height for as long as the clock stayed
                 // wrong. The same shape as `ChainStore::reapply`, one crate up.
                 let its_own_clock = block.header.timestamp;
-                if !matches!(
-                    chain.add_block(block, its_own_clock),
-                    Ok(Accepted::Extended)
-                ) {
-                    break;
+                let height = block.header.height;
+                match chain.add_block(block, its_own_clock) {
+                    Ok(Accepted::Extended) => applied = applied.saturating_add(1),
+                    // A refusal about this build or this command line rather
+                    // than about the block stops the start here, with nothing
+                    // cut. The same build refuses the same blocks from the
+                    // network, so what a cut would have asked for again could
+                    // never have been taken back, and the blocks it deleted
+                    // were valid ones some other build had written.
+                    Err(error) => {
+                        if let Some(stop) = about_the_reader(height, applied == 0, &error) {
+                            return Err(stop);
+                        }
+                        break;
+                    }
+                    Ok(_) => break,
                 }
-                applied = applied.saturating_add(1);
             }
         }
+        let read_again = if unreadable {
+            Some(log.read_again().map_err(in_file(BLOCK_LOG))?)
+        } else {
+            None
+        };
         let reached = start.saturating_add(applied as u64);
         let refused = if rejoining {
             0
@@ -3356,15 +3462,17 @@ impl Node {
                 .unwrap_or(0)
                 .saturating_sub(applied)
         };
-        if refused > 0 || rejoining {
-            log.keep_below(reached)?;
-        }
-        // Blocks the ledger already stands for, still on disk because this
-        // node was stopped before it could drop them. Dropped now, so the
-        // next start does not walk them again.
-        if !rejoining && log.first_height() < start {
-            log.keep_from(start)?;
-        }
+        // Nothing to cut when nothing was refused and the log is not being set
+        // aside, and then this cuts nothing: the log already ends at `reached`.
+        log.keep_below(reached).map_err(in_file(BLOCK_LOG))?;
+        // The blocks below the ledger stay. They were once dropped here, on
+        // the reading that a log beginning below the ledger was a node
+        // stopped before it could drop them, which was true while the trim
+        // dropped everything below the ledger. It keeps what its budget
+        // affords now (`cut_for`), so this was cutting what the running node
+        // kept on purpose: every restart left a node holding nothing below
+        // its anchor, with a budget it had been keeping. A log over its budget
+        // is trimmed by the first round of upkeep, by the budget's rule.
 
         // The network's first block, for a node that has nothing. After the
         // replay rather than before it: a chain that already holds the first
@@ -3381,18 +3489,19 @@ impl Node {
         // is filled in from the blocks that are still there. Everything older
         // than those is gone, which costs this node the ability to answer a
         // newcomer about that stretch and nothing else.
-        let mut headers = HeaderLog::open(&directory)?;
+        let mut headers = HeaderLog::open(&directory).map_err(in_file(HEADER_LOG))?;
         let headers_set_aside = headers_the_store_will_not_stand_behind(&headers);
         let CaughtUp {
             dropped: headers_dropped,
             unread,
         } = catch_up_headers(&mut headers, &log);
-        let mut forest = HeaderTree::open(&directory)?;
+        let mut forest = HeaderTree::open(&directory).map_err(in_file(HEADER_TREE))?;
         // A refusal here is not lost by being dropped: nothing has been
         // started yet that could carry it, and the first block this node
         // applies runs the same pass again and reports what it finds.
         let _ = grow_forest(&mut forest, &headers);
-        let mut filling = HeaderLog::open_named(&directory, FILLING_LOG)?;
+        let mut filling =
+            HeaderLog::open_named(&directory, FILLING_LOG).map_err(in_file(FILLING_LOG))?;
         // What was being collected is only useful while it leads up to the
         // oldest header held. A restart in the middle of a reorganisation, or
         // after the chain moved on, can leave it pointing nowhere.
@@ -3415,12 +3524,28 @@ impl Node {
         });
 
         let book = AddressBook::load(&directory);
+        // What reading the log again after the replay found, where the replay
+        // met a record it could not read, in place of what the open found.
+        let (discarded_bytes, left_in_place, unreadable) = match read_again {
+            Some(found) => (
+                recovered
+                    .discarded_bytes
+                    .saturating_add(found.discarded_bytes),
+                found.left_in_place,
+                found.unreadable,
+            ),
+            None => (
+                recovered.discarded_bytes,
+                recovered.left_in_place,
+                recovered.unreadable,
+            ),
+        };
         let restored = Restored {
             blocks: applied,
             refused,
-            discarded_bytes: recovered.discarded_bytes,
-            left_in_place: recovered.left_in_place,
-            unreadable: recovered.unreadable,
+            discarded_bytes,
+            left_in_place,
+            unreadable,
             blocks_set_aside: recovered.blocks_set_aside,
             rejoining,
             headers_set_aside,
@@ -6576,19 +6701,26 @@ type Handed = (LedgerState, Vec<BlockHeader>, u64, u64);
 fn read_handed_ledger(
     directory: &Path,
     params: &ConsensusParams,
-) -> Result<Option<Handed>, String> {
+) -> Result<Option<Handed>, NodeError> {
+    let unusable = |because: String| NodeError::UnusableLedger { because };
     let bytes = match std::fs::read(directory.join(HANDED_LEDGER)) {
         Ok(bytes) => bytes,
         // The one failure that means what the caller used to assume of all of
         // them. A node with no ledger file has not written one yet, which is
         // every node before its first, and it starts from its own log.
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("{HANDED_LEDGER} could not be read: {error}")),
+        Err(error) => {
+            return Err(unusable(format!(
+                "{HANDED_LEDGER} could not be read: {error}"
+            )))
+        }
     };
-    let handover = Handover::decode(&bytes)
-        .map_err(|error| format!("{HANDED_LEDGER} is not a ledger this build can read: {error}"))?;
-    let state = accept(&handover, params)
-        .map_err(|error| format!("{HANDED_LEDGER} was refused: {error}"))?;
+    let handover = Handover::decode(&bytes).map_err(|error| {
+        unusable(format!(
+            "{HANDED_LEDGER} is not a ledger this build can read: {error}"
+        ))
+    })?;
+    let state = accept(&handover, params).map_err(|error| ledger_refused(&error))?;
     let anchor = handover.at.height;
     Ok(Some((
         state,
@@ -6596,6 +6728,86 @@ fn read_handed_ledger(
         anchor,
         settles_at(anchor, handover.tip.height, params),
     )))
+}
+
+/// What a start says about a stored ledger the rules refused.
+///
+/// Four of the refusals are about this build or this command line and not
+/// about the file: rules this build does not have at a height, a version the
+/// rules there do not name, and a header from another network or from before
+/// this one opened. Those were told to put a copy back or delete the file,
+/// "which costs the stored blocks", and a copy is refused the same way while
+/// deleting it cures nothing: for another network's directory it costs that
+/// network's node its blocks.
+fn ledger_refused(error: &HandoverError) -> NodeError {
+    match *error {
+        HandoverError::SoftwareTooOld { .. } | HandoverError::WrongVersion { .. } => {
+            NodeError::OtherRules {
+                file: HANDED_LEDGER,
+                because: error.to_string(),
+            }
+        }
+        // Said from the fields rather than through the error's own words,
+        // which print the two networks as bare numbers.
+        HandoverError::WrongNetwork {
+            height,
+            expected,
+            found,
+        } => NodeError::OtherNetwork {
+            file: HANDED_LEDGER,
+            because: format!(
+                "the header at {height} belongs to {found}, and this node was started for \
+                 {expected}"
+            ),
+        },
+        HandoverError::BeforeTheNetworkOpened { .. } => NodeError::OtherNetwork {
+            file: HANDED_LEDGER,
+            because: error.to_string(),
+        },
+        _ => NodeError::UnusableLedger {
+            because: format!("{HANDED_LEDGER} was refused: {error}"),
+        },
+    }
+}
+
+/// Whether a block the replay refused was refused for something about this
+/// build or this command line, and what to stop the start with if so.
+///
+/// A build without the rules for a height, which is `SoftwareTooOld` where
+/// the schedule names the height and `UnsupportedVersion` where it does not;
+/// and the first record of the log belonging to another network, which is one
+/// start under a mistyped `--network`. Only the first: a record further up
+/// the log that names another network is not a directory of another network,
+/// it is a record that changed, and it is refused like any other.
+fn about_the_reader(height: u64, first: bool, error: &ChainError) -> Option<NodeError> {
+    let ChainError::InvalidBlock { source, .. } = error else {
+        return None;
+    };
+    match source {
+        BlockError::SoftwareTooOld { .. } => Some(NodeError::OtherRules {
+            file: BLOCK_LOG,
+            because: source.to_string(),
+        }),
+        BlockError::UnsupportedVersion(version) => Some(NodeError::OtherRules {
+            file: BLOCK_LOG,
+            because: format!(
+                "the block at height {height} is version {version}, and this build knows only \
+                 version {BLOCK_VERSION}"
+            ),
+        }),
+        BlockError::WrongNetwork { .. } | BlockError::BeforeTheNetworkOpened { .. } if first => {
+            Some(NodeError::OtherNetwork {
+                file: BLOCK_LOG,
+                because: format!("the block at height {height}: {source}"),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Names the file of this node's directory a store error came from.
+fn in_file(file: &'static str) -> impl FnOnce(StoreError) -> NodeError {
+    move |source| NodeError::File { file, source }
 }
 
 /// Works out what to do about one message, and writes down anything it
