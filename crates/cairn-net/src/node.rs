@@ -1514,6 +1514,156 @@ struct Shared {
     /// Empty on a node nobody has asked to recover anything, which is every
     /// node that is not carrying a wallet.
     asking: Mutex<Asking>,
+    /// Who handed in each body this node holds off its branch.
+    ///
+    /// A leaf, written with the chain held so that a switch failing on a body
+    /// in another thread cannot come before the note of who sent it.
+    held_aside: Mutex<HeldAside>,
+}
+
+/// Who handed in each body a node holds off its branch, so that a body which
+/// fails a switch costs its sender and nobody else.
+///
+/// A block that loses the fork choice is held without being applied, and its
+/// body is tried only when its branch becomes the heaviest, which is usually
+/// the delivery of a later block by some other peer. Its identifier is taken
+/// over the header alone, so the body tried can be a copy with its signatures
+/// broken that one connection sent ahead of the real block. Without this, the
+/// refusal reached only the peer that delivered the later block, which was the
+/// one carrying the real chain, and the sender of the copy could send it again
+/// after every failure and keep a node off the heavier branch for as long as
+/// it liked.
+#[derive(Debug)]
+struct HeldAside {
+    by: HashMap<Hash32, HandedIn>,
+    /// The size at which entries for bodies no longer held are next swept.
+    sweep_at: usize,
+}
+
+/// The connection a body came in on, and the address it came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HandedIn {
+    peer: PeerId,
+    host: Option<IpAddr>,
+}
+
+/// Entries written before the first sweep of [`HeldAside`].
+///
+/// Each later sweep waits for twice what the one before it kept, so the table
+/// holds at most twice the bodies the chain still holds, whose own ceiling is
+/// what bounds this one, and a sweep costs a constant for each entry written.
+const HELD_ASIDE_SWEEP: usize = 1_024;
+
+impl Default for HeldAside {
+    fn default() -> Self {
+        Self {
+            by: HashMap::new(),
+            sweep_at: HELD_ASIDE_SWEEP,
+        }
+    }
+}
+
+impl HeldAside {
+    /// Writes down who handed in the body now held for `id`.
+    ///
+    /// `still_held` answers for the chain: whether it still holds a body under
+    /// an identifier, which is what an entry is worth keeping for.
+    fn record(&mut self, id: Hash32, handed: HandedIn, still_held: impl Fn(&Hash32) -> bool) {
+        if self.by.len() >= self.sweep_at {
+            self.by.retain(|held, _| still_held(held));
+            self.sweep_at = self.by.len().saturating_mul(2).max(HELD_ASIDE_SWEEP);
+        }
+        self.by.insert(id, handed);
+    }
+
+    /// Who handed in the body held for `id`, which has just failed.
+    fn take(&mut self, id: &Hash32) -> Option<HandedIn> {
+        self.by.remove(id)
+    }
+}
+
+/// What [`HeldAside`] keeps and for how long, pinned beside it because the
+/// table is invisible from outside this file.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod who_handed_it_in {
+    use super::{HandedIn, Hash32, HeldAside, HELD_ASIDE_SWEEP};
+    use std::net::IpAddr;
+
+    fn body(n: usize) -> Hash32 {
+        let mut bytes = [0u8; 32];
+        for (byte, from) in bytes
+            .iter_mut()
+            .zip(u64::try_from(n).unwrap().to_le_bytes())
+        {
+            *byte = from;
+        }
+        Hash32::from_bytes(bytes)
+    }
+
+    fn peer(n: u64) -> HandedIn {
+        HandedIn {
+            peer: n,
+            host: Some(IpAddr::from([203, 0, 113, 7])),
+        }
+    }
+
+    /// The sender of a body is kept until that body fails, and handed over
+    /// once.
+    ///
+    /// Nothing asked this, so a table that forgot every sender, or kept only
+    /// the last, passed: the one fact it holds is only ever read after the
+    /// message that wrote it is gone.
+    #[test]
+    fn the_sender_of_a_body_is_kept_until_the_body_fails() {
+        let mut aside = HeldAside::default();
+        aside.record(body(1), peer(1), |_| true);
+        aside.record(body(2), peer(2), |_| true);
+        assert_eq!(
+            aside.take(&body(1)),
+            Some(peer(1)),
+            "the first sender was lost"
+        );
+        assert_eq!(
+            aside.take(&body(2)),
+            Some(peer(2)),
+            "the second sender was lost"
+        );
+        assert_eq!(aside.take(&body(1)), None, "a sender was handed over twice");
+    }
+
+    /// Senders of bodies the chain no longer holds are let go of, and only
+    /// once the table has grown to where a sweep is worth its cost.
+    ///
+    /// A block that loses the fork choice costs a stranger nothing to make, so
+    /// a table that kept every sender it was ever told about grew by one row
+    /// for each one sent, for the life of the node. Nothing asked this, so
+    /// that table passed, and so did one that swept on every write.
+    #[test]
+    fn senders_of_bodies_no_longer_held_are_let_go_of_when_the_table_is_full() {
+        let mut aside = HeldAside::default();
+        for n in 0..HELD_ASIDE_SWEEP {
+            aside.record(body(n), peer(1), |_| false);
+        }
+        assert_eq!(
+            aside.by.len(),
+            HELD_ASIDE_SWEEP,
+            "the table was swept before it was full"
+        );
+        let kept = body(3);
+        aside.record(body(HELD_ASIDE_SWEEP), peer(2), |held| *held == kept);
+        assert_eq!(
+            aside.by.len(),
+            2,
+            "a full table kept senders of bodies the chain no longer holds"
+        );
+        assert_eq!(
+            aside.take(&kept),
+            Some(peer(1)),
+            "a sweep lost a body still held"
+        );
+        assert_eq!(aside.take(&body(HELD_ASIDE_SWEEP)), Some(peer(2)));
+    }
 }
 
 /// One question about where fallen notes sit, and what has come back.
@@ -2397,6 +2547,23 @@ impl Shared {
     fn hang_up(&self, id: PeerId) {
         if let Some(peer) = self.peers().get(&id) {
             let _ = peer.stream.shutdown(Shutdown::Both);
+        }
+    }
+
+    /// Ends the connection that handed in a body held aside which has just
+    /// failed a switch, when one has, and refuses the address it came from.
+    ///
+    /// It is this peer that is refused, and not the one whose message made the
+    /// switch, which delivered the block above that body and is asked again
+    /// for its chain. Ended and refused like any peer that sent a block this
+    /// node rejects, which is what that body was.
+    fn turn_away(&self, handed: Option<HandedIn>) {
+        let Some(handed) = handed else {
+            return;
+        };
+        self.hang_up(handed.peer);
+        if let Some(host) = handed.host {
+            self.refuse(host, unix_now());
         }
     }
 
@@ -3685,6 +3852,7 @@ impl Node {
             unweighed: Mutex::new(Unweighed::default()),
             out_of_step: Mutex::new(OutOfStep::default()),
             asking: Mutex::new(Asking::default()),
+            held_aside: Mutex::new(HeldAside::default()),
         });
 
         {
@@ -7019,11 +7187,15 @@ fn in_file(file: &'static str) -> impl FnOnce(StoreError) -> NodeError {
 /// Everything that needs the chain happens here and nowhere else, so it is
 /// held once and let go before a single byte is sent: a slow peer must never
 /// be able to stall the chain for everyone.
+///
+/// Also says who handed in a body held aside that this message made fail, so
+/// the connection that sent it can be ended and its address refused.
 fn decide(
     shared: &Arc<Shared>,
+    id: PeerId,
     peer: &mut PeerState,
     message: Message,
-) -> (Reaction, Vec<Transfer>) {
+) -> (Reaction, Vec<Transfer>, Option<HandedIn>) {
     // Chain first and log second, here and everywhere, so two threads never
     // take these two the other way round from each other.
     let mut chain = shared.chain();
@@ -7049,6 +7221,23 @@ fn decide(
         nonce: shared.nonce,
     };
     let reaction = on_message(&mut local, peer, message, unix_now());
+
+    // Who handed in a body held aside, written while the chain is still held,
+    // and who handed in the one that has just failed, read the same way.
+    let blamed = {
+        let mut aside = shared
+            .held_aside
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(held) = reaction.held_aside {
+            let handed = HandedIn {
+                peer: id,
+                host: peer.remote,
+            };
+            aside.record(held, handed, |held| chain.block(held).is_some());
+        }
+        reaction.failed_below.and_then(|failed| aside.take(&failed))
+    };
 
     // Written while the chain is still held, so the log cannot record a branch
     // the chain has already moved off.
@@ -7076,7 +7265,7 @@ fn decide(
         .iter()
         .filter_map(|id| chain.pooled(id).cloned())
         .collect();
-    (reaction, passing)
+    (reaction, passing, blamed)
 }
 
 /// Whether the flood window that began at `started` is over by `now`.
@@ -7822,7 +8011,8 @@ fn read_loop(
 
         // The chain is held for the decision and for writing the log, and let
         // go before anything is sent, so a slow peer never stalls the chain.
-        let (mut reaction, passing) = decide(shared, &mut peer, message);
+        let (mut reaction, passing, blamed) = decide(shared, id, &mut peer, message);
+        shared.turn_away(blamed);
 
         // Paths offered back for places this node asked about, folded now that
         // the chain has been let go of. Named in the reaction rather than
