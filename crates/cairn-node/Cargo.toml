@@ -19,3 +19,11 @@ cairn-crypto.workspace = true
 cairn-ledger.workspace = true
 cairn-net.workspace = true
 cairn-primitives.workspace = true
+
+[dev-dependencies]
+# For the campaigns in `src/options_fuzz.rs`: the configuration file and the
+# sizes and keys a person types, and the wallet's reading of an address, which
+# the key a node mines to has to agree with. Dev-dependencies only: nothing
+# that ships gains either.
+cairn-fuzz.workspace = true
+cairn-wallet = { path = "../cairn-wallet" }

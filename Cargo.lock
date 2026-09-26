@@ -96,6 +96,7 @@ dependencies = [
  "cairn-net",
  "cairn-primitives",
  "cairn-store",
+ "cairn-wallet",
 ]
 
 [[package]]
@@ -143,9 +144,11 @@ version = "0.9.3"
 dependencies = [
  "cairn-chain",
  "cairn-crypto",
+ "cairn-fuzz",
  "cairn-ledger",
  "cairn-net",
  "cairn-primitives",
+ "cairn-wallet",
 ]
 
 [[package]]

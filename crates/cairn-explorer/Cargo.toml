@@ -37,3 +37,6 @@ cairn-docs.workspace = true
 # that moves under it, and it is the one surface in this crate that a
 # generator reaches places a hand-written case does not.
 cairn-fuzz.workspace = true
+# For the campaign at the foot of `src/api.rs`, which holds this program's
+# reading of an owner to the wallet's reading of the same address.
+cairn-wallet = { path = "../cairn-wallet" }
