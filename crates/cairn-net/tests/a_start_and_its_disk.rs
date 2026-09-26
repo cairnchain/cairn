@@ -481,6 +481,27 @@ fn a_record_of_another_network_further_up_the_log_is_cut_and_the_start_goes_on()
     );
 }
 
+/// A `ledger.dat` that is there and will not be read stops the start, and
+/// is not taken for a node that never wrote one.
+///
+/// Absence is the one failure that means no ledger. Nothing held the line
+/// between the two, so a start that read every failure to open the file as
+/// absence passed, and that is the reading that once replayed from block
+/// zero over a log beginning higher up and cut it to nothing.
+#[test]
+fn a_ledger_file_that_will_not_be_read_stops_the_start() {
+    let directory = scratch("unreadable-ledger");
+    std::fs::create_dir_all(directory.join(HANDED_LEDGER)).unwrap();
+
+    let said = refusal(Node::open(params(), loopback(), &directory));
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert!(
+        said.contains("could not be read"),
+        "a ledger file that would not be read was not said to be unreadable: {said}"
+    );
+}
+
 /// A header log that reaches past the block log is left as it is: the two
 /// agree where both hold, and a header written ahead of its block is what a
 /// stop between the two writes of an ordinary block leaves.
