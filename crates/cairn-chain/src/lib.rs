@@ -224,6 +224,23 @@ fn rate(fee: Amount, weight: usize) -> u128 {
         .unwrap_or(0)
 }
 
+/// The least fee that ranks a transfer of `weight` above one paying `rate`.
+///
+/// For a wallet quoting into a full pool, which makes room only for a better
+/// rate than the cheapest it holds: a quote at the floor into a pool kept full
+/// at the floor is refused, and what it takes to be taken is this. [`rate`]
+/// rounds down, so the answer is the smallest fee whose rate, rounded down,
+/// is past `rate`.
+#[must_use]
+pub fn fee_to_outrank(rate: u128, weight: usize) -> Amount {
+    let weight = u128::try_from(weight.max(1)).unwrap_or(1);
+    let pebbles = rate
+        .saturating_add(1)
+        .saturating_mul(weight)
+        .div_ceil(RATE_SCALE);
+    Amount::from_pebbles(u64::try_from(pebbles).unwrap_or(u64::MAX)).unwrap_or(Amount::MAX_MONEY)
+}
+
 /// A transfer waiting for a block, with what it pays and what it takes.
 ///
 /// Only the two sizes are settled by the transfer itself. The fee against
@@ -3127,6 +3144,30 @@ mod tests {
             HELD_OVERHEAD < entry * 2,
             "and the spare slots are a fraction of it, not another entry"
         );
+    }
+
+    /// The fee said to outrank a rate outranks it, and a pebble less does
+    /// not.
+    ///
+    /// A wallet quoting into a full pool pays this. Too little and the pool
+    /// refuses the payment it was quoted for; too much and the wallet pays
+    /// over the odds for nothing, and nothing but this asks which.
+    #[test]
+    fn the_fee_that_outranks_a_rate_is_the_least_that_does() {
+        for weight in [1usize, 7, 150, 700, 4_096, 65_537] {
+            for rate in [0u128, 1, 9, 10 * super::RATE_SCALE, 655_359, 1 << 40] {
+                let fee = super::fee_to_outrank(rate, weight);
+                assert!(
+                    super::rate(fee, weight) > rate,
+                    "a fee of {fee} on a weight of {weight} does not outrank {rate}"
+                );
+                let less = Amount::from_pebbles(fee.as_pebbles() - 1).unwrap();
+                assert!(
+                    super::rate(less, weight) <= rate,
+                    "{fee} on a weight of {weight} is more than it takes to outrank {rate}"
+                );
+            }
+        }
     }
 
     use cairn_ledger::block::BLOCK_VERSION;

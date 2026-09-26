@@ -348,6 +348,17 @@ fn state(wallet: &Wallet) -> Response {
     // as whether a spend has anything to reach for. The page used to answer
     // the second and print the first.
     json.field_bool("anything", !holdings.empty_handed());
+    // What to say when it holds nothing, in the command line's words: where
+    // this wallet's account begins decides whether the network or the
+    // account file is the place to look.
+    if holdings.empty_handed() {
+        json.field_str(
+            "nothingHere",
+            &crate::nothing_here_yet(&wallet.history_covers()),
+        );
+    } else {
+        json.field_null("nothingHere");
+    }
     json.field_usize("held", holdings.notes.len());
     // Counted here over every note, because the list below stops at
     // `NOTES_SHOWN` and a count the page made over that list was a count of
@@ -357,18 +368,7 @@ fn state(wallet: &Wallet) -> Response {
         holdings.notes.iter().filter(|held| held.is_cold()).count(),
     );
 
-    // Payments handed over that no block carries yet. The one thing a person
-    // watching an unmoved balance after pressing Send needs to be told.
-    json.key("payments");
-    json.begin_array();
-    for payment in wallet.waiting() {
-        json.begin_object();
-        json.field_str("id", &payment.id.to_string());
-        json.field_str("amount", &payment.amount.to_string());
-        json.field_str("committed", &payment.committed.to_string());
-        json.end_object();
-    }
-    json.end_array();
+    payments(&mut json, wallet);
     json.key("notes");
     json.begin_array();
     // Enough to show where the money sits without handing a page a list that
@@ -441,6 +441,50 @@ fn state(wallet: &Wallet) -> Response {
     json_response(200, json)
 }
 
+/// The payments a wallet handed over that no block carries yet, and the ones
+/// it stopped waiting on without a block carrying them.
+fn payments(json: &mut Writer, wallet: &Wallet) {
+    // Payments handed over that no block carries yet. The one thing a person
+    // watching an unmoved balance after pressing Send needs to be told.
+    json.key("payments");
+    json.begin_array();
+    for payment in wallet.waiting() {
+        json.begin_object();
+        json.field_str("id", &payment.id.to_string());
+        json.field_str("amount", &payment.amount.to_string());
+        json.field_str("committed", &payment.committed.to_string());
+        json.field_bool("pooled", payment.pooled);
+        match &payment.why {
+            Some(why) => json.field_str("why", why),
+            None => json.field_null("why"),
+        }
+        match payment.held_until {
+            Some(until) => json.field_u64("heldUntil", until),
+            None => json.field_null("heldUntil"),
+        }
+        json.end_object();
+    }
+    json.end_array();
+    // And the ones it stopped waiting on without a block carrying them. The
+    // waiting box used to empty and the balance go back up, which is what a
+    // carried payment looks like too.
+    json.key("notCarried");
+    json.begin_array();
+    for payment in wallet.not_carried() {
+        json.begin_object();
+        json.field_str("id", &payment.id.to_string());
+        json.field_str("amount", &payment.amount.to_string());
+        json.field_str("why", &payment.why);
+        json.field_u64("at", payment.at);
+        json.end_object();
+    }
+    json.end_array();
+    match wallet.payments_unkept() {
+        Some(unkept) => json.field_str("paymentsUnkept", &unkept),
+        None => json.field_null("paymentsUnkept"),
+    }
+}
+
 /// What a person typed into the send form, read once.
 struct Asked {
     recipient: PublicKey,
@@ -464,23 +508,30 @@ fn amount_of(field: Option<String>) -> Result<Amount, &'static str> {
     parse_amount(&text).ok_or("that is not an amount of CAIRN")
 }
 
+/// The recipient a spend names, or the sentence that says what is wrong with
+/// it.
+fn recipient_of(field: Option<String>) -> Result<PublicKey, String> {
+    let Some(to) = field else {
+        return Err("who is being paid?".to_owned());
+    };
+    // The reader's own words, which say what is wrong: the length, a
+    // character that is not hexadecimal, or sixty four good characters that
+    // are not a key. The command line printed them and this threw them away
+    // for a sentence about the length, which is the one thing a mistyped
+    // address usually has right.
+    parse_address(&to).map_err(|error| error.to_string())
+}
+
 fn asked(wallet: &Wallet, request: &Request) -> Result<Asked, Response> {
-    let Some(to) = request.field("to") else {
-        return Err(refusal("who is being paid?"));
-    };
-    let Ok(recipient) = parse_address(&to) else {
-        return Err(refusal(
-            "that is not a public key: it is 64 hexadecimal characters",
-        ));
-    };
+    let recipient = recipient_of(request.field("to")).map_err(|why| refusal(&why))?;
     let amount = amount_of(request.field("amount")).map_err(refusal)?;
     // Left blank means what the network asks, worked out from the transfer
-    // this would build. Nothing is no longer a fee anybody carries, and a page
-    // that sent one would have the refusal come back from a pool the person
-    // typing cannot see.
+    // this would build, with the margin `Wallet::fee_for` sets out. Nothing is
+    // no longer a fee anybody carries, and a page that sent one would have the
+    // refusal come back from a pool the person typing cannot see.
     let fee = match request.field("fee") {
-        None => wallet.floor_for(recipient, amount),
-        Some(text) if text.trim().is_empty() => wallet.floor_for(recipient, amount),
+        None => wallet.fee_for(recipient, amount),
+        Some(text) if text.trim().is_empty() => wallet.fee_for(recipient, amount),
         Some(text) => match parse_amount(&text) {
             Some(fee) => fee,
             None => return Err(refusal("that fee is not an amount of CAIRN")),
@@ -518,6 +569,14 @@ fn quote(wallet: &Wallet, request: &Request) -> Response {
     let mut json = Writer::new();
     json.begin_object();
     json.field_bool("quoted", true);
+    // Said back, because the one attack on this form a page elsewhere in the
+    // same browser can still mount is writing the clipboard on a click, and
+    // what is pasted into "To" is then somebody else's key. The sentence read
+    // before pressing Send named an amount and a fee, and nobody.
+    json.field_str("to", &asked.recipient.to_string());
+    // A payment to this wallet's own address, which is what pasting the
+    // address shown under Receive does, and which only moves the fee.
+    json.field_bool("toItself", asked.recipient == wallet.address());
     json.field_str("amount", &asked.amount.to_string());
     json.field_str("fee", &asked.fee.to_string());
     json.field_str("floor", &floor.to_string());
@@ -550,6 +609,7 @@ fn send(wallet: &Wallet, request: &Request) -> Response {
             let mut json = Writer::new();
             json.begin_object();
             json.field_bool("sent", true);
+            json.field_str("to", &asked.recipient.to_string());
             json.field_str("id", &sent.id.to_string());
             json.field_str("amount", &sent.amount.to_string());
             json.field_str("fee", &sent.fee.to_string());
@@ -557,6 +617,7 @@ fn send(wallet: &Wallet, request: &Request) -> Response {
             json.field_usize("notes", sent.notes);
             json.field_usize("from_cold", sent.from_cold);
             json.field_bool("handed_on", sent.handed_on);
+            json.field_usize("offered", sent.offered);
             json.end_object();
             json_response(200, json)
         }
@@ -622,7 +683,7 @@ fn text(status: u16, message: &str) -> Response {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{amount_of, constant_time_eq, parse_address, turned_away, Opened};
+    use super::{amount_of, constant_time_eq, parse_address, recipient_of, turned_away, Opened};
     use cairn_http::Request;
 
     fn opened() -> Opened {
@@ -815,6 +876,36 @@ mod tests {
             amount_of(Some("1.5".to_owned())).is_ok(),
             "and a real one reads"
         );
+    }
+
+    /// A recipient the page refuses is refused with the reason, as the
+    /// command line refuses it.
+    ///
+    /// Both faces read an address with the same reader, and the page threw
+    /// its answer away and said "it is 64 hexadecimal characters" whatever
+    /// was wrong. Nothing asked, so sixty four hexadecimal characters that are
+    /// not a key, which is what a one-character typo in a real address
+    /// usually is, were answered with the length the person had already
+    /// typed.
+    #[test]
+    fn a_recipient_the_page_refuses_is_refused_with_the_reason() {
+        let off_the_curve = "11".repeat(32);
+        let why = parse_address(&off_the_curve).unwrap_err().to_string();
+        assert_eq!(
+            recipient_of(Some(off_the_curve)),
+            Err(why),
+            "sixty four hexadecimal characters that are not a key were refused for their \
+             length rather than for what is wrong with them"
+        );
+        let short = "ab".to_owned();
+        let why = parse_address(&short).unwrap_err().to_string();
+        assert_eq!(recipient_of(Some(short)), Err(why));
+        assert_eq!(
+            recipient_of(None),
+            Err("who is being paid?".to_owned()),
+            "and a recipient left out is asked for"
+        );
+        assert!(recipient_of(Some(an_address())).is_ok());
     }
 
     #[test]

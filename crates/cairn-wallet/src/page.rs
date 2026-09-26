@@ -41,6 +41,7 @@ pub(crate) const HTML: &str = r#"<!doctype html>
     <div class="amount"><span id="spendable">…</span><span class="unit">CAIRN</span></div>
     <p class="note-line" id="held-line">Reading the chain.</p>
     <div class="stranded" id="waiting" hidden></div>
+    <div class="stranded" id="not-carried" hidden></div>
     <div class="stranded" id="ripening" hidden></div>
     <div class="stranded" id="stranded" hidden></div>
 <div class="stranded" id="unaccounted" hidden></div>
@@ -76,7 +77,8 @@ pub(crate) const HTML: &str = r#"<!doctype html>
           </label>
         </div>
         <p class="note-line" id="quote">Leave the fee blank for the least the
-          network will carry.</p>
+          network will carry, and a little over it in case a note of it falls
+          out of the hot set before a block carries it.</p>
         <button id="go" type="submit">Send</button>
         <p class="said" id="said"></p>
       </form>
@@ -253,13 +255,58 @@ const KEY = new URLSearchParams(location.search).get("k") || "";
 const $ = (id) => document.getElementById(id);
 const text = (id, value) => { $(id).textContent = value; };
 
+// A line of words, put in as text and never as markup, for anything the
+// wallet says that is not a number.
+const line = (words) => {
+  const div = document.createElement("div");
+  div.textContent = words;
+  return div;
+};
+const bold = (words) => {
+  const b = document.createElement("b");
+  b.textContent = words;
+  return b;
+};
+
+// The first and last eight characters of an address, which is what a person
+// compares by eye.
+const ends = (address) => address.slice(0, 8) + "…" + address.slice(-8);
+
+// When the wallet last answered, so a page whose wallet has stopped can say
+// how old its figures are.
+let answeredAt = null;
+
+// A poll that got no answer. The figures stay, because they are the last ones
+// there were, and the box above them says how old they are. Returning without
+// a word left a balance and a height from a wallet that had exited, or been
+// restarted with a new address, looking exactly like current ones.
+function unanswered(why) {
+  const warning = $("warning");
+  warning.hidden = false;
+  warning.textContent = why + (answeredAt === null
+    ? " Nothing below has been read from it yet."
+    : " Not answering since " + answeredAt.toLocaleTimeString() +
+      "; the figures below are from then.");
+}
+
 async function refresh() {
   let state;
   try {
     const answer = await fetch("/api/state?k=" + encodeURIComponent(KEY));
-    if (!answer.ok) { return; }
+    if (answer.status === 403) {
+      unanswered("The address of this page has changed: open the one the wallet printed.");
+      return;
+    }
+    if (!answer.ok) {
+      unanswered("The wallet answered with an error.");
+      return;
+    }
     state = await answer.json();
-  } catch (_) { return; }
+  } catch (_) {
+    unanswered("The wallet is not answering. Is it still running?");
+    return;
+  }
+  answeredAt = new Date();
 
   text("network", state.network);
   text("height", state.height === null ? "…" : state.height);
@@ -282,14 +329,43 @@ async function refresh() {
   // person pressing Send twice because nothing happened is the whole reason
   // this line is here.
   const waiting = $("waiting");
-  waiting.hidden = state.payments.length === 0;
+  waiting.hidden = state.payments.length === 0 && state.paymentsUnkept === null;
+  waiting.replaceChildren();
+  if (state.paymentsUnkept !== null) { waiting.append(line(state.paymentsUnkept)); }
   if (state.payments.length > 0) {
     const total = state.payments.map((p) => p.amount).join(", ");
-    waiting.innerHTML = "<b>" + state.payments.length +
+    const head = document.createElement("div");
+    head.innerHTML = "<b>" + state.payments.length +
       (state.payments.length === 1 ? " payment is" : " payments are") +
-      " waiting for a block</b>: " + total + ". Nothing has been paid yet and " +
-      "nothing has been sent twice. A block takes a few minutes; the balance " +
-      "moves when one carries it.";
+      " waiting for a block</b>: " + total + ". Nothing has been paid yet, and " +
+      "only a block confirms a payment. A block takes a few minutes; the " +
+      "balance moves when one carries it. Do not send one again while it is " +
+      "listed here.";
+    waiting.append(head);
+    // One the wallet's node does not hold says why, and until when its notes
+    // stay held.
+    for (const p of state.payments) {
+      if (p.why === null) { continue; }
+      waiting.append(line(p.amount + " is not held by this wallet's node: " + p.why + "." +
+        (p.heldUntil === null ? "" : " Its notes stay held until block " + p.heldUntil + ".")));
+    }
+  }
+
+  // A payment the wallet stopped waiting on without a block carrying it. The
+  // box above used to empty and the balance go back up, which is exactly
+  // what a carried payment looks like, and nobody was told it was not coming.
+  const notCarried = $("not-carried");
+  notCarried.hidden = state.notCarried.length === 0;
+  notCarried.replaceChildren();
+  if (state.notCarried.length > 0) {
+    const head = document.createElement("div");
+    head.innerHTML = "<b>Not carried by any block</b>, so nobody was paid by " +
+      (state.notCarried.length === 1 ? "it" : "them") + ". The money is back in " +
+      "the balance above; if one should still be paid, send it again.";
+    notCarried.append(head);
+    for (const p of state.notCarried) {
+      notCarried.append(line(p.amount + ", stopped waiting on at block " + p.at + ": " + p.why + "."));
+    }
   }
 
   // Money that moved and then did not, because the chain the wallet had read
@@ -384,7 +460,7 @@ async function refresh() {
   if (state.movements.length === 0) {
     said.push(state.history_from === null
       ? "Nothing yet."
-      : "Nothing since block " + state.history_from + ", which is as far back as this wallet can see.");
+      : "Nothing since block " + state.history_from + ", which is as far back as this wallet read.");
   } else if (state.history_from > 0) {
     said.push("As far back as block " + state.history_from + ": this wallet did not read what came before.");
   }
@@ -416,8 +492,12 @@ async function refresh() {
   // "Nothing here yet" directly above the line naming the amount.
   const held = state.held;
   const fallen = state.fallen;
+  // Nothing at all is said in the wallet's own words, which name the account
+  // file when the account begins above the first block. The page said to
+  // check the height, which no height answers for somebody restored from the
+  // key alone.
   text("held-line", !state.anything
-    ? "Nothing here yet. If this key should hold something, check the height above."
+    ? state.nothingHere
     : held === 0
     ? "Nothing here can be spent right now."
     : held + (held === 1 ? " note" : " notes") + ", " + fallen + " of them fallen to the cold set.");
@@ -457,7 +537,8 @@ const post = (path, body) => fetch(path, {
 let quoting = 0;
 async function quote() {
   const mine = ++quoting;
-  const blank = "Leave the fee blank for the least the network will carry.";
+  const blank = "Leave the fee blank for the least the network will carry, and a " +
+    "little over it in case a note of it falls out of the hot set before a block carries it.";
   if ($("to").value.trim().length !== 64 || $("amount").value.trim() === "") {
     text("quote", blank);
     return;
@@ -466,9 +547,11 @@ async function quote() {
   try { result = await post("/api/quote", typed()); } catch (_) { return; }
   if (mine !== quoting) { return; }
   if (!result.quoted) { text("quote", blank); return; }
-  text("quote", "Sending " + result.amount + " and paying " + result.fee +
-    " to carry it, " + result.total + " in all. The network asks " +
-    result.floor + ".");
+  text("quote", "Sending " + result.amount + " to " + ends(result.to) + " and paying " +
+    result.fee + " to carry it, " + result.total + " in all. The network asks " +
+    result.floor + "." + (result.toItself
+      ? " That is this wallet's own address: nothing leaves it but the fee."
+      : ""));
 }
 
 for (const box of ["to", "amount", "fee"]) {
@@ -488,18 +571,33 @@ async function spend(anyway) {
   try {
     const result = await post("/api/send", body);
     if (result.sent) {
-      // A transfer nobody took is not good news wearing a green box. It was
-      // drafted, it was signed, and it went nowhere, and the headline said
-      // "Handed over" above the sentence saying it had not been.
+      // A transfer nobody was offered is not good news wearing a green box.
+      // And one that was offered is a socket write and no more: no message in
+      // the protocol answers a transfer, so this says what was measured and
+      // that only a block confirms it. It said the payment was handed over.
       said.className = result.handed_on ? "said good" : "said bad";
-      said.innerHTML = (result.handed_on
-        ? "Handed over: <b>" + result.amount + "</b> to be paid, <b>" + result.fee +
-          "</b> to carry it. <b>Waiting for a block</b>, which takes a few minutes. " +
-          "Nobody has been paid yet."
-        : "<b>No peer took it.</b> This wallet reached nobody to give it to, so it " +
-          "is not sent, nobody has been paid, and the <b>" + result.amount + "</b> is " +
-          "still here.") +
-        "<br><code>" + result.id + "</code>";
+      said.replaceChildren();
+      const code = document.createElement("code");
+      code.textContent = result.id;
+      if (result.handed_on) {
+        said.append(bold("Written to " + result.offered +
+            (result.offered === 1 ? " peer" : " peers") + "; only a block confirms it."),
+          " ", bold(result.amount), " to be paid to ", bold(ends(result.to)), ", ",
+          bold(result.fee), " to carry it. Whether a peer kept it, nothing in the network " +
+          "says. It is listed above as waiting for a block, which takes a few minutes, " +
+          "and nobody has been paid yet.");
+      } else {
+        // Kept rather than taken back: this wallet offers it to every peer it
+        // reaches, now and the next time it opens. It used to say the money
+        // was still here, beside a box showing the same payment waiting with
+        // its notes held, and nothing ever offered it to anyone.
+        said.append(bold("No peer has been offered it yet."), " This wallet reached " +
+          "nobody to give it to. It is kept, and offered to every peer this wallet " +
+          "reaches while it is open and the next time it opens; until then nobody has " +
+          "it and nobody has been paid. Its notes stay held for it, so do not send it " +
+          "again: it is listed above as waiting.");
+      }
+      said.append(document.createElement("br"), code);
       $("to").value = ""; $("amount").value = ""; $("fee").value = "";
       quote();
     } else if (result.steep) {
@@ -517,8 +615,13 @@ async function spend(anyway) {
       said.textContent = result.error;
     }
   } catch (_) {
+    // Not "it did not go": the answer is what was lost, and the payment may
+    // have been handed over before it was. A payment that was is listed as
+    // waiting, and the wallet refuses the same one again while it is.
     said.className = "said bad";
-    said.textContent = "The wallet stopped answering. Is it still running?";
+    said.textContent = "The wallet stopped answering before it said what became of this " +
+      "payment. Is it still running? Look at the payments waiting above before sending " +
+      "it again.";
   }
   go.disabled = false;
   go.textContent = "Send";
@@ -533,3 +636,97 @@ $("send").addEventListener("submit", (event) => {
 refresh();
 setInterval(refresh, 2000);
 "##;
+
+#[cfg(test)]
+mod tests {
+    use super::JS;
+
+    /// The script's `refresh`, from its first line to the next function.
+    fn refresh() -> &'static str {
+        let start = JS.find("async function refresh()").unwrap_or(0);
+        let rest = JS.get(start..).unwrap_or("");
+        let end = rest
+            .get(1..)
+            .and_then(|after| {
+                after
+                    .find("\nasync function ")
+                    .or_else(|| after.find("\n$("))
+            })
+            .map_or(rest.len(), |at| at.saturating_add(1));
+        rest.get(..end).unwrap_or(rest)
+    }
+
+    /// A poll the wallet does not answer is said on the page, with how old
+    /// the figures under it are, and not passed over.
+    ///
+    /// `refresh` returned on a failed poll without a word, so a tab whose
+    /// wallet had exited, or been started again on a new address, went on
+    /// showing the last balance and height as if they were current. Nothing
+    /// read the script, so that passed.
+    #[test]
+    fn a_wallet_that_stops_answering_is_said_on_the_page() {
+        let refresh = refresh();
+        assert!(
+            !refresh.contains("{ return; }"),
+            "a poll that got no answer returns without writing anything to the page"
+        );
+        assert!(
+            JS.contains("Not answering since"),
+            "the page does not say how old its figures are once the wallet stops answering"
+        );
+        assert!(
+            refresh.contains("403"),
+            "a page whose address the wallet no longer answers is not told to open the new one"
+        );
+    }
+
+    /// A page showing a wallet that holds nothing says what the command line
+    /// says: where the account begins, and that below it only the account
+    /// file can find money that fell, rather than sending its owner to look
+    /// at the network.
+    ///
+    /// The command line was taught this and the page was not: it said "check
+    /// the height above" to somebody restored from the key alone, whose
+    /// missing money no height will ever show. Nothing read the page's
+    /// sentence, so a page that pointed at the wrong cause passed.
+    #[test]
+    fn an_empty_wallet_is_told_on_the_page_what_the_command_line_tells_it() {
+        assert!(
+            !JS.contains("check the height above"),
+            "the page sends somebody whose account begins late to look at the height"
+        );
+        assert!(
+            JS.contains("state.nothingHere"),
+            "the page does not say what the wallet says about holding nothing"
+        );
+        assert!(
+            JS.contains("which is as far back as this wallet read."),
+            "the page says where its list begins in other words than the command line"
+        );
+    }
+
+    /// What the page says once a payment is sent is what was measured, and
+    /// names who is being paid, before and after.
+    ///
+    /// It said "Handed over" for a socket write that no peer answers, and the
+    /// sentences read before and after pressing Send named an amount and a
+    /// fee and nobody, while a page elsewhere in the same browser can put its
+    /// own key on the clipboard the person pastes from.
+    #[test]
+    fn a_sent_payment_is_said_as_what_was_measured_and_to_whom() {
+        assert!(
+            !JS.contains("Handed over"),
+            "the page still says a payment was handed over"
+        );
+        assert!(JS.contains("only a block confirms it"));
+        assert_eq!(
+            JS.matches("ends(result.to)").count(),
+            2,
+            "the recipient is not said back both in the quote and once it is sent"
+        );
+        assert!(
+            JS.contains("result.toItself"),
+            "a payment to this wallet's own address is not said to be one"
+        );
+    }
+}
