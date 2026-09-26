@@ -1341,15 +1341,23 @@ struct Peer {
     /// hello inside `attach_peer`, and one channel is one order, so everything
     /// after it lands after it.
     greeted: bool,
-    /// Whether this peer said it keeps the cold set, and so can rebuild a path
-    /// for a note that fell long ago.
+    /// What this peer said it kept, once it has introduced itself: the cold
+    /// set, so it can rebuild a path for a note that fell long ago, and the
+    /// headers from the first block, so it can supply the ones from before
+    /// this node arrived.
     ///
-    /// A claim and nothing more, which is all it has to be: what such a peer
-    /// hands over is folded against a commitment this node worked out itself,
-    /// so a lie costs the liar a message and this node a comparison. What the
-    /// claim saves is asking every peer in turn and waiting on the ones that
-    /// were never going to answer.
-    archives: bool,
+    /// Claims and nothing more, which is all they have to be: what such a peer
+    /// hands over is folded or weighed against a commitment this node worked
+    /// out itself, so a lie costs the liar a message or its turn, and this
+    /// node a comparison. What a claim saves is asking every peer in turn and
+    /// waiting on the ones that were never going to answer.
+    ///
+    /// The headers claim was read into the chooser and dropped, so the turn to
+    /// supply the headers went to the next connection along whatever it had
+    /// said, half a minute each for a peer that said it could not answer: a
+    /// node that joined, surrounded by nodes that joined, handed the turn
+    /// round all of them for ever.
+    keeps: Keeps,
     /// The height and the work this peer said its chain had when it
     /// introduced itself, once it has.
     ///
@@ -3436,15 +3444,15 @@ impl Shared {
     /// connected to nobody who can build one, has somewhere to knock. Neither
     /// is trusted for anything: what an archivist hands over is checked, and
     /// this only decides who is asked first.
-    fn note_what_it_keeps(&self, id: PeerId, advertised: Option<SocketAddr>, archives: bool) {
+    fn note_what_it_keeps(&self, id: PeerId, advertised: Option<SocketAddr>, keeps: Keeps) {
         if let Some(peer) = self.peers().get_mut(&id) {
-            peer.archives = archives;
+            peer.keeps = keeps;
             // Called once the introduction has been read, which is the moment
             // this connection is safe to send anything else down.
             peer.greeted = true;
         }
         if let Some(address) = advertised {
-            self.book().keeps_the_cold_set(&address, archives);
+            self.book().keeps_the_cold_set(&address, keeps.cold_set);
         }
     }
 
@@ -3470,7 +3478,7 @@ impl Shared {
     fn worth_asking(&self) -> Vec<PeerId> {
         self.peers()
             .iter()
-            .filter(|(_, peer)| peer.archives)
+            .filter(|(_, peer)| peer.keeps.cold_set)
             .map(|(id, _)| *id)
             .collect()
     }
@@ -4847,7 +4855,7 @@ impl Node {
         self.shared
             .peers()
             .values()
-            .filter(|peer| peer.archives)
+            .filter(|peer| peer.keeps.cold_set)
             .count()
     }
 
@@ -6211,16 +6219,32 @@ impl Shared {
         if let Some(turn) = previous.filter(|_| keeps_turn) {
             return Some((turn.peer, asking));
         }
+        // Among the peers that said they keep the headers, when any did. The
+        // claim is only a claim, which is why nobody claiming falls back to
+        // everybody, and why a lie costs only the turn: see [`Peer::keeps`].
+        let claiming: Vec<PeerId> = {
+            let peers = self.peers();
+            connected
+                .iter()
+                .copied()
+                .filter(|id| peers.get(id).is_some_and(|peer| peer.keeps.headers))
+                .collect()
+        };
+        let candidates = if claiming.is_empty() {
+            connected
+        } else {
+            &claiming
+        };
         let next = previous
             .map(|turn| turn.peer)
             .and_then(|peer| {
-                connected
+                candidates
                     .iter()
                     .copied()
                     .filter(|other| *other > peer)
                     .min()
             })
-            .or_else(|| connected.iter().copied().min())?;
+            .or_else(|| candidates.iter().copied().min())?;
         // A collection is one peer's work from end to end. What is left of the
         // last peer's goes when its turn does, because a run half from one
         // peer and half from another is the thing this whole arrangement
@@ -6300,9 +6324,15 @@ impl Shared {
             // that is the whole of the difference: renewing on one meant a peer
             // answering each question with a single header held the turn for
             // ever, and the node never filled its headers in at all.
+            //
+            // Counted from nought when the collection is below the mark. A
+            // write this node's disk refused throws the collection away and
+            // keeps the turn, and read against the old mark every run after it
+            // was nothing, so the turn was taken from a peer still delivering.
             Filled::Grew(reached) => {
                 if let Some(turn) = self.filling_from().as_mut() {
-                    if reached.saturating_sub(turn.marked) >= HEADER_RUN {
+                    let run = reached.checked_sub(turn.marked).unwrap_or(reached);
+                    if run >= HEADER_RUN {
                         turn.marked = reached;
                         turn.moved = now;
                     }
@@ -6320,7 +6350,9 @@ impl Shared {
             // against nobody. The turn stays where it is: the supplier has
             // done nothing wrong, and the patience on the turn still moves it
             // along if nothing else happens, so this cannot pin the node to
-            // one peer either.
+            // one peer either. What the supplier sends next starts the
+            // collection again from nought, and renews the turn as a run
+            // does: see the arm above.
             //
             // Reached with no lock held, which the write half needs: saying
             // what a write cost takes the chain and then the log.
@@ -8388,7 +8420,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
             host: remote,
             advertised: None,
             dialled_to: dialled,
-            archives: false,
+            keeps: Keeps::default(),
             claims: None,
         },
     );
@@ -8748,7 +8780,7 @@ fn read_loop(
         }
         shared.remember(&reaction.learned);
         if introduction && peer.greeted {
-            shared.note_what_it_keeps(id, peer.advertised, peer.keeps.cold_set);
+            shared.note_what_it_keeps(id, peer.advertised, peer.keeps);
             shared.note_what_it_claims(id, peer.height, peer.total_work);
         }
         shared.forget(&reaction.forget);
@@ -10177,7 +10209,7 @@ mod peers_and_loops {
             dialled_to: None,
             dialled,
             greeted: false,
-            archives: false,
+            keeps: Keeps::default(),
             claims: None,
         }
     }
@@ -10698,6 +10730,89 @@ mod peers_and_loops {
             "the turn was taken away inside its patience"
         );
         assert_eq!(after, Some(2), "the turn was kept past its patience");
+    }
+
+    /// The turn to fill the headers in goes first to peers that say they keep
+    /// them, and to anybody when none does.
+    ///
+    /// Every peer says so in its greeting and the node read it for the
+    /// chooser and dropped it, so the turn went to the next connection along
+    /// whatever it had claimed. A peer that joined and has not filled in
+    /// answers with nothing, and each such peer cost half a minute a round.
+    #[test]
+    fn the_turn_to_fill_the_headers_in_goes_first_to_a_peer_that_says_it_keeps_them() {
+        let (node, directory) = holding_headers(10, 3, "turn-claim");
+        let (near, _far) = a_socket();
+        for id in 1..=3 {
+            node.shared.peers().insert(id, stand_in(&near, true));
+        }
+        let keeps = |headers| Keeps {
+            headers,
+            cold_set: false,
+        };
+        node.shared.note_what_it_keeps(1, None, keeps(false));
+        node.shared.note_what_it_keeps(2, None, keeps(true));
+        node.shared.note_what_it_keeps(3, None, keeps(false));
+        let first = node
+            .shared
+            .asks_headers_of(&[1, 2, 3], 1_000)
+            .map(|(peer, _)| peer);
+        node.shared.note_what_it_keeps(2, None, keeps(false));
+        let spoiled = node.shared.filling_from().map(|turn| Turn {
+            spoiled: true,
+            ..turn
+        });
+        *node.shared.filling_from() = spoiled;
+        let with_nobody_claiming = node
+            .shared
+            .asks_headers_of(&[1, 2, 3], 1_001)
+            .map(|(peer, _)| peer);
+        node.shared.peers().clear();
+        drop(node);
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            first,
+            Some(2),
+            "the turn went to a peer that said it cannot show the chain, ahead of one that can"
+        );
+        assert_eq!(
+            with_nobody_claiming,
+            Some(3),
+            "with nobody claiming the headers, the turn stopped going round"
+        );
+    }
+
+    /// A full run renews a turn whose collection went back to nothing,
+    /// however far the collection had reached before.
+    ///
+    /// A write this node's disk refused throws the collection away and keeps
+    /// the turn, on purpose, and the mark of how far the turn had got stayed
+    /// where it was. The supplier's runs then started from nought, each one
+    /// read as nothing against a mark above it, and the turn was taken from a
+    /// peer still delivering: the misattribution the refusal keeps the turn
+    /// to avoid.
+    #[test]
+    fn a_full_run_renews_a_turn_whose_collection_started_again() {
+        let (node, directory) = holding_headers(2_000, 3, "turn-again");
+        *node.shared.filling_from() = Some(Turn {
+            peer: 1,
+            moved: 1_000,
+            marked: 1_536,
+            spoiled: false,
+        });
+        let run = headers_from(0, HEADER_RUN, NetworkId::TESTNET);
+        node.shared.take_headers(1, 0, &run, 1_020);
+        let turn = (*node.shared.filling_from()).unwrap();
+        drop(node);
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            turn.moved, 1_020,
+            "a full run from a supplier whose collection had started again did not renew its turn"
+        );
+        assert_eq!(
+            turn.marked, HEADER_RUN,
+            "and the mark is where the collection is"
+        );
     }
 
     /// The turn to fill the headers in passes on one patience after the clock
