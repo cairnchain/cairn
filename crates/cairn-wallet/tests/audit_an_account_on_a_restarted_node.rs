@@ -23,6 +23,8 @@ use cairn_ledger::note::Note;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
+use cairn_primitives::{Amount, Hash32};
+use cairn_wallet::history::Direction;
 use cairn_wallet::Wallet;
 
 const NOW: u64 = 2_000_000_000;
@@ -37,6 +39,10 @@ fn params() -> ConsensusParams {
     ConsensusParams::testnet()
         .with_burial(8)
         .with_coinbase_maturity(0)
+}
+
+fn cairn(text: &str) -> Amount {
+    Amount::from_cairn(text).unwrap()
 }
 
 fn somebody(seed: u8) -> PublicKey {
@@ -128,6 +134,10 @@ fn restarted(name: &str, keep_the_account: bool) -> (Restarted, Wallet) {
     )
 }
 
+fn pooled(wallet: &Wallet, id: &Hash32) -> Option<Transfer> {
+    wallet.node().with_chain(|chain| chain.pooled(id).cloned())
+}
+
 /// A reorganisation on a restarted node takes back only what the chain took.
 ///
 /// Starting again set every movement aside as undone and gave each one back
@@ -181,6 +191,52 @@ fn a_reorganisation_on_a_restarted_node_takes_back_only_what_the_chain_took() {
         wallet.history_covers().missed_below,
         None,
         "and says it could not read blocks it had read"
+    );
+
+    wallet.shutdown();
+    let _ = std::fs::remove_dir_all(&chain.directory);
+}
+
+/// A payment from notes paid below where the log begins is recorded as what
+/// left.
+///
+/// An account starting over on a restarted node begins where the log does and
+/// never reads the blocks that paid the notes below it. Those notes are in the
+/// ledger, so the balance counts them and a payment spends them; the account,
+/// which tells this key's inputs from a stranger's by the notes it knows,
+/// recorded the payment as the change coming back against the few notes it
+/// did know. No test paid out of notes the account had not read the blocks
+/// for, so an account that wrote down the wrong payment passed.
+#[test]
+fn a_payment_from_notes_paid_below_the_log_is_recorded_as_what_left() {
+    let (mut chain, wallet) = restarted("below-the-log", false);
+    let recipient = somebody(9);
+
+    let known = wallet.history().len();
+    assert_eq!(
+        wallet.holdings().spendable,
+        cairn("2000"),
+        "forty rewards, all in the hot set and all counted"
+    );
+
+    let amount = cairn("1950");
+    let fee = wallet.floor_for(recipient, amount);
+    let sent = wallet.send(recipient, amount, fee).unwrap();
+    assert!(
+        sent.notes > known,
+        "the payment gathers more notes than the account read the blocks for"
+    );
+    let transfer = pooled(&wallet, &sent.id).expect("in the pool");
+    let block = chain.forge.mine(&somebody(7), vec![transfer]);
+    wallet.node().submit_block(block).unwrap();
+
+    let newest = wallet.history()[0];
+    let left = amount.checked_add(fee).unwrap();
+    assert_eq!(
+        (newest.direction, newest.amount),
+        (Direction::Sent, left),
+        "this key paid the amount and the fee away in one transfer, and the account wrote \
+         down something else: the change coming back against the notes it happened to know"
     );
 
     wallet.shutdown();
