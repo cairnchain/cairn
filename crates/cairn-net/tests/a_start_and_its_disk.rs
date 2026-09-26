@@ -29,7 +29,10 @@ use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
 use cairn_net::{Node, NodeError, Restored};
-use cairn_store::{BlockLog, DirectoryLock, BLOCK_INDEX, BLOCK_LOG, HANDED_LEDGER, HEADER_LOG};
+use cairn_store::{
+    BlockLog, DirectoryLock, HeaderLog, HeaderTree, BLOCK_INDEX, BLOCK_LOG, HANDED_LEDGER,
+    HEADER_LOG,
+};
 
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
@@ -478,6 +481,42 @@ fn a_record_of_another_network_further_up_the_log_is_cut_and_the_start_goes_on()
     );
 }
 
+/// A header log that reaches past the block log is left as it is: the two
+/// agree where both hold, and a header written ahead of its block is what a
+/// stop between the two writes of an ordinary block leaves.
+///
+/// The mend above cuts where the two logs disagree and nowhere else. Nothing
+/// held the other side of that, so a start that cut every header past the
+/// last block passed, reporting headers replaced that were never on another
+/// branch.
+#[test]
+fn a_header_written_ahead_of_its_block_is_not_cut() {
+    let directory = scratch("ahead");
+    let blocks = chain(&params(), 13);
+    let (node, _) = Node::open(params(), loopback(), &directory).unwrap();
+    for block in &blocks[..12] {
+        node.submit_block(block.clone()).unwrap();
+    }
+    node.shutdown();
+    drop(node);
+    {
+        let mut headers = HeaderLog::open(&directory).unwrap();
+        headers.append(&blocks[12].header).unwrap();
+    }
+
+    let (node, restored) = Node::open(params(), loopback(), &directory).unwrap();
+    node.shutdown();
+    drop(node);
+    let reaches = HeaderLog::open(&directory).unwrap().reaches();
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert_eq!(
+        (restored.headers_replaced, reaches),
+        (0, 13),
+        "a header written ahead of its block was cut as another branch's"
+    );
+}
+
 /// Waits for something a node's upkeep does, for as long as a loaded machine
 /// could need and no longer.
 fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
@@ -523,5 +562,108 @@ fn a_start_keeps_the_blocks_the_budget_kept() {
     assert_eq!(
         after, kept,
         "the start cut the blocks the running node had kept under its budget"
+    );
+}
+
+/// A branch off `main` at `fork`, mined by another key so every header on it
+/// differs from the one it stands beside.
+fn side_branch(main: &[Block], fork: usize, count: usize) -> Vec<Block> {
+    let rules = params();
+    let miner = SecretKey::from_bytes(&[7; 32]);
+    let mut state = LedgerState::new();
+    for block in &main[..fork] {
+        connect_block(&mut state, block, &rules, NOW).unwrap();
+    }
+    let mut clock = 1_000u64 + 600 * u64::try_from(fork).unwrap() + 300;
+    (0..count)
+        .map(|_| {
+            let height = state.next_height().unwrap();
+            clock += 600;
+            let coinbase = CoinbaseTransaction::new(
+                height,
+                vec![Note::new(rules.initial_reward, miner.public_key())],
+            );
+            let block =
+                assemble_block(&state, coinbase, Vec::<Transfer>::new(), &rules, clock, 0).unwrap();
+            let block = mine_block(block, ATTEMPTS).expect("a nonce exists");
+            connect_block(&mut state, &block, &rules, NOW).unwrap();
+            block
+        })
+        .collect()
+}
+
+/// A start after a stop between the header write and the block write of a
+/// reorganisation leaves a header log that agrees with the chain at every
+/// height, and says what it cut.
+///
+/// Nothing asked this, so the start filled the header log in from the blocks
+/// after whatever it held, which was the abandoned branch from the fork: a
+/// log of the old branch, then the new one, then the old one again. Nothing
+/// afterwards visited the seam, the forest stopped at it for good, the node
+/// stopped showing newcomers the chain and stopped keeping its budget, and at
+/// every block it reported a header the store would not vouch for, in the
+/// words for a disk that changed a byte.
+#[test]
+fn a_stop_in_the_middle_of_a_reorganisation_leaves_no_seam_in_the_headers() {
+    const FORK: usize = 5;
+    const SIDE: usize = 3;
+    const HELD: usize = 12;
+    let main = chain(&params(), HELD + 1);
+    let side = side_branch(&main, FORK, SIDE);
+    assert_eq!(side[0].header.previous, main[FORK - 1].id());
+
+    let directory = scratch("seam");
+    let (node, _) = Node::open(params(), loopback(), &directory).unwrap();
+    for block in &main[..HELD] {
+        node.submit_block(block.clone()).unwrap();
+    }
+    node.shutdown();
+    drop(node);
+
+    // What a stop leaves after `write_headers` and `grow_forest` have run for
+    // a reorganisation to the side branch and before `write_blocks` has: the
+    // header log cut at the fork and holding the side branch, the forest cut
+    // at the fork, the block log untouched.
+    {
+        let mut headers = HeaderLog::open(&directory).unwrap();
+        headers.keep_below(u64::try_from(FORK).unwrap()).unwrap();
+        for block in &side {
+            headers.append(&block.header).unwrap();
+        }
+        let mut forest = HeaderTree::open(&directory).unwrap();
+        forest.keep_first(u64::try_from(FORK).unwrap()).unwrap();
+    }
+
+    let (node, restored) = Node::open(params(), loopback(), &directory).unwrap();
+    node.submit_block(main[HELD].clone()).unwrap();
+    let unwritten = node.unwritten().is_some();
+    node.shutdown();
+    drop(node);
+
+    let headers = HeaderLog::open(&directory).unwrap();
+    let disagree = (0..=HELD)
+        .filter(|height| {
+            headers
+                .read_at(u64::try_from(*height).unwrap())
+                .ok()
+                .flatten()
+                != Some(main[*height].header)
+        })
+        .count();
+    drop(headers);
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert_eq!(
+        disagree, 0,
+        "after the start and one block, the header log disagrees with the chain"
+    );
+    assert!(
+        !unwritten,
+        "and the node reports a header write it could not make after one block"
+    );
+    assert_eq!(
+        restored.headers_replaced,
+        u64::try_from(SIDE).unwrap(),
+        "and the start does not say it cut the abandoned branch's headers"
     );
 }

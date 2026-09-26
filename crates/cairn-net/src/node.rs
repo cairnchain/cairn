@@ -831,6 +831,22 @@ pub struct Restored {
     /// the node collects the run from before it arrived again, from a peer
     /// that kept it.
     pub headers_dropped: u64,
+    /// Header records cut because they were of a branch the blocks are not
+    /// on, and written again from the blocks.
+    ///
+    /// What a machine stopped in the middle of a reorganisation leaves. The
+    /// new branch's headers are written before its blocks, so a stop between
+    /// the two leaves the header log on the new branch from the fork and the
+    /// block log on the old one, and the start comes back on the old one. It
+    /// used to fill the header log in from the blocks after whatever it held,
+    /// which stitched a log of the old branch, the new one and the old one
+    /// again. Nothing afterwards took the seam out: the forest stopped at it,
+    /// the node stopped showing newcomers the chain and keeping its budget,
+    /// and it reported a header the store would not vouch for at every block.
+    ///
+    /// Nothing is lost by the cut. What replaces them is the headers of the
+    /// branch this node is on, read off its own blocks.
+    pub headers_replaced: u64,
     /// Block records set aside because the log does not know where it starts.
     ///
     /// The store reads where the log begins off its first record, and asks the
@@ -3528,6 +3544,7 @@ impl Node {
         let headers_set_aside = headers_the_store_will_not_stand_behind(&headers);
         let CaughtUp {
             dropped: headers_dropped,
+            replaced: headers_replaced,
             unread,
         } = catch_up_headers(&mut headers, &log);
         let mut forest = HeaderTree::open(&directory).map_err(in_file(HEADER_TREE))?;
@@ -3585,6 +3602,7 @@ impl Node {
             rejoining,
             headers_set_aside,
             headers_dropped,
+            headers_replaced,
             addresses: book.len(),
         };
 
@@ -6615,18 +6633,67 @@ fn catch_up_headers(headers: &mut HeaderLog, blocks: &BlockLog) -> CaughtUp {
         if let Err(error) = headers.keep_below(0) {
             return CaughtUp {
                 dropped: 0,
+                replaced: 0,
                 unread: Some(stopped_at(Reading::Headers, 0, &error)),
             };
         }
         return CaughtUp {
             dropped,
+            replaced: 0,
             unread: catch_up_from(headers, blocks, blocks.first_height()),
         };
     }
+    // Where the header log leaves the branch the blocks hold. A stop between
+    // the two writes of a reorganisation leaves the headers on the new branch
+    // from the fork and the blocks on the old one, and filling in after that
+    // stitched the old branch on top of the new: a seam nothing afterwards
+    // visits, since every later walk starts at the tip and stops at the first
+    // record that agrees.
+    let (from, replaced) = match off_the_branch(headers, blocks) {
+        Some(fork) => {
+            let replaced = headers.reaches().saturating_sub(fork);
+            if let Err(error) = headers.keep_below(fork) {
+                return CaughtUp {
+                    dropped: 0,
+                    replaced: 0,
+                    unread: Some(stopped_at(Reading::Headers, fork, &error)),
+                };
+            }
+            (fork, replaced)
+        }
+        None => (from, 0),
+    };
     CaughtUp {
         dropped: 0,
+        replaced,
         unread: catch_up_from(headers, blocks, from),
     }
+}
+
+/// The height from which the header log holds a branch the block log does
+/// not, or `None` where the two agree at the top of what both hold.
+///
+/// Walked back from there and no further than a reorganisation can reach,
+/// since that is the only way the two come apart. A record either side will
+/// not read ends the walk with nothing to cut: that is the disk's news, and
+/// the first block this node accepts reads the same record and says so. So
+/// does finding no height within that reach where the two agree, which no
+/// reorganisation leaves and which the blocks could not mend anyway.
+fn off_the_branch(headers: &HeaderLog, blocks: &BlockLog) -> Option<u64> {
+    let top = headers.reaches().min(blocks.reaches());
+    let bottom = headers
+        .first_height()
+        .max(blocks.first_height())
+        .max(top.saturating_sub(u64::try_from(MAX_REORG_DEPTH).unwrap_or(u64::MAX)));
+    for at in (bottom..top).rev() {
+        let held = headers.read_at(at).ok()??;
+        let block = blocks.read_at(at).ok()??;
+        if held.id() == block.header.id() {
+            let fork = at.saturating_add(1);
+            return (fork < top).then_some(fork);
+        }
+    }
+    None
 }
 
 /// What filling the header log in from the blocks did.
@@ -6636,6 +6703,10 @@ struct CaughtUp {
     ///
     /// See [`Restored::headers_dropped`]. Zero on every ordinary start.
     dropped: u64,
+    /// Headers cut because they were of a branch the blocks are not on.
+    ///
+    /// See [`Restored::headers_replaced`]. Zero on every ordinary start.
+    replaced: u64,
     /// A read or a write that the disk refused partway through the fill.
     unread: Option<Unread>,
 }

@@ -217,6 +217,18 @@ pub(crate) fn what_was_restored(restored: &Restored, directory: &str) -> Vec<Str
             said.push(format!("             {line}"));
         }
     }
+    // Not a fault of the disk, and said so: a machine stopped between the two
+    // writes of a reorganisation, and nothing it leaves costs anything.
+    if restored.headers_replaced > 0 {
+        for line in wrapped(&format!(
+            "{} stored headers were of a branch the stored blocks are not on, which is what \
+             a machine stopped in the middle of a reorganisation leaves. They were cut and \
+             written again from the blocks, and nothing was lost.",
+            restored.headers_replaced
+        )) {
+            said.push(format!("             {line}"));
+        }
+    }
     if let Some(record) = restored.unreadable {
         for line in wrapped(&format!(
             "stored block {record} will not read back. That is damage to the file rather \
@@ -475,7 +487,7 @@ mod tests {
     /// Every way a start can be short is said, and a clean start says only
     /// what it restored.
     ///
-    /// The explorer printed the blocks and the addresses and none of the eight
+    /// The explorer printed the blocks and the addresses and none of the nine
     /// other things the open reports, so an archivist whose first record would
     /// not check against the second fetched the whole chain again without a
     /// word, when `cairnd`'s own paragraph for that case says what happens to
@@ -492,6 +504,7 @@ mod tests {
                 unreadable: None,
                 headers_set_aside: 0,
                 headers_dropped: 0,
+                headers_replaced: 0,
                 blocks_set_aside: 0,
                 rejoining: false,
                 addresses: 3,
@@ -502,7 +515,7 @@ mod tests {
         let first = quiet.first().unwrap();
         assert!(first.contains("12 blocks") && first.contains("3 addresses"));
 
-        let cases: [Case; 8] = [
+        let cases: [Case; 9] = [
             ("rejoining", |r| r.rejoining = true, "partway"),
             ("refused", |r| r.refused = 4, "cut from the log"),
             ("discarded_bytes", |r| r.discarded_bytes = 96, "unfinished"),
@@ -521,6 +534,11 @@ mod tests {
                 "headers_dropped",
                 |r| r.headers_dropped = 12,
                 "were deleted",
+            ),
+            (
+                "headers_replaced",
+                |r| r.headers_replaced = 3,
+                "reorganisation",
             ),
             ("unreadable", |r| r.unreadable = Some(7), "block 7"),
         ];

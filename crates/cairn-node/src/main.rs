@@ -653,6 +653,18 @@ fn what_was_restored(restored: &Restored, directory: &str) -> Vec<String> {
             said.push(format!("             {line}"));
         }
     }
+    // Not a fault of the disk, and said so: a machine stopped between the two
+    // writes of a reorganisation, and nothing it leaves costs anything.
+    if restored.headers_replaced > 0 {
+        for line in wrapped(&format!(
+            "{} stored headers were of a branch the stored blocks are not on, which is what \
+             a machine stopped in the middle of a reorganisation leaves. They were cut and \
+             written again from the blocks, and nothing was lost.",
+            restored.headers_replaced
+        )) {
+            said.push(format!("             {line}"));
+        }
+    }
     if let Some(record) = restored.unreadable {
         for line in wrapped(&format!(
             "stored block {record} will not read back. That is damage to the file rather \
@@ -1192,6 +1204,7 @@ mod said_out_loud {
                 unreadable: None,
                 headers_set_aside: 0,
                 headers_dropped: 0,
+                headers_replaced: 0,
                 blocks_set_aside: 0,
                 rejoining: false,
                 addresses: 3,
@@ -1209,7 +1222,7 @@ mod said_out_loud {
             "and says nothing else at all: {said}"
         );
 
-        let cases: [Case; 7] = [
+        let cases: [Case; 8] = [
             ("rejoining", |r| r.rejoining = true, "partway"),
             // "Cut", because that is what happened to them. The line said
             // "set aside", which is this report's word for bytes it kept.
@@ -1230,6 +1243,11 @@ mod said_out_loud {
                 "headers_dropped",
                 |r| r.headers_dropped = 12,
                 "were deleted",
+            ),
+            (
+                "headers_replaced",
+                |r| r.headers_replaced = 3,
+                "reorganisation",
             ),
         ];
         for (field, set, word) in cases {
