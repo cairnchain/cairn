@@ -6,8 +6,13 @@
 //! it in the ledger would be asking every node in the world to carry it.
 //!
 //! So the wallet keeps its own, by watching the blocks it validates go past.
-//! It is not consensus and nothing depends on it: lose the file and the money
-//! is exactly where it was, and reading the chain again rebuilds it.
+//! It is not consensus, and the money does not depend on it: lose the file and
+//! the money is exactly where it was. Finding it does. A note that has fallen
+//! out of the set every node holds is spent with its place in the cold set,
+//! that set carries no owner, and the place is written down here and nowhere
+//! else. Reading the chain again rebuilds this account only as far back as the
+//! blocks the node still holds, so this file is half of a wallet's backup, and
+//! the key file is the other half.
 //!
 //! What it can say is bounded by what the wallet kept. A wallet that dropped
 //! old blocks, or that was handed a ledger rather than reading its way to one,
@@ -16,7 +21,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use cairn_crypto::PublicKey;
 use cairn_ledger::block::Block;
@@ -310,13 +315,15 @@ pub struct History {
 
 /// Why a history file that was there was not used.
 ///
-/// Either way the wallet reads the chain again rather than trusting it,
-/// and either way the money is safe, because the chain is what the money
-/// is on and this file is only a record of what was already read. What is
-/// lost is the list of movements below the height the wallet restarts its
-/// reading at, and that is worth one line on the face rather than nothing
-/// at all: a wallet that quietly forgot what it had shown yesterday is a
-/// wallet nobody can tell apart from one that is wrong.
+/// Whatever the reason, the wallet reads the chain again rather than trusting
+/// it, and the file is moved aside rather than written over. The money is on
+/// the chain either way. What the wallet loses until the file is back is the
+/// list of movements below the height it restarts its reading at, and the
+/// place of every note that fell out of the set every node holds before
+/// then, which is money it cannot find without that place. That is worth a
+/// line on the face rather than nothing at all: a wallet that quietly forgot
+/// what it had shown yesterday is a wallet nobody can tell apart from one
+/// that is wrong.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Discarded {
     /// Written by a release from before the stamp existed.
@@ -337,8 +344,7 @@ pub enum Discarded {
     /// The one case that is not about the bytes, because nothing here got to
     /// read any. A permission a restore left wrong, a disk that will not
     /// answer, a name taken by a directory. Said rather than passed over,
-    /// since the next save replaces the file and whatever it held goes with
-    /// it.
+    /// since whatever it holds is worth having once the cause is mended.
     WouldNotOpen,
 }
 
@@ -708,22 +714,23 @@ impl History {
     /// Reads it back from `path`, or starts empty when there is nothing to
     /// read.
     ///
-    /// A file that cannot be understood is not an error worth stopping for:
-    /// this is one person's notes about their own money, and the chain can
-    /// always be read again.
+    /// A file that cannot be understood is not an error worth stopping for,
+    /// and it is not one to write over either. This only reads: it says why
+    /// a file was not used, and a caller that is going to save moves that
+    /// file out of the way first, with [`History::set_aside`].
     #[must_use]
     pub fn load(path: &Path) -> (Self, Option<Discarded>) {
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
-            // A file that is not there is a wallet that has never run, and
-            // there is nothing to say about it. A file that is there and will
-            // not open is the opposite case, and it took the same exit: empty
-            // account, nothing reported, and the next save writes over it,
-            // because a rename needs the directory and not the file. Every
-            // variant below is worked out from bytes, so they were only ever
-            // reached when there were bytes, and this is the case where
-            // "worth looking into" is most likely to be the right thing to
-            // say.
+            // A file that is not there is a wallet that has never run, or one
+            // restored from its key alone, and there is nothing in it to keep.
+            // A file that is there and will not open is the opposite case,
+            // and it took the same exit: empty account, nothing reported, and
+            // the next save wrote over it, because a rename needs the
+            // directory and not the file. Every variant below is worked out
+            // from bytes, so they were only ever reached when there were
+            // bytes, and this is the case where "worth looking into" is most
+            // likely to be the right thing to say.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return (Self::default(), None)
             }
@@ -802,19 +809,31 @@ impl History {
     /// rename covers a process that stops and not a machine that stops: a
     /// write returns when the bytes are in the page cache, so without this
     /// the file can come back present and short.
+    ///
+    /// The partial file is made new, private from the call that creates it,
+    /// with whatever stood at its name taken away first; `keyfile::create_anew`
+    /// says why. The key file has a paragraph on why it is `0600`, and this
+    /// file needs the same one for a different reason: it holds no key, and it
+    /// holds everything else, every note this key was paid, what each is
+    /// worth, which of them are still held, and where each of the fallen ones
+    /// sits. A save that fails takes its partial file away with it, so what is
+    /// left is the account as it was and nothing beside it.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let partial = path.with_extension("part");
         let mut bytes = self.encode();
         bytes.extend_from_slice(hash(Domain::WalletHistory, &bytes).as_bytes());
-        {
-            let mut file = create_private(&partial)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
+        let moved = write_and_move(&partial, path, &bytes);
+        if moved.is_err() {
+            let _ = std::fs::remove_file(&partial);
         }
-        std::fs::rename(&partial, path)?;
-        // Best effort, where the key file's own directory sync is required: a
-        // rename that does not reach the disk leaves the history before it,
-        // and this account can always be read again from the chain.
+        moved?;
+        // Best effort, where the key file's own directory sync is required. A
+        // rename the machine loses leaves the account as an earlier save left
+        // it, and the next start carries it forward by reading the blocks
+        // since, which are the newest the node holds. A key file whose name is
+        // lost is money nobody can reach; this is a few blocks read twice, and
+        // saying so would be the line that tells a person this wallet cannot
+        // keep its account, when it can.
         if let Some(directory) = path.parent() {
             if let Ok(handle) = std::fs::File::open(directory) {
                 let _ = handle.sync_all();
@@ -822,44 +841,58 @@ impl History {
         }
         Ok(())
     }
+
+    /// Moves a file that was not read back out of the way of the next save,
+    /// to a name nothing writes to, and says where it went.
+    ///
+    /// A save renames a new account over `path`, and for a file that was not
+    /// read that destroyed the only record of where this key's fallen notes
+    /// sit: from a newer version the wallet had just called whole, from a disk
+    /// it had just called worth looking into. So it is never written over.
+    /// The name is `path` with `.unread-` and the first number nothing stands
+    /// at, not even a link, so one set aside before keeps its own. Nothing
+    /// else writes to the directory while its node holds the lock on it, so a
+    /// name found free is still free when the rename lands; a name that cannot
+    /// even be looked at is one the rename cannot reach either, and it fails
+    /// there. The directory is synced after, because a move the machine loses
+    /// puts the file back where the next save goes.
+    pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
+        let name = path.file_name().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a file name")
+        })?;
+        for count in 1..=SET_ASIDE_NAMES {
+            let mut aside = name.to_os_string();
+            aside.push(format!(".unread-{count}"));
+            let aside = path.with_file_name(aside);
+            if std::fs::symlink_metadata(&aside).is_err() {
+                std::fs::rename(path, &aside)?;
+                crate::keyfile::sync_the_directory(&aside)?;
+                return Ok(aside);
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "every name an unread account is set aside under is taken",
+        ))
+    }
 }
 
-/// Creates a file only its owner can read, replacing whatever is there.
+/// Names tried for an account set aside before giving up.
 ///
-/// The key file has a paragraph on why it is `0600`, and this file needs the
-/// same one for a different reason. It holds no key, and it holds everything
-/// else: every note this key was paid, what each is worth, which of them are
-/// still held, and where each of the fallen ones sits. That is one person's
-/// whole account, and on a shared machine it was written at whatever the
-/// umask allowed, which is `0644` on most of them.
-///
-/// The mode is asked for on the way in and set again afterwards, because a
-/// mode given to `open` applies to a file being created and not to one already
-/// there: a partial file left by a write that stopped halfway would otherwise
-/// keep whatever it was made with, and the rename would carry it onto the
-/// account itself.
-#[cfg(unix)]
-fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+/// One is used each time a file does not read back, which is once per
+/// upgrade across the stamp, once per downgrade, or once per disk fault. A
+/// directory holding this many has something wrong with it that another name
+/// would not help.
+const SET_ASIDE_NAMES: u32 = 1000;
 
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    Ok(file)
-}
-
-/// The same where there is no mode to ask for.
-///
-/// Windows decides who may read a file by an access control list inherited
-/// from the directory it is made in, which `keyfile::create_private` sets out
-/// at length. The account is exactly as private as the directory holding it.
-#[cfg(not(unix))]
-fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::File::create(path)
+/// Writes `bytes` to `partial`, made new, and moves it onto `path`.
+fn write_and_move(partial: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    {
+        let mut file = crate::keyfile::create_anew(partial)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(partial, path)
 }
 
 impl Encode for History {

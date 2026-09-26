@@ -517,3 +517,60 @@ fn what_can_never_be_asked_about_is_not_reported_as_worth_waiting_for() {
         "nothing here would be fixed by connecting to one: {words}"
     );
 }
+
+/// **A restore from what `cairn-wallet backup` wrote gets every note back.**
+///
+/// The other half of the test above, made by the command a person is told to
+/// run rather than by a copy this file takes by hand. The key file and the
+/// account both go, as they do with a lost disk, and both come back from the
+/// backup and nowhere else.
+///
+/// There was no such command: the two files live apart, and the wallet named
+/// only the key as something to keep.
+#[test]
+fn a_restore_from_what_the_backup_command_wrote_gets_every_note_back() {
+    let chain = a_chain_that_paid_this_key("backup-command");
+
+    let whole = {
+        let (wallet, _) = Wallet::open(&chain.key_file, params(), &chain.data).unwrap();
+        for block in chain.paid.iter().chain(&chain.moved_on) {
+            wallet.node().submit_block(block.clone()).unwrap();
+        }
+        catch_the_history_up(&wallet);
+        let holdings = wallet.holdings();
+        assert!(holdings.total() > Amount::ZERO, "it was paid");
+        assert!(wallet.node().write_ledger());
+        wallet.shutdown();
+        holdings.total()
+    };
+
+    let into = chain.directory.join("the-backup");
+    let backed_up = std::process::Command::new(env!("CARGO_BIN_EXE_cairn-wallet"))
+        .arg("backup")
+        .arg(&chain.key_file)
+        .arg("--data")
+        .arg(&chain.data)
+        .arg("--into")
+        .arg(&into)
+        .output()
+        .expect("the wallet runs");
+    assert!(backed_up.status.success(), "the backup was refused");
+
+    // The disk is lost: the key file and the account both go.
+    std::fs::remove_file(&chain.key_file).unwrap();
+    std::fs::remove_file(account(&chain.data)).unwrap();
+    std::fs::copy(into.join("key"), &chain.key_file).unwrap();
+    std::fs::copy(into.join("history.dat"), account(&chain.data)).unwrap();
+
+    let (wallet, _) = Wallet::open(&chain.key_file, params(), &chain.data).unwrap();
+    catch_the_history_up(&wallet);
+    let holdings = wallet.holdings();
+    wallet.shutdown();
+    drop(wallet);
+    let _ = std::fs::remove_dir_all(&chain.directory);
+    assert_eq!(
+        holdings.total(),
+        whole,
+        "a restore from the backup did not find every note the key was paid"
+    );
+}

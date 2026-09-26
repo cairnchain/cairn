@@ -37,11 +37,17 @@ cairn-wallet, a Cairn wallet that is itself a node
   cairn-wallet open <key file> [network options]
       open the wallet as a page on this machine, and print its address
 
+  cairn-wallet backup <key file> --into <directory> [--data <directory>]
+      copy the key file and this wallet's account, history.dat, into a
+      directory of their own. A restore needs both: see below
+
 Network options
 
-  --data <directory>   where this wallet keeps its copy of the chain
-                       (default: cairn-wallet-data, and it must not be the
-                       same directory a node is using)
+  --data <directory>   where this wallet keeps its copy of the chain, and
+                       history.dat, its own account of what this key was
+                       paid, which is half of its backup (default:
+                       cairn-wallet-data, and it must not be the same
+                       directory a node is using)
   --seed <address>     a peer to start from; repeat for more. Without one,
                        the addresses written into the program are used
   --network <name>     testnet-6 or devnet (default: testnet-6); it has to
@@ -60,7 +66,19 @@ Options for `open`
   --port <number>      port to serve the page on (default: one the system
                        picks). It is served on 127.0.0.1 and nowhere else,
                        and the address carries a secret without which the
-                       wallet answers nothing.";
+                       wallet answers nothing.
+
+Backing up
+
+  A wallet is two files. The key file spends the money, and it is plain
+  text with no passphrase: anyone who can read it, or a copy of it, holds
+  the money. history.dat, in the --data directory, is this wallet's own
+  account of what the key was paid, and the only record of where money
+  that has fallen out of the set every node holds now sits. A restore from
+  the key alone does not find that money, and nothing on the network can.
+  `backup` copies the two together and never writes over a file. Take it
+  again after the wallet has run, and restore by putting the key file back
+  and history.dat back in the --data directory before the wallet starts.";
 
 fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -87,6 +105,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
         "balance" => show_balance(rest),
         "send" => spend(rest),
         "open" => open_page(rest),
+        "backup" => back_up(rest),
         other => Err(format!("unknown command `{other}`; try `help`")),
     }
 }
@@ -97,7 +116,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
 /// `cairnd` and the explorer. Taken and ignored, `--netwrok devnet` read a
 /// balance on the default network and printed it as the answer, and `--fees`
 /// paid the least the network carries instead of what its sender had priced.
-const KNOWN: [&str; 9] = [
+const KNOWN: [&str; 10] = [
     "data",
     "seed",
     "network",
@@ -107,6 +126,7 @@ const KNOWN: [&str; 9] = [
     "to",
     "amount",
     "port",
+    "into",
 ];
 
 /// Options that are the whole of what they say, with nothing after them.
@@ -240,8 +260,53 @@ fn make_key(arguments: &[String]) -> Result<(), String> {
 
     println!("key written to {}", path.display());
     println!("address        {}", secret.public_key());
+    say(
+        "Anyone holding that file holds the money: it is plain text with no passphrase, \
+         so keep it where only you can read it.",
+    );
+    // It said "That file is the only copy", and a restore from it alone finds
+    // nothing of the money that has fallen out of the set every node holds.
+    say(
+        "It is not all of this wallet. The first time the wallet runs it starts \
+         history.dat in its data directory, its own account of what this key is paid, \
+         and money that has fallen out of the set every node holds can only be found \
+         again with that file. So a backup is both, taken again after the wallet has \
+         run. This copies the two together, given the same --data as the wallet if it \
+         runs with one:",
+    );
     println!();
-    println!("That file is the only copy. Anyone holding it holds the money.");
+    println!(
+        "  cairn-wallet backup {} --into <directory>",
+        path.display()
+    );
+    if let Some(note) = keyfile::what_was_not_checked() {
+        say(note);
+    }
+    Ok(())
+}
+
+/// Copies the key file and the account beside the chain into one directory.
+fn back_up(arguments: &[String]) -> Result<(), String> {
+    let flags = Flags::parse(arguments)?;
+    let into = flags
+        .value("into")
+        .map(PathBuf::from)
+        .ok_or_else(|| "where to? use --into <directory>".to_owned())?;
+    let copies = keyfile::back_up(&flags.key_file()?, &data_directory(&flags), &into)?;
+
+    println!("key       {}", copies.key.display());
+    println!("account   {}", copies.account.display());
+    say(
+        "Those two files are this wallet. To restore it, put the key file back, and put \
+         history.dat back in the wallet's --data directory before the wallet starts. The \
+         account changes as the wallet reads the chain, and a note that falls out of the \
+         set every node holds later is recorded only in a newer copy, so back up again \
+         after the wallet has run.",
+    );
+    say(
+        "The key file is plain text with no passphrase. Anyone who can read either copy of \
+         it holds the money, so keep the backup where only you can reach it.",
+    );
     if let Some(note) = keyfile::what_was_not_checked() {
         say(note);
     }
@@ -339,7 +404,7 @@ fn show_balance(arguments: &[String]) -> Result<(), String> {
     show_waiting(&wallet);
     show_undone(&wallet);
 
-    for line in beside_the_balance(&holdings, recovery.words()) {
+    for line in beside_the_balance(&holdings, recovery.words(), &wallet.history_covers()) {
         println!("{line}");
     }
 
@@ -420,7 +485,11 @@ fn what_happened(movements: &[Movement], covered: &Covered) -> Vec<String> {
 /// so each can be held to when it is said: it all used to be printed in the
 /// middle of reading the wallet, and not one of the four conditions was asked
 /// of anything.
-fn beside_the_balance(holdings: &Holdings, recovery: Option<String>) -> Vec<String> {
+fn beside_the_balance(
+    holdings: &Holdings,
+    recovery: Option<String>,
+    covered: &Covered,
+) -> Vec<String> {
     let mut lines = Vec::new();
     if holdings.ripening > Amount::ZERO {
         lines.push(String::new());
@@ -459,11 +528,34 @@ fn beside_the_balance(holdings: &Holdings, recovery: Option<String>) -> Vec<Stri
     // whose notes have fallen out of reach: this line then told somebody who
     // had just been shown their own balance that there was nothing here and
     // that they should go and check their connection.
+    //
+    // And when this wallet's account begins above the first block, the network
+    // is not the only place to look. A restore from the key alone lands here:
+    // the account starts where the node was handed the chain, and every note
+    // that fell out of the set before that is missing, with nothing to name it
+    // by. Sending that person to check their connection sends them the wrong
+    // way.
     if holdings.empty_handed() {
         lines.push(String::new());
-        lines
-            .push("Nothing here yet. If this key should hold something, check that the".to_owned());
-        lines.push("wallet reached a peer and caught up to the height you expect.".to_owned());
+        match covered.from {
+            Some(from) if from > 0 => lines.extend(wrapped(&format!(
+                "Nothing here yet. This wallet's account of this key begins at block {from}. \
+                 If this key was paid before that, money that has since fallen out of the set \
+                 every node holds may be missing here, and only a history.dat that recorded it \
+                 can find it: close the wallet, put a backup of that file in its data \
+                 directory, and run this again. Otherwise, check that the wallet reached a \
+                 peer and caught up to the height you expect."
+            ))),
+            _ => {
+                lines.push(
+                    "Nothing here yet. If this key should hold something, check that the"
+                        .to_owned(),
+                );
+                lines.push(
+                    "wallet reached a peer and caught up to the height you expect.".to_owned(),
+                );
+            }
+        }
     }
     lines
 }
@@ -935,7 +1027,7 @@ mod tests {
     #[test]
     fn what_is_beside_the_balance_is_said_when_it_is_so() {
         assert!(
-            beside_the_balance(&holding(), None).is_empty(),
+            beside_the_balance(&holding(), None, &covered(0, 90, 90)).is_empty(),
             "money that can move and nothing else needs nothing said beside it"
         );
 
@@ -944,7 +1036,7 @@ mod tests {
             ripe_at: Some(120),
             ..holding()
         };
-        let lines = beside_the_balance(&ripening, None);
+        let lines = beside_the_balance(&ripening, None, &covered(0, 90, 90));
         assert!(
             says(
                 &lines,
@@ -961,7 +1053,7 @@ mod tests {
             ..ripening
         };
         assert!(says(
-            &beside_the_balance(&unsettled, None),
+            &beside_the_balance(&unsettled, None, &covered(0, 90, 90)),
             "They move once their blocks are settled."
         ));
 
@@ -969,7 +1061,11 @@ mod tests {
             stranded: pebbles(300),
             ..holding()
         };
-        let lines = beside_the_balance(&stranded, Some("Words about it.".to_owned()));
+        let lines = beside_the_balance(
+            &stranded,
+            Some("Words about it.".to_owned()),
+            &covered(0, 90, 90),
+        );
         assert!(
             says(
                 &lines,
@@ -978,7 +1074,11 @@ mod tests {
             "{lines:?}"
         );
         assert!(says(&lines, "Words about it."), "{lines:?}");
-        let lines = beside_the_balance(&holding(), Some("Words about it.".to_owned()));
+        let lines = beside_the_balance(
+            &holding(),
+            Some("Words about it.".to_owned()),
+            &covered(0, 90, 90),
+        );
         assert!(
             !says(&lines, "cannot move yet"),
             "nothing stranded is nothing to count: {lines:?}"
@@ -989,13 +1089,44 @@ mod tests {
             ..holding()
         };
         assert!(says(
-            &beside_the_balance(&nothing, None),
+            &beside_the_balance(&nothing, None, &covered(0, 90, 90)),
             "Nothing here yet."
         ));
         assert!(!says(
-            &beside_the_balance(&holding(), None),
+            &beside_the_balance(&holding(), None, &covered(0, 90, 90)),
             "Nothing here yet."
         ));
+    }
+
+    /// An empty wallet whose account begins above the first block names the
+    /// account file, rather than only sending its owner to check the network.
+    ///
+    /// A restore from the key alone lands exactly here: nothing held, an
+    /// account that begins where the node was handed the chain, and every
+    /// note that fell out of the set before that missing. It was told to check
+    /// that the wallet reached a peer. Nothing asked what an empty wallet says
+    /// about where its account begins.
+    #[test]
+    fn an_empty_wallet_whose_account_begins_late_names_the_account_file() {
+        let nothing = Holdings {
+            spendable: Amount::ZERO,
+            ..holding()
+        };
+        let late = beside_the_balance(&nothing, None, &covered(70, 90, 90)).join(" ");
+        assert!(
+            late.contains("block 70"),
+            "the wallet does not say where its account begins"
+        );
+        assert!(
+            late.contains("history.dat"),
+            "the wallet does not name the file that finds money fallen before it"
+        );
+        let whole = beside_the_balance(&nothing, None, &covered(0, 90, 90)).join(" ");
+        assert!(
+            !whole.contains("history.dat"),
+            "a wallet that read every block has missed nothing, and is sent looking \
+             for a file it does not need"
+        );
     }
 
     fn moved(height: u64, direction: Direction) -> Movement {

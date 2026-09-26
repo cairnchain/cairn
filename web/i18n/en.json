@@ -653,7 +653,7 @@
     "wallet": {
       "title": "Make a wallet",
       "body": {
-        "plain": ["The first command makes a secret key on your own machine. The second shows the address people pay you at. The third opens the wallet as a page in your browser, served by your own computer. The secret never leaves it, and it is never sent to this website or to anybody else. If you lose that file the money is gone: nobody, including us, can give it back."],
+        "plain": ["The first command makes a secret key on your own machine. The second shows the address people pay you at. The third opens the wallet as a page in your browser, served by your own computer. The secret never leaves it, and it is never sent to this website or to anybody else. If you lose that file the money is gone: nobody, including us, can give it back. It is not the only file to keep. Once the wallet has run, its folder holds history.dat, the wallet's own record of where your money that has fallen to the cold set sits, and without it that money cannot be found again, by your wallet or by anybody. Back the two up together with cairn-wallet backup, and again from time to time as the wallet runs."],
         "curious": ["The wallet is a node. It does not ask a server what it owns; it joins the network, verifies the chain itself, and reads its balance out of the ledger it validated. The page it opens is served on the loopback and nowhere else, behind a secret carried in the address."],
         "technical": ["Ed25519. The key file is written with restrictive permissions and is never overwritten. The wallet keeps its own inclusion proofs for notes that have fallen to the cold set and refreshes them as the forest grows, so a cold spend needs no third party."]
       }
