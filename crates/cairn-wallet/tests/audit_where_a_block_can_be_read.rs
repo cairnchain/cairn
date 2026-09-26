@@ -105,7 +105,19 @@ impl Chain {
         }
         wallet.follow_to_the_tip();
         if ledger {
+            // The ledger, and the blocks below it dropped by the budget, which
+            // is what drops blocks: a start no longer cuts the log at the
+            // ledger.
             assert!(wallet.node().write_ledger());
+            wallet.node().keep_blocks(1);
+            let started = std::time::Instant::now();
+            while wallet.node().blocks_from().unwrap_or(0) == 0 {
+                assert!(
+                    started.elapsed() < std::time::Duration::from_secs(120),
+                    "the node never dropped the blocks below its ledger"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
         }
         (
             Self {

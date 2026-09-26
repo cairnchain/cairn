@@ -80,3 +80,32 @@ fn a_lock_file_left_by_a_dead_process_does_not_block_a_restart() {
     DirectoryLock::acquire(&directory).expect("a stale lock file must not block a restart");
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// What the lock file says about its holder is read up to a line, however
+/// long the file has become.
+///
+/// The holder is a process identifier, written for a message. Nothing asked
+/// how much of the file was read for it, so a lock file of any length was read
+/// whole into memory before anything was said, on the machine the design says
+/// should be a phone.
+#[cfg(unix)]
+#[test]
+fn a_lock_file_is_read_up_to_a_line_for_its_message() {
+    let directory = scratch("long");
+    let first = DirectoryLock::acquire(&directory).unwrap();
+    std::fs::write(first.path(), vec![b'7'; 1 << 20]).unwrap();
+
+    match DirectoryLock::acquire(&directory) {
+        Err(StoreError::Locked { holder, .. }) => assert!(
+            holder.len() < 256,
+            "a lock file of a megabyte was read whole for a message of {} bytes",
+            holder.len()
+        ),
+        other => panic!(
+            "a held directory was not refused as held: {:?}",
+            other.err()
+        ),
+    }
+    drop(first);
+    let _ = std::fs::remove_dir_all(&directory);
+}

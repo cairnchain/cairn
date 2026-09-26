@@ -81,8 +81,22 @@ Backing up
   and history.dat back in the --data directory before the wallet starts.";
 
 fn main() {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
-    if let Err(message) = run(&arguments) {
+    // Read as it comes rather than through `std::env::args`, which panics on
+    // an argument that is not Unicode: a path with one stray byte in it was
+    // answered with a Rust panic and 101 rather than a message and 2.
+    let arguments: Result<Vec<String>, _> = std::env::args_os()
+        .skip(1)
+        .map(std::ffi::OsString::into_string)
+        .collect();
+    let ran = arguments
+        .map_err(|unreadable| {
+            format!(
+                "`{}` is not text this program can read",
+                unreadable.to_string_lossy()
+            )
+        })
+        .and_then(|arguments| run(&arguments));
+    if let Err(message) = ran {
         eprintln!("cairn-wallet: {message}");
         std::process::exit(2);
     }

@@ -197,13 +197,23 @@ fn a_note_spent_in_a_block_the_account_skipped_is_not_this_key_s_money() {
     );
 
     // The rest of the chain arrives while the account is not reading, and the
-    // node writes its ledger, which is what cuts the log. Opening it again is
-    // the ordinary life of a node, and it is what leaves the block carrying
-    // the payment below where the log begins.
+    // node writes its ledger and drops the blocks its budget does not keep,
+    // which is what cuts the log. Opening it again is the ordinary life of a
+    // node, and it leaves the block carrying the payment below where the log
+    // begins.
     for block in chain.iter().skip(OURS) {
         wallet.node().submit_block(block.clone()).unwrap();
     }
     assert!(wallet.node().write_ledger());
+    wallet.node().keep_blocks(1);
+    let started = std::time::Instant::now();
+    while wallet.node().blocks_from().unwrap_or(0) <= OURS as u64 {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(120),
+            "the node never dropped the blocks below its ledger"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     drop(wallet);
 
     // The same account file, so what follows is what this wallet remembers.

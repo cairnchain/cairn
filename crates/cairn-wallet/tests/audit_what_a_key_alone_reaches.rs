@@ -351,7 +351,9 @@ fn a_restore_from_the_key_alone_finds_nothing_and_says_how_far_back_it_looked() 
         catch_the_history_up(&wallet);
         let holdings = wallet.holdings();
         assert!(holdings.total() > Amount::ZERO, "it was paid");
-        assert!(wallet.node().write_ledger());
+        // Dropped by the budget, which is what drops blocks: a start no
+        // longer cuts the log at the ledger (17-F2).
+        let_the_blocks_below_the_ledger_go(&wallet, u64::try_from(PAID - 1).unwrap());
         wallet.shutdown();
         std::fs::copy(account(&chain.data), &backup).unwrap();
         holdings.total()

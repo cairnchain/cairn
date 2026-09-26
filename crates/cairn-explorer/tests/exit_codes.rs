@@ -75,3 +75,36 @@ fn check_prints_the_settings_and_stops_with_nought() {
         "and a check starts no node: {said}"
     );
 }
+
+/// An argument that is not text is a command line it cannot use, and stops it
+/// with a code of two and the usage text.
+///
+/// Nothing asked this, so the arguments were read with `std::env::args`,
+/// which panics on one that is not Unicode, and a data directory named with a
+/// stray byte was answered with a Rust panic and 101.
+#[cfg(unix)]
+#[test]
+fn an_argument_that_is_not_text_stops_it_with_a_code_of_two() {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cairn-explorer"))
+        .arg("--data")
+        .arg(std::ffi::OsStr::from_bytes(b"explorer-\xff"))
+        .arg("--check")
+        .output()
+        .expect("cairn-explorer runs");
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !said.contains("panicked"),
+        "an argument that is not text was answered with a panic: {said}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "an argument that is not text was not refused with a code of two: {said}"
+    );
+    assert!(
+        said.contains("--check"),
+        "and the usage text does not follow it: {said}"
+    );
+}

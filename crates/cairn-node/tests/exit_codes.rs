@@ -23,11 +23,29 @@ fn scratch(name: &str) -> PathBuf {
     directory
 }
 
+/// Runs `cairnd` to its end, and fails rather than waiting for ever if it
+/// does not stop.
+///
+/// Every command line here is one that stops on its own. One that was read as
+/// nothing at all starts a node on the default directory that runs until it
+/// is killed, and a test that waited for it hung rather than saying so.
 fn cairnd(arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_cairnd"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cairnd"))
         .args(arguments)
-        .output()
-        .expect("cairnd runs")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("cairnd runs");
+    let started = std::time::Instant::now();
+    while child.try_wait().expect("cairnd can be waited on").is_none() {
+        if started.elapsed() > std::time::Duration::from_secs(60) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("cairnd was still running a minute after a command line that stops it");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    child.wait_with_output().expect("cairnd ends")
 }
 
 /// A node that ran for as long as it was asked leaves by the ordinary door.
@@ -288,11 +306,13 @@ fn a_node_that_could_not_start_says_so_without_the_usage_text() {
     // held yet and exited nought, and the test failed for the machine's
     // reasons rather than the node's.
     // Kept alive past the read, and not let go of at the end of a block. A
-    // dropped reader closes the pipe, the node writing into it meets a broken
-    // pipe on its next line and stops, and the directory it was holding is
-    // free by the time the second node asks for it. That is what this met on
-    // one platform and not the other two: an empty refusal, because there was
-    // nothing left to refuse it.
+    // dropped reader closes the pipe, and a node writing into it used to meet
+    // a broken pipe on its next line and stop, leaving the directory free by
+    // the time the second node asked for it. That is what this met on one
+    // platform and not the other two: an empty refusal, because there was
+    // nothing left to refuse it. The node now lets a line nobody reads go and
+    // carries on (`a_reader_that_went_away.rs`), and the reader is still kept
+    // so that this test asks about the lock and nothing else.
     let _held_open = {
         use std::io::BufRead as _;
         let stdout = holding

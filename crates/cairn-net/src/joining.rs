@@ -31,6 +31,13 @@ use crate::message::{Joining, MAX_JOIN_PARTS};
 /// on the wire for one.
 const MAX_JOIN_BYTES: usize = 48 * 1024 * 1024;
 
+/// The same ceiling, for the one reader outside a join: a ledger a node wrote
+/// or took is never longer than a join may be, so a `ledger.dat` longer than
+/// this is refused by its length before it is read.
+pub(crate) const fn most_join_bytes() -> usize {
+    MAX_JOIN_BYTES
+}
+
 /// Pieces of one answer, as they arrive.
 #[derive(Clone, Debug)]
 pub(crate) struct Collecting {

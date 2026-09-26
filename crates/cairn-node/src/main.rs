@@ -18,6 +18,32 @@ use cairn_net::{Filling, Joined, Node, NodeError, Restored, Unanswered};
 
 const TICK: Duration = Duration::from_millis(100);
 
+/// Writes a line to standard output, and lets it go if nobody is reading.
+///
+/// Every line this program prints goes through here. `println!` panics when
+/// the write fails, and the write fails when whatever was reading went away: a
+/// `tee` that was killed, a pager that was quit, a log shipper that restarted.
+/// Rust ignores `SIGPIPE`, so that arrives as an error from the write, and the
+/// release profile's `panic = "abort"` made the panic the whole node gone,
+/// with no line anywhere saying why, because the line that would have said it
+/// was the one that could not be written. The chain is on the disk and not in
+/// these lines, so a line nobody can read is dropped and the node carries on.
+macro_rules! say {
+    ($($words:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout().lock(), $($words)*);
+    }};
+}
+
+/// The same for standard error, where a closed descriptor turned the exit
+/// codes a supervisor reads, 1 and 2, into the 101 of a panic.
+macro_rules! complain {
+    ($($words:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr().lock(), $($words)*);
+    }};
+}
+
 /// Why the node is no longer running, which is what the exit code is made of.
 ///
 /// A node that stops because its disk filled, because the chain moved to rules
@@ -70,33 +96,55 @@ pub(crate) enum Stopping {
 }
 
 fn main() {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
-    match run(&arguments) {
+    match read_arguments().and_then(|arguments| run(&arguments)) {
         Ok(Ending::AsAsked) => {}
         // No usage text: nothing on the command line was wrong, and the
         // paragraph the node printed before stopping is the thing to read.
         Ok(Ending::Fault) => std::process::exit(1),
         Err(Stopping::CouldNotStart(message)) => {
-            eprintln!("cairnd: {message}");
+            complain!("cairnd: {message}");
             std::process::exit(1);
         }
         Err(Stopping::Misread(message)) => {
-            eprintln!("cairnd: {message}");
-            eprintln!();
-            eprintln!("{}", options::HELP);
+            complain!("cairnd: {message}");
+            complain!();
+            complain!("{}", options::HELP);
             std::process::exit(2);
         }
     }
 }
 
+/// The command line, as text, or the argument that is not.
+///
+/// `std::env::args` panics on an argument that is not Unicode, so a data
+/// directory named with one stray byte was answered with a Rust panic and 101
+/// rather than the usage text and the code a command line this program cannot
+/// read is answered with.
+fn read_arguments() -> Result<Vec<String>, Stopping> {
+    std::env::args_os()
+        .skip(1)
+        .map(|argument| {
+            argument.into_string().map_err(|unreadable| {
+                Stopping::Misread(format!(
+                    "`{}` is not text this program can read",
+                    unreadable.to_string_lossy()
+                ))
+            })
+        })
+        .collect()
+}
+
 fn run(arguments: &[String]) -> Result<Ending, Stopping> {
     let Some(options) = options::resolve_options(arguments)? else {
-        println!("{}", options::HELP);
+        say!("{}", options::HELP);
         return Ok(Ending::AsAsked);
     };
 
-    println!("cairnd {}", env!("CARGO_PKG_VERSION"));
-    print!("{}", options::describe(&options));
+    say!("cairnd {}", env!("CARGO_PKG_VERSION"));
+    {
+        use std::io::Write as _;
+        let _ = write!(std::io::stdout().lock(), "{}", options::describe(&options));
+    }
 
     // Everything above is a question about the settings, and everything below
     // starts a node. A script updating a machine needs the first without the
@@ -121,9 +169,9 @@ fn run(arguments: &[String]) -> Result<Ending, Stopping> {
     node.keep_blocks(options.keep);
     let node = Arc::new(node);
 
-    println!("listening    {}", node.address());
+    say!("listening    {}", node.address());
     for line in what_was_restored(&restored, &options.data.display().to_string()) {
-        println!("{line}");
+        say!("{line}");
     }
     // Before the node has answered anybody, because filling the headers in
     // from the blocks is the first thing that reads them back, and a refusal
@@ -133,7 +181,7 @@ fn run(arguments: &[String]) -> Result<Ending, Stopping> {
             &unread,
             &options.data.display().to_string(),
         )) {
-            println!("             {line}");
+            say!("             {line}");
         }
     }
     // A node that was handed a ledger owes the network its own check of the
@@ -142,8 +190,8 @@ fn run(arguments: &[String]) -> Result<Ending, Stopping> {
     // only in the status line, because this is the moment an operator finds
     // out what they are starting.
     if let Some(probation) = node.probation() {
-        println!("probation    {probation}");
-        println!(
+        say!("probation    {probation}");
+        say!(
             "             it does not mine, does not take transfers, and does not \
              answer as a node on a chain until it has"
         );
@@ -155,10 +203,10 @@ fn run(arguments: &[String]) -> Result<Ending, Stopping> {
     // takes them to notice the height has stopped.
     if let Some(said) = rules_running_out(&options.params, node.height()) {
         for line in wrapped(&said) {
-            println!("             {line}");
+            say!("             {line}");
         }
     }
-    println!();
+    say!();
 
     // The names, not just what they resolved to: a node that could not look
     // anything up at this moment asks again while it runs, rather than sitting
@@ -174,11 +222,11 @@ fn run(arguments: &[String]) -> Result<Ending, Stopping> {
         // for both: a seed turned away for want of room was printed as
         // `reached`, and the operator counted it.
         match node.connect(*seed) {
-            Ok(()) => println!("reached      {seed}"),
+            Ok(()) => say!("reached      {seed}"),
             Err(NodeError::NotKept { because, .. }) => {
-                println!("not kept     {seed} ({because}), will keep trying");
+                say!("not kept     {seed} ({because}), will keep trying");
             }
-            Err(error) => println!("unreachable  {seed} ({error}), will keep trying"),
+            Err(error) => say!("unreachable  {seed} ({error}), will keep trying"),
         }
     }
 
@@ -193,8 +241,8 @@ fn run(arguments: &[String]) -> Result<Ending, Stopping> {
         let _ = miner.join();
     }
     match ending {
-        Ending::AsAsked => println!("stopped"),
-        Ending::Fault => println!("stopped on the fault above"),
+        Ending::AsAsked => say!("stopped"),
+        Ending::Fault => say!("stopped on the fault above"),
     }
     Ok(ending)
 }
@@ -234,7 +282,7 @@ fn start_mining(
             mining::run(&node, &params, key, alone, &running, |report| match report {
                 mining::Report::Found(block, landed) => {
                     let (verdict, aside) = what_the_chain_did(landed);
-                    println!(
+                    say!(
                         "[{:>8}] {:<6} height {:<6} difficulty {:<10} {}{}",
                         stamp(started),
                         verdict,
@@ -244,14 +292,14 @@ fn start_mining(
                         aside,
                     );
                 }
-                mining::Report::Says(saying) => println!("[{:>8}] {saying}", stamp(started)),
+                mining::Report::Says(saying) => say!("[{:>8}] {saying}", stamp(started)),
             });
             },
         );
         match asked {
             Ok(mining) => Some(mining),
             Err(error) => {
-                println!(
+                say!(
                     "not mining  this machine would not start the thread for it ({error}).                      The node is running and following the chain"
                 );
                 None
@@ -282,7 +330,7 @@ fn watch(node: &Node, options: &options::Options, running: &AtomicBool) -> Endin
             node.unwritten(),
             &directory,
         ) {
-            println!("[{:>8}] stopping: {fault}", stamp(started));
+            say!("[{:>8}] stopping: {fault}", stamp(started));
             return Ending::Fault;
         }
         if let Some(limit) = limit {
@@ -301,7 +349,7 @@ fn watch(node: &Node, options: &options::Options, running: &AtomicBool) -> Endin
             let stored = node
                 .written_through()
                 .map_or_else(|| "-".to_owned(), |height| height.to_string());
-            println!(
+            say!(
                 "{}",
                 status_line(
                     &stamp(started),
@@ -335,7 +383,7 @@ fn watch(node: &Node, options: &options::Options, running: &AtomicBool) -> Endin
 fn say_what_the_numbers_do_not(node: &Node, directory: &str) {
     let say = |text: &str| {
         for line in wrapped(text) {
-            println!("           {line}");
+            say!("           {line}");
         }
     };
     // A node whose disk has stopped taking writes shows nothing else: it
@@ -391,13 +439,13 @@ fn say_what_the_numbers_do_not(node: &Node, directory: &str) {
     // has arrived, so without this it reads as stuck.
     match node.joining() {
         Joined::No | Joined::Done => {}
-        joining => println!("           joining  {joining}"),
+        joining => say!("           joining  {joining}"),
     }
     // And once it has arrived, the height it shows is the anchor's rather than
     // this node's, which without this reads as a healthy node. It is not one
     // until the line below stops appearing.
     if let Some(probation) = node.probation() {
-        println!(
+        say!(
             "           {}",
             probation_line(&probation, node.out_of_reach())
         );
@@ -535,7 +583,7 @@ fn what_was_restored(restored: &Restored, directory: &str) -> Vec<String> {
     }
     if restored.refused > 0 {
         said.push(format!(
-            "             {} stored blocks were set aside; they will be asked for again",
+            "             {} stored blocks were cut from the log; they will be asked for again",
             restored.refused
         ));
     }
@@ -563,11 +611,12 @@ fn what_was_restored(restored: &Restored, directory: &str) -> Vec<String> {
         for line in wrapped(&format!(
             "{} stored blocks were set aside because the first of them could not be \
              checked against the one after it, so this node does not know what height \
-             its own log begins at. Nothing was deleted and the bytes are still on the \
-             disk to look at. This node fetches the chain again from the network; an \
-             archivist should look at the first record before letting it, because that \
-             is the copy nobody else has. If this happens again after a clean restart, \
-             the disk under {directory} is the thing to check.",
+             its own log begins at. Nothing was cut, but the first record is written \
+             over by the first block this node writes, which on a network that pins its \
+             first block is this start; the records after it stay on the disk until the \
+             log grows over them. This node fetches the chain again from the network. If \
+             this happens again after a clean restart, the disk under {directory} is the \
+             thing to check.",
             restored.blocks_set_aside
         )) {
             said.push(format!("             {line}"));
@@ -576,11 +625,12 @@ fn what_was_restored(restored: &Restored, directory: &str) -> Vec<String> {
     if restored.headers_set_aside > 0 {
         for line in wrapped(&format!(
             "{} stored headers were set aside because the first of them could not be \
-             checked against the one after it. Nothing was deleted and the bytes are \
-             still on the disk to look at. This node writes the headers again from the \
-             blocks it kept and asks the network for the rest, and until it has them it \
-             cannot show the chain to anybody arriving new. If this happens again after \
-             a clean restart, the disk under {directory} is the thing to check.",
+             checked against the one after it. The header log is written again from the \
+             blocks this node kept, and the first of those writes cuts the file, so it \
+             begins at the oldest block this node holds and the headers below that are \
+             gone until a peer hands them back. Until it has them it cannot show the \
+             chain to anybody arriving new. If this happens again after a clean restart, \
+             the disk under {directory} is the thing to check.",
             restored.headers_set_aside
         )) {
             said.push(format!("             {line}"));
@@ -603,13 +653,25 @@ fn what_was_restored(restored: &Restored, directory: &str) -> Vec<String> {
             said.push(format!("             {line}"));
         }
     }
+    // Not a fault of the disk, and said so: a machine stopped between the two
+    // writes of a reorganisation, and nothing it leaves costs anything.
+    if restored.headers_replaced > 0 {
+        for line in wrapped(&format!(
+            "{} stored headers were of a branch the stored blocks are not on, which is what \
+             a machine stopped in the middle of a reorganisation leaves. They were cut and \
+             written again from the blocks, and nothing was lost.",
+            restored.headers_replaced
+        )) {
+            said.push(format!("             {line}"));
+        }
+    }
     if let Some(record) = restored.unreadable {
         for line in wrapped(&format!(
             "stored block {record} will not read back. That is damage to the file rather \
-             than an unfinished write, so nothing was cut for it and the bytes are still on \
-             the disk to look at. This node starts from the blocks before it and asks the \
-             network for the rest. If it happens again after a clean restart, the disk under \
-             {directory} is the thing to check."
+             than an unfinished write, so nothing was cut for it: the bytes stay on the disk \
+             until the first block this node writes past them. This node starts from the \
+             blocks before it and asks the network for the rest. If it happens again after \
+             a clean restart, the disk under {directory} is the thing to check."
         )) {
             said.push(format!("             {line}"));
         }
@@ -996,7 +1058,7 @@ fn what_the_chain_did(landed: &Accepted) -> (&'static str, &'static str) {
 }
 /// The line a running node writes, so that what it says can be asked of it.
 ///
-/// A function rather than a `println!` because `deploy/DOWNLOAD.txt` shows one
+/// A function rather than a `say!` because `deploy/DOWNLOAD.txt` shows one
 /// of these to somebody who has just unpacked the archive, and showed a line
 /// this program had stopped writing: the `stored` column was added and the
 /// text was not. Now `the_download_shows_the_line_this_node_writes` builds one
@@ -1142,6 +1204,7 @@ mod said_out_loud {
                 unreadable: None,
                 headers_set_aside: 0,
                 headers_dropped: 0,
+                headers_replaced: 0,
                 blocks_set_aside: 0,
                 rejoining: false,
                 addresses: 3,
@@ -1159,12 +1222,18 @@ mod said_out_loud {
             "and says nothing else at all: {said}"
         );
 
-        let cases: [Case; 7] = [
+        let cases: [Case; 8] = [
             ("rejoining", |r| r.rejoining = true, "partway"),
-            ("refused", |r| r.refused = 4, "asked for again"),
+            // "Cut", because that is what happened to them. The line said
+            // "set aside", which is this report's word for bytes it kept.
+            ("refused", |r| r.refused = 4, "cut from the log"),
             ("discarded_bytes", |r| r.discarded_bytes = 96, "unfinished"),
             ("left_in_place", |r| r.left_in_place = 96, "unread"),
-            ("blocks_set_aside", |r| r.blocks_set_aside = 12, "archivist"),
+            (
+                "blocks_set_aside",
+                |r| r.blocks_set_aside = 12,
+                "written over",
+            ),
             (
                 "headers_set_aside",
                 |r| r.headers_set_aside = 12,
@@ -1174,6 +1243,11 @@ mod said_out_loud {
                 "headers_dropped",
                 |r| r.headers_dropped = 12,
                 "were deleted",
+            ),
+            (
+                "headers_replaced",
+                |r| r.headers_replaced = 3,
+                "reorganisation",
             ),
         ];
         for (field, set, word) in cases {
@@ -1201,6 +1275,56 @@ mod said_out_loud {
             said.contains("block 7") && said.contains("/var/lib/cairn"),
             "a record that will not read names itself and the disk to look at: \
              {said}"
+        );
+    }
+
+    /// Neither sentence about records set aside sends an operator to look at
+    /// bytes the same node writes over.
+    ///
+    /// Nothing asked this, so both said "Nothing was deleted and the bytes are
+    /// still on the disk to look at". For headers, the same start wrote the log
+    /// again from the blocks, and the first of those writes cut the file, so a
+    /// node that had trimmed its blocks had deleted every header below them.
+    /// For blocks, the first block the node writes goes over the first record,
+    /// and on a network that pins its first block that is the start itself.
+    /// An operator sent to look found a healthy file and concluded the disk
+    /// was fine.
+    #[test]
+    fn records_set_aside_are_not_said_to_be_on_the_disk_to_look_at() {
+        let headers = Restored {
+            headers_set_aside: 12,
+            ..Restored::default()
+        };
+        // One run of words, since the lines are wrapped where they fall.
+        let words = |restored: &Restored| {
+            what_was_restored(restored, "/var/lib/cairn")
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let said = words(&headers);
+        assert!(
+            !said.contains("still on the disk"),
+            "headers the start writes over are said to be on the disk: {said}"
+        );
+        assert!(
+            said.contains("gone until a peer"),
+            "and it is not said that the headers below the oldest block are gone: {said}"
+        );
+
+        let blocks = Restored {
+            blocks_set_aside: 12,
+            ..Restored::default()
+        };
+        let said = words(&blocks);
+        assert!(
+            !said.contains("to look at"),
+            "a first record the node writes over is said to be there to look at: {said}"
+        );
+        assert!(
+            said.contains("written over"),
+            "and it is not said that the first record is written over: {said}"
         );
     }
 

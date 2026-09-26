@@ -390,21 +390,17 @@ fn a_node_that_dropped_its_bodies_still_keeps_the_headers_and_the_ledger() {
     let _ = std::fs::remove_dir_all(&trimmed.directory);
 }
 
-/// **A node that has written a ledger drops the bodies below it on its next
-/// start, whatever its budget says.**
+/// **A node that has written a ledger keeps the bodies below it across a
+/// start, as its budget says.**
 ///
-/// The budget is a preference and this is not. Once a ledger file is there,
-/// the blocks it already stands for are dropped when the node opens, so
-/// `--keep all` does not put them back: the only node that holds every body is
-/// one that has never written a ledger down, which is one whose blocks have
-/// never outgrown its budget.
-///
-/// Said here because it is the reason the loss is not something an operator
-/// opts into. A node started with a budget it later exceeds writes a ledger
-/// once, and from that start on it is a node that cannot serve the beginning
-/// of the chain, whatever the budget is set to afterwards.
+/// It did not. Once a ledger file was there, the blocks it already stood for
+/// were dropped when the node opened, so `--keep all` did not put them back:
+/// the only node that held every body was one that had never written a ledger
+/// down, and a node started with a budget it later exceeded could not serve
+/// the beginning of the chain from that start on, whatever the budget was set
+/// to afterwards. The budget is what decides now, at a start as while running.
 #[test]
-fn a_written_ledger_takes_the_bodies_below_it_whatever_the_budget() {
+fn a_written_ledger_leaves_the_bodies_below_it_to_the_budget() {
     let directory = scratch("ledger-takes-them");
     let mut forge = Forge::new();
     let blocks = forge.mine_many(BLOCKS);
@@ -433,7 +429,7 @@ fn a_written_ledger_takes_the_bodies_below_it_whatever_the_budget() {
         "it came back on the same chain"
     );
     assert!(
-        node.archived_at(0).is_none(),
+        node.archived_at(0).is_some(),
         "and without the first block, which the ledger it started from stands \
          for. The budget was never asked"
     );

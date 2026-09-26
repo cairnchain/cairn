@@ -147,7 +147,7 @@ pub(crate) fn what_was_restored(restored: &Restored, directory: &str) -> Vec<Str
     }
     if restored.refused > 0 {
         said.push(format!(
-            "             {} stored blocks were set aside; they will be asked for again",
+            "             {} stored blocks were cut from the log; they will be asked for again",
             restored.refused
         ));
     }
@@ -175,11 +175,12 @@ pub(crate) fn what_was_restored(restored: &Restored, directory: &str) -> Vec<Str
         for line in wrapped(&format!(
             "{} stored blocks were set aside because the first of them could not be \
              checked against the one after it, so this node does not know what height \
-             its own log begins at. Nothing was deleted and the bytes are still on the \
-             disk to look at. This node fetches the chain again from the network; an \
-             archivist should look at the first record before letting it, because that \
-             is the copy nobody else has. If this happens again after a clean restart, \
-             the disk under {directory} is the thing to check.",
+             its own log begins at. Nothing was cut, but the first record is written \
+             over by the first block this node writes, which on a network that pins its \
+             first block is this start; the records after it stay on the disk until the \
+             log grows over them. This node fetches the chain again from the network. If \
+             this happens again after a clean restart, the disk under {directory} is the \
+             thing to check.",
             restored.blocks_set_aside
         )) {
             said.push(format!("             {line}"));
@@ -188,11 +189,12 @@ pub(crate) fn what_was_restored(restored: &Restored, directory: &str) -> Vec<Str
     if restored.headers_set_aside > 0 {
         for line in wrapped(&format!(
             "{} stored headers were set aside because the first of them could not be \
-             checked against the one after it. Nothing was deleted and the bytes are \
-             still on the disk to look at. This node writes the headers again from the \
-             blocks it kept and asks the network for the rest, and until it has them it \
-             cannot show the chain to anybody arriving new. If this happens again after \
-             a clean restart, the disk under {directory} is the thing to check.",
+             checked against the one after it. The header log is written again from the \
+             blocks this node kept, and the first of those writes cuts the file, so it \
+             begins at the oldest block this node holds and the headers below that are \
+             gone until a peer hands them back. Until it has them it cannot show the \
+             chain to anybody arriving new. If this happens again after a clean restart, \
+             the disk under {directory} is the thing to check.",
             restored.headers_set_aside
         )) {
             said.push(format!("             {line}"));
@@ -215,13 +217,25 @@ pub(crate) fn what_was_restored(restored: &Restored, directory: &str) -> Vec<Str
             said.push(format!("             {line}"));
         }
     }
+    // Not a fault of the disk, and said so: a machine stopped between the two
+    // writes of a reorganisation, and nothing it leaves costs anything.
+    if restored.headers_replaced > 0 {
+        for line in wrapped(&format!(
+            "{} stored headers were of a branch the stored blocks are not on, which is what \
+             a machine stopped in the middle of a reorganisation leaves. They were cut and \
+             written again from the blocks, and nothing was lost.",
+            restored.headers_replaced
+        )) {
+            said.push(format!("             {line}"));
+        }
+    }
     if let Some(record) = restored.unreadable {
         for line in wrapped(&format!(
             "stored block {record} will not read back. That is damage to the file rather \
-             than an unfinished write, so nothing was cut for it and the bytes are still on \
-             the disk to look at. This node starts from the blocks before it and asks the \
-             network for the rest. If it happens again after a clean restart, the disk under \
-             {directory} is the thing to check."
+             than an unfinished write, so nothing was cut for it: the bytes stay on the disk \
+             until the first block this node writes past them. This node starts from the \
+             blocks before it and asks the network for the rest. If it happens again after \
+             a clean restart, the disk under {directory} is the thing to check."
         )) {
             said.push(format!("             {line}"));
         }
@@ -473,11 +487,11 @@ mod tests {
     /// Every way a start can be short is said, and a clean start says only
     /// what it restored.
     ///
-    /// The explorer printed the blocks and the addresses and none of the eight
+    /// The explorer printed the blocks and the addresses and none of the nine
     /// other things the open reports, so an archivist whose first record would
     /// not check against the second fetched the whole chain again without a
-    /// word, when `cairnd`'s own paragraph for that case tells an archivist to
-    /// look at that record first.
+    /// word, when `cairnd`'s own paragraph for that case says what happens to
+    /// that record.
     #[test]
     fn every_way_a_start_is_short_is_said_and_a_clean_one_is_not() {
         type Case = (&'static str, fn(&mut Restored), &'static str);
@@ -490,6 +504,7 @@ mod tests {
                 unreadable: None,
                 headers_set_aside: 0,
                 headers_dropped: 0,
+                headers_replaced: 0,
                 blocks_set_aside: 0,
                 rejoining: false,
                 addresses: 3,
@@ -500,12 +515,16 @@ mod tests {
         let first = quiet.first().unwrap();
         assert!(first.contains("12 blocks") && first.contains("3 addresses"));
 
-        let cases: [Case; 8] = [
+        let cases: [Case; 9] = [
             ("rejoining", |r| r.rejoining = true, "partway"),
-            ("refused", |r| r.refused = 4, "asked for again"),
+            ("refused", |r| r.refused = 4, "cut from the log"),
             ("discarded_bytes", |r| r.discarded_bytes = 96, "unfinished"),
             ("left_in_place", |r| r.left_in_place = 96, "unread"),
-            ("blocks_set_aside", |r| r.blocks_set_aside = 12, "archivist"),
+            (
+                "blocks_set_aside",
+                |r| r.blocks_set_aside = 12,
+                "written over",
+            ),
             (
                 "headers_set_aside",
                 |r| r.headers_set_aside = 12,
@@ -515,6 +534,11 @@ mod tests {
                 "headers_dropped",
                 |r| r.headers_dropped = 12,
                 "were deleted",
+            ),
+            (
+                "headers_replaced",
+                |r| r.headers_replaced = 3,
+                "reorganisation",
             ),
             ("unreadable", |r| r.unreadable = Some(7), "block 7"),
         ];

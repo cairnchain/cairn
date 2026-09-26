@@ -107,8 +107,13 @@ cairnd, a Cairn node
                          cannot work it out for itself. Says so on the
                          handshake, so wallets can find this node. Costs a set
                          that grows with every note ever spent; without it a
-                         node keeps sixty four hashes. `--archive no` keeps
-                         the hashes only, whatever cairn.conf says
+                         node keeps sixty four hashes. Keeps every block
+                         whatever --keep says, and reads them all again at
+                         every start, which is how the set is built; a
+                         directory whose blocks do not begin at the first
+                         cannot be an archivist's, and the node says so and
+                         does not start. `--archive no` keeps the hashes
+                         only, whatever cairn.conf says
   --keep <size|all>      how much of the chain to keep on disk, in bytes, or
                          `all` to keep every block ever accepted (default:
                          1GB). A node does not need old blocks: it keeps the
@@ -467,6 +472,12 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         None => KEEP_BLOCK_BYTES,
         Some(text) => parse_size(&text).map_err(misread)?,
     };
+    // An archivist keeps every block, whatever it is told. The archive is
+    // built by reading every block from the first at every start, so a budget
+    // that dropped any of them turned an archivist into an ordinary node at
+    // its next start, with nothing said. A node refuses that start now, and
+    // this is what keeps an archivist from reaching it.
+    let keep = if archive { u64::MAX } else { keep };
 
     Ok(Some(Options {
         data,
@@ -573,7 +584,8 @@ pub(crate) fn describe(options: &Options) -> String {
         "keeping      {}",
         if options.archive {
             "the whole cold set (archivist: this node answers wallets that \
-             have lost their own path to a put-away note)"
+             have lost their own path to a put-away note, and keeps every block, \
+             whatever --keep says, to build the set from at every start)"
         } else {
             "sixty four hashes"
         }
@@ -1081,10 +1093,22 @@ mod tests {
         let options = resolve_options(&args(&["--keep", "all"])).unwrap().unwrap();
         assert_eq!(options.keep, u64::MAX, "and can be told to keep the lot");
 
-        let options = resolve_options(&args(&["--archive"])).unwrap().unwrap();
-        assert_eq!(
-            options.keep, KEEP_BLOCK_BYTES,
-            "archiving is about headers and fallen notes, not about blocks"
-        );
+        // An archivist keeps every block, whatever it is told. Its archive is
+        // built by reading every block from the first at every start, so one
+        // that dropped any stopped being an archivist at its next start and
+        // said nothing: this used to answer a gigabyte, "archiving is about
+        // headers and fallen notes, not about blocks".
+        for asked in [&["--archive"][..], &["--archive", "--keep", "1GB"][..]] {
+            let options = resolve_options(&args(asked)).unwrap().unwrap();
+            assert_eq!(
+                options.keep,
+                u64::MAX,
+                "an archivist was given a budget that drops blocks"
+            );
+            assert!(
+                describe(&options).contains("every one ever accepted"),
+                "and the settings do not say it keeps every block"
+            );
+        }
     }
 }
