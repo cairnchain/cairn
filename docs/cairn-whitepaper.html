@@ -115,9 +115,14 @@
     <p>
       Hashing is BLAKE3 with a distinct derived key per domain, so a value
       hashed as a note leaf can never be read as a header leaf or a Merkle
-      node. Signatures are Ed25519 with two restrictions beyond the standard:
-      small-order keys are rejected at construction, and non-canonical
-      encodings are refused, so two byte strings can never name one key. Every
+      node. Signatures are Ed25519 with four restrictions beyond what the
+      standard requires. A key must be canonically encoded, not of small
+      order, and in the prime order subgroup, all three refused at
+      construction, so two byte strings can never name one key and no note can
+      be paid to a key nobody holds. And a signature is checked by the
+      cofactorless equation against an <code>R</code> that is canonical and not of small
+      order, the choice the standard leaves open and verifiers in use make
+      differently, so a signature one node takes is one every node takes. Every
       signature commits to the network, the version, the transaction
       identifier, the input index, and the value and owner of the note being
       spent. Committing to the spent note is the lesson of transaction formats

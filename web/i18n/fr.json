@@ -370,7 +370,7 @@
     "address": {
       "plain": "Une adresse est un nom public que vous pouvez distribuer sans risque. N'importe qui peut voir ce qu'elle détient. Seule la personne qui a le secret correspondant peut la dépenser, et ce secret n'apparaît jamais ici ni nulle part sur ce site.",
       "curious": "Cette page est construite à partir d'un index sur toute la chaîne, un service que l'explorateur rend et que le protocole refuse délibérément : aucun nœud ne garde de table associant les propriétaires à leurs billets.",
-      "technical": "Clés Ed25519, avec deux restrictions au-delà du standard : les clés de petit ordre sont rejetées à la construction, et les encodages non canoniques sont refusés pour que deux suites d'octets ne puissent jamais désigner une même clé."
+      "technical": "Clés Ed25519, refusées à la construction si elles ne sont pas encodées de façon canonique, si elles sont de petit ordre ou hors du sous-groupe d'ordre premier : deux suites d'octets ne peuvent jamais désigner une même clé, et rien ne peut être payé à une clé que personne ne détient. Une signature est vérifiée par l'équation sans cofacteur, contre un R canonique et qui n'est pas de petit ordre : un nœud accepte exactement les signatures que tous les autres acceptent."
     },
     "holdings": {
       "plain": "Les billets que cette adresse détient, un par un. Un solde n'est que leur somme.",

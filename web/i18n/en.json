@@ -370,7 +370,7 @@
     "address": {
       "plain": "An address is a public name you can hand out safely. Anyone can see what it holds. Only the person with the matching secret can spend it, and that secret never appears here or anywhere on this site.",
       "curious": "This page is built from an index over the whole chain, which is a service the explorer provides and the protocol deliberately does not: no node keeps a map from owners to notes.",
-      "technical": "Ed25519 keys, with two restrictions beyond the standard: small order keys are rejected at construction, and non-canonical encodings are refused so two byte strings can never name one key."
+      "technical": "Ed25519 keys, refused at construction unless canonically encoded, not of small order and in the prime order subgroup, so two byte strings can never name one key and nothing can be paid to a key nobody holds. A signature is checked by the cofactorless equation against an R that is canonical and not of small order, so one node takes exactly the signatures every node takes."
     },
     "holdings": {
       "plain": "The individual notes this address is holding. A balance is just what they add up to.",

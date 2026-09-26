@@ -1,6 +1,9 @@
 //! Signing keys and signature verification.
 //!
-//! Cairn signs with Ed25519, with two restrictions over the bare scheme.
+//! Cairn signs with Ed25519, with four restrictions over the bare scheme:
+//! three on keys, applied at construction, and one on verification. The
+//! specification states all four, with vectors, in *Notes* and in *How a
+//! signature is verified*.
 //!
 //! Public keys outside the prime order subgroup are refused at construction, so
 //! a note can never be locked to a key that has no usable secret. The reference
@@ -25,10 +28,13 @@
 //! representation per value rule the wire format relies on, and would give a
 //! note two distinct identifiers.
 //!
-//! Verification uses the strict variant, which rejects non canonical signature
-//! encodings. Permissive verification accepts signatures that some
-//! implementations reject, and a signature that is valid on one node and
-//! invalid on another splits the chain.
+//! Verification uses the strict variant: `S` must be below the group order,
+//! `R` must be the canonical encoding of a point that is not of small order,
+//! and the equation is the cofactorless one. RFC 8032 leaves the last two
+//! open, and verifiers in use answer them differently, so permissive
+//! verification accepts signatures that some implementations reject, and a
+//! signature that is valid on one node and invalid on another splits the
+//! chain.
 
 use std::fmt;
 

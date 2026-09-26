@@ -94,10 +94,12 @@
     </p>
 
     <p>
-      Every hash is BLAKE3 in keyed mode. The key is a 32-byte domain constant, and a
-      value hashed under one domain MUST NOT be accepted where another domain is
-      required. Each domain is a distinct constant, so a preimage under one says
-      nothing under any other.
+      Every hash this protocol defines is BLAKE3 in keyed mode. The key is a 32-byte
+      domain constant, and a value hashed under one domain MUST NOT be accepted where
+      another domain is required. Each domain is a distinct constant, so a preimage
+      under one says nothing under any other. The one other hash a node computes is
+      the SHA-512 inside Ed25519, which belongs to the signature scheme and is
+      specified with it in <em>How a signature is verified</em>.
     </p>
 
     <h3><span class="sub">2.3</span>Sequences</h3>
@@ -119,6 +121,9 @@
       An encoder MUST NOT produce a sequence longer than that limit. A structure
       holding one would encode to bytes no conforming decoder can read back, and a
       node could then commit to an identifier over a structure it cannot re-parse.
+      No structure in this protocol can reach the limit, since every sequence in a
+      block or a message has a tighter one of its own, so the reference encoder
+      relies on that rather than checking, and only a debug build asserts it.
     </p>
 
     <h3><span class="sub">2.4</span>Structures and choices</h3>
@@ -140,7 +145,8 @@
 
     <p>
       An amount is a count of pebbles, encoded as a <code>u64</code>. One CAIRN is 100 000 000
-      pebbles. No amount may exceed the monetary ceiling, and a decoder MUST refuse
+      pebbles. No amount may exceed the monetary ceiling, which is
+      100 000 000 000 000 000 pebbles, one billion CAIRN, and a decoder MUST refuse
       an amount above it rather than accepting and clamping, so a value past the
       ceiling cannot exist in a decoded structure anywhere in the system.
     </p>
@@ -305,11 +311,41 @@
       that it sits at that position. A decoder MUST refuse any other tag.
     </p>
 
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
+      <tbody>
+        <tr><td>note</td><td>note</td><td class="n">40</td></tr>
+        <tr><td>position</td><td>u64</td><td class="n">8</td></tr>
+        <tr><td>proof</td><td>sequence of hash</td><td class="n">4 + 32d</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      Those are the bytes after the tag. The proof's hashes are the siblings from the
+      note's leaf up to the root of its tree, bottom first, as <em>Proofs</em> gives them.
+    </p>
+
     <p>
       <strong>A transfer's identifier is not the hash of its wire encoding.</strong> It is the
       hash, under the transfer domain, of the version, the count of inputs, each
       input's note identifier alone, and the outputs. Signatures and witnesses are
       left out.
+    </p>
+
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
+      <tbody>
+        <tr><td>version</td><td>u16</td><td class="n">2</td></tr>
+        <tr><td>input count</td><td>u32</td><td class="n">4</td></tr>
+        <tr><td>note identifiers</td><td>note identifier, one per input, in order</td><td class="n">36n</td></tr>
+        <tr><td>outputs</td><td>sequence of note</td><td class="n">4 + 40m</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      It is the transfer's own encoding with each input cut down to its note
+      identifier: the input count is the count the inputs sequence carries, and the
+      outputs are the same sequence, count included.
     </p>
 
     <p>
@@ -336,13 +372,107 @@
       input's index, and the value and owner of the note being spent.
     </p>
 
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
+      <tbody>
+        <tr><td>network</td><td>u32</td><td class="n">4</td></tr>
+        <tr><td>version</td><td>u16</td><td class="n">2</td></tr>
+        <tr><td>transfer</td><td>hash</td><td class="n">32</td></tr>
+        <tr><td>index</td><td>u32</td><td class="n">4</td></tr>
+        <tr><td>value</td><td>amount</td><td class="n">8</td></tr>
+        <tr><td>owner</td><td>public key</td><td class="n">32</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      That is 82 bytes. <code>network</code> is the identifier the network's headers carry,
+      <code>version</code> is the transfer's, <code>transfer</code> is its identifier, <code>index</code> is the
+      input's position among the transfer's inputs counting from nought, and <code>value</code>
+      and <code>owner</code> are the spent note's.
+    </p>
+
     <p>
       The last two matter and are not obvious. Without them a wallet shown a false
       value for the note it is spending would sign a transaction whose real fee is
       the difference, and the signature would be perfectly valid.
     </p>
 
-    <h3><span class="sub">5.3</span>Rules a transfer must satisfy</h3>
+    <h3><span class="sub">5.3</span>How a signature is verified</h3>
+
+    <p>
+      A signature is 64 bytes: the encoding of a point <code>R</code> in the first 32, and a
+      scalar <code>S</code>, little-endian, in the last 32. It is pure Ed25519 as RFC 8032
+      defines it, with the 32 bytes of the digest above as the message: no prehash
+      and no context, so neither Ed25519ph nor Ed25519ctx.
+    </p>
+
+    <p>
+      RFC 8032 leaves a verifier two choices, and the verifiers in use differ
+      exactly there, so this protocol makes both. With <code>A</code> the owner's public key,
+      <code>B</code> the base point, <code>M</code> the message, and <code>L</code> the order of the prime order
+      subgroup, which is <code>2^252 + 27742317777372353535851937790883648493</code>, a node
+      MUST accept a signature if and only if all four of these hold:
+    </p>
+
+    <ol>
+      <li><code>S</code>, read as a 256-bit little-endian integer, is below <code>L</code>;</li>
+      <li><code>R</code> is the canonical encoding of a point on the curve;</li>
+      <li>that point is not of small order;</li>
+      <li><code>[S]B = R + [k]A</code>, where <code>k</code> is SHA-512 of the 32 bytes of <code>R</code>, the 32 bytes
+      of <code>A</code> and the message, in that order, read as a little-endian integer and
+      reduced modulo <code>L</code>. The equation is checked as written, without multiplying
+      either side by the cofactor.</li>
+    </ol>
+
+    <p>
+      Any other signature is refused, and the refusal is <code>InvalidSignature</code>. <code>A</code> is a
+      key that passed the three refusals in <em>Notes</em>, so it is never of small order
+      itself.
+    </p>
+
+    <p>
+      The third and the fourth are the choices. RFC 8032 never asks about the order
+      of <code>R</code>, and without the third a signature whose <code>R</code> is the identity and whose
+      <code>S</code> is <code>k</code> times the signer's secret scalar verifies. RFC 8032 permits the
+      cofactored equation, <code>[8][S]B = [8]R + [8][k]A</code>, and states it first, and under
+      it a signature whose <code>R</code> carries a torsion component verifies. The holder of a
+      key can make either kind at will, so a node that took them would accept spends
+      every other node refuses, and follow another chain from the first block that
+      carried one.
+    </p>
+
+    <p>
+      These vectors are for checking a verifier against. The key is the one whose
+      32-byte seed is the first 32 bytes of SHA-512 of the ASCII bytes
+      <code>cairn signature vector</code>, and the message is the first 32 bytes of SHA-512 of
+      <code>cairn signature vector message</code>. The first vector is the signature that key
+      makes. The second is the first with <code>L</code> added to <code>S</code>, a second spelling of the
+      same signature that a verifier reducing <code>S</code> would take. The third has the
+      identity as <code>R</code> and <code>k</code> times the secret scalar as <code>S</code>, which both of RFC 8032's
+      equations accept. The fourth has <code>R = rB + T</code>, for <code>T</code> a point of order eight
+      and <code>r</code> the first 32 bytes of SHA-512 of <code>cairn signature vector nonce</code> reduced
+      modulo <code>L</code>, and <code>S = r + ka</code>, which the cofactored equation accepts and the
+      cofactorless one does not.
+    </p>
+
+    <pre><code>seed        first 32 bytes of SHA-512("cairn signature vector")
+public key  47da95e3585bde332648ce1bf660eb1d68bb4fd9a6b206f80996056edd78995c
+message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
+
+1 accepted
+  R  ee55676db80fe280c81940fa37575a96b8c21ad71eed1fcbe291476eab5e6b20
+  S  0d89268dcbb5832ee6a1f74092cd27ca3d725e9ddb9176ebae0f37663b76820b
+2 refused, S is not below L
+  R  ee55676db80fe280c81940fa37575a96b8c21ad71eed1fcbe291476eab5e6b20
+  S  fa5c1ceae5189686bc3eefe370c706df3d725e9ddb9176ebae0f37663b76821b
+3 refused, R is of small order
+  R  0100000000000000000000000000000000000000000000000000000000000000
+  S  da47d66f55f2a53bbd2b3ffbd771feb593dd18170e8c8a23d429af3baebc7909
+4 refused, the cofactorless equation does not hold
+  R  8a30403f65da91381b89212ab91f54e609038f8cf15a9a15a497697a245745e0
+  S  c06945247d082b057059703beedb5cc928346815e7aa6c7fe1afadb508f08b03</code></pre>
+
+    <h3><span class="sub">5.4</span>Rules a transfer must satisfy</h3>
 
     <p>
       Applied in this order, each producing the refusal named.
@@ -351,7 +481,7 @@
     <table>
       <thead><tr><th class="n">#</th><th>Refusal</th><th>When</th></tr></thead>
       <tbody>
-        <tr><td class="n">1</td><td>UnsupportedVersion</td><td>the version is not one these rules know</td></tr>
+        <tr><td class="n">1</td><td>UnsupportedVersion</td><td>the version is not one these rules know, which is 1</td></tr>
         <tr><td class="n">2</td><td>NoInputs</td><td>it spends nothing</td></tr>
         <tr><td class="n">3</td><td>NoOutputs</td><td>it pays nobody</td></tr>
         <tr><td class="n">4</td><td>TooManyInputs</td><td>past the network's limit, which is 256 on every network here</td></tr>
@@ -364,7 +494,10 @@
 
     <p>
       The shape is checked before any signature is verified, because the shape is
-      cheap and a signature is not.
+      cheap and a signature is not. The inputs are resolved against the state next,
+      by the refusals in <em>Which witness a spend must carry</em>, and the signatures come
+      last: in a block, after every transfer's inputs have resolved, as the body
+      table in <em>Blocks</em> orders them.
     </p>
 
     <p>
@@ -372,7 +505,7 @@
       the block's coinbase or destroyed; there is no third destination.
     </p>
 
-    <h3><span class="sub">5.4</span>Coinbase</h3>
+    <h3><span class="sub">5.5</span>Coinbase</h3>
 
     <table>
       <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
@@ -513,12 +646,34 @@
         <tr><td class="n">3</td><td>TooManyCoinbaseOutputs</td><td>past the network's limit, which is 16 on every network here</td></tr>
         <tr><td class="n">4</td><td>ZeroValueCoinbaseOutput</td><td>a coinbase note worth nothing</td></tr>
         <tr><td class="n">5</td><td>TooManyTransfers</td><td>past the network's limit, which is 4 096 on every network here</td></tr>
-        <tr><td class="n">6</td><td>InvalidTransfer, InvalidSignature</td><td>every transfer in order, against the transfer rules above</td></tr>
-        <tr><td class="n">7</td><td>CoinbaseOverpay</td><td>the coinbase claims more than the schedule pays plus the fees given up</td></tr>
-        <tr><td class="n">8</td><td>TooManyEvictions</td><td>past the network's eviction cap</td></tr>
-        <tr><td class="n">9</td><td>SupplyDoesNotAddUp</td><td>the running supply is not the parent's plus what this block issued</td></tr>
+        <tr><td class="n">6</td><td>InvalidTransfer</td><td>every transfer in block order: its shape by the transfer rules above, then its inputs by the refusals in <em>Which witness a spend must carry</em></td></tr>
+        <tr><td class="n">7</td><td>ValueOverflow</td><td>the fees the transfers give up do not sum</td></tr>
+        <tr><td class="n">8</td><td>InvalidSignature</td><td>once every transfer has passed six, the first input in block order whose signature does not verify</td></tr>
+        <tr><td class="n">9</td><td>ValueOverflow</td><td>the schedule's reward plus the fees, or the coinbase's outputs, do not sum</td></tr>
+        <tr><td class="n">10</td><td>CoinbaseOverpay</td><td>the coinbase claims more than the schedule pays plus the fees given up</td></tr>
+        <tr><td class="n">11</td><td>TooManyEvictions</td><td>past the network's eviction cap</td></tr>
+        <tr><td class="n">12</td><td>SupplyDoesNotAddUp</td><td>the running supply is not the parent's plus what this block issued</td></tr>
       </tbody>
     </table>
+
+    <p>
+      <code>InvalidSignature</code> is reported as <code>InvalidTransfer</code> naming the transfer and the
+      input, like every refusal of a transfer. Because the signatures are verified
+      together after every transfer has resolved, a block whose first transfer is
+      badly signed and whose second is badly shaped is refused for the second
+      transfer's shape. The verdict is the same either way; only the name differs.
+    </p>
+
+    <p>
+      Seven, and the first half of nine, cannot happen on any chain these rules
+      produce: fees are given up by notes that exist, so they sum to at most the
+      supply, and the schedule keeps the supply near a tenth of the monetary ceiling.
+      They are named because part 1 names every overflow.
+      The second half of nine can happen: a coinbase carries up to sixteen outputs,
+      each of them an amount, and sixteen amounts need not sum to one. A node asks
+      seven as each transfer passes six, which reaches the same verdict as asking it
+      once afterwards on any chain that can exist.
+    </p>
 
     <p>
       A block MUST NOT both spend a note and evict it.
@@ -921,6 +1076,19 @@
         <tr><td class="n">7</td><td>OutputsExceedInputs</td><td>the outputs total more than the inputs, once every input has resolved</td></tr>
       </tbody>
     </table>
+
+    <p>
+      Adding each input's value to the running total is an operation on decoded
+      values, so a total that does not fit is refused <code>ValueOverflow</code>, and on a chain
+      these rules produce it never is, for the reason the body table gives for fees.
+    </p>
+
+    <p>
+      Rows three to six assume the node holds what <em>What a node MUST hold and what
+      it MAY discard</em> requires of it, the path of every note in its grace window among them. A node that has
+      lost one answers <code>MissingProof</code> for a spend of a window note that every other
+      node takes, which is a fault in that node and not in the block.
+    </p>
 
     <p>
       A transfer MUST NOT spend a note created by the same block. Every input is

@@ -1273,6 +1273,23 @@ fn the_specification_gives_every_limit_it_names_the_number_the_rules_use() {
         )),
         "the specification does not name the coinbase version this build knows"
     );
+    // The transfer's twin of the line above, and the ceiling the Money section
+    // names. Both were stated only twelve hundred lines away, in Emission and
+    // in part 4, so a reader of the section that uses them had to search.
+    assert!(
+        spec.contains(&format!(
+            "<td>UnsupportedVersion</td><td>the version is not one these rules know, which is {}</td>",
+            cairn_ledger::transaction::TRANSFER_VERSION
+        )),
+        "the specification does not name the transfer version this build knows"
+    );
+    assert!(
+        spec.contains(&format!(
+            "the monetary ceiling, which is {} pebbles",
+            grouped(Amount::MAX_MONEY.as_pebbles())
+        )),
+        "the specification's Money section does not give the ceiling the decoder holds"
+    );
 
     // And the ceilings the format holds above each of those, so that a decoder
     // refuses what no network allows before a rule has read the frame.

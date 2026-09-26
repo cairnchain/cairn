@@ -105,13 +105,13 @@ fn spec_note_id_bytes(id: &NoteId) -> Vec<u8> {
     out
 }
 
-/// A witness: a `u8` tag, then the bytes of the shape it selects.
+/// A witness: a `u8` tag, then the bytes of the shape it selects, which for a
+/// cold one is the table under the witness paragraph: the note, the position
+/// as a `u64`, and the proof as a sequence of hashes.
 ///
-/// Assumed, because the document does not say: the proof inside a cold witness
-/// is a sequence of hashes in the sense part 1 gives, a `u32` count then the
-/// siblings. The document gives that encoding for the proof beside a *sample*
-/// in the weighing, at "4 + 32d", and never gives one for the proof inside a
-/// witness.
+/// That table used to be missing, and this helper assumed the proof was a
+/// sequence in the part 1 sense because the document gave that encoding only
+/// for the proof beside a sample in the weighing.
 fn spec_witness_bytes(witness: &Witness) -> Vec<u8> {
     let mut out = Vec::new();
     match witness {
@@ -194,12 +194,6 @@ fn spec_block_bytes(block: &Block) -> Vec<u8> {
     out
 }
 
-/// The transfer identifier's preimage: "the version, the count of inputs, each
-/// input's note identifier alone, and the outputs".
-///
-/// Assumed, because the document says "the outputs" rather than spelling the
-/// count out a second time: the outputs are a sequence in the part 1 sense, so
-/// their own `u32` count is in the preimage.
 /// `transactions_root`, built from *What a block is* and from nothing else.
 ///
 /// The document's words: one leaf per transaction, the coinbase first and then
@@ -243,6 +237,10 @@ fn spec_transactions_root(block: &Block) -> Hash32 {
     level[0]
 }
 
+/// The transfer identifier's preimage: "the version, the count of inputs, each
+/// input's note identifier alone, and the outputs", with the widths the table
+/// under that sentence gives. The outputs carry their own `u32` count, which
+/// the table says and the sentence did not: this helper had to assume it.
 fn spec_transfer_id_preimage(transfer: &Transfer) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&transfer.version.to_le_bytes());
@@ -259,10 +257,11 @@ fn spec_transfer_id_preimage(transfer: &Transfer) -> Vec<u8> {
 
 /// What a signature commits to: "the network identifier, the transfer's
 /// version, the transfer's identifier, the input's index, and the value and
-/// owner of the note being spent".
+/// owner of the note being spent", at the widths the table under it gives.
 ///
-/// Assumed: the index is a `u32`, which is the width the public signature of
-/// `sign_input` names. The document gives no width for it.
+/// The index is a `u32` by that table. Before it, the document gave the index
+/// no width and this helper took the one the public signature of `sign_input`
+/// names.
 fn spec_signature_message(
     transfer: &Transfer,
     network: NetworkId,
@@ -600,6 +599,172 @@ fn a_signature_commits_to_the_network_version_identifier_index_and_spent_note() 
     assert_ne!(
         transfer.signature_message(NetworkId::TESTNET, 1, &spent),
         transfer.signature_message(NetworkId::TESTNET, 0, &spent)
+    );
+}
+
+const SPECIFICATION: &str = include_str!("../../../docs/cairn-specification.md");
+
+/// The rows of the first table the document prints after `marker`: the field,
+/// its type, and its width in bytes, as the three cells give them.
+fn spec_rows_after(marker: &str) -> Vec<(String, String, String)> {
+    let after = SPECIFICATION
+        .split_once(marker)
+        .unwrap_or_else(|| panic!("the specification no longer says `{marker}`"))
+        .1;
+    let body = after
+        .split_once("<tbody>")
+        .and_then(|(_, rest)| rest.split_once("</tbody>"))
+        .expect("a table after the sentence")
+        .0;
+    body.lines()
+        .filter_map(|line| {
+            let cells: Vec<&str> = line
+                .split("<td")
+                .skip(1)
+                .filter_map(|cell| cell.split_once('>')?.1.split_once("</td>"))
+                .map(|(inside, _)| inside)
+                .collect();
+            match cells.as_slice() {
+                [field, kind, bytes] => {
+                    Some(((*field).to_owned(), (*kind).to_owned(), (*bytes).to_owned()))
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// An integer at the width a row's type names, and nothing else: a row that
+/// named the wrong width builds the wrong preimage.
+fn spec_integer(kind: &str, value: u64) -> Vec<u8> {
+    match kind {
+        "u16" => u16::try_from(value).unwrap().to_le_bytes().to_vec(),
+        "u32" => u32::try_from(value).unwrap().to_le_bytes().to_vec(),
+        "u64" => value.to_le_bytes().to_vec(),
+        other => panic!("a row names `{other}` where an integer was expected"),
+    }
+}
+
+/// Builds a preimage row by row from the document's table, taking each field's
+/// bytes from `field` and holding the width column to them wherever it is a
+/// plain number.
+fn spec_preimage(
+    rows: &[(String, String, String)],
+    field: impl Fn(&str, &str) -> Vec<u8>,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (name, kind, width) in rows {
+        let bytes = field(name, kind);
+        if let Ok(width) = width.parse::<usize>() {
+            assert_eq!(
+                bytes.len(),
+                width,
+                "the table gives `{name}` a width its type does not have"
+            );
+        }
+        out.extend_from_slice(&bytes);
+    }
+    out
+}
+
+/// **The three byte tables a signer computes from are the bytes the code
+/// hashes and encodes.**
+///
+/// They were sentences without widths. The identifier's preimage said "the
+/// outputs" without saying the count comes with them, the signature's gave
+/// the input's index no width anywhere, and the cold witness said "a proof"
+/// and nothing about its bytes. The helpers in this file had to guess all
+/// three, and a second implementer guessing differently computes another
+/// digest for every transfer and every signature. Built here from the tables
+/// alone, row by row, so a table that names a width the code does not use
+/// builds a different preimage and fails.
+#[test]
+fn the_preimage_tables_are_the_bytes_the_code_hashes() {
+    let transfer = sample_transfer();
+    let identifier =
+        spec_rows_after("A transfer's identifier is not the hash of its wire encoding.");
+    let preimage = spec_preimage(&identifier, |name, kind| match name {
+        "version" => spec_integer(kind, u64::from(transfer.version)),
+        "input count" => spec_integer(kind, transfer.inputs.len() as u64),
+        "note identifiers" => transfer
+            .inputs
+            .iter()
+            .flat_map(|input| spec_note_id_bytes(&input.note_id))
+            .collect(),
+        "outputs" => {
+            assert_eq!(kind, "sequence of note");
+            let mut out = Vec::new();
+            spec_sequence_header(transfer.outputs.len(), &mut out);
+            for note in &transfer.outputs {
+                out.extend_from_slice(&spec_note_bytes(note));
+            }
+            out
+        }
+        other => panic!("the identifier's table has a row `{other}` the code does not hash"),
+    });
+    assert_eq!(
+        hash(Domain::TransferId, &preimage),
+        transfer.id(),
+        "the identifier built from the document's table is not the one the code computes"
+    );
+
+    let spent = note(300_000_000, 4);
+    let index = 1u32;
+    let committed = spec_rows_after("Each input is signed separately");
+    let message = spec_preimage(&committed, |name, kind| match name {
+        "network" => spec_integer(kind, u64::from(NetworkId::TESTNET.as_u32())),
+        "version" => spec_integer(kind, u64::from(transfer.version)),
+        "transfer" => {
+            assert_eq!(kind, "hash");
+            transfer.id().as_bytes().to_vec()
+        }
+        "index" => spec_integer(kind, u64::from(index)),
+        "value" => {
+            assert_eq!(kind, "amount");
+            spent.value.as_pebbles().to_le_bytes().to_vec()
+        }
+        "owner" => {
+            assert_eq!(kind, "public key");
+            spent.owner.as_bytes().to_vec()
+        }
+        other => panic!("the signature's table has a row `{other}` the code does not hash"),
+    });
+    assert_eq!(
+        hash(Domain::SignatureMessage, &message),
+        transfer.signature_message(NetworkId::TESTNET, index, &spent),
+        "the message built from the document's table is not the one a signer signs"
+    );
+    assert!(
+        SPECIFICATION.contains(&format!("That is {} bytes.", message.len())),
+        "the document does not give the signature's preimage the length its table sums to"
+    );
+
+    let Witness::Cold(cold) = &transfer.inputs[1].witness else {
+        panic!("the sample's second input is the cold one");
+    };
+    let shape = spec_rows_after("A decoder MUST refuse any other tag.");
+    let mut witness = vec![1u8];
+    witness.extend(spec_preimage(&shape, |name, kind| match name {
+        "note" => {
+            assert_eq!(kind, "note");
+            spec_note_bytes(&cold.note)
+        }
+        "position" => spec_integer(kind, cold.position),
+        "proof" => {
+            assert_eq!(kind, "sequence of hash");
+            let mut out = Vec::new();
+            spec_sequence_header(cold.proof.siblings.len(), &mut out);
+            for sibling in &cold.proof.siblings {
+                out.extend_from_slice(sibling.as_bytes());
+            }
+            out
+        }
+        other => panic!("the witness table has a row `{other}` the code does not encode"),
+    }));
+    assert_eq!(
+        witness,
+        transfer.inputs[1].witness.encode(),
+        "a cold witness built from the document's table is not the one the code encodes"
     );
 }
 
@@ -2517,6 +2682,111 @@ fn a_bodys_shape_is_refused_in_the_order_the_table_gives() {
             BlockError::InvalidTransfer { .. }
         ),
         "6 is reached once the count is inside the limit"
+    );
+}
+
+/// **Six through ten of the body table, on a state with money in it: the
+/// signatures after every transfer, and the coinbase's own sum before what it
+/// claims.**
+///
+/// The table had one row reading "`InvalidTransfer`, `InvalidSignature`:
+/// every transfer in order", and the code checks every transfer's shape and inputs
+/// first and the signatures of the whole block afterwards, so the transfer
+/// named for a block with two faults was a later one than that row says. And
+/// a coinbase whose outputs do not sum was refused `ValueOverflow` under a
+/// name the table did not carry. Nothing asked either, so the table could say
+/// the one-transfer-at-a-time order and the code keep the other.
+#[test]
+fn the_body_checks_signatures_after_every_transfer_and_the_coinbase_sum_before_its_claim() {
+    let params = ConsensusParams::testnet().with_coinbase_maturity(0);
+    let miner = wallet(1);
+    let mut state = LedgerState::new();
+    let mut coins = Vec::new();
+    for height in 0..2u64 {
+        let coinbase = CoinbaseTransaction::new(
+            height,
+            vec![Note::new(params.reward_at(height), miner.public_key())],
+        );
+        let block = assemble_block(
+            &state,
+            coinbase,
+            Vec::new(),
+            &params,
+            1_000 + height * 60,
+            0,
+        )
+        .expect("a block with no transfers in it");
+        connect_block(&mut state, &block, &params, 2_000_000_000).expect("and it holds");
+        coins.extend(block.coinbase.created_notes());
+    }
+    let height = state.next_height().unwrap();
+    let paid = |notes: Vec<Note>| CoinbaseTransaction::new(height, notes);
+    let spend = |(id, spent): (NoteId, Note), signer: &SecretKey| {
+        let mut transfer =
+            Transfer::new(vec![Input::hot(id)], vec![Note::new(spent.value, owner(9))]);
+        transfer.sign_input(params.network, 0, &spent, signer);
+        transfer
+    };
+    let signed = spend(coins[0], &miner);
+    let forged = spend(coins[0], &wallet(2));
+    let mut shapeless = spend(coins[1], &miner);
+    shapeless.outputs.push(Note::new(Amount::ZERO, owner(9)));
+    let reward = || vec![Note::new(params.reward_at(height), miner.public_key())];
+    let past_the_ceiling = vec![
+        Note::new(Amount::MAX_MONEY, owner(9)),
+        Note::new(Amount::MAX_MONEY, owner(9)),
+    ];
+    let evaluate = |coinbase: CoinbaseTransaction, transfers: &[Transfer]| {
+        cairn_ledger::validation::evaluate_block_body(&state, &coinbase, transfers, &params)
+            .expect_err("every case here is refused")
+    };
+
+    // 6 before 8: the first transfer badly signed, the second badly shaped.
+    assert!(
+        matches!(
+            evaluate(paid(reward()), &[forged.clone(), shapeless]),
+            BlockError::InvalidTransfer {
+                index: 1,
+                source: TransferError::ZeroValueOutput { .. }
+            }
+        ),
+        "a later transfer's shape is named before an earlier transfer's signature"
+    );
+
+    // 8 before 9: a bad signature and a coinbase whose outputs do not sum.
+    assert!(
+        matches!(
+            evaluate(paid(past_the_ceiling.clone()), &[forged]),
+            BlockError::InvalidTransfer {
+                index: 0,
+                source: TransferError::InvalidSignature { input_index: 0 }
+            }
+        ),
+        "the signatures are checked before the coinbase is summed"
+    );
+
+    // 9 before 10: a coinbase whose outputs do not sum is not an overpayment.
+    assert!(
+        matches!(
+            evaluate(paid(past_the_ceiling), std::slice::from_ref(&signed)),
+            BlockError::ValueOverflow
+        ),
+        "a coinbase whose outputs do not sum is refused ValueOverflow"
+    );
+
+    // And 10 reached, by a coinbase that sums and claims one pebble more than
+    // the reward, beside a transfer that gives up no fee.
+    let mut greedy = reward();
+    greedy.push(Note::new(
+        Amount::from_pebbles(1).unwrap(),
+        miner.public_key(),
+    ));
+    assert!(
+        matches!(
+            evaluate(paid(greedy), &[signed]),
+            BlockError::CoinbaseOverpay { .. }
+        ),
+        "a coinbase that sums and claims a pebble past the reward is an overpayment"
     );
 }
 
