@@ -27,7 +27,7 @@
 use cairn_accumulator::{Archive, Forest, SparseMerkleTree};
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::{BlockHeader, HeaderSummary};
-use cairn_ledger::handover::{accept, Handover};
+use cairn_ledger::handover::{accept, Handover, HandoverError};
 use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::pow::{median_time_past, next_difficulty, work_of, RECENT_HEADERS};
 use cairn_ledger::state::{header_leaf, HotEntry};
@@ -339,13 +339,22 @@ fn a_handed_ledger_naming_a_note_in_both_tiers_spends_it_twice() {
     let taken = accept(&handover, &params);
     let mut state = match taken {
         Ok(state) => state,
-        Err(refused) => {
-            // The defect is absent: the ledger was refused, and the reason is
-            // printed so a refusal for some unrelated reason is not read as a
-            // rule that is there.
-            println!("\n  the forged ledger was refused: {refused}\n");
+        // The defect is absent: the ledger is refused, for the rule this test
+        // is about and for this note. Any other refusal used to end the test
+        // here too, printing the reason where nobody reads it, so a fixture
+        // broken by an unrelated rule passed with the double spend never
+        // attempted.
+        Err(HandoverError::NoteInBothTiers(named)) => {
+            assert_eq!(
+                named, id,
+                "the ledger was refused for naming some other note in both tiers"
+            );
             return;
         }
+        Err(other) => panic!(
+            "the forged ledger was refused for {other}, which is not the rule this \
+             test is about, so the note named in both tiers was never spent twice"
+        ),
     };
 
     assert!(
