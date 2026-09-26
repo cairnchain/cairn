@@ -21,7 +21,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cairn_accumulator::forest::{Forest, ForestProof};
-use cairn_chain::{Accepted, Bodies, ChainError, ChainStore, Located, Outdated, MAX_REORG_DEPTH};
+use cairn_chain::{
+    first_to_offer, Accepted, Bodies, ChainError, ChainStore, Located, Outdated, MAX_REORG_DEPTH,
+};
 use cairn_crypto::PublicKey;
 use cairn_ledger::block::{Block, BlockHeader, BLOCK_VERSION};
 use cairn_ledger::genesis;
@@ -454,6 +456,19 @@ const BEHIND_SENDERS: usize = 64;
 /// up to a claim about this machine.
 const BEHIND_MEMORY: u64 = 3_600;
 
+/// Peers that said they can supply nothing just above this node's tip, before
+/// a person is told it may be further behind than the network keeps blocks
+/// for.
+///
+/// The same reasoning as [`UNJUDGED_PEERS`] and the same honest caveat:
+/// whoever holds two addresses meets it. What the line says to do is start
+/// again from an empty directory, which is the most a line here ever asks,
+/// so one machine's word is not enough to make it say so.
+const SHORT_PEERS: usize = 2;
+
+/// Addresses counted towards [`SHORT_PEERS`] at once.
+const SHORT_SENDERS: usize = 64;
+
 /// A gap between two rounds of maintenance that means the machine was away.
 ///
 /// A round takes a second. Thirty of them passing at once is not a busy
@@ -666,13 +681,22 @@ pub struct Filling {
     /// The lowest header this node holds. Everything below it is what it is
     /// still asking the network for.
     pub from: u64,
+    /// Headers collected so far towards what is below [`Self::from`], counted
+    /// from the first block up.
+    ///
+    /// The one number here that moves while a fill is going well. What is
+    /// collected is kept apart and merged whole once it reaches `from`, so the
+    /// three below do not move at all until then, which for a node that
+    /// joined a million and a half blocks up is most of an hour; a line that
+    /// told an operator to watch those told them a healthy fill was stuck.
+    pub collected: u64,
     /// One past the highest header it holds.
     pub through: u64,
     /// Leaves in the forest built over those headers, which is what a place in
     /// the chain is proved against.
     pub proved: u64,
-    /// How far the chain has got, so each of the three above can be said
-    /// against something rather than as "some".
+    /// How far the chain has got, so each of the three numbers above that say
+    /// what is held can be said against something rather than as "some".
     pub reaches: u64,
     /// Bytes of blocks on the disk now.
     pub bytes: u64,
@@ -1636,6 +1660,13 @@ struct Shared {
     /// A leaf as well, written from the thread reading a peer once the chain
     /// has been let go of, and once at start for this build's own first block.
     out_of_step: Mutex<OutOfStep>,
+    /// Peers that answered this node's question for the chain from above its
+    /// tip, each with the height the tip stood at when they did.
+    ///
+    /// Only the entries about where the tip stands now mean anything, and the
+    /// rest are dropped as soon as the tip moves. A leaf as well, written from
+    /// the thread reading a peer once the chain has been let go of.
+    short_of_the_tip: Mutex<HashMap<Sender, u64>>,
     /// What this node is asking the network about where fallen notes sit.
     ///
     /// Empty on a node nobody has asked to recover anything, which is every
@@ -3005,6 +3036,23 @@ impl Shared {
         count_unreadable(&mut met, from, version, now);
     }
 
+    /// Writes down that a peer could supply nothing just above where this
+    /// node's chain stands. See [`Reaction::cannot_supply`].
+    fn cannot_supply(&self, from: Option<Sender>) {
+        let Some(from) = from else { return };
+        let Some(tip) = self.chain().height() else {
+            return;
+        };
+        let mut met = self
+            .short_of_the_tip
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        met.retain(|_, at| *at == tip);
+        if met.len() < SHORT_SENDERS || met.contains_key(&from) {
+            met.insert(from, tip);
+        }
+    }
+
     /// Counts one block refused for standing further ahead than this node's
     /// clock allows, and who sent it.
     ///
@@ -3226,8 +3274,10 @@ impl Shared {
 
     /// How far this node's branch runs past the first position in `locator`
     /// this node agrees with, which is the highest only on a locator ordered
-    /// from the tip down. See `ChainStore::chain_after`, which this answers
-    /// out of memory and the disk together.
+    /// from the tip down, and never from a block this node can hand over
+    /// neither from memory nor from its log. See `ChainStore::chain_after`,
+    /// which this answers out of memory and the disk together, by the same
+    /// rule.
     ///
     /// Memory first, which answers whenever the peer is anywhere near this
     /// node's tip. A peer far behind names heights this node no longer holds
@@ -3284,11 +3334,19 @@ impl Shared {
         // The same mistake as the one the walk above was fixed for, one step
         // further on: this node's disk stated as a fact about somebody else's
         // chain. What it can hand over starts where its log does.
+        //
+        // And one step further again, for a peer this node agrees with about
+        // something below that. Memory still names the first block, and one
+        // every thousand and twenty four heights after it, under a log that
+        // has been cut, so a peer further behind than the cut was pointed just
+        // above one of those and asked for blocks nobody here holds. Below the
+        // log, the answer starts where memory can still hand the block over,
+        // and at the log where it cannot.
         let floor = {
             let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
             log.as_ref().map_or(0, |store| store.blocks.first_height())
         };
-        let from = agreed.map_or(floor, |height| height.saturating_add(1));
+        let from = first_to_offer(agreed, floor, |at| self.chain().block_at(at).is_some());
         (from, reaches.saturating_sub(from).min(max))
     }
 
@@ -4156,6 +4214,7 @@ impl Node {
             unjudged: Mutex::new(Unreadable::default()),
             unweighed: Mutex::new(Unweighed::default()),
             out_of_step: Mutex::new(OutOfStep::default()),
+            short_of_the_tip: Mutex::new(HashMap::new()),
             asking: Mutex::new(Asking::default()),
             held_aside: Mutex::new(HeldAside::default()),
         });
@@ -4708,6 +4767,11 @@ impl Node {
         }
         Some(Filling {
             from: store.headers.first_height(),
+            collected: if store.filling.is_empty() {
+                0
+            } else {
+                store.filling.reaches()
+            },
             through: store.headers.reaches(),
             proved: store.forest.len(),
             reaches,
@@ -4719,10 +4783,34 @@ impl Node {
     /// Blocks this node was offered and can never reach.
     ///
     /// Zero on a healthy node. Anything else means somebody is following a
-    /// branch that parts from this one below the point this node was handed
-    /// on, which it cannot cross to however much of that branch arrives.
+    /// branch that parts from this one further back than this node can reach:
+    /// below the point it was handed on, or deeper than it will undo. It
+    /// cannot cross to that branch however much of it arrives. A few such
+    /// blocks are anybody's to send; a run of them from several peers is this
+    /// node on a branch the network has left.
     pub fn out_of_reach(&self) -> u64 {
         self.shared.out_of_reach.load(Ordering::Relaxed)
+    }
+
+    /// Peers that said they can supply nothing just above where this node's
+    /// chain stands, once [`SHORT_PEERS`] of them have.
+    ///
+    /// Every peer answers a node further behind than it keeps blocks for from
+    /// where its own log begins, and such a node can neither read across the
+    /// gap nor be handed a ledger, since it already follows a chain. It used
+    /// to print healthy lines under a height that did not move, and nothing
+    /// said why.
+    pub fn behind_what_peers_keep(&self) -> Option<usize> {
+        let tip = self.shared.chain().height()?;
+        let peers = self
+            .shared
+            .short_of_the_tip
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .filter(|at| **at == tip)
+            .count();
+        (peers >= SHORT_PEERS).then_some(peers)
     }
 
     /// Sets how long this node waits for the blocks above an anchor it was
@@ -8501,10 +8589,11 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
     true
 }
 
-/// Writes down the three blocks a node refuses without blaming anybody.
+/// Writes down the three blocks a node refuses without blaming anybody, and
+/// the one answer about the chain it cannot use.
 ///
-/// All three are here rather than among the reasons to drop a peer because
-/// none of them is the peer's doing, and all three used to pass in silence: an
+/// All four are here rather than among the reasons to drop a peer because
+/// none of them is the peer's doing, and all four used to pass in silence: an
 /// operator saw a height that had stopped moving and nothing else. Counted, so
 /// a run of them from several peers can be read for what it is.
 fn note_what_was_not_taken(
@@ -8534,6 +8623,12 @@ fn note_what_was_not_taken(
     // ever mentions one.
     if let Some(ahead) = reaction.ahead_of_the_clock {
         shared.clock_looks_behind(from, ahead, now);
+    }
+    // Not a block, and not refused: a peer that can supply nothing just above
+    // this node's tip. A run of these from several peers is a node further
+    // behind than the network keeps blocks for, which nothing else said.
+    if reaction.cannot_supply.is_some() {
+        shared.cannot_supply(from);
     }
 }
 
@@ -9361,6 +9456,30 @@ mod disk_and_headers {
         );
     }
 
+    /// What a node reports while it fills its old headers in carries how much
+    /// of them it has collected.
+    ///
+    /// The report carried only what a fill leaves alone until it is complete,
+    /// so a node collecting at the honest rate read the same for most of an
+    /// hour as one that had found nobody to collect from.
+    #[test]
+    fn a_node_filling_its_headers_in_says_how_many_it_has_collected() {
+        let headers = linked(30);
+        let directory = scratch("filling-collected");
+        let node = started(
+            store_in(&directory, &headers[20..], &headers[..8]),
+            &directory,
+        );
+        let filling = node.filling();
+        finish(node, &directory);
+        let filling = filling.expect("a node holding headers from 20 up cannot show the chain");
+        assert_eq!(filling.from, 20);
+        assert_eq!(
+            filling.collected, 8,
+            "the eight headers collected so far were not in what the node reports"
+        );
+    }
+
     /// A collection that leads nowhere is thrown away at the start: one left
     /// beside a header log that already begins at the first block, and one
     /// that does not begin at the first block itself.
@@ -9744,6 +9863,112 @@ mod disk_and_headers {
             (0, 6),
             "a position the disk holds another block at was agreed with"
         );
+    }
+
+    /// A peer is never pointed at a block this node can hand over neither
+    /// from memory nor from its log, and is pointed at one memory still holds.
+    ///
+    /// The locator walk agrees in memory first, and memory still names one
+    /// block every thousand and twenty four heights under a log this node has
+    /// cut, the first block among them. A peer further behind than the cut
+    /// was told to start just above such a block, asked for heights nobody
+    /// here holds a body for, was sent nothing, and asked again for ever. The
+    /// newcomer's empty locator was answered from the floor already; this is
+    /// the same mistake one step on. The second half holds the other edge: a
+    /// body memory still holds under the log is still offered.
+    #[test]
+    fn a_peer_further_behind_than_the_log_is_pointed_at_the_log() {
+        let params = ConsensusParams::testnet().with_burial(8);
+        let (blocks, _) = forged(100, params);
+        let directory = scratch("behind-the-log");
+        let node = holding(&blocks, params, &directory);
+        node.keep_blocks(1);
+        node.shared.trim_history();
+        wait_until("the log to be trimmed", || {
+            node.blocks_from().unwrap_or(0) > 60
+        });
+        let floor = node.blocks_from().unwrap();
+        let (gone, kept) =
+            node.with_chain(|chain| (chain.block_at(1).is_none(), chain.block_at(51).is_some()));
+        let from_the_first = node
+            .shared
+            .chain_after(&[Located::new(0, blocks[0].id())], 100);
+        let from_memory = node
+            .shared
+            .chain_after(&[Located::new(50, blocks[50].id())], 100);
+        finish(node, &directory);
+
+        assert!(
+            gone && kept,
+            "the fixture needs the body at 1 let go of and the one at 51 still held"
+        );
+        assert_eq!(
+            from_the_first,
+            (floor, 100 - floor),
+            "a peer holding only the first block was pointed at blocks this node holds \
+             neither in memory nor on its disk"
+        );
+        assert_eq!(
+            from_memory,
+            (51, 49),
+            "a peer was not offered blocks this node still holds in memory under its log"
+        );
+    }
+
+    /// A node says it is further behind than its peers keep blocks for once
+    /// two peers have said they can supply nothing just above its tip, and
+    /// stops saying so once its tip moves.
+    ///
+    /// Such a node asked every peer for heights none of them held, took
+    /// blocks it could not connect, and asked again after each batch, with
+    /// nothing said at all. What is said now tells the operator to start
+    /// again, so one peer's word is not enough and a word about a tip since
+    /// left behind is not kept.
+    #[test]
+    fn two_peers_short_of_the_tip_are_said_and_a_tip_that_moved_is_not() {
+        let params = ConsensusParams::testnet();
+        let (blocks, _) = forged(4, params);
+        let directory = scratch("short-of-the-tip");
+        let node = holding(&blocks[..3], params, &directory);
+        let peer = |last: u8| Some(SocketAddr::from(([198, 51, 100, last], 9_000)));
+
+        node.shared.cannot_supply(peer(1));
+        let one = node.behind_what_peers_keep();
+        node.shared.cannot_supply(peer(1));
+        let one_twice = node.behind_what_peers_keep();
+        node.shared.cannot_supply(peer(2));
+        let two = node.behind_what_peers_keep();
+        node.submit_block(blocks[3].clone()).unwrap();
+        let moved = node.behind_what_peers_keep();
+        for last in 0..=u8::MAX {
+            node.shared.cannot_supply(peer(last));
+        }
+        let held = node
+            .shared
+            .short_of_the_tip
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len();
+        finish(node, &directory);
+
+        assert_eq!(
+            one, None,
+            "one peer's word told the operator to start again"
+        );
+        assert_eq!(
+            one_twice, None,
+            "one peer saying it twice was counted as two"
+        );
+        assert_eq!(
+            two,
+            Some(2),
+            "two peers that can supply nothing above the tip went unsaid"
+        );
+        assert_eq!(
+            moved, None,
+            "a word about a tip since left behind was still said"
+        );
+        assert_eq!(held, SHORT_SENDERS, "the table grew past its ceiling");
     }
 
     /// A block on this node's disk is read back off it.

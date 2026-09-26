@@ -971,6 +971,21 @@ pub struct Reaction {
     /// the same reason [`Self::unjudged`] is: one of these is a number a
     /// stranger writes in a field.
     pub ahead_of_the_clock: Option<u64>,
+    /// The first height a peer said it can supply, when that is above this
+    /// node's tip, in answer to this node's own question for its chain.
+    ///
+    /// A peer answers from where its log begins when that is above anything
+    /// this node agrees with, and a node further behind than its peers keep
+    /// blocks for is answered that way by all of them. It used to ask for
+    /// those heights all the same, take blocks whose parents it would never
+    /// hold, and ask for the chain again after each batch, for as long as it
+    /// ran, printing healthy lines under a height that did not move. It
+    /// cannot be handed a ledger either, since it already follows a chain.
+    ///
+    /// Named rather than acted on, and counted where peers are counted: one
+    /// of these is a number a peer writes, and what a node should conclude
+    /// from several is a question about the node.
+    pub cannot_supply: Option<u64>,
 }
 
 impl Reaction {
@@ -1933,6 +1948,17 @@ fn answer(local: &mut Local<'_>, peer: &mut PeerState, message: Message, now: u6
             // Taken rather than read, so one `GetChain` pays for one answer
             // and a peer that sends five gets the price of a push for four.
             let prompted = std::mem::take(&mut peer.chain_asked);
+            // Nothing this node holds connects to a stretch that starts above
+            // its tip, so none of it is asked for: see
+            // [`Reaction::cannot_supply`]. Not the chain again either, which
+            // would only bring the same answer back. A node with no chain has
+            // a chooser to ask somebody else, and is left to it.
+            if from > have && !local.chain.is_empty() {
+                return Reaction {
+                    cannot_supply: prompted.then_some(from),
+                    ..Reaction::idle()
+                };
+            }
             if start >= end {
                 follow_up(local.chain, peer, now)
             } else {

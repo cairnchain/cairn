@@ -151,7 +151,7 @@ fn exchange(
 fn resolve(reaction: cairn_net::sync::Reaction, chain: &ChainStore) -> Vec<Message> {
     let mut out = reaction.reply;
     if let Some(locator) = reaction.locate.as_ref() {
-        let (from, count) = chain.chain_after(locator, MAX_CHAIN);
+        let (from, count) = chain.chain_after(locator, MAX_CHAIN, 0);
         out.push(Message::Chain { from, count });
     }
     for height in &reaction.fetch {
@@ -668,6 +668,59 @@ fn a_block_above_the_tip_from_a_peer_greeted_as_an_equal_asks_for_the_chain() {
          evidence the peer is ahead, and nothing was asked of it: the asking read only the \
          work the peer wrote in its greeting"
     );
+}
+
+/// A peer that can supply blocks only from above this node's tip is not
+/// asked for them.
+///
+/// A node further behind than its peers keep blocks for is answered from
+/// where their logs begin, above its own tip. It asked for those heights all
+/// the same, took blocks whose parents it would never hold, and asked again
+/// for the chain after each batch, for as long as it ran, with nothing said.
+#[test]
+fn a_peer_that_can_supply_only_from_above_the_tip_is_not_asked_for_those_blocks() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(3);
+    let mut node = store_with(params, &blocks);
+    let mut peer = greeted_peer(u128::MAX / 2, 5_000);
+    peer.chain_asked = true;
+
+    let answered = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Chain {
+            from: 4_000,
+            count: 1_000,
+        },
+        NOW,
+    );
+    assert!(
+        !answered
+            .reply
+            .iter()
+            .any(|said| matches!(said, Message::GetBlocks(_))),
+        "heights no block this node holds can connect to were asked for"
+    );
+    assert!(peer.awaiting.is_empty(), "and are waited on for nothing");
+    assert_eq!(
+        answered.cannot_supply,
+        Some(4_000),
+        "a peer that cannot supply what is above this node's tip was not said to"
+    );
+
+    // The same answer nobody asked for is a number a peer wrote, and is not
+    // passed up as evidence of anything.
+    let unasked = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Chain {
+            from: 4_000,
+            count: 1_000,
+        },
+        NOW,
+    );
+    assert_eq!(unasked.cannot_supply, None);
 }
 
 /// A tie at one height that the network resolved the other way is followed

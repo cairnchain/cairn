@@ -694,20 +694,64 @@ fn a_locator_ordered_from_the_bottom_up_is_answered_from_the_bottom() {
     assert!(store.agrees_with(&low) && store.agrees_with(&high));
 
     assert_eq!(
-        store.chain_after(&[high, low], 64),
+        store.chain_after(&[high, low], 64, 0),
         (5, 1),
         "from the tip down, the answer starts above the highest agreement"
     );
     assert_eq!(
-        store.chain_after(&[low, high], 64),
+        store.chain_after(&[low, high], 64, 0),
         (2, 4),
         "the other way round, it starts above the lowest, which is the \
          sender asking for more of its own allowance"
     );
     assert_eq!(
-        store.chain_after(&[low, high], 2),
+        store.chain_after(&[low, high], 2, 0),
         (2, 2),
         "and the count is what `max` allows either way"
+    );
+}
+
+/// A locator is never answered from a block the caller can hand over neither
+/// from memory nor from its log, and is answered from one memory still holds.
+///
+/// The store's copy answered from nought when nothing agreed and from just
+/// above any agreement, where the node's answered from where its log begins
+/// when nothing agreed: the same question, two answers, and the store's the
+/// one the node had stopped giving because it kept a newcomer asking for
+/// blocks nobody held.
+#[test]
+fn a_locator_is_never_answered_from_a_block_nobody_here_holds() {
+    let miner = wallet(1);
+    let mut source = Source::new();
+    let mut blocks = Vec::new();
+    source.run(&miner, 70, &mut blocks);
+    let shelf = Arc::new(Shelf::default());
+    let mut store = ChainStore::new(params());
+    store.reads_bodies_from(shelf.clone());
+    for block in &blocks {
+        shelf.put(block);
+        store.add_block(block.clone(), NOW).unwrap();
+    }
+    // What a node does once a block is written: bodies more than the warm
+    // stretch below the tip are let go of, here the first five.
+    store.release_bodies(0, 70);
+    assert!(store.block_at(1).is_none() && store.block_at(11).is_some());
+    let floor = 20;
+
+    assert_eq!(
+        store.chain_after(&[Located::new(0, blocks[0].id())], 64, floor),
+        (20, 50),
+        "an agreement under the log, above a block let go of, pointed the peer at it"
+    );
+    assert_eq!(
+        store.chain_after(&[], 64, floor),
+        (20, 50),
+        "a locator agreeing with nothing was answered from below the log"
+    );
+    assert_eq!(
+        store.chain_after(&[Located::new(10, blocks[10].id())], 64, floor),
+        (11, 59),
+        "a block still held in memory under the log was not offered"
     );
 }
 

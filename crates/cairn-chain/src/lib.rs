@@ -678,6 +678,33 @@ impl Decode for Located {
     }
 }
 
+/// The first height worth offering a peer, given the highest position in its
+/// locator this node agrees with, `floor`, the first height its log can hand a
+/// block for, and `held`, which says whether memory still holds the body of a
+/// block below that.
+///
+/// Just above the agreement, and not below the floor unless memory can hand
+/// that block over itself. Agreement is found in memory first, and memory
+/// still names one block every [`MILESTONE`] heights under a log that has been
+/// cut, the first block among them. A peer further behind than the cut was
+/// told to start just above such a block and asked for heights nobody here
+/// holds a body for: sent nothing, it asked again, and was pointed at the same
+/// heights for as long as it tried.
+///
+/// Memory is asked rather than the floor taken as the answer, because on a
+/// network whose burial is shallower than the window a node holds in full,
+/// the log is cut above bodies memory still holds and serves, and a peer just
+/// under the cut can be handed those.
+#[must_use]
+pub fn first_to_offer(agreed: Option<u64>, floor: u64, held: impl FnOnce(u64) -> bool) -> u64 {
+    let from = agreed.map_or(floor, |height| height.saturating_add(1));
+    if from >= floor || held(from) {
+        from
+    } else {
+        floor
+    }
+}
+
 /// The branch a node follows, as much of it as a node has any use for.
 ///
 /// In full for as far back as a reorganisation may reach, since that is the
@@ -1357,14 +1384,22 @@ impl ChainStore {
     /// regardless: a block carries what it is built on, so a chain of them
     /// proves its own order.
     ///
-    /// When nothing in the locator is recognised the answer starts at zero,
-    /// which is what a node syncing from scratch needs.
-    pub fn chain_after(&self, locator: &[Located], max: u64) -> (u64, u64) {
+    /// `floor` is the first height the caller's log can hand a block for, and
+    /// the answer starts below it only where this store holds the body in
+    /// memory: see [`first_to_offer`], which the node answering out of memory
+    /// and its disk together reads too.
+    ///
+    /// This said "when nothing in the locator is recognised the answer starts
+    /// at zero, which is what a node syncing from scratch needs", and started
+    /// there. The node had stopped giving that answer, because a node that has
+    /// cut its log holds no body at zero and pointed a newcomer at blocks
+    /// nobody here had, and this copy, read only by tests, went on giving it.
+    pub fn chain_after(&self, locator: &[Located], max: u64, floor: u64) -> (u64, u64) {
         let common = locator
             .iter()
             .find(|entry| self.agrees_with(entry))
             .map(|entry| entry.height);
-        let from = common.map_or(0, |height| height.saturating_add(1));
+        let from = first_to_offer(common, floor, |at| self.block_at(at).is_some());
         let count = self.branch.len().saturating_sub(from).min(max);
         (from, count)
     }
