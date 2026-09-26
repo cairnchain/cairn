@@ -378,17 +378,16 @@ async function refresh() {
       m.way + " " + m.amount + " at block " + m.height +
       (held.has(m.id) ? ", waiting for a block again" : ""));
     // Said before the closing sentence, because the closing sentence is what
-    // makes the list read as complete: "whoever you were paying has not been
-    // paid" is about the ones named, and somebody whose payment is not named
-    // takes it to mean theirs went through.
+    // makes the list read as complete: what it says became of the money is
+    // about the ones named, and somebody whose payment is not named takes it
+    // to mean theirs went through.
     const rest = state.undone_held > state.undone.length
       ? " Showing the newest " + state.undone.length + " of " +
         state.undone_held + "; the rest are not listed here."
       : "";
     undone.innerHTML = "<b>The chain changed and took these back.</b> They " +
       "were in this wallet's account of itself and the chain no longer " +
-      "carries them: " + lines.join("; ") + "." + rest + " The money is back " +
-      "in the balance above. Whoever you were paying has not been paid.";
+      "carries them: " + lines.join("; ") + "." + rest + " " + state.undoneNote;
   }
 
   const ripening = $("ripening");

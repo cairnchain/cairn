@@ -425,7 +425,9 @@ fn show_balance(arguments: &[String]) -> Result<(), String> {
     ) {
         println!("{line}");
     }
-    show_undone(&wallet);
+    for line in what_was_taken_back(&wallet.undone()) {
+        println!("{line}");
+    }
 
     for line in beside_the_balance(&holdings, recovery.words(), &wallet.history_covers()) {
         println!("{line}");
@@ -635,31 +637,34 @@ fn what_is_waiting(
     lines
 }
 
-/// What the chain took back.
+/// What the chain took back, and what became of the money, as lines.
 ///
 /// A branch that lost takes its blocks with it, and this key's account of what
-/// happened went with them. The money is back; whoever was being paid is not
-/// paid, and only the person holding the wallet can do anything about that.
-fn show_undone(wallet: &Wallet) {
-    let undone = wallet.undone();
-    if undone.is_empty() {
-        return;
-    }
-    println!();
-    println!("The chain changed and took these back:");
-    println!();
-    for movement in &undone {
-        println!(
+/// happened went with them. What that means depends on which way the money
+/// went, and the library says it for both faces.
+fn what_was_taken_back(undone: &[Movement]) -> Vec<String> {
+    let Some(note) = cairn_wallet::undone_note(undone) else {
+        return Vec::new();
+    };
+    let mut lines = vec![
+        String::new(),
+        "The chain changed and took these back:".to_owned(),
+        String::new(),
+    ];
+    for movement in undone {
+        lines.push(format!(
             "  {:<9} {:<22} block {}",
             movement.direction.as_str(),
             movement.amount.to_string(),
             movement.height,
-        );
+        ));
     }
-    println!();
-    println!("They were in this wallet's account of itself and the chain no longer");
-    println!("carries them. The money is back in the balance above, and anyone who was");
-    println!("being paid has not been paid.");
+    lines.push(String::new());
+    lines.extend(wrapped(&format!(
+        "They were in this wallet's account of itself and the chain no longer carries them. \
+         {note}"
+    )));
+    lines
 }
 
 /// Breaks a sentence over lines a terminal holds.
@@ -1057,6 +1062,7 @@ fn how_the_wait_ended(waited: Waited, patience: u64) -> Vec<String> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
+    use super::what_was_taken_back;
     use super::{about_to_pay, answered_yes, ask, how_the_wait_ended, must_ask};
     use super::{after_sending, beside_the_balance, what_happened, what_is_waiting};
     use super::{stop_before_paying, Waited};
@@ -1341,6 +1347,24 @@ mod tests {
             amount: pebbles(50),
             id: Hash32::ZERO,
         }
+    }
+
+    /// The command line closes the list of what the chain took back with what
+    /// the library says of it, and says nothing when there is nothing on it.
+    ///
+    /// It printed its own sentence, that the money was back in the balance,
+    /// whatever the list held, and no test read what it printed.
+    #[test]
+    fn what_the_chain_took_back_is_said_with_what_became_of_the_money() {
+        assert!(what_was_taken_back(&[]).is_empty(), "nothing to say");
+        let orphaned = [moved(7, Direction::Mined)];
+        let said = what_was_taken_back(&orphaned).join("\n");
+        assert!(said.contains("took these back"), "{said}");
+        assert!(said.contains("block 7"), "the movement is listed: {said}");
+        assert!(
+            said.contains("not in the balance any more") && !said.contains("back in the balance"),
+            "an orphaned reward is said to be back in the balance: {said}"
+        );
     }
 
     fn covered(from: u64, through: u64, tip: u64) -> Covered {

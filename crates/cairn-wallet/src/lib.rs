@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::history::{Discarded, Fork, History, Movement};
+use crate::history::{Direction, Discarded, Fork, History, Movement};
 use crate::pending::{Handed, Pending};
 use cairn_accumulator::ForestProof;
 use cairn_chain::{ChainStore, Outdated};
@@ -232,6 +232,39 @@ fn waiting_note(waiting: Amount) -> String {
         String::new()
     } else {
         format!(". Another {waiting} is held by a payment waiting for a block")
+    }
+}
+
+/// What to say under the list of movements the chain took back, or `None`
+/// when there are none.
+///
+/// Said by the way the money went, because the two ways are opposite pieces
+/// of news. A payment out that the chain took back goes back to waiting for a
+/// block, so its money is back in the balance and whoever was being paid has
+/// not been paid. A reward or a payment in left the balance with the block
+/// that paid it. Both faces closed the list with the first sentence whatever
+/// was on it, which told a miner whose block was orphaned that the reward was
+/// back in the balance while the balance beside it had just gone down by it.
+///
+/// Here rather than on each face so the page and the command line cannot say
+/// two different things about the same list.
+#[must_use]
+pub fn undone_note(undone: &[Movement]) -> Option<String> {
+    let paid_out = undone
+        .iter()
+        .any(|movement| movement.direction == Direction::Sent);
+    let paid_in = undone
+        .iter()
+        .any(|movement| movement.direction != Direction::Sent);
+    let out = "What was paid out is back in the balance above, and whoever you were paying has \
+               not been paid.";
+    let came_in = "What was paid to you is not in the balance any more: the block that paid it \
+                   is gone.";
+    match (paid_out, paid_in) {
+        (true, true) => Some(format!("{out} {came_in}")),
+        (true, false) => Some(out.to_owned()),
+        (false, true) => Some(came_in.to_owned()),
+        (false, false) => None,
     }
 }
 
@@ -4279,6 +4312,40 @@ mod tests {
     /// so did telling them their money could move again only in part when all
     /// of it could, and naming "0 of them" as notes nothing can reach. Each
     /// state here is held to its own sentence and kept out of the others'.
+    /// What is said under the list of what the chain took back depends on
+    /// which way the money went, and each way is said only when it is there.
+    ///
+    /// Both faces said the money was back in the balance whatever was on the
+    /// list, and the only test of the list undid a payment out.
+    #[test]
+    fn what_the_chain_took_back_is_said_by_which_way_the_money_went() {
+        use crate::history::{Direction, Movement};
+
+        let movement = |direction| Movement {
+            height: 3,
+            at: 0,
+            direction,
+            amount: cairn("50"),
+            id: Hash32::ZERO,
+        };
+        let back = "back in the balance";
+        let gone = "not in the balance any more";
+        assert_eq!(super::undone_note(&[]), None, "nothing on the list");
+
+        let out = super::undone_note(&[movement(Direction::Sent)]).unwrap();
+        assert!(out.contains(back) && !out.contains(gone), "{out}");
+        for direction in [Direction::Mined, Direction::Received] {
+            let came_in = super::undone_note(&[movement(direction)]).unwrap();
+            assert!(
+                came_in.contains(gone) && !came_in.contains(back),
+                "{came_in}"
+            );
+        }
+        let both =
+            super::undone_note(&[movement(Direction::Mined), movement(Direction::Sent)]).unwrap();
+        assert!(both.contains(back) && both.contains(gone), "{both}");
+    }
+
     #[test]
     fn each_state_of_stuck_money_is_told_its_own_answer() {
         let stuck = Recovery {
