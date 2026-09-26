@@ -1836,6 +1836,43 @@ mod tests {
         assert!(history.spent.is_empty(), "nothing is left to put back");
     }
 
+    /// A note the ledger holds that was paid below where the account reads is
+    /// taken up, so a payment spending it is recorded as what left; a note
+    /// the account already holds keeps what it knew of it.
+    ///
+    /// Without it an account moved past blocks never knew those notes, and
+    /// recorded a payment from them as the change coming back.
+    #[test]
+    fn a_note_paid_below_where_the_account_reads_is_taken_up() {
+        let mine = key(1);
+        let mut history = History::new();
+        history.skip_to(10);
+        let below = NoteId::new(Hash32::from_bytes([5; 32]), 0);
+        history.paid_before(below, amount("50"), 3);
+        history.paid_before(below, amount("7"), 4);
+        assert_eq!(
+            history
+                .held()
+                .find(|(id, _)| *id == below)
+                .map(|(_, value)| value),
+            Some(amount("50")),
+            "the note is not taken up, or not with what was first known of it"
+        );
+        assert_eq!(history.paid_at.get(&below), Some(&3));
+
+        let spending = Transfer::new(
+            vec![Input::hot(below)],
+            vec![Note::new(amount("49"), key(2))],
+        );
+        history.take(&next_block(&history, 10, key(2), vec![spending]), mine);
+        let newest = history.movements().next().copied().unwrap();
+        assert_eq!(
+            (newest.direction, newest.amount),
+            (Direction::Sent, amount("50")),
+            "a payment from it is recorded as what left"
+        );
+    }
+
     /// A rewind to a block the account does not remember changes nothing.
     ///
     /// Below the blocks remembered, the notes spent at the oldest of them
