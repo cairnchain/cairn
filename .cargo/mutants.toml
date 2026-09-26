@@ -48,5 +48,8 @@ exclude_re = [
 
 # A mutant that makes a loop run forever is one the suite would have caught if
 # it had been allowed to finish, so a timeout is not a survivor. The bound is
-# passed on the command line by the workflow, since this file does not carry
-# it: `--timeout 180`, several times the longest honest test here.
+# passed on the command line by `.github/workflows/mutants.yml`, since this
+# file does not carry it, and is worked out from the unmutated run rather than
+# stated: `--timeout-multiplier 1` over the crate's own suite on the weekly
+# run, and the tool's own default multiple on a pull request's, both with
+# `--minimum-test-timeout 120` under them.

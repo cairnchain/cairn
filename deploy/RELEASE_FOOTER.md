@@ -35,11 +35,16 @@ That asks GitHub which commit and which workflow produced the file, and
 GitHub answers from its own records rather than from anything we control.
 The build ran in the open and its log is on this repository.
 
-Or compare hashes against `SHA256SUMS`, published beside the archives:
+`SHA256SUMS`, published beside the archives, is signed the same way. Once it
+has passed the same check, it vouches for every archive it lists:
 
 ```
-shasum -a 256 <the archive>
+gh attestation verify SHA256SUMS --repo cairnchain/cairn
+shasum -a 256 -c SHA256SUMS --ignore-missing
 ```
+
+Comparing hashes without the first line shows only that a download arrived
+whole: whoever could replace an archive could replace the list beside it.
 
 ## This is a test network
 
