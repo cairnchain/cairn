@@ -774,10 +774,10 @@ impl DropReason {
     /// Whether this peer behaved badly, rather than merely belonging elsewhere.
     ///
     /// A node on another network or an older protocol has done nothing wrong
-    /// and may be on this one tomorrow, so it is disconnected and forgotten
-    /// rather than refused. A peer sending a block this node rejects, or
-    /// speaking before introducing itself, is broken or probing, and is worth
-    /// turning away for a while.
+    /// and may be on this one tomorrow, so it is disconnected rather than
+    /// refused, and its address is kept. A peer sending a block this node
+    /// rejects, or speaking before introducing itself, is broken or probing,
+    /// and is worth turning away for a while.
     pub fn is_misbehaviour(self) -> bool {
         match self {
             Self::Unannounced { .. } | Self::RepeatedHandshake | Self::BadBlock { .. } => true,

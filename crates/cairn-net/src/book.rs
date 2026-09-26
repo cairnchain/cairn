@@ -62,6 +62,19 @@ pub const MAX_PER_GROUP: usize = 32;
 /// a bad connection would empty the book.
 pub(crate) const MAX_MISSES: u8 = 3;
 
+/// Dials in a row that were taken and shut before a word, before an address
+/// is dropped.
+///
+/// Counted apart from misses, because the two are different news. A dial
+/// nothing answered is a machine that may be gone; a dial that was taken and
+/// shut is somebody there, and it is what a node with no room does. Booked as
+/// a miss, a full honest node left the book of everybody who tried it three
+/// times, in about five minutes, while the strangers holding its slots stayed
+/// in theirs. Allowed far more, so such a node is tried again for hours; and
+/// still counted, so an address that takes every connection and shuts it is
+/// dropped in the end.
+pub(crate) const MAX_TURNED_AWAY: u8 = 32;
+
 /// How long an address is left alone after one failed dial.
 ///
 /// It doubles twice over per further miss, so an address that has just missed
@@ -90,6 +103,8 @@ const MAX_QUIET: u64 = 600;
 struct Known {
     /// Failed dials in a row, cleared by any peer that introduces itself.
     misses: u8,
+    /// Dials in a row taken and shut before a word, cleared the same way.
+    turned_away: u8,
     /// When it last spoke, or when it was first written down.
     heard: u64,
     /// The moment before which this address is not dialled again.
@@ -551,6 +566,7 @@ impl AddressBook {
             return;
         };
         known.misses = 0;
+        known.turned_away = 0;
         known.quiet_until = 0;
         let before = known.heard;
         known.heard = now;
@@ -575,6 +591,39 @@ impl AddressBook {
         }
         self.remove(address);
         true
+    }
+
+    /// Notes that a dial to this address was taken and shut before the far
+    /// end said a word.
+    ///
+    /// Returns whether that was the last chance it had. Waits as a miss does,
+    /// and is allowed [`MAX_TURNED_AWAY`] of them rather than
+    /// [`MAX_MISSES`]: see the first for why.
+    pub(crate) fn turned_away(&mut self, address: &SocketAddr, now: u64) -> bool {
+        let Some(known) = self.known.get_mut(address) else {
+            return false;
+        };
+        known.turned_away = known.turned_away.saturating_add(1);
+        known.quiet_until = now.saturating_add(Known::quiet_for(known.turned_away));
+        if known.turned_away < MAX_TURNED_AWAY || known.seed {
+            return false;
+        }
+        self.remove(address);
+        true
+    }
+
+    /// Notes that this address answered a dial from another protocol
+    /// version, another network or another first block.
+    ///
+    /// Nothing is counted against it. A node there has done nothing wrong and
+    /// may be on this one tomorrow, and counting the ending as a miss took it
+    /// out of the book on the third. It is left alone for the longest wait,
+    /// so a node does not spend a dial every round on a peer it cannot yet
+    /// talk to.
+    pub(crate) fn belongs_elsewhere(&mut self, address: &SocketAddr, now: u64) {
+        if let Some(known) = self.known.get_mut(address) {
+            known.quiet_until = now.saturating_add(MAX_QUIET);
+        }
     }
 
     /// Writes down what an address said about keeping the cold set.
@@ -616,6 +665,7 @@ impl AddressBook {
     pub(crate) fn forgive_all(&mut self) {
         for known in self.known.values_mut() {
             known.misses = 0;
+            known.turned_away = 0;
             known.quiet_until = 0;
         }
     }
@@ -1723,6 +1773,109 @@ mod tests {
         assert_eq!(
             before, MAX_QUIET,
             "a long run of misses ends at the longest wait"
+        );
+    }
+
+    /// An address that takes dials and shuts them before a word is kept for
+    /// far more of them than one nothing answers at, is left alone between
+    /// them as after a miss, and is dropped in the end.
+    ///
+    /// Nothing asked. A book that dropped it on the third passed, which is a
+    /// full honest node forgotten by everybody who tried it, and so did one
+    /// that kept it for ever or dialled it again at once.
+    #[test]
+    fn an_address_that_shuts_the_door_is_tried_for_longer_and_then_dropped() {
+        let mut book = AddressBook::new();
+        let busy = address(1, 9000);
+        book.insert(busy);
+        let mut now = 1_000;
+        for _ in 1..MAX_TURNED_AWAY {
+            assert!(
+                !book.turned_away(&busy, now),
+                "an address that took the connection was dropped before its last chance"
+            );
+            assert!(book.ready(now).is_empty(), "it was dialled again at once");
+            now += MAX_QUIET;
+            assert_eq!(book.ready(now), vec![busy], "and never again");
+        }
+        assert!(
+            book.turned_away(&busy, now),
+            "an address that shuts every connection was never dropped"
+        );
+        assert!(!book.contains(&busy));
+    }
+
+    /// What is held against an address that shut the door goes the way a
+    /// miss does: when it answers, and when this machine was away.
+    ///
+    /// Nothing asked, so a count that outlived both passed, and a node
+    /// dropped an address that had answered it since.
+    #[test]
+    fn a_door_shut_earlier_is_forgotten_once_the_address_answers() {
+        let mut book = AddressBook::new();
+        let busy = address(1, 9000);
+        book.insert(busy);
+        for _ in 1..MAX_TURNED_AWAY {
+            book.turned_away(&busy, 1_000);
+        }
+        book.answered(&busy, 2_000);
+        for _ in 1..MAX_TURNED_AWAY {
+            book.turned_away(&busy, 3_000);
+        }
+        book.forgive_all();
+        assert!(
+            !book.turned_away(&busy, 4_000),
+            "the doors shut before it answered, or before the machine was away, were \
+             still counted"
+        );
+        assert!(book.contains(&busy));
+    }
+
+    /// A seed that shuts the door is kept however often it does.
+    #[test]
+    fn a_seed_that_shuts_the_door_is_never_dropped() {
+        let mut book = AddressBook::new();
+        let seed = address(1, 9000);
+        book.insert_seed(seed);
+        for _ in 0..u16::from(MAX_TURNED_AWAY) * 2 {
+            assert!(
+                !book.turned_away(&seed, 1_000),
+                "a seed was given a last chance"
+            );
+        }
+        assert!(book.contains(&seed));
+    }
+
+    /// An address that answered from another version, network or first
+    /// block is left alone for the longest wait, and nothing is counted
+    /// against it.
+    ///
+    /// Nothing asked. A book that counted it as a miss passed, and dropped
+    /// on the third a node that may be on this network tomorrow; so did one
+    /// that dialled it again every round.
+    #[test]
+    fn an_address_from_elsewhere_is_left_alone_and_not_counted() {
+        let mut book = AddressBook::new();
+        let elsewhere = address(1, 9000);
+        book.insert(elsewhere);
+        for _ in 1..MAX_MISSES {
+            book.missed(&elsewhere, 1_000);
+        }
+        for _ in 0..u16::from(MAX_MISSES) * 2 {
+            book.belongs_elsewhere(&elsewhere, 2_000);
+        }
+        assert!(
+            book.contains(&elsewhere),
+            "an address from elsewhere was dropped"
+        );
+        assert!(
+            book.ready(2_000 + MAX_QUIET - 1).is_empty(),
+            "an address from elsewhere was dialled again before the longest wait was over"
+        );
+        assert_eq!(book.ready(2_000 + MAX_QUIET), vec![elsewhere]);
+        assert!(
+            book.missed(&elsewhere, 3_000),
+            "the misses it had before were forgotten, so answering from elsewhere washed them"
         );
     }
 

@@ -53,8 +53,8 @@ use crate::message::{
 };
 use crate::refusal::{can_be_refused, Refusals};
 use crate::sync::{
-    a_window_has_turned, asked_for_the_chain, local_handshake, on_message, tick, Allowance, Local,
-    PeerState, Reaction, Window,
+    a_window_has_turned, asked_for_the_chain, local_handshake, on_message, tick, Allowance,
+    DropReason, Local, PeerState, Reaction, Window,
 };
 use crate::wire::{most_from, read_frame, write_message, Framed, WireError};
 
@@ -8785,7 +8785,7 @@ fn read_loop(
     let mut last_heard = unix_now();
     let mut window_start = last_heard;
     let mut in_window = 0u32;
-    let mut misbehaved = false;
+    let mut parting = Parting::default();
 
     // Reads carry a deadline, so this loop looks up regularly rather than
     // waiting on a peer that may never speak again. Two silences are told
@@ -8812,6 +8812,7 @@ fn read_loop(
         // the connection and a refusal.
         let frame = match read_frame(&mut stream, network, most_from(peer.greeted)) {
             Ok(Framed::Frame(frame)) => {
+                parting.said_anything = true;
                 last_heard = unix_now();
                 if window_is_over(window_start, last_heard) {
                     window_start = last_heard;
@@ -8819,7 +8820,7 @@ fn read_loop(
                 }
                 in_window = in_window.saturating_add(1);
                 if in_window > MAX_MESSAGES_PER_WINDOW {
-                    misbehaved = true;
+                    parting.flooded = true;
                     break;
                 }
                 frame
@@ -8833,7 +8834,7 @@ fn read_loop(
             // No arm for an interrupted read: `read_frame` goes round again on
             // one itself, so it never reaches here.
             Err(error) => {
-                misbehaved = is_peer_fault(&error);
+                parting.failure = Some(error);
                 break;
             }
         };
@@ -8845,7 +8846,7 @@ fn read_loop(
             Ok(Some(message)) => message,
             Ok(None) => continue,
             Err(error) => {
-                misbehaved = is_peer_fault(&error);
+                parting.failure = Some(error);
                 break;
             }
         };
@@ -8936,12 +8937,12 @@ fn read_loop(
             break;
         }
         if let Some(reason) = reaction.drop_peer {
-            misbehaved = reason.is_misbehaviour();
+            parting.dropped = Some(reason);
             break;
         }
     }
 
-    note_the_ending(shared, remote, dialled, misbehaved, peer.greeted);
+    note_the_ending(shared, remote, dialled, &parting, peer.greeted);
     // Always, however the loop ended. It is what frees the writing thread: a
     // write on a socket just shut fails at once, wherever in a frame it was.
     let _ = stream.shutdown(Shutdown::Both);
@@ -8971,32 +8972,126 @@ fn still_there_after_a_quiet_read(
         .all(|reply| outbound.try_send(reply).is_ok())
 }
 
+/// How one connection ended, gathered as its reading loop goes.
+#[derive(Debug, Default)]
+struct Parting {
+    /// Whether the peer sent more in one window than talking takes.
+    flooded: bool,
+    /// Whether the peer sent a message at all.
+    said_anything: bool,
+    /// The read that failed, when one did.
+    failure: Option<WireError>,
+    /// Why the conversation was ended, when it was ended over one.
+    dropped: Option<DropReason>,
+}
+
+impl Parting {
+    /// Whether the peer behaved badly, which is what turns its host away.
+    fn misbehaved(&self) -> bool {
+        self.flooded
+            || self.failure.as_ref().is_some_and(is_peer_fault)
+            || self.dropped.is_some_and(DropReason::is_misbehaviour)
+    }
+
+    /// What the connection came to, for an address this node dialled.
+    fn reached(&self, greeted: bool) -> Reached {
+        if greeted {
+            Reached::Greeted
+        } else if self.dropped.is_some_and(belongs_elsewhere) {
+            Reached::Elsewhere
+        } else if !self.said_anything && self.failure.as_ref().is_some_and(is_shut) {
+            Reached::TurnedAway
+        } else {
+            Reached::Nothing
+        }
+    }
+}
+
+/// What a connection came to, as far as the address this node dialled is
+/// concerned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reached {
+    /// The peer introduced itself.
+    Greeted,
+    /// The peer introduced itself as a node on another protocol version,
+    /// another network or another first block.
+    Elsewhere,
+    /// The far end took the connection and shut it before saying a word,
+    /// which is what a node with no room does.
+    TurnedAway,
+    /// Nothing that says anybody is there to talk to: silence, a failure, or
+    /// words that were not an introduction.
+    Nothing,
+}
+
+/// Whether a failed read is the far end shutting the connection.
+fn is_shut(error: &WireError) -> bool {
+    matches!(
+        error,
+        WireError::Io(error) if matches!(
+            error.kind(),
+            io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted
+        )
+    )
+}
+
+/// Whether a refusal is of a peer that belongs somewhere else, which the
+/// specification says a node MUST NOT hold against the address.
+const fn belongs_elsewhere(reason: DropReason) -> bool {
+    matches!(
+        reason,
+        DropReason::WrongVersion { .. }
+            | DropReason::WrongNetwork { .. }
+            | DropReason::ForeignChain { .. }
+    )
+}
+
 /// What the node holds against an address once its connection has ended.
 ///
 /// Two different judgements, and neither is about the message that happened
 /// to be last. A peer that behaved badly is turned away for a while. And an
-/// address this node went out to, that took the connection and then never
-/// introduced itself, has a miss counted against it exactly as one that
-/// refused the dial outright does. It is worse than a refusal, in fact: a
-/// refused dial costs a syscall, and this one held an outbound slot until
-/// `PEER_SILENCE` was up. Without it such an address stays in the book for
-/// good and is dialled again every ninety seconds for the life of the node.
+/// address this node went out to is written down for what it came to.
+///
+/// One that took the connection and then said nothing, or nothing that
+/// introduced it, has a miss counted against it exactly as one that refused
+/// the dial outright does. It
+/// is worse than a refusal, in fact: a refused dial costs a syscall, and this
+/// one held an outbound slot until `PEER_SILENCE` was up. Without it such an
+/// address stays in the book for good and is dialled again every ninety
+/// seconds for the life of the node.
+///
+/// Two endings short of an introduction are not that. A far end that shut
+/// the connection before a word is somebody with no room, and is counted
+/// apart, with far more chances: see [`crate::book::MAX_TURNED_AWAY`]. And a
+/// peer that introduced itself from another version, network or first block
+/// answered, and the specification says a node MUST NOT hold that against
+/// the address. Both used to be misses, so a full honest node, or one a
+/// version behind, was forgotten after three dials.
 fn note_the_ending(
     shared: &Arc<Shared>,
     remote: Option<IpAddr>,
     dialled: Option<SocketAddr>,
-    misbehaved: bool,
+    parting: &Parting,
     greeted: bool,
 ) {
     let now = unix_now();
-    if misbehaved {
+    if parting.misbehaved() {
         if let Some(host) = remote {
             shared.refuse(host, now);
         }
     }
     if let Some(address) = dialled {
-        if !greeted {
-            shared.book().missed(&address, now);
+        match parting.reached(greeted) {
+            Reached::Greeted => {}
+            Reached::Elsewhere => shared.book().belongs_elsewhere(&address, now),
+            Reached::TurnedAway => {
+                shared.book().turned_away(&address, now);
+            }
+            Reached::Nothing => {
+                shared.book().missed(&address, now);
+            }
         }
     }
 }
@@ -11863,6 +11958,190 @@ mod peers_and_loops {
         assert!(
             !node.shared.book().contains(&dialled),
             "an address that never introduced itself survived its last miss"
+        );
+    }
+
+    /// An address one miss from being dropped, in a quiet node's book.
+    fn on_its_last_chance(node: &Node, port: u16) -> SocketAddr {
+        let dialled = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let mut book = node.shared.book();
+        book.insert(dialled);
+        for _ in 1..MAX_MISSES {
+            book.missed(&dialled, 1_000);
+        }
+        dialled
+    }
+
+    /// A dialled address that answered from another protocol version, or
+    /// named another network in its introduction, is not charged a miss for
+    /// it.
+    ///
+    /// The specification says a node MUST NOT hold any of these against the
+    /// address, "because a node on another network or an older build has
+    /// done nothing wrong and may be on this one tomorrow". The host was not
+    /// refused, and the address was: the connection never reached a greeting,
+    /// so its ending was booked as a dial that came to nothing, and three of
+    /// those took the address out of the book. Nothing dialled a peer on
+    /// another version, so a node that forgot every one it met passed.
+    #[test]
+    fn a_dialled_address_that_answered_from_elsewhere_is_not_charged_a_miss() {
+        let theirs = |version: u32, network: NetworkId| {
+            Message::Welcome(Handshake {
+                version,
+                network,
+                genesis: Hash32::ZERO,
+                tip: Hash32::ZERO,
+                height: 0,
+                total_work: 0,
+                listen: 9_944,
+                nonce: 7,
+                keeps: Keeps::default(),
+            })
+        };
+        let ours = ConsensusParams::testnet().network;
+        let answers = [
+            (
+                "a newer protocol version",
+                theirs(PROTOCOL_VERSION + 1, ours),
+            ),
+            (
+                "another network",
+                theirs(PROTOCOL_VERSION, NetworkId::DEVNET),
+            ),
+        ];
+        for (port, (from, answer)) in (9_960..).zip(answers) {
+            let node = quiet();
+            let dialled = on_its_last_chance(&node, port);
+            let mut line = Line::open(node, Some(dialled));
+            line.send(&answer);
+            let ended = line.ends();
+            let node = line.close();
+            assert!(ended, "a peer from {from} was kept");
+            assert!(
+                node.shared.book().contains(&dialled),
+                "an address that answered from {from} was counted as a dial that came to \
+                 nothing, and dropped on its third"
+            );
+        }
+    }
+
+    /// A dialled address that took the connection and shut it before saying a
+    /// word is not taken for one that is gone.
+    ///
+    /// That is what a node with no room does, and a refused dial and a dead
+    /// machine look the same from here only when nothing answered at all.
+    /// Here something did: the connection was taken. Booked as a miss, a full
+    /// honest node left the book of everybody who tried it three times, in
+    /// about five minutes, while the strangers holding its slots stayed in
+    /// theirs. Nothing dialled a node that shut the door, so that passed.
+    #[test]
+    fn a_dialled_address_that_shut_the_door_at_once_is_not_charged_a_miss() {
+        let node = quiet();
+        let dialled = on_its_last_chance(&node, 9_970);
+        let line = Line::open(node, Some(dialled));
+        let _ = line.far.shutdown(Shutdown::Write);
+        let ended = line.ends();
+        let node = line.close();
+        assert!(ended, "a connection shut at the far end was kept");
+        assert!(
+            node.shared.book().contains(&dialled),
+            "an address that took the connection and shut it was counted as gone, and \
+             dropped on its third such dial"
+        );
+    }
+
+    /// How a connection ended decides what is held against its host and what
+    /// its address is written down as, one fact at a time.
+    ///
+    /// The read loop gathers the facts and the two questions are asked of
+    /// them afterwards. Every connection a test can open here comes from the
+    /// loopback, which is never refused, so without asking these directly a
+    /// node that refused nobody, or everybody, passed.
+    #[test]
+    fn a_parting_is_judged_on_what_happened_and_nothing_else() {
+        let shut = || WireError::Io(io::Error::from(io::ErrorKind::UnexpectedEof));
+        let parting = |flooded, said_anything, failure, dropped| Parting {
+            flooded,
+            said_anything,
+            failure,
+            dropped,
+        };
+        let quiet = parting(false, true, None, None);
+        assert!(!quiet.misbehaved(), "a peer that did nothing was refused");
+        assert!(
+            parting(true, true, None, None).misbehaved(),
+            "a flood was not held against the host"
+        );
+        assert!(
+            parting(
+                false,
+                true,
+                Some(WireError::FrameTooLarge {
+                    declared: 9,
+                    limit: 1
+                }),
+                None
+            )
+            .misbehaved(),
+            "a frame the peer wrote badly was not held against the host"
+        );
+        assert!(
+            !parting(false, true, Some(shut()), None).misbehaved(),
+            "a connection that closed was held against the host"
+        );
+        assert!(
+            parting(false, true, None, Some(DropReason::RepeatedHandshake)).misbehaved(),
+            "a second introduction was not held against the host"
+        );
+        assert!(
+            !parting(
+                false,
+                true,
+                None,
+                Some(DropReason::WrongVersion { theirs: 9 })
+            )
+            .misbehaved(),
+            "a peer on another version was held against the host"
+        );
+
+        let elsewhere = parting(
+            false,
+            true,
+            None,
+            Some(DropReason::WrongVersion { theirs: 9 }),
+        );
+        assert_eq!(elsewhere.reached(true), Reached::Greeted);
+        assert_eq!(elsewhere.reached(false), Reached::Elsewhere);
+        assert_eq!(
+            parting(false, true, None, Some(DropReason::RepeatedHandshake)).reached(false),
+            Reached::Nothing,
+            "a peer that misbehaved was taken for one from elsewhere"
+        );
+        assert_eq!(
+            parting(false, false, Some(shut()), None).reached(false),
+            Reached::TurnedAway
+        );
+        assert_eq!(
+            parting(false, true, Some(shut()), None).reached(false),
+            Reached::Nothing,
+            "a peer that spoke, never introduced itself and left was taken for a node with \
+             no room"
+        );
+        assert_eq!(
+            parting(
+                false,
+                false,
+                Some(WireError::Stalled { had: 1, wanted: 2 }),
+                None
+            )
+            .reached(false),
+            Reached::Nothing,
+            "a stalled frame was taken for a node with no room"
+        );
+        assert_eq!(
+            parting(false, false, None, None).reached(false),
+            Reached::Nothing,
+            "silence was taken for a node with no room"
         );
     }
 
