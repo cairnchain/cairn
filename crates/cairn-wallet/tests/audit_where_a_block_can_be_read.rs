@@ -17,10 +17,10 @@
 //! without it "a block dropped off the bottom and a block not yet written look
 //! the same", which is the same defect the explorer's index had.
 //!
-//! Two ordinary things make an account start over: a reorganisation, which is
-//! the whole of `History::forget`, and an account file that would not read
-//! back, which `cairnd` prints a line about saying the balance beside it
-//! becomes right on its own. Neither did.
+//! Two things make an account start over: a reorganisation below every block
+//! it remembers, which is `History::forget`, and an account file that would
+//! not read back, which `cairnd` prints a line about saying the balance beside
+//! it becomes right on its own. Neither did.
 
 #![allow(
     clippy::unwrap_used,

@@ -626,7 +626,7 @@ fn a_reorganisation_says_what_it_undid() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
-/// CLAIM UNDER TEST: `History::diverged` notices a branch that was undone.
+/// CLAIM UNDER TEST: `History::fork` notices a branch that was undone.
 ///
 /// What used to happen: it asked about one height, the newest block it had
 /// read, and read `None` there as "the wallet cannot see that far" rather than
@@ -641,12 +641,12 @@ fn a_branch_that_wins_while_ending_lower_is_noticed() {
     use cairn_wallet::history::History;
 
     let mine = SecretKey::from_bytes(&[28; 32]).public_key();
-    let block = |height: u64, nonce: u64| Block {
+    let block = |height: u64, nonce: u64, previous: Hash32| Block {
         header: BlockHeader {
             version: 1,
             network: NetworkId::TESTNET,
             height,
-            previous: Hash32::ZERO,
+            previous,
             state_root: Hash32::ZERO,
             transactions_root: Hash32::ZERO,
             history: Hash32::ZERO,
@@ -662,7 +662,7 @@ fn a_branch_that_wins_while_ending_lower_is_noticed() {
     let mut history = History::new();
     let mut read = Vec::new();
     for height in 0..5 {
-        let block = block(height, 0);
+        let block = block(height, 0, read.last().copied().unwrap_or(Hash32::ZERO));
         read.push(block.id());
         history.take(&block, mine);
     }
@@ -672,24 +672,29 @@ fn a_branch_that_wins_while_ending_lower_is_noticed() {
     // The chain now ends at height 2, and every block on it above the fork is
     // a different one. Everything this history holds above height 2 describes
     // blocks nobody has.
-    let rival: Vec<Hash32> = (0..3).map(|height| block(height, 9).id()).collect();
+    let rival: Vec<Hash32> = (0..3)
+        .map(|height| block(height, 9, Hash32::ZERO).id())
+        .collect();
     assert_ne!(rival[2], read[2], "the branch really did change");
 
     assert!(
-        history.diverged(Some(2), |height| {
-            usize::try_from(height)
-                .ok()
-                .and_then(|at| rival.get(at))
-                .copied()
-        }),
+        history
+            .fork(Some(2), |height| {
+                usize::try_from(height)
+                    .ok()
+                    .and_then(|at| rival.get(at))
+                    .copied()
+            })
+            .is_some(),
         "the chain stops below what this read, so what it read is gone"
     );
 
-    // And a block the wallet merely dropped for age is still not a divergence,
-    // which is the case the old reading got right and is worth keeping.
+    // And a height the chain cannot say anything about is still not a
+    // divergence, which is the case the old reading got right and is worth
+    // keeping.
     assert!(
-        !history.diverged(Some(9), |_| None),
-        "a block that was dropped is not a block that changed"
+        history.fork(Some(9), |_| None).is_none(),
+        "a block the chain cannot answer for is not a block that changed"
     );
 
     history.forget(None);

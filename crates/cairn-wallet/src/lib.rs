@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::history::{Discarded, History, Movement};
+use crate::history::{Discarded, Fork, History, Movement};
 use crate::pending::{Handed, Pending};
 use cairn_accumulator::ForestProof;
 use cairn_chain::{ChainStore, Outdated};
@@ -1580,17 +1580,31 @@ impl Wallet {
         // branch that was undone leaves this history describing blocks nobody
         // has any more, and reading on from there would stack the winning
         // branch on top of the losing one.
-        if history.diverged(Some(tip), |height| {
-            self.node.archived_at(height).map(|block| block.id())
-        }) {
-            // How deep a switch this node will follow, which is the rule its
-            // own `follow` enforces and so a ceiling on what a reorganisation
-            // can have taken away. Everything paid below it is settled, and
-            // what the account keeps of it is set out on `History::forget`.
-            let reach = self.node.with_chain(cairn_chain::ChainStore::undo_limit);
-            let settled_below = tip.checked_sub(reach);
-            history.forget(settled_below);
-            self.write_history(&history);
+        //
+        // Asked of the chain's own identifiers, which the node holds in memory
+        // for every height a switch can reach and keeps in its header log
+        // below that. It used to be asked of the block log: a read and a
+        // decode of the newest block on every look, four times a page view,
+        // to learn thirty two bytes, and a log the node trims from the front,
+        // so a block replaced and then trimmed away read as unchanged.
+        match history.fork(Some(tip), |height| self.node.id_at(height)) {
+            None => {}
+            Some(Fork::At(fork)) => {
+                history.rewind_to(fork);
+                self.write_history(&history);
+            }
+            Some(Fork::Deeper) => {
+                // Below every block the account remembers, which one switch
+                // cannot reach: an account written before it remembered more
+                // than its newest block, or one that had to let go of its
+                // oldest. The line is how deep a switch this node will follow
+                // from the tip as it stands, and what the account keeps below
+                // it is set out on `History::forget`.
+                let reach = self.node.with_chain(cairn_chain::ChainStore::undo_limit);
+                let settled_below = tip.checked_sub(reach);
+                history.forget(settled_below);
+                self.write_history(&history);
+            }
         }
 
         let mut taken = 0usize;
@@ -1626,7 +1640,11 @@ impl Wallet {
                 }
                 continue;
             };
-            history.take(&block, mine);
+            if !history.take(&block, mine) {
+                // Not built on the block read before it: the chain switched
+                // since this call looked. The next call finds where.
+                break;
+            }
             taken = taken.saturating_add(1);
         }
 
