@@ -586,6 +586,22 @@ pub struct Waiting {
     pub committed: Amount,
 }
 
+/// An account this wallet had written down and did not read back, and where
+/// it went.
+///
+/// Moved before anything could save over it. What it holds is the only record
+/// of where this key's fallen notes sit, and every reason a file fails to read
+/// back leaves it worth having: the version that wrote it reads it, the fault
+/// that stopped it opening can be mended, or somebody wants to see what the
+/// disk did to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SetAside {
+    /// Why it was not read back.
+    pub why: Discarded,
+    /// Where it is now, under a name nothing writes to.
+    pub kept_as: PathBuf,
+}
+
 /// Where this wallet's node has got to.
 #[derive(Clone, Debug)]
 pub struct Progress {
@@ -659,12 +675,14 @@ pub struct Progress {
     /// oldest block its node still holds.
     pub keeping_its_account: bool,
     /// Why the account this wallet had written down was not read back, if it
-    /// was there and was not used.
+    /// was there and was not used, and where it was put.
     ///
     /// Set once at start and left set, because what it costs does not go away
     /// when the rescan catches up: the movements below where the reading
-    /// restarts are gone whatever the height says afterwards.
-    pub lost_its_account: Option<Discarded>,
+    /// restarts, and the places of the notes that fell before it, are missing
+    /// whatever the height says afterwards, until that file or a backup is
+    /// put back.
+    pub lost_its_account: Option<SetAside>,
 }
 
 /// The line for a wallet whose machine's clock is behind the network's.
@@ -704,8 +722,8 @@ fn clock_is_slow(behind: &Behind) -> String {
 /// thing they must not do is share a vague one: an operator told their disk is
 /// suspect looks at hardware, and one told their wallet is a version behind
 /// looks at the version.
-fn lost_its_account(why: Discarded) -> String {
-    let because = match why {
+fn lost_its_account(lost: &SetAside) -> String {
+    let because = match lost.why {
         Discarded::BeforeTheStamp => {
             "It was written by an older version of this wallet, which did not stamp \
              the file, and this one only reads back a file it can tell is the one it \
@@ -717,22 +735,26 @@ fn lost_its_account(why: Discarded) -> String {
         }
         Discarded::FromANewerVersion => {
             "It was written by a newer version of this wallet and holds things this \
-             one has no reader for. The file is whole and your disk is fine. Going \
-             back to the newer version reads it again."
+             one has no reader for. The file is whole and your disk is fine, and the \
+             newer version reads it again if it is put back as history.dat."
         }
         Discarded::WouldNotOpen => {
             "It is there and would not open, so nothing here has read a byte of it: a \
              permission this wallet does not have, a disk that would not answer, or a \
-             name something else has taken. This is worth looking into before the next \
-             save writes over it."
+             name something else has taken. This is worth looking into."
         }
     };
     format!(
-        "This wallet did not read back the account it had written down. {because} It is \
-         reading the chain again to rebuild it, so the balance beside this becomes right \
-         on its own. What does not come back is the list of payments older than the \
-         oldest block your node still holds. Nothing is lost on the chain and the key \
-         file is not touched."
+        "This wallet did not read back the account it had written down. {because} It has \
+         been moved aside, to {}, and nothing will write over it. This wallet is reading \
+         the chain again from the oldest block its node still holds. Money this key was \
+         paid that had fallen out of the set every node holds long before that block is \
+         not counted in the balance beside this, and this wallet cannot find it on its \
+         own: where it fell was written down only in that account. A backup of \
+         history.dat finds it again: close the wallet, put the backup in its data \
+         directory, and start it again. Nothing is lost on the chain and the key file is \
+         not touched.",
+        lost.kept_as.display()
     )
 }
 
@@ -752,10 +774,12 @@ impl Progress {
     /// the one that means the number is not this wallet's own reading at all,
     /// and then the one that means it is this wallet's reading of a chain the
     /// network has left. Then the ones that mean the number is right and
-    /// something else is at
-    /// risk, and last the account this wallet lost, because that balance is
-    /// right and becomes right again on its own, and what it costs is a record
-    /// rather than money.
+    /// something else is at risk, and last the two about this wallet's own
+    /// account. Those can mean money missing from the number, which by that
+    /// ranking would put them higher. They stay last because each can sit
+    /// there a long time, the lost account's for the whole run, and above the
+    /// others it would hide a full disk or a slow clock, each mended by doing
+    /// something now, for as long as it sat there.
     ///
     /// Probation used to be last of all, under three lines that say in as many
     /// words that the balance is right. It is set whenever the node under this
@@ -775,9 +799,11 @@ impl Progress {
                 "This wallet was handed the ledger at block {}, and had to check its own way to \
                  block {} before it could stand behind it. The blocks in between never arrived, \
                  and it holds nothing below block {}, so there is no other way to reach them. \
-                 The balance shown is not one this wallet has checked. Delete this wallet's data \
-                 directory and start it again from a peer you trust; the key file is a separate \
-                 file and is not touched by that.",
+                 The balance shown is not one this wallet has checked. Close this wallet, delete \
+                 everything in its data directory except history.dat, which is its own account \
+                 of this key and the only record of where its fallen notes sit, and start it \
+                 again from a peer you trust. The key file is a separate file and is not \
+                 touched by that.",
                 stranded.anchor, stranded.settles_at, stranded.anchor
             ));
         }
@@ -855,15 +881,17 @@ impl Progress {
         if !self.keeping_its_account {
             return Some(
                 "This wallet cannot write down its own account of what you have been \
-                 paid. The balance beside this is still right, and it is being kept in \
-                 memory only: if the wallet is closed it will have to read its way back \
-                 through the chain, and anything older than the blocks your node still \
-                 keeps will be gone. The usual cause is a disk with nothing left on it."
+                 paid. The balance beside this is still right, and what this wallet has \
+                 learned since the file was last written is kept in memory only: if the \
+                 wallet is closed before this is mended, that is gone, including where \
+                 any note of this key fell out of the set every node holds in that time, \
+                 which is money this wallet then cannot find on its own. The usual cause \
+                 is a disk with nothing left on it."
                     .to_owned(),
             );
         }
-        if let Some(why) = self.lost_its_account {
-            return Some(lost_its_account(why));
+        if let Some(lost) = &self.lost_its_account {
+            return Some(lost_its_account(lost));
         }
         None
     }
@@ -957,6 +985,8 @@ fn current(
 }
 
 /// What the history is written to, inside the wallet's own directory.
+///
+/// Half of a wallet's backup: [`keyfile::back_up`] copies it with the key.
 const HISTORY_FILE: &str = "history.dat";
 
 /// How long a wallet waits for somebody to rebuild the paths it is missing.
@@ -1028,8 +1058,9 @@ pub struct Wallet {
     history_file: PathBuf,
     /// Whether the last attempt to write it down worked.
     wrote_history: Mutex<bool>,
-    /// Why the account on disk was not read back at start, if it was not.
-    lost_its_account: Option<Discarded>,
+    /// Why the account on disk was not read back at start, if it was not, and
+    /// where it was moved.
+    lost_its_account: Option<SetAside>,
     /// Paths somebody else rebuilt, for notes this wallet's node cannot place.
     ///
     /// Held here rather than handed to the node, because the node has no way
@@ -1128,7 +1159,28 @@ impl Wallet {
         let (node, restored) = Node::open_watching(params, listen, data, &[mine])
             .map_err(|error| WalletError::CouldNotStart(error.to_string()))?;
         let history_file = data.join(HISTORY_FILE);
-        let (history, lost_its_account) = History::load(&history_file);
+        let (history, discarded) = History::load(&history_file);
+        // Before anything can save, since a save renames a new account over
+        // this name. A file that did not read back is the only record of where
+        // this key's fallen notes sit, and it is moved, never written over.
+        // One that cannot even be moved stops the wallet here, which is the
+        // one way left of not writing over it.
+        let lost_its_account = discarded
+            .map(|why| {
+                History::set_aside(&history_file)
+                    .map(|kept_as| SetAside { why, kept_as })
+                    .map_err(|error| {
+                        WalletError::CouldNotStart(format!(
+                            "{} did not read back, and moving it aside to keep it did not \
+                             finish: {error}. This wallet has not started, so nothing has \
+                             written over it: it is under that name, or beside it with \
+                             .unread- and a number after it. Move it somewhere safe and start \
+                             the wallet again.",
+                            history_file.display()
+                        ))
+                    })
+            })
+            .transpose()?;
         Ok((
             Self {
                 node,
@@ -1254,7 +1306,7 @@ impl Wallet {
                 .wrote_history
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
-            lost_its_account: self.lost_its_account,
+            lost_its_account: self.lost_its_account.clone(),
         }
     }
 
@@ -3206,7 +3258,10 @@ mod tests {
         ];
         for (why, own) in cases {
             let said = Progress {
-                lost_its_account: Some(why),
+                lost_its_account: Some(super::SetAside {
+                    why,
+                    kept_as: std::path::PathBuf::from("data/history.dat.unread-1"),
+                }),
                 ..healthy()
             }
             .warning()
@@ -3225,6 +3280,15 @@ mod tests {
             assert!(
                 said.contains("the key file is not touched"),
                 "{why:?} did not say the key is safe"
+            );
+            assert!(
+                said.contains("data/history.dat.unread-1"),
+                "{why:?} did not say where the account it could not read went"
+            );
+            assert!(
+                !said.contains("becomes right"),
+                "{why:?} promised a balance that is missing every note fallen before \
+                 the oldest block the node holds"
             );
         }
     }

@@ -192,3 +192,119 @@ fn a_link_file_left_widened_is_narrowed_again_before_the_token_goes_back_in() {
 
     let _ = std::fs::remove_dir_all(&data);
 }
+
+/// The link is never written through a symbolic link standing at its name.
+///
+/// The file was opened in place, which follows a link, so a link planted in
+/// the data directory, or brought back by a restore, named the file the
+/// spending token went into, wherever that was and whoever could read it.
+/// Every test here cleared the directory first, so the file was always
+/// created new and a link at its name was never met.
+#[cfg(unix)]
+#[test]
+fn the_link_is_never_written_through_a_symbolic_link_at_its_name() {
+    let data = scratch("planted");
+    let elsewhere = scratch("planted-target").join("readable-by-others");
+    std::fs::write(&elsewhere, b"").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, data.join("open-this-page")).unwrap();
+
+    let link = opened().hand_over(&data, false).unwrap();
+
+    assert!(
+        !std::fs::read_to_string(&elsewhere)
+            .unwrap()
+            .contains(SECRET),
+        "the spending token was written through a symbolic link the wallet did not make"
+    );
+    let Link::Written(path) = link else {
+        panic!("a redirected stdout was handed the address itself")
+    };
+    assert!(
+        std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_file(),
+        "what the operator is told to open is not a file the wallet made"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), opened().url());
+    let _ = std::fs::remove_dir_all(&data);
+    let _ = std::fs::remove_dir_all(elsewhere.parent().unwrap());
+}
+
+/// A link at the link file's name cannot empty the key file.
+///
+/// The file was truncated as it was opened, so whatever a planted link named
+/// was emptied and refilled with the page's address. Named at the key, the
+/// running wallet noticed nothing, since the key was already in memory, and
+/// the next start found an address where the key had been.
+#[cfg(unix)]
+#[test]
+fn a_link_at_the_link_file_s_name_cannot_empty_the_key_file() {
+    let data = scratch("at-the-key");
+    let keys = scratch("at-the-key-keys");
+    let key_file = keys.join("alice.key");
+    let secret = cairn_crypto::SecretKey::from_bytes(&[7; 32]);
+    cairn_wallet::keyfile::write(&key_file, &secret).unwrap();
+    std::os::unix::fs::symlink(&key_file, data.join("open-this-page")).unwrap();
+
+    opened().hand_over(&data, false).unwrap();
+
+    assert!(
+        cairn_wallet::keyfile::read(&key_file)
+            .is_ok_and(|read| read.public_key() == secret.public_key()),
+        "the key file was written over through a link named open-this-page"
+    );
+    let _ = std::fs::remove_dir_all(&data);
+    let _ = std::fs::remove_dir_all(&keys);
+}
+
+/// A link file an earlier run left is taken away when this run hands its
+/// address to a terminal.
+///
+/// Only a wallet that closed cleanly took its file away, so after a wallet
+/// stopped any other way, and then run again on a terminal, the data
+/// directory went on holding an address to a page that was not there.
+#[test]
+fn a_link_an_earlier_run_left_is_taken_away_when_the_address_goes_to_a_terminal() {
+    let data = scratch("stale");
+    std::fs::write(data.join("open-this-page"), "http://127.0.0.1:1/?k=older").unwrap();
+
+    let link = opened().hand_over(&data, true).unwrap();
+
+    assert_eq!(link, Link::Shown(opened().url()));
+    assert!(
+        !data.join("open-this-page").exists(),
+        "a link to a page that is gone was left beside a wallet that is running"
+    );
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// Printing the page, or where its address went, does not print the token.
+///
+/// `SecretKey` and `Wallet` write their own `Debug` so that a key cannot reach
+/// a log through a derived formatter. The token is the other thing here that
+/// spends money, and both types that carry it took the derive, so a `{:?}` in
+/// an error or a panic would have written it into the journal `hand_over`
+/// keeps it out of. Nothing formatted either type.
+#[test]
+fn printing_the_page_or_its_link_does_not_print_the_token() {
+    let page = opened();
+    assert!(
+        !format!("{page:?}").contains(SECRET),
+        "the page prints the token that spends the wallet"
+    );
+    assert!(
+        format!("{page:?}").contains("127.0.0.1:8712"),
+        "and it still says where it is"
+    );
+    let shown = Link::Shown(page.url());
+    assert!(
+        !format!("{shown:?}").contains(SECRET),
+        "the address handed to a terminal prints the token"
+    );
+    let written = Link::Written(PathBuf::from("data/open-this-page"));
+    assert!(
+        format!("{written:?}").contains("open-this-page"),
+        "the path the address was written to is not a secret and is printed"
+    );
+}

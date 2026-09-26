@@ -1314,7 +1314,10 @@ fn a_wallet_that_has_not_checked_its_chain_says_so_before_anything_smaller() {
     );
 
     let lost_account = progress(|progress| {
-        progress.lost_its_account = Some(cairn_wallet::history::Discarded::BeforeTheStamp);
+        progress.lost_its_account = Some(cairn_wallet::SetAside {
+            why: cairn_wallet::history::Discarded::BeforeTheStamp,
+            kept_as: std::path::PathBuf::from("history.dat.unread-1"),
+        });
     });
     assert!(
         lost_account.contains(unchecked),
@@ -1332,7 +1335,7 @@ fn a_wallet_that_has_not_checked_its_chain_says_so_before_anything_smaller() {
         });
     });
     assert!(
-        stranded.contains("Delete this wallet's data directory"),
+        stranded.contains("delete everything in its data directory except history.dat"),
         "a stranded wallet was told to wait: {stranded}"
     );
 }

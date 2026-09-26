@@ -40,19 +40,43 @@ const NOTES_SHOWN: usize = 200;
 const MOVEMENTS_SHOWN: usize = 100;
 
 /// A running wallet page.
-#[derive(Debug)]
 pub struct Opened {
     pub address: SocketAddr,
     pub secret: String,
 }
 
+/// Written by hand, as `SecretKey`'s and `Wallet`'s are, and for the same
+/// reason: the secret spends the wallet, a token that reached a log or a
+/// panic message is one that is gone, and the derive that would have put it
+/// there is one line. `hand_over` keeps it out of whatever reads stdout; this
+/// keeps it out of whatever reads a `{:?}`.
+impl std::fmt::Debug for Opened {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Opened")
+            .field("address", &self.address)
+            .field("secret", &"<withheld>")
+            .finish()
+    }
+}
+
 /// Where the link to a running page was handed over.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Link {
     /// The address itself, for an operator who is looking at a terminal.
     Shown(String),
     /// A file holding it, for a stdout that is not one.
     Written(PathBuf),
+}
+
+/// By hand, for the reason `Opened`'s is: the address shown carries the
+/// secret. The path it was written to does not, and is said.
+impl std::fmt::Debug for Link {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Shown(_) => f.write_str("Shown(<address withheld>)"),
+            Self::Written(path) => f.debug_tuple("Written").field(path).finish(),
+        }
+    }
 }
 
 /// What the file is called, in the wallet's own directory.
@@ -84,8 +108,13 @@ impl Opened {
     /// The token dies with the process either way. What this changes is how
     /// long a copy of it lasts and who can reach that copy, not how long it
     /// works.
+    ///
+    /// A link file already in the data directory is from a run that stopped
+    /// without closing, and names a page that is not there. It goes either
+    /// way: written over by the route below, taken away by this one.
     pub fn hand_over(&self, data: &Path, to_a_terminal: bool) -> Result<Link, String> {
         if to_a_terminal {
+            Self::let_the_link_go(data);
             return Ok(Link::Shown(self.url()));
         }
         let path = data.join(LINK_FILE);
@@ -94,11 +123,12 @@ impl Opened {
         Ok(Link::Written(path))
     }
 
-    /// Takes the file back out, for a wallet that is closing.
+    /// Takes the file back out, for a wallet that is closing or one that is
+    /// handing its address to a terminal instead.
     ///
     /// A link that no longer works is worth nothing to anybody, so this is
     /// tidiness rather than safety: what it prevents is an operator opening a
-    /// stale file on the next run and finding a page that is not there.
+    /// stale file and finding a page that is not there.
     pub fn let_the_link_go(data: &Path) {
         let _ = std::fs::remove_file(data.join(LINK_FILE));
     }
@@ -106,36 +136,26 @@ impl Opened {
 
 /// Writes a file the owner can read and nobody else can.
 ///
-/// The mode is asked for on the way in and set again afterwards, because a
+/// The file holds the address the page is served at, and that address carries
+/// the token that spends the wallet. It was opened in place, twice wrongly. A
 /// mode given to `open` applies to a file being created and not to one that is
-/// already there. This said the opposite, and it was wrong in the one way that
-/// matters here: the file it writes holds the address the page is served at,
-/// and that address carries the token that spends the wallet. A link file left
-/// from an earlier run and widened since, by a restore, a copy off a stick, or
-/// a `chmod -R` over the data directory, kept whatever it had been widened to
-/// and the token went back into it at that mode.
+/// already there, so a link file left from an earlier run and widened since,
+/// by a restore, a copy off a stick, or a `chmod -R` over the data directory,
+/// took the token back in at the mode it had been widened to. And opening in
+/// place follows a symbolic link at the name, so a link planted in the data
+/// directory, or brought back by a restore, chose where the token went, and
+/// emptied that file first: pointed at the key file, it put a page address
+/// where the key had been.
 ///
-/// The account file learned this and had the reasoning written down beside it;
-/// the link file, which is the one holding a spending token, did not.
-///
-/// Windows has no mode to set and the file takes the directory's own access
-/// control, which is where the wallet already keeps its keys.
+/// So the file is made new each time, with whatever stood at its name taken
+/// away first, by the one helper the account's own partial file is made by;
+/// `keyfile::create_anew` has the reasoning. Windows has no mode to set and
+/// the file takes the directory's own access control, which is where the
+/// wallet already keeps its keys.
 fn write_for_the_owner(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
 
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
+    let mut file = crate::keyfile::create_anew(path)?;
     file.write_all(bytes)
 }
 

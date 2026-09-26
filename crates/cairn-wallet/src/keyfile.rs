@@ -28,7 +28,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use cairn_crypto::SecretKey;
 use zeroize::Zeroizing;
@@ -168,7 +168,7 @@ pub const fn what_was_not_checked() -> Option<&'static str> {
 pub fn write(path: &Path, secret: &SecretKey) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
+            make_private_directory(parent)
                 .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
         }
     }
@@ -213,6 +213,100 @@ pub fn write(path: &Path, secret: &SecretKey) -> Result<(), String> {
     Ok(())
 }
 
+/// Where a backup put the two files a wallet is made of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackedUp {
+    /// The copy of the key file.
+    pub key: PathBuf,
+    /// The copy of the account.
+    pub account: PathBuf,
+}
+
+/// Copies a key file and the account beside it into one directory, together.
+///
+/// A wallet is two files and they live apart: the key wherever its owner put
+/// it, the account in the data directory. The key spends the money. The
+/// account is the only record of where a note that has fallen out of the set
+/// every node holds now sits, and without it that money cannot be found by
+/// this wallet, by an archivist or by anybody, because the set is a list of
+/// hashes with no owner attached. A restore from the key alone finds only
+/// what is still in the set every node holds, so a backup is both files or
+/// it is not a backup, and a key with no account beside it is refused rather
+/// than copied on its own.
+///
+/// Neither copy is ever written over, and both names are checked before
+/// either is written, so a refusal leaves nothing behind: in particular no
+/// copy of the key, written and then removed, in the free space of a memory
+/// stick. The key is read the way the wallet reads it, so what is copied is a
+/// key and a private one, and it is written the way `new` writes one. A
+/// directory this makes is its owner's alone; one already there is left as
+/// its owner set it.
+pub fn back_up(key: &Path, data: &Path, into: &Path) -> Result<BackedUp, String> {
+    let secret = read(key)?;
+    let account = data.join(crate::HISTORY_FILE);
+    let held = match std::fs::read(&account) {
+        Ok(held) => held,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "{} holds no {}, which is the account this wallet starts the first time it \
+                 reads the chain. A key without it is half of a backup, so nothing was copied. \
+                 Run the wallet with this --data first (`cairn-wallet balance` does), then back \
+                 up.",
+                data.display(),
+                crate::HISTORY_FILE
+            ))
+        }
+        Err(error) => return Err(format!("could not read {}: {error}", account.display())),
+    };
+    let named = key
+        .file_name()
+        .ok_or_else(|| format!("{} does not name a file", key.display()))?;
+    let copies = BackedUp {
+        key: into.join(named),
+        account: into.join(crate::HISTORY_FILE),
+    };
+    for copy in [&copies.key, &copies.account] {
+        if std::fs::symlink_metadata(copy).is_ok() {
+            return Err(format!(
+                "{} is already there, and a backup never writes over a file: the copy it \
+                 would replace is the one you would need if this one went wrong. Name a \
+                 directory that holds neither file.",
+                copy.display()
+            ));
+        }
+    }
+    make_private_directory(into)
+        .map_err(|error| format!("could not create {}: {error}", into.display()))?;
+    write(&copies.key, &secret)?;
+    if let Err(error) = write_private(&copies.account, &held) {
+        // The key copy is this call's own, made a moment ago, and a key with
+        // no account beside it is the half backup this refuses to leave.
+        let _ = std::fs::remove_file(&copies.key);
+        return Err(format!(
+            "could not write {}: {error}. Nothing was left behind.",
+            copies.account.display()
+        ));
+    }
+    Ok(copies)
+}
+
+/// Writes bytes that are nobody else's business to a file made new for them,
+/// and makes them durable.
+///
+/// A file this made and could not finish is taken away again; one that was
+/// already at the name is not touched, because the call that creates the file
+/// refuses it.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut file = create_private(path)?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    if written.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    written?;
+    sync_the_directory(path)
+}
+
 /// What to say about a key file that is already where one was asked for.
 ///
 /// An empty one is the case worth telling apart. That is what a write cut off
@@ -255,7 +349,7 @@ fn whitespace_only(path: &Path) -> bool {
 /// directory as a file, so there it is left as it is, which is the same
 /// position `cairn-store` records for the same reason.
 #[cfg(unix)]
-fn sync_the_directory(path: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_the_directory(path: &Path) -> std::io::Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty());
@@ -267,8 +361,51 @@ fn sync_the_directory(path: &Path) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 #[allow(clippy::unnecessary_wraps)]
-fn sync_the_directory(_path: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_the_directory(_path: &Path) -> std::io::Result<()> {
     Ok(())
+}
+
+/// Makes a directory, and any above it that are missing, readable by its
+/// owner alone.
+///
+/// One already there is left as it is: its mode was somebody's choice. One
+/// this program makes is this program's choice, and a directory made at the
+/// umask to hold a key tells every account on the machine that this one holds
+/// a wallet, and what its file is called. Where there is no mode to ask for,
+/// the directory takes the access control of the one it is made in, as a key
+/// file does.
+fn make_private_directory(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+
+/// Makes a file new at `path`, private to its owner, taking away whatever
+/// stood at that name first.
+///
+/// For the two files this wallet writes again every run beside the chain: the
+/// account's partial file and the page's link. Both were opened in place,
+/// which follows a symbolic link standing at the name, and truncated, which
+/// empties whatever the link names. A link planted in the data directory, or
+/// brought back by a restore, chose the file the account or the spending token
+/// went into and emptied it first, the key file included.
+///
+/// So the name is cleared, and the file is made by the call that refuses one
+/// already there, which a link planted in between is. The mode comes from that
+/// same call, as the key file's does, so there is no file left from an earlier
+/// run to carry a mode it was widened to in the meantime.
+pub(crate) fn create_anew(path: &Path) -> std::io::Result<std::fs::File> {
+    if let Err(error) = std::fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(error);
+        }
+    }
+    create_private(path)
 }
 
 /// The key as the file spells it, in a buffer that wipes itself on the way out.
@@ -483,6 +620,30 @@ mod tests {
         // otherwise widen it has nothing to widen.
         let contents = std::fs::read_to_string(&path).unwrap();
         assert_eq!(contents.trim().len(), 64, "and it still holds the key");
+    }
+
+    /// A directory made to hold a key is its owner's alone.
+    ///
+    /// It was made at the umask, `0755` on most machines, so
+    /// `cairn-wallet new ~/wallets/alice.key` told every account on the machine
+    /// that this one holds a Cairn wallet and what its file is called. The key
+    /// inside was private, and nothing asked about the directory around it.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_made_to_hold_a_key_is_its_owner_s_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let top = scratch("directory");
+        let wallets = top.join("wallets");
+        let path = wallets.join("alice").join("key");
+        write(&path, &SecretKey::from_bytes(&[8; 32])).unwrap();
+        for made in [wallets.clone(), wallets.join("alice")] {
+            let mode = std::fs::metadata(&made).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o700,
+                "a directory made to hold a key is open to other accounts"
+            );
+        }
     }
 
     /// A key file named without a directory is made durable in the directory
