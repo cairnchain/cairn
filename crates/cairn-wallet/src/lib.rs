@@ -2733,9 +2733,15 @@ mod tests {
             ..healthy
         };
         let said = on_probation.warning().unwrap();
-        assert!(said.contains("900"), "{said}");
-        assert!(said.contains("40 of the 100"), "{said}");
-        assert!(said.contains("has not yet checked"), "{said}");
+        assert!(said.contains("900"), "the warning does not name the anchor");
+        assert!(
+            said.contains("40 of the 100"),
+            "the warning does not say how far the check has come"
+        );
+        assert!(
+            said.contains("has not yet checked"),
+            "the warning does not say the ledger is unchecked"
+        );
     }
 
     /// A wallet whose node stopped over a full disk is not told the blocks
