@@ -133,7 +133,13 @@ fn main() {
          node held the body of every block it might have to undo. It holds the\n\
          recent ones now and the headers of the rest, and reads a body back off\n\
          its own disk on the one occasion that needs it: a switch to another\n\
-         branch that fails partway and has to put this one back.",
+         branch that fails partway and has to put this one back.\n\
+         \n\
+         Beside every block in the window a node also keeps a record of what\n\
+         the block did and how to take it back. That is not printed here: it\n\
+         is counted from the structures by `cargo test -p cairn-explorer\n\
+         --test published_figures`, and on a chain of full blocks it is the\n\
+         largest thing a node holds, larger than the hot set.",
     );
 }
 

@@ -14,6 +14,9 @@ name = "cairn-explorer"
 path = "src/main.rs"
 
 [dependencies]
+# For what an archive holds a fallen note at, which `/api/status` serves. The
+# crate is linked already, through the ledger; this names it.
+cairn-accumulator.workspace = true
 cairn-chain.workspace = true
 cairn-crypto.workspace = true
 cairn-http.workspace = true
@@ -22,9 +25,6 @@ cairn-net.workspace = true
 cairn-primitives.workspace = true
 
 [dev-dependencies]
-# For `tests/published_figures.rs`, which takes a sampled weighing apart to
-# work out what one costs on a chain no test can mine to.
-cairn-accumulator.workspace = true
 # For `tests/answers.rs`, which damages a header log on purpose to put a node
 # in the one state where its disk grows with the chain.
 cairn-store.workspace = true

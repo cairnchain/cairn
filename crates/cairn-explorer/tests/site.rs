@@ -68,6 +68,9 @@ fn dependencies_of(crate_name: &str) -> Vec<String> {
         .1
         .lines()
         .take_while(|line| !line.starts_with('['))
+        // A comment is not a dependency, and a comment with a full stop in it
+        // was counted as one.
+        .filter(|line| !line.trim_start().starts_with('#'))
         .filter_map(|line| line.split_once('.'))
         .map(|(name, _)| name.to_owned())
         .filter(|name| !name.is_empty())

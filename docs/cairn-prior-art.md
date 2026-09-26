@@ -429,7 +429,7 @@ s'interdit.
       <tr>
         <td>Ce que coûte le témoin</td>
         <td>Une appartenance, plus une absence par période traversée : il s'allonge avec le sommeil</td>
-        <td>Une seule appartenance, 369 à 685 octets mesurés ; la durée du sommeil n'y change rien</td>
+        <td>Une seule appartenance, 263 à 586 octets mesurés ; la durée du sommeil n'y change rien</td>
       </tr>
       <tr>
         <td>Le retour d'absence</td>

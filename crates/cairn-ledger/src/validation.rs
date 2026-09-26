@@ -1474,6 +1474,16 @@ pub struct ConnectedBlock {
     pub undo: BlockUndo,
 }
 
+impl ConnectedBlock {
+    /// What a node holds for this block while it can still be undone, in
+    /// bytes of content: the transition and its inverse together.
+    pub fn bytes_held(&self) -> usize {
+        self.transition
+            .bytes_held()
+            .saturating_add(self.undo.bytes_held())
+    }
+}
+
 /// Checks everything about a header that does not need the block body.
 ///
 /// Split out from [`connect_block`] so that each half stays short enough to
@@ -1723,6 +1733,44 @@ pub fn disconnect_block(state: &mut LedgerState, connected: &ConnectedBlock) {
 mod tests {
     use super::*;
     use cairn_crypto::SecretKey;
+
+    /// What a node holds for a block it could still undo is the transition and
+    /// its inverse, both, and grows with what the block did.
+    ///
+    /// Nothing counted it, so the papers' total of what a node holds went
+    /// without its largest term on a busy chain.
+    #[test]
+    fn a_connected_block_holds_what_it_did_and_how_to_undo_it() {
+        let params = ConsensusParams::testnet();
+        let miner = SecretKey::from_bytes(&[5; 32]).public_key();
+        let mut state = LedgerState::new();
+        let mut held = Vec::new();
+        for outputs in [1usize, 3] {
+            let height = state.next_height().unwrap();
+            let each = Amount::from_pebbles(1_000).unwrap();
+            let coinbase = CoinbaseTransaction::new(height, vec![Note::new(each, miner); outputs]);
+            let block = assemble_block(
+                &state,
+                coinbase,
+                Vec::new(),
+                &params,
+                1_000 + height * 60,
+                0,
+            )
+            .unwrap();
+            let connected = connect_block(&mut state, &block, &params, u64::MAX / 2).unwrap();
+            assert_eq!(
+                connected.bytes_held(),
+                connected.transition.bytes_held() + connected.undo.bytes_held(),
+                "a connected block holds its transition and its undo record together"
+            );
+            held.push(connected.bytes_held());
+        }
+        assert!(
+            held[1] > held[0],
+            "a block that created more notes left a record no larger"
+        );
+    }
 
     /// The floor under a disk budget is the burial times the largest block.
     ///

@@ -59,8 +59,8 @@ The explorer always keeps the cold set, because answering questions about
 notes that have fallen is the whole point of it. That is a cost which grows
 with the chain, which is exactly what a plain node refuses to carry. The
 index it builds on top grows faster still: 627 bytes for every note that has
-ever existed, against 72 for every note that has fallen. Both are
-reported live at /api/status.";
+ever existed, against 104 for every note that has fallen and not been
+spent. Both are reported live at /api/status.";
 
 /// Everything the explorer needs to start.
 #[derive(Clone, Debug)]

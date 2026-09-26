@@ -249,22 +249,32 @@ What an archivist costs is a number that had never been written down,
 and it is worth writing down beside the claim it is the exception to.
 Measured over 3.2 million notes falling to the cold set, a plain node's
 ledger stays flat between 15 and 20 MB, from 319 000 notes to ten times
-that. An archiving node costs **exactly 64 bytes for every note that
-has ever fallen**: the note's leaf, and the one inner node that leaf
-completes, at thirty two bytes each. That is the size of the exception,
-and it is the price of being able to rebuild a proof for somebody who
-lost theirs.
+that. An archiving node costs **104 bytes for every fallen note still
+standing**: the note's leaf, the one inner node that leaf completes, at
+thirty two bytes each, and forty bytes saying where the leaf sits, so
+that finding a note is a lookup rather than a pass over the whole
+archive. A note that is spent keeps its two hashes and gives up its
+place in the index. That is the size of the exception, and it is the
+price of being able to rebuild a proof for somebody who lost theirs.
 
-That second figure is structural rather than measured, and saying which
-is the point. What an archive holds is 64 bytes a note and does not
+It is memory, and it is rebuilt: an archiving node holds the archive in
+the process rather than in a file, and reads the whole chain again at
+every start to put it back together. On a thirty year chain that is
+every block ever mined, read in order before the node answers anybody.
+
+That figure is structural rather than measured, and saying which is the
+point. What an archive holds is 104 bytes a standing note and does not
 vary. What a process holding one occupies is more and moves about: the
 hashes live in vectors that grow by doubling, so between two doublings a
 vector carries up to its own length again in capacity nobody is using,
-and occupancy swings between 64 and about 90 bytes a note as the set
-grows. A slope read off a handful of points lands wherever those points
+and the index is a hash table carrying buckets nobody is using either.
+A slope read off a handful of points lands wherever those points
 happened to fall on that swing, which is how the explorer came to serve
-72 for the same quantity. The design costs 64. What a process costs is a
-fact about an allocator.
+72, measured before the index existed. The design costs 104. What a
+process costs is a fact about an allocator.
+
+The figure was 64 here for a week after the index went in, because the
+one accessor anything read counted the hashes and not the index.
 
 The measurements here were first published wrong, and how is worth more
 than the correction. They were read with `ps`, which reports
@@ -409,9 +419,9 @@ unbounded, and this is where the design was weakest.
 ### The measured cost of arrival
 
 On this implementation, at one block per minute with blocks carrying 64
-ordinary payments, thirty years of chain is 197 GB to download and about
-19 hours to revalidate on one core, to arrive at a validation state
-weighing 68 MB. The wall is bandwidth, not computation.
+ordinary payments, thirty years of chain is 197 GB to download and every
+one of its blocks to revalidate, to arrive at a validation state
+weighing 68 MB.
 
 ### What headers commit to
 
@@ -495,7 +505,7 @@ rather than devising its own. It is implemented: a newcomer draws 4 096
 headers against accumulated work rather than height, with a Fiat-Shamir
 seed taken from the tip, and each opened header is checked against the
 tip's own commitment. Weighing a thirty year chain costs about 3 MB, of
-which the run described below is 200 kB.
+which the run described below is 110 kB.
 
 Four checks sit around the draw, and they are not decoration. An audit
 of the implementation found that without them a stranger could hand a
@@ -527,9 +537,9 @@ the difficulty floor for a thousand hashes, and the phrase bought
 nothing.
 
 Those three were written first and were not enough, which is worth
-recording rather than tidying away. The draw deliberately stops
-resolving about a thousand blocks from the tip, and nothing else looked
-up there either. So a forger left the honest chain untouched, appended
+recording rather than tidying away. The draw stopped resolving about a
+thousand blocks from the tip at the time, deliberately, and nothing else
+looked up there either. So a forger left the honest chain untouched, appended
 its own headers at the difficulty floor, one hash each, and put the work
 it was inventing inside the band the draw never reaches. Every check
 above passes: the tip has a parent, because the forger mined one; the
@@ -820,8 +830,6 @@ estimated, on one core of an ordinary machine.
   <div><span class="k">Ordinary payment</span><span class="v">191 bytes</span></div>
   <div><span class="k">Empty block</span><span class="v">244 bytes</span></div>
   <div><span class="k">Block with 64 ordinary payments</span><span class="v">12 468 bytes</span></div>
-  <div><span class="k">Validation, empty block</span><span class="v">0.016 ms</span></div>
-  <div><span class="k">Validation, 64 payments</span><span class="v">4.4 ms</span></div>
 </div>
 
 <div class="scroll">
@@ -845,20 +853,30 @@ estimated, on one core of an ordinary machine.
         <td class="n">2.9 GB</td>
         <td>No, grows with history</td>
       </tr>
-      <tr>
-        <td>Revalidating from genesis</td>
-        <td class="n">19 h</td>
-        <td>No, grows with history</td>
-      </tr>
       <tr class="us">
         <td>Validation state a node holds</td>
         <td class="n">68 MB</td>
         <td>Yes, by consensus rule</td>
       </tr>
       <tr class="us">
-        <td>Blocks a node may hold to undo</td>
-        <td class="n">233 MB</td>
+        <td>Undo records a node keeps</td>
+        <td class="n">51 MB</td>
         <td>Yes, by the block size and window</td>
+      </tr>
+      <tr class="us">
+        <td>Paths beside the grace window</td>
+        <td class="n">17 MB</td>
+        <td>Yes, by the window and the tallest tree</td>
+      </tr>
+      <tr class="us">
+        <td>Block bodies a node keeps to undo</td>
+        <td class="n">8.6 MB</td>
+        <td>Yes, 64 bodies and the headers of the rest</td>
+      </tr>
+      <tr class="us">
+        <td>Identifiers kept below the window</td>
+        <td class="n">492 kB</td>
+        <td>No, 16 kB a year</td>
       </tr>
       <tr class="us">
         <td>Headers a node keeps on disk</td>
@@ -880,16 +898,37 @@ estimated, on one core of an ordinary machine.
 </div>
 
 <p class="fig-note">
-  The first three rows are what arriving used to cost, and section 7 is how
+  The first two rows are what arriving used to cost, and section 7 is how
   it stopped costing that. Arriving now has three parts, and it is worth
   adding them up rather than quoting the smallest: about 3 MB to weigh the
-  chain, about 12 MB for the ledger, and the thousand blocks between that
+  chain; the ledger, which is 11 MB of hot set, and at most 29 MB once the
+  grace window and a path for every note in it are counted, as they are on
+  any chain that has seen traffic; and the thousand blocks between that
   ledger and the tip, which a newcomer validates itself. Those blocks are
   at most 134 MB, the block size limit a thousand and twenty four times
   over, and in practice far less, since a block is only as large as the
-  traffic that filled it: call it 20 MB on a quiet chain. Against a hundred
-  and ninety-seven gigabytes of reading, and none of the three grows with
-  the chain's age.
+  traffic that filled it. Against a hundred and ninety-seven gigabytes of
+  reading, and none of the three grows with the chain's age.
+</p>
+
+<p class="fig-note">
+  What a node holds is every row marked as its own, and the largest of them
+  is not the hot set. A node keeps a record of every block it could still
+  undo, what the block did and how to take it back, and at 64 payments a
+  block those records come to the 51 MB above; they come to 466 MB on a
+  chain of full blocks, where every block spends and creates ten times as
+  much. That term was left out of this table until the records were
+  counted, and it is the one that decides what a phone has to hold on a
+  busy chain. Beside it, the paths a node keeps for the notes in its grace
+  window are priced at the tallest tree a forest can hold, and are a few
+  megabytes on a real chain. The block bodies a node keeps are the sixty
+  four most recent and the headers of the rest; it reads an older body back
+  off its own disk on the one occasion that needs it, a switch that fails
+  partway. What the store allows itself is larger, at most 168 MB of
+  blocks, rival branches included. And one row grows: an identifier every
+  1 024 heights for everything older than the window, 16 kB a year, which
+  is what lets two nodes agree where to look without either holding its
+  whole branch.
 </p>
 
 <p class="fig-note">
@@ -979,7 +1018,7 @@ failures have in common.
 
 **A rule changes at a height, and a node that has not updated by
 then is on another chain.** Renumbering the network, which is what
-the test networks did three times, throws every balance away with the
+the test networks did five times, throws every balance away with the
 chain; on a network carrying value that is not a mechanism but a loss. So
 a rule that changes names the height it takes effect at, and blocks below
 it go on being judged by the rule that judged them: nothing already mined

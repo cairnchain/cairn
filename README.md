@@ -79,7 +79,10 @@ anyone volunteering to carry its history.
 
 An archivist keeps the whole cold set and is the only party that can rebuild
 the proof of a note whose owner lost theirs. That service costs a set that
-grows, it is chosen rather than paid for, and the network runs without it.
+grows, 104 bytes for every fallen note still unspent, it is chosen rather than
+paid for, and the network runs without it. The set is held in memory and
+rebuilt by reading the whole chain again at every start, so an archivist also
+keeps every block.
 
 A wallet keeps its own proofs current out of what every block already carries,
 so it spends a fallen note without asking anyone. Money moves between people
@@ -91,8 +94,8 @@ like the cold set. What they buy is the only way to join this chain without
 downloading all of it. Someone starting from nothing draws 4 096 old headers
 against accumulated work rather than height, checks each is really where it
 claims to be in the tip's own commitment, and works out what stands behind the
-tip without reading the millions in between. Then they are handed the ledger.
-Twelve megabytes for a thirty year chain, against 2 067 GB of reading.
+tip without reading the millions in between. Then they are handed the ledger,
+and validate the thousand or so blocks between it and the tip themselves.
 
 Any node can answer, because every node keeps the headers on disk at 182 bytes
 each, and the forest they make at 64 more. Joining does not depend on anyone
@@ -108,10 +111,11 @@ stranger's word for where the story begins.
 
 A block holds 128 kilobytes, which is about 686 ordinary payments, or eleven a
 second. That number decides three things at once and is small because of the
-first two: a node holds the blocks it could still reorganise away, so it is
-186 MB of memory every node must have; it sets how fast the hot set turns over
-and with it how long a fallen note stays spendable without a proof; and it is
-how many people can be paid in a minute.
+first two: a node keeps a record of every block it could still reorganise
+away, so it decides the largest thing every node must hold, 466 MB on a chain
+of full blocks; it sets how fast the hot set turns over and with it how long a
+fallen note stays spendable without a proof; and it is how many people can be
+paid in a minute.
 
 | Network | Starts from | Opens at | Block time |
 | --- | --- | --- | --- |
@@ -347,9 +351,16 @@ can fill is bounded. A reorganisation deeper than `MAX_REORG_DEPTH` is refused
 rather than kept possible by holding undo records forever; that is a local
 safety policy, not a consensus rule, and it is written down as such.
 
-What a node must hold to validate is capped by the rules: 68 MB of hot notes
-and, in the worst case the rules allow, 233 MB of blocks it could still have to
-undo. Neither grows with the chain.
+What a node must hold to validate is capped by the rules, and none of it grows
+with the chain's age: 68 MB of hot notes; 8.6 MB of block bodies it could still
+have to undo, with the headers of the rest; the record of every one of those
+blocks, 51 MB of undo records at 64 payments a block and 466 MB on a chain of
+full blocks, which is the largest term there is; and at most 17 MB of paths
+beside the grace window. It reads an older body back off its own disk when a
+switch that fails partway needs one, and the store allows itself 168 MB of
+blocks at most, rival branches included. On top of that come what its peers
+can make it queue, which is bounded per connection. `cargo test -p
+cairn-explorer --test published_figures` computes every one of these.
 
 One cost does grow, and it is small and named: the headers and the forest they
 make, at 129 MB a year. A node keeps them so that anyone can join through it.

@@ -33,7 +33,7 @@ use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::sampling::{draw, levels_for, open_start, seed_of, MOST_TAIL, SAMPLES};
-use cairn_ledger::state::header_leaf;
+use cairn_ledger::state::{header_leaf, GRACE_BLOCKS, GRACE_NOTES};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
 use cairn_ledger::LedgerState;
@@ -50,6 +50,9 @@ const DESIGN: &str = include_str!("../../../docs/cairn-design.html");
 /// cap, the header, the forest and the grace window, every one of them a
 /// figure this build decides.
 const PRIOR_ART: &str = include_str!("../../../docs/cairn-prior-art.html");
+/// The open questions paper, which quotes the proof a holder carries and what
+/// an archivist holds.
+const QUESTIONS: &str = include_str!("../../../docs/cairn-open-questions.html");
 const SITE_EN: &str = include_str!("../../../web/i18n/en.json");
 const SITE_FR: &str = include_str!("../../../web/i18n/fr.json");
 /// The source that acts on the cap, which quotes the same two figures in the
@@ -97,6 +100,7 @@ fn table_row(label: &str) -> String {
 /// for stops the test rather than passing quietly.
 fn in_french(value: usize) -> &'static str {
     match value {
+        5 => "cinq",
         8 => "huit",
         64 => "soixante-quatre",
         other => panic!(
@@ -363,6 +367,524 @@ fn the_headers_a_year_figure_counts_the_forest_the_headers_make() {
     );
 }
 
+/// The record a node keeps for one block of `payments` ordinary payments, on a
+/// chain in the state a busy chain is in: the hot set full, so every block
+/// pushes out as many notes as it adds, and the grace window holding all the
+/// landings it will.
+///
+/// The hot set is small here so that it fills in a few blocks. What a block
+/// evicts is decided by what it adds and not by how large the set is, so the
+/// record is the one a set of 131 072 produces. The one part that depends on
+/// the chain's size is the paths the record writes down when a landing ages
+/// out of the window, which grow with the log of the cold set; they share
+/// their siblings, because a landing is consecutive places, and they are the
+/// smallest part of a record here as on a real chain.
+///
+/// Each payment spends the change of one made the block before, so the purse
+/// is always the newest notes there are and is never the thing evicted.
+fn undo_record_at(payments: usize) -> usize {
+    let params = ConsensusParams::testnet()
+        .with_coinbase_maturity(0)
+        .with_hot_capacity(4_096);
+    let miner = SecretKey::from_bytes(&[1; 32]);
+    let spender = SecretKey::from_bytes(&[2; 32]);
+    let mut state = LedgerState::new();
+    let mut clock = 1_000u64;
+    let mut purse: Vec<(NoteId, Note)> = Vec::new();
+    let each = Amount::from_pebbles(
+        params.initial_reward.as_pebbles() / params.max_coinbase_outputs as u64,
+    )
+    .unwrap();
+    while purse.len() < payments {
+        let height = state.next_height().unwrap();
+        clock += 60;
+        let outputs = vec![Note::new(each, spender.public_key()); params.max_coinbase_outputs];
+        let block = assemble_block(
+            &state,
+            CoinbaseTransaction::new(height, outputs),
+            Vec::<Transfer>::new(),
+            &params,
+            clock,
+            0,
+        )
+        .unwrap();
+        connect_block(&mut state, &block, &params, u64::MAX / 2).unwrap();
+        purse.extend(block.coinbase.created_notes());
+    }
+    purse.truncate(payments);
+
+    // Enough blocks for the hot set to fill and then for the window to hold
+    // every landing it can, which is sixty four of them or 8 192 notes.
+    let per_block = payments + 1;
+    let blocks =
+        params.hot_capacity / per_block + GRACE_BLOCKS.min(GRACE_NOTES.div_ceil(per_block)) + 2;
+    let paid = Amount::from_pebbles(1_000).unwrap();
+    let mut record = 0;
+    for _ in 0..blocks {
+        let height = state.next_height().unwrap();
+        clock += 60;
+        let transfers: Vec<Transfer> = purse
+            .drain(..payments)
+            .map(|(id, note)| {
+                let change = note.value.checked_sub(paid).unwrap();
+                let mut transfer = Transfer::new(
+                    vec![Input::hot(id)],
+                    vec![
+                        Note::new(paid, miner.public_key()),
+                        Note::new(change, spender.public_key()),
+                    ],
+                );
+                transfer.sign_input(params.network, 0, &note, &spender);
+                transfer
+            })
+            .collect();
+        let coinbase = CoinbaseTransaction::new(
+            height,
+            vec![Note::new(params.initial_reward, miner.public_key())],
+        );
+        let block = assemble_block(&state, coinbase, transfers, &params, clock, 0).unwrap();
+        let connected = connect_block(&mut state, &block, &params, u64::MAX / 2).unwrap();
+        assert!(
+            connected.transition.evicted.len() <= params.max_evictions_per_block,
+            "a block of {payments} payments evicts more than the rules allow"
+        );
+        record = connected.bytes_held();
+        purse.extend(
+            block
+                .transfers
+                .iter()
+                .map(|transfer| (NoteId::new(transfer.id(), 1), transfer.outputs[1])),
+        );
+    }
+    record
+}
+
+/// Ordinary payments a block the size the rules allow carries.
+fn payments_in_a_full_block() -> usize {
+    let mut bench = Bench::new(1);
+    let payment = bench.payment().encode().len();
+    let empty = bench.block(0).encode().len();
+    (ConsensusParams::testnet().max_block_bytes - empty) / payment
+}
+
+/// **What a node holds is every term the rules bound, and the papers' total
+/// names each of them at the size this build gives it.**
+///
+/// The table said "Blocks a node may hold to undo: 233 MB", the README said
+/// 233 MB and 186 MB for that one quantity a page apart, and the design paper
+/// said 233 Mo. 233 was every block of the window held decoded, from before a
+/// node let go of all but sixty four bodies; what the store bounds itself to
+/// is 168 MB and what it holds is 8.6 MB, and nothing read the row. The total
+/// left out the two terms nobody had measured besides: the undo record a node
+/// keeps for every block it could still undo, which on a chain of full blocks
+/// is the largest thing it holds, and the paths it keeps beside the grace
+/// window. And the one term that does grow, the identifiers kept below the
+/// window, had no row.
+#[test]
+fn what_a_node_holds_is_every_term_the_rules_bound() {
+    use cairn_chain::{ChainStore, HELD_WINDOW, MILESTONE, WARM_BODIES};
+
+    let params = ConsensusParams::testnet();
+    let header = BlockHeader::ENCODED_BYTES as u64;
+    let windowed = HELD_WINDOW as u64;
+    let warm = WARM_BODIES * params.max_block_bytes as u64 + (windowed - WARM_BODIES) * header;
+    let ceiling = ChainStore::held_bytes_ceiling(&params) as u64;
+    let ordinary = undo_record_at(64) as u64 * windowed;
+    let full_block = payments_in_a_full_block();
+    let full = undo_record_at(full_block) as u64 * windowed;
+    // A path at the tallest tree a forest can hold, kept for every note the
+    // window can hold, measured as a forest counts what it holds.
+    let path = {
+        let mut forest = cairn_accumulator::Forest::new();
+        let before = forest.bytes_held();
+        forest.watch(
+            0,
+            cairn_accumulator::forest::ForestProof {
+                siblings: vec![
+                    cairn_primitives::Hash32::ZERO;
+                    cairn_accumulator::forest::MAX_HEIGHT - 1
+                ],
+            },
+        );
+        (forest.bytes_held() - before) as u64
+    };
+    let grace = path * GRACE_NOTES as u64;
+    let milestones = (THIRTY_YEARS / MILESTONE + 1) * 32;
+    let a_year = A_YEAR / MILESTONE * 32;
+    println!(
+        "bodies {warm}, store ceiling {ceiling}, undo records {ordinary} at 64 payments and \
+         {full} at {full_block}, grace paths at most {grace}, milestones {milestones} at thirty \
+         years and {a_year} a year"
+    );
+
+    let megabytes = |bytes: u64| format!("{:.0} MB", bytes as f64 / 1e6);
+    assert_eq!(
+        table_row("Block bodies a node keeps to undo"),
+        format!("{:.1} MB", warm as f64 / 1e6)
+    );
+    assert_eq!(table_row("Undo records a node keeps"), megabytes(ordinary));
+    assert_eq!(table_row("Paths beside the grace window"), megabytes(grace));
+    assert_eq!(
+        table_row("Identifiers kept below the window"),
+        format!("{} kB", milestones / 1_000)
+    );
+    let paper = flowing();
+    for said in [
+        format!("{} kB a year", a_year / 1_000),
+        format!(
+            "at most {} of blocks, rival branches included",
+            megabytes(ceiling)
+        ),
+        format!("{} on a chain of full blocks", megabytes(full)),
+    ] {
+        assert!(
+            paper.contains(&said),
+            "the paper does not say `{said}`, which is what this build holds"
+        );
+    }
+
+    let readme = README.split_whitespace().collect::<Vec<_>>().join(" ");
+    for said in [
+        format!("{:.1} MB of block bodies", warm as f64 / 1e6),
+        format!("{} of undo records", megabytes(ordinary)),
+        format!("{} on a chain of full blocks", megabytes(full)),
+        format!("{} of paths beside the grace window", megabytes(grace)),
+        format!("which is {} kB over thirty years", milestones / 1_000),
+    ] {
+        assert!(
+            readme.contains(&said),
+            "the README does not say `{said}`, which is what this build holds"
+        );
+    }
+    for (page, text) in [
+        ("paper", PAPER),
+        ("README", README),
+        ("design paper", DESIGN),
+    ] {
+        for stale in ["233 MB", "186 MB", "233 Mo"] {
+            assert!(
+                !text.contains(stale),
+                "the {page} still says {stale}, a window of decoded bodies no node holds"
+            );
+        }
+    }
+    let bodies = format!("{:.1}", warm as f64 / 1e6).replace('.', ",");
+    for said in [
+        format!("{bodies} Mo de corps de blocs"),
+        format!(
+            "{:.0} Mo d'enregistrements d'annulation",
+            ordinary as f64 / 1e6
+        ),
+        format!("{:.0} Mo sur une chaîne de blocs pleins", full as f64 / 1e6),
+    ] {
+        assert!(
+            DESIGN.contains(&said),
+            "the design paper does not say `{said}`, which is what this build holds"
+        );
+    }
+}
+
+/// A handover off a small chain that has run long enough for its hot set to
+/// fill and its grace window to hold every landing it can.
+fn running_handover() -> cairn_ledger::handover::Handover {
+    use cairn_accumulator::forest::ForestProof;
+
+    const HOT: usize = 64;
+    const PER_BLOCK: usize = 8;
+    let params = ConsensusParams::testnet().with_hot_capacity(HOT);
+    let miner = SecretKey::from_bytes(&[1; 32]);
+    let mut state = LedgerState::archiving();
+    let mut headers = Vec::new();
+    let mut clock = 1_000u64;
+    let each = params.initial_reward.as_pebbles() / PER_BLOCK as u64;
+    for _ in 0..=(HOT / PER_BLOCK + GRACE_BLOCKS) {
+        let height = state.next_height().unwrap();
+        clock += 600;
+        let outputs =
+            vec![Note::new(Amount::from_pebbles(each).unwrap(), miner.public_key()); PER_BLOCK];
+        let block = assemble_block(
+            &state,
+            CoinbaseTransaction::new(height, outputs),
+            Vec::<Transfer>::new(),
+            &params,
+            clock,
+            0,
+        )
+        .unwrap();
+        connect_block(&mut state, &block, &params, u64::MAX / 2).unwrap();
+        headers.push(block.header);
+    }
+    let at = *headers.last().unwrap();
+    let handover = state
+        .handover(
+            at,
+            at,
+            state.headers_before_tip(),
+            ForestProof {
+                siblings: Vec::new(),
+            },
+            Vec::new(),
+            vec![at],
+        )
+        .expect("every note in the window has a path");
+    assert_eq!(
+        state.grace_len(),
+        GRACE_BLOCKS * PER_BLOCK,
+        "the window is not full, so this is not the state a running chain is in"
+    );
+
+    handover
+}
+
+/// **The ledger a newcomer is handed, at the network's size, on a chain that has
+/// seen traffic.**
+///
+/// The paper said "about 12 MB for the ledger", which is the hot set alone:
+/// the figure `cairn-ledger/examples/joining.rs` took on the one block of a
+/// chain's life when nothing has yet fallen, and which that example now
+/// refuses to publish. On every block after it the handover also carries the
+/// grace window and a path through the cold set for every note in it, and
+/// `cairn-ledger/tests/audit_handover_weight.rs` measured that part as the
+/// larger.
+///
+/// Taken apart the way the weighing is: a real handover off a small running
+/// chain, every entry checked to encode at one size, and the sizes applied at
+/// the network's hot set, window and burial. The paths are priced at the
+/// tallest tree a forest can hold, so the total is a ceiling rather than a
+/// reading.
+#[test]
+fn the_ledger_a_newcomer_is_handed_is_the_size_the_paper_gives() {
+    use cairn_accumulator::forest::{ForestProof, MAX_HEIGHT};
+
+    let handover = running_handover();
+
+    let whole = handover.encode().len();
+    let hot_entry = {
+        let sizes: Vec<usize> = handover
+            .hot
+            .iter()
+            .map(|(id, entry)| id.encode().len() + entry.note.encode().len() + 8)
+            .collect();
+        assert!(
+            sizes.windows(2).all(|two| two[0] == two[1]),
+            "hot entries differ in size"
+        );
+        sizes[0]
+    };
+    let window_entry = {
+        let sizes: Vec<usize> = handover
+            .grace
+            .iter()
+            .flatten()
+            .map(|(id, position, note)| {
+                id.encode().len() + position.encode().len() + note.encode().len()
+            })
+            .collect();
+        assert!(
+            sizes.windows(2).all(|two| two[0] == two[1]),
+            "window entries differ in size"
+        );
+        sizes[0]
+    };
+    let hot = 4 + handover.hot.len() * hot_entry;
+    let window =
+        4 + handover.grace.len() * 4 + handover.grace.iter().flatten().count() * window_entry;
+    let paths = 4 + handover
+        .grace_proofs
+        .iter()
+        .map(|(position, proof)| position.encode().len() + proof.encode().len())
+        .sum::<usize>();
+    let fixed = whole - hot - window - paths;
+
+    // At the network's size. A path is its count and a sibling a level, at
+    // the most levels a tree in a forest can have.
+    let tallest = ForestProof {
+        siblings: vec![cairn_primitives::Hash32::ZERO; MAX_HEIGHT - 1],
+    }
+    .encode()
+    .len();
+    let network = ConsensusParams::testnet();
+    let hot_then = 4 + network.hot_capacity * hot_entry;
+    let window_then = 4 + GRACE_BLOCKS * 4 + GRACE_NOTES * window_entry;
+    let paths_then = 4 + GRACE_NOTES * (8 + tallest);
+    let buried_then = usize::try_from(network.burial).unwrap() * BlockHeader::ENCODED_BYTES;
+    let most = fixed + hot_then + window_then + paths_then + buried_then;
+    println!(
+        "a handover here is {whole} bytes; at the network's size its hot set is {hot_then}, \
+         its window {window_then}, its paths at most {paths_then}, and the whole at most {most}"
+    );
+
+    let paper = flowing();
+    for said in [
+        format!("{:.0} MB of hot set", hot_then as f64 / 1e6),
+        format!("at most {:.0} MB once the grace window", most as f64 / 1e6),
+    ] {
+        assert!(
+            paper.contains(&said),
+            "the paper's arrival note does not say `{said}`, which is what this build hands over"
+        );
+    }
+    assert!(
+        !paper.contains("about 12 MB for the ledger"),
+        "the paper still prices the ledger at the hot set alone"
+    );
+}
+
+/// **The papers count the renumberings the network identifiers record.**
+///
+/// The whitepaper's limitations said the test networks were renumbered three
+/// times and the design paper said the same twice, while `note.rs` carries six
+/// test networks, each taken because a rule changed. Three was true at
+/// testnet-4. A count of how often something happened is a figure like any
+/// other, and the identifiers are where it is written down.
+#[test]
+fn the_papers_count_the_renumberings_the_networks_carry() {
+    use cairn_ledger::note::NetworkId;
+
+    let renumbered = NetworkId::TESTNET.as_u32() - NetworkId::TESTNET_1.as_u32();
+    println!("the public test network has been renumbered {renumbered} times");
+    assert!(
+        flowing().contains(&format!(
+            "the test networks did {} times",
+            spelled(u64::from(renumbered))
+        )),
+        "the paper does not say the test networks were renumbered {renumbered} times"
+    );
+    let times = in_french(usize::try_from(renumbered).unwrap());
+    for said in [
+        format!("C'est arrivé {times} fois"),
+        format!("qui a servi {times} fois"),
+    ] {
+        assert!(
+            DESIGN.contains(&said),
+            "the design paper does not say `{said}`, which is what the identifiers record"
+        );
+    }
+}
+
+/// **The perpetual tail is the share of the supply the design paper says.**
+///
+/// It said "un vingtième de pour cent", 0.05 per cent a year. The rules pay
+/// 0.01 CAIRN a block, 525 600 blocks a year, on about 105 million: 5 256
+/// CAIRN, which is 0.005 per cent, ten times less. A rate of dilution is a
+/// number a reader of a monetary design acts on.
+#[test]
+fn the_design_papers_tail_emission_is_the_share_the_rules_pay() {
+    use cairn_ledger::emission::{reward_at, HALVING_INTERVAL};
+
+    let params = ConsensusParams::testnet();
+    let tail = params.tail_reward.as_pebbles();
+    let mut supply = 0u64;
+    let mut era = 0u64;
+    loop {
+        let rate = reward_at(
+            era * HALVING_INTERVAL,
+            HALVING_INTERVAL,
+            params.initial_reward,
+            params.tail_reward,
+        )
+        .as_pebbles();
+        if rate <= tail {
+            break;
+        }
+        supply += rate * HALVING_INTERVAL;
+        era += 1;
+    }
+    let a_year = tail * (365 * 24 * 60 * 60 / params.target_block_time);
+    let share = a_year as f64 / supply as f64 * 100.0;
+    let millions = supply as f64 / 1e8 / 1e6;
+    println!(
+        "the halvings pay {millions:.1} million CAIRN, then {} CAIRN a year, {share:.4} per cent",
+        a_year / 100_000_000
+    );
+    assert!(
+        (share - 0.005).abs() < 0.000_5,
+        "the tail is {share:.4} per cent a year, and the design paper says a two hundredth"
+    );
+    for said in [
+        format!("environ {millions:.0} millions de CAIRN"),
+        "soit un deux-centième de pour cent".to_owned(),
+    ] {
+        assert!(
+            DESIGN.contains(&said),
+            "the design paper does not say `{said}`, which is what the schedule pays"
+        );
+    }
+    assert!(
+        !DESIGN.contains("un vingtième de pour cent"),
+        "the design paper still states the tail ten times too high"
+    );
+}
+
+/// **What an archivist holds is what an archive's own count says, and the open
+/// questions paper prices the service at it.**
+///
+/// The whitepaper said "exactly 64 bytes for every note that has ever fallen",
+/// the README repeated it, and the open questions paper built its table of
+/// what the two services weigh on 72. An archive has kept where each standing
+/// leaf sits since 18 September, forty bytes a note on top of the two hashes,
+/// and the one accessor anything read counted the hashes. So the paper's
+/// archive column was two thirds of what an archivist holds.
+#[test]
+fn the_papers_price_an_archivist_at_what_an_archive_holds() {
+    use cairn_accumulator::forest::forest_leaf;
+
+    let mut archive = Archive::new();
+    let count = 1u64 << 16;
+    for index in 0..count {
+        archive.add(forest_leaf(&index.to_le_bytes()));
+    }
+    let per_note = archive.bytes_held().div_ceil(count);
+    println!("an archive holds {per_note} bytes a standing note");
+
+    assert!(
+        flowing().contains(&format!(
+            "{per_note} bytes for every fallen note still standing"
+        )),
+        "the paper does not say an archivist holds {per_note} bytes a standing note"
+    );
+    assert!(
+        README.contains(&format!(
+            "{per_note} bytes for every fallen note still unspent"
+        )),
+        "the README does not say an archivist holds {per_note} bytes a standing note"
+    );
+    assert!(
+        QUESTIONS.contains(&format!("{per_note} octets par billet tombé")),
+        "the open questions paper does not say an archivist holds {per_note} bytes a note"
+    );
+
+    // The table of the two services, at the three shares of a full block the
+    // paper uses: every note a payment leaves behind falls sooner or later,
+    // and the history is every block.
+    let params = ConsensusParams::testnet();
+    let payment = Bench::new(1).payment().encode().len() as u64;
+    let french = |value: f64| format!("{value:.1}").replace('.', ",");
+    let size = |bytes: u64| {
+        if bytes >= 1_000_000_000_000 {
+            format!("{} To", french(bytes as f64 / 1e12))
+        } else {
+            format!("{} Go", french(bytes as f64 / 1e9))
+        }
+    };
+    for share in [100u64, 10, 1] {
+        let block = params.max_block_bytes as u64 * share / 100;
+        let payments = block / payment;
+        let fallen = THIRTY_YEARS * payments - params.hot_capacity as u64;
+        let row = format!(
+            "<td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td>",
+            french(payments as f64 / 60.0),
+            size(fallen * per_note),
+            size(THIRTY_YEARS * block)
+        );
+        println!("at {share} per cent: {row}");
+        assert!(
+            QUESTIONS.contains(&row),
+            "the open questions paper's table has no row `{row}` for a chain {share} per cent full"
+        );
+    }
+}
+
 /// The README quotes the number of headers a newcomer actually opens.
 ///
 /// It said 512 in the paragraph that describes joining and 4 096 in the one
@@ -557,6 +1079,31 @@ fn the_papers_weighing_is_the_size_this_build_encodes() {
         README.contains("about\nthree megabytes against the hundred and ninety-seven gigabytes"),
         "the README does not say what weighing costs in the same figure"
     );
+    // The README priced joining twice, a page apart: this figure, and "twelve
+    // megabytes for a thirty year chain, against 2 067 GB of reading" higher
+    // up, from before the count and the encoder were settled. Only this one
+    // was held.
+    assert!(
+        !README.contains("Twelve megabytes") && !README.contains("2 067 GB"),
+        "the README still gives a second, older cost for joining"
+    );
+
+    // And the run up to the tip, which the paper prices on its own. It said
+    // 200 kB, the figure from when the draw stopped a thousand and twenty four
+    // blocks from the tip; the draw stops at `SHALLOWEST` now, and the run is
+    // the headers from a retarget window below the deepest pinned draw.
+    let run = start.tail.encode().len();
+    println!(
+        "the run up to the tip is {} headers, {run} bytes",
+        start.tail.len()
+    );
+    assert!(
+        flowing().contains(&format!(
+            "of which the run described below is {:.0} kB",
+            run as f64 / 1e3
+        )),
+        "the paper does not price the run up to the tip at the {run} bytes this build sends"
+    );
     assert!(
         PRIOR_ART.contains(&format!(
             "environ {megabytes:.0} Mo pour rejoindre trente ans de"
@@ -748,57 +1295,94 @@ fn the_survey_paper_sends_a_reader_to_the_sections_that_are_there() {
     }
 }
 
-/// The proof a holder carries is the size the papers say it is.
+/// The proof a holder of a fallen note carries is the size the papers say it
+/// is.
 ///
 /// Both French papers publish it, the design paper as the four rows of the
 /// table its whole thesis is in and the survey paper as the range between
 /// their ends, and it is the figure that answers the one objection this
-/// design invites: if the node holds nothing, what does the holder hold. It
-/// was measured once by `cairn-accumulator/examples/scale.rs` and typed into
-/// two documents, and nothing has looked at it since.
+/// design invites: if the node holds nothing, what does the holder hold.
 ///
-/// Measured here exactly as that example measures it, sampling evenly across
-/// the set, because an average over a different sample is a different figure.
+/// It was measured on the wrong structure. The column came from
+/// `SparseMerkleTree::prove`, which is the hot set's tree, and nobody ever
+/// presents one of its proofs: a hot note needs none, and a spender of a
+/// fallen note carries a `ForestProof` against the cold forest, whose length
+/// is the height of the tree its place sits in. So every row was about a
+/// hundred bytes too high, and a guard read it against the same wrong
+/// structure. Measured here on an archive of that many fallen notes, sampling
+/// evenly across the places as before, and with the longest proof beside the
+/// mean, because the papers say how far apart the two can be.
 #[test]
-fn the_french_papers_quote_the_proof_a_holder_carries() {
-    use cairn_accumulator::{Key, SparseMerkleTree};
-    use cairn_primitives::hash::{hash, Domain};
+fn the_french_papers_quote_the_proof_a_holder_of_a_fallen_note_carries() {
+    use cairn_accumulator::forest::forest_leaf;
 
-    let key = |index: u64| Key::from_hash(hash(Domain::StateEntry, &index.to_le_bytes()));
-    let mut tree = SparseMerkleTree::new();
+    let mut archive = Archive::new();
     let mut filled = 0u64;
-    let mut average = Vec::new();
+    let mut measured = Vec::new();
     for notes in [1_000u64, 10_000, 100_000, 1_000_000] {
         while filled < notes {
-            tree.insert(key(filled), hash(Domain::MerkleLeaf, &filled.to_le_bytes()));
+            archive.add(forest_leaf(&filled.to_le_bytes()));
             filled += 1;
         }
         let sampled = 2_000u64.min(notes);
         let step = notes / sampled;
-        let total: usize = (0..sampled)
-            .map(|sample| tree.prove(key(sample * step)).size_in_bytes())
-            .sum();
-        average.push((notes, total / usize::try_from(sampled).unwrap_or(1)));
+        let sizes: Vec<usize> = (0..sampled)
+            .map(|sample| {
+                archive
+                    .prove(sample * step)
+                    .expect("an archive proves every place it holds")
+                    .size_in_bytes()
+            })
+            .collect();
+        let mean = sizes.iter().sum::<usize>() / sizes.len();
+        let longest = sizes.iter().copied().max().unwrap_or(0);
+        measured.push((notes, mean, longest));
     }
-    for (notes, bytes) in &average {
-        println!("{notes} notes: a proof is {bytes} bytes on average");
+    for (notes, mean, longest) in &measured {
+        println!("{notes} fallen notes: a proof is {mean} bytes on average, {longest} at most");
     }
-    let (_, smallest) = average.first().expect("a measured size");
-    let (_, largest) = average.last().expect("a measured size");
+    let (_, smallest, _) = measured.first().expect("a measured size");
+    let (_, largest, _) = measured.last().expect("a measured size");
 
     assert!(
         PRIOR_ART.contains(&format!("{smallest} à {largest} octets mesurés")),
         "the survey paper does not say a proof is {smallest} to {largest} bytes, \
          which is what this build measures at the ends of the design paper's table"
     );
-    for (notes, bytes) in &average {
-        let said = format!("<td class=\"num\">{bytes} o</td>");
+    for (notes, mean, longest) in &measured {
+        let said = format!("<td class=\"num\">{mean} o</td>");
         assert!(
             DESIGN.contains(&said),
-            "the design paper's table has no row saying a proof at {notes} notes \
-             is {bytes} bytes"
+            "the design paper's table has no row saying a proof at {notes} fallen notes \
+             is {mean} bytes"
+        );
+        assert!(
+            longest - mean <= 32,
+            "the longest proof at {notes} is {longest} bytes, more than 32 past the mean \
+             the design paper says it stays within"
         );
     }
+    for (page, text) in [
+        ("design paper", DESIGN),
+        ("open questions paper", QUESTIONS),
+    ] {
+        assert!(
+            text.contains(&format!("une preuve pèse {largest} octets en moyenne")),
+            "the {page} does not say a proof weighs {largest} bytes at a million fallen notes"
+        );
+    }
+    // The design paper says how the column grows: a little more than double
+    // across a thousandfold, which is the sentence its thesis rests on.
+    let grows = *largest as f64 / *smallest as f64;
+    assert!(
+        (2.0..2.5).contains(&grows),
+        "the proof grows {grows:.2} times across the table, and the design paper says a \
+         little more than double"
+    );
+    assert!(
+        DESIGN.contains("ne fait qu'un peu plus que doubler"),
+        "the design paper does not say how the proof grows across its table"
+    );
 }
 
 /// Blocks in a year at a block a minute, which is what the cliff below is
@@ -1106,6 +1690,18 @@ fn the_depth_a_newcomer_can_be_put_at_is_inside_the_depth_this_node_undoes() {
         "the paper no longer says 633 blocks; whatever it says now has to be \
          read against MAX_REORG_DEPTH here"
     );
+    // The design paper states the same guarantee, and stated the one from
+    // before the draw's floor was halved, 1 240 blocks and twenty hours, for a
+    // fortnight after the change.
+    for said in [
+        format!("environ {stated} blocs"),
+        format!("{} blocs du sommet", cairn_ledger::sampling::SHALLOWEST),
+    ] {
+        assert!(
+            DESIGN.contains(&said),
+            "the design paper does not say `{said}`, which is the depth this build guarantees"
+        );
+    }
     let undone = u64::try_from(cairn_chain::MAX_REORG_DEPTH).unwrap_or(u64::MAX);
     assert_eq!(undone, 1_024, "MAX_REORG_DEPTH moved");
 
@@ -1149,6 +1745,14 @@ fn the_depth_a_newcomer_can_be_put_at_is_inside_the_depth_this_node_undoes() {
     // And the depth is the band the draw stops at plus what the staircase costs
     // at its edges, so it moves with `SHALLOWEST` and nothing else here does.
     assert_eq!(cairn_ledger::sampling::SHALLOWEST, 512);
+    // The paper told the story of the fourth forgery in the present tense,
+    // "the draw deliberately stops resolving about a thousand blocks from the
+    // tip", four paragraphs before saying it stops at 512.
+    assert!(
+        !flowing().contains("The draw deliberately stops resolving about a thousand blocks"),
+        "the paper says in the present tense that the draw stops a thousand blocks from \
+         the tip, and it stops at SHALLOWEST"
+    );
     assert!(
         stated > cairn_ledger::sampling::SHALLOWEST,
         "the depth a newcomer can be moved by is never less than the band the \

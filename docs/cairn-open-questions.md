@@ -5,12 +5,12 @@ stylesheet: cairn-design.css
 strap:
   Trois questions qu'une *revue extérieure* a posées, et la position prise
   sur chacune.
-byline: Questions ouvertes · v1
-byline: 31 août 2026
+byline: Questions ouvertes · v1.1
+byline: 31 août 2026, revu le 26 septembre 2026
 byline: Complète le document de conception
 numerals: roman
 subsections: unnumbered
-footer: Cairn · questions ouvertes v1
+footer: Cairn · questions ouvertes v1.1
 footer: Statut : positions prises, à discuter
 footer: Rien de ce document n'est un conseil en investissement
 ---
@@ -223,7 +223,7 @@ dure douze minutes à pleine charge. La cave est donc l'état normal de toute
 
 Trois situations, et elles n'appellent pas le même service. Un portefeuille
 allumé ne remarque rien : chaque bloc porte de quoi rafraîchir ses preuves, il
-ne demande rien à personne, et une preuve pèse 685 octets en moyenne à un
+ne demande rien à personne, et une preuve pèse 586 octets en moyenne à un
 million de billets tombés, de l'ordre du kilooctet à trente ans de chaîne
 pleine. Un portefeuille éteint quelques jours se rattrape en relisant les
 blocs manqués, que les nœuds gardent pour cela : un gigaoctet par défaut,
@@ -231,8 +231,9 @@ environ cinq jours de chaîne pleine.
 
 Au-delà, tout dépend de ce qui a survécu. Celui qui a gardé son carnet, quels
 billets, à quelle position de la forêt, n'a besoin que d'une preuve fraîche.
-La produire demande l'archive de la cave, 72 octets par billet tombé ; cela
-coûte quelques microsecondes et une réponse d'un kilooctet, et le portefeuille
+La produire demande l'archive de la cave, 104 octets par billet tombé et pas
+encore dépensé, que le programme tient aujourd'hui en mémoire et reconstruit en
+relisant toute la chaîne à chaque démarrage ; cela coûte quelques microsecondes et une réponse d'un kilooctet, et le portefeuille
 vérifie seul le résultat contre les racines que tout nœud tient. La confiance
 demandée est nulle : un archiviste ne peut pas mentir, il peut seulement se
 taire. Celui qui a tout perdu sauf sa clé doit d'abord retrouver ce qu'il
@@ -251,14 +252,14 @@ entièrement.
     <caption>Ce que pèsent les deux services, mesuré à trente ans, un bloc par minute</caption>
     <thead><tr><th>La chaîne est</th><th>Paiements / s</th><th>L'archive, pour prouver</th><th>L'histoire, pour retrouver</th></tr></thead>
     <tbody>
-      <tr><td>pleine à 1 %</td><td class="num">0,1</td><td class="num">6,8 Go</td><td class="num">20,7 Go</td></tr>
-      <tr><td>pleine à 10 %</td><td class="num">1,1</td><td class="num">77,2 Go</td><td class="num">206,7 Go</td></tr>
-      <tr class="us"><td>pleine</td><td class="num">11,4</td><td class="num">778,8 Go</td><td class="num">2,1 To</td></tr>
+      <tr><td>pleine à 1 %</td><td class="num">0,1</td><td class="num">9,8 Go</td><td class="num">20,7 Go</td></tr>
+      <tr><td>pleine à 10 %</td><td class="num">1,1</td><td class="num">111,5 Go</td><td class="num">206,7 Go</td></tr>
+      <tr class="us"><td>pleine</td><td class="num">11,4</td><td class="num">1,1 To</td><td class="num">2,1 To</td></tr>
     </tbody>
   </table>
 </div>
 
-<p class="push-md">Même au pire, l'archive tient sur un seul disque ordinaire. C'est un rôle de bénévole au sens où l'archive complète de Bitcoin en est un, à deux différences près : là-bas, tout nouveau venu dépend d'elle, ici seul l'épargnant sans carnet en dépend ; et là-bas elle pèse des téraoctets dès aujourd'hui. Le risque n'est donc pas le prix du service. Le risque est qu'une année calme d'une petite chaîne n'ait personne pour le rendre, et un protocole ne fabrique pas des volontaires. Ce qu'il peut faire : les multiplier, les rendre vérifiables, et les rendre payables.</p>
+<p class="push-md">Même au pire, l'archive tiendrait sur un seul disque ordinaire ; que le programme la garde aujourd'hui en mémoire plutôt que sur disque est un défaut du programme, pas du rôle. C'est un rôle de bénévole au sens où l'archive complète de Bitcoin en est un, à deux différences près : là-bas, tout nouveau venu dépend d'elle, ici seul l'épargnant sans carnet en dépend ; et là-bas elle pèse des téraoctets dès aujourd'hui. Le risque n'est donc pas le prix du service. Le risque est qu'une année calme d'une petite chaîne n'ait personne pour le rendre, et un protocole ne fabrique pas des volontaires. Ce qu'il peut faire : les multiplier, les rendre vérifiables, et les rendre payables.</p>
 
 ### Ce qui existe déjà, et ce qui se construit
 
@@ -266,9 +267,10 @@ Deux morceaux sont déjà dans le code. L'explorateur garde la cave entière par
 défaut, en plus de son index : chaque explorateur public est donc déjà,
 matériellement, un point de reconstitution complet, l'index pour retrouver et
 l'archive pour prouver. Et un nœud ordinaire accepte un drapeau qui lui fait
-garder la cave. Ce qui manque est le chemin : aucun message du protocole
-réseau ne permet aujourd'hui de demander une preuve à qui que ce soit, et rien
-ne permet de payer celui qui la rend.
+garder la cave. Le chemin existe aussi depuis le 2 septembre : deux messages du
+protocole réseau permettent de demander à un archiviste où se trouve un billet
+tombé et d'en recevoir la preuve, qu'un portefeuille vérifie seul contre les
+racines que tout nœud tient. Ce qui manque est de payer celui qui la rend.
 
 <div class="decisions">
   <div class="dec">
@@ -279,7 +281,7 @@ ne permet de payer celui qui la rend.
   <div class="dec">
     <span class="q">Payer la reconstitution</span>
     <span class="a">Un marché, petit, non atomique, sans toucher au consensus</span>
-    <span class="why">Le format le permet déjà, et c'était voulu : la signature d'un transfert engage les billets et les montants, jamais le témoin qui les accompagne. Un portefeuille signe donc un transfert qui dépense le billet retrouvé et paie l'archiviste dans une sortie ordinaire ; l'archiviste y attache la preuve et le diffuse. Il ne peut pas détourner un centime, tout est signé ; le portefeuille ne peut guère tricher, dépenser le même billet ailleurs demanderait une autre preuve fraîche, qu'il n'a pas. Le seul vol possible est le frais de reconstitution lui-même, en soufflant la preuve d'une transaction déjà en vol : à ce niveau d'enjeu, viser l'atomicité coûterait au protocole plus que le marché ne pèse. Deux messages s'ajoutent au protocole réseau, demander et livrer ; rien au consensus, rien au format. Le prix se découvre entre les parties ; servir coûte des microsecondes, c'est porter l'ensemble qui se paie.</span>
+    <span class="why">Le format le permet déjà, et c'était voulu : la signature d'un transfert engage les billets et les montants, jamais le témoin qui les accompagne. Un portefeuille signe donc un transfert qui dépense le billet retrouvé et paie l'archiviste dans une sortie ordinaire ; l'archiviste y attache la preuve et le diffuse. Il ne peut pas détourner un centime, tout est signé ; le portefeuille ne peut guère tricher, dépenser le même billet ailleurs demanderait une autre preuve fraîche, qu'il n'a pas. Le seul vol possible est le frais de reconstitution lui-même, en soufflant la preuve d'une transaction déjà en vol : à ce niveau d'enjeu, viser l'atomicité coûterait au protocole plus que le marché ne pèse. Les deux messages qu'il demande, demander et livrer, sont déjà dans le protocole réseau ; il n'ajoute rien au consensus, rien au format. Le prix se découvre entre les parties ; servir coûte des microsecondes, c'est porter l'ensemble qui se paie.</span>
   </div>
   <div class="dec">
     <span class="q">Qui porte quoi</span>

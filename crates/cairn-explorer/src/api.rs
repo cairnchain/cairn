@@ -123,21 +123,24 @@ const ADDRESS_SCAN: usize = 10_000;
 /// it, so the pages and the program can no longer drift apart.
 const HOT_BYTES_PER_NOTE: u64 = 516;
 
-/// Bytes one fallen note costs a node that keeps the whole cold set, measured
-/// the same way.
+/// Bytes one fallen note still standing costs a node that keeps the whole cold
+/// set: its leaf, the inner node it completes, and its entry in the position
+/// index.
 ///
-/// A slope and not a reading: the resident set was taken at five points over
-/// three million fallen notes, and this is what it climbed by. The same
-/// measurement on a node that keeps only the roots has no slope at all, which
-/// is the claim the protocol rests on and the reason this cost is an
-/// archivist's alone.
-pub(crate) const COLD_BYTES_PER_NOTE: u64 = 72;
+/// This was 72, a slope read off the resident set at five points over three
+/// million fallen notes, and it was taken before an archive kept its position
+/// index, which adds forty bytes a note. So it is now the archive's own count
+/// rather than a reading: the content, which does not move with an allocator,
+/// and the figure the papers publish. A node that keeps only the roots has no
+/// such cost at all, which is the claim the protocol rests on and the reason
+/// this one is an archivist's alone.
+pub(crate) const COLD_BYTES_PER_NOTE: u64 = cairn_accumulator::Archive::BYTES_PER_STANDING_NOTE;
 
 /// Bytes one note that has ever existed costs the index.
 ///
 /// Named here so `/api/status` can carry both figures side by side. The site
 /// used to call the cold set the explorer's growing cost, and the index is
-/// nearly nine times larger, so the page was pointing at the smaller half.
+/// about six times larger, so the page was pointing at the smaller half.
 const INDEX_BYTES_PER_NOTE: u64 = crate::index::BYTES_PER_NOTE;
 
 /// The node the explorer reads, plus what it keeps on top of it.

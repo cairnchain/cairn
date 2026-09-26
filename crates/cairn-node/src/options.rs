@@ -106,11 +106,12 @@ cairnd, a Cairn node
                          that asks where one of its put-away notes sits and
                          cannot work it out for itself. Says so on the
                          handshake, so wallets can find this node. Costs a set
-                         that grows with every note ever spent; without it a
-                         node keeps sixty four hashes. Keeps every block
-                         whatever --keep says, and reads them all again at
-                         every start, which is how the set is built; a
-                         directory whose blocks do not begin at the first
+                         that grows with every note that ever fell out of the
+                         hot set, about a hundred bytes each, held in memory;
+                         without it a node keeps sixty four hashes. Keeps
+                         every block whatever --keep says, and reads them all
+                         again at every start, which is how the set is built;
+                         a directory whose blocks do not begin at the first
                          cannot be an archivist's, and the node says so and
                          does not start. `--archive no` keeps the hashes
                          only, whatever cairn.conf says
@@ -206,7 +207,7 @@ impl Given {
     /// `name = value`, and the value is the answer. Asking `has` of a file
     /// asks whether the word appeared, so `archive = no` turned archiving on
     /// and said nothing about it, which costs the operator a set that grows
-    /// with every note ever spent for the rest of the node's life.
+    /// with every note that ever fell for the rest of the node's life.
     ///
     /// Anything that is neither refuses the start rather than being guessed
     /// at, under the rule this file states above [`KNOWN`]: a setting silently
@@ -824,13 +825,40 @@ mod tests {
         );
     }
 
+    /// **The help says what archiving costs, where it lives, and what grows it.**
+    ///
+    /// It said the set "grows with every note ever spent", which is the wrong
+    /// population: what an archive holds is every note that ever fell out of
+    /// the hot set, spent or not. And it said nothing of where the set lives,
+    /// which is memory, so an operator could choose a machine that cannot
+    /// hold it without having been told. That it reads every block again at
+    /// each start is said beside it.
+    #[test]
+    fn the_archive_help_says_what_the_set_costs_and_where_it_lives() {
+        let help = HELP.split_whitespace().collect::<Vec<_>>().join(" ");
+        for said in [
+            "every note that ever fell out of the hot set",
+            "held in memory",
+            "reads them all again at every start",
+        ] {
+            assert!(
+                help.contains(said),
+                "the --archive help does not say `{said}`"
+            );
+        }
+        assert!(
+            !help.contains("every note ever spent"),
+            "the --archive help counts spent notes, and an archive holds every fallen one"
+        );
+    }
+
     /// A file writes `key = value`, so the value is the answer.
     ///
     /// `has` asks whether the word appeared, which is the right question for a
     /// command line where `--archive` is the whole of what it says and the
     /// wrong one for a file. `archive = no` turned archiving on and said
-    /// nothing, which costs the operator a set that grows with every note ever
-    /// spent, for the life of the node.
+    /// nothing, which costs the operator a set that grows with every note that
+    /// ever fell, for the life of the node.
     #[test]
     fn a_no_in_the_file_is_a_no() {
         let said = |line: &str| -> Result<bool, ()> {
