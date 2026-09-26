@@ -61,6 +61,10 @@ pub struct PeerState {
     /// its parent missing, and asked for nothing, for as long as the
     /// connection lived.
     pub total_work: u128,
+    /// The number the peer drew when it started, as it said in its
+    /// introduction. Both ends of a pair hold both numbers once greeted, which
+    /// is what makes it the thing to break a tie between two connections on.
+    pub nonce: u64,
     /// What the peer said it kept. Choosing whom to join has to know the
     /// first about everyone who spoke, and a wallet looking for somebody to
     /// rebuild a path has to know the second.
@@ -1089,6 +1093,7 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
     peer.greeted = true;
     peer.height = theirs.height;
     peer.total_work = theirs.total_work;
+    peer.nonce = theirs.nonce;
     peer.keeps = theirs.keeps;
 
     let mut reaction = Reaction::idle();

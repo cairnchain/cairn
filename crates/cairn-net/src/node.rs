@@ -8767,15 +8767,28 @@ fn register(shared: &Arc<Shared>, id: PeerId, address: SocketAddr) -> Registrati
 ///
 /// Two nodes that dial each other at the same moment end up holding two
 /// connections. The one that survives is the one opened by whichever node has
-/// the lower address, a comparison both sides make identically, so both drop
-/// the same connection rather than each dropping the other's.
-fn loses_the_tie(ours: SocketAddr, theirs: SocketAddr, initiator: bool) -> bool {
+/// the lower key, a comparison both sides make identically, so both drop the
+/// same connection rather than each dropping the other's. What the keys are
+/// is [`tie_keys`].
+fn loses_the_tie(ours: u64, theirs: u64, initiator: bool) -> bool {
     let our_dial_survives = ours < theirs;
     if initiator {
         !our_dial_survives
     } else {
         our_dial_survives
     }
+}
+
+/// What this node compares with a peer to break a tie between two
+/// connections to it: the number each drew at start.
+///
+/// It was the address each listens on, and a node bound to every address
+/// listens on `0.0.0.0:<port>`, which sorts below any real address: both
+/// ends of a pair found themselves lower, each kept its own dial and ended
+/// the other's, and the pair could be left with nothing. The numbers are the
+/// one thing both ends hold alike once both have introduced themselves.
+fn tie_keys(shared: &Shared, their_nonce: u64) -> (u64, u64) {
+    (shared.nonce, their_nonce)
 }
 
 /// Takes a connection into the peer table and starts its two threads.
@@ -9137,7 +9150,8 @@ fn what_it_said_it_was(
         return Ending::Keep;
     };
     if let Registration::Redundant(other) = register(shared, id, address) {
-        if loses_the_tie(shared.address, address, dialled.is_some()) {
+        let (ours, theirs) = tie_keys(shared, peer.nonce);
+        if loses_the_tie(ours, theirs, dialled.is_some()) {
             return Ending::HangUp;
         }
         // This is the half to keep, so the other half goes. Both ends work the
@@ -13535,18 +13549,13 @@ mod tests {
 
     use super::*;
 
-    fn address(last: u8) -> SocketAddr {
-        SocketAddr::from((Ipv4Addr::new(127, 0, 0, last), 9_000))
-    }
-
     /// A port the operating system picks, which is what every other test that
     /// starts a node asks for.
     ///
     /// The one test here that really binds used to name port 9000, and two
     /// tests wanting one port is one of them failing: under the parallel suite
     /// it panicked with `AddrInUse`, from a bind that has nothing to do with
-    /// what it is about. The addresses above are still fixed, because nothing
-    /// binds them: they are two peers being compared with each other.
+    /// what it is about.
     fn loopback() -> SocketAddr {
         SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
     }
@@ -14895,13 +14904,60 @@ mod tests {
         assert!(was_away(1_000, 900), "and a clock that was put right");
     }
 
+    /// Two nodes listening on every address, as every production node does,
+    /// that dial each other at once end the same one of their two
+    /// connections.
+    ///
+    /// The tie was broken on the address each node listens on, and a node
+    /// bound to `0.0.0.0` listens on `0.0.0.0:<port>`, which sorts below any
+    /// real address. Each side found itself lower, so each kept its own dial
+    /// and ended the other's, and when both got that far the pair was left
+    /// with nothing. The tests above compared two real addresses, which no
+    /// production node has, so that passed.
+    #[test]
+    fn two_nodes_bound_to_every_address_end_the_same_connection() {
+        let a = Node::bind(
+            ConsensusParams::testnet(),
+            (Ipv4Addr::UNSPECIFIED, 0).into(),
+        )
+        .unwrap();
+        let b = Node::bind(
+            ConsensusParams::testnet(),
+            (Ipv4Addr::UNSPECIFIED, 0).into(),
+        )
+        .unwrap();
+        let (a_ours, a_theirs) = tie_keys(&a.shared, b.shared.nonce);
+        let (b_ours, b_theirs) = tie_keys(&b.shared, a.shared.nonce);
+        // The connection `a` opened, seen from each end, and then the one `b`
+        // opened.
+        let a_opened = (
+            loses_the_tie(a_ours, a_theirs, true),
+            loses_the_tie(b_ours, b_theirs, false),
+        );
+        let b_opened = (
+            loses_the_tie(a_ours, a_theirs, false),
+            loses_the_tie(b_ours, b_theirs, true),
+        );
+        a.shutdown();
+        b.shutdown();
+        assert_eq!(
+            a_opened.0, a_opened.1,
+            "the two ends of one connection did not agree on whether it ends"
+        );
+        assert_eq!(b_opened.0, b_opened.1, "nor on the other one");
+        assert_ne!(
+            a_opened.0, b_opened.0,
+            "and not exactly one of the two ends"
+        );
+    }
+
     #[test]
     fn both_sides_of_a_double_connection_drop_the_same_one() {
-        let lower = address(1);
-        let higher = address(2);
+        let lower = 1;
+        let higher = 2;
 
-        // The lower address keeps the connection it opened, so it drops the one
-        // that came in; the higher address drops the one it opened. Those are
+        // The lower number keeps the connection it opened, so it drops the one
+        // that came in; the higher number drops the one it opened. Those are
         // the same connection seen from its two ends.
         assert!(!loses_the_tie(lower, higher, true));
         assert!(loses_the_tie(lower, higher, false));
@@ -14912,8 +14968,8 @@ mod tests {
 
     #[test]
     fn exactly_one_of_the_two_connections_is_dropped() {
-        let lower = address(1);
-        let higher = address(2);
+        let lower = 1;
+        let higher = 2;
         // What each node decides about each of its two connections.
         let dropped = [
             loses_the_tie(lower, higher, true),
