@@ -15,6 +15,7 @@
     clippy::too_many_lines
 )]
 
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::PathBuf;
 
 use cairn_crypto::{PublicKey, SecretKey};
@@ -86,6 +87,18 @@ struct Restarted {
 }
 
 fn restarted(name: &str, keep_the_account: bool) -> (Restarted, Wallet) {
+    let (chain, wallet) = reopened(name, keep_the_account);
+    wallet.follow_to_the_tip();
+    assert!(
+        wallet.node().blocks_from() > Some(0),
+        "a node that wrote its ledger and started again was meant to have cut its log"
+    );
+    assert_eq!(wallet.progress().height, Some(HEIGHT - 1));
+    (chain, wallet)
+}
+
+/// The same, before the account has looked at anything.
+fn reopened(name: &str, keep_the_account: bool) -> (Restarted, Wallet) {
     let directory = std::env::temp_dir().join(format!(
         "cairn-restarted-{name}-{}-{:?}",
         std::process::id(),
@@ -118,12 +131,6 @@ fn restarted(name: &str, keep_the_account: bool) -> (Restarted, Wallet) {
     }
 
     let (wallet, _) = Wallet::open(&key_file, params(), &data).unwrap();
-    wallet.follow_to_the_tip();
-    assert!(
-        wallet.node().blocks_from() > Some(0),
-        "a node that wrote its ledger and started again was meant to have cut its log"
-    );
-    assert_eq!(wallet.progress().height, Some(HEIGHT - 1));
     (
         Restarted {
             directory,
@@ -237,6 +244,61 @@ fn a_payment_from_notes_paid_below_the_log_is_recorded_as_what_left() {
         (Direction::Sent, left),
         "this key paid the amount and the fee away in one transfer, and the account wrote \
          down something else: the change coming back against the notes it happened to know"
+    );
+
+    wallet.shutdown();
+    let _ = std::fs::remove_dir_all(&chain.directory);
+}
+
+/// An account whose node cannot give back the first block of its log stops
+/// there and says so, rather than going round for ever.
+///
+/// An account starting over asks for block zero, is told the log begins
+/// further up, and moves there. When the block there will not read either,
+/// the place the log begins is the place the account already stands, and
+/// moving there again moves nothing. Nothing damaged the first block of a
+/// log under an account, so a reading that went on asking passed.
+#[test]
+fn an_account_that_cannot_read_the_first_block_of_the_log_stops_there() {
+    let (chain, wallet) = reopened("first-unreadable", false);
+    let first = wallet.node().blocks_from().expect("the log holds blocks");
+    assert!(
+        first > 0,
+        "a node that wrote its ledger was meant to have cut its log"
+    );
+
+    // The first record's header, past its length prefix, names its parent
+    // from byte fourteen: a changed parent is a record the one after it no
+    // longer names, which the store refuses.
+    let log = chain.directory.join("data").join("blocks.log");
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&log)
+        .unwrap();
+    let at = SeekFrom::Start(4 + 14);
+    let mut byte = [0u8; 1];
+    file.seek(at).unwrap();
+    file.read_exact(&mut byte).unwrap();
+    file.seek(at).unwrap();
+    file.write_all(&[byte[0] ^ 0xFF]).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    assert!(
+        wallet.node().archived_at(first).is_none(),
+        "the first block of the log still reads, so this asks nothing"
+    );
+
+    assert_eq!(wallet.follow(), 0, "a block that will not read was read");
+    assert_eq!(wallet.follow(), 0);
+    assert_eq!(
+        wallet.history_covers().missed_below,
+        Some(first),
+        "the account moved to where the log begins and stands there"
+    );
+    assert!(
+        wallet.progress().unread.is_some(),
+        "and the refusal is said"
     );
 
     wallet.shutdown();
