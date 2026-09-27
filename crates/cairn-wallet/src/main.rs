@@ -83,6 +83,21 @@ Options for `open`
                        and the address carries a secret without which the
                        wallet answers nothing.
 
+What the network learns
+
+  The wallet is a node: it reads its balance out of a chain it checked
+  itself, and tells no peer which key it holds to do that. Every peer sees
+  the address of this machine. The wallet does not ask peers to write that
+  address down or hand it on. A payment goes to every peer connected at the
+  moment it is sent, so the first of them to receive it can tell that it
+  came from here, and whose notes it spends. When money cannot move until
+  somebody says where it sits, the wallet asks only peers started with
+  --archive, and the question tells them which notes are stuck and whose.
+
+  This wallet uses one address for everything, the public key `address`
+  prints. Anyone who knows it can read on the chain everything it was paid,
+  everything it spent, and what it holds.
+
 Backing up
 
   A wallet is two files. The key file spends the money, and it is plain

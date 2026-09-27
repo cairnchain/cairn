@@ -56,7 +56,9 @@ pub(crate) const HTML: &str = r#"<!doctype html>
         <button class="quiet" id="copy" type="button">Copy</button>
       </div>
       <p class="note-line">Anyone paying you needs these 64 characters and
-        nothing else.</p>
+        nothing else. Anyone who has them can also read on the chain
+        everything paid to them and everything spent from them: this wallet
+        uses the one address for everything.</p>
     </section>
 
     <section class="card">
@@ -82,6 +84,9 @@ pub(crate) const HTML: &str = r#"<!doctype html>
         <button id="go" type="submit">Send</button>
         <p class="said" id="said"></p>
       </form>
+      <p class="note-line">A payment goes first to the peers this wallet is
+        connected to, and the first of them to receive it can tell it came
+        from this machine.</p>
     </section>
   </div>
 

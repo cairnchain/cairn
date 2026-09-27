@@ -848,14 +848,15 @@ fn a_stranger_that_has_not_spoken_is_not_answered() {
     );
 }
 
-/// **The place a note landed is all that crosses the wire about it.**
+/// **The question carries places and no name.**
 ///
-/// Not a rule the protocol can enforce and worth pinning all the same. What an
-/// asker hands over is a list of numbers, and what comes back is a list of
-/// hashes: the answerer is never told whose money it is, what it is worth, or
-/// which of the places it was handed matter to whom.
+/// What an asker hands over is a list of numbers: not the owner, not the
+/// note. That is all this checks, and all it can. It used to say that the
+/// answerer is never told whose money it is or what it is worth, which is a
+/// claim about what the receiver learns, and the test after this one shows it
+/// was false.
 #[test]
-fn asking_says_nothing_about_whose_money_it_is() {
+fn the_question_carries_places_and_no_name() {
     let ready = a_chain_with_a_fallen_note();
     let asked = Message::GetProofs(vec![ready.position]).encode();
     let owner = ready.note.owner.encode();
@@ -874,5 +875,49 @@ fn asking_says_nothing_about_whose_money_it_is() {
         asked.len(),
         1 + 4 + 8,
         "a tag, a count and one place, which is the whole of it"
+    );
+}
+
+/// **A place names the note, its owner and its value to anyone with the
+/// chain.**
+///
+/// Pinned so that no sentence says otherwise. Places are handed out in the
+/// order notes fall, every node sees them fall, and every note ever created
+/// is in the blocks, so an archivist given nothing but the places in a
+/// question finds which notes they are with the chain it already holds.
+/// Asking by place keeps the name off the wire and does nothing more, which
+/// is why a node puts the question only to peers that say they keep the
+/// whole set. The papers and the code said a list of places told the
+/// answerer nothing about whose money it was, and the test above, checking
+/// the wire, was read as holding that.
+#[test]
+fn a_place_names_the_note_its_owner_and_its_value_to_anyone_with_the_chain() {
+    let ready = a_chain_with_a_fallen_note();
+    let Message::GetProofs(positions) = Message::GetProofs(vec![ready.position]) else {
+        unreachable!()
+    };
+
+    // An archivist that watched the same blocks go past.
+    let mut archivist = LedgerState::archiving();
+    for block in &ready.blocks {
+        connect_block(&mut archivist, block, &params(), NOW).unwrap();
+    }
+
+    let mut named = Vec::new();
+    for position in &positions {
+        for block in &ready.blocks {
+            for (id, note) in block.coinbase.created_notes() {
+                if archivist.cold().locate(&id, &note) == Some(*position) {
+                    named.push((note.owner, note.value));
+                }
+            }
+        }
+    }
+    assert_eq!(
+        named,
+        vec![(ready.note.owner, ready.note.value)],
+        "an archivist holding the chain could not name the owner and the value \
+         of the note at a place it was asked about, so what the papers say of a \
+         place has to be checked again"
     );
 }
