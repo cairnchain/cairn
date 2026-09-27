@@ -883,9 +883,14 @@ impl<R: Read> Read for Counting<R> {
 /// remembers. The methods are read out of the `match` that decides them, and
 /// each has to appear in the header. A new one is then a decision somebody
 /// writes down, not one the header quietly stops describing.
+///
+/// Both headers. The crate's own, in `lib.rs`, is the one `cargo doc` opens
+/// on, and it went on saying "GET and HEAD" after this file's was corrected,
+/// because this read `http.rs` alone.
 #[test]
 fn the_header_names_every_method_this_answers() {
     const SOURCE: &str = include_str!("../src/http.rs");
+    const CRATE: &str = include_str!("../src/lib.rs");
 
     // The sentence that enumerates them, and not the header at large. The
     // first version of this asked whether each method appeared anywhere in
@@ -931,6 +936,27 @@ fn the_header_names_every_method_this_answers() {
             "this server answers {method} and its header does not say so. The \
              header is what somebody reads to know what a stranger can reach: \
              {answered:?}"
+        );
+    }
+
+    let crate_header: String = CRATE
+        .lines()
+        .take_while(|line| line.starts_with("//!"))
+        .map(|line| line.trim_start_matches("//!").trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let (_, rest) = crate_header
+        .split_once("nothing else:")
+        .expect("the crate header says what it does and nothing else");
+    let crate_says = rest
+        .split_once(", one request per connection")
+        .expect("the enumerating sentence ends where the connection claim begins")
+        .0;
+    for method in &answered {
+        assert!(
+            crate_says.contains(method),
+            "this server answers {method} and the crate's own header, the page \
+             `cargo doc` opens on, does not say so: {answered:?}"
         );
     }
 }
