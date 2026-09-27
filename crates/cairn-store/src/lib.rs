@@ -291,9 +291,12 @@ fn hold(path: &Path) -> Result<File, StoreError> {
 
 /// Makes a rename durable, where the platform has a way to say so.
 ///
-/// Unix has one: syncing the directory itself. Windows does not let a
-/// directory be opened as a file at all, and `ReplaceFile` is not something
-/// the standard library reaches — so on Windows this is a no-op and a
+/// Unix has one: syncing the directory itself. Windows has one too, and the
+/// standard library does not reach it: what makes a rename durable there is
+/// `MOVEFILE_WRITE_THROUGH`, and `fs::rename` passes `MOVEFILE_REPLACE_EXISTING`
+/// alone. (A directory can be opened on Windows, with
+/// `FILE_FLAG_BACKUP_SEMANTICS`, which `File::open` does not pass; this said it
+/// could not be opened at all.) So on Windows this is a no-op and a
 /// compaction interrupted by a power cut can leave the old log in place. The
 /// next start treats that as an index reaching past its log and rebuilds, so
 /// nothing is served wrongly; what is lost is the compaction, not the chain.

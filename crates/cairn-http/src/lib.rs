@@ -7,9 +7,10 @@
 //! chain should stay readable end to end, and a second copy of a server is a
 //! second place for a hole to open.
 //!
-//! It does what those two need and nothing else: GET and HEAD, one request per
-//! connection, no compression, no ranges, no keep-alive. Anything else is
-//! answered with a status and dropped.
+//! It does what those two need and nothing else: GET, HEAD and POST, one
+//! request per connection, a body only for a POST and only to a server that
+//! takes one, no transfer codings, no compression, no ranges, no keep-alive.
+//! Anything else is answered with a status and dropped.
 
 pub mod http;
 mod json;

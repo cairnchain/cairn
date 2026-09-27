@@ -257,10 +257,12 @@ impl HeaderLog {
             return Err(error);
         }
 
-        // The handle is let go of before the move, because Windows will not
-        // rename over an open file. It points at a scratch file meanwhile,
-        // since a `File` closes when it is dropped and there is no other way
-        // to say so.
+        // The handle is let go of before the move, because on Windows an open
+        // file can stop it: the standard library's rename is refused over an
+        // open file there, and it then tries again with POSIX semantics,
+        // which not every Windows and every volume can do. It points at a
+        // scratch file meanwhile, since a `File` closes when it is dropped
+        // and there is no other way to say so.
         let scratch = crate::beside(&self.path, ".hold");
         let parked = OpenOptions::new()
             .read(true)

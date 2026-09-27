@@ -154,15 +154,51 @@ fn a_head_that_never_ends_is_cut_off_at_the_deadline() {
     );
 
     // The caller is told rather than merely dropped, as everywhere else here.
-    // What arrives can be cut short by the reset the caller's own next byte
-    // provokes, so the check is that whatever did arrive was a timeout and not
-    // something else.
+    //
+    // This asked whether what arrived was the start of a 408, and nothing at
+    // all is the start of everything: the 408 was built at the deadline and
+    // written into a budget that ended at that same deadline, so not a byte
+    // of it left, and an empty answer passed. The status line is asked for
+    // whole now. The caller writes nothing between the moment it reads the
+    // answer's first byte and the end of this test, so no byte of its own is
+    // left to provoke a reset over the rest.
     let mut said = String::from_utf8_lossy(&seen).into_owned();
     said.push_str(&reply(&mut stream));
     let first = said.lines().next().unwrap_or_default();
     assert!(
-        "HTTP/1.1 408 Request Timeout".starts_with(first),
-        "the server answered {first:?}"
+        first.starts_with("HTTP/1.1 408 Request Timeout"),
+        "a caller cut off at the deadline was not told so: the server answered {first:?}"
+    );
+}
+
+/// **A body that never finishes is told 408 too, and told it.**
+///
+/// The body is read by length rather than a line at a time, and that read
+/// mapped every failure to 400, "malformed request", so a caller cut off at
+/// the deadline halfway through its form would have been told its form was
+/// malformed. It was told nothing: the refusal was made at the deadline and
+/// its writing budget ended there too. A caller reading nothing at all
+/// passed.
+#[test]
+fn a_body_that_never_finishes_is_told_it_was_late() {
+    let address = start();
+    let mut stream = TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(REQUEST_DEADLINE + Duration::from_secs(10)))
+        .unwrap();
+    stream
+        .write_all(b"POST / HTTP/1.1\r\nhost: x\r\ncontent-length: 10\r\n\r\nabc")
+        .unwrap();
+    let said = reply(&mut stream);
+    let first = said.lines().next().unwrap_or_default();
+    assert!(
+        first.starts_with("HTTP/1.1 408 Request Timeout"),
+        "a caller whose body stopped short of its length was not told it was late: \
+         the server answered {first:?}"
+    );
+    assert!(
+        said.contains("the request did not arrive in time"),
+        "{said}"
     );
 }
 

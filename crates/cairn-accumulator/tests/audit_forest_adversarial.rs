@@ -416,6 +416,8 @@ fn the_structure_agrees_with_the_leaves_after_any_sequence() {
 /// the ledger the only producer of a cold leaf is `cold_leaf`, which hashes a
 /// note identifier followed by a note and is therefore never empty. The
 /// separation holds, and it holds by that one fact rather than by domain.
+/// `Forest::add` refusing the sentinel makes it the structure's rule as well
+/// as the callers'.
 #[test]
 fn the_empty_leaf_is_reachable_only_by_hashing_nothing() {
     assert_eq!(
@@ -432,21 +434,17 @@ fn the_empty_leaf_is_reachable_only_by_hashing_nothing() {
         );
     }
 
-    // And if one ever were added, the place it took could never be emptied,
-    // and the count of what is standing would be wrong for good. Shown rather
-    // than argued, because it is the consequence that matters.
+    // And one handed to `add` is refused. It used to be taken and counted as
+    // standing, in a place nothing could empty again, since a removal refuses
+    // the sentinel: the count of what is standing was wrong for good, and an
+    // archive that undid the append left more standing than it held.
     let mut forest = Forest::new();
-    let (position, proof) = forest.add(empty_leaf()).unwrap();
-    assert_eq!(forest.len(), 1, "it counts as standing");
     assert!(
-        forest.verify(position, empty_leaf(), &proof),
-        "and it verifies like any other leaf"
+        forest.add(empty_leaf()).is_none(),
+        "the sentinel was taken as a leaf"
     );
-    assert!(
-        !forest.remove(position, empty_leaf(), &proof),
-        "but nothing can take it out again"
-    );
-    assert_eq!(forest.len(), 1, "so the count never comes back down");
+    assert_eq!(forest.leaves(), 0, "and took a place");
+    assert_eq!(forest.len(), 0, "and counted as standing");
 }
 
 /// Trees are laid out largest first and named by the set bits of the count, so

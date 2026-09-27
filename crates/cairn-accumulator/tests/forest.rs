@@ -12,6 +12,7 @@
 use cairn_accumulator::forest::{empty_leaf, forest_leaf, MAX_HEIGHT};
 use cairn_accumulator::{Archive, Forest, ForestProof};
 use cairn_primitives::codec::{Decode, Encode};
+use cairn_primitives::hash::counting;
 use cairn_primitives::Hash32;
 
 fn leaf(index: u64) -> Hash32 {
@@ -314,6 +315,86 @@ fn the_order_spends_appear_in_changes_nothing() {
     assert_eq!(forward, shuffled);
 }
 
+/// A batch removal costs a few folds of each path it empties, however many
+/// of the paths share a tree.
+///
+/// Every later entry in the same tree was brought up to date by folding the
+/// emptied place's path again, once per pair, on the trial and again on the
+/// removal: a hundred and sixty spends in one tree of height seventeen hashed
+/// about four hundred thousand nodes, fifty times the three passes the comment
+/// on `remove_batch` priced it at, and nothing counted them. That passed.
+#[test]
+fn a_batch_removal_costs_a_few_passes_and_not_a_pass_per_pair() {
+    const HEIGHT: u64 = 16;
+    const BATCH: u64 = 160;
+    let places = 1u64 << HEIGHT;
+    let mut archive = Archive::new();
+    for index in 0..places {
+        archive.add(leaf(index)).unwrap();
+    }
+    // Scattered over the one tree, so most pairs meet low and some high.
+    let chosen: std::collections::BTreeSet<u64> = (0..BATCH)
+        .map(|turn| turn.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(17) % places)
+        .collect();
+    let removals: Vec<_> = chosen
+        .iter()
+        .map(|at| (*at, leaf(*at), archive.prove(*at).unwrap()))
+        .collect();
+    let mut node = archive.forest().roots_only();
+
+    counting::reset();
+    assert!(node.remove_batch(&removals), "the batch goes through");
+    // A node hash takes sixty four bytes, and the empty leaf takes none.
+    let hashed = counting::reset() / 64;
+
+    let entries = u64::try_from(removals.len()).unwrap();
+    assert!(entries > BATCH / 2, "the batch is mostly distinct places");
+    assert_eq!(node.len(), places - entries);
+    // Nine folds of each path: one to verify it, and on each of the trial and
+    // the removal one to verify it again, one to empty it, one to move the
+    // sibling it changes on watched paths, and one for the later entries to
+    // take their new sibling from.
+    let priced = 9 * entries * HEIGHT;
+    assert!(
+        hashed <= priced,
+        "a batch of {entries} in a tree of height {HEIGHT} hashed {hashed} nodes \
+         where nine folds of each path is {priced}: the later entries are being \
+         brought up to date by folding again for every pair"
+    );
+}
+
+/// The empty leaf is not a leaf anybody can add.
+///
+/// It is what an emptied place holds, and every other operation reads it so:
+/// a removal refuses it, the archive's index skips it, and undoing the append
+/// of one leaves the live count alone. `add` took it like any other leaf and
+/// counted it live, so an archive handed it and then undone held one live leaf
+/// among none, a forest its own decoder refuses. That passed.
+#[test]
+fn the_empty_leaf_cannot_be_added() {
+    let mut forest = Forest::new();
+    assert!(
+        forest.add(empty_leaf()).is_none(),
+        "a forest took the empty leaf as a leaf"
+    );
+    assert_eq!(forest, Forest::new(), "a refused addition moved the forest");
+
+    let mut archive = Archive::new();
+    archive.add(leaf(1)).unwrap();
+    let before = archive.commitment();
+    assert!(
+        archive.add(empty_leaf()).is_none(),
+        "an archive took the empty leaf as a leaf"
+    );
+    assert_eq!(archive.commitment(), before, "and moved for it");
+    assert_eq!(archive.leaf_at(1), None, "and kept what its forest refused");
+    assert!(archive.remove_last());
+    assert!(
+        Forest::decode(&archive.forest().encode()).is_ok(),
+        "undoing what the archive held left a forest the decoder refuses"
+    );
+}
+
 #[test]
 fn a_batch_with_one_bad_proof_changes_nothing() {
     let mut archive = Archive::new();
@@ -494,7 +575,7 @@ fn a_forest_whose_roots_contradict_its_count_is_refused() {
 }
 
 /// The proofs an archive builds must not depend on how it came to hold what it
-/// holds. It keeps its inner nodes so a proof costs one hash per level rather
+/// holds. It keeps its inner nodes so a proof costs one lookup per level rather
 /// than a pass over everything, and every path that changes a leaf has to
 /// leave those nodes saying what the leaves say.
 #[test]

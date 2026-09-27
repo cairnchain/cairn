@@ -662,7 +662,19 @@ impl Forest {
     ///
     /// Only the roots are read and written, which is what lets a node that
     /// holds nothing else keep the commitment current.
+    ///
+    /// Nothing when the count is full, and nothing for the empty leaf. That
+    /// is what an emptied place holds, and every other operation here reads
+    /// it so: a removal refuses it, the archive's index leaves it out, and
+    /// undoing the append of one leaves the live count alone. Taken here and
+    /// counted live, it left an archive that was then undone holding one live
+    /// leaf among none, a forest [`Forest::decode`] refuses. No leaf a chain
+    /// adds is it, since each is hashed over bytes and it is the hash of
+    /// none, so refusing it changes what happens to nothing anybody can make.
     pub fn add(&mut self, leaf: Hash32) -> Option<(u64, ForestProof)> {
+        if leaf == empty_leaf() {
+            return None;
+        }
         let position = self.leaves;
         let next = self.leaves.checked_add(1)?;
 
@@ -869,13 +881,22 @@ impl Forest {
     /// that could act on the answer read it as "nothing happened".
     ///
     /// What the trial costs is a copy of sixty four hashes and then the whole
-    /// batch folded against it, so a batch removal is about three passes: the
-    /// verify above, the trial, and the removal. The note here used to price
-    /// the copy and read as pricing the trial, which is the more expensive
-    /// half of it by far. Immaterial in absolute terms, since a full block
-    /// holds about a hundred and sixty cold spends and the second pass is
-    /// microseconds, and worth saying correctly because a price nobody has
-    /// worked out is how a ceiling stops binding.
+    /// batch folded against it. So a batch of `n` places in trees of height
+    /// `h` costs at most nine folds of each path, `9nh` node hashes: one to
+    /// verify it above, and on each of the trial and the removal one to
+    /// verify it again, one to empty it, one to move the sibling it changes on
+    /// the watched paths beside it, and one for the later entries in its tree
+    /// to take their new sibling from. A full block holds about a hundred and
+    /// sixty cold spends, which in a tree of height twenty two is about
+    /// thirty two thousand hashes.
+    ///
+    /// That last fold was made once per later entry rather than once, which
+    /// is a fold per pair: the same block hashed half a million nodes, fifty
+    /// times what this note said, and took sixty milliseconds where it now
+    /// takes under five. The note called the trial microseconds. A price
+    /// nobody has worked out is how a ceiling stops binding, and this one was
+    /// worked out by reading the code rather than counting what it hashed;
+    /// `a_batch_removal_costs_a_few_passes_and_not_a_pass_per_pair` counts.
     pub fn remove_batch(&mut self, removals: &[(u64, Hash32, ForestProof)]) -> bool {
         for (position, leaf, proof) in removals {
             if !self.verify(*position, *leaf, proof) {
@@ -911,6 +932,11 @@ impl Forest {
 
             let next = index.saturating_add(1);
             if let Some(rest) = pending.get_mut(next..) {
+                // The emptied place's path, folded once for every later entry
+                // in its tree to read from. It was folded again for each of
+                // them, which is a fold per pair: fifty times the price below
+                // at a full block, on the trial and again on the removal.
+                let mut path: Option<Vec<Hash32>> = None;
                 for (other, _, other_proof) in rest {
                     let Some((other_height, other_offset)) = tree_of(self.leaves, *other) else {
                         continue;
@@ -921,7 +947,8 @@ impl Forest {
                     let Some(other_index) = other.checked_sub(other_offset) else {
                         continue;
                     };
-                    refresh(other_index, other_proof, emptied, &proof);
+                    let path = path.get_or_insert_with(|| emptied_path(emptied, &proof));
+                    refresh(other_index, other_proof, emptied, path);
                 }
             }
             index = next;
@@ -930,14 +957,38 @@ impl Forest {
     }
 }
 
+/// The nodes on an emptied place's path, from the empty leaf up: the one at
+/// `l` is the node of height `l` that holds the place, which is what every
+/// other place in the tree whose path meets this one at `l + 1` has as its
+/// sibling there.
+///
+/// One per sibling, the root left out, since no other place in a tree has
+/// the root beside it.
+fn emptied_path(index_in_tree: u64, proof: &ForestProof) -> Vec<Hash32> {
+    let mut path = Vec::with_capacity(proof.siblings.len());
+    let mut current = empty_leaf();
+    let mut index = index_in_tree;
+    for sibling in &proof.siblings {
+        path.push(current);
+        current = if index & 1 == 0 {
+            node_hash(current, *sibling)
+        } else {
+            node_hash(*sibling, current)
+        };
+        index = index.checked_shr(1).unwrap_or(0);
+    }
+    path
+}
+
 /// Updates one proof after another leaf in the same tree was emptied.
 ///
 /// The two paths run together from the root down to the level where they part.
 /// Everything above that is untouched, everything below is inside the target's
 /// own subtree, and the one sibling that moved is the subtree the other leaf
 /// sits in. That subtree's new root folds out of the other leaf's own proof,
-/// which is why a block carrying both proofs carries enough.
-fn refresh(target: u64, proof: &mut ForestProof, changed: u64, changed_proof: &ForestProof) {
+/// which is why a block carrying both proofs carries enough; `changed_path`
+/// is that fold, made once by [`emptied_path`] for every proof it moves.
+fn refresh(target: u64, proof: &mut ForestProof, changed: u64, changed_path: &[Hash32]) {
     let mut level = 0usize;
     while level < proof.siblings.len() {
         let shift = u32::try_from(level).unwrap_or(u32::MAX);
@@ -949,12 +1000,11 @@ fn refresh(target: u64, proof: &mut ForestProof, changed: u64, changed_proof: &F
     let Some(below) = level.checked_sub(1) else {
         return;
     };
-    let Some(prefix) = changed_proof.siblings.get(..below) else {
+    let Some(updated) = changed_path.get(below) else {
         return;
     };
-    let updated = fold(empty_leaf(), changed, prefix);
     if let Some(slot) = proof.siblings.get_mut(below) {
-        *slot = updated;
+        *slot = *updated;
     }
 }
 
@@ -987,7 +1037,7 @@ pub struct Archive {
     /// holds, which on a chain of a million blocks is eighty seconds for the
     /// five hundred and twelve a newcomer asks for: longer than the tip it was
     /// built for lasts, so the answer would never be finished. With it a proof
-    /// is one hash per level.
+    /// is one lookup per level, and nothing is hashed.
     ///
     /// It costs another thirty two bytes a block, on top of the thirty two the
     /// leaves already cost. That is the archivist's own bargain and nobody
@@ -1348,9 +1398,11 @@ impl Archive {
 
     /// Builds the proof for `position`.
     ///
-    /// Each sibling is a subtree hashed from its leaves, so one proof costs a
-    /// pass over the forest. An archivist serving many would keep the internal
-    /// nodes instead; nothing about the proof it produces would change.
+    /// One lookup a level and no hashing: every sibling a proof asks for is a
+    /// node whose leaves have all arrived, and `inner` holds each of those.
+    /// This said a proof hashed every sibling up from its leaves, a pass over
+    /// the forest, and that an archivist serving many would keep the internal
+    /// nodes instead, for four weeks after it had started keeping them.
     pub fn prove(&self, position: u64) -> Option<ForestProof> {
         self.prove_in(position, self.forest.leaves)
     }
