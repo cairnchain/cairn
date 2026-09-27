@@ -1,8 +1,9 @@
-//! An account on a node that wrote its ledger down and started again.
+//! An account on a node that wrote its ledger down, dropped the blocks below
+//! it, and started again.
 //!
-//! That is the ordinary life of a node, and it cuts the block log to the
-//! ledger's height: the account can no longer read the blocks below where the
-//! log begins. What it knows of them is what it read before, and what it can
+//! That is the ordinary life of a node on a disk budget: once the ledger is
+//! written the budget drops the blocks below it, and the account can no longer
+//! read the blocks below where the log begins. What it knows of them is what it read before, and what it can
 //! learn from the node's ledger now. Each test here is something the account
 //! got wrong about the blocks it can no longer read.
 
@@ -91,7 +92,7 @@ fn restarted(name: &str, keep_the_account: bool) -> (Restarted, Wallet) {
     wallet.follow_to_the_tip();
     assert!(
         wallet.node().blocks_from() > Some(0),
-        "a node that wrote its ledger and started again was meant to have cut its log"
+        "a node that dropped the blocks below its ledger and started again was meant to hold a cut log"
     );
     assert_eq!(wallet.progress().height, Some(HEIGHT - 1));
     (chain, wallet)
@@ -124,6 +125,17 @@ fn reopened(name: &str, keep_the_account: bool) -> (Restarted, Wallet) {
         }
         assert_eq!(wallet.history().len() as u64, HEIGHT);
         assert!(wallet.node().write_ledger());
+        // The budget is what drops blocks: a start no longer cuts the log at
+        // the ledger.
+        wallet.node().keep_blocks(1);
+        let started = std::time::Instant::now();
+        while wallet.node().blocks_from().unwrap_or(0) == 0 {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(120),
+                "the node never dropped the blocks below its ledger"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         wallet.shutdown();
     }
     if !keep_the_account {
@@ -264,7 +276,7 @@ fn an_account_that_cannot_read_the_first_block_of_the_log_stops_there() {
     let first = wallet.node().blocks_from().expect("the log holds blocks");
     assert!(
         first > 0,
-        "a node that wrote its ledger was meant to have cut its log"
+        "a node that dropped the blocks below its ledger was meant to hold a cut log"
     );
 
     // The first record's header, past its length prefix, names its parent
