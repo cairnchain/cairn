@@ -866,8 +866,6 @@ impl Branch {
     }
 }
 
-/// Every block a node knows, the branch it currently follows, and the ledger
-/// state that branch produces.
 /// Where a chain reads back the body of a block it let go of.
 ///
 /// A node holds the bodies of the blocks it could still have to undo, which on
@@ -883,6 +881,8 @@ pub trait Bodies: std::fmt::Debug + Send + Sync {
     fn body(&self, height: u64) -> Option<Block>;
 }
 
+/// Every block a node knows, the branch it currently follows, and the ledger
+/// state that branch produces.
 #[derive(Debug)]
 pub struct ChainStore {
     params: ConsensusParams,
@@ -1159,9 +1159,6 @@ impl ChainStore {
         self.branch.height_of(id)
     }
 
-    /// The identifier the followed branch carries at `height`, when this node
-    /// still holds it: everything inside the reorganisation window, and one
-    /// height in every [`MILESTONE`] before that.
     /// The lowest height this node still holds a block for.
     ///
     /// Zero for a node that read its chain from the first block, and the
@@ -1199,6 +1196,9 @@ impl ChainStore {
         Some(self.branch.from)
     }
 
+    /// The identifier the followed branch carries at `height`, when this node
+    /// still holds it: everything inside the reorganisation window, and one
+    /// height in every [`MILESTONE`] before that.
     pub fn id_at(&self, height: u64) -> Option<Hash32> {
         self.branch.id_at(height)
     }
@@ -2871,7 +2871,6 @@ impl ChainStore {
         }
     }
 
-    /// Recomputes the byte count after a sweep that dropped many at once.
     /// Recomputes what is held, counting only the blocks whose body is still
     /// here.
     ///
@@ -2887,7 +2886,6 @@ impl ChainStore {
             .fold(0usize, usize::saturating_add);
     }
 
-    /// Bytes of blocks that are not on the followed branch.
     /// Entries held off the followed branch, body or no body.
     ///
     /// Counted rather than weighed, and counted whether or not a body is still
@@ -3057,7 +3055,7 @@ impl ChainStore {
                 });
                 // `self.invalid` was swept here too, keeping the identifiers
                 // the branch does not name. It could not remove anything: an
-                // identifier reaches that set from `switch_to`, when applying
+                // identifier reaches that set from `follow`, when applying
                 // a candidate branch failed and the branch was rolled back, so
                 // it was never on `self.branch`; and `add_block` refuses
                 // anything already in it, so it never gets on afterwards. The

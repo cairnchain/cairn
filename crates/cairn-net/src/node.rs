@@ -8108,8 +8108,8 @@ fn read_loop(
         // hundred bytes long. Before it arrives, a megabyte of notes bought
         // one and a third seconds of this node's processor, because decoding
         // one decompresses a curve point for every owner in it. The budget
-        // that would have charged for that is `held_off`, twenty lines below,
-        // and by then the work is done.
+        // that would have charged for that is `held_off`, below, and by then
+        // the work is done.
         let message = match read_message(&mut stream, network, most_from(announced)) {
             Ok(Incoming::Message(message)) => {
                 last_heard = unix_now();

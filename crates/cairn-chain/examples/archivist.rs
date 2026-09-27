@@ -45,18 +45,21 @@ const NOTES_PER_PAYMENT: u64 = 1;
 /// Structural, and worth saying so: a forest of `n` leaves holds `n` of them
 /// and `n - 1` nodes above, at thirty two bytes each, so it costs two hashes
 /// an item on disk. It is not a reading of a process, and it must not be
-/// quoted as one.
+/// quoted as one. This is what every node pays for each header, in the forest
+/// the headers make.
+const FOREST_BYTES: u64 = 2 * 32;
+/// What an archive holds for each fallen note still standing: the two hashes
+/// above, and forty bytes saying where the leaf sits.
 ///
-/// This used to say the whitepaper's "about 64 bytes for every note that has
-/// ever fallen" was a separate number that happened to land in the same place,
-/// an archiving node's memory read with `footprint`. They are the same number
-/// now, and the paper says so: `cairn-accumulator/tests/archivist_cost.rs`
-/// established that the content is exactly this and does not vary, while a
-/// resident reading swings between it and about ninety as the vectors holding
-/// the hashes double. The design figure is the one worth publishing, because
-/// it is a property of the design and not of an allocator, and it is checked
-/// against `Archive::hashes_held` rather than against itself.
-const ARCHIVED_BYTES: u64 = 2 * 32;
+/// This used to be the sixty four of the header forest, for a week after the
+/// archive began keeping its index, because the accessor the figure was
+/// checked against counted the hashes and nothing else.
+/// `Archive::bytes_held` counts both, `tests/archivist_cost.rs` in
+/// `cairn-accumulator` holds it at a hundred and four, and the papers publish
+/// that. A note that is spent gives up its index entry and keeps its hashes,
+/// so what follows prices every fallen note as still standing, which is the
+/// most an archive holds.
+const ARCHIVED_BYTES: u64 = FOREST_BYTES + 40;
 /// What a header takes on disk, which is what it takes on the wire.
 ///
 /// Taken from the type rather than written out. `cairn-store` refuses to open
@@ -91,10 +94,11 @@ fn main() {
         // Taking in newcomers: every header, and the forest they make, both
         // on disk. The same figure whatever the chain carries, since a header
         // is the same size whether its block is full or empty.
-        let taking_in = BLOCKS * (HEADER_BYTES + ARCHIVED_BYTES);
+        let taking_in = BLOCKS * (HEADER_BYTES + FOREST_BYTES);
 
         // Archiving: every note that ever fell out of the hot set, held so a
-        // path through them can be built.
+        // path through them can be built. In memory, today, and rebuilt by
+        // reading every block again at each start.
         let fallen = (BLOCKS * notes).saturating_sub(params.hot_capacity as u64);
         let archive = fallen * ARCHIVED_BYTES;
 

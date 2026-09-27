@@ -415,7 +415,7 @@ fn state(wallet: &Wallet) -> Response {
     }
     json.end_array();
     // How many there were, for the same reason `movements_held` is written
-    // ten lines above and by the rule written beside the other face: a list
+    // above and by the rule written beside the other face: a list
     // that stops short and does not say where it stopped has told somebody
     // something untrue about their own money. This list holds up to
     // `MAX_UNDONE`, which is two hundred and fifty six, and shows a hundred,

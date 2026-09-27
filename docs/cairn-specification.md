@@ -66,10 +66,12 @@ A fixed-size byte array is encoded as its bytes in order, with no length
 prefix, because its width is known from its type. A hash is a 32-byte array and
 is encoded the same way.
 
-Every hash is BLAKE3 in keyed mode. The key is a 32-byte domain constant, and a
-value hashed under one domain MUST NOT be accepted where another domain is
-required. Each domain is a distinct constant, so a preimage under one says
-nothing under any other.
+Every hash this protocol defines is BLAKE3 in keyed mode. The key is a 32-byte
+domain constant, and a value hashed under one domain MUST NOT be accepted where
+another domain is required. Each domain is a distinct constant, so a preimage
+under one says nothing under any other. The one other hash a node computes is
+the SHA-512 inside Ed25519, which belongs to the signature scheme and is
+specified with it in *How a signature is verified*.
 
 ### Sequences
 
@@ -85,6 +87,9 @@ so that a declared length can never drive an allocation.
 An encoder MUST NOT produce a sequence longer than that limit. A structure
 holding one would encode to bytes no conforming decoder can read back, and a
 node could then commit to an identifier over a structure it cannot re-parse.
+No structure in this protocol can reach the limit, since every sequence in a
+block or a message has a tighter one of its own, so the reference encoder
+relies on that rather than checking, and only a debug build asserts it.
 
 ### Structures and choices
 
@@ -100,7 +105,8 @@ than skipping it, since it cannot know how many bytes to skip.
 ### Money
 
 An amount is a count of pebbles, encoded as a `u64`. One CAIRN is 100 000 000
-pebbles. No amount may exceed the monetary ceiling, and a decoder MUST refuse
+pebbles. No amount may exceed the monetary ceiling, which is
+100 000 000 000 000 000 pebbles, one billion CAIRN, and a decoder MUST refuse
 an amount above it rather than accepting and clamping, so a value past the
 ceiling cannot exist in a decoded structure anywhere in the system.
 
@@ -141,6 +147,10 @@ thing it exists for.
     <tr><td>grace window</td><td><code>cairn v1 grace window</code></td></tr>
   </tbody>
 </table>
+
+One of them, `state entry`, is reserved: nothing on the network is hashed
+under it. It is published so that its string cannot come to mean one thing to
+one implementation and another to a second.
 
 Two consequences follow and both are load-bearing.
 
@@ -228,10 +238,36 @@ already holds it, and carries nothing further. Tag `1` means the note has
 fallen to the cold set, and carries the note itself, its position, and a proof
 that it sits at that position. A decoder MUST refuse any other tag.
 
+<table>
+  <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
+  <tbody>
+    <tr><td>note</td><td>note</td><td class="n">40</td></tr>
+    <tr><td>position</td><td>u64</td><td class="n">8</td></tr>
+    <tr><td>proof</td><td>sequence of hash</td><td class="n">4 + 32d</td></tr>
+  </tbody>
+</table>
+
+Those are the bytes after the tag. The proof's hashes are the siblings from the
+note's leaf up to the root of its tree, bottom first, as *Proofs* gives them.
+
 **A transfer's identifier is not the hash of its wire encoding.** It is the
 hash, under the transfer domain, of the version, the count of inputs, each
 input's note identifier alone, and the outputs. Signatures and witnesses are
 left out.
+
+<table>
+  <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
+  <tbody>
+    <tr><td>version</td><td>u16</td><td class="n">2</td></tr>
+    <tr><td>input count</td><td>u32</td><td class="n">4</td></tr>
+    <tr><td>note identifiers</td><td>note identifier, one per input, in order</td><td class="n">36n</td></tr>
+    <tr><td>outputs</td><td>sequence of note</td><td class="n">4 + 40m</td></tr>
+  </tbody>
+</table>
+
+It is the transfer's own encoding with each input cut down to its note
+identifier: the input count is the count the inputs sequence carries, and the
+outputs are the same sequence, count included.
 
 That is deliberate and a second implementation must reproduce it exactly. A
 cold witness carries a proof that goes stale as the accumulator moves, and it
@@ -251,9 +287,91 @@ Each input is signed separately, over the hash under the signature domain of:
 the network identifier, the transfer's version, the transfer's identifier, the
 input's index, and the value and owner of the note being spent.
 
+<table>
+  <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
+  <tbody>
+    <tr><td>network</td><td>u32</td><td class="n">4</td></tr>
+    <tr><td>version</td><td>u16</td><td class="n">2</td></tr>
+    <tr><td>transfer</td><td>hash</td><td class="n">32</td></tr>
+    <tr><td>index</td><td>u32</td><td class="n">4</td></tr>
+    <tr><td>value</td><td>amount</td><td class="n">8</td></tr>
+    <tr><td>owner</td><td>public key</td><td class="n">32</td></tr>
+  </tbody>
+</table>
+
+That is 82 bytes. `network` is the identifier the network's headers carry,
+`version` is the transfer's, `transfer` is its identifier, `index` is the
+input's position among the transfer's inputs counting from nought, and `value`
+and `owner` are the spent note's.
+
 The last two matter and are not obvious. Without them a wallet shown a false
 value for the note it is spending would sign a transaction whose real fee is
 the difference, and the signature would be perfectly valid.
+
+### How a signature is verified
+
+A signature is 64 bytes: the encoding of a point `R` in the first 32, and a
+scalar `S`, little-endian, in the last 32. It is pure Ed25519 as RFC 8032
+defines it, with the 32 bytes of the digest above as the message: no prehash
+and no context, so neither Ed25519ph nor Ed25519ctx.
+
+RFC 8032 leaves a verifier two choices, and the verifiers in use differ
+exactly there, so this protocol makes both. With `A` the owner's public key,
+`B` the base point, `M` the message, and `L` the order of the prime order
+subgroup, which is `2^252 + 27742317777372353535851937790883648493`, a node
+MUST accept a signature if and only if all four of these hold:
+
+1. `S`, read as a 256-bit little-endian integer, is below `L`;
+2. `R` is the canonical encoding of a point on the curve;
+3. that point is not of small order;
+4. `[S]B = R + [k]A`, where `k` is SHA-512 of the 32 bytes of `R`, the 32 bytes
+   of `A` and the message, in that order, read as a little-endian integer and
+   reduced modulo `L`. The equation is checked as written, without multiplying
+   either side by the cofactor.
+
+Any other signature is refused, and the refusal is `InvalidSignature`. `A` is a
+key that passed the three refusals in *Notes*, so it is never of small order
+itself.
+
+The third and the fourth are the choices. RFC 8032 never asks about the order
+of `R`, and without the third a signature whose `R` is the identity and whose
+`S` is `k` times the signer's secret scalar verifies. RFC 8032 permits the
+cofactored equation, `[8][S]B = [8]R + [8][k]A`, and states it first, and under
+it a signature whose `R` carries a torsion component verifies. The holder of a
+key can make either kind at will, so a node that took them would accept spends
+every other node refuses, and follow another chain from the first block that
+carried one.
+
+These vectors are for checking a verifier against. The key is the one whose
+32-byte seed is the first 32 bytes of SHA-512 of the ASCII bytes
+`cairn signature vector`, and the message is the first 32 bytes of SHA-512 of
+`cairn signature vector message`. The first vector is the signature that key
+makes. The second is the first with `L` added to `S`, a second spelling of the
+same signature that a verifier reducing `S` would take. The third has the
+identity as `R` and `k` times the secret scalar as `S`, which both of RFC 8032's
+equations accept. The fourth has `R = rB + T`, for `T` a point of order eight
+and `r` the first 32 bytes of SHA-512 of `cairn signature vector nonce` reduced
+modulo `L`, and `S = r + ka`, which the cofactored equation accepts and the
+cofactorless one does not.
+
+```text
+seed        first 32 bytes of SHA-512("cairn signature vector")
+public key  47da95e3585bde332648ce1bf660eb1d68bb4fd9a6b206f80996056edd78995c
+message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
+
+1 accepted
+  R  ee55676db80fe280c81940fa37575a96b8c21ad71eed1fcbe291476eab5e6b20
+  S  0d89268dcbb5832ee6a1f74092cd27ca3d725e9ddb9176ebae0f37663b76820b
+2 refused, S is not below L
+  R  ee55676db80fe280c81940fa37575a96b8c21ad71eed1fcbe291476eab5e6b20
+  S  fa5c1ceae5189686bc3eefe370c706df3d725e9ddb9176ebae0f37663b76821b
+3 refused, R is of small order
+  R  0100000000000000000000000000000000000000000000000000000000000000
+  S  da47d66f55f2a53bbd2b3ffbd771feb593dd18170e8c8a23d429af3baebc7909
+4 refused, the cofactorless equation does not hold
+  R  8a30403f65da91381b89212ab91f54e609038f8cf15a9a15a497697a245745e0
+  S  c06945247d082b057059703beedb5cc928346815e7aa6c7fe1afadb508f08b03
+```
 
 ### Rules a transfer must satisfy
 
@@ -262,7 +380,7 @@ Applied in this order, each producing the refusal named.
 <table>
   <thead><tr><th class="n">#</th><th>Refusal</th><th>When</th></tr></thead>
   <tbody>
-    <tr><td class="n">1</td><td>UnsupportedVersion</td><td>the version is not one these rules know</td></tr>
+    <tr><td class="n">1</td><td>UnsupportedVersion</td><td>the version is not one these rules know, which is 1</td></tr>
     <tr><td class="n">2</td><td>NoInputs</td><td>it spends nothing</td></tr>
     <tr><td class="n">3</td><td>NoOutputs</td><td>it pays nobody</td></tr>
     <tr><td class="n">4</td><td>TooManyInputs</td><td>past the network's limit, which is 256 on every network here</td></tr>
@@ -274,7 +392,10 @@ Applied in this order, each producing the refusal named.
 </table>
 
 The shape is checked before any signature is verified, because the shape is
-cheap and a signature is not.
+cheap and a signature is not. The inputs are resolved against the state next,
+by the refusals in *Which witness a spend must carry*, and the signatures come
+last: in a block, after every transfer's inputs have resolved, as the body
+table in *Blocks* orders them.
 
 Outputs MUST NOT exceed inputs. The difference is the fee, and it is claimed by
 the block's coinbase or destroyed; there is no third destination.
@@ -318,6 +439,9 @@ difference is destroyed rather than held anywhere.
   </tbody>
 </table>
 
+A first block names thirty two zero bytes as `previous`, since there is no
+block before it to name.
+
 The header is a fixed 182 bytes. Nothing in it is optional and nothing is
 variable-length, which is what lets a header log store them at a fixed stride
 and what makes extending the header a different problem from extending anything
@@ -342,6 +466,16 @@ case does not arise here.
 This order is normative. Several of these rules are cheap and decisive and the
 ones after them are not, so applying them out of order lets a sender spend a
 node's time for nothing.
+
+What the order binds is the rules a block is judged by. Before it begins, a
+node MAY refuse a block on a fact about the block's own bytes that the order
+would refuse it for anyway, such as a header that does not meet even the
+difficulty it claims, or a first block that names a parent; and on a fact
+about what the node holds, such as an identifier it already knows to be bad, a
+height below the deepest block it would switch to, or a parent it does not
+have. None of those turns a block the order accepts into one it refuses. They
+change only which refusal is named, and what the node does about the peer that
+sent it.
 
 <table>
   <thead><tr><th class="n">#</th><th>Refusal</th><th>What it means</th></tr></thead>
@@ -374,13 +508,19 @@ comes after the header's own arithmetic, which costs nothing, and before the
 body is looked at, which costs a great deal. A forged block therefore costs its
 sender the work or costs the reader one hash.
 
-**Sixteen is the one refusal in this list that two honest nodes can disagree
-about.** It is measured against the reading node's own clock, so the same block
-is refused by one node and taken by another, and the same node reverses its
-verdict by waiting. A node MUST NOT remember this verdict as a property of the
-block, and MUST NOT hold it against the peer that offered it. Every other
-refusal here is a fact about the block that any node reaches from the same
-bytes.
+**Sixteen is the one refusal in this list that two honest nodes on the same
+build can disagree about.** It is measured against the reading node's own
+clock, so the same block is refused by one node and taken by another, and the
+same node reverses its verdict by waiting. A node MUST NOT remember this
+verdict as a property of the block, and MUST NOT hold it against the peer that
+offered it.
+
+**Four and five are judgements about the reader's build, not about the
+block.** Two honest nodes on different builds disagree about them by
+construction, and *Rules that activate at a height* says what a node MUST NOT
+do with them: remember them against the block or hold them against the peer.
+Every other refusal here is a fact about the block that any node reaches from
+the same bytes.
 
 **The body is evaluated between nineteen and twenty**, and in this order. Four
 of these were made by the implementation and stated nowhere here until this
@@ -398,19 +538,39 @@ transactions root are checked before any of it.
     <tr><td class="n">3</td><td>TooManyCoinbaseOutputs</td><td>past the network's limit, which is 16 on every network here</td></tr>
     <tr><td class="n">4</td><td>ZeroValueCoinbaseOutput</td><td>a coinbase note worth nothing</td></tr>
     <tr><td class="n">5</td><td>TooManyTransfers</td><td>past the network's limit, which is 4 096 on every network here</td></tr>
-    <tr><td class="n">6</td><td>InvalidTransfer, InvalidSignature</td><td>every transfer in order, against the transfer rules above</td></tr>
-    <tr><td class="n">7</td><td>CoinbaseOverpay</td><td>the coinbase claims more than the schedule pays plus the fees given up</td></tr>
-    <tr><td class="n">8</td><td>TooManyEvictions</td><td>past the network's eviction cap</td></tr>
-    <tr><td class="n">9</td><td>SupplyDoesNotAddUp</td><td>the running supply is not the parent's plus what this block issued</td></tr>
+    <tr><td class="n">6</td><td>InvalidTransfer</td><td>every transfer in block order: its shape by the transfer rules above, then its inputs by the refusals in <em>Which witness a spend must carry</em></td></tr>
+    <tr><td class="n">7</td><td>ValueOverflow</td><td>the fees the transfers give up do not sum</td></tr>
+    <tr><td class="n">8</td><td>InvalidSignature</td><td>once every transfer has passed six, the first input in block order whose signature does not verify</td></tr>
+    <tr><td class="n">9</td><td>ValueOverflow</td><td>the schedule's reward plus the fees, or the coinbase's outputs, do not sum</td></tr>
+    <tr><td class="n">10</td><td>CoinbaseOverpay</td><td>the coinbase claims more than the schedule pays plus the fees given up</td></tr>
+    <tr><td class="n">11</td><td>TooManyEvictions</td><td>past the network's eviction cap</td></tr>
+    <tr><td class="n">12</td><td>SupplyDoesNotAddUp</td><td>the running supply is not the parent's plus what this block issued</td></tr>
   </tbody>
 </table>
+
+`InvalidSignature` is reported as `InvalidTransfer` naming the transfer and the
+input, like every refusal of a transfer. Because the signatures are verified
+together after every transfer has resolved, a block whose first transfer is
+badly signed and whose second is badly shaped is refused for the second
+transfer's shape. The verdict is the same either way; only the name differs.
+
+Seven, and the first half of nine, cannot happen on any chain these rules
+produce: fees are given up by notes that exist, so they sum to at most the
+supply, and the schedule keeps the supply near a tenth of the monetary ceiling.
+They are named because part 1 names every overflow.
+The second half of nine can happen: a coinbase carries up to sixteen outputs,
+each of them an amount, and sixteen amounts need not sum to one. A node asks
+seven as each transfer passes six, which reaches the same verdict as asking it
+once afterwards on any chain that can exist.
 
 A block MUST NOT both spend a note and evict it.
 
 The four limits in that table are the network's rather than the format's, and
-the format holds a ceiling above each so that a decoder refuses what no network
-allows before any rule has read the frame: 256 inputs, 256 outputs, 16 coinbase
-outputs and 4 096 transfers. A build whose rules asked for more than its own
+the format holds a ceiling at or above each so that a decoder refuses what no
+network allows before any rule has read the frame: 256 inputs, 256 outputs, 16 coinbase
+outputs and 4 096 transfers. The decoder holds the coinbase's extra to its 64
+bytes too, so row two of the body table is reached only by a block built
+beside the rules that judge it, never by one read off the wire. A build whose rules asked for more than its own
 decoder accepts would refuse blocks its rules allow, which is a fork with
 nobody at fault, so the two are checked against each other at compile time.
 
@@ -568,6 +728,9 @@ spent under the grace window is not one of these: it had already fallen, and
 it comes out of the cold set. Let *created* be every note this block creates,
 in this order: the transfers in the order they appear in the block, each
 transfer's outputs in index order, then the coinbase's outputs in index order.
+That order decides nothing a rule reads: the hot tree is a set, and the
+shortfall below sorts by identifier. It is given so that a block's notes have
+one order to be described in.
 
 Let `surviving` be the hot count less the number of notes in *spent*, and let
 `overflow` be `surviving` plus the number of notes in *created*, less
@@ -613,13 +776,21 @@ order is part of the rule rather than an implementation's convenience:
 1. every note the block spends out of the cold set is emptied from the
    accumulator, all of them proved against the roots as they stood at the
    parent before any of them is applied;
-2. the accumulator is checked to have room for the notes about to fall;
+2. the accumulator is checked to have room for the notes about to fall,
+   which on any chain these rules produce it has, since its positions are
+   counted in 64 bits;
 3. every note the block spends out of the hot set is removed from the hot
    tree;
 4. every note the block creates is inserted into the hot tree, carrying this
    block's height;
 5. each note in the eviction list, in eviction order, is removed from the hot
    tree and appended to the accumulator at the next free position.
+
+A node that finds, applying a block it has already judged valid, that step 1
+or step 2 cannot be done, has found itself holding a state it disagrees with.
+That is not a refusal a peer can cause and not one another implementation has
+to reproduce; the reference names it `NoteNotWhereProved` and refuses the
+block rather than carry on with a root that describes nothing.
 
 Step 4 before step 5 is what lets a note created by this very block fall
 straight through to the cold set, which is the case the shortfall rule above
@@ -667,10 +838,12 @@ accumulator as it currently stands.** A node that cannot produce one cannot
 validate a proofless spend the rest of the network accepts, and cannot hand
 its state to a newcomer.
 
-Under the block bound, a note that fell in the block at height *f* is in the
-window from the block at height *f* + 1 through the block at height *f* + 64
-inclusive, and is out of it from *f* + 65. The note bound moves that edge
-earlier whenever more than 128 notes a block are falling.
+Under the block bound, a note that fell in the block at height *f* may be spent
+without a proof by the blocks at heights *f* + 1 through *f* + 64 inclusive,
+and not by the block at *f* + 65. Said of the window rather than of the note:
+after the block at height *h* it holds the landings of the blocks at heights
+*h* - 63 through *h*, and the block at *h* + 1 is judged against that. The note
+bound moves that edge earlier whenever more than 128 notes a block are falling.
 
 ### Which witness a spend must carry
 
@@ -712,6 +885,15 @@ be, and the last is asked once every input has resolved.
     <tr><td class="n">7</td><td>OutputsExceedInputs</td><td>the outputs total more than the inputs, once every input has resolved</td></tr>
   </tbody>
 </table>
+
+Adding each input's value to the running total is an operation on decoded
+values, so a total that does not fit is refused `ValueOverflow`, and on a chain
+these rules produce it never is, for the reason the body table gives for fees.
+
+Rows three to six assume the node holds what *What a node MUST hold and what
+it MAY discard* requires of it, the path of every note in its grace window among them. A node that has
+lost one answers `MissingProof` for a spend of a window note that every other
+node takes, which is a fault in that node and not in the block.
 
 A transfer MUST NOT spend a note created by the same block. Every input is
 resolved against the state as it stood at the block's parent, and a note this
@@ -843,7 +1025,9 @@ After the block at height *h* the window is the parent's window with:
 2. an entry appended, holding *h* + `coinbase_maturity` and this block's
    coinbase identifier, unless the coinbase paid no outputs, or unless
    *h* + `coinbase_maturity` is not above *h*. A coinbase whose notes are
-   spendable on the block that pays them never enters the window at all.
+   spendable from the very next block, which is as soon as any note is, since
+   nothing is spent in the block that creates it, never enters the window at
+   all.
 
 A transfer in a block at height *H* MUST NOT spend a note whose source names a
 coinbase in the window whose height is above *H*. The refusal is
@@ -1220,7 +1404,7 @@ median, and a block refused for either is refused everywhere and for good. The
 drift bound is measured against a clock the block knows nothing about: the
 same block is refused by one node and taken by another, and the same node
 reverses its verdict by waiting. It is the only refusal in the whole of the
-block rules that two honest nodes can disagree about.
+block rules that two honest nodes on the same build can disagree about.
 
 Three obligations follow, and a node that gets any of them wrong harms itself
 rather than the network, which is why they must be written down.

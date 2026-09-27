@@ -7,21 +7,23 @@
 //! re-read structurally. Nothing said which was the quantity and which was the
 //! reading of it, so a reader could take either as the other's correction.
 //!
-//! They are both right and they are not the same number. What an archive holds
-//! is exactly 64 bytes a note and does not vary: the leaf, and the one inner
-//! node that leaf completes. What a process holding it occupies is more,
-//! because the vectors those hashes live in grow by doubling, so between two
-//! doublings a vector carries up to its own length again in capacity nobody is
-//! using. The occupancy therefore swings between 64 and about 90 bytes a note
-//! as the set grows, and a slope taken at a handful of points lands wherever
-//! those points fell on that swing.
+//! They are both right and they are not the same number. What an archive's
+//! hashes hold is exactly 64 bytes a note and does not vary: the leaf, and the
+//! one inner node that leaf completes. What a process holding it occupies is
+//! more, because the vectors those hashes live in grow by doubling, so between
+//! two doublings a vector carries up to its own length again in capacity nobody
+//! is using. The occupancy therefore swings between 64 and about 90 bytes a
+//! note as the set grows, and a slope taken at a handful of points lands
+//! wherever those points fell on that swing.
 //!
 //! The content is what the papers publish, because it is a property of the
 //! design rather than of a `Vec`'s growth policy, and it is what
-//! `cairn-chain/examples/archivist.rs` counts with. The whitepaper said "about
-//! 64 bytes" under a paragraph about what was measured; it now says exactly 64
-//! and says why the resident reading differs. The explorer goes on serving 72
-//! and goes on calling it a slope, which is what it is.
+//! `cairn-chain/examples/archivist.rs` counts with. And the content is not the
+//! hashes alone any more. On 18 September an archive began keeping where each
+//! standing leaf sits, forty bytes a note, so that finding one is a lookup; the
+//! papers, the example and this file went on publishing 64 for a week, because
+//! the accessor they read counted the hashes and nothing else.
+//! `Archive::bytes_held` counts both, and a standing note costs 104.
 
 #![allow(
     clippy::unwrap_used,
@@ -35,11 +37,16 @@ use cairn_accumulator::forest::forest_leaf;
 use cairn_accumulator::Archive;
 use cairn_primitives::hash::counting;
 
-/// Bytes an archivist holds for every note that has ever fallen.
+/// Bytes of hashes an archivist holds for every note that has ever fallen: the
+/// leaf and the inner node it completes.
+const HASHED_BYTES: u64 = 64;
+
+/// Bytes an archivist holds for every fallen note still standing: the hashes,
+/// and where the note sits.
 ///
 /// The figure `cairn-chain/examples/archivist.rs` counts with, and the one the
 /// whitepaper publishes.
-const ARCHIVED_BYTES: u64 = 64;
+const ARCHIVED_BYTES: u64 = 104;
 
 /// Hashes the archive holds for `leaves` leaves: one each, plus the inner
 /// nodes that are complete.
@@ -61,7 +68,7 @@ fn restated_hashes(leaves: u64) -> u64 {
     leaves + inner
 }
 
-/// The structural count is the one the papers publish, and it is 64 bytes.
+/// The hashes are 64 bytes a note, whatever the size of the set.
 ///
 /// Taken from archives that were built rather than from the arithmetic above.
 /// This used to build one archive, check that its leaf count was the number of
@@ -73,7 +80,7 @@ fn restated_hashes(leaves: u64) -> u64 {
 /// `Archive::add` could have stopped closing inner nodes altogether and this
 /// test would have gone on reporting 64 bytes a note.
 #[test]
-fn an_archivist_holds_sixty_four_bytes_for_every_note_that_ever_fell() {
+fn an_archivists_hashes_are_sixty_four_bytes_for_every_note_that_ever_fell() {
     let mut archive = Archive::new();
     let count = 1u64 << 16;
     for index in 0..count {
@@ -93,8 +100,8 @@ fn an_archivist_holds_sixty_four_bytes_for_every_note_that_ever_fell() {
     // hashes over the whole set and so vanishes into the per-note figure.
     let per_note = archive.hashes_held() as f64 * 32.0 / count as f64;
     assert!(
-        (per_note - ARCHIVED_BYTES as f64).abs() < 0.01,
-        "an archivist holds {per_note} bytes a note, not {ARCHIVED_BYTES}"
+        (per_note - HASHED_BYTES as f64).abs() < 0.01,
+        "an archivist holds {per_note} bytes of hashes a note, not {HASHED_BYTES}"
     );
 
     // And it does not drift with the size, which is the whole reason it can be
@@ -121,6 +128,47 @@ fn an_archivist_holds_sixty_four_bytes_for_every_note_that_ever_fell() {
             "{leaves} leaves come to {each} bytes each"
         );
     }
+}
+
+/// **What an archivist holds is the hashes and the position index, 104 bytes a
+/// standing note, and the index is what falls when a note is spent.**
+///
+/// The papers said 64 for a week after the index went in, and the test above
+/// held them to it, because `hashes_held` was the one accessor there was and it
+/// never saw the index. Nothing counted the forty bytes an entry costs except
+/// the index's own doc comment. So an operator sizing an archivist's memory was
+/// told 64 bytes a note and needed 104 before the allocator took its share.
+#[test]
+fn an_archivist_holds_a_hundred_and_four_bytes_for_every_note_still_standing() {
+    let mut archive = Archive::new();
+    let count = 1u64 << 16;
+    for index in 0..count {
+        archive.add(forest_leaf(&index.to_le_bytes()));
+    }
+    // A power of two is one tree: one inner node per leaf less the root, and
+    // every leaf standing.
+    assert_eq!(
+        archive.bytes_held(),
+        ARCHIVED_BYTES * count - 32,
+        "an archive of standing notes does not hold its hashes and its index"
+    );
+
+    // Spending a note empties its place and drops its index entry; the hashes
+    // stay, because the place does.
+    let hashes = archive.hashes_held();
+    for position in (0..count).step_by(2) {
+        assert!(archive.remove(position), "place {position} empties");
+    }
+    assert_eq!(
+        archive.hashes_held(),
+        hashes,
+        "emptying a place keeps its hashes"
+    );
+    assert_eq!(
+        archive.bytes_held(),
+        HASHED_BYTES * count - 32 + (ARCHIVED_BYTES - HASHED_BYTES) * count / 2,
+        "the index did not let go of the half that was spent"
+    );
 }
 
 /// And why a resident reading of the same archive says something larger.
@@ -157,8 +205,9 @@ fn a_resident_reading_of_it_swings_between_the_content_and_twice_it() {
         "four million notes occupy {best} bytes each"
     );
 
-    // The published 72 sits inside that swing, which is what it is: a reading
-    // taken somewhere on it, not a second opinion about the content.
+    // The 72 the explorer served until the index went in sits inside that
+    // swing, which is what it was: a reading taken somewhere on it, not a
+    // second opinion about the content.
     assert!(best < 72.0 && 72.0 < worst);
 }
 

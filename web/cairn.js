@@ -616,7 +616,7 @@ async function home() {
   What this website costs, as against what a node costs.
 
   The site named the cold set as the explorer's growing cost, and the cold set
-  is the smaller half of it by nearly nine times: a node that keeps the whole
+  is the smaller half of it by about six times: a node that keeps the whole
   cave carries a fixed handful of bytes for each note that has fallen, a node
   that keeps none carries nothing at all, and the index above both of them
   carries that whole ratio again for every note that has ever existed. None of

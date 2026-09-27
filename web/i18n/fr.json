@@ -95,13 +95,13 @@
     "eyebrow": "{network}, en direct",
     "title": {
       "plain": "Une monnaie que vous pouvez vérifier |vous-même|, sur un ordinateur ordinaire, pour toujours.",
-      "curious": "Un nœud complet qui coûtera |dans trente ans| ce qu'il coûte aujourd'hui.",
+      "curious": "Un nœud complet dont l'état à valider est |plafonné par règle|, quel que soit l'âge de la chaîne.",
       "technical": "Un coût de validation constant |par construction|, pas par politique."
     },
     "lede": {
       "plain": [
         "Toutes les cryptomonnaies ont un problème dont on parle peu : plus elles sont utilisées, plus il devient cher de les vérifier soi-même. Or c'est la vérification qui les tient honnêtes. Donc plus elles réussissent, moins il reste de gens capables de leur demander des comptes, et plus il faut croire quelqu'un d'autre sur parole.",
-        "Cairn est construite pour que ça n'arrive jamais. Quoi que fasse la chaîne, quel que soit le nombre d'utilisateurs, la vérifier coûte la même chose. Pas moins qu'aujourd'hui, pas plus. La même chose."
+        "Cairn est construite pour que ça n'arrive jamais. Quoi que fasse la chaîne, quel que soit le nombre d'utilisateurs, ce qu'un nœud doit tenir pour la vérifier a un plafond écrit dans les règles. La seule chose qui grandit est la chaîne des en-têtes de blocs qu'un nœud garde pour que les nouveaux venus puissent la rejoindre par lui, et elle grandit lentement : 129 Mo par an."
       ],
       "curious": [
         "Sur les chaînes existantes, faire tourner un nœud complet signifie détenir l'intégralité des sorties non dépensées, et cet ensemble grandit avec l'adoption. Bitcoin en est à plusieurs gigaoctets, Ethereum demande une machine que peu de gens possèdent. Le coût de la vérification monte avec l'usage, donc le succès pousse discrètement la vérification vers les centres de données.",
@@ -142,12 +142,12 @@
           "Cela coûte environ {perNote} octets par billet ayant jamais existé, et cela ne cesse jamais de grandir. Garder la cave, ce que cet ordinateur fait aussi, coûte environ {coldPerNote} octets par billet tombé. Un nœud ordinaire ne garde ni l'un ni l'autre, et ne paie ni l'un ni l'autre."
         ],
         "curious": [
-          "L'index est le coût croissant propre à l'explorateur, et c'est le plus lourd de ses deux coûts, d'un facteur neuf environ : {perNote} octets pour chaque billet jamais créé, contre {coldPerNote} octets pour chaque billet tombé dans l'ensemble froid. Aucun des deux n'est borné, et les deux pèsent sur qui choisit de rendre ce service.",
+          "L'index est le coût croissant propre à l'explorateur, et c'est le plus lourd de ses deux coûts, d'un facteur six environ : {perNote} octets pour chaque billet jamais créé, contre {coldPerNote} octets pour chaque billet tombé dans l'ensemble froid et pas encore dépensé. Aucun des deux n'est borné, et les deux pèsent sur qui choisit de rendre ce service.",
           "Un nœud ordinaire ne porte ni l'un ni l'autre. Sa mémoire ne bouge pas du tout avec l'ensemble froid, et c'est là-dessus que repose toute la conception ; cette page montre à quoi ressemble une exception."
         ],
         "technical": [
           "Propriétaire vers billets, billet vers fiche, identifiant de transaction vers emplacement, et un mouvement enregistré à chaque crédit comme à chaque débit. Rien n'en sort jamais : la taille dépend donc de toute l'histoire de la chaîne et non de son état courant.",
-          "Mesuré sur l'implémentation réelle : {perNote} octets par billet jamais créé pour l'index, {coldPerNote} octets par billet tombé pour l'ensemble froid d'un nœud archiviste, et aucune pente du tout pour un nœud qui ne garde que les soixante-quatre racines.",
+          "Mesuré sur l'implémentation réelle : {perNote} octets par billet jamais créé pour l'index, et aucune pente du tout pour un nœud qui ne garde que les soixante-quatre racines. L'ensemble froid d'un nœud archiviste se compte d'après ce qu'il contient plutôt que se lit sur un processus : {coldPerNote} octets par billet tombé et pas encore dépensé.",
           "Rien de tout cela n'est borné par une règle. Un bloc rempli jusqu'à la limite d'octets peut contenir trois mille billets de poussière vers trois mille adresses neuves, soit environ 1,9 Mo d'index pour ce seul bloc, et environ 1010 Go par an à raison d'un bloc par minute. Celui qui mine ce bloc ne paie rien pour cela : le plancher de frais est la politique de chaque nœud sur ce qu'il accepte de porter, pas une règle de la chaîne."
         ]
       }
@@ -370,7 +370,7 @@
     "address": {
       "plain": "Une adresse est un nom public que vous pouvez distribuer sans risque. N'importe qui peut voir ce qu'elle détient. Seule la personne qui a le secret correspondant peut la dépenser, et ce secret n'apparaît jamais ici ni nulle part sur ce site.",
       "curious": "Cette page est construite à partir d'un index sur toute la chaîne, un service que l'explorateur rend et que le protocole refuse délibérément : aucun nœud ne garde de table associant les propriétaires à leurs billets.",
-      "technical": "Clés Ed25519, avec deux restrictions au-delà du standard : les clés de petit ordre sont rejetées à la construction, et les encodages non canoniques sont refusés pour que deux suites d'octets ne puissent jamais désigner une même clé."
+      "technical": "Clés Ed25519, refusées à la construction si elles ne sont pas encodées de façon canonique, si elles sont de petit ordre ou hors du sous-groupe d'ordre premier : deux suites d'octets ne peuvent jamais désigner une même clé, et rien ne peut être payé à une clé que personne ne détient. Une signature est vérifiée par l'équation sans cofacteur, contre un R canonique et qui n'est pas de petit ordre : un nœud accepte exactement les signatures que tous les autres acceptent."
     },
     "holdings": {
       "plain": "Les billets que cette adresse détient, un par un. Un solde n'est que leur somme.",
@@ -675,8 +675,8 @@
       "title": "Miner",
       "body": {
         "plain": ["C'est ainsi qu'on obtient des CAIRN sur un réseau de test. Votre ordinateur se met à chercher des blocs, et quand il en trouve un, la récompense va à votre adresse. Il n'y a aucun autre moyen d'en obtenir : personne n'a de stock à distribuer."],
-        "curious": ["Minage sur un seul fil d'exécution dans le nœud, ce qui suffit pour un réseau de test. Les récompenses vont à la clé que vous indiquez, et cette clé peut vivre n'importe où : le nœud reçoit une adresse et ne voit jamais le secret qui est derrière."],
-        "technical": ["La difficulté d'ouverture de testnet-6 est 2^27, calibrée pour que le premier bloc prenne à peu près le temps de bloc visé sur un cœur ordinaire, à 2,29 millions d'empreintes par seconde mesurées."]
+        "curious": ["Minage dans le nœud, sur tous les cœurs sauf un, ce qui suffit pour un réseau de test. Les récompenses vont à la clé que vous indiquez, et cette clé peut vivre n'importe où : le nœud reçoit une adresse et ne voit jamais le secret qui est derrière."],
+        "technical": ["La difficulté d'ouverture de testnet-6 est 2^27, calibrée pour que le premier bloc prenne à peu près le temps de bloc visé sur un cœur ordinaire."]
       }
     },
     "server": {
@@ -692,7 +692,7 @@
       "body": {
         "plain": ["Ce site est l'un des trois programmes du dossier que vous avez téléchargé. Il sert exactement ces pages depuis votre machine, en lisant votre propre nœud. Rien ici non plus n'a besoin d'être pris sur parole."],
         "curious": ["L'explorateur est un nœud qui construit en plus un index et sert le site. Cet index est un coût qui grandit avec la chaîne, et c'est précisément pour cela qu'il vit ici et pas dans le nœud que tout le monde fait tourner."],
-        "technical": ["Le site est compilé dans le binaire, rien n'est lu sur le disque à l'exécution. La couche HTTP n'utilise que la bibliothèque standard, un fil par connexion, GET et HEAD, sans corps de requête.", "Contrairement à un nœud, l'explorateur garde par défaut tous les blocs sur le disque, et non un gigaoctet. Il construit son index en parcourant la chaîne depuis le premier bloc : les blocs abandonnés par le bas sont donc précisément ceux dont il a le plus besoin. On peut malgré tout le borner avec --keep, et le site indique alors sur chaque page qu'il n'a lu la chaîne qu'à partir du plus ancien bloc qu'il détient encore."]
+        "technical": ["Le site est compilé dans le binaire, rien n'est lu sur le disque à l'exécution. La couche HTTP n'utilise que la bibliothèque standard, un fil par connexion, GET, HEAD et POST, avec un corps de requête lu seulement pour un POST, et plafonné.", "Contrairement à un nœud, l'explorateur garde par défaut tous les blocs sur le disque, et non un gigaoctet. Il construit son index en parcourant la chaîne depuis le premier bloc : les blocs abandonnés par le bas sont donc précisément ceux dont il a le plus besoin. On peut malgré tout le borner avec --keep, et le site indique alors sur chaque page qu'il n'a lu la chaîne qu'à partir du plus ancien bloc qu'il détient encore."]
       }
     },
     "build": {
@@ -740,6 +740,8 @@
 
   "foot": {
     "whitepaper": "Le papier",
+    "specification": "Les règles, octet par octet",
+    "threatModel": "Ce qu’il défend",
     "design": "Comment c’est construit",
     "openQuestions": "Ce qui n’est pas tranché",
     "priorArt": "Ce qui existait avant",

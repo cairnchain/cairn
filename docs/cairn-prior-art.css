@@ -1,3 +1,9 @@
+/* The palette, including the variables and the [data-theme] selectors no
+   paper uses, mirrors the site's stylesheet, so that a paper and the site
+   read as one thing; unused ones are kept on purpose.
+   The opening block of this paper is a verdict panel that styles itself, so
+   .abstract has no rule here; a paragraph written above the first section
+   would render unstyled until one is added. */
   :root{
     --paper:#F7F8F6; --surface:#FFFFFF; --sunk:#EFF1EC;
     --ink:#171A17; --ink-2:#4A524C; --ink-3:#7C847E;
@@ -149,7 +155,6 @@
     background:var(--surface);
     padding:1.05rem 1.2rem;
   }
-  .card.ours{border-left-color:var(--ours)}
   .card.caution{border-left-color:var(--caution)}
 
   .card-top{

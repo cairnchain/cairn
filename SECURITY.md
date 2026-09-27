@@ -169,14 +169,30 @@ something here:
 
 ## Scope
 
-In scope: `crates/cairn-ledger`, `crates/cairn-chain`, `crates/cairn-accumulator`,
-`crates/cairn-crypto`, `crates/cairn-primitives`, `crates/cairn-store`,
-`crates/cairn-net`, and `crates/cairn-wallet` where it touches keys or spending.
+In scope: every crate a program we ship is built from, which is
+`crates/cairn-primitives`, `crates/cairn-crypto`, `crates/cairn-accumulator`,
+`crates/cairn-ledger`, `crates/cairn-chain`, `crates/cairn-net`,
+`crates/cairn-store`, `crates/cairn-node`, `crates/cairn-wallet`,
+`crates/cairn-http` and `crates/cairn-explorer`; the installer and the units it
+writes, `deploy/install.sh`, `deploy/explorer.sh`, `deploy/cairnd.service` and
+`deploy/cairn-explorer.service`; and the workflow that builds and attests the
+releases, `.github/workflows/release.yml`. The node mines and trims its own
+chain, the wallet's page spends through `cairn-http`, the installer decides
+what a server runs after an upgrade, and the explorer hands out the download
+and the instructions for checking it, so a flaw in any of them reaches money or
+a machine as surely as one in the ledger.
 
-Out of scope: the explorer and the site under `web/`, the deployment scripts
-under `deploy/`, and the servers themselves. Reports against a running testnet
-node are welcome but the network is expected to be reset.
+Out of scope: the styling and the translations under `web/`, and the operation
+of the servers we run, `seed.cairnchain.org` and `cairnchain.org`: what their
+hosts log and how they are kept up. The code those servers run is in scope like
+any other copy of it. Reports against a running testnet node are welcome but
+the network is expected to be reset.
+
+What the project defends, against whom, and what it knowingly does not is
+written down in `docs/cairn-threat-model.md`, which a node serves at
+`/threat-model`. A report that a row there is wrong is a report worth sending.
 
 ## Supported versions
 
-Only the tip of `main`. There is no released version to support yet.
+The newest release, and the tip of `main`. A report against an older release is
+welcome if it reproduces on either.

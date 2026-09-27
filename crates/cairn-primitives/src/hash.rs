@@ -132,6 +132,10 @@ domains! {
     MerkleLeaf => merkle_leaf, "cairn v1 merkle leaf";
     MerkleNode => merkle_node, "cairn v1 merkle node";
     MerkleEmpty => merkle_empty, "cairn v1 merkle empty";
+    // Reserved: nothing on the network is hashed under this one, and the
+    // specification says so beside its row. Tests and examples key synthetic
+    // entries with it; a consensus hash must not start to without the
+    // document saying what it hashes.
     StateEntry => state_entry, "cairn v1 state entry";
     AccumulatorEmpty => accumulator_empty, "cairn v1 accumulator empty";
     AccumulatorLeaf => accumulator_leaf, "cairn v1 accumulator leaf";

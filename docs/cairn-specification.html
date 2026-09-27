@@ -1,3 +1,8 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
 <title>Cairn Protocol Specification</title>
 <link rel="stylesheet" href="cairn-whitepaper.css">
 <div class="paper" lang="en">
@@ -39,7 +44,7 @@
 <section>
   <div class="num">1</div>
   <div class="body">
-    <h2>Conformance</h2>
+    <h2 id="conformance">Conformance</h2>
     <p>
       <strong>MUST</strong> and <strong>MUST NOT</strong> mark what a node has to do to reach the same
       conclusions as every other node. Getting one of them wrong is a chain split,
@@ -68,8 +73,8 @@
 <section>
   <div class="num">2</div>
   <div class="body">
-    <h2>Primitives</h2>
-    <h3><span class="sub">2.1</span>Integers</h3>
+    <h2 id="primitives">Primitives</h2>
+    <h3 id="integers"><span class="sub">2.1</span>Integers</h3>
 
     <p>
       Integers are unsigned, of fixed width, and encoded little-endian with no
@@ -85,7 +90,7 @@
       wrapped value, and the refusal is named where the operation is specified.
     </p>
 
-    <h3><span class="sub">2.2</span>Byte arrays and hashes</h3>
+    <h3 id="byte-arrays-and-hashes"><span class="sub">2.2</span>Byte arrays and hashes</h3>
 
     <p>
       A fixed-size byte array is encoded as its bytes in order, with no length
@@ -94,13 +99,15 @@
     </p>
 
     <p>
-      Every hash is BLAKE3 in keyed mode. The key is a 32-byte domain constant, and a
-      value hashed under one domain MUST NOT be accepted where another domain is
-      required. Each domain is a distinct constant, so a preimage under one says
-      nothing under any other.
+      Every hash this protocol defines is BLAKE3 in keyed mode. The key is a 32-byte
+      domain constant, and a value hashed under one domain MUST NOT be accepted where
+      another domain is required. Each domain is a distinct constant, so a preimage
+      under one says nothing under any other. The one other hash a node computes is
+      the SHA-512 inside Ed25519, which belongs to the signature scheme and is
+      specified with it in <em>How a signature is verified</em>.
     </p>
 
-    <h3><span class="sub">2.3</span>Sequences</h3>
+    <h3 id="sequences"><span class="sub">2.3</span>Sequences</h3>
 
     <p>
       A sequence is encoded as a <code>u32</code> count, little-endian, followed by that many
@@ -119,9 +126,12 @@
       An encoder MUST NOT produce a sequence longer than that limit. A structure
       holding one would encode to bytes no conforming decoder can read back, and a
       node could then commit to an identifier over a structure it cannot re-parse.
+      No structure in this protocol can reach the limit, since every sequence in a
+      block or a message has a tighter one of its own, so the reference encoder
+      relies on that rather than checking, and only a debug build asserts it.
     </p>
 
-    <h3><span class="sub">2.4</span>Structures and choices</h3>
+    <h3 id="structures-and-choices"><span class="sub">2.4</span>Structures and choices</h3>
 
     <p>
       A structure is encoded as its fields in the order this document lists them,
@@ -136,11 +146,12 @@
       than skipping it, since it cannot know how many bytes to skip.
     </p>
 
-    <h3><span class="sub">2.5</span>Money</h3>
+    <h3 id="money"><span class="sub">2.5</span>Money</h3>
 
     <p>
       An amount is a count of pebbles, encoded as a <code>u64</code>. One CAIRN is 100 000 000
-      pebbles. No amount may exceed the monetary ceiling, and a decoder MUST refuse
+      pebbles. No amount may exceed the monetary ceiling, which is
+      100 000 000 000 000 000 pebbles, one billion CAIRN, and a decoder MUST refuse
       an amount above it rather than accepting and clamping, so a value past the
       ceiling cannot exist in a decoded structure anywhere in the system.
     </p>
@@ -150,7 +161,7 @@
 <section>
   <div class="num">3</div>
   <div class="body">
-    <h2>Identifiers</h2>
+    <h2 id="identifiers">Identifiers</h2>
     <p>
       An identifier is the hash of an encoding under a stated domain. Because the
       encoding is positional and unpadded, an identifier commits to every field of
@@ -192,6 +203,12 @@
     </table>
 
     <p>
+      One of them, <code>state entry</code>, is reserved: nothing on the network is hashed
+      under it. It is published so that its string cannot come to mean one thing to
+      one implementation and another to a second.
+    </p>
+
+    <p>
       Two consequences follow and both are load-bearing.
     </p>
 
@@ -214,7 +231,7 @@
 <section>
   <div class="num">4</div>
   <div class="body">
-    <h2>Notes</h2>
+    <h2 id="notes">Notes</h2>
     <p>
       A note is an amount and the public key that may spend it.
     </p>
@@ -267,13 +284,13 @@
 <section>
   <div class="num">5</div>
   <div class="body">
-    <h2>Transactions</h2>
+    <h2 id="transactions">Transactions</h2>
     <p>
       There are two kinds and they are not interchangeable. A transfer moves notes
       that exist. A coinbase creates them, and exactly one appears in each block.
     </p>
 
-    <h3><span class="sub">5.1</span>Transfer</h3>
+    <h3 id="transfer"><span class="sub">5.1</span>Transfer</h3>
 
     <table>
       <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
@@ -305,11 +322,41 @@
       that it sits at that position. A decoder MUST refuse any other tag.
     </p>
 
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
+      <tbody>
+        <tr><td>note</td><td>note</td><td class="n">40</td></tr>
+        <tr><td>position</td><td>u64</td><td class="n">8</td></tr>
+        <tr><td>proof</td><td>sequence of hash</td><td class="n">4 + 32d</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      Those are the bytes after the tag. The proof's hashes are the siblings from the
+      note's leaf up to the root of its tree, bottom first, as <em>Proofs</em> gives them.
+    </p>
+
     <p>
       <strong>A transfer's identifier is not the hash of its wire encoding.</strong> It is the
       hash, under the transfer domain, of the version, the count of inputs, each
       input's note identifier alone, and the outputs. Signatures and witnesses are
       left out.
+    </p>
+
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
+      <tbody>
+        <tr><td>version</td><td>u16</td><td class="n">2</td></tr>
+        <tr><td>input count</td><td>u32</td><td class="n">4</td></tr>
+        <tr><td>note identifiers</td><td>note identifier, one per input, in order</td><td class="n">36n</td></tr>
+        <tr><td>outputs</td><td>sequence of note</td><td class="n">4 + 40m</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      It is the transfer's own encoding with each input cut down to its note
+      identifier: the input count is the count the inputs sequence carries, and the
+      outputs are the same sequence, count included.
     </p>
 
     <p>
@@ -328,12 +375,31 @@
       signatures and witnesses, and that is intended rather than tolerated.
     </p>
 
-    <h3><span class="sub">5.2</span>What a signature commits to</h3>
+    <h3 id="what-a-signature-commits-to"><span class="sub">5.2</span>What a signature commits to</h3>
 
     <p>
       Each input is signed separately, over the hash under the signature domain of:
       the network identifier, the transfer's version, the transfer's identifier, the
       input's index, and the value and owner of the note being spent.
+    </p>
+
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
+      <tbody>
+        <tr><td>network</td><td>u32</td><td class="n">4</td></tr>
+        <tr><td>version</td><td>u16</td><td class="n">2</td></tr>
+        <tr><td>transfer</td><td>hash</td><td class="n">32</td></tr>
+        <tr><td>index</td><td>u32</td><td class="n">4</td></tr>
+        <tr><td>value</td><td>amount</td><td class="n">8</td></tr>
+        <tr><td>owner</td><td>public key</td><td class="n">32</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      That is 82 bytes. <code>network</code> is the identifier the network's headers carry,
+      <code>version</code> is the transfer's, <code>transfer</code> is its identifier, <code>index</code> is the
+      input's position among the transfer's inputs counting from nought, and <code>value</code>
+      and <code>owner</code> are the spent note's.
     </p>
 
     <p>
@@ -342,7 +408,82 @@
       the difference, and the signature would be perfectly valid.
     </p>
 
-    <h3><span class="sub">5.3</span>Rules a transfer must satisfy</h3>
+    <h3 id="how-a-signature-is-verified"><span class="sub">5.3</span>How a signature is verified</h3>
+
+    <p>
+      A signature is 64 bytes: the encoding of a point <code>R</code> in the first 32, and a
+      scalar <code>S</code>, little-endian, in the last 32. It is pure Ed25519 as RFC 8032
+      defines it, with the 32 bytes of the digest above as the message: no prehash
+      and no context, so neither Ed25519ph nor Ed25519ctx.
+    </p>
+
+    <p>
+      RFC 8032 leaves a verifier two choices, and the verifiers in use differ
+      exactly there, so this protocol makes both. With <code>A</code> the owner's public key,
+      <code>B</code> the base point, <code>M</code> the message, and <code>L</code> the order of the prime order
+      subgroup, which is <code>2^252 + 27742317777372353535851937790883648493</code>, a node
+      MUST accept a signature if and only if all four of these hold:
+    </p>
+
+    <ol>
+      <li><code>S</code>, read as a 256-bit little-endian integer, is below <code>L</code>;</li>
+      <li><code>R</code> is the canonical encoding of a point on the curve;</li>
+      <li>that point is not of small order;</li>
+      <li><code>[S]B = R + [k]A</code>, where <code>k</code> is SHA-512 of the 32 bytes of <code>R</code>, the 32 bytes
+      of <code>A</code> and the message, in that order, read as a little-endian integer and
+      reduced modulo <code>L</code>. The equation is checked as written, without multiplying
+      either side by the cofactor.</li>
+    </ol>
+
+    <p>
+      Any other signature is refused, and the refusal is <code>InvalidSignature</code>. <code>A</code> is a
+      key that passed the three refusals in <em>Notes</em>, so it is never of small order
+      itself.
+    </p>
+
+    <p>
+      The third and the fourth are the choices. RFC 8032 never asks about the order
+      of <code>R</code>, and without the third a signature whose <code>R</code> is the identity and whose
+      <code>S</code> is <code>k</code> times the signer's secret scalar verifies. RFC 8032 permits the
+      cofactored equation, <code>[8][S]B = [8]R + [8][k]A</code>, and states it first, and under
+      it a signature whose <code>R</code> carries a torsion component verifies. The holder of a
+      key can make either kind at will, so a node that took them would accept spends
+      every other node refuses, and follow another chain from the first block that
+      carried one.
+    </p>
+
+    <p>
+      These vectors are for checking a verifier against. The key is the one whose
+      32-byte seed is the first 32 bytes of SHA-512 of the ASCII bytes
+      <code>cairn signature vector</code>, and the message is the first 32 bytes of SHA-512 of
+      <code>cairn signature vector message</code>. The first vector is the signature that key
+      makes. The second is the first with <code>L</code> added to <code>S</code>, a second spelling of the
+      same signature that a verifier reducing <code>S</code> would take. The third has the
+      identity as <code>R</code> and <code>k</code> times the secret scalar as <code>S</code>, which both of RFC 8032's
+      equations accept. The fourth has <code>R = rB + T</code>, for <code>T</code> a point of order eight
+      and <code>r</code> the first 32 bytes of SHA-512 of <code>cairn signature vector nonce</code> reduced
+      modulo <code>L</code>, and <code>S = r + ka</code>, which the cofactored equation accepts and the
+      cofactorless one does not.
+    </p>
+
+    <pre><code>seed        first 32 bytes of SHA-512("cairn signature vector")
+public key  47da95e3585bde332648ce1bf660eb1d68bb4fd9a6b206f80996056edd78995c
+message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
+
+1 accepted
+  R  ee55676db80fe280c81940fa37575a96b8c21ad71eed1fcbe291476eab5e6b20
+  S  0d89268dcbb5832ee6a1f74092cd27ca3d725e9ddb9176ebae0f37663b76820b
+2 refused, S is not below L
+  R  ee55676db80fe280c81940fa37575a96b8c21ad71eed1fcbe291476eab5e6b20
+  S  fa5c1ceae5189686bc3eefe370c706df3d725e9ddb9176ebae0f37663b76821b
+3 refused, R is of small order
+  R  0100000000000000000000000000000000000000000000000000000000000000
+  S  da47d66f55f2a53bbd2b3ffbd771feb593dd18170e8c8a23d429af3baebc7909
+4 refused, the cofactorless equation does not hold
+  R  8a30403f65da91381b89212ab91f54e609038f8cf15a9a15a497697a245745e0
+  S  c06945247d082b057059703beedb5cc928346815e7aa6c7fe1afadb508f08b03</code></pre>
+
+    <h3 id="rules-a-transfer-must-satisfy"><span class="sub">5.4</span>Rules a transfer must satisfy</h3>
 
     <p>
       Applied in this order, each producing the refusal named.
@@ -351,7 +492,7 @@
     <table>
       <thead><tr><th class="n">#</th><th>Refusal</th><th>When</th></tr></thead>
       <tbody>
-        <tr><td class="n">1</td><td>UnsupportedVersion</td><td>the version is not one these rules know</td></tr>
+        <tr><td class="n">1</td><td>UnsupportedVersion</td><td>the version is not one these rules know, which is 1</td></tr>
         <tr><td class="n">2</td><td>NoInputs</td><td>it spends nothing</td></tr>
         <tr><td class="n">3</td><td>NoOutputs</td><td>it pays nobody</td></tr>
         <tr><td class="n">4</td><td>TooManyInputs</td><td>past the network's limit, which is 256 on every network here</td></tr>
@@ -364,7 +505,10 @@
 
     <p>
       The shape is checked before any signature is verified, because the shape is
-      cheap and a signature is not.
+      cheap and a signature is not. The inputs are resolved against the state next,
+      by the refusals in <em>Which witness a spend must carry</em>, and the signatures come
+      last: in a block, after every transfer's inputs have resolved, as the body
+      table in <em>Blocks</em> orders them.
     </p>
 
     <p>
@@ -372,7 +516,7 @@
       the block's coinbase or destroyed; there is no third destination.
     </p>
 
-    <h3><span class="sub">5.4</span>Coinbase</h3>
+    <h3 id="coinbase"><span class="sub">5.5</span>Coinbase</h3>
 
     <table>
       <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
@@ -401,7 +545,7 @@
 <section>
   <div class="num">6</div>
   <div class="body">
-    <h2>Blocks</h2>
+    <h2 id="blocks">Blocks</h2>
     <table>
       <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
       <tbody>
@@ -418,6 +562,11 @@
         <tr><td>nonce</td><td>u64</td><td class="n">8</td></tr>
       </tbody>
     </table>
+
+    <p>
+      A first block names thirty two zero bytes as <code>previous</code>, since there is no
+      block before it to name.
+    </p>
 
     <p>
       The header is a fixed 182 bytes. Nothing in it is optional and nothing is
@@ -444,12 +593,24 @@
       case does not arise here.
     </p>
 
-    <h3><span class="sub">6.1</span>The order a node applies the rules</h3>
+    <h3 id="the-order-a-node-applies-the-rules"><span class="sub">6.1</span>The order a node applies the rules</h3>
 
     <p>
       This order is normative. Several of these rules are cheap and decisive and the
       ones after them are not, so applying them out of order lets a sender spend a
       node's time for nothing.
+    </p>
+
+    <p>
+      What the order binds is the rules a block is judged by. Before it begins, a
+      node MAY refuse a block on a fact about the block's own bytes that the order
+      would refuse it for anyway, such as a header that does not meet even the
+      difficulty it claims, or a first block that names a parent; and on a fact
+      about what the node holds, such as an identifier it already knows to be bad, a
+      height below the deepest block it would switch to, or a parent it does not
+      have. None of those turns a block the order accepts into one it refuses. They
+      change only which refusal is named, and what the node does about the peer that
+      sent it.
     </p>
 
     <table>
@@ -486,13 +647,21 @@
     </p>
 
     <p>
-      <strong>Sixteen is the one refusal in this list that two honest nodes can disagree
-      about.</strong> It is measured against the reading node's own clock, so the same block
-      is refused by one node and taken by another, and the same node reverses its
-      verdict by waiting. A node MUST NOT remember this verdict as a property of the
-      block, and MUST NOT hold it against the peer that offered it. Every other
-      refusal here is a fact about the block that any node reaches from the same
-      bytes.
+      <strong>Sixteen is the one refusal in this list that two honest nodes on the same
+      build can disagree about.</strong> It is measured against the reading node's own
+      clock, so the same block is refused by one node and taken by another, and the
+      same node reverses its verdict by waiting. A node MUST NOT remember this
+      verdict as a property of the block, and MUST NOT hold it against the peer that
+      offered it.
+    </p>
+
+    <p>
+      <strong>Four and five are judgements about the reader's build, not about the
+      block.</strong> Two honest nodes on different builds disagree about them by
+      construction, and <em>Rules that activate at a height</em> says what a node MUST NOT
+      do with them: remember them against the block or hold them against the peer.
+      Every other refusal here is a fact about the block that any node reaches from
+      the same bytes.
     </p>
 
     <p>
@@ -513,12 +682,34 @@
         <tr><td class="n">3</td><td>TooManyCoinbaseOutputs</td><td>past the network's limit, which is 16 on every network here</td></tr>
         <tr><td class="n">4</td><td>ZeroValueCoinbaseOutput</td><td>a coinbase note worth nothing</td></tr>
         <tr><td class="n">5</td><td>TooManyTransfers</td><td>past the network's limit, which is 4 096 on every network here</td></tr>
-        <tr><td class="n">6</td><td>InvalidTransfer, InvalidSignature</td><td>every transfer in order, against the transfer rules above</td></tr>
-        <tr><td class="n">7</td><td>CoinbaseOverpay</td><td>the coinbase claims more than the schedule pays plus the fees given up</td></tr>
-        <tr><td class="n">8</td><td>TooManyEvictions</td><td>past the network's eviction cap</td></tr>
-        <tr><td class="n">9</td><td>SupplyDoesNotAddUp</td><td>the running supply is not the parent's plus what this block issued</td></tr>
+        <tr><td class="n">6</td><td>InvalidTransfer</td><td>every transfer in block order: its shape by the transfer rules above, then its inputs by the refusals in <em>Which witness a spend must carry</em></td></tr>
+        <tr><td class="n">7</td><td>ValueOverflow</td><td>the fees the transfers give up do not sum</td></tr>
+        <tr><td class="n">8</td><td>InvalidSignature</td><td>once every transfer has passed six, the first input in block order whose signature does not verify</td></tr>
+        <tr><td class="n">9</td><td>ValueOverflow</td><td>the schedule's reward plus the fees, or the coinbase's outputs, do not sum</td></tr>
+        <tr><td class="n">10</td><td>CoinbaseOverpay</td><td>the coinbase claims more than the schedule pays plus the fees given up</td></tr>
+        <tr><td class="n">11</td><td>TooManyEvictions</td><td>past the network's eviction cap</td></tr>
+        <tr><td class="n">12</td><td>SupplyDoesNotAddUp</td><td>the running supply is not the parent's plus what this block issued</td></tr>
       </tbody>
     </table>
+
+    <p>
+      <code>InvalidSignature</code> is reported as <code>InvalidTransfer</code> naming the transfer and the
+      input, like every refusal of a transfer. Because the signatures are verified
+      together after every transfer has resolved, a block whose first transfer is
+      badly signed and whose second is badly shaped is refused for the second
+      transfer's shape. The verdict is the same either way; only the name differs.
+    </p>
+
+    <p>
+      Seven, and the first half of nine, cannot happen on any chain these rules
+      produce: fees are given up by notes that exist, so they sum to at most the
+      supply, and the schedule keeps the supply near a tenth of the monetary ceiling.
+      They are named because part 1 names every overflow.
+      The second half of nine can happen: a coinbase carries up to sixteen outputs,
+      each of them an amount, and sixteen amounts need not sum to one. A node asks
+      seven as each transfer passes six, which reaches the same verdict as asking it
+      once afterwards on any chain that can exist.
+    </p>
 
     <p>
       A block MUST NOT both spend a note and evict it.
@@ -526,9 +717,11 @@
 
     <p>
       The four limits in that table are the network's rather than the format's, and
-      the format holds a ceiling above each so that a decoder refuses what no network
-      allows before any rule has read the frame: 256 inputs, 256 outputs, 16 coinbase
-      outputs and 4 096 transfers. A build whose rules asked for more than its own
+      the format holds a ceiling at or above each so that a decoder refuses what no
+      network allows before any rule has read the frame: 256 inputs, 256 outputs, 16 coinbase
+      outputs and 4 096 transfers. The decoder holds the coinbase's extra to its 64
+      bytes too, so row two of the body table is reached only by a block built
+      beside the rules that judge it, never by one read off the wire. A build whose rules asked for more than its own
       decoder accepts would refuse blocks its rules allow, which is a fork with
       nobody at fault, so the two are checked against each other at compile time.
     </p>
@@ -538,7 +731,7 @@
 <section>
   <div class="num">7</div>
   <div class="body">
-    <h2>The state</h2>
+    <h2 id="the-state">The state</h2>
     <p>
       The state is the set of unspent notes, split across two tiers, together with
       three things a block's validity depends on that no note holds: what fell
@@ -559,7 +752,7 @@
       rule.
     </p>
 
-    <h3><span class="sub">7.1</span>The two tiers</h3>
+    <h3 id="the-two-tiers"><span class="sub">7.1</span>The two tiers</h3>
 
     <p>
       The <strong>hot set</strong> is the notes every node holds in full. A note enters it when
@@ -616,7 +809,7 @@
       128 blocks whatever shape the blocks take.
     </p>
 
-    <h3><span class="sub">7.2</span>What the state root commits to</h3>
+    <h3 id="what-the-state-root-commits-to"><span class="sub">7.2</span>What the state root commits to</h3>
 
     <p>
       <code>state_root</code> is the hash, under the state commitment domain, of the following
@@ -667,7 +860,7 @@
       all twenty.
     </p>
 
-    <h3><span class="sub">7.3</span>The hot set</h3>
+    <h3 id="the-hot-set"><span class="sub">7.3</span>The hot set</h3>
 
     <p>
       The hot set is committed to by a sparse Merkle tree keyed by note.
@@ -718,7 +911,7 @@
       the hot count is nought.
     </p>
 
-    <h3><span class="sub">7.4</span>Eviction</h3>
+    <h3 id="eviction"><span class="sub">7.4</span>Eviction</h3>
 
     <p>
       Eviction happens on every block, after the block's transactions have been
@@ -732,6 +925,9 @@
       it comes out of the cold set. Let <em>created</em> be every note this block creates,
       in this order: the transfers in the order they appear in the block, each
       transfer's outputs in index order, then the coinbase's outputs in index order.
+      That order decides nothing a rule reads: the hot tree is a set, and the
+      shortfall below sorts by identifier. It is given so that a block's notes have
+      one order to be described in.
     </p>
 
     <p>
@@ -795,7 +991,9 @@
       <li>every note the block spends out of the cold set is emptied from the
       accumulator, all of them proved against the roots as they stood at the
       parent before any of them is applied;</li>
-      <li>the accumulator is checked to have room for the notes about to fall;</li>
+      <li>the accumulator is checked to have room for the notes about to fall,
+      which on any chain these rules produce it has, since its positions are
+      counted in 64 bits;</li>
       <li>every note the block spends out of the hot set is removed from the hot
       tree;</li>
       <li>every note the block creates is inserted into the hot tree, carrying this
@@ -805,13 +1003,21 @@
     </ol>
 
     <p>
+      A node that finds, applying a block it has already judged valid, that step 1
+      or step 2 cannot be done, has found itself holding a state it disagrees with.
+      That is not a refusal a peer can cause and not one another implementation has
+      to reproduce; the reference names it <code>NoteNotWhereProved</code> and refuses the
+      block rather than carry on with a root that describes nothing.
+    </p>
+
+    <p>
       Step 4 before step 5 is what lets a note created by this very block fall
       straight through to the cold set, which is the case the shortfall rule above
       is about. The eviction order skips every note the block spends, which is what
       makes it true that a block never both spends a note and evicts it.
     </p>
 
-    <h3><span class="sub">7.5</span>The grace window</h3>
+    <h3 id="the-grace-window"><span class="sub">7.5</span>The grace window</h3>
 
     <p>
       The grace window is what fell recently, held in full by every node, so that a
@@ -867,13 +1073,15 @@
     </p>
 
     <p>
-      Under the block bound, a note that fell in the block at height <em>f</em> is in the
-      window from the block at height <em>f</em> + 1 through the block at height <em>f</em> + 64
-      inclusive, and is out of it from <em>f</em> + 65. The note bound moves that edge
-      earlier whenever more than 128 notes a block are falling.
+      Under the block bound, a note that fell in the block at height <em>f</em> may be spent
+      without a proof by the blocks at heights <em>f</em> + 1 through <em>f</em> + 64 inclusive,
+      and not by the block at <em>f</em> + 65. Said of the window rather than of the note:
+      after the block at height <em>h</em> it holds the landings of the blocks at heights
+      <em>h</em> - 63 through <em>h</em>, and the block at <em>h</em> + 1 is judged against that. The note
+      bound moves that edge earlier whenever more than 128 notes a block are falling.
     </p>
 
-    <h3><span class="sub">7.6</span>Which witness a spend must carry</h3>
+    <h3 id="which-witness-a-spend-must-carry"><span class="sub">7.6</span>Which witness a spend must carry</h3>
 
     <p>
       Part 2 gives the two witness shapes. Which of them an input must carry is a
@@ -923,12 +1131,25 @@
     </table>
 
     <p>
+      Adding each input's value to the running total is an operation on decoded
+      values, so a total that does not fit is refused <code>ValueOverflow</code>, and on a chain
+      these rules produce it never is, for the reason the body table gives for fees.
+    </p>
+
+    <p>
+      Rows three to six assume the node holds what <em>What a node MUST hold and what
+      it MAY discard</em> requires of it, the path of every note in its grace window among them. A node that has
+      lost one answers <code>MissingProof</code> for a spend of a window note that every other
+      node takes, which is a fault in that node and not in the block.
+    </p>
+
+    <p>
       A transfer MUST NOT spend a note created by the same block. Every input is
       resolved against the state as it stood at the block's parent, and a note this
       block creates is not in it. There is no chaining inside a block.
     </p>
 
-    <h3><span class="sub">7.7</span>The cold set</h3>
+    <h3 id="the-cold-set"><span class="sub">7.7</span>The cold set</h3>
 
     <p>
       The cold set is committed to by an append-only forest of perfect binary trees.
@@ -988,7 +1209,7 @@
       the two merge into a tree one height taller.
     </p>
 
-    <h3><span class="sub">7.8</span>Proofs</h3>
+    <h3 id="proofs"><span class="sub">7.8</span>Proofs</h3>
 
     <p>
       A proof for a position is the siblings from its leaf up to the root of the
@@ -1064,7 +1285,7 @@
       siblings of every other leaf in its tree.
     </p>
 
-    <h3><span class="sub">7.9</span>The maturity window and the issued total</h3>
+    <h3 id="the-maturity-window-and-the-issued-total"><span class="sub">7.9</span>The maturity window and the issued total</h3>
 
     <p>
       The maturity window is the coinbases whose notes cannot be spent yet. Each
@@ -1091,7 +1312,9 @@
       <li>an entry appended, holding <em>h</em> + <code>coinbase_maturity</code> and this block's
       coinbase identifier, unless the coinbase paid no outputs, or unless
       <em>h</em> + <code>coinbase_maturity</code> is not above <em>h</em>. A coinbase whose notes are
-      spendable on the block that pays them never enters the window at all.</li>
+      spendable from the very next block, which is as soon as any note is, since
+      nothing is spent in the block that creates it, never enters the window at
+      all.</li>
     </ol>
 
     <p>
@@ -1129,7 +1352,7 @@
       thing that should stop a block rather than be rounded away.
     </p>
 
-    <h3><span class="sub">7.10</span>What a node MUST hold and what it MAY discard</h3>
+    <h3 id="what-a-node-must-hold-and-what-it-may-discard"><span class="sub">7.10</span>What a node MUST hold and what it MAY discard</h3>
 
     <p>
       This is the claim the design rests on, and it is stated as two lists so that
@@ -1202,7 +1425,7 @@
 <section>
   <div class="num">8</div>
   <div class="body">
-    <h2>Consensus</h2>
+    <h2 id="consensus">Consensus</h2>
     <p>
       This part specifies what decides which chain is the chain: the work a block
       must carry, the difficulty it must carry it at, the timestamps it may claim,
@@ -1244,7 +1467,7 @@
       timestamp rules below were once wrong about.
     </p>
 
-    <h3><span class="sub">8.1</span>Proof of work</h3>
+    <h3 id="proof-of-work"><span class="sub">8.1</span>Proof of work</h3>
 
     <p>
       A block's difficulty is a plain <code>u64</code> in its header. There is no compact
@@ -1315,7 +1538,7 @@
       expecting one this protocol does not have.
     </p>
 
-    <h3><span class="sub">8.2</span>The difficulty retarget</h3>
+    <h3 id="the-difficulty-retarget"><span class="sub">8.2</span>The difficulty retarget</h3>
 
     <p>
       Every block retargets. There is no epoch and no boundary at which the
@@ -1504,7 +1727,7 @@
       2<sup>20</sup> asks for very nearly twice the difficulty a block.
     </p>
 
-    <h3><span class="sub">8.3</span>Timestamps</h3>
+    <h3 id="timestamps"><span class="sub">8.3</span>Timestamps</h3>
 
     <p>
       A timestamp is a <code>u64</code> count of seconds since the Unix epoch. There is no
@@ -1571,7 +1794,7 @@
       drift bound is measured against a clock the block knows nothing about: the
       same block is refused by one node and taken by another, and the same node
       reverses its verdict by waiting. It is the only refusal in the whole of the
-      block rules that two honest nodes can disagree about.
+      block rules that two honest nodes on the same build can disagree about.
     </p>
 
     <p>
@@ -1605,7 +1828,7 @@
       protocol's dependence on wall time.
     </p>
 
-    <h3><span class="sub">8.4</span>Emission</h3>
+    <h3 id="emission"><span class="sub">8.4</span>Emission</h3>
 
     <p>
       The schedule is counted in blocks, so it is a property of the chain rather
@@ -1702,7 +1925,7 @@
       halving the floor would need about 170 000 years to add the difference.
     </p>
 
-    <h3><span class="sub">8.5</span>Fork choice</h3>
+    <h3 id="fork-choice"><span class="sub">8.5</span>Fork choice</h3>
 
     <p>
       What is compared is one number, the <code>total_work</code> the tip of a branch states in
@@ -1744,7 +1967,7 @@
       stored at all, so the most it buys is one wasted attempt.
     </p>
 
-    <h3><span class="sub">8.6</span>Burial</h3>
+    <h3 id="burial"><span class="sub">8.6</span>Burial</h3>
 
     <p>
       Burial is the depth below the tip at which this network calls a block settled.
@@ -1812,7 +2035,7 @@
       MUST keep a window at least as deep as the network's burial.
     </p>
 
-    <h3><span class="sub">8.7</span>Rules that activate at a height</h3>
+    <h3 id="rules-that-activate-at-a-height"><span class="sub">8.7</span>Rules that activate at a height</h3>
 
     <p>
       A network carries a schedule of activations, oldest first. Each is two fields.
@@ -1946,7 +2169,7 @@
 <section>
   <div class="num">9</div>
   <div class="body">
-    <h2>Joining a chain</h2>
+    <h2 id="joining-a-chain">Joining a chain</h2>
     <p>
       A node with no chain has to answer two questions before it can check anything,
       and they are answered by two separate exchanges. Which of the chains being
@@ -1964,7 +2187,7 @@
       that costs a node is stated exactly under <em>What a newcomer ends up trusting</em>.
     </p>
 
-    <h3><span class="sub">9.1</span>What a newcomer is shown</h3>
+    <h3 id="what-a-newcomer-is-shown"><span class="sub">9.1</span>What a newcomer is shown</h3>
 
     <p>
       A weighing is one structure. Its fields are encoded in this order, which is not
@@ -2055,7 +2278,7 @@
       and it is stated rather than hidden.
     </p>
 
-    <h3><span class="sub">9.2</span>The draw</h3>
+    <h3 id="the-draw"><span class="sub">9.2</span>The draw</h3>
 
     <p>
       Both sides derive the same list of work values from the tip alone, so no round
@@ -2226,7 +2449,7 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
       the heights rather than by scanning them.
     </p>
 
-    <h3><span class="sub">9.3</span>Where the chain starts</h3>
+    <h3 id="where-the-chain-starts"><span class="sub">9.3</span>Where the chain starts</h3>
 
     <p>
       On a network that pins its first block, a node MUST refuse a weighing whose
@@ -2245,7 +2468,7 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
       already holds its identifier; only the path is.
     </p>
 
-    <h3><span class="sub">9.4</span>What each sample must prove</h3>
+    <h3 id="what-each-sample-must-prove"><span class="sub">9.4</span>What each sample must prove</h3>
 
     <p>
       For each drawn value, in draw order, the header opened against it MUST satisfy
@@ -2281,7 +2504,7 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
       the whole opening is worth at least one unit per block.
     </p>
 
-    <h3><span class="sub">9.5</span>The run up to the tip</h3>
+    <h3 id="the-run-up-to-the-tip"><span class="sub">9.5</span>The run up to the tip</h3>
 
     <p>
       The draw leaves a band of work near the tip unresolved, about 512 blocks wide
@@ -2348,7 +2571,7 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
       weighing.
     </p>
 
-    <h3><span class="sub">9.6</span>The order a node applies the checks</h3>
+    <h3 id="the-order-a-node-applies-the-checks"><span class="sub">9.6</span>The order a node applies the checks</h3>
 
     <p>
       This order is normative. The stages run as listed: the tip, then each sample in
@@ -2409,7 +2632,7 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
       work was really done and not that no heavier chain exists.
     </p>
 
-    <h3><span class="sub">9.7</span>What the bound is worth</h3>
+    <h3 id="what-the-bound-is-worth"><span class="sub">9.7</span>What the bound is worth</h3>
 
     <p>
       <strong>The bound this draw rests on is measured, not proved.</strong> It is this project's
@@ -2495,7 +2718,7 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
 <section>
   <div class="num">10</div>
   <div class="body">
-    <h2>The handover</h2>
+    <h2 id="the-handover">The handover</h2>
     <p>
       Weighing settles which chain is heaviest. It says nothing about who owns what,
       so a newcomer that has settled it still cannot check a single transaction. A
@@ -2518,7 +2741,7 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
       as long as it took to build the burial.
     </p>
 
-    <h3><span class="sub">10.1</span>What it carries</h3>
+    <h3 id="what-it-carries"><span class="sub">10.1</span>What it carries</h3>
 
     <p>
       Encoded in this order.
@@ -2576,7 +2799,7 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
       header forest holds. A summary cannot be checked against anything.
     </p>
 
-    <h3><span class="sub">10.2</span>The order a node applies the checks</h3>
+    <h3 id="the-order-a-node-applies-the-checks-2"><span class="sub">10.2</span>The order a node applies the checks</h3>
 
     <p>
       This order is normative.
@@ -2698,7 +2921,7 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
       gaps, so no header of a run of ninety-one can be judged by it.
     </p>
 
-    <h3><span class="sub">10.3</span>What is pinned by a commitment, and what is not</h3>
+    <h3 id="what-is-pinned-by-a-commitment-and-what-is-not"><span class="sub">10.3</span>What is pinned by a commitment, and what is not</h3>
 
     <p>
       Everything in a handover except one field is checked against something the
@@ -2751,7 +2974,7 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
       schedule is for.
     </p>
 
-    <h3><span class="sub">10.4</span>What a newcomer ends up trusting</h3>
+    <h3 id="what-a-newcomer-ends-up-trusting"><span class="sub">10.4</span>What a newcomer ends up trusting</h3>
 
     <p>
       This is the trade the design makes, and a specification that leaves it implicit
@@ -2813,7 +3036,7 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
 <section>
   <div class="num">11</div>
   <div class="body">
-    <h2>The message set</h2>
+    <h2 id="the-message-set">The message set</h2>
     <p>
       Every message is a <code>u8</code> tag followed by the fields listed, in order. A decoder
       MUST refuse a tag it does not know rather than skipping it, since it cannot
@@ -2931,7 +3154,7 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
       undone by the fork choice like any other.
     </p>
 
-    <h3><span class="sub">11.1</span>What a node MUST refuse</h3>
+    <h3 id="what-a-node-must-refuse"><span class="sub">11.1</span>What a node MUST refuse</h3>
 
     <p>
       Below the message set, a frame is a four byte network marker, a four byte
@@ -3032,7 +3255,7 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
 <section>
   <div class="num">12</div>
   <div class="body">
-    <h2>Versions</h2>
+    <h2 id="versions">Versions</h2>
     <p>
       There are two version numbers in this protocol and they are compared
       differently.
@@ -3142,7 +3365,7 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
 <section>
   <div class="num">13</div>
   <div class="body">
-    <h2>The allowance</h2>
+    <h2 id="the-allowance">The allowance</h2>
     <p>
       <strong>The allowance bounds how often a peer may ask, and nothing else.</strong> How much
       one answer weighs is bounded separately, by the per-message ceilings above and
@@ -3254,7 +3477,7 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
 <section>
   <div class="num">14</div>
   <div class="body">
-    <h2>Where this document is held to the code</h2>
+    <h2 id="where-this-document-is-held-to-the-code">Where this document is held to the code</h2>
     <p>
       Every statement above that names a layout or a number is checked against the
       reference implementation by tests in

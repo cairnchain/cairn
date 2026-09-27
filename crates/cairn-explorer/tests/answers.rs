@@ -548,7 +548,13 @@ fn the_site_asks_the_node_how_it_is() {
         )),
         "{page}"
     );
-    assert!(page.contains("\"bytesPerNote\":72"), "{page}");
+    assert!(
+        page.contains(&format!(
+            "\"bytesPerNote\":{}",
+            cairn_accumulator::Archive::BYTES_PER_STANDING_NOTE
+        )),
+        "{page}"
+    );
     assert!(page.contains("\"movements\":"), "{page}");
 
     // The disk half. The four above are about the chain, and a node can be
@@ -1300,9 +1306,9 @@ fn a_route_is_answered_while_the_index_is_being_built() {
 /// distance between them.
 ///
 /// Five sentences in four files say the index is the larger of the explorer's
-/// two growing costs by about nine, and the nine is not written down
-/// anywhere: it is the per-note figure over 72, and it moves the day either
-/// of those moves. Both halves have instruments and the ratio between them
+/// two growing costs by about six, and the six is not written down
+/// anywhere: it is the index's per-note figure over the cold set's, and it
+/// moves the day either of those moves. Both halves have instruments and the ratio between them
 /// had none, so a correction to one constant would have left every one of
 /// those sentences confidently wrong, in two languages, with nothing to catch
 /// it. That is the exact shape of the last thirteen wrong figures: the number
@@ -1311,12 +1317,14 @@ fn a_route_is_answered_while_the_index_is_being_built() {
 /// It has since earned its place. The per-note figure went from 565 to 627
 /// when it stopped being calibrated on owners holding a hundred and thirty
 /// notes each, and this is what said that five sentences and a help text had
-/// to move with it.
+/// to move with it. And the cold figure went from a slope of 72 to the
+/// archive's own count of 104, once an archive kept its position index, and
+/// the nine became six.
 ///
 /// The ratio is what is held, not the wording, and it is held to the whole
 /// number the sentences round it to. The failure names where to go.
 #[test]
-fn the_ratio_the_site_calls_nine_is_the_one_this_program_serves() {
+fn the_ratio_the_site_calls_six_is_the_one_this_program_serves() {
     const EN: &str = include_str!("../../../web/i18n/en.json");
     const FR: &str = include_str!("../../../web/i18n/fr.json");
     const SCRIPT: &str = include_str!("../../../web/cairn.js");
@@ -1355,17 +1363,17 @@ fn the_ratio_the_site_calls_nine_is_the_one_this_program_serves() {
         (
             "web/i18n/en.json",
             EN,
-            "the larger of its two by about nine times",
+            "the larger of its two by about six times",
         ),
         (
             "web/i18n/fr.json",
             FR,
-            "le plus lourd de ses deux coûts, d'un facteur neuf environ",
+            "le plus lourd de ses deux coûts, d'un facteur six environ",
         ),
         (
             "web/cairn.js",
             SCRIPT,
-            "the smaller half of it by nearly nine times",
+            "the smaller half of it by about six times",
         ),
     ] {
         assert!(
@@ -1374,9 +1382,9 @@ fn the_ratio_the_site_calls_nine_is_the_one_this_program_serves() {
         );
     }
     assert_eq!(
-        times, 9,
+        times, 6,
         "the index costs {index} bytes a note and the cold set {cold}, which is {times} \
-         times and not nine. Every one of these says nine and all of them are now \
+         times and not six. Every one of these says six and all of them are now \
          wrong: web/i18n/en.json, web/i18n/fr.json, web/cairn.js, and the doc comments \
          on INDEX_BYTES_PER_NOTE in cairn-explorer/src/api.rs and on BYTES_PER_NOTE in \
          cairn-explorer/src/index.rs"

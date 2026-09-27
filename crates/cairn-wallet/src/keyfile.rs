@@ -3,7 +3,16 @@
 //! One key, written as hexadecimal, one line. Plain text on purpose: the point
 //! of a key file is that its owner can read it, copy it, and print it onto
 //! paper, and an encrypted format that only this program understands would take
-//! that away without adding anything a filesystem permission does not.
+//! that away.
+//!
+//! What that costs is worth saying in the right terms. A filesystem permission
+//! answers who on this machine can read the file; it says nothing about a copy
+//! that has left the machine, and a copy is exactly what a backup is. A stolen
+//! backup, a memory stick left in a drawer, or a synchronised folder holds the
+//! money as surely as the original does, with nothing between the finder and
+//! the key. That is the threat this format accepts, and it accepts it knowingly:
+//! a passphrase would close it, at the price of the paper copy and of a secret
+//! that, forgotten, loses the money as surely as a lost key.
 //!
 //! The key still passes through memory here, as bytes on one side and as
 //! hexadecimal on the other, and a buffer that is merely freed keeps what it
@@ -15,6 +24,12 @@
 //! hexadecimal parser builds a vector of its own that it frees itself. Closing
 //! either means changing `cairn-primitives`, and neither of them outlives the
 //! process the way a file does.
+//!
+//! And the boundary of that inventory is this module's own buffers, which is
+//! narrower than everywhere the key goes. A `SecretKey` moved from one place to
+//! another leaves its bytes in the frame it was moved out of, and every
+//! signature expands the seed with SHA-512 inside `ed25519-dalek`, whose hash is
+//! built without wiping; neither is something this module can reach.
 //!
 //! There was a third, and naming two of them is what kept it out of sight: a
 //! list of what cannot be closed reads as a list of everywhere the key goes.

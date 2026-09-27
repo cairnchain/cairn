@@ -426,9 +426,10 @@ pub(crate) fn read_to_the_end(reach: u64, mut turn: impl FnMut() -> Reading) -> 
 ///
 /// Every note ever made, spent or not, with its owner, its value, the two
 /// heights and the movements on both sides of it. It is the explorer's real
-/// growing cost and it is nearly nine times the one the site used to name: a
-/// node that keeps the whole cold set carries seventy two bytes for each note
-/// that has fallen, and a node that keeps none carries nothing at all.
+/// growing cost and it is about six times the one the site used to name: a
+/// node that keeps the whole cold set carries a hundred and four bytes for
+/// each fallen note still standing, and a node that keeps none carries
+/// nothing at all.
 ///
 /// A note is what is counted, and a note is not the whole of what is kept: the
 /// index also holds an entry per transaction, a movement per side of every

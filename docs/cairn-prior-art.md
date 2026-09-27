@@ -295,8 +295,11 @@ moins il reste de gens capables de le faire.
       <span class="lbl">Repris</span>
       <span class="val">
         C'est le schéma que Cairn suit. Les deux champs qu'il exige sont
-        gravés dans nos en-têtes, et le tirage est implémenté avec ses
-        paramètres démontrés, non réinventé.
+        gravés dans nos en-têtes, et le tirage en reprend la densité, une sur
+        la distance au sommet, et le plancher sous lequel il cesse de
+        distinguer. Le nombre d'échantillons, le nombre de paliers et la
+        mesure qui les tient sont à nous : dérivés et mesurés dans le code,
+        pas démontrés, et relus par personne.
       </span>
     </div>
   </div>
@@ -429,7 +432,7 @@ s'interdit.
       <tr>
         <td>Ce que coûte le témoin</td>
         <td>Une appartenance, plus une absence par période traversée : il s'allonge avec le sommeil</td>
-        <td>Une seule appartenance, 369 à 685 octets mesurés ; la durée du sommeil n'y change rien</td>
+        <td>Une seule appartenance, 263 à 586 octets mesurés ; la durée du sommeil n'y change rien</td>
       </tr>
       <tr>
         <td>Le retour d'absence</td>
@@ -630,7 +633,7 @@ pas payer celui qui utilise sa monnaie normalement.
         <td class="yes">Oui, 131 072 billets</td>
         <td class="yes">Oui</td>
         <td class="yes">Oui</td>
-        <td>Prévu, en-têtes gravés</td>
+        <td>Oui, 4 096 en-têtes ouverts</td>
       </tr>
     </tbody>
   </table>
@@ -673,9 +676,11 @@ pas payer celui qui utilise sa monnaie normalement.
     <b>Reprendre FlyClient, ne pas l'inventer.</b>
     <span>
       Le schéma est publié, relu, et sa sécurité est établie sous une
-      hypothèse claire. C'est fait depuis : l'implantation reprend le
-      modèle d'adversaire économique proposé en 2026, qui coûte environ
-      37 % d'échantillons en moins à sécurité égale.
+      hypothèse claire. C'est fait depuis pour la densité du tirage et son
+      plancher. Le nombre d'échantillons, lui, vient de notre propre
+      dérivation, mesurée contre les placements qui arrangent le mieux un
+      faussaire et non démontrée ; SECURITY.md dit ce qui en a été vérifié
+      et ce qui ne l'a pas été.
     </span>
   </li>
   <li>

@@ -11,8 +11,8 @@
 //! twenty six thousand keys: a sixth of a second of somebody else's processor
 //! before the subgroup check went in, and one and a third seconds after.
 //!
-//! The budget that would have charged for it is `held_off`, twenty lines below
-//! the read, and by then the work is done. A control that exists and is
+//! The budget that would have charged for it is `held_off`, after the read,
+//! and by then the work is done. A control that exists and is
 //! charged one layer too high.
 //!
 //! So the cap is the caller's to state now, and the caller that reads from a

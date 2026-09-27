@@ -68,6 +68,9 @@ fn dependencies_of(crate_name: &str) -> Vec<String> {
         .1
         .lines()
         .take_while(|line| !line.starts_with('['))
+        // A comment is not a dependency, and a comment with a full stop in it
+        // was counted as one.
+        .filter(|line| !line.trim_start().starts_with('#'))
         .filter_map(|line| line.split_once('.'))
         .map(|(name, _)| name.to_owned())
         .filter(|name| !name.is_empty())
@@ -678,4 +681,151 @@ fn quoted_before(text: &str, what: &str) -> usize {
         .collect::<String>()
         .parse()
         .expect("a number")
+}
+
+/// **SECURITY.md scopes in every crate a shipped program is built from, the
+/// installer and the release workflow, and supports the releases that exist.**
+///
+/// Its scope named eight crates and left out `cairn-node`, `cairn-http` and
+/// the explorer, and put the installer out of scope, which is where most of
+/// the operator-facing defects of the September audits were found: the node
+/// mines and trims its chain, the wallet's page spends through `cairn-http`,
+/// and the installer decides what a server runs after an upgrade. A reporter
+/// reading the list would have held those back, or filed them in public. And
+/// it said there was no released version to support, while every release had
+/// been published and attested since 31 August.
+#[test]
+fn security_scopes_every_crate_a_shipped_program_is_built_from() {
+    let policy = std::fs::read_to_string("../../SECURITY.md").expect("SECURITY.md");
+    let flowing = policy.split_whitespace().collect::<Vec<_>>().join(" ");
+    let scope = flowing
+        .split_once("## Scope")
+        .and_then(|(_, rest)| rest.split_once("Out of scope"))
+        .map(|(scope, _)| scope)
+        .expect("a scope paragraph");
+    for crate_name in shipped(&members()) {
+        assert!(
+            scope.contains(&format!("`crates/{crate_name}`")),
+            "SECURITY.md does not scope in `crates/{crate_name}`, which a shipped program \
+             is built from"
+        );
+    }
+    for path in [
+        "deploy/install.sh",
+        "deploy/cairnd.service",
+        ".github/workflows/release.yml",
+    ] {
+        assert!(
+            scope.contains(&format!("`{path}`")),
+            "SECURITY.md does not scope in `{path}`"
+        );
+        assert!(
+            std::path::Path::new(&format!("../../{path}")).exists(),
+            "SECURITY.md scopes in `{path}`, which is not in the repository"
+        );
+    }
+    assert!(
+        !flowing.contains("no released version"),
+        "SECURITY.md says there is no released version, and releases are published"
+    );
+    assert!(
+        flowing.contains("The newest release, and the tip of `main`"),
+        "SECURITY.md does not say which versions it supports"
+    );
+    assert!(
+        flowing.contains("`docs/cairn-threat-model.md`"),
+        "SECURITY.md does not send a reporter to the threat model"
+    );
+}
+
+/// **The threat model names only what the repository holds.**
+///
+/// The model lived outside the repository, in French, dated 30 August, and
+/// nineteen of its thirty seven rows had been contradicted or qualified by the
+/// time anybody read it against the code again. It is in `docs/` now so that
+/// it moves with the code, and this is what makes it move: every file a row
+/// names has to exist, and every item named beside a file has to appear in
+/// it, so a row whose mitigation was renamed or deleted fails here rather
+/// than standing as a claim about code that is not there.
+#[test]
+fn the_threat_model_names_only_what_the_repository_holds() {
+    const MODEL: &str = include_str!("../../../docs/cairn-threat-model.md");
+    let codes: Vec<&str> = MODEL
+        .split("<code>")
+        .skip(1)
+        .filter_map(|rest| rest.split_once("</code>").map(|(inside, _)| inside))
+        .collect();
+    let is_path = |text: &str| {
+        text == "Cargo.toml"
+            || text.starts_with("crates/")
+            || text.starts_with("deploy/")
+            || text.starts_with(".github/")
+            || text.starts_with("docs/")
+    };
+    let mut paths = 0;
+    let mut items = 0;
+    for code in &codes {
+        if !is_path(code) {
+            continue;
+        }
+        paths += 1;
+        let file = std::fs::read_to_string(format!("../../{code}"))
+            .unwrap_or_else(|_| panic!("the threat model names `{code}`, which is not there"));
+        // An item is the code span right after a path, joined to it by a
+        // comma: `<code>path</code>, <code>item</code>`.
+        let beside = format!("<code>{code}</code>, <code>");
+        let joined = MODEL
+            .split(&beside)
+            .skip(1)
+            .filter_map(|rest| rest.split_once("</code>").map(|(item, _)| item));
+        for item in joined {
+            if is_path(item) {
+                continue;
+            }
+            items += 1;
+            assert!(
+                file.contains(item),
+                "the threat model says `{code}` holds `{item}`, and it does not"
+            );
+        }
+    }
+    assert!(
+        paths > 20 && items > 20,
+        "the threat model was read: {paths} paths and {items} items"
+    );
+
+    // What is left open is written as finding identifiers and nothing else.
+    for row in MODEL
+        .lines()
+        .filter(|line| line.trim_start().starts_with("<tr><td>"))
+    {
+        let cells: Vec<&str> = row.split("<td>").skip(1).collect();
+        let last = cells
+            .last()
+            .and_then(|cell| cell.split_once("</td>"))
+            .map_or("", |(inside, _)| inside);
+        for id in last.split(", ").filter(|id| !id.is_empty()) {
+            let shape = id.len() >= 5
+                && id.as_bytes()[..2].iter().all(u8::is_ascii_digit)
+                && id.as_bytes()[2] == b'-'
+                && matches!(id.as_bytes()[3], b'F' | b'I' | b'Q')
+                && id.as_bytes()[4..].iter().all(u8::is_ascii_digit);
+            assert!(
+                shape,
+                "`{id}` in the threat model is not a finding identifier"
+            );
+        }
+    }
+
+    // The one figure in it, which is the count a newcomer draws.
+    let draws = cairn_ledger::sampling::SAMPLES.to_string();
+    let grouped = format!(
+        "{} {}",
+        &draws[..draws.len() - 3],
+        &draws[draws.len() - 3..]
+    );
+    assert!(
+        MODEL.contains(&format!("Now: {grouped} samples")),
+        "the threat model does not give the draw count this build uses"
+    );
 }

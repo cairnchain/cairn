@@ -357,7 +357,9 @@ impl CoinbaseTransaction {
 
     /// The same, carrying something beyond what consensus reads.
     ///
-    /// A miner uses it as search space past the header nonce. The first block
+    /// A miner could use it as search space past the header nonce; the miner
+    /// in this workspace builds with [`CoinbaseTransaction::new`] and never
+    /// does. The first block
     /// of a network uses it to say something about the day it was made: a
     /// piece of public news nobody could have known in advance is what shows
     /// the chain was not quietly started weeks earlier.

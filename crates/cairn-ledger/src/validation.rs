@@ -59,7 +59,8 @@ const TAIL_REWARD: Amount = reward_of(emission::TAIL_REWARD_PEBBLES);
 /// raise this.
 const DEFAULT_HOT_CAPACITY: usize = 1 << 17;
 
-/// Seconds a block is meant to take. Provisional.
+/// Seconds a block is meant to take, which is the network's value and the
+/// one the specification states.
 const DEFAULT_TARGET_BLOCK_TIME: u64 = 60;
 
 /// How many of a network's own blocks a timestamp may run ahead of a reader's
@@ -670,6 +671,9 @@ pub enum TransferError {
     TooManyInputs { count: usize, limit: usize },
     #[error("transfer creates {count} notes, limit is {limit}")]
     TooManyOutputs { count: usize, limit: usize },
+    /// Raised by the pool, never by a block rule: a transfer no block could
+    /// carry is one the pool will not hold, and a block that carried it would
+    /// be refused as `BlockTooLarge` instead.
     #[error("transfer takes {bytes} bytes, more than the {limit} a block carries")]
     TooLargeForABlock { bytes: usize, limit: usize },
     /// Raised by the pool, never by a block rule: what a block may carry is
@@ -1474,6 +1478,16 @@ pub struct ConnectedBlock {
     pub undo: BlockUndo,
 }
 
+impl ConnectedBlock {
+    /// What a node holds for this block while it can still be undone, in
+    /// bytes of content: the transition and its inverse together.
+    pub fn bytes_held(&self) -> usize {
+        self.transition
+            .bytes_held()
+            .saturating_add(self.undo.bytes_held())
+    }
+}
+
 /// Checks everything about a header that does not need the block body.
 ///
 /// Split out from [`connect_block`] so that each half stays short enough to
@@ -1643,9 +1657,11 @@ pub fn connect_block(
     }
 
     // What a peer has to carry, a node has to hold while it validates, and a
-    // disk has to keep. Checked once here, on the encoding a node received
-    // rather than on a count of parts, because bytes are what the limit is
-    // about and counting parts is how the two drifted apart.
+    // disk has to keep. Checked once here, on the block's encoding rather than
+    // on a count of parts, because bytes are what the limit is about and
+    // counting parts is how the two drifted apart. The encoding is made again
+    // from the decoded block, and it is the bytes the node received because
+    // the format is canonical: a decoder accepts one spelling of each value.
     let bytes = block.encode().len();
     if bytes > params.max_block_bytes {
         return Err(BlockError::BlockTooLarge {
@@ -1723,6 +1739,44 @@ pub fn disconnect_block(state: &mut LedgerState, connected: &ConnectedBlock) {
 mod tests {
     use super::*;
     use cairn_crypto::SecretKey;
+
+    /// What a node holds for a block it could still undo is the transition and
+    /// its inverse, both, and grows with what the block did.
+    ///
+    /// Nothing counted it, so the papers' total of what a node holds went
+    /// without its largest term on a busy chain.
+    #[test]
+    fn a_connected_block_holds_what_it_did_and_how_to_undo_it() {
+        let params = ConsensusParams::testnet();
+        let miner = SecretKey::from_bytes(&[5; 32]).public_key();
+        let mut state = LedgerState::new();
+        let mut held = Vec::new();
+        for outputs in [1usize, 3] {
+            let height = state.next_height().unwrap();
+            let each = Amount::from_pebbles(1_000).unwrap();
+            let coinbase = CoinbaseTransaction::new(height, vec![Note::new(each, miner); outputs]);
+            let block = assemble_block(
+                &state,
+                coinbase,
+                Vec::new(),
+                &params,
+                1_000 + height * 60,
+                0,
+            )
+            .unwrap();
+            let connected = connect_block(&mut state, &block, &params, u64::MAX / 2).unwrap();
+            assert_eq!(
+                connected.bytes_held(),
+                connected.transition.bytes_held() + connected.undo.bytes_held(),
+                "a connected block holds its transition and its undo record together"
+            );
+            held.push(connected.bytes_held());
+        }
+        assert!(
+            held[1] > held[0],
+            "a block that created more notes left a record no larger"
+        );
+    }
 
     /// The floor under a disk budget is the burial times the largest block.
     ///

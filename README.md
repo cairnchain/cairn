@@ -19,8 +19,11 @@ everything that has not moved recently lives only in the commitment and
 is spent by presenting a proof. Nothing is ever destroyed, expired, or charged
 rent.
 
-The paper is `docs/cairn-whitepaper.html`. What the field has already done
-with this problem, and where Cairn stands against it, is in
+The paper is `docs/cairn-whitepaper.html`. What a node must do, byte for byte,
+so that a second implementation could be written without reading this one, is
+`docs/cairn-specification.html`, and what the project defends, against whom,
+and what it leaves open is `docs/cairn-threat-model.html`. What the field has
+already done with this problem, and where Cairn stands against it, is in
 `docs/cairn-prior-art.html`; the working design notes are in
 `docs/cairn-design.html`.
 
@@ -29,9 +32,9 @@ what it borrows and what limit it accepts.
 
 ## Status
 
-Pre-alpha, and running in public. `testnet-6` opened on 1 September 2026, on
-three machines at three hosts. Its money is worth nothing, is meant to be
-worth nothing, and the network will be reset.
+Pre-alpha, and running in public. `testnet-6` opened on 1 September 2026. Its
+money is worth nothing, is meant to be worth nothing, and the network will be
+reset.
 
 It is the sixth because three audit passes in one day found three things, and
 the last of them was not a hole an attacker exploits but the central mechanism
@@ -79,7 +82,10 @@ anyone volunteering to carry its history.
 
 An archivist keeps the whole cold set and is the only party that can rebuild
 the proof of a note whose owner lost theirs. That service costs a set that
-grows, it is chosen rather than paid for, and the network runs without it.
+grows, 104 bytes for every fallen note still unspent, it is chosen rather than
+paid for, and the network runs without it. The set is held in memory and
+rebuilt by reading the whole chain again at every start, so an archivist also
+keeps every block.
 
 A wallet keeps its own proofs current out of what every block already carries,
 so it spends a fallen note without asking anyone. Money moves between people
@@ -91,8 +97,8 @@ like the cold set. What they buy is the only way to join this chain without
 downloading all of it. Someone starting from nothing draws 4 096 old headers
 against accumulated work rather than height, checks each is really where it
 claims to be in the tip's own commitment, and works out what stands behind the
-tip without reading the millions in between. Then they are handed the ledger.
-Twelve megabytes for a thirty year chain, against 2 067 GB of reading.
+tip without reading the millions in between. Then they are handed the ledger,
+and validate the thousand or so blocks between it and the tip themselves.
 
 Any node can answer, because every node keeps the headers on disk at 182 bytes
 each, and the forest they make at 64 more. Joining does not depend on anyone
@@ -108,10 +114,11 @@ stranger's word for where the story begins.
 
 A block holds 128 kilobytes, which is about 686 ordinary payments, or eleven a
 second. That number decides three things at once and is small because of the
-first two: a node holds the blocks it could still reorganise away, so it is
-186 MB of memory every node must have; it sets how fast the hot set turns over
-and with it how long a fallen note stays spendable without a proof; and it is
-how many people can be paid in a minute.
+first two: a node keeps a record of every block it could still reorganise
+away, so it decides the largest thing every node must hold, 466 MB on a chain
+of full blocks; it sets how fast the hot set turns over and with it how long a
+fallen note stays spendable without a proof; and it is how many people can be
+paid in a minute.
 
 | Network | Starts from | Opens at | Block time |
 | --- | --- | --- | --- |
@@ -218,6 +225,8 @@ sh /usr/local/src/cairn/deploy/install.sh
 | `cairn-wallet` | the wallet: a library that holds the key, and `cairn-wallet` on top of it |
 | `cairn-http` | the small HTTP server and JSON writer the wallet and the explorer share |
 | `cairn-explorer` | `cairn-explorer`, a node that indexes the chain and serves `web/` |
+| `cairn-docs` | renders `docs/` into the HTML a node serves; ships in nothing |
+| `cairn-fuzz` | the generators and shrinker the fuzz tests share; ships in nothing |
 
 The website itself is in `web/`, kept out of the protocol crates. It is plain
 HTML, CSS and JavaScript with no build step and no framework, compiled into the
@@ -355,9 +364,16 @@ can fill is bounded. A reorganisation deeper than `MAX_REORG_DEPTH` is refused
 rather than kept possible by holding undo records forever; that is a local
 safety policy, not a consensus rule, and it is written down as such.
 
-What a node must hold to validate is capped by the rules: 68 MB of hot notes
-and, in the worst case the rules allow, 233 MB of blocks it could still have to
-undo. Neither grows with the chain.
+What a node must hold to validate is capped by the rules, and none of it grows
+with the chain's age: 68 MB of hot notes; 8.6 MB of block bodies it could still
+have to undo, with the headers of the rest; the record of every one of those
+blocks, 51 MB of undo records at 64 payments a block and 466 MB on a chain of
+full blocks, which is the largest term there is; and at most 17 MB of paths
+beside the grace window. It reads an older body back off its own disk when a
+switch that fails partway needs one, and the store allows itself 168 MB of
+blocks at most, rival branches included. On top of that come what its peers
+can make it queue, which is bounded per connection. `cargo test -p
+cairn-explorer --test published_figures` computes every one of these.
 
 One cost does grow, and it is small and named: the headers and the forest they
 make, at 129 MB a year. A node keeps them so that anyone can join through it.

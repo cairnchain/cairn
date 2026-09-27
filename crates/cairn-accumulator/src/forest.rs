@@ -512,6 +512,30 @@ impl Forest {
         self.watched.len()
     }
 
+    /// What this holds, in bytes of content: the roots, and every watched
+    /// path with the place it is kept for.
+    ///
+    /// Content and not occupancy, the same measure as
+    /// [`PathsBefore::bytes_held`]. A forest a plain node keeps is the roots
+    /// and the paths of its grace window, and one kept inside an undo record
+    /// is the roots alone, so this is what says which of the two a figure is
+    /// made of.
+    pub fn bytes_held(&self) -> usize {
+        let roots = self
+            .roots
+            .len()
+            .saturating_mul(std::mem::size_of::<Option<Hash32>>());
+        self.watched.values().fold(roots, |held, proof| {
+            held.saturating_add(std::mem::size_of::<(u64, ForestProof)>())
+                .saturating_add(
+                    proof
+                        .siblings
+                        .len()
+                        .saturating_mul(std::mem::size_of::<Hash32>()),
+                )
+        })
+    }
+
     /// The same forest with nothing watched.
     ///
     /// This is the cheap half, and most callers want it. Whether a leaf may be
@@ -1034,25 +1058,58 @@ impl Archive {
         self.forest.is_empty()
     }
 
-    /// Hashes this archive is holding, which is what its cost is counted in.
+    /// Hashes this archive is holding.
     ///
     /// One per leaf plus one per inner node that some leaf completed, at
-    /// thirty two bytes each. This is the quantity the whitepaper publishes as
-    /// sixty four bytes a note, and it is here rather than worked out from
-    /// [`Archive::len`] by whoever is publishing it: a figure re-derived at
-    /// the place it is quoted is a second implementation that can drift from
-    /// the first without anything noticing, and `tests/archivist_cost.rs` was
-    /// checking its own arithmetic against itself for exactly that reason.
-    ///
-    /// What this does not count is the capacity the vectors have asked for and
-    /// are not using, which is the difference between what an archive holds
-    /// and what a process holding one occupies. The same test measures that
-    /// gap and says why the two figures differ.
+    /// thirty two bytes each: sixty four bytes a note. That was the whole of
+    /// what an archive held, and the whitepaper published it as such, until
+    /// the position index went in beside the hashes; what an archive holds is
+    /// [`Archive::bytes_held`] now, and this is the part of it that proves.
+    /// It is here rather than worked out from [`Archive::len`] by whoever is
+    /// quoting it: a figure re-derived at the place it is quoted is a second
+    /// implementation that can drift from the first without anything
+    /// noticing, and `tests/archivist_cost.rs` was checking its own arithmetic
+    /// against itself for exactly that reason.
     pub fn hashes_held(&self) -> u64 {
         let leaves = u64::try_from(self.leaves.len()).unwrap_or(u64::MAX);
         self.inner.iter().fold(leaves, |held, level| {
             held.saturating_add(u64::try_from(level.len()).unwrap_or(u64::MAX))
         })
+    }
+
+    /// What an archive holds for a fallen note still standing: its leaf, the
+    /// inner node it completes, and its entry in the position index.
+    ///
+    /// [`Archive::bytes_held`] divided by the notes, less the roots no leaf
+    /// completed, which are at most sixty four over the whole set. Written as
+    /// a figure for whoever quotes it, and held to the layout by this
+    /// module's tests, so a quotation reads it rather than works it out again.
+    pub const BYTES_PER_STANDING_NOTE: u64 = 104;
+
+    /// What this archive holds, in bytes of content: the hashes, and an entry
+    /// in the position index for every leaf still standing.
+    ///
+    /// The figure the papers publish for an archivist, and a hundred and four
+    /// bytes a standing note: its leaf, the inner node it completes, and the
+    /// forty bytes of its index entry. The papers said sixty four for a week
+    /// after the index went in, because the one accessor anything read was
+    /// [`Archive::hashes_held`], and the index's own doc comment was the only
+    /// place that counted it.
+    ///
+    /// Content and not occupancy, as with the paths a forest keeps: what a
+    /// process holding this occupies is more, because the vectors grow by
+    /// doubling and a hash map carries buckets it is not using, and that moves
+    /// with the allocator rather than with the design. `tests/archivist_cost.rs`
+    /// measures the gap and says why the two figures differ.
+    pub fn bytes_held(&self) -> u64 {
+        let index = u64::try_from(self.standing.len())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(
+                u64::try_from(std::mem::size_of::<(Hash32, u64)>()).unwrap_or(u64::MAX),
+            );
+        self.hashes_held()
+            .saturating_mul(u64::try_from(std::mem::size_of::<Hash32>()).unwrap_or(u64::MAX))
+            .saturating_add(index)
     }
 
     pub fn add(&mut self, leaf: Hash32) -> Option<(u64, ForestProof)> {
@@ -1409,6 +1466,71 @@ impl Archive {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// The figure an archive is quoted at is the one its layout gives: two
+    /// hashes and an index entry.
+    ///
+    /// Quoted by the explorer's status route and by the papers, and held here
+    /// so that a hash or an index entry changing size moves the quotation
+    /// rather than leaving it standing.
+    #[test]
+    fn a_standing_note_is_quoted_at_what_the_archive_holds_for_it() {
+        let layout = 2 * size_of::<Hash32>() + size_of::<(Hash32, u64)>();
+        assert_eq!(
+            Archive::BYTES_PER_STANDING_NOTE,
+            u64::try_from(layout).unwrap(),
+            "the figure an archive is quoted at is not its layout"
+        );
+        let mut archive = Archive::new();
+        for index in 0u64..1 << 10 {
+            archive.add(forest_leaf(&index.to_le_bytes()));
+        }
+        assert_eq!(
+            archive.bytes_held(),
+            Archive::BYTES_PER_STANDING_NOTE * (1 << 10) - 32,
+            "an archive of one tree does not hold the quoted figure a note, less its root"
+        );
+    }
+
+    /// A forest's content is its roots and every watched path, each path at
+    /// its own length.
+    ///
+    /// Nothing counted what a forest holds, so an undo record carrying three
+    /// of them and a plain node carrying one with its grace window's paths had
+    /// no figure for either, and the papers' total of what a node holds left
+    /// both out.
+    #[test]
+    fn a_forest_holds_its_roots_and_every_path_it_watches() {
+        let mut forest = Forest::new();
+        let roots = MAX_HEIGHT * size_of::<Option<Hash32>>();
+        assert_eq!(
+            forest.bytes_held(),
+            roots,
+            "a forest watching nothing holds its roots"
+        );
+
+        let path = |length: usize| ForestProof {
+            siblings: vec![Hash32::from_bytes([7; 32]); length],
+        };
+        forest.watch(3, path(5));
+        let one = roots + size_of::<(u64, ForestProof)>() + 5 * size_of::<Hash32>();
+        assert_eq!(
+            forest.bytes_held(),
+            one,
+            "a watched path costs its place and its siblings"
+        );
+        forest.watch(9, path(2));
+        assert_eq!(
+            forest.bytes_held(),
+            one + size_of::<(u64, ForestProof)>() + 2 * size_of::<Hash32>(),
+            "a second path is counted at its own length"
+        );
+        assert_eq!(
+            forest.roots_only().bytes_held(),
+            roots,
+            "the roots alone are what an undo record keeps"
+        );
+    }
 
     /// A path promising more siblings than a forest has is refused at the
     /// count, not after the frame runs out.

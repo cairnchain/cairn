@@ -1,3 +1,6 @@
+/* The palette, including the variables and the [data-theme] selectors no
+   paper uses, mirrors the site's stylesheet, so that a paper and the site
+   read as one thing; unused ones are kept on purpose. */
   :root{
     --ground:#EDEEE9; --surface:#F6F7F3; --surface-2:#E4E6DE;
     --ink:#1A1E1B; --ink-2:#4C544E; --ink-3:#79817A;
@@ -27,12 +30,15 @@
 
   *{box-sizing:border-box}
   body{
+    margin:0;
     background:var(--ground); color:var(--ink);
     font-family:"Newsreader",Georgia,"Times New Roman",serif;
     font-size:1.0625rem; line-height:1.65; font-weight:380;
     -webkit-font-smoothing:antialiased;
   }
   .paper{max-width:80rem;margin:0 auto;padding:0 clamp(1.1rem,4vw,3rem) 6rem}
+  /* The opening block, for a document that has one above its first section. */
+  .abstract{margin:0 0 2.5rem}
 
   /* ---- masthead ---- */
   .title{padding:clamp(3rem,9vw,6.5rem) 0 2.25rem;border-bottom:1px solid var(--rule)}

@@ -838,7 +838,85 @@ pub struct BlockUndo {
     headers_before_before_tip: Forest,
 }
 
+impl StateTransition {
+    /// What this holds, in bytes of content.
+    ///
+    /// A node keeps one of these for every block it could still undo, beside
+    /// the record in [`BlockUndo::bytes_held`], so the two together times that
+    /// depth are memory every node must have. The papers' total of what a
+    /// node holds left both out, and on a chain of full blocks they are the
+    /// largest term in it.
+    ///
+    /// Content and not occupancy, the measure every other figure of this kind
+    /// is stated in: what the vectors hold, not the capacity they asked for.
+    pub fn bytes_held(&self) -> usize {
+        let cold = self.spent_cold.iter().fold(0usize, |held, spend| {
+            held.saturating_add(std::mem::size_of::<ColdSpend>())
+                .saturating_add(
+                    spend
+                        .proof
+                        .siblings
+                        .len()
+                        .saturating_mul(std::mem::size_of::<Hash32>()),
+                )
+        });
+        std::mem::size_of::<Self>()
+            .saturating_add(
+                self.spent_hot
+                    .len()
+                    .saturating_mul(std::mem::size_of::<NoteId>()),
+            )
+            .saturating_add(cold)
+            .saturating_add(
+                self.created
+                    .len()
+                    .saturating_add(self.evicted.len())
+                    .saturating_mul(std::mem::size_of::<(NoteId, Note)>()),
+            )
+    }
+}
+
 impl BlockUndo {
+    /// What this record holds, in bytes of content: every note it would put
+    /// back, the forests it would restore, and the paths it wrote down.
+    ///
+    /// Counted beside [`StateTransition::bytes_held`] for the reason given
+    /// there. [`BlockUndo::path_bytes`] is the one part of it that was ever
+    /// measured, and it is the smallest part on an ordinary chain.
+    pub fn bytes_held(&self) -> usize {
+        let dropped = self.grace_dropped.iter().fold(0usize, |held, landing| {
+            held.saturating_add(std::mem::size_of::<Vec<Fallen>>())
+                .saturating_add(landing.len().saturating_mul(std::mem::size_of::<Fallen>()))
+        });
+        std::mem::size_of::<Self>()
+            .saturating_add(
+                self.restored_hot
+                    .len()
+                    .saturating_add(self.unevicted.len())
+                    .saturating_mul(std::mem::size_of::<(NoteId, HotEntry)>()),
+            )
+            .saturating_add(self.cold_before.bytes_held())
+            .saturating_add(self.disturbed.bytes_held())
+            .saturating_add(self.grace_lifted.len().saturating_mul(std::mem::size_of::<(
+                usize,
+                usize,
+                Fallen,
+            )>()))
+            .saturating_add(dropped)
+            .saturating_add(
+                self.watched_removed
+                    .len()
+                    .saturating_mul(std::mem::size_of::<Fallen>()),
+            )
+            .saturating_add(
+                self.matured
+                    .len()
+                    .saturating_mul(std::mem::size_of::<Maturing>()),
+            )
+            .saturating_add(self.headers_before.bytes_held())
+            .saturating_add(self.headers_before_before_tip.bytes_held())
+    }
+
     /// Watched paths this record has to carry.
     ///
     /// A node keeps one record per block it could still undo, so this times
@@ -1984,6 +2062,118 @@ mod tests {
     use cairn_primitives::codec::Decode;
 
     use super::*;
+
+    /// What a block leaves a node holding, counted entry by entry: every field
+    /// of the transition and of its undo record adds its own size for every
+    /// entry it holds.
+    ///
+    /// Nothing counted either. A node keeps one of each for every block it
+    /// could still undo, and the papers' total of what a node holds named the
+    /// hot set and the block bodies and left these out, so the one quantity
+    /// that grows with how full the blocks are went unpublished.
+    #[test]
+    fn a_block_record_counts_every_entry_it_holds() {
+        let owner = cairn_crypto::SecretKey::from_bytes(&[13; 32]).public_key();
+        let id = NoteId::new(Hash32::from_bytes([3; 32]), 0);
+        let note = Note::new(Amount::ZERO, owner);
+        let fallen: Fallen = (id, 4, note);
+
+        let mut moved = StateTransition::default();
+        let mut held = moved.bytes_held();
+        assert_eq!(held, size_of::<StateTransition>(), "an empty transition");
+        moved.spent_hot.push(id);
+        assert_eq!(moved.bytes_held(), held + size_of::<NoteId>(), "spent_hot");
+        held = moved.bytes_held();
+        moved.created.push((id, note));
+        assert_eq!(
+            moved.bytes_held(),
+            held + size_of::<(NoteId, Note)>(),
+            "created"
+        );
+        held = moved.bytes_held();
+        moved.evicted.push((id, note));
+        assert_eq!(
+            moved.bytes_held(),
+            held + size_of::<(NoteId, Note)>(),
+            "evicted"
+        );
+        held = moved.bytes_held();
+        moved.spent_cold.push(ColdSpend {
+            id,
+            position: 4,
+            note,
+            proof: ForestProof {
+                siblings: vec![Hash32::ZERO; 3],
+            },
+        });
+        assert_eq!(
+            moved.bytes_held(),
+            held + size_of::<ColdSpend>() + 3 * size_of::<Hash32>(),
+            "spent_cold, with the proof each spend carries"
+        );
+
+        let mut undo = BlockUndo::default();
+        let mut held = undo.bytes_held();
+        assert_eq!(
+            held,
+            size_of::<BlockUndo>() + 3 * Forest::default().bytes_held(),
+            "an empty record holds its three sets of roots"
+        );
+        let entry = size_of::<(NoteId, HotEntry)>();
+        undo.restored_hot.push((id, HotEntry { note, height: 4 }));
+        assert_eq!(undo.bytes_held(), held + entry, "restored_hot");
+        held = undo.bytes_held();
+        undo.unevicted.push((id, HotEntry { note, height: 4 }));
+        assert_eq!(undo.bytes_held(), held + entry, "unevicted");
+        held = undo.bytes_held();
+        undo.grace_lifted.push((0, 0, fallen));
+        assert_eq!(
+            undo.bytes_held(),
+            held + size_of::<(usize, usize, Fallen)>(),
+            "grace_lifted"
+        );
+        held = undo.bytes_held();
+        undo.grace_dropped.push(vec![fallen, fallen]);
+        assert_eq!(
+            undo.bytes_held(),
+            held + size_of::<Vec<Fallen>>() + 2 * size_of::<Fallen>(),
+            "grace_dropped, a landing at a time"
+        );
+        held = undo.bytes_held();
+        undo.watched_removed.push(fallen);
+        assert_eq!(
+            undo.bytes_held(),
+            held + size_of::<Fallen>(),
+            "watched_removed"
+        );
+        held = undo.bytes_held();
+        undo.matured.push((4, Hash32::ZERO));
+        assert_eq!(undo.bytes_held(), held + size_of::<Maturing>(), "matured");
+        held = undo.bytes_held();
+        let mut forest = Forest::default();
+        forest.watch(
+            1,
+            ForestProof {
+                siblings: vec![Hash32::ZERO; 2],
+            },
+        );
+        let grown = forest.bytes_held() - Forest::default().bytes_held();
+        undo.cold_before = forest.clone();
+        assert_eq!(undo.bytes_held(), held + grown, "cold_before");
+        held = undo.bytes_held();
+        undo.headers_before = forest.clone();
+        assert_eq!(undo.bytes_held(), held + grown, "headers_before");
+        held = undo.bytes_held();
+        undo.headers_before_before_tip = forest.clone();
+        assert_eq!(undo.bytes_held(), held + grown, "headers_before_before_tip");
+        held = undo.bytes_held();
+        let mut before = PathsBefore::before(4);
+        forest.unwatch_keeping(1, &mut before);
+        let written = before.bytes_held();
+        assert!(written > 0, "a path let go of is written down");
+        undo.disturbed = before;
+        assert_eq!(undo.bytes_held(), held + written, "disturbed");
+    }
 
     /// What a ledger holds in full is asked by identifier, and an empty ledger
     /// is one holding nothing in either tier.

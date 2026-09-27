@@ -29,45 +29,40 @@ pub(crate) const LOCALES: [(&str, &str, &str); 2] = [
 ///
 /// A protocol whose whole argument is that you should check things for
 /// yourself has to be readable somewhere that is not a code host showing HTML
-/// as source. Each is written as a fragment, so the declaration a browser
-/// needs is glued on in front at compile time; nothing else is added, and in
-/// particular no navigation and no script, so nothing on the page can change
-/// what the paper says.
+/// as source. Each file is the whole page, declaration, language, character
+/// set and viewport included, written by `cairn-docs` from the document's own
+/// front matter; nothing is added here, and in particular no navigation and no
+/// script, so nothing on the page can change what the paper says.
+///
+/// The shell used to be glued on here at compile time, with the language typed
+/// a second time beside each file. A file opened from a checkout then had no
+/// character set, and the language had two sources that nothing held equal.
 ///
 /// They name no font from anywhere else. That is what lets the site's policy
 /// stay as strict as it is, and what stops a paper meant to outlast us from
 /// needing somebody else's server to be read.
 macro_rules! paper {
-    ($language:literal, $file:literal) => {
-        concat!(
-            "<!doctype html>\n<html lang=\"",
-            $language,
-            "\">\n<meta charset=\"utf-8\">\n",
-            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n",
-            "<meta name=\"color-scheme\" content=\"dark light\">\n",
-            include_str!($file)
-        )
+    ($file:literal) => {
+        include_str!($file)
     };
 }
 
-pub(crate) const PAPERS: [(&str, &str); 5] = [
-    (
-        "/whitepaper",
-        paper!("en", "../../../docs/cairn-whitepaper.html"),
-    ),
+pub(crate) const PAPERS: [(&str, &str); 6] = [
+    ("/whitepaper", paper!("../../../docs/cairn-whitepaper.html")),
     (
         "/specification",
-        paper!("en", "../../../docs/cairn-specification.html"),
+        paper!("../../../docs/cairn-specification.html"),
     ),
-    ("/design", paper!("fr", "../../../docs/cairn-design.html")),
+    (
+        "/threat-model",
+        paper!("../../../docs/cairn-threat-model.html"),
+    ),
+    ("/design", paper!("../../../docs/cairn-design.html")),
     (
         "/open-questions",
-        paper!("fr", "../../../docs/cairn-open-questions.html"),
+        paper!("../../../docs/cairn-open-questions.html"),
     ),
-    (
-        "/prior-art",
-        paper!("fr", "../../../docs/cairn-prior-art.html"),
-    ),
+    ("/prior-art", paper!("../../../docs/cairn-prior-art.html")),
 ];
 
 /// The look of each paper, kept beside it rather than inside it.
@@ -146,6 +141,90 @@ fn languages() -> String {
 mod tests {
     use super::{answer, LOCALES, PAPERS, PAPER_STYLES};
     use cairn_http::{Request, Response};
+
+    /// The value of `name="` in the first element that carries `marker`.
+    fn attribute_of<'a>(page: &'a str, marker: &str, name: &str) -> Option<&'a str> {
+        let element = page.split_once(marker)?.1.split_once('>')?.0;
+        element
+            .split_once(&format!("{name}=\""))?
+            .1
+            .split_once('"')
+            .map(|(value, _)| value)
+    }
+
+    /// **Every document rendered is a paper served, and every paper served is
+    /// a rendered document, byte for byte.**
+    ///
+    /// The two lists are kept by hand in two crates. A document added to one
+    /// and not the other was generated and never served, or served from a
+    /// file nothing regenerated, and nothing said either.
+    #[test]
+    fn the_papers_served_are_the_documents_rendered() {
+        assert_eq!(
+            PAPERS.len(),
+            cairn_docs::DOCUMENTS.len(),
+            "the explorer serves a different number of papers than cairn-docs renders"
+        );
+        for document in cairn_docs::DOCUMENTS {
+            let committed = std::fs::read_to_string(cairn_docs::html_path(document)).unwrap();
+            assert!(
+                PAPERS.iter().any(|(_, body)| *body == committed),
+                "{document} is rendered and not served as it is on disk"
+            );
+        }
+    }
+
+    /// **Each paper's language is written once, and the stylesheet it links is
+    /// one this serves.**
+    ///
+    /// The language used to be typed here beside each file and again in the
+    /// front matter, and nothing held the two equal. And a stylesheet a paper
+    /// names that is not in the list below is answered with the site's index
+    /// page, which a browser drops for its type, so the paper rendered
+    /// unstyled with no error anywhere.
+    #[test]
+    fn each_paper_declares_one_language_and_links_a_stylesheet_that_is_served() {
+        for (path, body) in PAPERS {
+            let page = attribute_of(body, "<html", "lang").unwrap();
+            let paper = attribute_of(body, "<div class=\"paper\"", "lang").unwrap();
+            assert_eq!(page, paper, "{path} declares two languages");
+            let sheet = attribute_of(body, "<link rel=\"stylesheet\"", "href").unwrap();
+            assert!(
+                PAPER_STYLES
+                    .iter()
+                    .any(|(served, _)| served.strip_prefix('/') == Some(sheet)),
+                "{path} links {sheet}, which the explorer does not serve"
+            );
+        }
+    }
+
+    /// **The folder holds the pages rendered and the stylesheets they link,
+    /// and nothing else.**
+    ///
+    /// A page left behind after its document was removed, or a stylesheet no
+    /// page links, was noticed by nothing.
+    #[test]
+    fn the_documents_folder_holds_no_page_or_stylesheet_nothing_uses() {
+        for entry in std::fs::read_dir(cairn_docs::folder()).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            if let Some(stem) = name.strip_suffix(".html") {
+                assert!(
+                    cairn_docs::DOCUMENTS.contains(&stem),
+                    "docs/{name} is a page no document renders"
+                );
+            } else if std::path::Path::new(&name)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("css"))
+            {
+                assert!(
+                    PAPER_STYLES
+                        .iter()
+                        .any(|(served, _)| served.strip_prefix('/') == Some(name.as_str())),
+                    "docs/{name} is a stylesheet the explorer does not serve"
+                );
+            }
+        }
+    }
 
     fn get(path: &str) -> Response {
         answer(&Request {

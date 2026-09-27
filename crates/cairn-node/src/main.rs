@@ -1061,8 +1061,8 @@ fn what_the_chain_did(landed: &Accepted) -> (&'static str, &'static str) {
 /// A function rather than a `say!` because `deploy/DOWNLOAD.txt` shows one
 /// of these to somebody who has just unpacked the archive, and showed a line
 /// this program had stopped writing: the `stored` column was added and the
-/// text was not. Now `the_download_shows_the_line_this_node_writes` builds one
-/// here and holds the two together.
+/// text was not. Now `every_shipped_text_shows_the_line_this_node_writes`
+/// builds one here and holds the two together.
 fn status_line(
     stamp: &str,
     height: &str,

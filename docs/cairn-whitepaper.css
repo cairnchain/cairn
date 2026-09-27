@@ -104,10 +104,15 @@
   a{color:var(--accent-ink);text-decoration:underline;text-decoration-color:var(--rule-firm);text-underline-offset:.16em}
   a:hover{text-decoration-color:currentColor}
   a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-  code,.mono{
+  code{
     font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.85em;
     font-variant-numeric:lining-nums;
+    overflow-wrap:anywhere;
   }
+  /* A line of the specification's vectors is wider than a phone. It scrolls
+     inside its own box rather than carrying the whole page sideways. */
+  pre{overflow-x:auto;max-width:100%}
+  pre code{overflow-wrap:normal}
   sup a{text-decoration:none;font-size:.72em;padding:0 .1em;font-variant-numeric:lining-nums}
 
   /* ---- figures ---- */
