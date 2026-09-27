@@ -116,11 +116,38 @@ const DIAL_TIMEOUT: Duration = Duration::from_secs(3);
 ///
 /// A round now spends this much and goes back to the rest of its work; what is
 /// left is dialled on the next one. It is the time and not the number that is
-/// capped, because a dial that fails fast is not the problem: an address that
-/// refuses comes back in microseconds, so a book full of those is still worked
-/// through in one round. Only the ones that hang are rationed, and one of those
-/// per round is what this buys.
+/// capped, because a dial that fails fast is not the problem. Only the ones
+/// that take seconds are rationed, and one wave of those per round is what
+/// this buys: once a round's first wave comes back short, it dials
+/// [`DIALS_AT_ONCE`] side by side, so a wave costs its slowest dial rather
+/// than the sum of them.
+///
+/// Which dials fail fast depends on the machine. On Linux and macOS an address
+/// that refuses comes back in microseconds, so a book full of those is worked
+/// through in one round. On Windows it does not: Microsoft documents that
+/// Winsock sends the SYN again after the reset, and others have measured a
+/// second or two for a refused dial on the loopback. This said refusals were
+/// free everywhere while the round dialled one address after another, which
+/// on Windows would get through two or three of them in a round and ration the
+/// rest as if they hung. Side by side a round gets through a wave of them in
+/// the time of one, and what is still rationed is the number of waves. Not
+/// measured on Windows here: `a_round_charges_every_address_that_refuses_it`
+/// is what the Windows runner measures.
 const DIAL_BUDGET: Duration = Duration::from_secs(3);
+/// Dials a round makes at once, once its first wave has come back short.
+///
+/// The first wave of a round is only as wide as what the node is short of, so
+/// a node whose book answers opens what it needs and nothing more. A wave that
+/// comes back short says the book holds addresses that do not answer, and from
+/// there a round dials this many side by side, so that a dial which takes
+/// seconds to fail, a hang anywhere or a refusal on Windows, costs the round
+/// one wait rather than one each. More of a wave can then answer than the node
+/// needs: those are closed again at once, neither kept nor charged, and are
+/// dialled for real when a slot comes free.
+///
+/// Twice [`TARGET_PEERS`]: a thread each, for as long as one dial takes, which
+/// is [`DIAL_TIMEOUT`] at most.
+const DIALS_AT_ONCE: usize = 2 * TARGET_PEERS;
 /// How long a read waits before the loop looks up to check on things.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a write may block before the peer is treated as gone.
@@ -7846,6 +7873,19 @@ fn look_up_seed_names(shared: &Arc<Shared>, now: u64) {
 }
 
 fn dial_from_book(shared: &Arc<Shared>, now: u64) {
+    dial_from_book_with(shared, now, &|address: &SocketAddr| {
+        TcpStream::connect_timeout(address, DIAL_TIMEOUT)
+    });
+}
+
+/// [`dial_from_book`], with the dial handed in.
+///
+/// So that a dial which takes seconds to be refused, which is what Windows
+/// does, can be stood in for on a machine where a refusal takes microseconds.
+fn dial_from_book_with<D>(shared: &Arc<Shared>, now: u64, dial: &D)
+where
+    D: Fn(&SocketAddr) -> io::Result<TcpStream> + Sync,
+{
     let (connected, count) = {
         let peers = shared.peers();
         // Both the address a peer introduced itself at and the address this
@@ -7897,33 +7937,95 @@ fn dial_from_book(shared: &Arc<Shared>, now: u64) {
         .collect();
 
     let dialling_since = Instant::now();
+    let mut candidates = candidates.into_iter();
     let mut opened = 0usize;
-    for address in candidates {
+    // What the node is short of, and then, once a wave has come back short,
+    // `DIALS_AT_ONCE`. A node whose book answers never goes past the first.
+    let mut width = wanted;
+    loop {
         if opened >= wanted || !shared.running.load(Ordering::SeqCst) {
             return;
         }
-        // Checked before the dial rather than after, so a round always opens at
-        // least one connection however slow the last one was. Otherwise a node
-        // whose every address hangs would stop dialling altogether.
+        // Checked before a wave rather than after, so a round always makes at
+        // least one however slow the last one was. Otherwise a node whose
+        // every address hangs would stop dialling altogether.
         if dialling_since.elapsed() >= DIAL_BUDGET {
             return;
         }
-        let host = address.ip();
-        if shared.refuses(host, now) || !shared.has_room_for(Some(host)) {
-            continue;
+        let wave: Vec<SocketAddr> = candidates
+            .by_ref()
+            .filter(|address| {
+                let host = address.ip();
+                !shared.refuses(host, now) && shared.has_room_for(Some(host))
+            })
+            .take(width)
+            .collect();
+        if wave.is_empty() {
+            return;
         }
-        match TcpStream::connect_timeout(&address, DIAL_TIMEOUT) {
-            Ok(stream) => {
-                attach_peer(shared, stream, Some(address));
-                opened = opened.saturating_add(1);
-            }
-            // An address that never answers would otherwise be dialled every
-            // second forever, and handed to every peer that asks.
-            Err(_) => {
-                shared.book().missed(&address, now);
+        for (address, dialled) in dial_side_by_side(&wave, dial) {
+            match dialled {
+                // Asked again, because the room was judged before the wave
+                // for each address alone, and two in one wave can be one
+                // host. Past what the node is short of, or past the host's
+                // share, the connection is closed and nothing is held
+                // against the address: it answered.
+                Ok(stream) => {
+                    if opened < wanted && shared.has_room_for(Some(address.ip())) {
+                        attach_peer(shared, stream, Some(address));
+                        opened = opened.saturating_add(1);
+                    } else {
+                        let _ = stream.shutdown(Shutdown::Both);
+                    }
+                }
+                // An address that never answers would otherwise be dialled every
+                // second forever, and handed to every peer that asks.
+                Err(_) => {
+                    shared.book().missed(&address, now);
+                }
             }
         }
+        width = DIALS_AT_ONCE;
     }
+}
+
+/// Dials every address in `wave` at once, and answers for each in the order
+/// they were given.
+///
+/// Side by side, so a wave costs its slowest dial rather than the sum of them:
+/// a thread each, all joined before this returns. A machine that will not
+/// start one gets that dial made here instead, after the others, which is how
+/// every dial was made before.
+fn dial_side_by_side<D>(wave: &[SocketAddr], dial: &D) -> Vec<(SocketAddr, io::Result<TcpStream>)>
+where
+    D: Fn(&SocketAddr) -> io::Result<TcpStream> + Sync,
+{
+    if let [only] = wave {
+        return vec![(*only, dial(only))];
+    }
+    thread::scope(|scope| {
+        let started: Vec<_> = wave
+            .iter()
+            .map(|address| {
+                let dialling = thread::Builder::new()
+                    .name("cairn-dial".to_owned())
+                    .spawn_scoped(scope, move || dial(address));
+                (address, dialling)
+            })
+            .collect();
+        started
+            .into_iter()
+            .map(|(address, dialling)| {
+                let dialled = match dialling {
+                    Ok(handle) => handle
+                        .join()
+                        .unwrap_or_else(|_| Err(io::Error::other("the dial did not finish"))),
+                    Err(_) => dial(address),
+                };
+                (*address, dialled)
+            })
+            .collect()
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10508,6 +10610,12 @@ mod peers_and_loops {
     /// Nothing held the count: a round that went on dialling past what it
     /// wanted passed, which is a node opening a connection to everything in
     /// its book once a second.
+    ///
+    /// Counted at the dial as well as in the table. A connection past what
+    /// the node needs is closed as soon as it answers, so a round that went
+    /// on dialling once it had what it needed kept the table right, and
+    /// passed, while it opened and closed connections on other people's
+    /// nodes.
     #[test]
     fn a_round_dials_what_the_node_is_short_of_and_no_more() {
         let node = quiet();
@@ -10523,12 +10631,21 @@ mod peers_and_loops {
             node.shared.book().insert(door.local_addr().unwrap());
         }
         node.shared.running.store(true, Ordering::SeqCst);
-        dial_from_book(&node.shared, 1_000);
+        let dials = AtomicUsize::new(0);
+        dial_from_book_with(&node.shared, 1_000, &|address: &SocketAddr| {
+            dials.fetch_add(1, Ordering::SeqCst);
+            TcpStream::connect_timeout(address, DIAL_TIMEOUT)
+        });
         let reached = dialled(&node);
         stop_all(&node);
         assert_eq!(
             reached, 1,
             "a node one peer short of its target dialled more than one"
+        );
+        assert_eq!(
+            dials.load(Ordering::SeqCst),
+            1,
+            "a node one peer short went on dialling once it had its peer"
         );
     }
 
@@ -10588,12 +10705,126 @@ mod peers_and_loops {
             .is_some()
     }
 
+    /// An address nothing listens on, so a dial to it is refused.
+    fn a_vacant_address() -> SocketAddr {
+        TcpListener::bind(local()).unwrap().local_addr().unwrap()
+    }
+
+    /// A node one peer short of its target, with `addresses` in its book.
+    fn one_short_knowing(addresses: &[SocketAddr]) -> (Node, TcpStream, TcpStream) {
+        let node = quiet();
+        let (socket, far) = a_socket();
+        {
+            let mut peers = node.shared.peers();
+            for id in 1..TARGET_PEERS {
+                peers.insert(u64::try_from(id).unwrap(), stand_in(&socket, true));
+            }
+        }
+        for address in addresses {
+            node.shared.book().insert(*address);
+        }
+        node.shared.running.store(true, Ordering::SeqCst);
+        (node, socket, far)
+    }
+
+    /// A round charges every address in the book that refuses it.
+    ///
+    /// `DIAL_BUDGET` says a book full of refusing addresses is worked through
+    /// in one round, and on Linux and macOS it is, one after another, because
+    /// a refusal comes back in microseconds. On Windows a refusal is reported
+    /// to take a second or two, so a round dialling one after another would
+    /// reach two or three of these sixteen and leave the rest for later
+    /// rounds, as if they hung. Nothing asked. This is the test the Windows
+    /// runner is for; the one after it stands in for Windows here.
+    #[test]
+    fn a_round_charges_every_address_that_refuses_it() {
+        let vacant: Vec<SocketAddr> = (0..16).map(|_| a_vacant_address()).collect();
+        let (node, _socket, _far) = one_short_knowing(&vacant);
+        dial_from_book(&node.shared, 1_000);
+        let ready = node.shared.book().ready(1_000);
+        let reached = dialled(&node);
+        stop_all(&node);
+        let uncharged = vacant.iter().filter(|at| ready.contains(at)).count();
+        assert_eq!(
+            uncharged, 0,
+            "a round left refusing addresses undialled, as if each had hung"
+        );
+        assert_eq!(reached, 0, "a refused dial was taken for a connection");
+    }
+
+    /// A round is not rationed by addresses that take seconds to refuse.
+    ///
+    /// Windows is the platform where a refusal takes that long: Winsock sends
+    /// the SYN again after the reset. It cannot be made to happen on this
+    /// machine, so the dial is handed in, and it takes a second to refuse.
+    /// Dialled one after another, a round of `DIAL_BUDGET` reached three of
+    /// these sixteen and rationed the rest as if they hung, which is what a
+    /// Windows node would do with every refusing address in its book. That
+    /// passed.
+    #[test]
+    fn a_round_is_not_rationed_by_addresses_that_are_slow_to_refuse() {
+        let vacant: Vec<SocketAddr> = (0..16).map(|_| a_vacant_address()).collect();
+        let (node, _socket, _far) = one_short_knowing(&vacant);
+        let dials = AtomicUsize::new(0);
+        dial_from_book_with(&node.shared, 1_000, &|_: &SocketAddr| {
+            dials.fetch_add(1, Ordering::SeqCst);
+            thread::sleep(Duration::from_secs(1));
+            Err(io::ErrorKind::ConnectionRefused.into())
+        });
+        let ready = node.shared.book().ready(1_000);
+        stop_all(&node);
+        let uncharged = vacant.iter().filter(|at| ready.contains(at)).count();
+        assert_eq!(
+            uncharged, 0,
+            "addresses that took a second each to refuse were rationed as if they hung"
+        );
+        assert_eq!(dials.load(Ordering::SeqCst), 16, "each was dialled once");
+    }
+
+    /// A round that dials side by side opens what the node is short of and
+    /// closes the rest, without holding their answer against them.
+    ///
+    /// Once a round's first wave comes back short it dials several addresses
+    /// at once, so more of them can answer than the node needs. Taking them
+    /// all is a node past its own target, and charging the ones it closed is
+    /// a node forgetting peers for answering. Neither was asked.
+    #[test]
+    fn a_round_takes_what_it_is_short_of_and_holds_nothing_against_the_rest() {
+        let refusing = a_vacant_address();
+        let doors = [a_door(), a_door(), a_door()];
+        let mut known = vec![refusing];
+        known.extend(doors.iter().map(|door| door.local_addr().unwrap()));
+        let (node, _socket, _far) = one_short_knowing(&known);
+        // Heard from, so it is dialled first and the first wave comes back
+        // short.
+        node.shared.book().answered(&refusing, 900);
+        dial_from_book(&node.shared, 1_000);
+        let ready = node.shared.book().ready(1_000);
+        let reached = dialled(&node);
+        stop_all(&node);
+        assert_eq!(reached, 1, "a node one peer short took more than one");
+        assert!(
+            !ready.contains(&refusing),
+            "the address that refused was not charged"
+        );
+        for door in &doors {
+            assert!(
+                ready.contains(&door.local_addr().unwrap()),
+                "an address that answered was charged for it"
+            );
+        }
+    }
+
     /// A node whose table is full dials nobody.
     ///
     /// The round took a dial as allowed when either the refusal or the room
     /// said so, and nothing held it to both: dialling out of a full table
     /// passed, which is one connection more than the ceiling says a node
     /// holds.
+    ///
+    /// Counted at the dial as well as in the table. The room is asked again
+    /// when a dial answers, so a round that dialled out of a full table and
+    /// closed what answered left the table right, and passed.
     #[test]
     fn a_node_whose_table_is_full_dials_nobody() {
         let node = quiet();
@@ -10607,10 +10838,19 @@ mod peers_and_loops {
         let door = a_door();
         node.shared.book().insert(door.local_addr().unwrap());
         node.shared.running.store(true, Ordering::SeqCst);
-        dial_from_book(&node.shared, 1_000);
+        let dials = AtomicUsize::new(0);
+        dial_from_book_with(&node.shared, 1_000, &|address: &SocketAddr| {
+            dials.fetch_add(1, Ordering::SeqCst);
+            TcpStream::connect_timeout(address, DIAL_TIMEOUT)
+        });
         let reached = dialled(&node);
         stop_all(&node);
         assert_eq!(reached, 0, "a node with every slot taken dialled another");
+        assert_eq!(
+            dials.load(Ordering::SeqCst),
+            0,
+            "a node with every slot taken dialled out, and closed what answered"
+        );
     }
 
     /// A round dials neither the node itself nor an address it already holds a
