@@ -202,6 +202,10 @@ pub struct Handshake {
     /// The port this node listens on. A peer already knows the address the
     /// connection came from, so this is what completes it into an address
     /// others can be pointed at.
+    ///
+    /// Nought from a node that does not offer itself to be dialled, which is
+    /// what a wallet's node says: a peer writes nothing down for it and hands
+    /// nothing on.
     pub listen: u16,
     /// Drawn once when the node starts, and never reused.
     ///
@@ -337,11 +341,17 @@ pub enum Message {
     /// buries another note, and a wallet whose node stopped keeping it current
     /// has money it can see and cannot move.
     ///
-    /// Places rather than notes, because a place is what both kinds of
-    /// answerer can look up: an archivist rebuilds the path from the leaves it
-    /// kept, and a node following the owner already holds it. Naming the note
-    /// instead would have made the archivist the only possible answerer and
-    /// would have told it whose money it was being asked about.
+    /// Places rather than notes, because a place is what a node that kept
+    /// every leaf rebuilds a path from. Only such a node answers with one. A
+    /// node following an owner holds that owner's paths and answers with
+    /// nothing all the same, because which paths it holds says whose node it
+    /// is, and no message can say that the asker is that owner.
+    ///
+    /// A place is not a disguise. It carries no name, and it names a note to
+    /// anyone who has the chain: places are handed out in the order notes
+    /// fall, and every node sees them fall. Whoever answers learns which notes
+    /// the asker cannot spend, whose they are and what they are worth, and it
+    /// can move none of them.
     GetProofs(Vec<u64>),
     /// One answer per place asked about, in the order they were asked about.
     ///

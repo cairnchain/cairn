@@ -2484,7 +2484,8 @@ A handshake is 108 bytes and carries the protocol version as a `u32`, the
 network as a `u32`, the first block of the branch this node follows, its tip,
 its height, the work behind that tip as a `u128`, the port it listens on as a
 `u16`, a `u64` nonce drawn once when the node started, and two `u8` claims about
-what it kept. A decoder MUST refuse either claim byte if it is neither `0` nor
+what it kept. A node that does not offer itself to be dialled, as a wallet's
+does not, names port `0`, and a peer MUST NOT write an address down for it. A decoder MUST refuse either claim byte if it is neither `0` nor
 `1`, because reading anything else as true is guessing on the peer's behalf.
 
 The two claims are separate on purpose. Keeping the headers is what lets a node
@@ -2505,7 +2506,11 @@ rather than leaving it out or saying nothing, because silence from a peer is
 indistinguishable from a peer that has hung up, and a wallet waiting on the one
 thing that would let it spend its money has to be able to tell those apart and
 go and ask somebody else. An answer names every position asked about, in the
-order asked.
+order asked. A node that does not keep every leaf SHOULD answer `0` at every
+position, including one whose path it keeps for an owner it follows: past the
+grace window those are the only paths it keeps, so which of them it hands over
+says whose node it is, and nothing in a message tells that owner from a
+stranger.
 
 `GetJoin` and `JoinPart` carry a `u8` saying which answer is meant: `0` for the
 weighing, `1` for the ledger. A decoder MUST refuse any other value. Both

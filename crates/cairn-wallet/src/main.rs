@@ -19,6 +19,7 @@ use cairn_primitives::Amount;
 use cairn_wallet::history::{Direction, Movement};
 use cairn_wallet::{
     keyfile, serve, Covered, Holdings, NotCarried, Sent, Waited, Waiting, Wallet, WalletError,
+    BOOK_PATIENCE,
 };
 
 const HELP: &str = "\
@@ -52,7 +53,11 @@ Network options
                        cairn-wallet-data, and it must not be the same
                        directory a node is using)
   --seed <address>     a peer to start from; repeat for more. Without one,
-                       the addresses written into the program are used
+                       the wallet starts from the peers it met last time,
+                       and dials the address written into the program only
+                       when they do not bring it two peers within five
+                       seconds: a seed learns that a wallet runs at your
+                       address, and when
   --network <name>     testnet-6 or devnet (default: testnet-6); it has to
                        be the same network the node is on
   --wait <seconds>     how long to spend catching up (default: 30)
@@ -77,6 +82,21 @@ Options for `open`
                        picks). It is served on 127.0.0.1 and nowhere else,
                        and the address carries a secret without which the
                        wallet answers nothing.
+
+What the network learns
+
+  The wallet is a node: it reads its balance out of a chain it checked
+  itself, and tells no peer which key it holds to do that. Every peer sees
+  the address of this machine. The wallet does not ask peers to write that
+  address down or hand it on. A payment goes to every peer connected at the
+  moment it is sent, so the first of them to receive it can tell that it
+  came from here, and whose notes it spends. When money cannot move until
+  somebody says where it sits, the wallet asks only peers started with
+  --archive, and the question tells them which notes are stuck and whose.
+
+  This wallet uses one address for everything, the public key `address`
+  prints. Anyone who knows it can read on the chain everything it was paid,
+  everything it spent, and what it holds.
 
 Backing up
 
@@ -1004,16 +1024,30 @@ fn joined(flags: &Flags) -> Result<(Wallet, Waited), String> {
 
     // As a node does: the names are kept, so a wallet opened on a machine
     // whose name server is not answering yet still joins once it is.
-    wallet
-        .node()
-        .start_from_names(seeds::names_for(flags.values("seed"), params.network));
-
-    let mut reached = 0usize;
-    for address in seeds::start_from(flags.values("seed"), params.network)? {
-        if wallet.reach(address) {
-            reached = reached.saturating_add(1);
+    let asked = flags.values("seed");
+    let started = if asked.is_empty() {
+        // Nothing named, so the seeds are the ones written into the program,
+        // and those are for a wallet its own book cannot start: whoever runs
+        // them sees every wallet that dials them.
+        wallet.start_from_the_book(
+            BOOK_PATIENCE,
+            seeds::names_for(asked, params.network),
+            || seeds::start_from(asked, params.network).unwrap_or_default(),
+        )
+    } else {
+        // What the person named is dialled whatever the book holds, and a
+        // name of theirs that will not resolve stops the wallet.
+        wallet
+            .node()
+            .start_from_names(seeds::names_for(asked, params.network));
+        let mut reached = 0usize;
+        for address in seeds::start_from(asked, params.network)? {
+            if wallet.reach(address) {
+                reached = reached.saturating_add(1);
+            }
         }
-    }
+        Some(reached)
+    };
 
     let patience: u64 = match flags.value("wait") {
         None => 30,
@@ -1022,7 +1056,13 @@ fn joined(flags: &Flags) -> Result<(Wallet, Waited), String> {
             .map_err(|_| format!("`{text}` is not seconds"))?,
     };
 
-    println!("wallet    {blocks} blocks on disk, {reached} seed(s) reached");
+    match started {
+        Some(reached) => println!("wallet    {blocks} blocks on disk, {reached} seed(s) reached"),
+        None => println!(
+            "wallet    {blocks} blocks on disk, {} peers from its own address book, no seed asked",
+            wallet.node().peers_introduced()
+        ),
+    }
     print!("catching up");
     // Flushed, because a standard output holds a line until it ends, and this
     // one ends when the wait does: the word meant to say the wallet is working

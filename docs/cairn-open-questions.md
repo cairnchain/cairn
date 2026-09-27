@@ -66,6 +66,25 @@ elle ne protège de rien, car n'importe qui peut construire le même index
 depuis ce que le réseau diffuse de toute façon. Un nœud oublie ; le monde,
 non. Ce qui a été diffusé une fois est public pour toujours.
 
+Le réseau, lui, apprend autre chose que la chaîne : d'où l'on parle. Un
+portefeuille est un nœud, et chacun de ses pairs voit l'adresse IP de la
+machine. Un paiement part vers tous les pairs connectés à l'instant où il est
+envoyé, sans délai ni détour : le premier à le recevoir peut lire d'où il
+vient, et relier cette adresse IP aux billets dépensés, donc à leur
+propriétaire. Bitcoin a la même exposition et a ajouté de quoi la brouiller ;
+Cairn ne l'a pas fait, et c'est un choix qui n'était écrit nulle part. Un
+portefeuille qui doit demander le chemin d'un billet tombé envoie des places
+dans la cave, et une place désigne, pour quiconque a la chaîne, le billet, son
+propriétaire et son montant : il ne la demande donc qu'aux pairs qui disent
+garder toute la cave. Il ne demande pas à ses pairs d'inscrire son adresse
+dans leurs carnets, et un nœud qui ne garde pas toute la cave ne répond à
+personne depuis les chemins qu'il tient pour son propriétaire, ce qui dirait à
+un inconnu à qui est la machine. Il ne compose l'adresse écrite dans le
+programme, la graine, que si moins de deux des pairs rencontrés la fois
+précédente lui répondent. Quand il la compose, la graine voit la session, et
+d'où part un paiement envoyé pendant qu'elle est là ; ce qu'elle en garde, le
+code ne le dit pas.
+
 ### Ce que font les autres, et à quel prix
 
 <div class="tablewrap">
@@ -103,7 +122,7 @@ discret, que l'adversaire de la section suivante casse.
   <div class="dec">
     <span class="q">La réutilisation d'adresse</span>
     <span class="a">Le portefeuille tire une clé neuve par paiement, avant le mainnet</span>
-    <span class="why">Une graine unique, des clés dérivées, une adresse fraîche à chaque encaissement. Le portefeuille est déjà un nœud qui lit chaque bloc : reconnaître cent adresses au lieu d'une est une comparaison de plus par sortie, pas un serveur de plus, et personne d'autre n'apprend rien, là où un portefeuille sur téléphone, ailleurs, confie sa liste d'adresses au serveur qu'il interroge. Cela ramène Cairn à la norme de Bitcoin, pas au-delà : une dépense qui réunit plusieurs billets les relie publiquement, et une adresse de dons publiée reste un point fixe. C'est un changement de logiciel, pas de protocole, et le fichier de clé actuel reste lisible.</span>
+    <span class="why">Une graine unique, des clés dérivées, une adresse fraîche à chaque encaissement. Le portefeuille est déjà un nœud qui lit chaque bloc : reconnaître cent adresses au lieu d'une est une comparaison de plus par sortie, pas un serveur de plus, et personne n'apprend lesquelles il reconnaît, là où un portefeuille sur téléphone, ailleurs, confie sa liste d'adresses au serveur qu'il interroge. Cela ramène Cairn à la norme de Bitcoin, pas au-delà : une dépense qui réunit plusieurs billets les relie publiquement, et une adresse de dons publiée reste un point fixe. C'est un changement de logiciel, pas de protocole, et le fichier de clé actuel reste lisible.</span>
   </div>
   <div class="dec">
     <span class="q">Les montants</span>

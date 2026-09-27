@@ -34,7 +34,9 @@ pub struct Local<'a> {
     /// gives the first and almost none gives the second, and while they shared
     /// a field the second was claimed by everybody and offered by nobody.
     pub keeps: Keeps,
-    /// The port this node listens on, so peers can pass its address along.
+    /// The port this node names when it introduces itself, so peers can pass
+    /// its address along. Nought for a node that does not offer itself to be
+    /// dialled, which is a wallet's, and its peers then write nothing down.
     pub listen: u16,
     /// What this node calls itself on the wire, so it can recognise its own
     /// connection coming back to it.

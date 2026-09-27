@@ -313,65 +313,161 @@ fn the_two_things_a_node_may_have_kept_are_told_apart_on_the_wire() {
 /// answer names every place that was asked about, including the ones it has
 /// nothing for.
 ///
-/// The node in the middle here keeps the headers and not the cold set, which
-/// is what almost every node on the network is, and which used to be a node
-/// that claimed it could answer this.
+/// The node here keeps the headers and not the cold set, which is what almost
+/// every node on the network is, and which used to be a node that claimed it
+/// could answer this. A node of this program no longer puts the question to
+/// one, so it is put over a bare socket, as anybody else's software may.
 #[test]
 fn a_node_that_cannot_help_says_so_rather_than_nothing() {
     let ready = a_chain_with_a_fallen_note();
-    let top = (ready.blocks.len() - 1) as u64;
 
     let directory = scratch("plainly");
     let (middle, _) = Node::open(params(), loopback(), &directory).unwrap();
     for block in &ready.blocks {
         middle.submit_block(block.clone()).unwrap();
     }
+    assert!(
+        !middle.is_archiving(),
+        "it keeps the headers and not the set"
+    );
+
+    let placed = asked_directly(middle.address(), vec![ready.position]);
+    assert_eq!(
+        placed,
+        vec![Placed {
+            position: ready.position,
+            proof: None,
+        }],
+        "a node that cannot help still answers, with nothing where the path \
+         would be, or the asker cannot tell it from a node that has gone away"
+    );
+
+    middle.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// **Only a peer that says it keeps the whole set is asked.**
+///
+/// The question names places, and a place names a note, its owner and its
+/// value to anyone who has the chain. When no peer claimed to keep the set,
+/// the question went to every peer instead, on the grounds that a node
+/// following the owner could answer it; no node answers out of those paths
+/// any more, so every one of those peers learned whose money was stuck and
+/// had nothing to give for it. A wallet with stuck money told every stranger
+/// it was connected to, and each new one as it arrived.
+///
+/// So a node connected only to a peer that keeps no more than the headers
+/// asks nobody, and a node connected to that peer and to an archivist asks
+/// the archivist alone. Nothing asked the first half: the test that reached
+/// a plain peer asserted that it had been asked.
+#[test]
+fn only_a_peer_that_says_it_keeps_the_whole_set_is_asked() {
+    let ready = a_chain_with_a_fallen_note();
+    let top = (ready.blocks.len() - 1) as u64;
+
+    let plain_directory = scratch("only-plain");
+    let (plain, _) = Node::open(params(), loopback(), &plain_directory).unwrap();
+    for block in &ready.blocks {
+        plain.submit_block(block.clone()).unwrap();
+    }
 
     let asker = Node::bind(params(), loopback()).unwrap();
-    asker.connect(middle.address()).unwrap();
+    asker.connect(plain.address()).unwrap();
     wait_for("the asking node to catch up", || {
         asker.height() == Some(top)
     });
     assert_eq!(
         asker.archiving_peers(),
         0,
-        "nothing it is connected to claims to keep the set"
+        "its one peer keeps the headers and not the set"
     );
 
+    // No archivist is known, so however long it waited nobody would arrive.
+    let alone = asker.recover_proofs(&[(ready.position, ready.leaf)], Duration::ZERO);
+    assert_eq!(
+        alone.asked, 0,
+        "a node put the places of a stuck note to a peer that keeps no set, \
+         which learns from them whose note it is and cannot rebuild its path"
+    );
+
+    let kept_directory = scratch("only-kept");
+    let (keeper, _) = Node::open_archiving(params(), loopback(), &kept_directory).unwrap();
+    for block in &ready.blocks {
+        keeper.submit_block(block.clone()).unwrap();
+    }
+    asker.connect(keeper.address()).unwrap();
+    wait_for("the archivist to say what it keeps", || {
+        asker.archiving_peers() == 1
+    });
+
     let answer = asker.recover_proofs(&[(ready.position, ready.leaf)], PATIENCE);
-    assert_eq!(
-        answer.archivists, 0,
-        "nobody claimed it, so everybody was asked"
+    assert!(
+        answer.proofs.contains_key(&ready.position),
+        "the archivist was asked, and answered"
     );
-    assert_eq!(answer.asked, 1);
     assert_eq!(
-        answer.answered, 1,
-        "a node that cannot help still answers, or the asker cannot tell it \
-         from a node that has gone away"
-    );
-    assert!(answer.proofs.is_empty(), "and it has nothing to give");
-    assert_eq!(
-        answer.refused, 0,
-        "which is not the same as answering badly"
+        answer.asked, answer.archivists,
+        "with an archivist connected, the peer that keeps no set was asked \
+         as well"
     );
 
     asker.shutdown();
-    middle.shutdown();
-    let _ = std::fs::remove_dir_all(&directory);
+    keeper.shutdown();
+    plain.shutdown();
+    let _ = std::fs::remove_dir_all(&plain_directory);
+    let _ = std::fs::remove_dir_all(&kept_directory);
 }
 
-/// **A node following the owner answers without keeping the whole set.**
+/// Introduces itself to `node` over a bare socket, asks where `positions`
+/// sit, and returns what came back.
 ///
-/// An archivist is the reliable answerer and not the only one. A node told to
-/// follow an owner holds the path to every one of that owner's fallen notes
-/// and keeps it current for nothing, because everything that takes is already
-/// passing through in the blocks. It can therefore answer for exactly those
-/// places, through the same call the archivist answers through, without either
-/// of them having to know which it is.
+/// A bare socket rather than a node, because what is asked here is what a
+/// node answers, and a stranger asking it need not run this program or ask
+/// only whom this program would ask.
+fn asked_directly(node: SocketAddr, positions: Vec<u64>) -> Vec<Placed> {
+    let network = params().network;
+    let mut peer = TcpStream::connect(node).unwrap();
+    peer.set_read_timeout(Some(PATIENCE)).unwrap();
+    write_message(
+        &mut peer,
+        network,
+        &a_handshake(0, 0x0b5e, Keeps::default()),
+    )
+    .unwrap();
+    loop {
+        match read_message(&mut peer, network, MAX_FRAME_BYTES) {
+            Ok(Incoming::Message(Message::Welcome(_))) => break,
+            Ok(_) => {}
+            Err(error) => panic!("no welcome came back: {error}"),
+        }
+    }
+    write_message(&mut peer, network, &Message::GetProofs(positions)).unwrap();
+    loop {
+        match read_message(&mut peer, network, MAX_FRAME_BYTES) {
+            Ok(Incoming::Message(Message::Proofs(placed))) => return placed,
+            Ok(_) => {}
+            Err(error) => panic!("no answer came back: {error}"),
+        }
+    }
+}
+
+/// **A node following an owner tells a stranger nothing about which one.**
+///
+/// A node told to follow an owner holds the path to every one of that owner's
+/// fallen notes long after every other node has let go of them, and a wallet
+/// is exactly such a node. Answering a stranger out of those paths answered a
+/// question nobody should be able to ask for free: name the places of key K's
+/// fallen notes, which anyone with the blocks can work out, and a path comes
+/// back from the node of key K and nothing comes back from anybody else's. One
+/// message told whoever held the connection which key sits behind it.
+///
+/// So a node that does not keep the whole set answers every place with
+/// nothing, whatever it follows. Nothing asked this: the test that reached a
+/// following node asserted that it answered, as a feature, so a wallet that
+/// told every peer whose wallet it was passed.
 #[test]
-fn a_node_following_the_owner_answers_without_keeping_the_whole_set() {
+fn a_node_following_an_owner_tells_a_stranger_nothing_about_which_one() {
     let ready = a_chain_with_a_fallen_note();
-    let top = (ready.blocks.len() - 1) as u64;
 
     let watching = scratch("watching");
     let (follower, _) =
@@ -387,31 +483,21 @@ fn a_node_following_the_owner_answers_without_keeping_the_whole_set() {
         follower
             .with_chain(|chain| chain.state().cold().proof_of(ready.position))
             .is_some(),
-        "and one of those paths is the one under test"
+        "and one of those paths is the one asked about, so what it answers is \
+         a choice and not a lack"
     );
 
-    // Asks the follower and nobody else, so what comes back can only have come
-    // from a node that never claimed to keep anything.
-    let asker = Node::bind(params(), loopback()).unwrap();
-    asker.connect(follower.address()).unwrap();
-    wait_for("the asking node to catch up", || {
-        asker.height() == Some(top)
-    });
+    let placed = asked_directly(follower.address(), vec![ready.position]);
+    assert_eq!(
+        placed,
+        vec![Placed {
+            position: ready.position,
+            proof: None,
+        }],
+        "a node that follows an owner handed a stranger the path to that \
+         owner's note, which tells the stranger whose node it is"
+    );
 
-    let answer = asker.recover_proofs(&[(ready.position, ready.leaf)], PATIENCE);
-    assert_eq!(answer.archivists, 0, "it never claimed to keep the set");
-    let proof = answer
-        .proofs
-        .get(&ready.position)
-        .expect("and it answered all the same, out of the path it already held");
-    assert!(asker.with_chain(|chain| {
-        chain
-            .state()
-            .cold()
-            .verify(ready.position, ready.leaf, proof)
-    }));
-
-    asker.shutdown();
     follower.shutdown();
     let _ = std::fs::remove_dir_all(&watching);
 }
@@ -762,14 +848,15 @@ fn a_stranger_that_has_not_spoken_is_not_answered() {
     );
 }
 
-/// **The place a note landed is all that crosses the wire about it.**
+/// **The question carries places and no name.**
 ///
-/// Not a rule the protocol can enforce and worth pinning all the same. What an
-/// asker hands over is a list of numbers, and what comes back is a list of
-/// hashes: the answerer is never told whose money it is, what it is worth, or
-/// which of the places it was handed matter to whom.
+/// What an asker hands over is a list of numbers: not the owner, not the
+/// note. That is all this checks, and all it can. It used to say that the
+/// answerer is never told whose money it is or what it is worth, which is a
+/// claim about what the receiver learns, and the test after this one shows it
+/// was false.
 #[test]
-fn asking_says_nothing_about_whose_money_it_is() {
+fn the_question_carries_places_and_no_name() {
     let ready = a_chain_with_a_fallen_note();
     let asked = Message::GetProofs(vec![ready.position]).encode();
     let owner = ready.note.owner.encode();
@@ -788,5 +875,49 @@ fn asking_says_nothing_about_whose_money_it_is() {
         asked.len(),
         1 + 4 + 8,
         "a tag, a count and one place, which is the whole of it"
+    );
+}
+
+/// **A place names the note, its owner and its value to anyone with the
+/// chain.**
+///
+/// Pinned so that no sentence says otherwise. Places are handed out in the
+/// order notes fall, every node sees them fall, and every note ever created
+/// is in the blocks, so an archivist given nothing but the places in a
+/// question finds which notes they are with the chain it already holds.
+/// Asking by place keeps the name off the wire and does nothing more, which
+/// is why a node puts the question only to peers that say they keep the
+/// whole set. The papers and the code said a list of places told the
+/// answerer nothing about whose money it was, and the test above, checking
+/// the wire, was read as holding that.
+#[test]
+fn a_place_names_the_note_its_owner_and_its_value_to_anyone_with_the_chain() {
+    let ready = a_chain_with_a_fallen_note();
+    let Message::GetProofs(positions) = Message::GetProofs(vec![ready.position]) else {
+        unreachable!()
+    };
+
+    // An archivist that watched the same blocks go past.
+    let mut archivist = LedgerState::archiving();
+    for block in &ready.blocks {
+        connect_block(&mut archivist, block, &params(), NOW).unwrap();
+    }
+
+    let mut named = Vec::new();
+    for position in &positions {
+        for block in &ready.blocks {
+            for (id, note) in block.coinbase.created_notes() {
+                if archivist.cold().locate(&id, &note) == Some(*position) {
+                    named.push((note.owner, note.value));
+                }
+            }
+        }
+    }
+    assert_eq!(
+        named,
+        vec![(ready.note.owner, ready.note.value)],
+        "an archivist holding the chain could not name the owner and the value \
+         of the note at a place it was asked about, so what the papers say of a \
+         place has to be checked again"
     );
 }

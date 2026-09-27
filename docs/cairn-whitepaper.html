@@ -374,19 +374,24 @@
       message set let a wallet ask an archivist for anything, and the error a
       stuck wallet showed named an archivist as though asking one were
       possible. That is closed. A wallet now asks for the paths it is missing,
-      by position and not by name, so what it hands over is a list of places in
-      a set the archivist already holds in full; and it folds every answer
-      against the root its own node worked out from blocks it checked itself,
-      so the answer can come from a stranger.
+      by position, and it folds every answer against the root its own node
+      worked out from blocks it checked itself, so the answer can come from a
+      stranger. A position is not a disguise. The question carries no name,
+      but anyone with the chain can say which note sits at a place, whose it
+      is and what it is worth, so the archivist learns whose money is stuck
+      and how much, from the address the question came from, and can move none
+      of it. The wallet therefore asks only nodes that say they keep the cold
+      set, and a node that does not keep it answers nobody out of the paths it
+      keeps for its own owner, which would tell a stranger whose node it is.
     </p>
 
     <p>
       What is left of it is narrower and is still a real hole. A path is asked
       for by where the note sits, and where a note sits is learned as it falls.
       A wallet that was not running when its note fell, and kept no record of
-      it, has nothing to ask about: the set is a list of hashes with no name
-      attached to any of them. That wallet's money is on the chain and is its
-      own, and nothing here can reach it. Compensating archivists remains open
+      it, has nothing to ask about: the question is asked by place, and no
+      message asks for a note by its owner. That wallet's money is on the chain
+      and is its own, and nothing here can reach it. Compensating archivists remains open
       as well, and is the lesser of the two.
     </p>
   </div>

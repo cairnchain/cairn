@@ -22,7 +22,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::history::{Direction, Discarded, Fork, History, Movement};
@@ -492,10 +493,19 @@ pub struct Recovery {
     /// How many of those this wallet could not even ask about, having never
     /// seen where they landed.
     pub unplaceable: usize,
-    /// Peers the question went to. Zero means there was nobody to ask.
+    /// Peers the question went to. Only peers that say they keep the whole
+    /// record are asked, so zero means none of them was connected.
     pub asked: usize,
-    /// How many of those said they keep the whole record.
+    /// How many connected peers said they keep the whole record.
     pub archivists: usize,
+    /// Peers this wallet was connected to when it asked, whether or not they
+    /// were asked.
+    ///
+    /// Counted apart from `asked` because nobody asked no longer means
+    /// nobody there. A wallet connected to peers that keep no record asks
+    /// none of them, and what it tells its owner is that a peer keeping the
+    /// record is missing, not that it is alone.
+    pub connected: usize,
     /// Peers that answered at all, whatever the answer was.
     pub answered: usize,
     /// Notes that can move again, because somebody rebuilt what it takes.
@@ -565,7 +575,7 @@ impl Recovery {
                  rest is still stuck, and asking again later may find it.",
                 self.rebuilt
             )
-        } else if self.asked == 0 {
+        } else if self.asked == 0 && self.connected == 0 {
             format!(
                 "This wallet holds {notes} it cannot spend yet. Spending a note \
                  that has been put away needs a small piece of evidence that goes \
@@ -574,22 +584,24 @@ impl Recovery {
                  anything at all. Connect to a peer that was started with \
                  --archive, or start one yourself."
             )
-        } else if self.archivists == 0 {
+        } else if self.asked == 0 {
             format!(
                 "This wallet holds {notes} it cannot spend yet. Spending a note \
                  that has been put away needs a small piece of evidence that goes \
                  stale, and this wallet's copy has. Rebuilding one takes a machine \
                  that kept the whole record, and none of the {} this wallet is \
-                 connected to says it did. Connect to a peer started with \
-                 --archive, or start one yourself.",
-                self.asked
+                 connected to says it did. It asks no other: the question names \
+                 these notes, and says whose they are to anyone who has the chain. \
+                 Connect to a peer started with --archive, or start one yourself, \
+                 and this wallet asks it.",
+                self.connected
             )
         } else {
             format!(
                 "This wallet holds {notes} it cannot spend yet. It asked {} machines \
                  that keep the whole record, and none of them could say where these \
                  notes sit. Asking again later may do better; so may a different peer.",
-                self.archivists
+                self.asked
             )
         };
 
@@ -1154,12 +1166,41 @@ const RECOVERY_PAUSE: Duration = Duration::from_secs(15);
 /// and the one that moves is never the copy.
 pub const CATCH_UP_BATCH: u64 = 512;
 
+/// Blocks read off the disk in one run with the account let go of.
+///
+/// Reading a block is a seek and a decode, and the account is what every page
+/// redraw and every payment waits on. Sixty four at a time keeps what is held
+/// in memory small and leaves the account held only while each run is taken
+/// into it.
+const READ_AHEAD: u64 = 64;
+
 /// How long the chain has to sit still, with somebody to ask, before catching
 /// up counts as done.
 ///
 /// Public for the reason [`CATCH_UP_BATCH`] is: the test that holds the wait to
 /// it counts against the number rather than against a copy of it.
 pub const SETTLED_FOR: Duration = Duration::from_secs(2);
+
+/// Peers a wallet's own book has to bring it before the seeds written into
+/// the program are left alone.
+///
+/// Two rather than one, so that a wallet does not read the chain from one
+/// peer only because that is the peer it met last time: the seed was the
+/// second opinion every run used to have. Public for the reason
+/// [`CATCH_UP_BATCH`] is.
+pub const FROM_THE_BOOK: usize = 2;
+
+/// How long a wallet gives the addresses it remembers before it goes to the
+/// seeds written into the program.
+///
+/// Its node dials its book a second after it starts and a dial gives up
+/// after three, so this is one round of dialling with room to spare. A
+/// wallet whose book has gone stale pays it once, and then reaches the seed
+/// as it always did.
+pub const BOOK_PATIENCE: Duration = Duration::from_secs(5);
+
+/// How often the wait for the book looks at who has arrived.
+const BOOK_POLL: Duration = Duration::from_millis(50);
 
 /// How far above what the network asks a fee may go before the wallet stops
 /// and makes sure it was meant.
@@ -1210,6 +1251,18 @@ pub struct Wallet {
     history_file: PathBuf,
     /// Whether the last attempt to write it down worked.
     wrote_history: Mutex<bool>,
+    /// How many times the account has been handed over to be written down,
+    /// counted while it is held, so the order of two counts is the order of
+    /// the two accounts they were taken from.
+    history_changes: AtomicU64,
+    /// The count of the newest account on the disk, held across writing one.
+    ///
+    /// A lock of its own and not the account's, which is the point: the
+    /// account is let go of before it is written, as the node's book is, so
+    /// that a page redraw or a payment does not wait on the disk. Two writers
+    /// meet here instead, and one carrying an account older than the one on
+    /// the disk does not write it over the newer.
+    writing_history: Mutex<u64>,
     /// Why the account on disk was not read back at start, if it was not, and
     /// where it was moved.
     lost_its_account: Option<SetAside>,
@@ -1355,6 +1408,8 @@ impl Wallet {
                 history: Mutex::new(history),
                 history_file,
                 wrote_history: Mutex::new(true),
+                history_changes: AtomicU64::new(0),
+                writing_history: Mutex::new(0),
                 rebuilt: Mutex::new(BTreeMap::new()),
                 last_recovery: Mutex::new(Asked::default()),
                 lost_its_account,
@@ -1508,6 +1563,55 @@ impl Wallet {
         self.node.connect(seed).is_ok()
     }
 
+    /// Starts this wallet's node from the addresses it remembers, and goes to
+    /// `seeds` only when those cannot bring it [`FROM_THE_BOOK`] peers within
+    /// `patience`.
+    ///
+    /// For the seeds written into the program, which a wallet told nothing
+    /// used to dial on every run. Whoever runs the machine behind them was
+    /// told of every session: the address it came from and when, and, since a
+    /// payment goes to every peer at once and on a first run the seed is the
+    /// only one, where each payment came from. A wallet that ran before has a
+    /// book of the addresses that answered it, written down when it stopped,
+    /// and its node dials them by itself within a second of starting. The seed
+    /// is for a wallet whose book is empty or has stopped answering.
+    ///
+    /// A book holding fewer addresses than this waits for cannot be enough,
+    /// so it goes to the seeds at once. `names` are handed to the node only
+    /// when the seeds are used, so only then does it look them up again later,
+    /// and `seeds` is not called otherwise: looking a name up is already a
+    /// question to somebody. A `patience` past what the clock can count waits
+    /// for as long as it takes.
+    ///
+    /// `None` when the book was enough, and otherwise how many of the seeds
+    /// were reached.
+    pub fn start_from_the_book(
+        &self,
+        patience: Duration,
+        names: Vec<String>,
+        seeds: impl FnOnce() -> Vec<SocketAddr>,
+    ) -> Option<usize> {
+        if self.node.known_addresses().len() >= FROM_THE_BOOK {
+            let deadline = Instant::now().checked_add(patience);
+            loop {
+                if self.node.peers_introduced() >= FROM_THE_BOOK {
+                    return None;
+                }
+                if deadline.is_some_and(|end| Instant::now() >= end) {
+                    break;
+                }
+                std::thread::sleep(BOOK_POLL);
+            }
+        }
+        self.node.start_from_names(names);
+        Some(
+            seeds()
+                .into_iter()
+                .filter(|address| self.reach(*address))
+                .count(),
+        )
+    }
+
     /// Where the node has got to.
     #[must_use]
     pub fn progress(&self) -> Progress {
@@ -1633,11 +1737,12 @@ impl Wallet {
         // decode of the newest block on every look, four times a page view,
         // to learn thirty two bytes, and a log the node trims from the front,
         // so a block replaced and then trimmed away read as unchanged.
+        let mut changed = false;
         match history.fork(Some(tip), |height| self.node.id_at(height)) {
             None => {}
             Some(Fork::At(fork)) => {
                 history.rewind_to(fork);
-                self.write_history(&history);
+                changed = true;
             }
             Some(Fork::Deeper) => {
                 // Below every block the account remembers, which one switch
@@ -1649,15 +1754,35 @@ impl Wallet {
                 let reach = self.node.with_chain(cairn_chain::ChainStore::undo_limit);
                 let settled_below = tip.checked_sub(reach);
                 history.forget(settled_below);
-                self.write_history(&history);
+                changed = true;
             }
         }
 
         let mut taken = 0usize;
         let stop = tip.saturating_add(1);
         while history.next() < stop && (taken as u64) < CATCH_UP_BATCH {
+            // The next run of blocks, read off the disk with the account let
+            // go of. Reading a batch with it held made every page redraw and
+            // every payment wait for up to `CATCH_UP_BATCH` seeks and decodes.
             let height = history.next();
-            let Some(block) = self.node.archived_at(height) else {
+            let room = CATCH_UP_BATCH.saturating_sub(taken as u64).min(READ_AHEAD);
+            let until = stop.min(height.saturating_add(room));
+            drop(history);
+            let run: Vec<cairn_ledger::block::Block> = (height..until)
+                .map_while(|at| self.node.archived_at(at))
+                .collect();
+            history = self
+                .history
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Another reader moved the account while this one was at the disk,
+            // and read those blocks itself. What was read here is for a place
+            // the account no longer stands at, so it looks again from where it
+            // does.
+            if history.next() != height {
+                continue;
+            }
+            if run.is_empty() {
                 // Nothing to read here. If the node holds later blocks, the
                 // history begins where they do rather than staying stuck.
                 //
@@ -1701,19 +1826,27 @@ impl Wallet {
                     history.paid_before(id, value, height);
                 }
                 continue;
-            };
-            if !history.take(&block, mine) {
+            }
+            let mut switched = false;
+            for block in &run {
+                if !history.take(block, mine) {
+                    switched = true;
+                    break;
+                }
+                taken = taken.saturating_add(1);
+            }
+            if switched {
                 // Not built on the block read before it: the chain switched
                 // since this call looked. The next call finds where.
                 break;
             }
-            taken = taken.saturating_add(1);
         }
 
-        if taken > 0 {
-            self.write_history(&history);
+        if changed || taken > 0 {
+            self.write_history(history);
+        } else {
+            drop(history);
         }
-        drop(history);
         self.note_where_they_landed();
         taken
     }
@@ -1807,7 +1940,7 @@ impl Wallet {
             learned |= history.fell_at(id, value, position);
         }
         if learned {
-            self.write_history(&history);
+            self.write_history(history);
         }
     }
 
@@ -2213,7 +2346,10 @@ impl Wallet {
     /// itself, or it is thrown away. So the question can be put to an
     /// anonymous stranger, which is the whole reason it is a question a node
     /// asks another node rather than a request to a website somebody has to
-    /// keep running.
+    /// keep running. Trusting nobody is not telling nobody, though: the
+    /// question says whose notes are stuck to whoever reads it, so it is put
+    /// only to a peer that says it keeps the whole record, and to nobody when
+    /// none is connected.
     ///
     /// Waits, because it is one round trip and there is nothing useful to do
     /// meanwhile, and asks again at most every [`RECOVERY_PAUSE`], because
@@ -2231,9 +2367,10 @@ impl Wallet {
         }
 
         // The place is what is asked about and the leaf is what the answer has
-        // to fold to. Neither says whose money it is: a leaf is a hash, and a
-        // place is a number, so what a wallet hands an archivist is a list of
-        // positions in a set that archivist already holds in full.
+        // to fold to. Only the place is sent, and it is not a disguise: a
+        // place names a note, its owner and its value to anyone who has the
+        // chain, so whoever is asked learns whose notes are stuck here. That is
+        // why the node asks only peers that say they keep the whole record.
         let wanted: Vec<(u64, Hash32)> = holdings
             .unprovable
             .iter()
@@ -2252,13 +2389,14 @@ impl Wallet {
             let paused = last
                 .at
                 .is_some_and(|asked| asked.elapsed() < RECOVERY_PAUSE);
-            // Three ways the pause does not apply, and each of them is a
-            // moment somebody is waiting on. Asking about a place that was
-            // answered for before means the path has gone stale rather than
-            // that nobody has one. Somebody worth asking arriving is the whole
-            // of what an empty-handed wallet was waiting for. And a wallet
-            // that had nobody at all to ask has a fresh question the moment it
-            // has anybody.
+            // Two ways the pause does not apply, and each of them is a moment
+            // somebody is waiting on. Asking about a place that was answered
+            // for before means the path has gone stale rather than that nobody
+            // has one. And somebody worth asking arriving is the whole of what
+            // an empty-handed wallet was waiting for. Only a peer that says it
+            // keeps the record is somebody worth asking: any other peer
+            // arriving used to count, which put this wallet's places to every
+            // stranger that connected.
             // The half a question actually carries, on both sides of the
             // comparison. `unresolved` holds the places that were asked about
             // and not answered for, which `still_outstanding` was repaired to
@@ -2274,8 +2412,7 @@ impl Wallet {
             let asking_about: BTreeSet<u64> =
                 one_question(&wanted).iter().map(|(at, _)| *at).collect();
             let same_question = asking_about.is_subset(&last.unresolved);
-            let better_now = self.node.archiving_peers() > last.report.archivists
-                || (last.report.asked == 0 && self.node.peers_introduced() > 0);
+            let better_now = self.node.archiving_peers() > last.report.archivists;
             if paused && same_question && !better_now {
                 return last.report;
             }
@@ -2315,6 +2452,7 @@ impl Wallet {
             unplaceable,
             asked: answer.asked,
             archivists: answer.archivists,
+            connected: self.node.peers_introduced(),
             answered: answer.answered,
             rebuilt: mended,
             refused: answer.refused,
@@ -2350,8 +2488,32 @@ impl Wallet {
     /// anywhere outside the chain, and a wallet that has stopped keeping it
     /// is one restart away from having to read its way back from the oldest
     /// block its node still holds.
-    fn write_history(&self, history: &History) {
-        let kept = history.save(&self.history_file).is_ok();
+    ///
+    /// Takes the account as it is held and lets go of it before the disk is
+    /// touched. What is written is a copy taken while it was held, and a copy
+    /// older than what the disk already has is not written at all. The account
+    /// used to be held across the write and its sync, and every page redraw
+    /// and every payment waited on it.
+    fn write_history(&self, history: MutexGuard<'_, History>) {
+        let count = self
+            .history_changes
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        let snapshot = history.snapshot();
+        drop(history);
+        let mut written = self
+            .writing_history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *written >= count {
+            return;
+        }
+        let kept = History::write(&self.history_file, &snapshot).is_ok();
+        if kept {
+            *written = count;
+        }
+        // Still holding the count, so two writers say whether they worked in
+        // the order they wrote.
         *self
             .wrote_history
             .lock()
@@ -2634,7 +2796,7 @@ impl Wallet {
                 changed |= history.accounted_for(id);
             }
             if changed {
-                self.write_history(&history);
+                self.write_history(history);
             }
         }
         Reckoned {
@@ -4395,6 +4557,7 @@ mod tests {
             unplaceable: 0,
             asked: 2,
             archivists: 1,
+            connected: 2,
             answered: 2,
             rebuilt: 64,
             refused: 0,
@@ -4472,9 +4635,10 @@ mod tests {
     fn each_state_of_stuck_money_is_told_its_own_answer() {
         let stuck = Recovery {
             stranded: 3,
-            asked: 2,
+            asked: 1,
             archivists: 1,
-            answered: 2,
+            connected: 2,
+            answered: 1,
             ..Recovery::default()
         };
         let cases = [
@@ -4501,6 +4665,7 @@ mod tests {
                 Recovery {
                     asked: 0,
                     archivists: 0,
+                    connected: 0,
                     answered: 0,
                     ..stuck
                 },
@@ -4510,7 +4675,9 @@ mod tests {
             (
                 "peers, none of them keeping the record",
                 Recovery {
+                    asked: 0,
                     archivists: 0,
+                    answered: 0,
                     ..stuck
                 },
                 "none of the 2 this wallet is connected to says it did",
@@ -4891,14 +5058,12 @@ mod tests {
     /// poisoned a lock in any test, so a wallet that stopped recording passed.
     #[test]
     fn a_save_that_failed_is_recorded_after_a_panic_held_the_record() {
-        use crate::history::History;
-
         let (mut wallet, directory) = opened("poisoned-recorded");
         // Nowhere a file can be written, so the save fails.
         wallet.history_file = directory.join("no-such-directory").join("history.dat");
         poison(&wallet.wrote_history);
 
-        wallet.write_history(&History::new());
+        wallet.write_history(wallet.history.lock().unwrap());
         let recorded = *wallet
             .wrote_history
             .lock()
@@ -4909,6 +5074,164 @@ mod tests {
             !recorded,
             "a save that failed was not recorded, because a thread had panicked \
              holding the record, and the wallet went on saying its account was written"
+        );
+    }
+
+    /// The account is let go of before it is written down.
+    ///
+    /// Writing it is a write and a sync of the whole file, and every page
+    /// redraw and every payment waits on the account. `follow` held it across
+    /// that write, and across reading every block of a batch off the disk. A
+    /// thread following one block is stopped here at the step after the file
+    /// is written, the one that records whether it was, and while it waits
+    /// there the account is read. Nothing asked this, so a wallet that made
+    /// every reader wait on its disk passed.
+    #[test]
+    fn the_account_is_let_go_of_before_it_is_written_down() {
+        use cairn_ledger::transaction::CoinbaseTransaction;
+        use cairn_ledger::validation::{assemble_block, mine_block, ConsensusParams};
+
+        let (wallet, directory) = opened("let-go");
+        let params = ConsensusParams::testnet();
+        let coinbase =
+            CoinbaseTransaction::new(0, vec![Note::new(params.initial_reward, wallet.address())]);
+        let block = assemble_block(
+            &cairn_ledger::LedgerState::new(),
+            coinbase,
+            Vec::new(),
+            &params,
+            1_600,
+            0,
+        )
+        .unwrap();
+        wallet
+            .node()
+            .submit_block(mine_block(block, 1 << 22).unwrap())
+            .unwrap();
+        let before = std::fs::read(&wallet.history_file).ok();
+
+        let free = std::thread::scope(|scope| {
+            let recording = wallet.wrote_history.lock().unwrap();
+            let following = scope.spawn(|| wallet.follow());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+            // Until the file changes, or the account is seen holding the block
+            // and free, or the follow ends without having waited to record
+            // anything, which is a follow that wrote nothing.
+            let advanced_and_free = || {
+                wallet
+                    .history
+                    .try_lock()
+                    .is_ok_and(|history| history.next() > 0)
+            };
+            while std::fs::read(&wallet.history_file).ok() == before
+                && !advanced_and_free()
+                && !following.is_finished()
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let free = !following.is_finished() && wallet.history.try_lock().is_ok();
+            drop(recording);
+            let _ = following.join();
+            free
+        });
+        wallet.shutdown();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            free,
+            "the account was held while it was written down, so everything that \
+             reads it waited on the disk"
+        );
+    }
+
+    /// A follow that finds nothing new does not write the account down.
+    ///
+    /// Everything a face shows follows first, so a page redrawing every two
+    /// seconds follows every two seconds, and a write here is a write and a
+    /// sync of the whole file each time. The file is taken away after a
+    /// follow that read the chain, and a second follow with nothing to read
+    /// must not put it back. Nothing asked this, so a wallet that wrote its
+    /// account on every look passed.
+    #[test]
+    fn a_follow_that_finds_nothing_new_does_not_write_the_account() {
+        use cairn_ledger::transaction::CoinbaseTransaction;
+        use cairn_ledger::validation::{assemble_block, mine_block, ConsensusParams};
+
+        let (wallet, directory) = opened("nothing-new");
+        let params = ConsensusParams::testnet();
+        let coinbase =
+            CoinbaseTransaction::new(0, vec![Note::new(params.initial_reward, wallet.address())]);
+        let block = assemble_block(
+            &cairn_ledger::LedgerState::new(),
+            coinbase,
+            Vec::new(),
+            &params,
+            1_600,
+            0,
+        )
+        .unwrap();
+        wallet
+            .node()
+            .submit_block(mine_block(block, 1 << 22).unwrap())
+            .unwrap();
+        assert_eq!(wallet.follow(), 1, "the first follow read the block");
+        assert!(wallet.history_file.exists(), "and wrote the account down");
+
+        std::fs::remove_file(&wallet.history_file).unwrap();
+        let read = wallet.follow();
+        let written = wallet.history_file.exists();
+        wallet.shutdown();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(read, 0, "there was nothing new to read");
+        assert!(
+            !written,
+            "a follow that read nothing wrote the account down all the same"
+        );
+    }
+
+    /// An account older than the one on the disk is not written over it.
+    ///
+    /// The account is let go of before it is written, so two writers can reach
+    /// the disk in either order, and the one carrying the older account must
+    /// not be the one that stays. Held by saying the disk already has a newer
+    /// account, then exactly the one about to be written. Nothing else can
+    /// reach this, because two writers racing is not something a test can
+    /// arrange to happen in one order.
+    #[test]
+    fn an_account_older_than_the_one_on_the_disk_is_not_written_over_it() {
+        let (mut wallet, directory) = opened("older");
+        wallet.history_file = directory.join("elsewhere.dat");
+
+        *wallet.writing_history.lock().unwrap() = u64::MAX;
+        wallet.write_history(wallet.history.lock().unwrap());
+        let after_a_newer = wallet.history_file.exists();
+
+        let next = wallet
+            .history_changes
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+        *wallet.writing_history.lock().unwrap() = next;
+        wallet.write_history(wallet.history.lock().unwrap());
+        let after_the_same = wallet.history_file.exists();
+
+        *wallet.writing_history.lock().unwrap() = 0;
+        wallet.write_history(wallet.history.lock().unwrap());
+        let after_an_older = wallet.history_file.exists();
+
+        wallet.shutdown();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            !after_a_newer,
+            "an account was written over a newer one already on the disk"
+        );
+        assert!(
+            !after_the_same,
+            "an account was written again over the very one already on the disk"
+        );
+        assert!(
+            after_an_older,
+            "and an account newer than the disk's was not written at all, so the \
+             two above ask nothing"
         );
     }
 

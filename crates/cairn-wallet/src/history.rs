@@ -1065,10 +1065,24 @@ impl History {
     /// sits. A save that fails takes its partial file away with it, so what is
     /// left is the account as it was and nothing beside it.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        let partial = path.with_extension("part");
+        Self::write(path, &self.snapshot())
+    }
+
+    /// What [`History::save`] writes: the account's bytes and the stamp after
+    /// them.
+    ///
+    /// Apart from the writing, so that a wallet can take it while it holds the
+    /// account and write it once it has let go.
+    pub(crate) fn snapshot(&self) -> Vec<u8> {
         let mut bytes = self.encode();
         bytes.extend_from_slice(hash(Domain::WalletHistory, &bytes).as_bytes());
-        let moved = write_and_move(&partial, path, &bytes);
+        bytes
+    }
+
+    /// Writes what [`History::snapshot`] took, as [`History::save`] says.
+    pub(crate) fn write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        let partial = path.with_extension("part");
+        let moved = write_and_move(&partial, path, bytes);
         if moved.is_err() {
             let _ = std::fs::remove_file(&partial);
         }
@@ -2377,6 +2391,39 @@ mod tests {
             history.movements().next().unwrap()
         );
         assert_eq!(read.encode(), bytes, "and the writing is canonical");
+    }
+
+    /// What is saved to a file is what is loaded from it.
+    ///
+    /// The account's own tests went through the encoding and never through
+    /// the file, so a save that wrote nothing, or wrote the stamp over no
+    /// account, passed every one of them; only suites that start a whole
+    /// wallet again read a file back. Kept here because the save is now two
+    /// halves, a copy taken while the account is held and a write made after.
+    #[test]
+    fn what_is_saved_is_what_is_loaded() {
+        let mine = key(1);
+        let mut history = History::new();
+        history.take(&next_block(&history, 0, mine, Vec::new()), mine);
+        let directory = std::env::temp_dir().join(format!(
+            "cairn-history-saved-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("history.dat");
+
+        history.save(&path).unwrap();
+        let (read, discarded) = History::load(&path);
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(discarded.is_none(), "what was saved did not read back");
+        assert_eq!(
+            read.encode(),
+            history.encode(),
+            "what was saved is not what was loaded"
+        );
+        assert_eq!(read.len(), 1, "and there was something in it to lose");
     }
 
     #[test]

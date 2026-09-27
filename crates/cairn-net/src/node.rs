@@ -727,13 +727,15 @@ pub struct Stranded {
 /// leaving the person to find it.
 #[derive(Clone, Debug, Default)]
 pub struct Recovered {
-    /// Peers the question went to. Zero means there was nobody to ask at all.
+    /// Peers the question went to. Only peers that say they keep the whole
+    /// cold set are asked, so zero means none was connected.
     pub asked: usize,
-    /// How many of those said they keep the whole cold set.
+    /// How many connected peers said they keep the whole cold set, when the
+    /// asking ended.
     ///
-    /// Told apart from the rest because it is the difference between having
-    /// asked the wrong people and having nobody to ask. A wallet with peers
-    /// but no archivist among them is one connection away from an answer.
+    /// The same as `asked` unless one of them hung up or arrived while the
+    /// question was out. A wallet with peers and no archivist among them is
+    /// one connection away from an answer, and it has asked none of them.
     pub archivists: usize,
     /// Peers that answered at all, whatever the answer was.
     pub answered: usize,
@@ -1334,6 +1336,16 @@ impl Peer {
 struct Shared {
     params: ConsensusParams,
     address: SocketAddr,
+    /// Whether this node names its port when it introduces itself, so that
+    /// peers write its address down and hand it to others.
+    ///
+    /// Not for a wallet's node. It runs for the seconds a command takes, on a
+    /// port the system picked, and naming that port wrote "a Cairn wallet ran
+    /// at this address" into the book of every peer it greeted, from where it
+    /// travelled in answers to strangers and was dialled on their next round.
+    /// A node that names no port is one the protocol already has a place for:
+    /// its peers answer it and write nothing down.
+    offers_its_address: bool,
     /// Drawn once at start. A node behind a router cannot recognise its own
     /// address coming back from a peer, but it can recognise this.
     nonce: u64,
@@ -2794,6 +2806,17 @@ impl Shared {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The port this node names when it introduces itself: its own, or none.
+    ///
+    /// See [`Shared::offers_its_address`].
+    fn port_to_offer(&self) -> u16 {
+        if self.offers_its_address {
+            self.address.port()
+        } else {
+            0
+        }
+    }
+
     fn threads(&self) -> MutexGuard<'_, Vec<JoinHandle<()>>> {
         self.threads.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -3312,13 +3335,17 @@ impl Shared {
     /// The paths for the places in the cold set a peer asked about, in the
     /// order it asked about them.
     ///
-    /// Answered by whoever can, which is the point. A node that kept the whole
-    /// set rebuilds a path from the leaves it holds; a node following an owner
-    /// already holds the path for that owner's notes and hands it over as it
-    /// stands. Neither has to know which of the two it is, because the cold
-    /// set answers the same question for both. A node that is neither says so
-    /// with nothing where the path would be, which is not the same as saying
-    /// nothing.
+    /// Answered out of the whole set or not at all. A node that kept every
+    /// leaf rebuilds a path from them, and would rebuild the same one for
+    /// anybody. A node that did not answers with nothing where the path would
+    /// be, which is not the same as saying nothing, even for a place whose
+    /// path it holds: the paths a node keeps past the window are the ones of
+    /// the owners it follows, so handing one over told a stranger whose node
+    /// this is. The places of a key's fallen notes are public to anyone with
+    /// the blocks, and a wallet is a node that follows its key, so the
+    /// question "is this the wallet of key K?" cost one message and was
+    /// answered. Nothing in a message can say that a peer is the same owner,
+    /// so no peer is answered as one.
     ///
     /// The chain is taken here and let go of again rather than held across the
     /// whole reaction, which is why this is not answered where the message was
@@ -3332,7 +3359,7 @@ impl Shared {
             .iter()
             .map(|position| Placed {
                 position: *position,
-                proof: cold.proof_of(*position),
+                proof: cold.prove(*position),
             })
             .collect()
     }
@@ -3369,28 +3396,23 @@ impl Shared {
         }
     }
 
-    /// Connections worth asking where a fallen note sits, and how many of them
-    /// said they keep the whole set.
+    /// Connections worth asking where a fallen note sits: the ones that said
+    /// they keep the whole set, and nobody when none of them did.
     ///
-    /// Peers that claim the service, when there are any. When there are none,
-    /// everybody, and the reason is that the claim is only a claim in the
-    /// other direction too: a node that never said it archives still holds the
-    /// path for every note of an owner it follows, which is what a second
-    /// wallet on the same key is. Asking costs one small message each and is
-    /// answered plainly either way, and it beats telling somebody their money
-    /// is out of reach without having asked anyone.
-    fn worth_asking(&self) -> (Vec<PeerId>, usize) {
-        let peers = self.peers();
-        let archivists: Vec<PeerId> = peers
+    /// It used to be everybody when nobody claimed the service, on the grounds
+    /// that a node following the owner holds the paths as well. No node
+    /// answers out of those paths (see [`Shared::place`]), so a peer that
+    /// keeps less than the whole set has nothing to answer with, and the
+    /// question told it everything it carries all the same: a place names a
+    /// note, its owner and its value to anyone who has the chain. A wallet
+    /// with stuck money handed that list to every stranger it was connected
+    /// to, and to each new one as it arrived.
+    fn worth_asking(&self) -> Vec<PeerId> {
+        self.peers()
             .iter()
             .filter(|(_, peer)| peer.archives)
             .map(|(id, _)| *id)
-            .collect();
-        let archiving = archivists.len();
-        if archiving > 0 {
-            return (archivists, archiving);
-        }
-        (peers.keys().copied().collect(), 0)
+            .collect()
     }
 
     /// Takes an answer about where fallen notes sit, keeping only the paths
@@ -3630,6 +3652,7 @@ impl Node {
             None,
             None,
             None,
+            true,
         )
     }
 
@@ -3652,6 +3675,11 @@ impl Node {
     ///
     /// This is what a wallet asks for. The owners have to be named before the
     /// chain is replayed, because what is learned is learned as notes fall.
+    ///
+    /// A node opened this way is a wallet's, and it introduces itself without
+    /// a port. It still listens and still answers whoever reaches it; what it
+    /// does not do is ask its peers to write its address down and hand it on.
+    /// See [`Shared::offers_its_address`].
     pub fn open_watching(
         params: ConsensusParams,
         address: SocketAddr,
@@ -3979,6 +4007,9 @@ impl Node {
             addresses: book.len(),
         };
 
+        // A node that follows owners is a wallet's: `open_watching` is the one
+        // way in that names any, and it says why this is what it means.
+        let offers_its_address = owners.is_empty();
         let node = Self::start(
             params,
             address,
@@ -3989,6 +4020,7 @@ impl Node {
             Some(lock),
             probation,
             unread,
+            offers_its_address,
         )?;
         Ok((node, restored))
     }
@@ -4004,6 +4036,7 @@ impl Node {
         lock: Option<DirectoryLock>,
         probation: Option<Undertaking>,
         unread: Option<Unread>,
+        offers_its_address: bool,
     ) -> Result<Self, NodeError> {
         let listener = TcpListener::bind(address)?;
         let address = listener.local_addr()?;
@@ -4011,6 +4044,7 @@ impl Node {
         let shared = Arc::new(Shared {
             params,
             address,
+            offers_its_address,
             nonce: fresh_nonce(),
             chain: Mutex::new(chain),
             log: Arc::new(Mutex::new(log)),
@@ -4760,8 +4794,15 @@ impl Node {
     ///
     /// `wanted` is the place each note is believed to sit and the leaf it must
     /// fold to, which is what makes the answer worth taking from a stranger.
-    /// Whoever answers is handed a list of places and nothing else: not the
-    /// notes, not the owner, not who is asking about what.
+    /// What is handed over is the list of places and nothing else, and it is
+    /// handed only to peers that say they keep the whole set. That is not
+    /// because the list is anonymous. A place names a note, its owner and its
+    /// value to anyone who has the chain, so whoever is asked learns whose
+    /// money the asker cannot move and how much of it there is, from the
+    /// address at the other end of the connection. It is because nobody else
+    /// could answer. With no such peer connected, nobody is asked: the node
+    /// reaches for one it has heard of, and if none arrives in time the answer
+    /// says that nobody was asked.
     ///
     /// Nothing here trusts anybody. A path is folded from the place named up
     /// to a commitment this node worked out for itself, block by block, and
@@ -4811,7 +4852,8 @@ impl Node {
 
         let deadline = Instant::now().checked_add(patience);
         loop {
-            let (worth_asking, archivists) = self.shared.worth_asking();
+            let worth_asking = self.shared.worth_asking();
+            let archivists = worth_asking.len();
             let fresh: Vec<PeerId> = {
                 let mut asking = self.shared.asking();
                 worth_asking
@@ -7631,7 +7673,7 @@ fn decide(
     let mut local = Local {
         chain: &mut chain,
         keeps,
-        listen: shared.address.port(),
+        listen: shared.port_to_offer(),
         nonce: shared.nonce,
     };
     let reaction = on_message(&mut local, peer, message, unix_now());
@@ -8219,7 +8261,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
             Message::Hello(local_handshake(
                 &chain,
                 keeps,
-                shared.address.port(),
+                shared.port_to_offer(),
                 shared.nonce,
             ))
         };
@@ -8816,6 +8858,7 @@ mod disk_and_headers {
             None,
             None,
             None,
+            true,
         )
         .unwrap()
     }
@@ -9657,17 +9700,37 @@ mod disk_and_headers {
         assert_eq!(once, 1, "a question that was put was not counted");
     }
 
+    /// A node that keeps the whole cold set and holds it in memory only,
+    /// which is the one kind of peer a question about fallen notes is put to.
+    fn an_archivist(params: ConsensusParams) -> Node {
+        Node::start(
+            params,
+            loopback(),
+            ChainStore::archiving(params),
+            None,
+            AddressBook::new(),
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap()
+    }
+
     /// A question that everybody asked has answered ends there, rather than at
     /// the end of its patience.
     ///
     /// Every recovery in the suite waited within its patience and looked only
     /// at what came back, so a wait that ran to the end of the patience
     /// whatever the answers passed. That is a wallet held for the whole wait
-    /// by a peer that answered at once that it could not help.
+    /// by a peer that answered at once that it could not help. The peer keeps
+    /// the whole set, since nobody else is asked, and has nothing at the place
+    /// asked about.
     #[test]
     fn a_question_everyone_asked_has_answered_ends_there() {
         let params = ConsensusParams::testnet();
-        let answering = Node::bind(params, loopback()).unwrap();
+        let answering = an_archivist(params);
         let asking = Node::bind(params, loopback()).unwrap();
         asking.connect(answering.address()).unwrap();
         wait_until("the two nodes to introduce themselves", || {
@@ -9704,7 +9767,7 @@ mod disk_and_headers {
     #[test]
     fn a_node_connected_to_nobody_reaches_for_an_archivist_it_has_heard_of() {
         let params = ConsensusParams::testnet();
-        let answering = Node::bind(params, loopback()).unwrap();
+        let answering = an_archivist(params);
         let asking = Node::bind(params, loopback()).unwrap();
         let known = answering.address();
         {
@@ -10054,6 +10117,7 @@ mod peers_and_loops {
             None,
             None,
             None,
+            true,
         )
         .unwrap();
         node.shutdown();
@@ -11345,7 +11409,14 @@ mod peers_and_loops {
     fn an_answer_is_counted_with_what_it_brought_whenever_the_question_is_looked_at() {
         let node = quiet();
         let (socket, _far) = a_socket();
-        node.shared.peers().insert(1, stand_in(&socket, true));
+        // An archivist: nobody else is asked where a note sits.
+        node.shared.peers().insert(
+            1,
+            Peer {
+                archives: true,
+                ..stand_in(&socket, true)
+            },
+        );
         let asker = &node;
 
         let recovered = thread::scope(|scope| {
@@ -12859,6 +12930,7 @@ mod tests {
             None,
             None,
             None,
+            true,
         )
         .unwrap();
         // The turn a peer would be holding, put there rather than waited for:
