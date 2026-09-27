@@ -28,7 +28,7 @@ use cairn_ledger::genesis;
 use cairn_ledger::handover::{accept, Handover, HandoverError};
 use cairn_ledger::note::NetworkId;
 use cairn_ledger::pow::RECENT_HEADERS;
-use cairn_ledger::sampling::{check_start, open_start, SampledStart, SAMPLES};
+use cairn_ledger::sampling::{check_start, open_start, SampledStart, StartError, Weighed, SAMPLES};
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::Transfer;
 use cairn_ledger::validation::BlockError;
@@ -1146,7 +1146,7 @@ pub struct Behind {
     pub seconds: u64,
     /// Seconds of drift the rules allow before a block is refused at all.
     pub drift: u64,
-    /// Blocks refused for it.
+    /// Blocks refused for it, the tips of showings among them.
     pub blocks: u64,
     /// Connections they arrived on.
     pub peers: usize,
@@ -2801,6 +2801,10 @@ impl Shared {
     /// Nothing is held against the peer here or anywhere. The block is valid
     /// to every node whose clock is right, and this node reverses the refusal
     /// by waiting; what a run of them says is about this machine.
+    ///
+    /// The tip of a showing counts as one, when the showing holds at the date
+    /// the tip carries: that tip is a block too, dated by whoever mined it,
+    /// and a node with no chain meets nothing else a slow clock refuses.
     fn clock_looks_behind(&self, from: Option<Sender>, ahead: u64, now: u64) {
         let mut met = self
             .out_of_step
@@ -4952,21 +4956,16 @@ fn weigh_what_was_shown(
     // takes is this build meeting a chain whose difficulty has fallen far
     // below what it ran at, where every archivist alive fails identically and
     // honestly. See [`Unweighable`] for what that costs and how long it lasts.
-    let weighed = SampledStart::decode(whole)
-        // Said rather than passed on bare. The codec names the type it refused
-        // and nothing else, which as a line for a person reads as a program
-        // talking to itself; and this is the refusal the tail ceiling comes
-        // out of, so it is the one worth placing.
-        .map_err(|error| format!("it could not be read as a weighing at all ({error})"))
-        .and_then(|start| {
-            check_start(&start, now, &shared.params)
-                .map(|weighed| (weighed, start.tip))
-                .map_err(|error| error.to_string())
-        });
-    if let Err(because) = &weighed {
-        // The address is read and let go of before the count is taken, so the
-        // table of these stays the leaf its own comment says it is.
-        shared.could_not_weigh(shared.sender_for(from), because, now);
+    //
+    // The address is read and let go of before either count is taken, so the
+    // tables of these stay the leaves their own comments say they are.
+    let weighed = weigh(whole, now, &shared.params);
+    match &weighed {
+        Shown::Weighed(..) => {}
+        Shown::AheadOfThisClock { ahead } => {
+            shared.clock_looks_behind(shared.sender_for(from), *ahead, now);
+        }
+        Shown::Refused(because) => shared.could_not_weigh(shared.sender_for(from), because, now),
     }
     let mut joining = shared.joining();
     // The attempt may have been given up on while this was being weighed:
@@ -4975,8 +4974,24 @@ fn weigh_what_was_shown(
     if !matches!(*joining, Progress::Weighing(_)) {
         return None;
     }
-    let Ok((shown, tip)) = weighed else {
-        return fail_attempt(&mut joining, shared, from, now);
+    let (shown, tip) = match weighed {
+        Shown::Weighed(shown, tip) => (shown, *tip),
+        // The one refusal here that two honest nodes can disagree about, and
+        // the specification says a node MUST NOT hold it against the peer. It
+        // was held against it all the same, the way any other refusal is: its
+        // address paused for a growing interval, and the showing counted
+        // towards telling a person that peers are making chains up or that the
+        // chain cannot be weighed, when what is wrong is this machine's clock.
+        // So the clock is counted instead, and the claim stops counting the
+        // way a ledger from past this build's rules does: nobody can hand this
+        // node that chain until its clock is right, and asking again would be
+        // a loop.
+        Shown::AheadOfThisClock { .. } => {
+            shared.choosing().cannot_be_taken(from, now);
+            *joining = Progress::Idle;
+            return None;
+        }
+        Shown::Refused(_) => return fail_attempt(&mut joining, shared, from, now),
     };
 
     // What weighing settles is that *this* chain's work was really done. It
@@ -5005,6 +5020,56 @@ fn weigh_what_was_shown(
         what: Joining::Ledger,
         part: 0,
     })
+}
+
+/// What came of weighing a showing.
+enum Shown {
+    /// It weighed, and settled on this tip. Boxed, because a header is most
+    /// of the size of the whole and the other two carry next to nothing.
+    Weighed(Weighed, Box<BlockHeader>),
+    /// It weighs at the date its tip carries, and that date stands `ahead`
+    /// seconds past this node's clock, which is further than a node takes.
+    AheadOfThisClock { ahead: u64 },
+    /// It does not weigh, for the reason given.
+    Refused(String),
+}
+
+/// Weighs a showing, telling a tip dated past this node's clock apart from a
+/// showing that does not hold.
+///
+/// The tip's date is the first thing a weighing checks, before any work, so
+/// that refusal alone is one anybody can earn by writing a number in a field,
+/// and a claimant it cost nothing would come back for another turn under a
+/// fresh connection for as long as it liked. It is read as this node's clock
+/// being behind only when the showing holds in every other respect, which is
+/// found by weighing it again at the date its tip carries: the clock is read
+/// nowhere else in a weighing. The first weighing stopped at the tip, so this
+/// is still one weighing's worth of work.
+fn weigh(whole: &[u8], now: u64, params: &ConsensusParams) -> Shown {
+    let start = match SampledStart::decode(whole) {
+        Ok(start) => start,
+        // Said rather than passed on bare. The codec names the type it refused
+        // and nothing else, which as a line for a person reads as a program
+        // talking to itself; and this is the refusal the tail ceiling comes
+        // out of, so it is the one worth placing.
+        Err(error) => {
+            return Shown::Refused(format!(
+                "it could not be read as a weighing at all ({error})"
+            ))
+        }
+    };
+    match check_start(&start, now, params) {
+        Ok(weighed) => Shown::Weighed(weighed, Box::new(start.tip)),
+        Err(StartError::TipFromTheFuture { timestamp }) => {
+            match check_start(&start, timestamp, params) {
+                Ok(_) => Shown::AheadOfThisClock {
+                    ahead: timestamp.saturating_sub(now),
+                },
+                Err(error) => Shown::Refused(error.to_string()),
+            }
+        }
+        Err(error) => Shown::Refused(error.to_string()),
+    }
 }
 
 /// Takes a whole ledger, checks it, adopts it and writes it down.
