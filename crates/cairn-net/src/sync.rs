@@ -1956,6 +1956,7 @@ fn answer(local: &mut Local<'_>, peer: &mut PeerState, message: Message, now: u6
             // Taken rather than read, so one `GetChain` pays for one answer
             // and a peer that sends five gets the price of a push for four.
             let prompted = std::mem::take(&mut peer.chain_asked);
+            let have = local.chain.height().map_or(0, |tip| tip.saturating_add(1));
             // Nothing this node holds connects to a stretch that starts above
             // its tip, so none of it is asked for: see
             // [`Reaction::cannot_supply`]. Not the chain again either, which
