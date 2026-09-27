@@ -934,6 +934,32 @@ mod tests {
         assert!(out.contains("><em>a | b</em></h2>"), "{out}");
     }
 
+    /// A bar inside an emphasis is the heading's even when no bar stands
+    /// before it, and an emphasised label is still a label.
+    #[test]
+    fn a_bar_is_a_label_only_outside_every_element() {
+        let out = page("\n## *a | b*\n\nText.\n");
+        assert!(out.contains("<div class=\"num\">1</div>"), "{out}");
+        assert!(out.contains("><em>a | b</em></h2>"), "{out}");
+        let out = page("\n## *Label* | The heading\n\nText.\n");
+        assert!(
+            out.contains("<div class=\"num\"><span>1</span><em>Label</em></div>"),
+            "{out}"
+        );
+        assert!(out.contains(">The heading</h2>"), "{out}");
+    }
+
+    /// A loose list, one paragraph an item, renders as a list: it is two
+    /// paragraphs in one item that is refused, not a paragraph.
+    #[test]
+    fn a_loose_list_of_one_paragraph_items_is_a_list() {
+        let out = page("\n## One\n\n- first\n\n- second\n");
+        assert!(
+            out.contains("<li>first</li>") && out.contains("<li>second</li>"),
+            "{out}"
+        );
+    }
+
     /// Two paragraphs in one list item are refused rather than glued into one
     /// word.
     #[test]
