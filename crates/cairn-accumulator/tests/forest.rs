@@ -575,7 +575,7 @@ fn a_forest_whose_roots_contradict_its_count_is_refused() {
 }
 
 /// The proofs an archive builds must not depend on how it came to hold what it
-/// holds. It keeps its inner nodes so a proof costs one hash per level rather
+/// holds. It keeps its inner nodes so a proof costs one lookup per level rather
 /// than a pass over everything, and every path that changes a leaf has to
 /// leave those nodes saying what the leaves say.
 #[test]

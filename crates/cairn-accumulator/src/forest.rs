@@ -1037,7 +1037,7 @@ pub struct Archive {
     /// holds, which on a chain of a million blocks is eighty seconds for the
     /// five hundred and twelve a newcomer asks for: longer than the tip it was
     /// built for lasts, so the answer would never be finished. With it a proof
-    /// is one hash per level.
+    /// is one lookup per level, and nothing is hashed.
     ///
     /// It costs another thirty two bytes a block, on top of the thirty two the
     /// leaves already cost. That is the archivist's own bargain and nobody
@@ -1398,9 +1398,11 @@ impl Archive {
 
     /// Builds the proof for `position`.
     ///
-    /// Each sibling is a subtree hashed from its leaves, so one proof costs a
-    /// pass over the forest. An archivist serving many would keep the internal
-    /// nodes instead; nothing about the proof it produces would change.
+    /// One lookup a level and no hashing: every sibling a proof asks for is a
+    /// node whose leaves have all arrived, and `inner` holds each of those.
+    /// This said a proof hashed every sibling up from its leaves, a pass over
+    /// the forest, and that an archivist serving many would keep the internal
+    /// nodes instead, for four weeks after it had started keeping them.
     pub fn prove(&self, position: u64) -> Option<ForestProof> {
         self.prove_in(position, self.forest.leaves)
     }
