@@ -763,6 +763,23 @@ pub struct Reaction {
     pub relayed: Vec<Hash32>,
     /// Set when the connection should be closed.
     pub drop_peer: Option<DropReason>,
+    /// A block whose body this peer handed in and this node now holds off its
+    /// branch, unjudged.
+    ///
+    /// Named so the node can write down who sent it. A body held aside is
+    /// only tried when its branch becomes the heaviest, usually on the
+    /// delivery of a later block by somebody else, and by then the one
+    /// message that could say whose body it was is long gone.
+    pub held_aside: Option<Hash32>,
+    /// A block held aside below the one that arrived, whose body failed when
+    /// the arrival made its branch the heaviest.
+    ///
+    /// Not this peer's doing, and it used to be charged to this peer: the
+    /// refusal names the block that failed, every such refusal became
+    /// `BadBlock` against the peer in hand, and the peer in hand is the one
+    /// carrying the heavier branch. Named instead, so the node can refuse
+    /// whoever handed in that body.
+    pub failed_below: Option<Hash32>,
     /// The height of a block this node refused because it can never take it,
     /// rather than because it has not caught up to it yet.
     ///
@@ -944,14 +961,20 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
         )));
     }
     if theirs.total_work > local.chain.total_work() {
-        // A node with no chain facing one long enough to be final does not
-        // ask here at all. Whatever it starts following first is what it
-        // keeps, so the choice of whom to ask is made once, by the node,
-        // against every claim it has heard, rather than by whichever
+        // A node with no chain of its own facing one long enough to be final
+        // does not ask here at all. Whatever it starts following first is
+        // what it keeps, so the choice of whom to ask is made once, by the
+        // node, against every claim it has heard, rather than by whichever
         // handshake this happens to be. A short chain carries no such
         // weight: following the wrong one is undone by the fork choice like
         // any other branch, so it is simply asked for.
-        let held_for_the_choice = local.chain.is_empty() && theirs.height >= JOIN_RATHER_THAN_READ;
+        //
+        // No chain of its own includes the first block a named network pins,
+        // which a node lays down the moment it starts. Asking whether the
+        // chain was empty instead meant no newcomer on a real network ever
+        // held off here, so every one of them read the chain block by block.
+        let held_for_the_choice =
+            local.chain.holds_nothing_of_its_own() && theirs.height >= JOIN_RATHER_THAN_READ;
         if !held_for_the_choice {
             peer.chain_asked = true;
             peer.work_when_asked = Some(local.chain.total_work());
@@ -1018,6 +1041,45 @@ pub const JOIN_RATHER_THAN_READ: u64 = 1_024;
 /// Public so a test names this number rather than restating it. A test that
 /// wrote `512` would pass on the day somebody changed it here.
 pub const MAX_AWAITING: usize = MAX_REQUESTED * 4;
+
+/// The first height worth asking for of a branch a peer offers from `from`.
+///
+/// `from` itself, as a rule. A peer answers a locator with the height past
+/// the highest position it agrees with, and a locator runs from the tip down,
+/// so every position above that one was put to it and refused. When the peer
+/// is on another branch, the heights between `from` and this node's tip are
+/// that branch, which this node does not have, and nothing above them can be
+/// applied without them. Asking only above the tip left a node that was not
+/// listening while a heavier branch's first blocks went round unable ever to
+/// take it, and after a switch that failed on a body held aside, unable ever
+/// to ask for the real one again.
+///
+/// Where the locator skips heights, the peer agrees below where the branches
+/// part rather than at it, so the first of what comes back is already here.
+/// That is less than one batch: `from` is taken only within a batch of the
+/// tip, so the batch asked from it always reaches past the tip, and brings
+/// more blocks of the other branch than this node holds of its own above
+/// where the two part, or all of them. More blocks and not more work: a branch
+/// whose blocks are so much lighter than this node's that a batch of them
+/// still weighs less is asked for the same batch every round, and is not taken
+/// from this answer either.
+///
+/// A batch or more below the tip, only what lies above the tip is asked for.
+/// A peer that recognises nothing it was shown answers from nought, which a
+/// locator always shows, and one that joined holds no identifier for the
+/// heights below where it joined. Asking from there is a batch of blocks this
+/// node already follows, the same batch every round, and the node never asks
+/// past its tip. A branch that parts that deep is not taken from this answer.
+fn first_wanted(chain: &ChainStore, from: u64) -> u64 {
+    let have = chain.height().map_or(0, |tip| tip.saturating_add(1));
+    let batch = u64::try_from(MAX_REQUESTED).unwrap_or(u64::MAX);
+    let within_a_batch = have.saturating_sub(from) < batch;
+    if within_a_batch {
+        from
+    } else {
+        have
+    }
+}
 
 /// Asks for a stretch of a peer's branch, starting at `from`.
 ///
@@ -1180,6 +1242,9 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
     let height = block.header.height;
     peer.awaiting.remove(&height);
     peer.offered.remove(&height);
+    // Whether a body is already held under this identifier, in which case the
+    // one this peer sent is not the one kept.
+    let held_before = chain.block(&id).is_some();
 
     match chain.add_block(block, now) {
         Ok(accepted @ (Accepted::Extended | Accepted::Reorganised { .. })) => {
@@ -1188,7 +1253,13 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
             reaction.broadcast.push(Located::new(height, id));
             reaction
         }
-        Ok(Accepted::SideBranch) => follow_up(chain, peer, now),
+        Ok(Accepted::SideBranch) => {
+            let mut reaction = follow_up(chain, peer, now);
+            if !held_before {
+                reaction.held_aside = Some(id);
+            }
+            reaction
+        }
         Ok(Accepted::Duplicate) => follow_up(chain, peer, now),
         // Missing history rather than a bad peer: the block is fine, this node
         // simply has not caught up to where it hangs. Asking again from a fresh
@@ -1305,7 +1376,46 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
             ahead_of_the_clock: Some(timestamp.saturating_sub(now)),
             ..Reaction::idle()
         },
+        // A block below this one failed, not this one. It was held aside
+        // unjudged, which is every block of a branch lighter than the one
+        // followed, and this delivery made its branch the heaviest, so the
+        // switch read its body and the body did not hold. An identifier is
+        // taken over a header alone, so that body can be a copy another peer
+        // sent ahead of the real block, and the peer here, which built on or
+        // relayed the real one, is the last to blame for it.
+        //
+        // It used to be the one blamed: disconnected and its host refused,
+        // while the sender of the body had been answered `SideBranch`. So the
+        // failed block is named for the node to refuse whoever handed that
+        // body in, unless the verdict is about this node rather than about
+        // the body, and this peer is asked again for its chain, which is
+        // where the real body is.
+        Err(ChainError::InvalidBlock { id: failed, source }) if failed != id => {
+            let mut reaction = follow_up(chain, peer, now);
+            reaction.failed_below = dropped_for(&source, failed)
+                .is_misbehaviour()
+                .then_some(failed);
+            reaction
+        }
+        Err(ChainError::InvalidBlock { source, .. }) => Reaction::close(dropped_for(&source, id)),
         Err(_) => Reaction::close(DropReason::BadBlock { id }),
+    }
+}
+
+/// Why a peer is left whose block `id` was refused for `source`, among the
+/// refusals nothing above answers otherwise.
+///
+/// Every one of them is the block's doing, and so the peer's, except one the
+/// ledger documents as this node disagreeing with itself: the transition was
+/// projected against this same state a moment before, and applying it found
+/// a note somewhere else. No peer can cause that. It fell to `BadBlock` with
+/// the rest, so if it ever fired this node would refuse every honest peer that
+/// offered the chain, one message each. It is left the way this node's own
+/// store is left: the connection closed, the host not refused.
+fn dropped_for(source: &BlockError, id: Hash32) -> DropReason {
+    match source {
+        BlockError::NoteNotWhereProved => DropReason::OwnStore,
+        _ => DropReason::BadBlock { id },
     }
 }
 
@@ -1521,14 +1631,7 @@ pub fn on_message(
             ..Reaction::idle()
         },
         Message::Chain { from, count } => {
-            // What the peer offers, minus what this node already has. A peer
-            // can only agree with a position it was shown, and this node shows
-            // it the heights it still holds identifiers for, so the agreement
-            // can land well behind where this node actually is. Asking from
-            // there would mean receiving what it already holds, one useful
-            // block at a time.
-            let have = local.chain.height().map_or(0, |tip| tip.saturating_add(1));
-            let start = from.max(have);
+            let start = first_wanted(local.chain, from);
             let end = from.saturating_add(count);
             // Taken rather than read, so one `GetChain` pays for one answer
             // and a peer that sends five gets the price of a push for four.
@@ -2037,6 +2140,41 @@ mod what_an_ask_costs {
              {} before the wire was priced, and a window of {MAX_HEADERS}-header asks \
              is the honest comparison",
             (128 * 1024) / header_bytes,
+        );
+    }
+}
+
+/// What a refused block says about the peer that delivered it.
+#[cfg(test)]
+mod refused_blocks {
+    use super::{dropped_for, BlockError, DropReason, Hash32};
+
+    /// A block refused for a verdict about this node is not held against the
+    /// peer that delivered it, and every other refusal still is.
+    ///
+    /// Nothing asked this, so a node that refused every honest peer offering
+    /// the chain for a disagreement inside its own ledger passed. No known
+    /// block reaches that verdict, which is why it is asked of the mapping.
+    #[test]
+    fn a_verdict_about_this_node_is_not_held_against_the_peer() {
+        let id = Hash32::from_bytes([7; 32]);
+        let own = dropped_for(&BlockError::NoteNotWhereProved, id);
+        assert!(
+            !own.is_misbehaviour(),
+            "a verdict the ledger calls this node disagreeing with itself refused the peer"
+        );
+        assert_eq!(own, DropReason::OwnStore);
+        let theirs = dropped_for(
+            &BlockError::StateRootMismatch {
+                expected: Hash32::ZERO,
+                found: id,
+            },
+            id,
+        );
+        assert_eq!(
+            theirs,
+            DropReason::BadBlock { id },
+            "a block that is wrong on its own account stopped being the peer's doing"
         );
     }
 }

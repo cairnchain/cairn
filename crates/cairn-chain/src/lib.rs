@@ -1129,6 +1129,22 @@ impl ChainStore {
         self.branch.is_empty()
     }
 
+    /// Whether this node holds nothing that would be lost by being handed a
+    /// ledger: no chain at all, or only the first block its network pins.
+    ///
+    /// A node on a named network lays that block down the moment it starts,
+    /// so one that has spoken to nobody still knows where the story starts.
+    /// Every chain on the network begins with it, so holding it chooses none
+    /// of them. Asking [`ChainStore::is_empty`] instead is what kept every
+    /// newcomer on the real networks from being handed a ledger: its chain was
+    /// never empty, so it never held off for the choice, never took a ledger
+    /// that arrived, and read the whole chain block by block. Every test of
+    /// the handover ran on rules that pin nothing, where the two questions
+    /// have the same answer.
+    pub fn holds_nothing_of_its_own(&self) -> bool {
+        self.branch.is_empty() || self.branch.tip() == self.params.genesis
+    }
+
     /// Whether `id` is on the part of the followed branch held in full.
     ///
     /// False for a block further back than a reorganisation could reach, which
@@ -1858,10 +1874,12 @@ impl ChainStore {
     /// that header against the work behind it, so what is left here is putting
     /// it in place.
     ///
-    /// Only onto a node with no chain at all. Replacing a chain a node already
-    /// follows would be a reorganisation of unbounded depth, decided by
-    /// whoever offered the replacement, which is the one thing the depth limit
-    /// exists to refuse.
+    /// Only onto a node with no chain of its own: none at all, or only the
+    /// first block its network pins, which every chain of that network starts
+    /// from and which replacing therefore undoes nothing. Replacing a chain a
+    /// node already follows would be a reorganisation of unbounded depth,
+    /// decided by whoever offered the replacement, which is the one thing the
+    /// depth limit exists to refuse.
     ///
     /// The branch starts from the headers that came with the ledger, so this
     /// node knows where it is and can be reorganised as far back as those go.
@@ -1869,7 +1887,7 @@ impl ChainStore {
     /// what it is following and cannot answer about what came before, which is
     /// the honest position for a node that was not there.
     pub fn adopt(&mut self, state: LedgerState, recent: &[BlockHeader]) -> Result<(), ChainError> {
-        if !self.branch.is_empty() {
+        if !self.holds_nothing_of_its_own() {
             return Err(ChainError::AlreadyFollowing);
         }
         let Some(tip) = state.tip() else {
@@ -2042,11 +2060,10 @@ impl ChainStore {
                 // fell through to `hold` and was written over the one already
                 // there. Neither is known good, since a block held aside has
                 // not been applied, so what settles it is which arrived first:
-                // a twin is made by copying a block and cannot exist before
-                // the block it copies, while last is the half of the race an
-                // attacker wins by merely answering every honest delivery.
+                // last is the half of the race an attacker wins by merely
+                // answering every honest delivery.
                 //
-                // What that bought was the branch. The forgery sat under the
+                // What last bought was the branch. The forgery sat under the
                 // real block's identifier until the branch it was on became
                 // the heaviest, and the switch onto it then read the forged
                 // body, failed on a root that did not match, and left the node
@@ -2055,6 +2072,16 @@ impl ChainStore {
                 // never sent. Offering the real block again did not undo it:
                 // it weighs no more than the branch already followed, so it
                 // was filed aside, and nothing re-weighed the block above it.
+                //
+                // First is not safe on its own either, and this used to say
+                // it was because a twin cannot exist before the block it
+                // copies. It cannot, but it can reach a node before the real
+                // one does, since forwarding a block without checking it is
+                // quicker than checking it, and then it bought the same thing
+                // last did. What stands behind first is the body's root, asked
+                // below before anything is held, and `cairn-net` refusing the
+                // sender of a body that fails a switch rather than the peer
+                // that delivered the block above it.
                 //
                 // The one held is the one this node tries. A block whose body
                 // fails to apply is dropped by `follow`, so the next body to
@@ -2158,6 +2185,33 @@ impl ChainStore {
                 .saturating_add(work_of(block.header.difficulty))
         };
 
+        // A block that loses the fork choice is held without being applied, so
+        // nothing else looks at its body until its branch is the heaviest, and
+        // the first body held under an identifier is the one tried then. An
+        // identifier is taken over a header, so a copy of a real block with
+        // another body inherits its work, and a copy forwarded without being
+        // checked can arrive ahead of the real one. Held, it stood in for the
+        // real block: the switch failed on it, the refusal named it, and the
+        // peer that delivered the block above it was the one blamed.
+        //
+        // Whether a body is the one its header names needs no ledger: it is
+        // the root over the coinbase and every transfer. Asked here, a copy
+        // with any other coinbase, transfers or order is refused on arrival
+        // and charged to whoever sent it. A copy that changes only signatures
+        // or proofs, which a transfer's identifier leaves out, still passes,
+        // and what answers that is `cairn-net` refusing the sender of a body
+        // that fails a switch.
+        let root = block.transactions_root();
+        if root != block.header.transactions_root {
+            return Err(ChainError::InvalidBlock {
+                id,
+                source: BlockError::TransactionsRootMismatch {
+                    expected: root,
+                    found: block.header.transactions_root,
+                },
+            });
+        }
+
         self.hold(id, block, total_work);
 
         if total_work <= self.total_work() {
@@ -2168,7 +2222,8 @@ impl ChainStore {
             // it was sent.
             //
             // What it was sent costs a stranger nothing. A block that loses
-            // the fork choice is never validated, never sized against
+            // the fork choice is never validated past the root its body has to
+            // produce, which anybody can work out, never sized against
             // `max_block_bytes`, and needs no work beyond the target its own
             // header claims, so every one of them can hang off one parent and
             // differ only in a nonce. Twelve thousand of them left a node

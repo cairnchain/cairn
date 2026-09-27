@@ -38,12 +38,14 @@
     clippy::arithmetic_side_effects
 )]
 
-use cairn_chain::{Accepted, ChainStore};
+use cairn_chain::{Accepted, ChainError, ChainStore};
 use cairn_crypto::{SecretKey, Signature};
 use cairn_ledger::block::Block;
 use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
-use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
+use cairn_ledger::validation::{
+    assemble_block, connect_block, mine_block, BlockError, ConsensusParams,
+};
 use cairn_ledger::LedgerState;
 use cairn_primitives::codec::Encode;
 
@@ -232,9 +234,11 @@ fn a_twin_of_a_block_already_followed_cannot_take_its_body() {
 /// The branch settles the case above and says nothing about this one. A block
 /// a node is holding aside has not been applied, so neither body under that
 /// identifier is known good, and `hold` wrote whichever arrived last over
-/// whichever arrived first. Last is the easy half of that race: a twin is made
-/// by copying a block, so it cannot exist before the block it copies, and an
-/// attacker who merely answers every honest delivery wins it every time.
+/// whichever arrived first. Last is the easy half of that race: an attacker
+/// who merely answers every honest delivery wins it every time. First is the
+/// other order, which a copy forwarded without being checked also wins; see
+/// `a_side_block_whose_body_is_not_the_one_its_header_names_is_refused_before_it_is_held`
+/// for what answers that.
 ///
 /// What that buys is the branch. The forgery sits under the real block's
 /// identifier until the branch it is on becomes the heaviest, and then the
@@ -318,4 +322,115 @@ fn a_twin_of_a_block_held_off_the_branch_cannot_take_its_body() {
     );
     assert_eq!(store.height(), Some(13));
     assert_eq!(store.tip(), Some(rival[2].id()));
+}
+
+/// A node on a two block branch, a rival of `rival_len` blocks off the same
+/// eleven, and a copy of the rival's first block: the real header, and a body
+/// paying the reward to somebody else.
+fn a_node_behind_a_rival(rival_len: usize) -> (ChainStore, Vec<Block>, Block) {
+    let params = params();
+    let miner = wallet(1);
+    let mut branch = Branch::new(params);
+    let shared = branch.mine_empty(&miner, 11);
+    let mut aside = branch.fork();
+    let followed = branch.mine_empty(&miner, 2);
+    let rival = aside.mine_empty(&wallet(2), rival_len);
+
+    let mut store = ChainStore::new(params);
+    for block in shared.iter().chain(followed.iter()) {
+        store.add_block(block.clone(), NOW).unwrap();
+    }
+    assert_eq!(store.height(), Some(12));
+
+    let mut copy = rival[0].clone();
+    copy.coinbase = CoinbaseTransaction::new(
+        11,
+        vec![Note::new(params.reward_at(11), wallet(9).public_key())],
+    );
+    assert_eq!(copy.id(), rival[0].id(), "the copy shares the identifier");
+    assert_ne!(copy.encode(), rival[0].encode(), "yet is a different block");
+    (store, rival, copy)
+}
+
+/// A copy of a side block whose body is not the one its header names is
+/// refused on arrival, and blamed on whoever sent it.
+///
+/// A block that loses the fork choice is held without being applied, and the
+/// first body held under an identifier is the one tried. That order is not
+/// safe either: a copy cannot exist before the block it copies, but it can
+/// reach a node before the real one does, since forwarding without checking
+/// is quicker than checking. The copy was held, the real body offered after it
+/// was thrown away, and the delivery of the block that made that branch the
+/// heaviest came back refused for the copy's body, which `cairn-net` charged to
+/// the peer that delivered it.
+///
+/// Whether a body is the one its header names needs no ledger: it is one
+/// Merkle root. Nothing asked it of a block held aside, so a node holding
+/// whatever body arrived first passed, and the delivery of the real third
+/// block was answered `InvalidBlock` for the first.
+#[test]
+fn a_side_block_whose_body_is_not_the_one_its_header_names_is_refused_before_it_is_held() {
+    let (mut store, rival, copy) = a_node_behind_a_rival(3);
+
+    let refused = store.add_block(copy.clone(), NOW);
+    assert!(
+        matches!(
+            &refused,
+            Err(ChainError::InvalidBlock {
+                id,
+                source: BlockError::TransactionsRootMismatch { .. },
+            }) if *id == copy.id()
+        ),
+        "a body that does not produce its header's transaction root was held aside \
+         unjudged, so its sender was refused nothing"
+    );
+    assert!(
+        store.block(&rival[0].id()).is_none(),
+        "and nothing is held under the identifier it copied"
+    );
+
+    for block in &rival[..2] {
+        assert_eq!(
+            store.add_block(block.clone(), NOW),
+            Ok(Accepted::SideBranch)
+        );
+    }
+    let delivered = store.add_block(rival[2].clone(), NOW);
+    assert!(
+        matches!(delivered, Ok(Accepted::Reorganised { .. })),
+        "the delivery of the block that makes the rival the heaviest was refused"
+    );
+    assert_eq!(store.tip(), Some(rival[2].id()));
+}
+
+/// Sending that copy again before every delivery does not keep a node off the
+/// heavier branch either.
+///
+/// After a switch failed on the copy, the copy was dropped, sent again, and
+/// held again ahead of the real block, so every delivery of the rival's next
+/// block failed the same way and the node stayed at height twelve under a
+/// heavier valid branch for as long as the sender cared to keep sending.
+/// Nothing asked this, so a node that could be held there by one connection
+/// re-sending one copy passed.
+#[test]
+fn a_copy_sent_again_before_every_delivery_does_not_keep_a_node_off_the_heavier_branch() {
+    let (mut store, rival, copy) = a_node_behind_a_rival(5);
+
+    let mut refused = 0usize;
+    for real in rival.iter().skip(1) {
+        let _ = store.add_block(copy.clone(), NOW);
+        let _ = store.add_block(rival[0].clone(), NOW);
+        if store.add_block(real.clone(), NOW).is_err() {
+            refused += 1;
+        }
+    }
+    assert_eq!(
+        refused, 0,
+        "honest deliveries of the rival branch were refused for a copy sent ahead of them"
+    );
+    assert_eq!(
+        store.tip(),
+        rival.last().map(Block::id),
+        "a node offered every block of a heavier valid branch stayed on the lighter one"
+    );
 }

@@ -28,7 +28,7 @@ use cairn_ledger::genesis;
 use cairn_ledger::handover::{accept, Handover, HandoverError};
 use cairn_ledger::note::NetworkId;
 use cairn_ledger::pow::RECENT_HEADERS;
-use cairn_ledger::sampling::{check_start, open_start, SampledStart, SAMPLES};
+use cairn_ledger::sampling::{check_start, open_start, SampledStart, StartError, Weighed, SAMPLES};
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::Transfer;
 use cairn_ledger::validation::BlockError;
@@ -1146,7 +1146,7 @@ pub struct Behind {
     pub seconds: u64,
     /// Seconds of drift the rules allow before a block is refused at all.
     pub drift: u64,
-    /// Blocks refused for it.
+    /// Blocks refused for it, the tips of showings among them.
     pub blocks: u64,
     /// Connections they arrived on.
     pub peers: usize,
@@ -1523,6 +1523,156 @@ struct Shared {
     /// Empty on a node nobody has asked to recover anything, which is every
     /// node that is not carrying a wallet.
     asking: Mutex<Asking>,
+    /// Who handed in each body this node holds off its branch.
+    ///
+    /// A leaf, written with the chain held so that a switch failing on a body
+    /// in another thread cannot come before the note of who sent it.
+    held_aside: Mutex<HeldAside>,
+}
+
+/// Who handed in each body a node holds off its branch, so that a body which
+/// fails a switch costs its sender and nobody else.
+///
+/// A block that loses the fork choice is held without being applied, and its
+/// body is tried only when its branch becomes the heaviest, which is usually
+/// the delivery of a later block by some other peer. Its identifier is taken
+/// over the header alone, so the body tried can be a copy with its signatures
+/// broken that one connection sent ahead of the real block. Without this, the
+/// refusal reached only the peer that delivered the later block, which was the
+/// one carrying the real chain, and the sender of the copy could send it again
+/// after every failure and keep a node off the heavier branch for as long as
+/// it liked.
+#[derive(Debug)]
+struct HeldAside {
+    by: HashMap<Hash32, HandedIn>,
+    /// The size at which entries for bodies no longer held are next swept.
+    sweep_at: usize,
+}
+
+/// The connection a body came in on, and the address it came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HandedIn {
+    peer: PeerId,
+    host: Option<IpAddr>,
+}
+
+/// Entries written before the first sweep of [`HeldAside`].
+///
+/// Each later sweep waits for twice what the one before it kept, so the table
+/// holds at most twice the bodies the chain still holds, whose own ceiling is
+/// what bounds this one, and a sweep costs a constant for each entry written.
+const HELD_ASIDE_SWEEP: usize = 1_024;
+
+impl Default for HeldAside {
+    fn default() -> Self {
+        Self {
+            by: HashMap::new(),
+            sweep_at: HELD_ASIDE_SWEEP,
+        }
+    }
+}
+
+impl HeldAside {
+    /// Writes down who handed in the body now held for `id`.
+    ///
+    /// `still_held` answers for the chain: whether it still holds a body under
+    /// an identifier, which is what an entry is worth keeping for.
+    fn record(&mut self, id: Hash32, handed: HandedIn, still_held: impl Fn(&Hash32) -> bool) {
+        if self.by.len() >= self.sweep_at {
+            self.by.retain(|held, _| still_held(held));
+            self.sweep_at = self.by.len().saturating_mul(2).max(HELD_ASIDE_SWEEP);
+        }
+        self.by.insert(id, handed);
+    }
+
+    /// Who handed in the body held for `id`, which has just failed.
+    fn take(&mut self, id: &Hash32) -> Option<HandedIn> {
+        self.by.remove(id)
+    }
+}
+
+/// What [`HeldAside`] keeps and for how long, pinned beside it because the
+/// table is invisible from outside this file.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod who_handed_it_in {
+    use super::{HandedIn, Hash32, HeldAside, HELD_ASIDE_SWEEP};
+    use std::net::IpAddr;
+
+    fn body(n: usize) -> Hash32 {
+        let mut bytes = [0u8; 32];
+        for (byte, from) in bytes
+            .iter_mut()
+            .zip(u64::try_from(n).unwrap().to_le_bytes())
+        {
+            *byte = from;
+        }
+        Hash32::from_bytes(bytes)
+    }
+
+    fn peer(n: u64) -> HandedIn {
+        HandedIn {
+            peer: n,
+            host: Some(IpAddr::from([203, 0, 113, 7])),
+        }
+    }
+
+    /// The sender of a body is kept until that body fails, and handed over
+    /// once.
+    ///
+    /// Nothing asked this, so a table that forgot every sender, or kept only
+    /// the last, passed: the one fact it holds is only ever read after the
+    /// message that wrote it is gone.
+    #[test]
+    fn the_sender_of_a_body_is_kept_until_the_body_fails() {
+        let mut aside = HeldAside::default();
+        aside.record(body(1), peer(1), |_| true);
+        aside.record(body(2), peer(2), |_| true);
+        assert_eq!(
+            aside.take(&body(1)),
+            Some(peer(1)),
+            "the first sender was lost"
+        );
+        assert_eq!(
+            aside.take(&body(2)),
+            Some(peer(2)),
+            "the second sender was lost"
+        );
+        assert_eq!(aside.take(&body(1)), None, "a sender was handed over twice");
+    }
+
+    /// Senders of bodies the chain no longer holds are let go of, and only
+    /// once the table has grown to where a sweep is worth its cost.
+    ///
+    /// A block that loses the fork choice costs a stranger nothing to make, so
+    /// a table that kept every sender it was ever told about grew by one row
+    /// for each one sent, for the life of the node. Nothing asked this, so
+    /// that table passed, and so did one that swept on every write.
+    #[test]
+    fn senders_of_bodies_no_longer_held_are_let_go_of_when_the_table_is_full() {
+        let mut aside = HeldAside::default();
+        for n in 0..HELD_ASIDE_SWEEP {
+            aside.record(body(n), peer(1), |_| false);
+        }
+        assert_eq!(
+            aside.by.len(),
+            HELD_ASIDE_SWEEP,
+            "the table was swept before it was full"
+        );
+        let kept = body(3);
+        aside.record(body(HELD_ASIDE_SWEEP), peer(2), |held| *held == kept);
+        assert_eq!(
+            aside.by.len(),
+            2,
+            "a full table kept senders of bodies the chain no longer holds"
+        );
+        assert_eq!(
+            aside.take(&kept),
+            Some(peer(1)),
+            "a sweep lost a body still held"
+        );
+        assert_eq!(aside.take(&body(HELD_ASIDE_SWEEP)), Some(peer(2)));
+    }
 }
 
 /// One question about where fallen notes sit, and what has come back.
@@ -2412,6 +2562,23 @@ impl Shared {
         }
     }
 
+    /// Ends the connection that handed in a body held aside which has just
+    /// failed a switch, when one has, and refuses the address it came from.
+    ///
+    /// It is this peer that is refused, and not the one whose message made the
+    /// switch, which delivered the block above that body and is asked again
+    /// for its chain. Ended and refused like any peer that sent a block this
+    /// node rejects, which is what that body was.
+    fn turn_away(&self, handed: Option<HandedIn>) {
+        let Some(handed) = handed else {
+            return;
+        };
+        self.hang_up(handed.peer);
+        if let Some(host) = handed.host {
+            self.refuse(host, unix_now());
+        }
+    }
+
     fn book(&self) -> MutexGuard<'_, AddressBook> {
         self.book.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -2646,6 +2813,10 @@ impl Shared {
     /// Nothing is held against the peer here or anywhere. The block is valid
     /// to every node whose clock is right, and this node reverses the refusal
     /// by waiting; what a run of them says is about this machine.
+    ///
+    /// The tip of a showing counts as one, when the showing holds at the date
+    /// the tip carries: that tip is a block too, dated by whoever mined it,
+    /// and a node with no chain meets nothing else a slow clock refuses.
     fn clock_looks_behind(&self, from: Option<Sender>, ahead: u64, now: u64) {
         let mut met = self
             .out_of_step
@@ -3217,6 +3388,13 @@ impl Shared {
 /// A network without one pinned leaves this alone, which is what tests and
 /// unnamed networks do.
 ///
+/// It chooses no chain: every chain on the network starts from it, so a node
+/// holding only this block is still one that can be handed a ledger (see
+/// `ChainStore::holds_nothing_of_its_own`), and one that is has it taken back
+/// off its disk by [`Shared::forget_the_first_block`]. Every door into the
+/// handover used to ask whether the chain was empty, which after this it
+/// never is on a named network.
+///
 /// It goes into the log as well as into memory. The log is the followed branch
 /// in order of height with nothing left out, and a first block held only in
 /// memory breaks that on the very first restart: the log would start at height
@@ -3727,6 +3905,7 @@ impl Node {
             unweighed: Mutex::new(Unweighed::default()),
             out_of_step: Mutex::new(OutOfStep::default()),
             asking: Mutex::new(Asking::default()),
+            held_aside: Mutex::new(HeldAside::default()),
         });
 
         {
@@ -4182,12 +4361,13 @@ impl Node {
     /// default budget can and cannot serve.
     ///
     /// And `None` again the moment a chain arrives, however it arrived.
-    /// Showings are only ever weighed while a node has nothing, so the count
+    /// Showings are only ever weighed while a node has no chain of its own,
+    /// which the first block a named network pins is not, so the count
     /// is frozen from then on, and left ungated it would follow a node that
     /// had long since read its chain for the rest of its life, telling its
     /// owner to wait for something that had already happened.
     pub fn unweighable(&self) -> Option<Unweighable> {
-        if !self.shared.chain().is_empty() {
+        if !self.shared.chain().holds_nothing_of_its_own() {
             return None;
         }
         let met = self
@@ -4751,7 +4931,9 @@ fn take_join_part(
 
         // A node that already has a chain is not joining one. This arrives
         // when an answer outlived the question, which costs nothing to ignore.
-        if !shared.chain().is_empty() {
+        // The first block a named network pins is not a chain of its own:
+        // every node on that network lays it down at start.
+        if !shared.chain().holds_nothing_of_its_own() {
             *joining = Progress::Landed;
             return None;
         }
@@ -4854,21 +5036,16 @@ fn weigh_what_was_shown(
     // takes is this build meeting a chain whose difficulty has fallen far
     // below what it ran at, where every archivist alive fails identically and
     // honestly. See [`Unweighable`] for what that costs and how long it lasts.
-    let weighed = SampledStart::decode(whole)
-        // Said rather than passed on bare. The codec names the type it refused
-        // and nothing else, which as a line for a person reads as a program
-        // talking to itself; and this is the refusal the tail ceiling comes
-        // out of, so it is the one worth placing.
-        .map_err(|error| format!("it could not be read as a weighing at all ({error})"))
-        .and_then(|start| {
-            check_start(&start, now, &shared.params)
-                .map(|weighed| (weighed, start.tip))
-                .map_err(|error| error.to_string())
-        });
-    if let Err(because) = &weighed {
-        // The address is read and let go of before the count is taken, so the
-        // table of these stays the leaf its own comment says it is.
-        shared.could_not_weigh(shared.sender_for(from), because, now);
+    //
+    // The address is read and let go of before either count is taken, so the
+    // tables of these stay the leaves their own comments say they are.
+    let weighed = weigh(whole, now, &shared.params);
+    match &weighed {
+        Shown::Weighed(..) => {}
+        Shown::AheadOfThisClock { ahead } => {
+            shared.clock_looks_behind(shared.sender_for(from), *ahead, now);
+        }
+        Shown::Refused(because) => shared.could_not_weigh(shared.sender_for(from), because, now),
     }
     let mut joining = shared.joining();
     // The attempt may have been given up on while this was being weighed:
@@ -4877,8 +5054,24 @@ fn weigh_what_was_shown(
     if !matches!(*joining, Progress::Weighing(_)) {
         return None;
     }
-    let Ok((shown, tip)) = weighed else {
-        return fail_attempt(&mut joining, shared, from, now);
+    let (shown, tip) = match weighed {
+        Shown::Weighed(shown, tip) => (shown, *tip),
+        // The one refusal here that two honest nodes can disagree about, and
+        // the specification says a node MUST NOT hold it against the peer. It
+        // was held against it all the same, the way any other refusal is: its
+        // address paused for a growing interval, and the showing counted
+        // towards telling a person that peers are making chains up or that the
+        // chain cannot be weighed, when what is wrong is this machine's clock.
+        // So the clock is counted instead, and the claim stops counting the
+        // way a ledger from past this build's rules does: nobody can hand this
+        // node that chain until its clock is right, and asking again would be
+        // a loop.
+        Shown::AheadOfThisClock { .. } => {
+            shared.choosing().cannot_be_taken(from, now);
+            *joining = Progress::Idle;
+            return None;
+        }
+        Shown::Refused(_) => return fail_attempt(&mut joining, shared, from, now),
     };
 
     // What weighing settles is that *this* chain's work was really done. It
@@ -4907,6 +5100,56 @@ fn weigh_what_was_shown(
         what: Joining::Ledger,
         part: 0,
     })
+}
+
+/// What came of weighing a showing.
+enum Shown {
+    /// It weighed, and settled on this tip. Boxed, because a header is most
+    /// of the size of the whole and the other two carry next to nothing.
+    Weighed(Weighed, Box<BlockHeader>),
+    /// It weighs at the date its tip carries, and that date stands `ahead`
+    /// seconds past this node's clock, which is further than a node takes.
+    AheadOfThisClock { ahead: u64 },
+    /// It does not weigh, for the reason given.
+    Refused(String),
+}
+
+/// Weighs a showing, telling a tip dated past this node's clock apart from a
+/// showing that does not hold.
+///
+/// The tip's date is the first thing a weighing checks, before any work, so
+/// that refusal alone is one anybody can earn by writing a number in a field,
+/// and a claimant it cost nothing would come back for another turn under a
+/// fresh connection for as long as it liked. It is read as this node's clock
+/// being behind only when the showing holds in every other respect, which is
+/// found by weighing it again at the date its tip carries: the clock is read
+/// nowhere else in a weighing. The first weighing stopped at the tip, so this
+/// is still one weighing's worth of work.
+fn weigh(whole: &[u8], now: u64, params: &ConsensusParams) -> Shown {
+    let start = match SampledStart::decode(whole) {
+        Ok(start) => start,
+        // Said rather than passed on bare. The codec names the type it refused
+        // and nothing else, which as a line for a person reads as a program
+        // talking to itself; and this is the refusal the tail ceiling comes
+        // out of, so it is the one worth placing.
+        Err(error) => {
+            return Shown::Refused(format!(
+                "it could not be read as a weighing at all ({error})"
+            ))
+        }
+    };
+    match check_start(&start, now, params) {
+        Ok(weighed) => Shown::Weighed(weighed, Box::new(start.tip)),
+        Err(StartError::TipFromTheFuture { timestamp }) => {
+            match check_start(&start, timestamp, params) {
+                Ok(_) => Shown::AheadOfThisClock {
+                    ahead: timestamp.saturating_sub(now),
+                },
+                Err(error) => Shown::Refused(error.to_string()),
+            }
+        }
+        Err(error) => Shown::Refused(error.to_string()),
+    }
 }
 
 /// Takes a whole ledger, checks it, adopts it and writes it down.
@@ -5030,8 +5273,20 @@ fn take_the_ledger(shared: &Arc<Shared>, whole: &[u8], tip: &BlockHeader, now: u
     // Asked again on the way in, because the ledger is checked against the
     // rules and adopting it is checked against this node's own chain, and the
     // two refuse for different reasons.
-    if let Err(error) = shared.chain().adopt(state, &handover.recent) {
-        return error.outdated().map_or(Landed::Refused, Landed::TooOld);
+    let forgotten = {
+        let mut chain = shared.chain();
+        // Anything a chain holds when a ledger can still be adopted over it is
+        // the first block its network pins, laid down at start.
+        let over_the_first_block = !chain.is_empty();
+        if let Err(error) = chain.adopt(state, &handover.recent) {
+            return error.outdated().map_or(Landed::Refused, Landed::TooOld);
+        }
+        // Chain first and log second, and the chain still held, so no block
+        // taken meanwhile is written behind a first block that is gone.
+        over_the_first_block.then(|| shared.forget_the_first_block())
+    };
+    if let Some(Some(refusing)) = forgotten {
+        shared.note_refusal(refusing);
     }
     // What the anchor was taken on: the blocks between it and the tip it
     // names, which `accept` asks nothing about. Written down before anything
@@ -5498,6 +5753,38 @@ impl Shared {
         let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
         log.as_ref()
             .is_some_and(|store| store.can_show_the_chain(reaches))
+    }
+
+    /// Takes off the disk the first block a node laid down at start, once it
+    /// has been handed a ledger in its place.
+    ///
+    /// A node on a named network writes that block to its block log, its
+    /// header to the header log, and a leaf for it to the forest, before it
+    /// has spoken to anybody. A handed ledger starts its branch far above it,
+    /// and each of the three is a run in order of height: left in place, the
+    /// block log was a record at height nought that nothing validated since
+    /// could follow, so every block this node applied after the ledger was a
+    /// write it could not make, and the headers the ledger came with had
+    /// nowhere to go. Emptied, the three are what a node on rules that pin
+    /// nothing has at this moment, and they are written from here as its are.
+    ///
+    /// Takes the log, so it is called with the chain held and never the other
+    /// way round. What the disk refused comes back to be said once both are
+    /// let go of.
+    fn forget_the_first_block(&self) -> Option<Refusing> {
+        let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        let store = log.as_mut()?;
+        if let Err(error) = store.blocks.clear() {
+            return Some(Refusing::at(Writing::Blocks, &error));
+        }
+        if let Err(error) = store.headers.clear() {
+            return Some(Refusing::at(Writing::Headers, &error));
+        }
+        store
+            .forest
+            .keep_first(0)
+            .err()
+            .map(|error| Refusing::at(Writing::Headers, &error))
     }
 
     /// Writes down the headers a handover came with.
@@ -7045,11 +7332,15 @@ fn in_file(file: &'static str) -> impl FnOnce(StoreError) -> NodeError {
 /// Everything that needs the chain happens here and nowhere else, so it is
 /// held once and let go before a single byte is sent: a slow peer must never
 /// be able to stall the chain for everyone.
+///
+/// Also says who handed in a body held aside that this message made fail, so
+/// the connection that sent it can be ended and its address refused.
 fn decide(
     shared: &Arc<Shared>,
+    id: PeerId,
     peer: &mut PeerState,
     message: Message,
-) -> (Reaction, Vec<Transfer>) {
+) -> (Reaction, Vec<Transfer>, Option<HandedIn>) {
     // Chain first and log second, here and everywhere, so two threads never
     // take these two the other way round from each other.
     let mut chain = shared.chain();
@@ -7075,6 +7366,23 @@ fn decide(
         nonce: shared.nonce,
     };
     let reaction = on_message(&mut local, peer, message, unix_now());
+
+    // Who handed in a body held aside, written while the chain is still held,
+    // and who handed in the one that has just failed, read the same way.
+    let blamed = {
+        let mut aside = shared
+            .held_aside
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(held) = reaction.held_aside {
+            let handed = HandedIn {
+                peer: id,
+                host: peer.remote,
+            };
+            aside.record(held, handed, |held| chain.block(held).is_some());
+        }
+        reaction.failed_below.and_then(|failed| aside.take(&failed))
+    };
 
     // Written while the chain is still held, so the log cannot record a branch
     // the chain has already moved off.
@@ -7102,7 +7410,7 @@ fn decide(
         .iter()
         .filter_map(|id| chain.pooled(id).cloned())
         .collect();
-    (reaction, passing)
+    (reaction, passing, blamed)
 }
 
 /// Whether the flood window that began at `started` is over by `now`.
@@ -7130,14 +7438,15 @@ fn was_away(previous: u64, now: u64) -> bool {
 }
 
 /// Notes what a peer introduced itself as having, for the choice a node
-/// with no chain has in front of it.
+/// with no chain of its own has in front of it.
 ///
 /// Only such a node has that choice: one with a chain weighs branches by
 /// their work as they arrive, and what anyone claims is neither here nor
-/// there.
+/// there. The first block a named network pins is not a chain of its own,
+/// since every chain on that network starts with it.
 fn note_claim(shared: &Arc<Shared>, id: PeerId, peer: &PeerState) {
-    let empty = shared.chain().is_empty();
-    if !empty {
+    let choosing = shared.chain().holds_nothing_of_its_own();
+    if !choosing {
         return;
     }
     shared.choosing().noted(
@@ -7168,11 +7477,17 @@ fn drive_choosing(shared: &Arc<Shared>, now: u64) {
         }
     };
     let connected: Vec<PeerId> = shared.peers().keys().copied().collect();
-    let (empty, work, archiving) = {
+    let (choosing, work, archiving) = {
         let chain = shared.chain();
-        (chain.is_empty(), chain.total_work(), chain.is_archiving())
+        (
+            chain.holds_nothing_of_its_own(),
+            chain.total_work(),
+            chain.is_archiving(),
+        )
     };
-    let step = shared.choosing().step(now, empty, work, join, &connected);
+    let step = shared
+        .choosing()
+        .step(now, choosing, work, join, &connected);
     match step {
         choosing::Step::Quiet => {}
         // An archivist reads the chain rather than being handed it. A ledger
@@ -7842,7 +8157,8 @@ fn read_loop(
 
         // The chain is held for the decision and for writing the log, and let
         // go before anything is sent, so a slow peer never stalls the chain.
-        let (mut reaction, passing) = decide(shared, &mut peer, message);
+        let (mut reaction, passing, blamed) = decide(shared, id, &mut peer, message);
+        shared.turn_away(blamed);
 
         // Paths offered back for places this node asked about, folded now that
         // the chain has been let go of. Named in the reaction rather than

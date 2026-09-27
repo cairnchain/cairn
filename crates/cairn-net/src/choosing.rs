@@ -468,13 +468,15 @@ impl Chooser {
     }
 
     /// The same, for a claim this node cannot take through nobody's fault: a
-    /// ledger from a height this build has no rules for.
+    /// ledger from a height this build has no rules for, or a showing whose
+    /// tip is dated further past this node's clock than a node takes.
     ///
     /// The claim stops counting, because this node cannot be handed that chain
     /// whoever offers it and asking again would be a loop. The address pays
     /// nothing, because every peer that has updated hands over the same ledger
-    /// and an update makes it readable, so the judgement is about this build.
-    /// It was the same call as the one above, which held an updated archivist
+    /// and an update makes it readable, and every honest peer shows the same
+    /// tip and a clock put right takes it, so the judgement is about this node.
+    /// Both were the same call as the one above, which held an honest archivist
     /// off for a growing pause and then did the same to the next one.
     pub(crate) fn cannot_be_taken(&mut self, peer: u64, now: u64) {
         self.stops_counting(peer, now, false);
@@ -534,10 +536,14 @@ impl Chooser {
     }
 
     /// One round of the choice.
+    ///
+    /// `without_a_chain` is whether the node holds no chain of its own: none
+    /// at all, or only the first block its network pins, which every chain on
+    /// that network starts from.
     pub fn step(
         &mut self,
         now: u64,
-        chain_is_empty: bool,
+        without_a_chain: bool,
         chain_work: u128,
         join: JoinProgress,
         connected: &[u64],
@@ -545,7 +551,7 @@ impl Chooser {
         if self.done {
             return Step::Quiet;
         }
-        if !chain_is_empty {
+        if !without_a_chain {
             return self.finish(chain_work, connected);
         }
         self.clock_went_back(now);

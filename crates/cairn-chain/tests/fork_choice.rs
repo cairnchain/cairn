@@ -733,7 +733,8 @@ fn the_most_a_node_will_hold_stays_something_a_phone_has() {
 /// Nothing sizes a side block. What bounds a block is applied when it is
 /// connected, and a block on a losing branch is never connected, so what a
 /// peer may make a node hold is bounded by the sweeps in `cairn-chain` and by
-/// nothing else.
+/// nothing else. The one thing asked of its body is that it produces the root
+/// its header names, which anybody can work out, so the header here names it.
 fn fat_block(height: u64, previous: Hash32, bytes: usize, owner: &SecretKey) -> Block {
     let value = Amount::from_pebbles(1).unwrap();
     let per = Note::new(value, owner.public_key()).encode().len();
@@ -745,7 +746,7 @@ fn fat_block(height: u64, previous: Hash32, bytes: usize, owner: &SecretKey) -> 
             .map(|_| Note::new(value, owner.public_key()))
             .collect(),
     );
-    Block {
+    let mut block = Block {
         header: BlockHeader {
             version: BLOCK_VERSION,
             network: NetworkId::TESTNET,
@@ -761,7 +762,9 @@ fn fat_block(height: u64, previous: Hash32, bytes: usize, owner: &SecretKey) -> 
         },
         coinbase: CoinbaseTransaction::new(height, Vec::new()),
         transfers: vec![transfer],
-    }
+    };
+    block.header.transactions_root = block.transactions_root();
+    block
 }
 
 /// The same ceiling, measured against a node rather than against arithmetic.

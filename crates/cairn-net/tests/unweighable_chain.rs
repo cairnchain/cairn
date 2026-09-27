@@ -30,18 +30,23 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use cairn_accumulator::Archive;
 use cairn_crypto::SecretKey;
-use cairn_ledger::block::Block;
+use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::note::Note;
+use cairn_ledger::sampling::{check_start, open_start, SampledStart, StartError, SAMPLES};
+use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
-use cairn_net::message::{Handshake, Keeps, Message, PROTOCOL_VERSION};
+use cairn_net::message::{Handshake, Joining, Keeps, Message, JOIN_PART_BYTES, PROTOCOL_VERSION};
+use cairn_net::node::{Behind, Unweighable};
 use cairn_net::sync::JOIN_RATHER_THAN_READ;
 use cairn_net::wire::{read_message, write_message, Incoming, MAX_FRAME_BYTES};
 use cairn_net::Node;
+use cairn_primitives::codec::Encode;
 use cairn_primitives::Hash32;
 
 const PATIENCE: Duration = Duration::from_secs(30);
@@ -377,5 +382,270 @@ fn a_chain_arriving_ends_the_claim_that_nobody_could_show_one() {
     assert!(
         after.is_none(),
         "a node that weighed a chain went on saying nobody could show it one: {after:?}"
+    );
+}
+
+/// This machine's clock, which is the one a running node reads.
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// A real showing of a short chain whose tip is dated an hour further past
+/// this machine's clock than a node takes.
+fn a_showing_dated_ahead() -> SampledStart {
+    let params = params();
+    let blocks = 40;
+    let tip_at = unix_now() + params.max_timestamp_drift + 3_600;
+    let mut forge = Forge {
+        params,
+        state: LedgerState::new(),
+        clock: tip_at - 600 * blocks,
+    };
+    let headers: Vec<BlockHeader> = forge
+        .mine_many(usize::try_from(blocks).unwrap())
+        .iter()
+        .map(|block| block.header)
+        .collect();
+    let tip = *headers.last().unwrap();
+    assert_eq!(tip.timestamp, tip_at);
+
+    let mut archive = Archive::new();
+    for header in &headers {
+        archive.add(header_leaf(&header.id()));
+    }
+    let start = open_start(
+        &tip,
+        forge.state.headers_before_tip(),
+        SAMPLES,
+        &params,
+        |height| headers.get(usize::try_from(height).ok()?).copied(),
+        |height| archive.prove_in(height, tip.height),
+    )
+    .expect("a chain this short can be shown");
+    assert!(
+        matches!(
+            check_start(&start, unix_now(), &params),
+            Err(StartError::TipFromTheFuture { .. })
+        ),
+        "the premise: this machine's clock refuses the tip"
+    );
+    assert!(
+        check_start(&start, tip.timestamp, &params).is_ok(),
+        "the premise: at the date its tip carries, the showing weighs"
+    );
+    start
+}
+
+/// Ten peers, each showing `start`, and a newcomer that has met them all.
+///
+/// Ten is more than the run of refusals a node counts before it names its
+/// clock, and more than it counts before it names the chain.
+fn a_newcomer_shown(start: &SampledStart) -> (Node, Vec<ShowsItEarly>) {
+    let shown = start.encode();
+    let newcomer = Node::bind(params(), loopback()).unwrap();
+    let peers: Vec<ShowsItEarly> = (0..10u8)
+        .map(|index| {
+            ShowsItEarly::start(
+                110 + index,
+                4_000_000 - u128::from(index),
+                start.tip.id(),
+                &shown,
+            )
+        })
+        .collect();
+    for peer in &peers {
+        newcomer.connect(peer.address).unwrap();
+    }
+    (newcomer, peers)
+}
+
+/// Waits until the newcomer says something about its clock or about the
+/// chain, and returns both readings.
+///
+/// Counted rather than timed: either line appears once enough showings have
+/// been refused, and which one it is is the question. The minute is a bound
+/// for a node that says neither, several times what the ten showings take.
+fn what_it_says(newcomer: &Node) -> (Option<Unweighable>, Option<Behind>) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline
+        && newcomer.clock_behind().is_none()
+        && newcomer.unweighable().is_none()
+    {
+        thread::sleep(Duration::from_millis(50));
+    }
+    (newcomer.unweighable(), newcomer.clock_behind())
+}
+
+/// A peer that claims a long chain, says it kept the headers, and answers the
+/// weighing with `shown`, a real one, in as many pieces as it takes.
+///
+/// Everything else it is asked is ignored, as [`CannotShowIt`] ignores it.
+struct ShowsItEarly {
+    address: SocketAddr,
+    running: Arc<AtomicBool>,
+    shown: Arc<AtomicU64>,
+}
+
+impl ShowsItEarly {
+    fn start(tag: u8, work: u128, tip: Hash32, shown: &[u8]) -> Self {
+        let listener = TcpListener::bind(loopback()).unwrap();
+        let address = listener.local_addr().unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let counted = Arc::new(AtomicU64::new(0));
+        let mine = (Arc::clone(&running), Arc::clone(&counted));
+        let pieces: Vec<Vec<u8>> = shown.chunks(JOIN_PART_BYTES).map(<[u8]>::to_vec).collect();
+        let parts = u32::try_from(pieces.len()).unwrap();
+        thread::spawn(move || {
+            let (running, counted) = mine;
+            for stream in listener.incoming() {
+                if !running.load(Ordering::SeqCst) {
+                    return;
+                }
+                let Ok(mut stream) = stream else { return };
+                let network = params().network;
+                stream
+                    .set_read_timeout(Some(Duration::from_millis(200)))
+                    .ok();
+                while running.load(Ordering::SeqCst) {
+                    let message = match read_message(&mut stream, network, MAX_FRAME_BYTES) {
+                        Ok(Incoming::Message(message)) => message,
+                        Ok(Incoming::Quiet) => continue,
+                        Err(_) => break,
+                    };
+                    let answer = match message {
+                        Message::Hello(_) => Message::Welcome(Handshake {
+                            version: PROTOCOL_VERSION,
+                            network,
+                            genesis: Hash32::ZERO,
+                            tip,
+                            height: JOIN_RATHER_THAN_READ + 4_096,
+                            total_work: work,
+                            listen: address.port(),
+                            nonce: u64::from(tag),
+                            keeps: Keeps {
+                                headers: true,
+                                cold_set: true,
+                            },
+                        }),
+                        Message::GetJoin {
+                            what: what @ Joining::Weight,
+                            part,
+                        } => {
+                            let Some(piece) = pieces.get(usize::try_from(part).unwrap()) else {
+                                continue;
+                            };
+                            if part + 1 == parts {
+                                counted.fetch_add(1, Ordering::SeqCst);
+                            }
+                            Message::JoinPart {
+                                what,
+                                at: tip,
+                                part,
+                                parts,
+                                bytes: piece.clone(),
+                            }
+                        }
+                        Message::Ping(token) => Message::Pong(token),
+                        _ => continue,
+                    };
+                    if write_message(&mut stream, network, &answer).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            address,
+            running,
+            shown: counted,
+        }
+    }
+
+    fn stop(&self) {
+        self.running.store(false, Ordering::SeqCst);
+        let _ = std::net::TcpStream::connect(self.address);
+    }
+}
+
+/// **A showing that holds, from a tip dated past this node's clock, is held
+/// against nobody and said to be about the clock.**
+///
+/// The one refusal in a weighing that two honest nodes can disagree about, and
+/// the specification says a node MUST NOT hold it against the peer that
+/// offered it. It went the way of every other refusal: the address paused for
+/// a growing interval, and the showing counted towards telling a person that
+/// peers are making chains up or that the chain cannot be weighed, while
+/// nothing anywhere said the clock. Nothing asked this, so a node whose slow
+/// clock refused every honest archivist, and blamed each of them for it,
+/// passed.
+#[test]
+fn a_showing_dated_past_this_clock_is_said_to_be_about_the_clock() {
+    let (newcomer, peers) = a_newcomer_shown(&a_showing_dated_ahead());
+    let (unweighable, behind) = what_it_says(&newcomer);
+    let showings: u64 = peers
+        .iter()
+        .map(|peer| peer.shown.load(Ordering::SeqCst))
+        .sum();
+    for peer in &peers {
+        peer.stop();
+    }
+    newcomer.shutdown();
+
+    assert!(
+        unweighable.is_none(),
+        "honest showings refused for this machine's clock were reported as a chain nobody \
+         can show: {unweighable:?}"
+    );
+    assert!(
+        behind.is_some(),
+        "{showings} honest showings were refused for a tip dated past this machine's clock, \
+         and nothing said the clock looks behind"
+    );
+}
+
+/// **A showing dated past this node's clock that would not weigh at its own
+/// date either is refused for what is wrong with it, and not taken for the
+/// clock.**
+///
+/// The date is the first thing a weighing checks, before any work, so a
+/// refusal for it alone costs nothing to earn. Taking every such refusal for
+/// the clock would let anybody who dates a made up showing ahead come back for
+/// another turn under every fresh connection, and tell the operator the clock
+/// is wrong. Nothing asked this, so a node that took any tip dated ahead for
+/// its own clock, whatever the showing under it, passed.
+#[test]
+fn a_showing_that_fails_at_its_own_date_is_not_taken_for_the_clock() {
+    let mut start = a_showing_dated_ahead();
+    let tip = start.tip;
+    for sibling in &mut start.samples[0].proof.siblings {
+        *sibling = Hash32::ZERO;
+    }
+    assert!(
+        matches!(
+            check_start(&start, tip.timestamp, &params()),
+            Err(StartError::NotInHistory { .. })
+        ),
+        "the premise: at the date its tip carries, the showing does not weigh"
+    );
+    let (newcomer, peers) = a_newcomer_shown(&start);
+    let (unweighable, behind) = what_it_says(&newcomer);
+    for peer in &peers {
+        peer.stop();
+    }
+    newcomer.shutdown();
+
+    assert!(
+        behind.is_none(),
+        "a showing that does not weigh at any date was taken for this machine's clock"
+    );
+    let unweighable = unweighable
+        .expect("showings that do not weigh were not reported as a chain nobody can show");
+    assert!(
+        !unweighable.because.starts_with("the tip is dated"),
+        "a showing that does not weigh at any date was refused for its date alone: {}",
+        unweighable.because
     );
 }

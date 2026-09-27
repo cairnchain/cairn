@@ -96,10 +96,12 @@ impl Chain {
 /// work there is.
 ///
 /// Difficulty one accepts every hash, so this costs its maker no work at all.
-/// Nothing here is validated: a block that loses the fork choice is stored and
-/// never connected, so its body is never looked at. Only the nonce changes
-/// between them, which is enough for a different identifier, so a whole branch
-/// of these hangs off one parent rather than having to be chained.
+/// Almost nothing here is validated: a block that loses the fork choice is
+/// stored and never connected, and the one thing asked of its body is that it
+/// is the body its header names, a root anybody can work out. Only the nonce
+/// changes between them, which is enough for a different identifier, so a
+/// whole branch of these hangs off one parent rather than having to be
+/// chained.
 fn side_block(height: u64, previous: Hash32, bytes: usize, nonce: u64, owner: &SecretKey) -> Block {
     let value = Amount::from_pebbles(1).unwrap();
     let per = Note::new(value, owner.public_key()).encode().len();
@@ -111,7 +113,7 @@ fn side_block(height: u64, previous: Hash32, bytes: usize, nonce: u64, owner: &S
             .map(|_| Note::new(value, owner.public_key()))
             .collect(),
     );
-    Block {
+    let mut block = Block {
         header: BlockHeader {
             version: BLOCK_VERSION,
             network: NetworkId::TESTNET,
@@ -127,7 +129,9 @@ fn side_block(height: u64, previous: Hash32, bytes: usize, nonce: u64, owner: &S
         },
         coinbase: CoinbaseTransaction::new(height, Vec::new()),
         transfers: vec![transfer],
-    }
+    };
+    block.header.transactions_root = block.transactions_root();
+    block
 }
 
 /// A block already judged and refused is not taken into memory again.
