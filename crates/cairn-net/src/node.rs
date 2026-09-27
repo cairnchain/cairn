@@ -9864,6 +9864,61 @@ mod peers_and_loops {
         assert_eq!(reached, 0, "a node with every slot taken dialled another");
     }
 
+    /// A round dials neither the node itself nor an address it already holds a
+    /// connection to.
+    ///
+    /// Nothing put either in the book, so a round that took an address as a
+    /// candidate when it passed either one of the two tests passed: a node
+    /// dialling every peer it already holds once a round, and itself.
+    #[test]
+    fn a_round_dials_neither_the_node_itself_nor_a_peer_it_holds() {
+        let node = quiet();
+        let (socket, _far) = a_socket();
+        let (in_door, out_door) = (a_door(), a_door());
+        let came_in = in_door.local_addr().unwrap();
+        let went_out = out_door.local_addr().unwrap();
+        {
+            let mut peers = node.shared.peers();
+            // One that opened its connection here and said where it listens,
+            // and one this node dialled.
+            peers.insert(
+                1,
+                Peer {
+                    advertised: Some(came_in),
+                    ..stand_in(&socket, false)
+                },
+            );
+            peers.insert(
+                2,
+                Peer {
+                    dialled_to: Some(went_out),
+                    ..stand_in(&socket, true)
+                },
+            );
+        }
+        {
+            let mut book = node.shared.book();
+            for address in [came_in, went_out, node.address()] {
+                assert!(book.insert(address), "the address goes into the book");
+            }
+        }
+        node.shared.running.store(true, Ordering::SeqCst);
+        dial_from_book(&node.shared, 1_000);
+        let reached = dialled(&node);
+        let still_ready = node.shared.book().ready(1_000);
+        stop_all(&node);
+
+        assert_eq!(
+            reached, 1,
+            "a round opened a connection to an address the node already holds one to, \
+             or to itself"
+        );
+        assert!(
+            still_ready.contains(&node.address()),
+            "a round dialled the node's own address"
+        );
+    }
+
     /// A peer may send as many messages as a window allows, and the next one
     /// ends it.
     ///
