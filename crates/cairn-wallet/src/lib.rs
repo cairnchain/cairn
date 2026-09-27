@@ -492,10 +492,19 @@ pub struct Recovery {
     /// How many of those this wallet could not even ask about, having never
     /// seen where they landed.
     pub unplaceable: usize,
-    /// Peers the question went to. Zero means there was nobody to ask.
+    /// Peers the question went to. Only peers that say they keep the whole
+    /// record are asked, so zero means none of them was connected.
     pub asked: usize,
-    /// How many of those said they keep the whole record.
+    /// How many connected peers said they keep the whole record.
     pub archivists: usize,
+    /// Peers this wallet was connected to when it asked, whether or not they
+    /// were asked.
+    ///
+    /// Counted apart from `asked` because nobody asked no longer means
+    /// nobody there. A wallet connected to peers that keep no record asks
+    /// none of them, and what it tells its owner is that a peer keeping the
+    /// record is missing, not that it is alone.
+    pub connected: usize,
     /// Peers that answered at all, whatever the answer was.
     pub answered: usize,
     /// Notes that can move again, because somebody rebuilt what it takes.
@@ -565,7 +574,7 @@ impl Recovery {
                  rest is still stuck, and asking again later may find it.",
                 self.rebuilt
             )
-        } else if self.asked == 0 {
+        } else if self.asked == 0 && self.connected == 0 {
             format!(
                 "This wallet holds {notes} it cannot spend yet. Spending a note \
                  that has been put away needs a small piece of evidence that goes \
@@ -574,22 +583,24 @@ impl Recovery {
                  anything at all. Connect to a peer that was started with \
                  --archive, or start one yourself."
             )
-        } else if self.archivists == 0 {
+        } else if self.asked == 0 {
             format!(
                 "This wallet holds {notes} it cannot spend yet. Spending a note \
                  that has been put away needs a small piece of evidence that goes \
                  stale, and this wallet's copy has. Rebuilding one takes a machine \
                  that kept the whole record, and none of the {} this wallet is \
-                 connected to says it did. Connect to a peer started with \
-                 --archive, or start one yourself.",
-                self.asked
+                 connected to says it did. It asks no other: the question names \
+                 these notes, and says whose they are to anyone who has the chain. \
+                 Connect to a peer started with --archive, or start one yourself, \
+                 and this wallet asks it.",
+                self.connected
             )
         } else {
             format!(
                 "This wallet holds {notes} it cannot spend yet. It asked {} machines \
                  that keep the whole record, and none of them could say where these \
                  notes sit. Asking again later may do better; so may a different peer.",
-                self.archivists
+                self.asked
             )
         };
 
@@ -2213,7 +2224,10 @@ impl Wallet {
     /// itself, or it is thrown away. So the question can be put to an
     /// anonymous stranger, which is the whole reason it is a question a node
     /// asks another node rather than a request to a website somebody has to
-    /// keep running.
+    /// keep running. Trusting nobody is not telling nobody, though: the
+    /// question says whose notes are stuck to whoever reads it, so it is put
+    /// only to a peer that says it keeps the whole record, and to nobody when
+    /// none is connected.
     ///
     /// Waits, because it is one round trip and there is nothing useful to do
     /// meanwhile, and asks again at most every [`RECOVERY_PAUSE`], because
@@ -2231,9 +2245,10 @@ impl Wallet {
         }
 
         // The place is what is asked about and the leaf is what the answer has
-        // to fold to. Neither says whose money it is: a leaf is a hash, and a
-        // place is a number, so what a wallet hands an archivist is a list of
-        // positions in a set that archivist already holds in full.
+        // to fold to. Only the place is sent, and it is not a disguise: a
+        // place names a note, its owner and its value to anyone who has the
+        // chain, so whoever is asked learns whose notes are stuck here. That is
+        // why the node asks only peers that say they keep the whole record.
         let wanted: Vec<(u64, Hash32)> = holdings
             .unprovable
             .iter()
@@ -2252,13 +2267,14 @@ impl Wallet {
             let paused = last
                 .at
                 .is_some_and(|asked| asked.elapsed() < RECOVERY_PAUSE);
-            // Three ways the pause does not apply, and each of them is a
-            // moment somebody is waiting on. Asking about a place that was
-            // answered for before means the path has gone stale rather than
-            // that nobody has one. Somebody worth asking arriving is the whole
-            // of what an empty-handed wallet was waiting for. And a wallet
-            // that had nobody at all to ask has a fresh question the moment it
-            // has anybody.
+            // Two ways the pause does not apply, and each of them is a moment
+            // somebody is waiting on. Asking about a place that was answered
+            // for before means the path has gone stale rather than that nobody
+            // has one. And somebody worth asking arriving is the whole of what
+            // an empty-handed wallet was waiting for. Only a peer that says it
+            // keeps the record is somebody worth asking: any other peer
+            // arriving used to count, which put this wallet's places to every
+            // stranger that connected.
             // The half a question actually carries, on both sides of the
             // comparison. `unresolved` holds the places that were asked about
             // and not answered for, which `still_outstanding` was repaired to
@@ -2274,8 +2290,7 @@ impl Wallet {
             let asking_about: BTreeSet<u64> =
                 one_question(&wanted).iter().map(|(at, _)| *at).collect();
             let same_question = asking_about.is_subset(&last.unresolved);
-            let better_now = self.node.archiving_peers() > last.report.archivists
-                || (last.report.asked == 0 && self.node.peers_introduced() > 0);
+            let better_now = self.node.archiving_peers() > last.report.archivists;
             if paused && same_question && !better_now {
                 return last.report;
             }
@@ -2315,6 +2330,7 @@ impl Wallet {
             unplaceable,
             asked: answer.asked,
             archivists: answer.archivists,
+            connected: self.node.peers_introduced(),
             answered: answer.answered,
             rebuilt: mended,
             refused: answer.refused,
@@ -4395,6 +4411,7 @@ mod tests {
             unplaceable: 0,
             asked: 2,
             archivists: 1,
+            connected: 2,
             answered: 2,
             rebuilt: 64,
             refused: 0,
@@ -4472,9 +4489,10 @@ mod tests {
     fn each_state_of_stuck_money_is_told_its_own_answer() {
         let stuck = Recovery {
             stranded: 3,
-            asked: 2,
+            asked: 1,
             archivists: 1,
-            answered: 2,
+            connected: 2,
+            answered: 1,
             ..Recovery::default()
         };
         let cases = [
@@ -4501,6 +4519,7 @@ mod tests {
                 Recovery {
                     asked: 0,
                     archivists: 0,
+                    connected: 0,
                     answered: 0,
                     ..stuck
                 },
@@ -4510,7 +4529,9 @@ mod tests {
             (
                 "peers, none of them keeping the record",
                 Recovery {
+                    asked: 0,
                     archivists: 0,
+                    answered: 0,
                     ..stuck
                 },
                 "none of the 2 this wallet is connected to says it did",

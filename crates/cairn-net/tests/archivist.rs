@@ -313,51 +313,109 @@ fn the_two_things_a_node_may_have_kept_are_told_apart_on_the_wire() {
 /// answer names every place that was asked about, including the ones it has
 /// nothing for.
 ///
-/// The node in the middle here keeps the headers and not the cold set, which
-/// is what almost every node on the network is, and which used to be a node
-/// that claimed it could answer this.
+/// The node here keeps the headers and not the cold set, which is what almost
+/// every node on the network is, and which used to be a node that claimed it
+/// could answer this. A node of this program no longer puts the question to
+/// one, so it is put over a bare socket, as anybody else's software may.
 #[test]
 fn a_node_that_cannot_help_says_so_rather_than_nothing() {
     let ready = a_chain_with_a_fallen_note();
-    let top = (ready.blocks.len() - 1) as u64;
 
     let directory = scratch("plainly");
     let (middle, _) = Node::open(params(), loopback(), &directory).unwrap();
     for block in &ready.blocks {
         middle.submit_block(block.clone()).unwrap();
     }
+    assert!(
+        !middle.is_archiving(),
+        "it keeps the headers and not the set"
+    );
+
+    let placed = asked_directly(middle.address(), vec![ready.position]);
+    assert_eq!(
+        placed,
+        vec![Placed {
+            position: ready.position,
+            proof: None,
+        }],
+        "a node that cannot help still answers, with nothing where the path \
+         would be, or the asker cannot tell it from a node that has gone away"
+    );
+
+    middle.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// **Only a peer that says it keeps the whole set is asked.**
+///
+/// The question names places, and a place names a note, its owner and its
+/// value to anyone who has the chain. When no peer claimed to keep the set,
+/// the question went to every peer instead, on the grounds that a node
+/// following the owner could answer it; no node answers out of those paths
+/// any more, so every one of those peers learned whose money was stuck and
+/// had nothing to give for it. A wallet with stuck money told every stranger
+/// it was connected to, and each new one as it arrived.
+///
+/// So a node connected only to a peer that keeps no more than the headers
+/// asks nobody, and a node connected to that peer and to an archivist asks
+/// the archivist alone. Nothing asked the first half: the test that reached
+/// a plain peer asserted that it had been asked.
+#[test]
+fn only_a_peer_that_says_it_keeps_the_whole_set_is_asked() {
+    let ready = a_chain_with_a_fallen_note();
+    let top = (ready.blocks.len() - 1) as u64;
+
+    let plain_directory = scratch("only-plain");
+    let (plain, _) = Node::open(params(), loopback(), &plain_directory).unwrap();
+    for block in &ready.blocks {
+        plain.submit_block(block.clone()).unwrap();
+    }
 
     let asker = Node::bind(params(), loopback()).unwrap();
-    asker.connect(middle.address()).unwrap();
+    asker.connect(plain.address()).unwrap();
     wait_for("the asking node to catch up", || {
         asker.height() == Some(top)
     });
     assert_eq!(
         asker.archiving_peers(),
         0,
-        "nothing it is connected to claims to keep the set"
+        "its one peer keeps the headers and not the set"
     );
 
+    // No archivist is known, so however long it waited nobody would arrive.
+    let alone = asker.recover_proofs(&[(ready.position, ready.leaf)], Duration::ZERO);
+    assert_eq!(
+        alone.asked, 0,
+        "a node put the places of a stuck note to a peer that keeps no set, \
+         which learns from them whose note it is and cannot rebuild its path"
+    );
+
+    let kept_directory = scratch("only-kept");
+    let (keeper, _) = Node::open_archiving(params(), loopback(), &kept_directory).unwrap();
+    for block in &ready.blocks {
+        keeper.submit_block(block.clone()).unwrap();
+    }
+    asker.connect(keeper.address()).unwrap();
+    wait_for("the archivist to say what it keeps", || {
+        asker.archiving_peers() == 1
+    });
+
     let answer = asker.recover_proofs(&[(ready.position, ready.leaf)], PATIENCE);
-    assert_eq!(
-        answer.archivists, 0,
-        "nobody claimed it, so everybody was asked"
+    assert!(
+        answer.proofs.contains_key(&ready.position),
+        "the archivist was asked, and answered"
     );
-    assert_eq!(answer.asked, 1);
     assert_eq!(
-        answer.answered, 1,
-        "a node that cannot help still answers, or the asker cannot tell it \
-         from a node that has gone away"
-    );
-    assert!(answer.proofs.is_empty(), "and it has nothing to give");
-    assert_eq!(
-        answer.refused, 0,
-        "which is not the same as answering badly"
+        answer.asked, answer.archivists,
+        "with an archivist connected, the peer that keeps no set was asked \
+         as well"
     );
 
     asker.shutdown();
-    middle.shutdown();
-    let _ = std::fs::remove_dir_all(&directory);
+    keeper.shutdown();
+    plain.shutdown();
+    let _ = std::fs::remove_dir_all(&plain_directory);
+    let _ = std::fs::remove_dir_all(&kept_directory);
 }
 
 /// Introduces itself to `node` over a bare socket, asks where `positions`

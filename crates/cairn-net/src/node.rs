@@ -727,13 +727,15 @@ pub struct Stranded {
 /// leaving the person to find it.
 #[derive(Clone, Debug, Default)]
 pub struct Recovered {
-    /// Peers the question went to. Zero means there was nobody to ask at all.
+    /// Peers the question went to. Only peers that say they keep the whole
+    /// cold set are asked, so zero means none was connected.
     pub asked: usize,
-    /// How many of those said they keep the whole cold set.
+    /// How many connected peers said they keep the whole cold set, when the
+    /// asking ended.
     ///
-    /// Told apart from the rest because it is the difference between having
-    /// asked the wrong people and having nobody to ask. A wallet with peers
-    /// but no archivist among them is one connection away from an answer.
+    /// The same as `asked` unless one of them hung up or arrived while the
+    /// question was out. A wallet with peers and no archivist among them is
+    /// one connection away from an answer, and it has asked none of them.
     pub archivists: usize,
     /// Peers that answered at all, whatever the answer was.
     pub answered: usize,
@@ -3394,28 +3396,23 @@ impl Shared {
         }
     }
 
-    /// Connections worth asking where a fallen note sits, and how many of them
-    /// said they keep the whole set.
+    /// Connections worth asking where a fallen note sits: the ones that said
+    /// they keep the whole set, and nobody when none of them did.
     ///
-    /// Peers that claim the service, when there are any. When there are none,
-    /// everybody, and the reason is that the claim is only a claim in the
-    /// other direction too: a node that never said it archives still holds the
-    /// path for every note of an owner it follows, which is what a second
-    /// wallet on the same key is. Asking costs one small message each and is
-    /// answered plainly either way, and it beats telling somebody their money
-    /// is out of reach without having asked anyone.
-    fn worth_asking(&self) -> (Vec<PeerId>, usize) {
-        let peers = self.peers();
-        let archivists: Vec<PeerId> = peers
+    /// It used to be everybody when nobody claimed the service, on the grounds
+    /// that a node following the owner holds the paths as well. No node
+    /// answers out of those paths (see [`Shared::place`]), so a peer that
+    /// keeps less than the whole set has nothing to answer with, and the
+    /// question told it everything it carries all the same: a place names a
+    /// note, its owner and its value to anyone who has the chain. A wallet
+    /// with stuck money handed that list to every stranger it was connected
+    /// to, and to each new one as it arrived.
+    fn worth_asking(&self) -> Vec<PeerId> {
+        self.peers()
             .iter()
             .filter(|(_, peer)| peer.archives)
             .map(|(id, _)| *id)
-            .collect();
-        let archiving = archivists.len();
-        if archiving > 0 {
-            return (archivists, archiving);
-        }
-        (peers.keys().copied().collect(), 0)
+            .collect()
     }
 
     /// Takes an answer about where fallen notes sit, keeping only the paths
@@ -4797,8 +4794,15 @@ impl Node {
     ///
     /// `wanted` is the place each note is believed to sit and the leaf it must
     /// fold to, which is what makes the answer worth taking from a stranger.
-    /// Whoever answers is handed a list of places and nothing else: not the
-    /// notes, not the owner, not who is asking about what.
+    /// What is handed over is the list of places and nothing else, and it is
+    /// handed only to peers that say they keep the whole set. That is not
+    /// because the list is anonymous. A place names a note, its owner and its
+    /// value to anyone who has the chain, so whoever is asked learns whose
+    /// money the asker cannot move and how much of it there is, from the
+    /// address at the other end of the connection. It is because nobody else
+    /// could answer. With no such peer connected, nobody is asked: the node
+    /// reaches for one it has heard of, and if none arrives in time the answer
+    /// says that nobody was asked.
     ///
     /// Nothing here trusts anybody. A path is folded from the place named up
     /// to a commitment this node worked out for itself, block by block, and
@@ -4848,7 +4852,8 @@ impl Node {
 
         let deadline = Instant::now().checked_add(patience);
         loop {
-            let (worth_asking, archivists) = self.shared.worth_asking();
+            let worth_asking = self.shared.worth_asking();
+            let archivists = worth_asking.len();
             let fresh: Vec<PeerId> = {
                 let mut asking = self.shared.asking();
                 worth_asking
@@ -9695,17 +9700,37 @@ mod disk_and_headers {
         assert_eq!(once, 1, "a question that was put was not counted");
     }
 
+    /// A node that keeps the whole cold set and holds it in memory only,
+    /// which is the one kind of peer a question about fallen notes is put to.
+    fn an_archivist(params: ConsensusParams) -> Node {
+        Node::start(
+            params,
+            loopback(),
+            ChainStore::archiving(params),
+            None,
+            AddressBook::new(),
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap()
+    }
+
     /// A question that everybody asked has answered ends there, rather than at
     /// the end of its patience.
     ///
     /// Every recovery in the suite waited within its patience and looked only
     /// at what came back, so a wait that ran to the end of the patience
     /// whatever the answers passed. That is a wallet held for the whole wait
-    /// by a peer that answered at once that it could not help.
+    /// by a peer that answered at once that it could not help. The peer keeps
+    /// the whole set, since nobody else is asked, and has nothing at the place
+    /// asked about.
     #[test]
     fn a_question_everyone_asked_has_answered_ends_there() {
         let params = ConsensusParams::testnet();
-        let answering = Node::bind(params, loopback()).unwrap();
+        let answering = an_archivist(params);
         let asking = Node::bind(params, loopback()).unwrap();
         asking.connect(answering.address()).unwrap();
         wait_until("the two nodes to introduce themselves", || {
@@ -9742,7 +9767,7 @@ mod disk_and_headers {
     #[test]
     fn a_node_connected_to_nobody_reaches_for_an_archivist_it_has_heard_of() {
         let params = ConsensusParams::testnet();
-        let answering = Node::bind(params, loopback()).unwrap();
+        let answering = an_archivist(params);
         let asking = Node::bind(params, loopback()).unwrap();
         let known = answering.address();
         {
