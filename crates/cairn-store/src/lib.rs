@@ -629,6 +629,33 @@ impl BlockLog {
         Ok(Some(block))
     }
 
+    /// How many bytes the block at `height` encodes to, found without reading
+    /// it.
+    ///
+    /// For a caller that has to price a block before it pays for reading it:
+    /// [`BlockLog::read_at`] decodes the whole record, and decoding a block
+    /// decompresses a key off the curve for every owner in it, which for a
+    /// full block is tens of milliseconds. This is two offsets off the index.
+    ///
+    /// The index is derived and can be wrong, so this is the index's word and
+    /// not the record's. `read_at` checks the one against the other and
+    /// refuses a record that disagrees, so an index that lies prices a block
+    /// wrongly and gets nothing served for it.
+    pub fn bytes_at(&self, height: u64) -> Result<Option<usize>, StoreError> {
+        if !self.holds(height) {
+            return Ok(None);
+        }
+        let Ok(index) = usize::try_from(height.saturating_sub(self.first)) else {
+            return Ok(None);
+        };
+        let Some((start, end)) = self.bounds(index)? else {
+            return Ok(None);
+        };
+        // Less the four bytes of length the record opens with.
+        let bytes = end.saturating_sub(start).saturating_sub(4);
+        Ok(Some(usize::try_from(bytes).unwrap_or(usize::MAX)))
+    }
+
     /// Whether the record beside record `index` names it.
     ///
     /// The record after it, which carries its identifier, or the record before

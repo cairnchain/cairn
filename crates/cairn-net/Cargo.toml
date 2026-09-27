@@ -22,3 +22,6 @@ thiserror.workspace = true
 [dev-dependencies]
 cairn-fuzz.workspace = true
 hex.workspace = true
+# For the serving tests in `node.rs`, which count the bytes reading a block
+# back hashes rather than timing the reads. Only the test build asks for it.
+cairn-primitives = { workspace = true, features = ["count-hashing"] }

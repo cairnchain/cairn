@@ -11,14 +11,20 @@
 //! twenty six thousand keys: a sixth of a second of somebody else's processor
 //! before the subgroup check went in, and one and a third seconds after.
 //!
-//! The budget that would have charged for it is `held_off`, after the read,
-//! and by then the work is done. A control that exists and is
-//! charged one layer too high.
+//! The budget that would have charged for it was asked after the read, once
+//! the message was built, and by then the work was done. A control that
+//! exists and is charged one layer too high.
 //!
 //! So the cap is the caller's to state now, and the caller that reads from a
 //! peer states a small one until the peer has introduced itself. A handshake
 //! is a fixed set of fields a few hundred bytes long, and it is the only thing
 //! a node has any business sending before one.
+//!
+//! The same defect reached a peer that had introduced itself, whose cap is the
+//! whole megabyte, and was closed the other way: its frames are charged to its
+//! allowance by their size before they are decoded, and one it cannot pay for
+//! is not decoded at all (`PeerState::afford_reading`). A stranger's are not
+//! charged, since a handshake is free, and this cap is what bounds them.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 

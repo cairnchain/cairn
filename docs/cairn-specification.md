@@ -506,7 +506,11 @@ sent it.
 **Fourteen is where the work is checked, and its position is deliberate.** It
 comes after the header's own arithmetic, which costs nothing, and before the
 body is looked at, which costs a great deal. A forged block therefore costs its
-sender the work or costs the reader one hash.
+sender the work or costs the reader one hash, once it has been read. Reading it
+is paid for separately and first: decoding a block decompresses a key off the
+curve for every owner in it, a frame may be eight times the largest block the
+rules allow, and so a frame is charged to its sender's allowance by its size
+before it is decoded. See the allowance.
 
 **Sixteen is the one refusal in this list that two honest nodes on the same
 build can disagree about.** It is measured against the reading node's own
@@ -2684,13 +2688,14 @@ what is not*.
 
 ## The allowance
 
-**The allowance bounds how often a peer may ask, and nothing else.** How much
-one answer weighs is bounded separately, by the per-message ceilings above and
-by the frame limit; how many messages a peer may send is bounded separately
-again. The three are worth keeping apart, because a price that counts only the
-asking sells a gigabyte of blocks per window for about six and a half kilobytes
-a second of asking: 128 heights fit in about a kilobyte of request and draw up
-to 16 777 216 bytes of reply.
+**The allowance bounds how much work a peer may ask of a node, and nothing
+else.** How much one answer weighs is bounded separately, by the per-message
+ceilings above and by the frame limit; how many messages a peer may send is
+bounded separately again. The three are worth keeping apart, because a price
+that counts only the asking sells a gigabyte of blocks per window for about six
+and a half kilobytes a second of asking: 128 heights fit in about a kilobyte of
+request and draw up to 16 777 216 bytes of reply. Reading what a peer sends is
+work it asks for too, and is priced with the rest.
 
 It is not consensus. A node that prices differently, or not at all, reaches the
 same conclusions about every chain; what it decides is how much of itself that
@@ -2712,24 +2717,41 @@ address SHOULD keep the larger rather than the sum, because that is what an
 honest pair of nodes behind one address is, and pooling makes two people behind
 one carrier gateway invisible to each other.
 
+**A frame is charged by its size before it is decoded.** Decoding is not
+free: every note in a frame is an owner's key decompressed off the curve and
+checked for its subgroup, which costs about what verifying a signature does, so
+eight hundred kilobytes of note owners are most of a second of processor before
+anything in them has been priced. A node SHOULD charge every frame from a peer
+that has introduced itself one unit per 512 bytes, rounded up, before it decodes
+it, and SHOULD NOT decode a frame the peer's window cannot pay for. That charge
+counts toward the price of the message the frame carried, so a message pays the
+larger of the two and never both. Two frames are not charged: a peer's frames
+before it has introduced itself, which may only be a handshake, and a
+`JoinPart`, which is taken outside the allowance as the answer to a question
+this node asked that one peer.
+
 <table>
-  <thead><tr><th>Ask</th><th>Cost</th></tr></thead>
+  <thead><tr><th>Message</th><th>Cost</th></tr></thead>
   <tbody>
     <tr><td>GetChain</td><td>8, plus 1 per locator entry, counted up to 64</td></tr>
-    <tr><td>GetBlocks</td><td>1 per height, counted up to 128</td></tr>
+    <tr><td>GetBlocks</td><td>1 per height, counted up to 128, and each block as it is served</td></tr>
     <tr><td>GetHeaders</td><td>1 per header, counted up to 512</td></tr>
     <tr><td>GetProofs</td><td>8 per position, counted up to 64</td></tr>
     <tr><td>GetPeers</td><td>64</td></tr>
     <tr><td>GetJoin</td><td>1 024</td></tr>
     <tr><td>Peers</td><td>1 per address carried, counted up to 64</td></tr>
-    <tr><td>Transaction</td><td>4</td></tr>
-    <tr><td>Block this node asked for</td><td>1</td></tr>
-    <tr><td>Block nobody asked for</td><td>8</td></tr>
-    <tr><td>anything else</td><td>1</td></tr>
+    <tr><td>Announce</td><td>1 per identifier carried, counted up to 512</td></tr>
+    <tr><td>Headers</td><td>1 per header carried, counted up to 512</td></tr>
+    <tr><td>Proofs</td><td>8 per path carried, counted up to 64</td></tr>
+    <tr><td>Transaction</td><td>4 per input and 4 per output</td></tr>
+    <tr><td>Block this node asked for</td><td>1 per 512 bytes of the message, rounded up, and 1 once it is on the branch this node follows</td></tr>
+    <tr><td>Block nobody asked for, or announced and then asked for</td><td>8, plus 1 per 512 bytes of the message, rounded up</td></tr>
+    <tr><td>Ping, Pong, Chain</td><td>1</td></tr>
+    <tr><td>Hello, Welcome, JoinPart</td><td>nothing</td></tr>
   </tbody>
 </table>
 
-Three of those prices are worth the sentence that explains them.
+Five of those prices are worth the sentence that explains them.
 
 **An ask is priced by what it makes the answerer do, not by what it weighs.**
 A locator is priced by its entries because every entry the answerer does not
@@ -2751,10 +2773,34 @@ one answer whose size the ask cannot state, since a block is anything up to what
 the consensus rules allow and only whoever read it off the disk knows which;
 headers and paths are bounded by the ask and are charged there instead.
 
-A batch SHOULD be charged as it is served rather than after, so a peer that has
-spent its window is handed what it could afford and the rest is not read, not
-encoded and not queued. A short batch is what a peer already gets for heights
-this node no longer holds, so it asks again for the rest.
+**A transfer costs what taking it in costs.** An input is a note resolved and a
+signature verified. An output is a key decompressed off the curve and checked
+for its subgroup while the frame is decoded, which costs about the same, so it
+is priced the same. Priced by its inputs alone, a transfer of one input and 256
+outputs cost what an ordinary payment does and bought over a hundred times the
+processor for each unit.
+
+**A block this node asked for is discounted once it has earned it.** It pays
+for its bytes like any other block, and has all of that but one unit handed back
+once it is on the branch this node follows, which it cannot be without the work
+its header claims at the difficulty the chain demands. A block under a parent
+this node does not hold, or one filed beside the branch without being checked,
+costs its sender nothing to make, and keeps its price.
+
+A batch SHOULD be charged block by block as it is served, and each block before
+it is read, from what its record says it weighs, so a peer that has spent its
+window is handed what it could afford and the rest is not read, not encoded and
+not queued. Reading a block back off a disk decodes it, so a batch read first
+and priced after costs its reader a decode of every owner in a hundred and
+twenty eight blocks whatever the peer can pay. A short batch is what a peer
+already gets for heights this node no longer holds, so it asks again for the
+rest.
+
+A join answer SHOULD be built once for each tip, however many peers ask for it
+at once. An asker arriving while one is being built waits for it, or is
+answered with silence and asks again; building it once for each of them is a
+build of the whole weighing, or a copy of the whole ledger unwound to its
+burial, for every connection that asks after a block.
 
 **What the allowance does not bound.** It does not bound the number of messages
 a peer sends: that is a separate ceiling, 2 000 messages in ten seconds, and
@@ -2772,13 +2818,20 @@ promising something no rule here delivers.
 
 ## Where this document is held to the code
 
-Every statement above that names a layout or a number is checked against the
-reference implementation by tests in
-`crates/cairn-primitives/tests/audit_vectors.rs` and
-`crates/cairn-explorer/tests/published_figures.rs`. They pin the encoded bytes
-of each structure, the identifier computed over them, and the figures this
-document quotes, so a change to either side that the other did not make fails
-the build.
+Statements above that name a layout or a number are checked against the
+reference implementation by tests in four places, so a change to either side
+that the other did not make fails the build.
+`crates/cairn-primitives/tests/audit_vectors.rs` pins the primitives: integers,
+byte arrays, sequences, amounts, the hash domains and the Merkle tree.
+`crates/cairn-ledger/tests/audit_the_specification.rs` pins the encoded bytes of
+each structure, the identifier computed over it, and the draw.
+`crates/cairn-net/tests/audit_the_specification.rs` pins the tag of every
+message, the size of a handshake, the protocol version, and every row of the
+allowance table, priced through the reference implementation.
+`crates/cairn-explorer/tests/published_figures.rs` pins the figures this
+document quotes, among them the list ceilings and the frame limit. What none of
+them pins is the order of the fields inside each message, which the message
+table states and a round trip cannot check.
 
 The draw is pinned now, which it was not when this document was first written.
 `crates/cairn-ledger/tests/audit_the_specification.rs` implements it from the
@@ -2803,10 +2856,11 @@ here, and they are stated with their numbers where the body is evaluated. Fixing
 them turned up a fifth: the body was said to be evaluated between seventeen and
 eighteen, where the implementation evaluates it between nineteen and twenty.
 
-One gap is left and is not a defect. The allowance is written as SHOULD
-throughout, because what an answer weighs is measured by encoding it, so two
-implementations can charge slightly differently for the same batch without
-either being wrong.
+The allowance is written as SHOULD throughout, because it is not consensus and
+two implementations may price differently without either being wrong. Its table
+is held all the same, because it says what the reference implementation
+charges: for a fortnight six of its rows said otherwise, each of them a price
+the project had changed because the old one was a defect.
 
 This is not a courtesy. Sixteen figures published by this project have turned
 out to contradict the code, and in every case the defect was in the instrument

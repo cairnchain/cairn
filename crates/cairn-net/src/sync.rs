@@ -18,8 +18,8 @@ use cairn_primitives::Hash32;
 
 use crate::book::worth_hearing_about;
 use crate::message::{
-    Handshake, Joining, Keeps, Message, PeerAddress, Placed, MAX_ANNOUNCED, MAX_HEADERS,
-    MAX_PROVEN, MAX_REQUESTED, MAX_SHARED_ADDRESSES, PROTOCOL_VERSION,
+    carries_a_join_part, Handshake, Joining, Keeps, Message, PeerAddress, Placed, MAX_ANNOUNCED,
+    MAX_HEADERS, MAX_PROVEN, MAX_REQUESTED, MAX_SHARED_ADDRESSES, PROTOCOL_VERSION,
 };
 
 /// Everything of the surrounding node this layer is allowed to see.
@@ -67,10 +67,11 @@ pub struct PeerState {
     ///
     /// The two are not the same errand and only one of them is owed a
     /// discount. Catching up, this node walks heights it worked out itself and
-    /// goes and asks for them; the peer answering is doing this node a favour
-    /// and is not charged for the bytes. An announcement is the other
-    /// direction: the peer offered, and a block offered is a block pushed,
-    /// which is what the byte price is for.
+    /// goes and asks for them; the peer answering is doing this node a favour,
+    /// and what reading its block cost is handed back once the block is on
+    /// the branch this node follows. An announcement is the other direction:
+    /// the peer offered, and a block offered is a block pushed, which is what
+    /// the byte price is for.
     ///
     /// Told apart here because the ask that follows an announcement looks
     /// exactly like the ask that follows a catch-up, and `awaiting` remembers
@@ -154,6 +155,13 @@ pub struct PeerState {
     ///
     /// Held by [`PeerState::afford`]; nothing else should touch it.
     pub spent: u32,
+    /// What reading the frame the current message came in was charged, before
+    /// a byte of it was decoded.
+    ///
+    /// Counted toward that message's price and taken by [`on_message`], so a
+    /// frame's charge settles the message it carried and no other. See
+    /// [`PeerState::afford_reading`].
+    pub paid_to_read: u32,
     /// Work this peer may still ask for in the current window.
     ///
     /// Nothing here stops a peer asking as fast as its connection allows, and
@@ -302,6 +310,24 @@ impl Allowance {
         }
         true
     }
+
+    /// Gives back `units` of what this connection spent in the window `now`
+    /// falls in.
+    ///
+    /// The address keeps the most it saw rather than following this down,
+    /// because what it keeps is the largest spend of any connection from it
+    /// and this cannot tell whose that was. So a connection opened from the
+    /// same address later in the same window may begin a little above what
+    /// was really spent, by at most one frame, which errs the way the
+    /// inheritance is for.
+    ///
+    /// A window that has turned since the charge has nothing of it left to
+    /// give back, and is left alone.
+    fn hand_back(&mut self, units: u32, now: u64) {
+        if self.mine.current(now) {
+            self.mine.spent = self.mine.spent.saturating_sub(units);
+        }
+    }
 }
 
 /// What a peer may ask for within one window.
@@ -335,7 +361,7 @@ impl Allowance {
 /// the exchange rather than here. `tests/network.rs` prints that reading off
 /// the catch-up it already runs, so whoever doubts the figure can take it
 /// again.
-const ALLOWANCE: u32 = 8_192;
+pub(crate) const ALLOWANCE: u32 = 8_192;
 
 /// What each kind of message costs to answer, in the same units.
 ///
@@ -374,12 +400,29 @@ const COST_CHAIN: u32 = 8;
 /// by the pool only on the rate it offers, which `ChainStore::accept_transfer`
 /// works out after `check_transfer` has verified every signature.
 ///
-/// Four an input, which is what a whole transfer used to cost, so the ordinary
-/// one input transfer pays exactly what it did. At the block ceiling this
-/// network allows, relaying every transfer the chain can carry costs about a
-/// twelfth of one window whatever shape they are in, where under the flat
-/// price that fraction was decided by the shape.
+/// Four an input, which is what a whole transfer used to cost. The outputs are
+/// priced beside it, by [`COST_PER_OUTPUT`], so an ordinary payment of one
+/// input and two outputs costs twelve.
 const COST_PER_INPUT: u32 = 4;
+/// What one output of a transfer costs to take.
+///
+/// Priced because it is not free, and the price above said nothing about it.
+/// An output is a note, and reading a note off the wire decompresses its
+/// owner's key off the curve and checks it for its subgroup, before anything
+/// has looked at the price. Measured beside a signature check on one machine:
+/// forty seven microseconds an output against fifty one a verification. So a
+/// transfer of one input and two hundred and fifty six outputs cost four
+/// units and twelve milliseconds, and a unit spent on that shape bought a
+/// hundred and twenty six times the processor a unit spent on an ordinary
+/// payment did. The widest shape was the cheapest way to make this node
+/// compute, which is the defect [`COST_PER_INPUT`] was written against,
+/// reached through the other list.
+///
+/// The same price as an input, since the work is about the same. At the block
+/// ceiling this network allows, relaying every transfer the chain can carry
+/// then costs one peer's window between a tenth and a quarter of it, by shape,
+/// and a sixth for ordinary payments.
+const COST_PER_OUTPUT: u32 = 4;
 /// What a block this node did not ask for costs, on top of its bytes.
 ///
 /// The bytes are the price and this is the floor under them, so the smallest
@@ -600,6 +643,65 @@ impl PeerState {
     /// this node no longer holds.
     pub(crate) fn afford_serving(&mut self, bytes: usize, now: u64) -> bool {
         self.afford(what_the_wire_costs(bytes), now)
+    }
+
+    /// Takes what reading `frame` costs, before a byte of it is decoded,
+    /// saying whether it was there.
+    ///
+    /// A frame is decoded before anything in it can be priced, and decoding
+    /// is not free: every note in it is an owner's key decompressed off the
+    /// curve and checked for its subgroup, about fifty microseconds each. The
+    /// price used to be asked only after that, in [`on_message`], so eight
+    /// hundred kilobytes of note owners from a peer that had introduced itself
+    /// cost this node nine tenths of a second of processor for the price of
+    /// one message against the flood ceiling, and a window that was spent
+    /// slowed none of it: a refusal was silence, and the next frame was
+    /// decoded like the last.
+    ///
+    /// So a frame is charged what its bytes cost first, at the rate a block
+    /// served is, and one this peer cannot pay for is not decoded at all. The
+    /// charge is a deposit rather than a second price: it counts toward what
+    /// the message it carried turns out to cost, and a message pays the larger
+    /// of the two.
+    ///
+    /// Two frames are not charged. One from a peer that has not introduced
+    /// itself, because it may only be a handshake, which is free, a few
+    /// hundred bytes, and the only frame such a peer may send at all. And a
+    /// piece of a join answer, which is taken before the allowance as the
+    /// answer to a question this node asked one named peer: charging it here
+    /// would have that peer's window refuse pieces this node went and asked
+    /// for, and decoding one is a copy of its bytes.
+    pub fn afford_reading(&mut self, frame: &[u8], now: u64) -> bool {
+        self.paid_to_read = 0;
+        if !self.greeted || carries_a_join_part(frame) {
+            return true;
+        }
+        let deposit = what_the_wire_costs(frame.len());
+        if !self.afford(deposit, now) {
+            return false;
+        }
+        self.paid_to_read = deposit;
+        true
+    }
+
+    /// Takes what `price` still owes once what reading its frame cost is
+    /// counted toward it, and says what the message came to in all, or `None`
+    /// when the window could not pay the rest.
+    ///
+    /// A message pays the larger of the two and never both. The frame's charge
+    /// is taken here whatever happens, so it settles this message and no
+    /// later one.
+    fn settle(&mut self, price: u32, now: u64) -> Option<u32> {
+        let paid = std::mem::take(&mut self.paid_to_read);
+        self.afford(price.saturating_sub(paid), now)
+            .then(|| price.max(paid))
+    }
+
+    /// Gives back `units` this peer paid, now that the message they paid for
+    /// has turned out to cost less.
+    fn hand_back(&mut self, units: u32, now: u64) {
+        self.allowance.hand_back(units, now);
+        self.spent = self.spent.saturating_sub(units);
     }
 }
 
@@ -1464,31 +1566,45 @@ fn cost_of(message: &Message, peer: &PeerState) -> u32 {
         // one of those bytes off the wire first. What it buys is the one
         // number that says what arrived, where the ask cannot.
         //
-        // A block this node asked for is still charged as an answer to
-        // something already paid for, which is what `awaiting` is. That set is
-        // filled by `request_announced`, from what this node decided to ask
-        // about, and what an announcement can arm is its own question.
+        // A block this node asked for costs what its bytes cost and not the
+        // floor under them, and it used to cost one unit whatever it weighed,
+        // while `add_block` went on to validate it. What one unit still buys is
+        // the answer that turned out to be worth having: once the block is on
+        // the branch this node follows, `on_message` hands the rest back,
+        // because a block on that branch carries the work its validation was
+        // paid for with. A block a peer can make for nothing, under a parent
+        // it invented or off to the side at the lowest difficulty there is,
+        // is never on that branch and keeps its price.
         Message::Block(block) => {
             // The discount is for an answer to something this node went and
             // asked for, which is what catching up is. A block this node was
-            // offered is charged what its bytes cost however the asking went,
-            // because being offered something and then asking for it is not
-            // the same errand as going to look for it.
-            let at = block.header.height;
-            let catching_up = peer.awaiting.contains(&at) && !peer.offered.contains(&at);
-            if catching_up {
-                COST_TRIVIAL
+            // offered is charged the floor as well however the asking went,
+            // and nothing is handed back, because being offered something and
+            // then asking for it is not the same errand as going to look for
+            // it.
+            //
+            // Measured on the whole message rather than on the block, since
+            // the message is what reading it was charged for, so that the two
+            // agree to the unit.
+            let wire = what_the_wire_costs(message.encode().len());
+            if asked_for(peer, block.header.height) {
+                wire
             } else {
-                COST_BLOCK.saturating_add(what_the_wire_costs(block.encode().len()))
+                COST_BLOCK.saturating_add(wire)
             }
         }
-        // Priced by the inputs it presents, for the reason every list here is
-        // priced by what it carries: what it carries is what this node does
-        // with it, and here that is a note resolved and a signature verified
-        // apiece.
+        // Priced by the inputs it presents and the outputs it creates, for the
+        // reason every list here is priced by what it carries: what it carries
+        // is what this node does with it, and here that is a note resolved and
+        // a signature verified for each input, and a key off the curve for
+        // each output, which the decode has already done by the time this is
+        // asked.
         Message::Transaction(transfer) => {
             let presented = u32::try_from(transfer.inputs.len()).unwrap_or(u32::MAX);
-            presented.saturating_mul(COST_PER_INPUT)
+            let created = u32::try_from(transfer.outputs.len()).unwrap_or(u32::MAX);
+            presented
+                .saturating_mul(COST_PER_INPUT)
+                .saturating_add(created.saturating_mul(COST_PER_OUTPUT))
         }
         Message::GetBlocks(ids) => {
             let wanted = u32::try_from(ids.len().min(MAX_REQUESTED)).unwrap_or(u32::MAX);
@@ -1565,6 +1681,41 @@ fn cost_of(message: &Message, peer: &PeerState) -> u32 {
     }
 }
 
+/// Takes a block a peer was `charged` for, and hands the price back down to
+/// one unit if it was an answer this node asked for and is now on the branch
+/// this node follows.
+///
+/// Handed back only for a block on that branch, which it cannot be without the
+/// work its header claims at the difficulty this chain demands. Everything
+/// else a peer answers an ask with costs it nothing to make: a block under a
+/// parent it invented, or one hung off an old block claiming the lowest
+/// difficulty there is, which is taken aside unvalidated. Handing those back
+/// too would give every connection a batch of decodes for nothing, because the
+/// first `GetChain` is asked on the handshake and its answer is a batch this
+/// node asked for.
+fn on_block_charged(
+    chain: &mut ChainStore,
+    peer: &mut PeerState,
+    block: Block,
+    charged: u32,
+    now: u64,
+) -> Reaction {
+    let at = block.header.height;
+    let id = block.id();
+    let asked = asked_for(peer, at);
+    let reaction = on_block(chain, peer, block, now);
+    if asked && chain.id_at(at) == Some(id) {
+        peer.hand_back(charged.saturating_sub(COST_TRIVIAL), now);
+    }
+    reaction
+}
+
+/// Whether a block arriving at `at` answers a question this node went and
+/// asked, rather than one a peer offered it.
+fn asked_for(peer: &PeerState, at: u64) -> bool {
+    peer.awaiting.contains(&at) && !peer.offered.contains(&at)
+}
+
 /// Handles one message from one peer.
 pub fn on_message(
     local: &mut Local<'_>,
@@ -1587,9 +1738,11 @@ pub fn on_message(
     // A peer that has used its window is answered with silence rather than
     // closed. What it asked for is not wrong, there has only been a lot of it,
     // and it asks again a moment later against a fresh window.
-    if !peer.afford(cost_of(&message, peer), now) {
+    //
+    // What reading the frame cost is already paid and counts toward this.
+    let Some(charged) = peer.settle(cost_of(&message, peer), now) else {
         return Reaction::idle();
-    }
+    };
 
     match message {
         // A pong needs no answer, a second introduction was already refused
@@ -1664,7 +1817,7 @@ pub fn on_message(
             fetch: heights.into_iter().take(MAX_REQUESTED).collect(),
             ..Reaction::idle()
         },
-        Message::Block(block) => on_block(local.chain, peer, *block, now),
+        Message::Block(block) => on_block_charged(local.chain, peer, *block, charged, now),
         // The clock decides which half of the book rotates into this answer,
         // so a peer asking twice does not hear the same names twice.
         // Both answers are megabytes, so building one runs after the chain is
@@ -1920,7 +2073,7 @@ mod what_an_ask_costs {
     fn an_announcement_does_not_write_its_own_discount() {
         let block = block_of(400);
         let at = block.header.height;
-        let bytes = block.encode().len();
+        let bytes = Message::Block(Box::new(block.clone())).encode().len();
 
         // Catching up: this node walked to the height itself and went and
         // asked. The peer answering is doing it a favour.
@@ -1928,8 +2081,11 @@ mod what_an_ask_costs {
         looking.awaiting.insert(at);
         let a_favour = cost_of(&Message::Block(Box::new(block.clone())), &looking);
         assert_eq!(
-            a_favour, 1,
-            "an answer to an ask this node made is an answer"
+            a_favour,
+            what_the_wire_costs(bytes),
+            "an answer to an ask this node made is charged its bytes and no floor under \
+             them; the rest of the favour is handed back once it lands, which \
+             `a_block_asked_for_is_discounted_only_once_it_is_on_the_branch` holds"
         );
 
         // Offered: the same height, in the same set, reached because the peer
@@ -2175,6 +2331,315 @@ mod refused_blocks {
             theirs,
             DropReason::BadBlock { id },
             "a block that is wrong on its own account stopped being the peer's doing"
+        );
+    }
+}
+
+/// What reading a frame costs, and what the message in it then costs on top.
+///
+/// Counted in units and in keys rather than timed. What a price decides is how
+/// much of a given kind of work a window pays for, which is arithmetic; the
+/// processor time behind each key was measured once, beside a signature check
+/// on the same machine, and is written where the prices are.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::arithmetic_side_effects
+)]
+mod what_a_frame_costs {
+    use super::{
+        on_message, what_the_wire_costs, Local, Message, PeerState, ALLOWANCE, COST_TRIVIAL,
+    };
+    use crate::message::{Joining, Keeps};
+    use cairn_chain::ChainStore;
+    use cairn_crypto::SecretKey;
+    use cairn_ledger::block::Block;
+    use cairn_ledger::note::{Note, NoteId};
+    use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
+    use cairn_ledger::validation::{assemble_block, mine_block, ConsensusParams};
+    use cairn_ledger::LedgerState;
+    use cairn_primitives::codec::Encode;
+    use cairn_primitives::{Amount, Hash32};
+
+    const NOW: u64 = 2_000_000_000;
+
+    fn params() -> ConsensusParams {
+        ConsensusParams::testnet()
+    }
+
+    fn greeted() -> PeerState {
+        PeerState {
+            greeted: true,
+            ..PeerState::default()
+        }
+    }
+
+    fn local(chain: &mut ChainStore) -> Local<'_> {
+        Local {
+            chain,
+            keeps: Keeps::default(),
+            listen: 0,
+            nonce: 1,
+        }
+    }
+
+    /// What `message` took out of a greeted peer's window, handed straight to
+    /// the layer that prices it.
+    fn charged(chain: &mut ChainStore, peer: &mut PeerState, message: Message) -> u32 {
+        let before = peer.spent;
+        on_message(&mut local(chain), peer, message, NOW);
+        peer.spent - before
+    }
+
+    /// A transfer spending `inputs` notes into `outputs` new ones, every owner
+    /// a real key, so decoding it does the whole of its work.
+    fn transfer(inputs: u32, outputs: u32) -> Transfer {
+        let spending = (0..inputs)
+            .map(|index| Input::hot(NoteId::new(Hash32::from_bytes([3; 32]), index)))
+            .collect();
+        let created = (0..outputs)
+            .map(|index| {
+                let mut seed = [9u8; 32];
+                seed[..4].copy_from_slice(&index.to_le_bytes());
+                Note::new(
+                    Amount::from_pebbles(1).unwrap(),
+                    SecretKey::from_bytes(&seed).public_key(),
+                )
+            })
+            .collect();
+        Transfer::new(spending, created)
+    }
+
+    /// The first block of a chain, mined for real so it lands, and paying as
+    /// many owners as the rules let a coinbase pay so it weighs more than one
+    /// unit's worth of bytes: a block that weighs one unit costs one unit
+    /// whether or not anything is handed back, and could not tell the two
+    /// apart.
+    fn first_block() -> Block {
+        let params = params();
+        let state = LedgerState::new();
+        let height = state.next_height().unwrap();
+        let owners = u64::try_from(params.max_coinbase_outputs).unwrap();
+        let one = Amount::from_pebbles(1).unwrap();
+        let rest = Amount::from_pebbles(params.initial_reward.as_pebbles() - (owners - 1)).unwrap();
+        let outputs = (0..owners)
+            .map(|index| {
+                let mut seed = [1u8; 32];
+                seed[..8].copy_from_slice(&index.to_le_bytes());
+                let owner = SecretKey::from_bytes(&seed).public_key();
+                Note::new(if index == 0 { rest } else { one }, owner)
+            })
+            .collect();
+        let coinbase = CoinbaseTransaction::new(height, outputs);
+        let block = assemble_block(&state, coinbase, Vec::new(), &params, 1_600, height).unwrap();
+        mine_block(block, 1 << 22).unwrap()
+    }
+
+    /// A transfer is priced by the keys its decode checks as well as by the
+    /// signatures its inputs carry.
+    ///
+    /// Every output is an owner's key, decompressed off the curve and checked
+    /// for its subgroup while the frame is decoded, and that costs about what
+    /// verifying a signature does. The price counted the inputs alone, so a
+    /// transfer of one input and two hundred and fifty six outputs was charged
+    /// what an ordinary payment is: a unit spent on the widest shape bought a
+    /// hundred and twenty eight times the keys a unit spent on a payment did,
+    /// and a greeted peer that sent nothing else bought about twenty five
+    /// seconds of this node's processor a window. Nothing compared the two
+    /// shapes, so a price that ignored the outputs passed.
+    #[test]
+    fn a_unit_buys_about_the_same_keys_whatever_shape_a_transfer_is() {
+        let mut chain = ChainStore::new(params());
+        let most = u32::try_from(params().max_outputs_per_transfer).unwrap();
+        let ordinary = transfer(1, 2);
+        let widest = transfer(1, most);
+        let ordinary_keys = u32::try_from(ordinary.outputs.len()).unwrap();
+        let widest_keys = u32::try_from(widest.outputs.len()).unwrap();
+
+        let ordinary_price = charged(
+            &mut chain,
+            &mut greeted(),
+            Message::Transaction(Box::new(ordinary)),
+        );
+        let widest_price = charged(
+            &mut chain,
+            &mut greeted(),
+            Message::Transaction(Box::new(widest)),
+        );
+
+        // Keys a unit buys, cross multiplied: the widest shape may buy up to
+        // four times what a payment does, which is slack and not a figure.
+        assert!(
+            widest_keys * ordinary_price <= 4 * ordinary_keys * widest_price,
+            "a transfer of {widest_keys} outputs was charged {widest_price} and an ordinary \
+             payment of {ordinary_keys} was charged {ordinary_price}, so a unit spent on the \
+             widest shape buys {} times the keys off the curve a unit spent on a payment \
+             does, and the widest shape is the cheapest way to make this node compute",
+            (widest_keys * ordinary_price) / (ordinary_keys * widest_price).max(1),
+        );
+        // And the widest is still a transfer a window pays for.
+        assert!(widest_price < ALLOWANCE);
+    }
+
+    /// A block this node asked for pays for its bytes unless it lands on the
+    /// branch this node follows, and then it pays one unit.
+    ///
+    /// The discount for answering an ask was one unit whatever the block
+    /// weighed, and `add_block` then took it and, for one it could place,
+    /// validated it. The first `GetChain` goes out on the handshake to any
+    /// peer claiming more work, so its answer is a batch this node asked for,
+    /// and a peer could fill that batch with blocks under parents it
+    /// invented: a hundred and twenty eight frames of note owners, each
+    /// decoded and never applied, at a unit apiece. Nothing tried an asked-for
+    /// block that did not land, so a discount that asked nothing of the answer
+    /// passed.
+    #[test]
+    fn a_block_asked_for_is_discounted_only_once_it_is_on_the_branch() {
+        let mut chain = ChainStore::new(params());
+
+        // One under a parent nobody has, which is free to make.
+        let mut invented = first_block();
+        invented.header.height = 5;
+        invented.header.previous = Hash32::from_bytes([7; 32]);
+        // The lowest difficulty there is, which any identifier meets, so what
+        // stops it is the parent.
+        invented.header.difficulty = 1;
+        let invented_bytes = Message::Block(Box::new(invented.clone())).encode().len();
+        assert!(
+            what_the_wire_costs(invented_bytes) > COST_TRIVIAL,
+            "the fixture's block has to weigh more than a unit for its price to say anything"
+        );
+        let mut asked = greeted();
+        asked.awaiting.insert(5);
+        let paid = charged(&mut chain, &mut asked, Message::Block(Box::new(invented)));
+        assert_eq!(
+            paid,
+            what_the_wire_costs(invented_bytes),
+            "a block this node asked for, that it could not place, was charged {paid} for \
+             {invented_bytes} bytes: the discount went to an answer anybody can make, and \
+             a batch of them is a batch of decodes for next to nothing"
+        );
+
+        // And one that lands, which carries its work.
+        let real = first_block();
+        let real_bytes = Message::Block(Box::new(real.clone())).encode().len();
+        assert!(what_the_wire_costs(real_bytes) > COST_TRIVIAL);
+        let mut asked = greeted();
+        asked.awaiting.insert(0);
+        let paid = charged(&mut chain, &mut asked, Message::Block(Box::new(real)));
+        assert_eq!(chain.height(), Some(0), "the fixture's block did not land");
+        assert_eq!(
+            paid, COST_TRIVIAL,
+            "a block this node asked for, that landed on its branch, was charged {paid}: an \
+             honest catch-up pays for its bytes at every block"
+        );
+        // And what was handed back is back in the window, not only in the
+        // count kept for reading: the window is what decides the next ask.
+        let mut left = 0u32;
+        while asked.afford(1, NOW) {
+            left += 1;
+        }
+        assert_eq!(
+            left,
+            ALLOWANCE - COST_TRIVIAL,
+            "the window a landed block was handed back to has {left} units left"
+        );
+
+        // The same block announced first and then asked for lands the same way
+        // and is not an answer: nothing is handed back to a push.
+        let mut chain = ChainStore::new(params());
+        let real = first_block();
+        let pushed = super::COST_BLOCK + what_the_wire_costs(real_bytes);
+        let mut offered = greeted();
+        offered.awaiting.insert(0);
+        offered.offered.insert(0);
+        let paid = charged(&mut chain, &mut offered, Message::Block(Box::new(real)));
+        assert_eq!(chain.height(), Some(0), "the fixture's block did not land");
+        assert_eq!(
+            paid, pushed,
+            "a block this node was offered, that landed, was handed back to {paid}: an \
+             announcement wrote its own discount"
+        );
+    }
+
+    /// A frame is charged by its size before it is read, and that charge is
+    /// part of the price of what was in it rather than a second price.
+    ///
+    /// New with the charge, so what it holds is that the charge is what the
+    /// document says it is: one unit per `BYTES_PER_UNIT` bytes rounded up, a
+    /// message paying the larger of that and its own price, and nothing for a
+    /// frame the window cannot pay for.
+    #[test]
+    fn a_frame_is_charged_before_it_is_read_and_counts_toward_its_price() {
+        let mut chain = ChainStore::new(params());
+
+        // An ask whose price is more than its frame: it pays its price.
+        let ask = Message::GetBlocks((0..128).collect());
+        let frame = ask.encode();
+        let mut peer = greeted();
+        assert!(peer.afford_reading(&frame, NOW));
+        assert_eq!(peer.spent, what_the_wire_costs(frame.len()));
+        on_message(&mut local(&mut chain), &mut peer, ask, NOW);
+        assert_eq!(peer.spent, 128, "an ask paid its frame and its price both");
+
+        // A frame whose bytes cost more than its message does: it pays for
+        // the bytes, since the bytes are what reading it was.
+        let pong = Message::Pong(3);
+        let mut padded = pong.encode();
+        padded.resize(4 * 512, 0);
+        let mut peer = greeted();
+        assert!(peer.afford_reading(&padded, NOW));
+        on_message(&mut local(&mut chain), &mut peer, pong, NOW);
+        assert_eq!(
+            peer.spent, 4,
+            "a frame's charge was handed back for a cheap message"
+        );
+
+        // A window that cannot pay for the frame is not charged for it, and
+        // says so.
+        let mut peer = greeted();
+        assert!(peer.afford_reading(&vec![0u8; 512 * 8_000], NOW));
+        let before = peer.spent;
+        assert!(
+            !peer.afford_reading(&vec![0u8; 512 * 193], NOW),
+            "a window with 192 units left paid for a frame of 193"
+        );
+        assert_eq!(peer.spent, before);
+        assert_eq!(
+            peer.paid_to_read, 0,
+            "a frame not paid for left a charge behind"
+        );
+    }
+
+    /// Two frames are not charged: a stranger's, which may only be a
+    /// handshake, and a piece of a join answer, which this node asked one
+    /// named peer for.
+    ///
+    /// Charging the second would have the answering peer's window refuse the
+    /// pieces this node went and asked for, and a collector left waiting for
+    /// a piece that was read and thrown away blames the peer that sent it.
+    #[test]
+    fn a_handshake_and_a_join_piece_are_read_for_nothing() {
+        let piece = Message::JoinPart {
+            what: Joining::Ledger,
+            at: Hash32::ZERO,
+            part: 0,
+            parts: 1,
+            bytes: vec![0u8; crate::message::JOIN_PART_BYTES],
+        };
+        let mut peer = greeted();
+        assert!(peer.afford_reading(&piece.encode(), NOW));
+        assert_eq!(
+            peer.spent, 0,
+            "a piece of a join answer was charged for its bytes"
+        );
+
+        let mut stranger = PeerState::default();
+        assert!(stranger.afford_reading(&vec![0u8; 4 * 1024], NOW));
+        assert_eq!(
+            stranger.spent, 0,
+            "a peer that had not said who it was was charged"
         );
     }
 }
