@@ -3312,13 +3312,17 @@ impl Shared {
     /// The paths for the places in the cold set a peer asked about, in the
     /// order it asked about them.
     ///
-    /// Answered by whoever can, which is the point. A node that kept the whole
-    /// set rebuilds a path from the leaves it holds; a node following an owner
-    /// already holds the path for that owner's notes and hands it over as it
-    /// stands. Neither has to know which of the two it is, because the cold
-    /// set answers the same question for both. A node that is neither says so
-    /// with nothing where the path would be, which is not the same as saying
-    /// nothing.
+    /// Answered out of the whole set or not at all. A node that kept every
+    /// leaf rebuilds a path from them, and would rebuild the same one for
+    /// anybody. A node that did not answers with nothing where the path would
+    /// be, which is not the same as saying nothing, even for a place whose
+    /// path it holds: the paths a node keeps past the window are the ones of
+    /// the owners it follows, so handing one over told a stranger whose node
+    /// this is. The places of a key's fallen notes are public to anyone with
+    /// the blocks, and a wallet is a node that follows its key, so the
+    /// question "is this the wallet of key K?" cost one message and was
+    /// answered. Nothing in a message can say that a peer is the same owner,
+    /// so no peer is answered as one.
     ///
     /// The chain is taken here and let go of again rather than held across the
     /// whole reaction, which is why this is not answered where the message was
@@ -3332,7 +3336,7 @@ impl Shared {
             .iter()
             .map(|position| Placed {
                 position: *position,
-                proof: cold.proof_of(*position),
+                proof: cold.prove(*position),
             })
             .collect()
     }

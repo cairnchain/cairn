@@ -3132,7 +3132,11 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
       indistinguishable from a peer that has hung up, and a wallet waiting on the one
       thing that would let it spend its money has to be able to tell those apart and
       go and ask somebody else. An answer names every position asked about, in the
-      order asked.
+      order asked. A node that does not keep every leaf SHOULD answer <code>0</code> at every
+      position, including one whose path it keeps for an owner it follows: past the
+      grace window those are the only paths it keeps, so which of them it hands over
+      says whose node it is, and nothing in a message tells that owner from a
+      stranger.
     </p>
 
     <p>

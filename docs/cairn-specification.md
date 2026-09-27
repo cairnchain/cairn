@@ -2505,7 +2505,11 @@ rather than leaving it out or saying nothing, because silence from a peer is
 indistinguishable from a peer that has hung up, and a wallet waiting on the one
 thing that would let it spend its money has to be able to tell those apart and
 go and ask somebody else. An answer names every position asked about, in the
-order asked.
+order asked. A node that does not keep every leaf SHOULD answer `0` at every
+position, including one whose path it keeps for an owner it follows: past the
+grace window those are the only paths it keeps, so which of them it hands over
+says whose node it is, and nothing in a message tells that owner from a
+stranger.
 
 `GetJoin` and `JoinPart` carry a `u8` saying which answer is meant: `0` for the
 weighing, `1` for the ledger. A decoder MUST refuse any other value. Both
