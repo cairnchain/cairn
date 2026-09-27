@@ -890,3 +890,77 @@ fn a_log_cut_at_both_ends_still_knows_where_it_begins() {
     drop(again);
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// A chain whose blocks are all different sizes, so a size answered for the
+/// wrong height is a wrong size.
+fn chain_of_sizes(count: usize) -> Vec<Block> {
+    let params = ConsensusParams::testnet();
+    let miner = SecretKey::from_bytes(&[1; 32]);
+    let mut state = LedgerState::new();
+    let mut clock = 1_000u64;
+
+    (0..count)
+        .map(|_| {
+            let height = state.next_height().unwrap();
+            clock += 600;
+            let extra = vec![7u8; usize::try_from(height).unwrap() * 3];
+            let coinbase = CoinbaseTransaction::with_extra(
+                height,
+                vec![Note::new(params.initial_reward, miner.public_key())],
+                extra,
+            );
+            let block = assemble_block(
+                &state,
+                coinbase,
+                Vec::<Transfer>::new(),
+                &params,
+                clock,
+                height,
+            )
+            .unwrap();
+            let block = mine_block(block, ATTEMPTS).unwrap();
+            connect_block(&mut state, &block, &params, NOW).unwrap();
+            block
+        })
+        .collect()
+}
+
+/// What the block at a height encodes to is known before it is read.
+///
+/// A node serving a peer charges for a block before it reads it, because
+/// reading one decodes it and decoding a full block is tens of milliseconds a
+/// peer with nothing left to spend used to get for free. The charge is only as
+/// good as this answer. Asked of a log that begins above zero, over blocks of
+/// every size, so an answer about the wrong record, or about a height the log
+/// does not hold, is a different number. New with the charge it serves.
+#[test]
+fn the_size_of_a_block_is_known_before_it_is_read() {
+    let directory = scratch("sizes");
+    let blocks = chain_of_sizes(8);
+    let (mut log, _) = BlockLog::open(&directory).unwrap();
+    for block in &blocks {
+        log.append(block).unwrap();
+    }
+    log.keep_from(3).unwrap();
+    assert_eq!(log.first_height(), 3, "the fixture's log begins above zero");
+
+    for block in &blocks[3..] {
+        let height = block.header.height;
+        assert_eq!(
+            log.bytes_at(height).unwrap(),
+            Some(block.encode().len()),
+            "the size answered for height {height} is not what its block encodes to"
+        );
+        assert_eq!(
+            log.read_at(height).unwrap().map(|read| read.encode().len()),
+            Some(block.encode().len()),
+            "and what is read there is that block"
+        );
+    }
+    assert_eq!(
+        log.bytes_at(2).unwrap(),
+        None,
+        "a height below where the log begins"
+    );
+    assert_eq!(log.bytes_at(8).unwrap(), None, "a height past its end");
+}

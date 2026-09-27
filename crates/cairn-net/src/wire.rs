@@ -340,11 +340,43 @@ pub fn write_message<W: Write>(
 ///
 /// Returns [`Incoming::Quiet`] when the deadline passes before a frame starts,
 /// so a caller can tell an idle peer from one holding a frame open.
+///
+/// Decodes whatever it reads. A node reading from a peer does not use this,
+/// because decoding is work a peer has to pay for first: it reads the frame
+/// with [`read_frame`] and decodes it once the peer's allowance has paid for
+/// the reading. See `PeerState::afford_reading`.
 pub fn read_message<R: Read>(
     reader: &mut R,
     network: NetworkId,
     most: usize,
 ) -> Result<Incoming, WireError> {
+    match read_frame(reader, network, most)? {
+        Framed::Frame(body) => Ok(Incoming::Message(crate::message::Message::decode(&body)?)),
+        Framed::Quiet => Ok(Incoming::Quiet),
+    }
+}
+
+/// What one read attempt found, before anything in it is decoded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Framed {
+    /// The body of one frame, as it arrived: a message not yet decoded.
+    Frame(Vec<u8>),
+    /// The deadline passed with no frame open. The peer is simply idle.
+    Quiet,
+}
+
+/// Reads one frame and decodes nothing in it, up to whatever deadline
+/// `reader` carries.
+///
+/// The half of [`read_message`] that is the same whoever is reading: the
+/// marker, the length checked against `most` before a byte is reserved, and
+/// the body. What is left, the decode, is where the work is, and the caller
+/// decides whether that work has been paid for.
+pub(crate) fn read_frame<R: Read>(
+    reader: &mut R,
+    network: NetworkId,
+    most: usize,
+) -> Result<Framed, WireError> {
     // The frame's own deadline. Started here rather than at the first byte,
     // which costs a peer that dawdles before speaking at most one read
     // deadline out of the twenty seconds; a peer with nothing to say at all
@@ -353,7 +385,7 @@ pub fn read_message<R: Read>(
     let mut patience = Patience::started();
     let mut header = [0u8; HEADER_BYTES];
     if fill(reader, &mut header, &mut patience)? == Filled::Nothing {
-        return Ok(Incoming::Quiet);
+        return Ok(Framed::Quiet);
     }
 
     let mut cursor = Reader::new(&header);
@@ -373,13 +405,13 @@ pub fn read_message<R: Read>(
     // What this caller will let this peer ask for, which is not the same
     // question as what the protocol allows. The cap used to be the protocol's
     // alone, and the comment here reasoned about the allocation: one megabyte,
-    // bounded connections, fine. The allocation is the cheap half. The line
-    // below decodes the frame, and decoding a frame full of notes decompresses
+    // bounded connections, fine. The allocation is the cheap half. Decoding
+    // the frame is the other, and decoding a frame full of notes decompresses
     // a point off the curve for every owner in it, so a megabyte from somebody
     // who had not yet said who they were bought a second and a third of this
     // node's processor. The cap is the caller's to state now, and the caller
     // that reads from a peer states a small one until the peer has introduced
-    // itself.
+    // itself, and charges the peer for the frame before decoding it after.
     let mut body = vec![0u8; declared];
     if fill(reader, &mut body, &mut patience)? == Filled::Nothing {
         return Err(WireError::Stalled {
@@ -387,7 +419,7 @@ pub fn read_message<R: Read>(
             wanted: declared,
         });
     }
-    Ok(Incoming::Message(crate::message::Message::decode(&body)?))
+    Ok(Framed::Frame(body))
 }
 
 #[cfg(test)]

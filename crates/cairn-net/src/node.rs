@@ -16,7 +16,7 @@ use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -46,14 +46,14 @@ use crate::book::AddressBook;
 use crate::choosing::{self, Approach, Chooser, JoinProgress};
 use crate::joining::{most_join_bytes, Collecting, Joined, Progress};
 use crate::message::{
-    Joining, Keeps, Message, Placed, JOIN_PART_BYTES, MAX_CHAIN, MAX_HEADERS, MAX_PROVEN,
-    MAX_SHARED_ADDRESSES,
+    a_block_weighs, Joining, Keeps, Message, Placed, JOIN_PART_BYTES, MAX_CHAIN, MAX_HEADERS,
+    MAX_PROVEN, MAX_SHARED_ADDRESSES,
 };
 use crate::refusal::{can_be_refused, Refusals};
 use crate::sync::{
     a_window_has_turned, local_handshake, on_message, Allowance, Local, PeerState, Reaction, Window,
 };
-use crate::wire::{most_from, read_message, write_message, Incoming, WireError};
+use crate::wire::{most_from, read_frame, write_message, Framed, WireError};
 
 /// Connections a node dials for itself.
 pub const TARGET_PEERS: usize = 8;
@@ -161,6 +161,14 @@ const OUTBOUND_QUEUE: usize = 256;
 /// hundred and twelve bytes to the unit for anything large. So a peer cannot
 /// have more waiting for it than it has paid for, and paying again means
 /// waiting out a window.
+///
+/// Bytes on the wire, which is what [`Message::weight`] counts, and not the
+/// memory the queue takes. What waits here is messages already built, and a
+/// built block holds its notes, keys and lists as structures rather than as
+/// the bytes they encode to, which is larger: the same gap the block table
+/// closes with `cairn_chain::HELD_OVERHEAD`, and this does not close it. So
+/// this bounds what one peer can have sent to it, and the memory that costs
+/// only to within that factor, which nothing here measures.
 const OUTBOUND_QUEUE_BYTES: usize = 4 * 1024 * 1024;
 /// How long the accept loop waits between looks when nothing is arriving.
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
@@ -1377,7 +1385,13 @@ struct Shared {
     ///
     /// A newcomer asking about a different tip replaces its kind, which costs
     /// the one it displaced a rebuild and no more.
-    joined: Mutex<[Option<Prepared>; 2]>,
+    ///
+    /// Beside each answer, whether one of that kind is being built right now.
+    /// See [`JoinCache::building`].
+    joined: Mutex<JoinCache>,
+    /// Woken when a build marked in [`Shared::joined`] ends, however it ends,
+    /// for the askers waiting on it.
+    join_built: Condvar,
     /// The tip the ledger on disk was written for, and the height that ledger
     /// stands at.
     ///
@@ -1799,6 +1813,58 @@ mod what_is_taken_for_nothing {
             "a run of paths folded against the cold set has a price, and this \
              is what decides whether anybody is asked for it"
         );
+    }
+
+    /// A frame is read for nothing exactly when the message in it is taken
+    /// for nothing.
+    ///
+    /// Asked twice, and the first time off one byte: the charge for reading a
+    /// frame is taken before the frame is decoded, so what it exempts has to be
+    /// told by its tag, and the list here is told by its message. New with the
+    /// charge. Two lists of one thing drift, and a frame read for nothing that
+    /// is not taken for nothing is a decode nobody paid for.
+    #[test]
+    fn a_frame_is_read_for_nothing_exactly_when_its_message_is_taken_for_nothing() {
+        use crate::message::carries_a_join_part;
+        use cairn_primitives::codec::Encode;
+
+        for message in [
+            Message::JoinPart {
+                what: Joining::Weight,
+                at: Hash32::ZERO,
+                part: 0,
+                parts: 1,
+                bytes: vec![1, 2, 3],
+            },
+            Message::Proofs(Vec::new()),
+            Message::Ping(1),
+            Message::Pong(1),
+            Message::GetPeers,
+            Message::Peers(Vec::new()),
+            Message::Announce(Vec::new()),
+            Message::GetBlocks(Vec::new()),
+            Message::GetProofs(Vec::new()),
+            Message::GetJoin {
+                what: Joining::Ledger,
+                part: 0,
+            },
+            Message::GetHeaders { from: 0, count: 1 },
+            Message::Headers {
+                from: 0,
+                headers: Vec::new(),
+            },
+            Message::Chain { from: 0, count: 0 },
+            Message::GetChain {
+                locator: Vec::new(),
+            },
+        ] {
+            assert_eq!(
+                carries_a_join_part(&message.encode()),
+                taken_before_the_allowance(&message),
+                "a {} frame and the message in it disagree about whether it is paid for",
+                message.kind()
+            );
+        }
     }
 
     /// And nothing else drifted onto it.
@@ -2593,7 +2659,7 @@ impl Shared {
         self.joining.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn joined(&self) -> MutexGuard<'_, [Option<Prepared>; 2]> {
+    fn joined(&self) -> MutexGuard<'_, JoinCache> {
         self.joined.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -3107,19 +3173,34 @@ impl Shared {
     /// Order is the point. A peer catching up applies what arrives as it
     /// arrives, and a block whose parent has not landed is dropped, so a batch
     /// delivered out of order is a batch mostly thrown away.
-    fn blocks_at(&self, heights: &[u64]) -> Vec<Block> {
+    ///
+    /// Each block is paid for by `afford`, handed what it weighs on the wire,
+    /// before it is read, and the first one it refuses ends the batch there:
+    /// nothing after it is read. Each comes back with that weight. The whole
+    /// batch used to be read first and priced after, and reading a block off
+    /// the disk decodes it, which is a key off the curve for every owner in
+    /// it: a hundred and twenty eight old full blocks cost this node eight
+    /// seconds of processor for one ask, whatever the peer's window then
+    /// allowed it to be sent.
+    fn blocks_at(
+        &self,
+        heights: &[u64],
+        mut afford: impl FnMut(usize) -> bool,
+    ) -> Vec<(Block, usize)> {
         gathered_a_few_at_a_time(
             heights.len(),
             BLOCKS_PER_HOLD,
             |at, run| {
                 let want = heights.get(at..at.saturating_add(run)).unwrap_or_default();
-                (self.blocks_under_one_hold(want), true)
+                self.blocks_under_one_hold(want, &mut afford)
             },
             // Only heights that came back next to each other can be checked,
             // and those are the ones a peer applies as a chain. Two of them
             // that do not link came off different branches, which is an
-            // answer this node never held.
-            |before, after| {
+            // answer this node never held. Such a batch was paid for and is
+            // not sent, which is rare, since it needs the chain to move while
+            // the batch is read, and costs the peer one batch.
+            |(before, _), (after, _)| {
                 after.header.height != before.header.height.saturating_add(1)
                     || after.header.previous == before.id()
             },
@@ -3127,15 +3208,23 @@ impl Shared {
     }
 
     /// A few of those blocks, with each of the two locks taken once and let go
-    /// of before this returns.
+    /// of before this returns, and whether there is any point asking for more.
     ///
     /// The bound is written here rather than at the caller because this is the
     /// function that holds the locks. It bounds both: the memory pass clones
     /// what it finds, and `MAX_REQUESTED` blocks cloned under the chain is
     /// sixteen megabytes of copying with everything else stopped.
-    fn blocks_under_one_hold(&self, heights: &[u64]) -> Vec<Block> {
+    ///
+    /// A block in memory is weighed once cloned, since a clone costs a copy
+    /// and nothing more. A block on the disk is weighed off the index, before
+    /// the read that would decode it.
+    fn blocks_under_one_hold(
+        &self,
+        heights: &[u64],
+        afford: &mut impl FnMut(usize) -> bool,
+    ) -> (Vec<(Block, usize)>, bool) {
         let heights = heights.get(..BLOCKS_PER_HOLD).unwrap_or(heights);
-        let mut found: Vec<Option<Block>> = {
+        let found: Vec<Option<Block>> = {
             let chain = self.chain();
             heights
                 .iter()
@@ -3144,25 +3233,41 @@ impl Shared {
         };
 
         let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(log) = log.as_ref() {
-            for (slot, height) in found.iter_mut().zip(heights.iter()) {
-                if slot.is_none() {
-                    // A height this log does not hold and a height it holds
-                    // and will not produce leave the same gap in the answer,
-                    // and the peer cannot tell them apart either way. The
-                    // difference is whose fault it is, and this is where it
-                    // is known.
-                    *slot = match log.blocks.read_at(*height) {
-                        Ok(found) => found,
-                        Err(error) => {
-                            self.could_not_read(Reading::Blocks, *height, &error);
-                            None
-                        }
-                    };
+        let mut served = Vec::new();
+        for (slot, height) in found.into_iter().zip(heights.iter()) {
+            if let Some(block) = slot {
+                let weight = a_block_weighs(block.encode().len());
+                if !afford(weight) {
+                    return (served, false);
                 }
+                served.push((block, weight));
+                continue;
+            }
+            let Some(log) = log.as_ref() else {
+                continue;
+            };
+            // A height this log does not hold and a height it holds and will
+            // not produce leave the same gap in the answer, and the peer
+            // cannot tell them apart either way. The difference is whose
+            // fault it is, and this is where it is known.
+            let weight = match log.blocks.bytes_at(*height) {
+                Ok(Some(bytes)) => a_block_weighs(bytes),
+                Ok(None) => continue,
+                Err(error) => {
+                    self.could_not_read(Reading::Blocks, *height, &error);
+                    continue;
+                }
+            };
+            if !afford(weight) {
+                return (served, false);
+            }
+            match log.blocks.read_at(*height) {
+                Ok(Some(block)) => served.push((block, weight)),
+                Ok(None) => {}
+                Err(error) => self.could_not_read(Reading::Blocks, *height, &error),
             }
         }
-        found.into_iter().flatten().collect()
+        (served, true)
     }
 
     /// The paths for the places in the cold set a peer asked about, in the
@@ -3882,7 +3987,8 @@ impl Node {
             windows: Mutex::new(HashMap::new()),
             crowded_window: Arc::new(Mutex::new(Window::default())),
             refusals: Mutex::new(Refusals::new()),
-            joined: Mutex::new([None, None]),
+            joined: Mutex::new(JoinCache::default()),
+            join_built: Condvar::new(),
             written: Mutex::new(None),
             joining: Mutex::new(Progress::Idle),
             join_asked_again_at: AtomicU64::new(0),
@@ -5524,6 +5630,49 @@ struct Prepared {
     bytes: Vec<u8>,
 }
 
+/// The join answers this node holds, one of each kind, and which kinds are
+/// being built.
+#[derive(Default)]
+struct JoinCache {
+    held: [Option<Prepared>; 2],
+    /// Whether an answer of each kind is being built right now.
+    ///
+    /// The cache was keyed on the tip and nothing else, and it was looked at
+    /// before a build and written after one, with every lock let go of in
+    /// between, which is right for the chain and left the question open for
+    /// as long as the build ran. Every greeted connection whose ask arrived in
+    /// that time found nothing held and built too: seven asking together after
+    /// a block cost seven builds, nineteen times the processor of one, and
+    /// the ledger kind clones and unwinds the whole ledger under the chain
+    /// lock for each of them. So "once per tip" was once per asker.
+    ///
+    /// Marked before the build starts and cleared when it ends, however it
+    /// ends, by [`Building`]. Whoever finds the mark waits for the answer
+    /// rather than building it again.
+    building: [bool; 2],
+}
+
+/// A build of one kind of join answer, marked in the cache for as long as it
+/// runs.
+///
+/// Cleared on the way out whatever the build came to, including nothing, so
+/// a build that failed never leaves its kind marked and its askers waiting.
+struct Building<'a> {
+    shared: &'a Shared,
+    slot: usize,
+}
+
+impl Drop for Building<'_> {
+    fn drop(&mut self) {
+        let mut cache = self.shared.joined();
+        if let Some(mark) = cache.building.get_mut(self.slot) {
+            *mark = false;
+        }
+        drop(cache);
+        self.shared.join_built.notify_all();
+    }
+}
+
 /// What the join answer this node holds says about one question.
 ///
 /// Three answers and not two, because the two ways of having no piece to send
@@ -5590,39 +5739,81 @@ impl Shared {
     /// meanwhile, and the cost was paid again on every new block, because this
     /// cache is keyed on the tip.
     fn serve_join(&self, what: Joining, part: u32) -> Option<Message> {
-        match self.held_join(what, part) {
-            Held::Piece(piece) => return Some(piece),
-            // The answer this node holds is the current one and simply has no
-            // such piece. That is a fact about the question, and it used to be
-            // read as a fact about the cache: one `GetJoin` naming a part past
-            // the end rebuilt the whole answer, every time it was sent, and
-            // nothing went back for it. Seventeen bytes bought five hundred and
-            // seventy milliseconds on a chain of four hundred, against thirty
-            // four to hand over a piece that existed, and the cost grows with
-            // the chain.
-            Held::NoSuchPart => return None,
-            Held::Nothing => {}
+        self.serve_join_by(what, part, || {
+            let ground = self.ground_for(what)?;
+            let bytes = self.build_join(what, &ground)?;
+            Some((ground.at, bytes))
+        })
+    }
+
+    /// The same, with the build handed in: what it builds, and the tip it
+    /// built it against.
+    ///
+    /// One build of each kind at a time. An asker that finds one running waits
+    /// for it and is answered out of what it built, and one that waited for a
+    /// build that came to nothing is answered with the silence that build
+    /// would have given it, rather than starting the same build over: a peer
+    /// already asks again for an answer it was not given. So however many
+    /// connections ask at once, a tip costs one build of each kind, which is
+    /// what keying the cache on the tip was always meant to buy.
+    fn serve_join_by(
+        &self,
+        what: Joining,
+        part: u32,
+        build: impl FnOnce() -> Option<(Located, Vec<u8>)>,
+    ) -> Option<Message> {
+        let slot = what.slot();
+        let mut cache = self.joined();
+        let mut waited = false;
+        loop {
+            match self.held_join(&cache, what, part) {
+                Held::Piece(piece) => return Some(piece),
+                // The answer this node holds is the current one and simply has
+                // no such piece. That is a fact about the question, and it used
+                // to be read as a fact about the cache: one `GetJoin` naming a
+                // part past the end rebuilt the whole answer, every time it was
+                // sent, and nothing went back for it. Seventeen bytes bought
+                // five hundred and seventy milliseconds on a chain of four
+                // hundred, against thirty four to hand over a piece that
+                // existed, and the cost grows with the chain.
+                Held::NoSuchPart => return None,
+                Held::Nothing => {}
+            }
+            if !cache.building.get(slot).copied().unwrap_or(false) {
+                break;
+            }
+            cache = self
+                .join_built
+                .wait(cache)
+                .unwrap_or_else(PoisonError::into_inner);
+            waited = true;
         }
-        let ground = self.ground_for(what)?;
-        let bytes = self.build_join(what, &ground)?;
+        if waited {
+            return None;
+        }
+        if let Some(mark) = cache.building.get_mut(slot) {
+            *mark = true;
+        }
+        drop(cache);
+        let _building = Building { shared: self, slot };
+        let (at, bytes) = build()?;
         self.keep_join(
             Prepared {
                 what,
-                at: ground.at.id,
+                at: at.id,
                 bytes,
             },
-            &ground.at,
+            &at,
             part,
         )
     }
 
     /// What the answer already held says about the question being asked.
-    fn held_join(&self, what: Joining, part: u32) -> Held {
-        let held = self.joined();
+    fn held_join(&self, cache: &JoinCache, what: Joining, part: u32) -> Held {
         let Some(tip) = self.chain().tip() else {
             return Held::Nothing;
         };
-        let Some(Some(ready)) = held.get(what.slot()) else {
+        let Some(Some(ready)) = cache.held.get(what.slot()) else {
             return Held::Nothing;
         };
         if ready.at != tip {
@@ -5648,11 +5839,11 @@ impl Shared {
     /// where it did, it never went anywhere in between, and every header read
     /// off the disk during the build belonged to this branch.
     fn keep_join(&self, prepared: Prepared, from: &Located, part: u32) -> Option<Message> {
-        let mut held = self.joined();
+        let mut cache = self.joined();
         if !self.chain().agrees_with(from) {
             return None;
         }
-        let slot = held.get_mut(prepared.what.slot())?;
+        let slot = cache.held.get_mut(prepared.what.slot())?;
         *slot = Some(prepared);
         piece_of(slot.as_ref()?, part)
     }
@@ -6591,23 +6782,24 @@ fn answer_deferred(
     //
     // Weighed here and nowhere earlier. The ask says how many blocks, and a
     // block is anything up to what the consensus rules allow, so what this
-    // costs to put on the wire is known once the block is in hand and not
-    // before. `GetBlocks` was priced at a seek a block and nothing for the
-    // megabyte that follows it, which sold a gigabyte per ten seconds for
-    // about six and a half kilobytes a second of asking.
-    for block in shared.blocks_at(&reaction.fetch) {
-        let answer = Message::Block(Box::new(block));
-        let weight = answer.weight();
-        // What it could not afford is not sent, and the peer asks again
-        // against a fresh window. A short batch is what it already gets for
-        // heights this node no longer holds, so nothing downstream is new.
-        if !peer.afford_serving(weight, now) {
-            break;
-        }
+    // costs to put on the wire is known once the block is in hand or its
+    // record found, and not before. `GetBlocks` was priced at a seek a block
+    // and nothing for the megabyte that follows it, which sold a gigabyte per
+    // ten seconds for about six and a half kilobytes a second of asking.
+    //
+    // What it could not afford is not read, and the peer asks again against a
+    // fresh window. A short batch is what it already gets for heights this
+    // node no longer holds, so nothing downstream is new.
+    for (block, weight) in
+        shared.blocks_at(&reaction.fetch, |weight| peer.afford_serving(weight, now))
+    {
         // And a queue this full is a peer that has stopped reading rather than
-        // one that is behind, so the rest of the batch is not built for it
+        // one that is behind, so the rest of the batch is not queued for it
         // either. The connection is left to the writer's own deadline.
-        if outbound.hand_over(answer, weight).is_err() {
+        if outbound
+            .hand_over(Message::Block(Box::new(block)), weight)
+            .is_err()
+        {
             break;
         }
     }
@@ -8024,6 +8216,23 @@ fn is_peer_fault(error: &WireError) -> bool {
     )
 }
 
+/// The message in `frame`, decoded only once reading it has been paid for.
+///
+/// `None` when the peer's window cannot pay for the frame, and then nothing in
+/// it is decoded or looked at: the peer is answered with the silence any ask
+/// past its window gets, and the frame costs this node the copy that brought
+/// it in. See [`PeerState::afford_reading`] for what is charged and why.
+fn paid_and_decoded(
+    peer: &mut PeerState,
+    frame: &[u8],
+    now: u64,
+) -> Result<Option<Message>, WireError> {
+    if !peer.afford_reading(frame, now) {
+        return Ok(None);
+    }
+    Ok(Some(Message::decode(frame)?))
+}
+
 /// Whether this node lets a message reach the layer that decides about it.
 ///
 /// Both reasons are about this node rather than about the message or the peer,
@@ -8101,6 +8310,13 @@ fn what_it_said_it_was(
     Ending::Keep
 }
 
+// Every stage here is placed by what it costs and what has been paid for it
+// when it runs: the frame read against its cap, counted against the flood
+// ceiling, charged to the allowance, and only then decoded, held off, collected
+// and decided on. Splitting it would move that order into a call graph, where
+// the next person to change one stage cannot see the others, and the order is
+// what the defects this loop has had were about.
+#[allow(clippy::too_many_lines)]
 fn read_loop(
     shared: &Arc<Shared>,
     mut stream: TcpStream,
@@ -8138,11 +8354,9 @@ fn read_loop(
         // a stranger gets, and a handshake is a fixed set of fields a few
         // hundred bytes long. Before it arrives, a megabyte of notes bought
         // one and a third seconds of this node's processor, because decoding
-        // one decompresses a curve point for every owner in it. The budget
-        // that would have charged for that is `held_off`, below, and by then
-        // the work is done.
-        let message = match read_message(&mut stream, network, most_from(announced)) {
-            Ok(Incoming::Message(message)) => {
+        // one decompresses a curve point for every owner in it.
+        let frame = match read_frame(&mut stream, network, most_from(announced)) {
+            Ok(Framed::Frame(frame)) => {
                 last_heard = unix_now();
                 if window_is_over(window_start, last_heard) {
                     window_start = last_heard;
@@ -8153,16 +8367,28 @@ fn read_loop(
                     misbehaved = true;
                     break;
                 }
-                message
+                frame
             }
-            Ok(Incoming::Quiet) => {
+            Ok(Framed::Quiet) => {
                 if unix_now().saturating_sub(last_heard) >= PEER_SILENCE.as_secs() {
                     break;
                 }
                 continue;
             }
-            // No arm for an interrupted read: `read_message` goes round again
-            // on one itself, so it never reaches here.
+            // No arm for an interrupted read: `read_frame` goes round again on
+            // one itself, so it never reaches here.
+            Err(error) => {
+                misbehaved = is_peer_fault(&error);
+                break;
+            }
+        };
+        // And after it, the frame is paid for before it is decoded. The budget
+        // used to be asked only once the message was built, by which time a
+        // greeted peer's megabyte of notes had cost what it costs whatever the
+        // budget then said.
+        let message = match paid_and_decoded(&mut peer, &frame, last_heard) {
+            Ok(Some(message)) => message,
+            Ok(None) => continue,
             Err(error) => {
                 misbehaved = is_peer_fault(&error);
                 break;
@@ -8948,6 +9174,68 @@ mod disk_and_headers {
         );
     }
 
+    /// What one run of headers from before a node arrived makes it hash: the
+    /// run, until the run that reaches the oldest header held, which weighs
+    /// everything before that header once.
+    ///
+    /// The weighing is a read and a leaf for every header before the node
+    /// arrived, which is a million and a half on a deep join, bought by one
+    /// run priced at a unit a header. What bounds it is that only the run
+    /// completing a collection weighs it, and weighs it in one pass. That was
+    /// argued in a comment and held by nothing, so a node that weighed on
+    /// every run, or read the collection again for every header it weighed,
+    /// passed.
+    ///
+    /// Counted in bytes hashed on this thread, for three gaps of different
+    /// length: a run short of the oldest header hashes the same whatever the
+    /// gap behind it, and the run that completes one hashes a fixed amount
+    /// more for every header in the gap.
+    #[test]
+    fn a_run_of_headers_weighs_the_gap_once_and_only_when_it_closes_it() {
+        use cairn_primitives::hash::counting;
+
+        let hashed = |gap: usize| -> (u64, u64) {
+            let directory = scratch(&format!("weighing-{gap}"));
+            let headers = linked(u64::try_from(gap + 10).unwrap());
+            let node = started(store_in(&directory, &headers[gap..], &[]), &directory);
+            counting::reset();
+            let short = node.shared.fill_headers(0, &headers[..8]);
+            let short_hashed = counting::reset();
+            let closing = node.shared.fill_headers(8, &headers[8..gap]);
+            let closing_hashed = counting::reset();
+            finish(node, &directory);
+            assert!(
+                matches!(short, Filled::Grew(8)),
+                "a short run was not filed"
+            );
+            // Made up headers, so the weighing finds them out, which it can
+            // only do by reading all of them.
+            assert!(
+                matches!(closing, Filled::Discarded),
+                "the run that closed the gap was not weighed"
+            );
+            (short_hashed, closing_hashed)
+        };
+        let (short_100, closing_100) = hashed(100);
+        let (short_200, closing_200) = hashed(200);
+        let (short_400, closing_400) = hashed(400);
+
+        assert!(
+            short_100 == short_200 && short_200 == short_400,
+            "a run of eight short of the oldest header hashed {short_100}, {short_200} and \
+             {short_400} bytes in front of gaps of 100, 200 and 400: it weighs what it does \
+             not close"
+        );
+        let per_hundred = closing_200 - closing_100;
+        assert!(per_hundred > 0);
+        assert_eq!(
+            closing_400 - closing_200,
+            2 * per_hundred,
+            "closing a gap of 100, 200 and 400 headers hashed {closing_100}, {closing_200} \
+             and {closing_400} bytes, which is not one pass over the gap"
+        );
+    }
+
     /// A collection is merged only while it is what was weighed: the same
     /// collection, in front of the same oldest header, still reaching it.
     ///
@@ -9480,6 +9768,7 @@ mod peers_and_loops {
     use crate::book::MAX_MISSES;
     use crate::message::{Handshake, PROTOCOL_VERSION};
     use crate::sync::JOIN_RATHER_THAN_READ;
+    use crate::wire::{read_message, Incoming};
 
     use super::*;
 
@@ -10302,6 +10591,85 @@ mod peers_and_loops {
             still_ready.contains(&node.address()),
             "a round dialled the node's own address"
         );
+    }
+
+    /// A frame the peer's window cannot pay for is not decoded.
+    ///
+    /// Decoding is where a frame of notes costs this node its processor: an
+    /// owner's key off the curve and checked for its subgroup, about fifty
+    /// microseconds a note, nine tenths of a second for eight hundred
+    /// kilobytes of them. The window was asked only once a message had been
+    /// built, so a peer that had spent it went on sending frames of owners,
+    /// and each was decoded in full and then answered with silence. Nothing
+    /// asked which came first, so a node that decoded before it priced passed
+    /// every test there was.
+    ///
+    /// Measured by what the node does with a frame it could only have refused
+    /// by decoding it: one that is not a message at all. Read after the window
+    /// is spent, it is not looked at, and the peer is still there to be
+    /// answered; decoded, it ends the connection as malformed.
+    ///
+    /// Asked inside one allowance window, and asked again if the clock turned
+    /// one over in the middle, since a fresh window pays for the frame and the
+    /// question would then be about something else.
+    #[test]
+    fn a_frame_the_window_cannot_pay_for_is_not_decoded() {
+        use crate::message::MAX_REQUESTED;
+        use std::io::Write as _;
+
+        let asks = crate::sync::ALLOWANCE / u32::try_from(MAX_REQUESTED).unwrap() - 1;
+        // Opened as a block, which is the frame a megabyte of note owners
+        // travels in, and nothing after the tag is one.
+        let a_block = Message::Block(Box::new(genesis::block(NetworkId::DEVNET).unwrap()));
+        let mut garbage = vec![0xffu8; crate::wire::MAX_FRAME_BYTES];
+        garbage[0] = a_block.encode()[0];
+        assert!(
+            Message::decode(&garbage).is_err(),
+            "the frame this test sends has to be one only a decode could refuse"
+        );
+        for _ in 0..3 {
+            let node = quiet();
+            let greeting = hello(node.shared.network(), 0, 0, stranger(&node));
+            let mut line = Line::open(node, None);
+            let began = unix_now();
+            line.send(&greeting);
+            // Everything but one ask's worth of the window, on asks this node
+            // answers out of nothing, since it holds no chain.
+            for _ in 0..asks {
+                line.send(&Message::GetBlocks(
+                    (0..u64::try_from(MAX_REQUESTED).unwrap()).collect(),
+                ));
+            }
+            let mut frame = Vec::new();
+            line.node.shared.network().as_u32().encode_to(&mut frame);
+            u32::try_from(garbage.len()).unwrap().encode_to(&mut frame);
+            frame.extend_from_slice(&garbage);
+            let _ = line.far.write_all(&frame);
+            line.send(&Message::Ping(7));
+            let answered = loop {
+                if let Ok((Message::Pong(7), _)) = line.said.try_recv() {
+                    break true;
+                }
+                if line.reading.is_finished() {
+                    break false;
+                }
+                thread::yield_now();
+            };
+            let ended = unix_now();
+            drop(line.close());
+            if crate::sync::a_window_has_turned(began, ended) {
+                continue;
+            }
+            assert!(
+                answered,
+                "a peer with less of its window left than a megabyte frame costs sent one, \
+                 and this node decoded it: the connection ended as malformed, which only a \
+                 decode could find. A frame of note owners in its place is nine tenths of a \
+                 second of this node's processor, bought after the window was spent"
+            );
+            return;
+        }
+        panic!("three attempts in a row straddled an allowance window");
     }
 
     /// A peer may send as many messages as a window allows, and the next one
@@ -11549,7 +11917,7 @@ mod tests {
         }
 
         let heights: Vec<u64> = (0..u64::try_from(blocks.len()).unwrap()).collect();
-        let under_one = node.shared.blocks_under_one_hold(&heights);
+        let (under_one, _) = node.shared.blocks_under_one_hold(&heights, &mut |_| true);
         assert_eq!(
             under_one.len(),
             BLOCKS_PER_HOLD,
@@ -11558,19 +11926,282 @@ mod tests {
             heights.len()
         );
 
-        let whole = node.shared.blocks_at(&heights);
+        let whole = node.shared.blocks_at(&heights, |_| true);
         assert_eq!(
             whole.len(),
             blocks.len(),
             "the peer still gets every block it named"
         );
-        for (at, block) in whole.iter().enumerate() {
+        for (at, (block, _)) in whole.iter().enumerate() {
             assert_eq!(
                 block.header.height,
                 u64::try_from(at).unwrap(),
                 "and gets them in the order it named them"
             );
         }
+    }
+
+    /// A node over a directory of its own, holding a chain long enough that
+    /// its first `old` blocks are on the disk and nowhere else, and the chain.
+    ///
+    /// Its own threads are stopped once it holds them, so nothing but the test
+    /// reads or writes its disk.
+    fn holding_old_blocks(name: &str, old: usize) -> (Node, PathBuf, Vec<Block>) {
+        let params = ConsensusParams::testnet();
+        let warm = usize::try_from(cairn_chain::WARM_BODIES).unwrap();
+        let blocks = chain_of(warm.saturating_add(old).saturating_add(2), params);
+        let directory =
+            std::env::temp_dir().join(format!("cairn-served-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let (node, _) = Node::open(params, loopback(), &directory).unwrap();
+        for block in &blocks {
+            node.submit_block(block.clone()).unwrap();
+        }
+        node.shutdown();
+        {
+            let chain = node.shared.chain();
+            for height in 0..u64::try_from(old).unwrap() {
+                assert!(
+                    chain.block_at(height).is_none(),
+                    "the block at {height} is still in memory, so serving it reads no disk"
+                );
+            }
+        }
+        (node, directory, blocks)
+    }
+
+    /// A block the asking peer's window cannot pay for is not read off the
+    /// disk.
+    ///
+    /// Reading a record back decodes it, and decoding a block decompresses a
+    /// key off the curve for every owner in it: sixty five milliseconds for a
+    /// full one. The batch was read whole and priced after, so a peer with
+    /// nothing left in its window still had a hundred and twenty eight old
+    /// blocks read and decoded for every ask, which is eight seconds of this
+    /// node's processor an ask for full ones, and was then sent none of them.
+    /// Nothing counted what serving read, so a node that read everything and
+    /// sent what was paid for passed every test there was.
+    ///
+    /// Counted by the bytes hashed on this thread: reading a record back hashes
+    /// its transactions to hold them to its header, and nothing else in
+    /// serving hashes anything for a block that is not sent.
+    #[test]
+    fn a_block_the_window_cannot_pay_for_is_not_read_off_the_disk() {
+        use cairn_primitives::hash::counting;
+
+        let (node, directory, _) = holding_old_blocks("spent", 8);
+        let mut peer = PeerState {
+            greeted: true,
+            ..PeerState::default()
+        };
+        // The whole window, spent on something else a unit at a time.
+        while peer.afford_serving(1, 1_000) {}
+        let (sender, inbox) = mpsc::sync_channel(OUTBOUND_QUEUE);
+        let reaction = Reaction {
+            fetch: (0..8).collect(),
+            ..Reaction::default()
+        };
+
+        counting::reset();
+        let writable = answer_deferred(
+            &node.shared,
+            &mut peer,
+            &reaction,
+            &Outbound::new(sender),
+            1_000,
+        );
+        let hashed = counting::reset();
+        let sent = inbox.try_iter().count();
+        drop(node);
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert!(writable);
+        assert_eq!(
+            sent, 0,
+            "a peer with nothing left in its window was sent blocks"
+        );
+        assert_eq!(
+            hashed, 0,
+            "a peer with nothing left in its window asked for eight blocks only the disk \
+             holds, and this node read them back to find it could send none of them"
+        );
+    }
+
+    /// And a window that pays for some of a batch has those read and nothing
+    /// after the first it cannot pay for.
+    ///
+    /// The other half of the same order. Asking before each read rather than
+    /// once before the batch is what makes a short window read a short batch.
+    #[test]
+    fn a_window_that_pays_for_two_blocks_has_two_read() {
+        use cairn_primitives::hash::counting;
+
+        let (node, directory, blocks) = holding_old_blocks("two", 8);
+        let weight = a_block_weighs(blocks[0].encode().len());
+        assert!(
+            blocks[..8]
+                .iter()
+                .all(|block| a_block_weighs(block.encode().len()) == weight),
+            "the fixture's blocks weigh the same, so a window that pays for two pays for no \
+             third"
+        );
+
+        // What reading the first two back hashes, and the one link between
+        // them a batch is checked for.
+        counting::reset();
+        let first = node.shared.block_off_disk(0).unwrap();
+        let _ = node.shared.block_off_disk(1).unwrap();
+        let _ = first.id();
+        let two = counting::reset();
+        assert!(two > 0);
+
+        // A window with room for two of them and not three.
+        let mut peer = PeerState {
+            greeted: true,
+            ..PeerState::default()
+        };
+        loop {
+            let mut probe = peer.clone();
+            if !(0..3).all(|_| probe.afford_serving(weight, 1_000)) {
+                break;
+            }
+            assert!(peer.afford_serving(1, 1_000));
+        }
+        let (sender, inbox) = mpsc::sync_channel(OUTBOUND_QUEUE);
+        let reaction = Reaction {
+            fetch: (0..8).collect(),
+            ..Reaction::default()
+        };
+
+        counting::reset();
+        assert!(answer_deferred(
+            &node.shared,
+            &mut peer,
+            &reaction,
+            &Outbound::new(sender),
+            1_000,
+        ));
+        let hashed = counting::reset();
+        let sent: Vec<u64> = inbox
+            .try_iter()
+            .filter_map(|(message, _)| match message {
+                Message::Block(block) => Some(block.header.height),
+                _ => None,
+            })
+            .collect();
+        drop(node);
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert_eq!(
+            sent,
+            vec![0, 1],
+            "a window that pays for two blocks was sent {sent:?}"
+        );
+        assert_eq!(
+            hashed, two,
+            "serving two blocks out of eight hashed {hashed} bytes where reading two back \
+             hashes {two}: blocks the window could not pay for were read"
+        );
+    }
+
+    /// An archiving node over a directory of its own, holding `blocks`, with
+    /// its own threads stopped so nothing but the test asks it anything.
+    fn showing(name: &str, blocks: &[Block]) -> (Node, PathBuf) {
+        let directory =
+            std::env::temp_dir().join(format!("cairn-showing-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let (node, _) =
+            Node::open_archiving(ConsensusParams::testnet(), loopback(), &directory).unwrap();
+        for block in blocks {
+            node.submit_block(block.clone()).unwrap();
+        }
+        node.shutdown();
+        (node, directory)
+    }
+
+    /// Asks `shared` for the first piece of the weighing from `askers` threads
+    /// released together, and says what each hashed and whether it was
+    /// answered.
+    ///
+    /// Waited on for a minute and no longer. An asker left waiting for a build
+    /// nobody is running never answers, and a test that joined it would never
+    /// end; this one says so instead.
+    fn asked_together(shared: &Arc<Shared>, askers: usize) -> Vec<(u64, bool)> {
+        use cairn_primitives::hash::counting;
+        use std::sync::Barrier;
+
+        let barrier = Arc::new(Barrier::new(askers));
+        let (sender, answers) = mpsc::channel();
+        for _ in 0..askers {
+            let (shared, barrier, sender) =
+                (Arc::clone(shared), Arc::clone(&barrier), sender.clone());
+            thread::spawn(move || {
+                barrier.wait();
+                counting::reset();
+                let piece = shared.serve_join(Joining::Weight, 0);
+                let _ = sender.send((counting::reset(), piece.is_some()));
+            });
+        }
+        let deadline = Instant::now().checked_add(Duration::from_secs(60)).unwrap();
+        (0..askers)
+            .map(|_| {
+                let left = deadline.saturating_duration_since(Instant::now());
+                answers.recv_timeout(left).expect(
+                    "an asker was still waiting for the join answer after a minute: it waited \
+                     on a build nobody was running",
+                )
+            })
+            .collect()
+    }
+
+    /// Askers arriving together cost one build of the join answer between
+    /// them, and each is handed its piece.
+    ///
+    /// The answer is kept per tip, and the cache was looked at before a build
+    /// and written after it with nothing marked in between, so every asker
+    /// that arrived while the first build ran built as well: seven greeted
+    /// connections asking after a block were measured at nineteen times the
+    /// processor of one ask, and for the ledger each of those builds clones
+    /// and unwinds the whole ledger with the chain held. Nothing asked two at
+    /// once, so a cache that only one asker at a time could use passed.
+    ///
+    /// Counted in bytes hashed rather than timed: a build hashes what it
+    /// proves, a hand-over hashes nothing, and each asker counts its own.
+    #[test]
+    fn askers_arriving_together_cost_one_build_of_the_join_answer() {
+        const ASKERS: usize = 6;
+        let blocks = chain_of(48, ConsensusParams::testnet());
+
+        let (alone, alone_directory) = showing("alone", &blocks);
+        let one = asked_together(&alone.shared, 1);
+        drop(alone);
+        let _ = std::fs::remove_dir_all(&alone_directory);
+        let (one_build, answered) = one[0];
+        assert!(
+            answered,
+            "the fixture's node cannot build a weighing at all"
+        );
+        assert!(
+            one_build > 0,
+            "a build hashed nothing, so nothing here could count one"
+        );
+
+        let (node, directory) = showing("together", &blocks);
+        let asked = asked_together(&node.shared, ASKERS);
+        drop(node);
+        let _ = std::fs::remove_dir_all(&directory);
+
+        let hashed: u64 = asked.iter().map(|(bytes, _)| bytes).sum();
+        assert!(
+            asked.iter().all(|(_, answered)| *answered),
+            "an asker that arrived while the answer was being built was not handed it"
+        );
+        assert!(
+            hashed < one_build.saturating_mul(2),
+            "{ASKERS} askers arriving together hashed {hashed} bytes where one build hashes \
+             {one_build}: the answer was built once for each of them rather than once for \
+             the tip"
+        );
     }
 
     /// A run whose halves came off different branches is refused whole.

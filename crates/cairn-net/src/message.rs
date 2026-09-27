@@ -504,9 +504,6 @@ impl Message {
     /// whose whole purpose is that a stranger does not get to decide how many
     /// of them this node is holding.
     pub fn weight(&self) -> usize {
-        /// Enough for the tag, the lengths and the fixed fields of any of
-        /// these.
-        const OVERHEAD: usize = 128;
         /// Height and identifier, taken from the type that carries them.
         const LOCATED_BYTES: usize = Located::ENCODED_BYTES;
         /// A tag, sixteen bytes of address and a port.
@@ -532,7 +529,8 @@ impl Message {
         const HEADER_BYTES: usize = BlockHeader::ENCODED_BYTES;
 
         let carried = match self {
-            Self::Block(_) | Self::Transaction(_) | Self::Proofs(_) => self.encode().len(),
+            Self::Block(block) => return a_block_weighs(block.encode().len()),
+            Self::Transaction(_) | Self::Proofs(_) => self.encode().len(),
             Self::JoinPart { bytes, .. } => bytes.len(),
             Self::Headers { headers, .. } => headers.len().saturating_mul(HEADER_BYTES),
             Self::Announce(ids) => ids.len().saturating_mul(LOCATED_BYTES),
@@ -568,13 +566,51 @@ impl Message {
             Self::Peers(_) => 10,
             Self::Transaction(_) => 11,
             Self::GetJoin { .. } => 12,
-            Self::JoinPart { .. } => 13,
+            Self::JoinPart { .. } => JOIN_PART_TAG,
             Self::GetHeaders { .. } => 14,
             Self::Headers { .. } => 15,
             Self::GetProofs(_) => 16,
             Self::Proofs(_) => 17,
         }
     }
+}
+
+/// Enough for the tag, the lengths and the fixed fields of any message, over
+/// what it carries. See [`Message::weight`].
+const OVERHEAD: usize = 128;
+
+/// What [`Message::weight`] says of a block that encodes to `block_bytes`,
+/// for a caller that knows the size and has not got the block.
+///
+/// Which is a node about to read one off its disk: what serving a block costs
+/// is charged before the read, so a peer whose window cannot pay for it does
+/// not have it read, and the size is all there is to charge on until then.
+/// The one sum both use, so what is charged before the read is what the block
+/// weighs once read.
+pub(crate) const fn a_block_weighs(block_bytes: usize) -> usize {
+    // The tag, before the block.
+    block_bytes
+        .saturating_add(size_of::<u8>())
+        .saturating_add(OVERHEAD)
+}
+
+/// The tag a piece of a join answer is sent under.
+///
+/// Named, rather than written as a number where it is encoded and decoded,
+/// because it is also read where nothing else in a frame has been: see
+/// [`carries_a_join_part`].
+const JOIN_PART_TAG: u8 = 13;
+
+/// Whether a frame carries a piece of a join answer, read off its first byte
+/// and nothing else.
+///
+/// Asked before a frame is decoded, which is the only reason it looks at bytes
+/// rather than at a message. A piece of a join answer is taken before the
+/// allowance, and the charge a frame pays for being read is part of the
+/// allowance, so the two have to agree about which frames those are before
+/// either has decoded anything.
+pub(crate) fn carries_a_join_part(frame: &[u8]) -> bool {
+    frame.first() == Some(&JOIN_PART_TAG)
 }
 
 /// A list of heights, refused before it is built if it is longer than `limit`.
@@ -672,7 +708,7 @@ impl Decode for Message {
                 what: Joining::decode_from(reader)?,
                 part: u32::decode_from(reader)?,
             }),
-            13 => {
+            JOIN_PART_TAG => {
                 let what = Joining::decode_from(reader)?;
                 let at = Hash32::decode_from(reader)?;
                 let part = u32::decode_from(reader)?;
@@ -713,9 +749,38 @@ impl Decode for Message {
 
 #[cfg(test)]
 mod tests {
-    use super::{Joining, Message, MAX_JOIN_PARTS};
+    use super::{a_block_weighs, Joining, Message, MAX_JOIN_PARTS};
+    use cairn_ledger::genesis;
+    use cairn_ledger::note::NetworkId;
     use cairn_primitives::codec::{Decode, Encode};
     use cairn_primitives::Hash32;
+
+    /// A block weighs at least what it puts on the wire, and the same whether
+    /// it is weighed from its size or from the message.
+    ///
+    /// The weight is what a node charges for serving a block before it reads
+    /// it off the disk, and what a peer's queue counts, so a weight under the
+    /// wire is a block served for less than it costs. New with the charge
+    /// before the read, which weighs a block from its size alone: nothing held
+    /// that sum, so one answering a single byte passed every test there was,
+    /// since each of them weighed its fixture with the same sum.
+    #[test]
+    fn a_block_weighs_at_least_what_it_puts_on_the_wire() {
+        for network in [NetworkId::DEVNET, NetworkId::TESTNET] {
+            let Some(block) = genesis::block(network) else {
+                continue;
+            };
+            let bytes = block.encode().len();
+            let message = Message::Block(Box::new(block));
+            let wire = message.encode().len();
+            assert!(
+                a_block_weighs(bytes) >= wire,
+                "a block of {wire} bytes on the wire weighs {}",
+                a_block_weighs(bytes)
+            );
+            assert_eq!(a_block_weighs(bytes), message.weight());
+        }
+    }
 
     /// The last piece of the largest answer allowed is read, not refused.
     ///
