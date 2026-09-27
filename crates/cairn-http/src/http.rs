@@ -82,7 +82,8 @@ const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// [`ANSWER_DEADLINE`], because a caller that asks properly and then takes the
 /// answer back in sips holds a slot exactly as well as one that never finishes
 /// asking: `WRITE_TIMEOUT` is per write, and every byte the caller consents to
-/// take resets it.
+/// take resets it. What the application itself takes to work the answer out
+/// is added on top, because that time is the server's and not the caller's.
 pub const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
 /// The slowest link an answer is written for, in bytes a second.
 ///
@@ -527,6 +528,9 @@ where
     F: Fn(&Request) -> Response,
 {
     let asking = deadline(accepted, Duration::ZERO);
+    // What the application spent working the answer out, which is the
+    // server's own time and not the caller's. See [`deadline`].
+    let mut thought = Duration::ZERO;
     let response = match read_request_as(
         &mut BufReader::new(Timed {
             stream,
@@ -536,7 +540,10 @@ where
     ) {
         Ok(Some(request)) => {
             let head_only = request.head_only;
-            (answer(&request), head_only)
+            let asked = Instant::now();
+            let response = answer(&request);
+            thought = asked.elapsed();
+            (response, head_only)
         }
         // [`ANSWERS`], not a sentence written here. This said "only GET and
         // HEAD are served" for as long as this server has answered POST, which
@@ -547,7 +554,7 @@ where
         Err(status) => (Response::error(status, refusal(status)), false),
     };
     let sent = if response.1 { 0 } else { response.0.body.len() };
-    let until = deadline(accepted, answering(sent));
+    let until = deadline(accepted, answering(sent).saturating_add(thought));
     // A blocking write comes back only when the whole slice has gone, and the
     // socket's own timeout is reset by every byte that moves, so one write of
     // a long answer sails past the deadline while the caller sips at it. A
@@ -843,6 +850,16 @@ fn hang_up(stream: &TcpStream, patience: Duration) {
 /// One moment for the whole connection rather than one for each half, so that
 /// a caller cannot spend the asking budget slowly and then start again on the
 /// answering one.
+///
+/// What the application spends working the answer out is added to
+/// `answering` by the one caller that has an answer to write. That time is
+/// the server's and nothing the caller does moves it, and it was charged to
+/// the caller: an answer that took longer to compute than the asking budget
+/// was computed and then thrown away unwritten, because the writer found the
+/// moment already past and hung up before the first byte. The wallet's page
+/// is where that lands on money: sending waits seconds inside the answer for
+/// a peer to take the transfer, and a send that ran past the budget left the
+/// payment handed over and the page saying the wallet had stopped answering.
 fn deadline(accepted: Instant, answering: Duration) -> Instant {
     accepted
         .checked_add(REQUEST_DEADLINE)
@@ -871,8 +888,10 @@ fn answering(bytes: usize) -> Duration {
 /// moves a byte whenever it is about to run out resets them forever and keeps
 /// its slot for almost nothing. It works in both directions: dribble the
 /// request, or ask properly and then take the answer back a byte at a time.
-/// This moment is fixed before either half starts and nothing the caller does
-/// moves it. It also hands the socket whatever is left of that budget as its
+/// Each half's moment is fixed before that half starts and nothing the caller
+/// does moves either: the asking one at accept, and the writing one once the
+/// answer is ready, from the same accept, as [`deadline`] sets out. It also
+/// hands the socket whatever is left of that budget as its
 /// own timeout, so a caller that goes quiet at the last moment cannot buy
 /// another timeout's worth of silence on top.
 ///
