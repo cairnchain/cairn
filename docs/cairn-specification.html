@@ -3105,7 +3105,8 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
       network as a <code>u32</code>, the first block of the branch this node follows, its tip,
       its height, the work behind that tip as a <code>u128</code>, the port it listens on as a
       <code>u16</code>, a <code>u64</code> nonce drawn once when the node started, and two <code>u8</code> claims about
-      what it kept. A decoder MUST refuse either claim byte if it is neither <code>0</code> nor
+      what it kept. A node that does not offer itself to be dialled, as a wallet's
+      does not, names port <code>0</code>, and a peer MUST NOT write an address down for it. A decoder MUST refuse either claim byte if it is neither <code>0</code> nor
       <code>1</code>, because reading anything else as true is guessing on the peer's behalf.
     </p>
 

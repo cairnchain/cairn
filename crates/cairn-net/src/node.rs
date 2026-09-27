@@ -1334,6 +1334,16 @@ impl Peer {
 struct Shared {
     params: ConsensusParams,
     address: SocketAddr,
+    /// Whether this node names its port when it introduces itself, so that
+    /// peers write its address down and hand it to others.
+    ///
+    /// Not for a wallet's node. It runs for the seconds a command takes, on a
+    /// port the system picked, and naming that port wrote "a Cairn wallet ran
+    /// at this address" into the book of every peer it greeted, from where it
+    /// travelled in answers to strangers and was dialled on their next round.
+    /// A node that names no port is one the protocol already has a place for:
+    /// its peers answer it and write nothing down.
+    offers_its_address: bool,
     /// Drawn once at start. A node behind a router cannot recognise its own
     /// address coming back from a peer, but it can recognise this.
     nonce: u64,
@@ -2794,6 +2804,17 @@ impl Shared {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The port this node names when it introduces itself: its own, or none.
+    ///
+    /// See [`Shared::offers_its_address`].
+    fn port_to_offer(&self) -> u16 {
+        if self.offers_its_address {
+            self.address.port()
+        } else {
+            0
+        }
+    }
+
     fn threads(&self) -> MutexGuard<'_, Vec<JoinHandle<()>>> {
         self.threads.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -3634,6 +3655,7 @@ impl Node {
             None,
             None,
             None,
+            true,
         )
     }
 
@@ -3656,6 +3678,11 @@ impl Node {
     ///
     /// This is what a wallet asks for. The owners have to be named before the
     /// chain is replayed, because what is learned is learned as notes fall.
+    ///
+    /// A node opened this way is a wallet's, and it introduces itself without
+    /// a port. It still listens and still answers whoever reaches it; what it
+    /// does not do is ask its peers to write its address down and hand it on.
+    /// See [`Shared::offers_its_address`].
     pub fn open_watching(
         params: ConsensusParams,
         address: SocketAddr,
@@ -3983,6 +4010,9 @@ impl Node {
             addresses: book.len(),
         };
 
+        // A node that follows owners is a wallet's: `open_watching` is the one
+        // way in that names any, and it says why this is what it means.
+        let offers_its_address = owners.is_empty();
         let node = Self::start(
             params,
             address,
@@ -3993,6 +4023,7 @@ impl Node {
             Some(lock),
             probation,
             unread,
+            offers_its_address,
         )?;
         Ok((node, restored))
     }
@@ -4008,6 +4039,7 @@ impl Node {
         lock: Option<DirectoryLock>,
         probation: Option<Undertaking>,
         unread: Option<Unread>,
+        offers_its_address: bool,
     ) -> Result<Self, NodeError> {
         let listener = TcpListener::bind(address)?;
         let address = listener.local_addr()?;
@@ -4015,6 +4047,7 @@ impl Node {
         let shared = Arc::new(Shared {
             params,
             address,
+            offers_its_address,
             nonce: fresh_nonce(),
             chain: Mutex::new(chain),
             log: Arc::new(Mutex::new(log)),
@@ -7635,7 +7668,7 @@ fn decide(
     let mut local = Local {
         chain: &mut chain,
         keeps,
-        listen: shared.address.port(),
+        listen: shared.port_to_offer(),
         nonce: shared.nonce,
     };
     let reaction = on_message(&mut local, peer, message, unix_now());
@@ -8223,7 +8256,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
             Message::Hello(local_handshake(
                 &chain,
                 keeps,
-                shared.address.port(),
+                shared.port_to_offer(),
                 shared.nonce,
             ))
         };
@@ -8820,6 +8853,7 @@ mod disk_and_headers {
             None,
             None,
             None,
+            true,
         )
         .unwrap()
     }
@@ -10058,6 +10092,7 @@ mod peers_and_loops {
             None,
             None,
             None,
+            true,
         )
         .unwrap();
         node.shutdown();
@@ -12863,6 +12898,7 @@ mod tests {
             None,
             None,
             None,
+            true,
         )
         .unwrap();
         // The turn a peer would be holding, put there rather than waited for:

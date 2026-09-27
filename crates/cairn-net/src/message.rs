@@ -202,6 +202,10 @@ pub struct Handshake {
     /// The port this node listens on. A peer already knows the address the
     /// connection came from, so this is what completes it into an address
     /// others can be pointed at.
+    ///
+    /// Nought from a node that does not offer itself to be dialled, which is
+    /// what a wallet's node says: a peer writes nothing down for it and hands
+    /// nothing on.
     pub listen: u16,
     /// Drawn once when the node starts, and never reused.
     ///
