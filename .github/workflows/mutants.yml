@@ -161,10 +161,24 @@ jobs:
           # a number written from the outside, against a suite whose length is
           # not this file's to know. The floor is here only so a crate whose
           # tests take a second does not get a one second budget.
+          #
+          # Twice the unmutated run rather than cargo-mutants' five times: a
+          # mutant that makes a wait loop spin was costing this job fifty
+          # minutes of a runner each, for a verdict the first minutes already
+          # gave.
+          #
+          # And a timeout is not a survivor, which is what `.cargo/mutants.toml`
+          # already says: a mutant that makes a loop run for ever is one the
+          # suite would have caught had it been allowed to finish. So exit 3
+          # (timeouts, nothing missed) passes, and exit 2 (a mutant the tests
+          # did not notice) and anything else still fails. This job reported
+          # failure on a pull request whose every missed mutant had been
+          # closed and whose two timeouts were both loops.
           cargo mutants --in-diff pr.diff \
             --test-workspace=false \
             --minimum-test-timeout 120 \
-            --in-place
+            --timeout-multiplier 2 \
+            --in-place || { status=$?; test "$status" -eq 3 || exit "$status"; }
       - name: The survivors, if any
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
