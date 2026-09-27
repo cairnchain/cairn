@@ -378,17 +378,16 @@ async function refresh() {
       m.way + " " + m.amount + " at block " + m.height +
       (held.has(m.id) ? ", waiting for a block again" : ""));
     // Said before the closing sentence, because the closing sentence is what
-    // makes the list read as complete: "whoever you were paying has not been
-    // paid" is about the ones named, and somebody whose payment is not named
-    // takes it to mean theirs went through.
+    // makes the list read as complete: what it says became of the money is
+    // about the ones named, and somebody whose payment is not named takes it
+    // to mean theirs went through.
     const rest = state.undone_held > state.undone.length
       ? " Showing the newest " + state.undone.length + " of " +
         state.undone_held + "; the rest are not listed here."
       : "";
     undone.innerHTML = "<b>The chain changed and took these back.</b> They " +
       "were in this wallet's account of itself and the chain no longer " +
-      "carries them: " + lines.join("; ") + "." + rest + " The money is back " +
-      "in the balance above. Whoever you were paying has not been paid.";
+      "carries them: " + lines.join("; ") + "." + rest + " " + state.undoneNote;
   }
 
   const ripening = $("ripening");
@@ -470,8 +469,8 @@ async function refresh() {
   if (state.history_missed_below !== null) {
     said.push("Could not read every block up to " + state.history_missed_below +
       ": the node had let go of them. Anything that happened to this key in the " +
-      "ones it missed is not listed. The balance is counted from the chain, not " +
-      "from this list.");
+      "ones it missed is not listed. What can be spent is counted from the chain, " +
+      "not from this list; notes this wallet lost track of there are named apart.");
   }
   if (state.movements_held > state.movements.length) {
     said.push("Showing the newest " + state.movements.length + " of " + state.movements_held + ".");
