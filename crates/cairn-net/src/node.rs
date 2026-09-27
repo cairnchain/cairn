@@ -8942,6 +8942,11 @@ fn start_writing(
         })
 }
 
+// Each step starts something the steps after it have to undo when they fail:
+// the table entry, the writing thread, the reading thread. Split up, the
+// undoing would sit in one function and what it undoes in another, where the
+// next change to one cannot see the other.
+#[allow(clippy::too_many_lines)]
 fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAddr>) -> bool {
     let initiator = dialled.is_some();
     // Nothing is attached to a node that has stopped. Checked here and again
