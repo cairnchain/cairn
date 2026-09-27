@@ -54,11 +54,12 @@ use cairn_http::http::{
 
 /// The statuses this server knows how to put a sentence under.
 ///
-/// `reason` and `refusal` in `http.rs` name exactly these; anything else
+/// `reason` and `refusal` in `http.rs` name each of these; anything else
 /// reaches a person as the bare word "Error" with no sentence, which is the
 /// complaint `refusal`'s own doc comment records having fixed. A reader that
-/// invented a fifth status would put it back.
-const REFUSALS: [u16; 4] = [400, 408, 413, 431];
+/// invented a sixth status would put it back. 501 is a body framed by a
+/// transfer coding, which this server does not take.
+const REFUSALS: [u16; 5] = [400, 408, 413, 431, 501];
 
 /// Feeds one byte string to the reader and holds everything against it.
 ///
@@ -234,8 +235,8 @@ fn a_request(rng: &mut Rng) -> Vec<u8> {
             .copied()
             .unwrap_or("host");
         head.extend_from_slice(name.as_bytes());
-        // Not always a colon, because a line without one is dropped rather
-        // than refused and that branch is reachable from a real client.
+        // Not always a colon, because a line without one is refused, and
+        // that branch is reachable from a real client.
         if rng.chance(8) {
             head.push(b';');
         } else {
@@ -412,7 +413,7 @@ fn the_campaign_reaches_every_branch_it_makes_a_claim_about() {
     let campaign = Campaign::named("http: branches reached");
     let corpus = corpus();
     let mut got = 0usize;
-    let mut refused = [0usize; 4];
+    let mut refused = [0usize; 5];
     let mut unanswered = 0usize;
     let mut with_a_body = 0usize;
     let mut with_an_escape = 0usize;
@@ -459,7 +460,8 @@ fn the_campaign_reaches_every_branch_it_makes_a_claim_about() {
     // 400, 413 and 431 are the three the campaign produces on its own. 408
     // needs a reader that errors rather than bytes that are wrong, and is
     // reached by `a_source_that_fails_is_a_timeout_and_not_a_malformed_request`
-    // instead.
+    // instead; 501 needs a header name the vocabulary does not hold, and
+    // `a_chunked_request_is_refused_rather_than_misread` in `http.rs` asks it.
     assert!(refused[0] > 0, "nothing was ever refused as malformed");
     assert!(refused[2] > 0, "the body cap was never reached");
     assert!(refused[3] > 0, "the head cap was never reached");

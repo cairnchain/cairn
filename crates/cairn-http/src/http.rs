@@ -4,7 +4,8 @@
 //! there is no upload path and no way to name a file outside what was
 //! compiled in. A body is read only for a POST and only up to
 //! [`MAX_BODY_BYTES`]; anything larger is refused with a 413 before a byte of
-//! it is taken. And only by a server that takes bodies at all: one started
+//! it is taken, and one framed by a transfer coding rather than a length is
+//! refused with a 501. And only by a server that takes bodies at all: one started
 //! with [`serve_without_bodies`], which is the explorer, refuses a POST with a
 //! 405 as soon as its head is read. One thread per connection, the same choice the node makes for
 //! its peers and for the same reason: a reader can hold the whole thing in
@@ -1015,27 +1016,57 @@ fn read_request_as<R: io::Read>(reader: &mut R, bodies: Bodies) -> Result<Option
 
     // Drain the header block so the caller sees a complete exchange rather
     // than a reset, and so a request that never ends is cut off by the cap.
-    // Two of them are kept: what host the caller thinks it is talking to, and
-    // how long a body to expect.
+    // Three of them are kept: what host the caller thinks it is talking to,
+    // the origin of the page asking, and how long a body to expect. A fourth,
+    // a transfer coding, refuses the request.
     let mut host = String::new();
     let mut origin = String::new();
-    let mut length = 0usize;
+    let mut length: Option<usize> = None;
     loop {
         let line = read_line(reader, &mut consumed)?;
         if line.is_empty() {
             break;
         }
-        if let Some((name, value)) = line.split_once(':') {
-            let value = value.trim();
-            if name.eq_ignore_ascii_case("host") {
-                value.clone_into(&mut host);
-            } else if name.eq_ignore_ascii_case("origin") {
-                value.clone_into(&mut origin);
-            } else if name.eq_ignore_ascii_case("content-length") {
-                length = value.parse().map_err(|_| 400u16)?;
+        // A name, a colon and a value, or a refusal (RFC 9112, 5.1 and 5.2).
+        // Anything else was skipped, so `host : x` was a request that named
+        // no host, and a line folded onto the one before vanished; a line
+        // that begins with a space or a tab is a fold, and its name has
+        // whitespace in it.
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(400);
+        };
+        if name.is_empty()
+            || name
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        {
+            return Err(400);
+        }
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("host") {
+            value.clone_into(&mut host);
+        } else if name.eq_ignore_ascii_case("origin") {
+            value.clone_into(&mut origin);
+        } else if name.eq_ignore_ascii_case("content-length") {
+            // Digits and nothing else, and one number however many times it
+            // is said. `usize::from_str` takes a leading plus, and each line
+            // used to overwrite the last, so `1` then `3` read three bytes.
+            if !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(400);
             }
+            let said: usize = value.parse().map_err(|_| 400u16)?;
+            if length.is_some_and(|before| before != said) {
+                return Err(400);
+            }
+            length = Some(said);
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            // A body framed by a coding this server does not take. Read by
+            // its length it was the chunk framing handed on as the form, and
+            // with no length it was no body at all (RFC 9112, 6.1 and 6.3).
+            return Err(501);
         }
     }
+    let length = length.unwrap_or(0);
 
     let mut parts = start.split(' ');
     let (Some(method), Some(target), Some(version)) = (parts.next(), parts.next(), parts.next())
@@ -1249,6 +1280,7 @@ fn reason(status: u16) -> &'static str {
         421 => "Misdirected Request",
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
+        501 => "Not Implemented",
         503 => "Service Unavailable",
         _ => "Error",
     }
@@ -1268,6 +1300,7 @@ fn refusal(status: u16) -> &'static str {
         405 => "only GET and HEAD are served here",
         413 => "the form body is larger than this server takes",
         431 => "the request head is larger than this server takes",
+        501 => "a body is taken here with a content-length and no transfer coding",
         _ => "malformed request",
     }
 }
@@ -1682,6 +1715,96 @@ mod tests {
     #[test]
     fn an_embedded_null_is_refused() {
         assert_eq!(head("GET /a%00b HTTP/1.1\r\n\r\n"), Err(400));
+    }
+
+    /// A request whose body is framed by a transfer coding is refused, with
+    /// or without a length beside it.
+    ///
+    /// Nothing looked at `transfer-encoding`, so a chunked body was read as
+    /// its content-length bytes, or as nothing when it had none, and the
+    /// chunk framing reached the wallet as its form: a 200 carrying "who is
+    /// being paid?" for a request that had named somebody. That passed.
+    #[test]
+    fn a_chunked_request_is_refused_rather_than_misread() {
+        assert_eq!(
+            head(
+                "POST /f HTTP/1.1\r\nhost: h\r\ncontent-length: 4\r\n\
+                 transfer-encoding: chunked\r\n\r\n1\r\na\r\n0\r\n\r\n"
+            ),
+            Err(501),
+            "a chunked body with a length beside it was read by the length"
+        );
+        assert_eq!(
+            head("POST /f HTTP/1.1\r\nhost: h\r\nTransfer-Encoding: chunked\r\n\r\n3\r\na=1\r\n0\r\n\r\n"),
+            Err(501),
+            "a chunked body with no length was read as no body at all"
+        );
+        assert_ne!(
+            refusal(501),
+            refusal(400),
+            "a coding this server does not take was called a malformed request"
+        );
+    }
+
+    /// A body's length is said once, in digits.
+    ///
+    /// Each `content-length` overwrote the last and `usize::from_str` takes a
+    /// leading plus, so `1` then `3` read three bytes and `+3` read three:
+    /// both passed. Two lines that agree are still one length.
+    #[test]
+    fn a_content_length_is_one_number_in_digits() {
+        assert_eq!(
+            head("POST /f HTTP/1.1\r\ncontent-length: 1\r\ncontent-length: 3\r\n\r\nabc"),
+            Err(400),
+            "two lengths that differ were read as the last of them"
+        );
+        assert_eq!(
+            head("POST /f HTTP/1.1\r\ncontent-length: 3\r\ncontent-length: 1\r\n\r\nabc"),
+            Err(400),
+            "two lengths that differ were read as the last of them"
+        );
+        assert_eq!(
+            head("POST /f HTTP/1.1\r\ncontent-length: +3\r\n\r\nabc"),
+            Err(400),
+            "a length with a sign in front of it was read as a number"
+        );
+        let agreed = head("POST /f HTTP/1.1\r\ncontent-length: 3\r\ncontent-length: 3\r\n\r\nabc")
+            .unwrap()
+            .unwrap();
+        assert_eq!(agreed.body, "abc", "two lengths that agree are one length");
+    }
+
+    /// A header line is a name, a colon and a value, and anything else is
+    /// refused rather than skipped.
+    ///
+    /// A line without a colon, a name with a space before its colon and a
+    /// line folded onto the one before were each dropped without a word: a
+    /// request naming its host as `host : x` was served as one that named
+    /// none. That passed.
+    #[test]
+    fn a_header_line_that_is_not_a_name_and_a_value_is_refused() {
+        for (line, what) in [
+            ("host : evil", "a space between the name and the colon"),
+            ("host\t: evil", "a tab between the name and the colon"),
+            ("this is not a header", "a line with no colon"),
+            (": value", "a line with no name"),
+            (" folded", "a line folded onto the one before"),
+            ("\tfolded: onto it", "a line folded with a tab"),
+            ("x\u{1}y: z", "a control byte in the name"),
+        ] {
+            assert_eq!(
+                head(&format!("GET / HTTP/1.1\r\nhost: h\r\n{line}\r\n\r\n")),
+                Err(400),
+                "{what} was skipped rather than refused"
+            );
+        }
+        let spaced = head("GET / HTTP/1.1\r\nhost:\t h \r\nx-empty:\r\n\r\n")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            spaced.host, "h",
+            "whitespace around a value is not whitespace in a name"
+        );
     }
 
     #[test]
