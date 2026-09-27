@@ -956,3 +956,63 @@ fn a_record_of_payments_that_does_not_read_back_is_said() {
         "and was not kept"
     );
 }
+
+/// Of two payments waiting, the one its node will not take back is let go of
+/// on its own, the look that lets go of it no longer lists it and writes it
+/// down, and the other goes on waiting.
+///
+/// Every test here followed one payment, so a wallet that judged a payment by
+/// whether some other payment was in the pool passed. And every test looked
+/// again before closing the wallet, so one that wrote the record down only at
+/// the look after a change passed too, while a command that exits after its
+/// last look loses what that look learned.
+#[test]
+fn of_two_payments_the_one_not_taken_back_is_let_go_of_on_its_own() {
+    let (wallet, mut funded) = funded("two-waiting", 4, small_hot_set());
+    let stranger = somebody();
+    let generous = wallet.send(somebody(), cairn("10"), cairn("0.01")).unwrap();
+    let fee = wallet.floor_for(recipient(), cairn("10"));
+    let exact = wallet.send(recipient(), cairn("10"), fee).unwrap();
+
+    let mut let_go = None;
+    for _ in 0..40 {
+        let block = funded.forge.mine(&stranger, Vec::new());
+        wallet.node().submit_block(block).unwrap();
+        let waiting = wallet.waiting();
+        if !wallet.not_carried().is_empty() {
+            let_go = Some(waiting);
+            break;
+        }
+    }
+    let named = wallet.not_carried();
+    // Closed straight after the look that let the payment go, as a command
+    // that has answered is, and read back before anything looks again.
+    wallet.shutdown();
+    drop(wallet);
+    let again = funded.open();
+    let named_again = again.not_carried();
+    let later = again.waiting();
+    again.shutdown();
+    drop(again);
+    let _ = std::fs::remove_dir_all(&funded.directory);
+
+    let waiting = let_go.expect("the payment paying exactly the floor was never let go of");
+    assert_eq!(
+        named_again.iter().map(|one| one.id).collect::<Vec<_>>(),
+        vec![exact.id],
+        "the look that let a payment go did not write it down, so the next start did not know"
+    );
+    assert_eq!(
+        named.iter().map(|one| one.id).collect::<Vec<_>>(),
+        vec![exact.id],
+        "the payment its node would not take back is not the one named as not carried"
+    );
+    assert!(
+        waiting.iter().all(|one| one.id != exact.id),
+        "the look that let a payment go still listed it as waiting"
+    );
+    assert!(
+        later.iter().any(|one| one.id == generous.id),
+        "the payment its node still holds stopped being listed as waiting"
+    );
+}

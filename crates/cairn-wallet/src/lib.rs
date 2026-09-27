@@ -1959,10 +1959,6 @@ impl Wallet {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        for id in &reckoned.gone {
-            self.settle_or_end(id, tip);
-        }
-        self.settle_the_carried();
         // Whether anything was handed back, which changes what the pool
         // holds and so what the money comes to.
         let mut handed_back = false;
@@ -1973,7 +1969,9 @@ impl Wallet {
                 .waiting
                 .iter()
                 .any(|waiting| waiting.id == id && waiting.pooled);
-            if pooled {
+            if reckoned.gone.contains(&id) {
+                self.settle_or_end(&id, one.made_at, tip);
+            } else if pooled {
                 // Taken back by some other road, a peer passing it on again
                 // among them, and so no longer refused: the wait before its
                 // notes come back would otherwise run on and let go of a
@@ -1982,11 +1980,12 @@ impl Wallet {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .taken_back(&id);
-            } else if !reckoned.gone.contains(&id) {
+            } else {
                 self.hand_back(one, &reckoned.promised, tip);
                 handed_back = true;
             }
         }
+        self.settle_the_carried();
         let changed = {
             let mut pending = self
                 .pending
@@ -2011,14 +2010,7 @@ impl Wallet {
     /// Takes a payment whose notes are no longer this key's off the record:
     /// settled if a block this wallet read carried it, and named as not
     /// carried if not.
-    fn settle_or_end(&self, id: &Hash32, tip: u64) {
-        let made_at = self
-            .pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .live()
-            .find(|one| one.id() == *id)
-            .map_or(0, |one| one.made_at);
+    fn settle_or_end(&self, id: &Hash32, made_at: u64, tip: u64) {
         let (carried, read_all_of_it) = {
             let history = self
                 .history
@@ -2095,10 +2087,12 @@ impl Wallet {
                 input.witness = held.as_input().witness;
             }
         }
-        let mut answer = self.node.submit_transaction(one.transfer.clone());
-        if answer.is_err() && fresh != one.transfer {
-            answer = self.node.submit_transaction(fresh);
-        }
+        let differs = fresh != one.transfer;
+        let answer = first_as_made(
+            self.node.submit_transaction(one.transfer.clone()),
+            differs,
+            || self.node.submit_transaction(fresh),
+        );
         note_the_answer(
             &mut self
                 .pending
@@ -2118,15 +2112,13 @@ impl Wallet {
             .offered
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let now = Instant::now();
-        if !offer_due(peers, *last, now) {
-            last.0 = peers;
-            return;
+        let (due, next) = offering(peers, *last, Instant::now());
+        *last = next;
+        if due {
+            for one in waiting.iter().filter(|one| one.pooled) {
+                self.node.offer_again(&one.id);
+            }
         }
-        for one in waiting.iter().filter(|one| one.pooled) {
-            self.node.offer_again(&one.id);
-        }
-        *last = (peers, Some(now));
     }
 
     /// Asks the network to rebuild what it takes to spend the notes this
@@ -3225,6 +3217,41 @@ fn read_every_block_since(next: u64, missed_below: Option<u64>, made_at: u64, ti
     next > tip && missed_below.is_none_or(|below| below <= made_at)
 }
 
+/// What handing a payment back came to: the node's answer to it as it was
+/// made, or, only when that is a refusal and fresher evidence would change
+/// the transfer, the node's answer to the fresher one.
+///
+/// Asking again after the first was taken would ask about a transfer the
+/// pool now holds, and its "already here" would stand in place of "taken":
+/// a payment the node took back would stay noted as refused, and be let go of
+/// when the wait ran out.
+fn first_as_made(
+    first: Result<bool, Refused>,
+    differs: bool,
+    fresh: impl FnOnce() -> Result<bool, Refused>,
+) -> Result<bool, Refused> {
+    if first.is_err() && differs {
+        fresh()
+    } else {
+        first
+    }
+}
+
+/// Whether to offer the payments a wallet's node holds to its `peers` now,
+/// and what to remember of it: how many peers there were, and when they were
+/// last offered anything.
+fn offering(
+    peers: usize,
+    last: (usize, Option<Instant>),
+    now: Instant,
+) -> (bool, (usize, Option<Instant>)) {
+    if offer_due(peers, last, now) {
+        (true, (peers, Some(now)))
+    } else {
+        (false, (peers, last.1))
+    }
+}
+
 /// Whether the payments a wallet's node holds are due to be offered to its
 /// peers again, given how many peers it has now, how many there were and
 /// when, the last time they were offered.
@@ -3326,10 +3353,10 @@ fn wait_until(patience: Duration, ready: impl Fn() -> bool) -> bool {
 )]
 mod tests {
     use super::{
-        asking, ceiling, crowded, held_back_because, margin_of, offer_due, one_question, ran_out,
-        read_every_block_since, said_plainly, select, settled, shuffle, still_outstanding,
-        too_old_for_this_chain, Covered, Held, NoDraft, Outdated, Progress, Recovery, Waited,
-        MAX_PROVEN, OFFER_PAUSE, SETTLED_FOR,
+        asking, ceiling, crowded, first_as_made, held_back_because, margin_of, offer_due, offering,
+        one_question, ran_out, read_every_block_since, said_plainly, select, settled, shuffle,
+        still_outstanding, too_old_for_this_chain, Covered, Held, NoDraft, Outdated, Progress,
+        Recovery, Waited, MAX_PROVEN, OFFER_PAUSE, SETTLED_FOR,
     };
 
     /// How many blocks an account has not read, when it has not read some.
@@ -3931,6 +3958,79 @@ mod tests {
             ran_out(&calm, short, false),
             Waited::Settled,
             "never moved and nobody says more: nothing says it is behind"
+        );
+    }
+
+    /// A payment handed back is asked about again with fresher evidence only
+    /// when it was refused as it was made and the evidence would change it.
+    ///
+    /// Asked again after it was taken, the pool's "already here" stood in for
+    /// "taken", and the refusal noted before stayed noted. Nothing reached a
+    /// payment taken back after a refusal, so either way passed.
+    #[test]
+    fn a_payment_is_handed_back_again_only_when_refused_as_it_was_made() {
+        let refused =
+            || -> Result<bool, Refused> { Err(Refused::Transfer(TransferError::NoInputs)) };
+        let asked = std::cell::Cell::new(false);
+        let fresh = || {
+            asked.set(true);
+            Ok(false)
+        };
+        assert!(matches!(first_as_made(Ok(true), true, fresh), Ok(true)));
+        assert!(
+            !asked.get(),
+            "a payment taken as it was made was asked about again"
+        );
+        assert!(matches!(
+            first_as_made(Ok(false), true, || Ok(true)),
+            Ok(false)
+        ));
+        assert!(
+            matches!(first_as_made(refused(), true, || Ok(true)), Ok(true)),
+            "a refused payment was not asked about with fresher evidence"
+        );
+        assert!(
+            first_as_made(refused(), false, || Ok(true)).is_err(),
+            "the same transfer was asked about twice"
+        );
+    }
+
+    /// Offering remembers the peers there are whether or not it offers, and
+    /// the moment only when it does.
+    ///
+    /// The count was brought up to date only when nothing was offered, so a
+    /// face that offered on every look but the one a peer arrived at passed.
+    #[test]
+    fn offering_remembers_the_peers_and_when_it_last_offered() {
+        let then = Instant::now();
+        let soon = then.checked_add(Duration::from_secs(1)).unwrap();
+        assert_eq!(offering(2, (1, Some(then)), soon), (true, (2, Some(soon))));
+        assert_eq!(offering(2, (2, Some(then)), soon), (false, (2, Some(then))));
+        assert_eq!(offering(1, (2, Some(then)), soon), (false, (1, Some(then))));
+        assert_eq!(offering(0, (0, None), soon), (false, (0, None)));
+    }
+
+    /// A record of payments that will not write is said, beside the payments
+    /// it is meant to keep.
+    ///
+    /// Nothing made the record fail to write, so a wallet that kept its
+    /// payments in memory only, and said nothing, passed.
+    #[test]
+    fn a_record_of_payments_that_will_not_write_is_said() {
+        let (mut wallet, directory) = opened("pending-unwritten");
+        assert_eq!(
+            wallet.payments_unkept(),
+            None,
+            "nothing to say before a write failed"
+        );
+        wallet.pending_file = directory.join("no-such-directory").join("pending.dat");
+        wallet.write_pending(&crate::pending::Pending::default());
+        let said = wallet.payments_unkept();
+        wallet.shutdown();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            said.is_some_and(|said| said.contains("cannot write down the payments")),
+            "a record of payments that did not write was not said"
         );
     }
 
