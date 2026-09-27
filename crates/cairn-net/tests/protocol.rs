@@ -1033,15 +1033,22 @@ fn a_batch_owed_by_a_quiet_peer_is_asked_again_one_patience_after_the_clock_step
     );
     assert_eq!(peer.awaiting.len(), 3);
 
-    // A `Chain` naming nothing this node lacks reaches the patience whatever
-    // else does.
-    let nothing_new = || Message::Chain { from: 0, count: 1 };
+    // Any word from the peer reaches the patience (the test above), and a
+    // ping asks nothing that could stand in for the batch. A `Chain` from
+    // nought did, until a stretch a peer names inside one batch of the tip
+    // came to be asked for as its branch.
+    let nothing_new = |nonce| Message::Ping(nonce);
     let stepped_back = NOW - 3_600;
-    on_message(&mut solo(&mut node), &mut peer, nothing_new(), stepped_back);
+    on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        nothing_new(1),
+        stepped_back,
+    );
     let later = on_message(
         &mut solo(&mut node),
         &mut peer,
-        nothing_new(),
+        nothing_new(2),
         stepped_back + BATCH_PATIENCE + 1,
     );
     assert!(
