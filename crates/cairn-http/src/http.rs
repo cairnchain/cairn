@@ -408,14 +408,50 @@ where
         };
 
         let answer = Arc::clone(&answer);
-        let _ = thread::Builder::new()
-            .name("explorer-http".to_owned())
-            .spawn(move || {
-                handle(&stream, answer.as_ref(), accepted, bodies);
-                // Mentioned so the closure owns the slot, which is what
-                // gives it back on the ways out that never reach this line.
-                drop(slot);
-            });
+        start_or_refuse(stream, accepted, &refusals, move |stream| {
+            thread::Builder::new()
+                .name("explorer-http".to_owned())
+                .spawn(move || {
+                    handle(&stream, answer.as_ref(), accepted, bodies);
+                    // Mentioned so the closure owns the slot, which is what
+                    // gives it back on the ways out that never reach this
+                    // line.
+                    drop(slot);
+                })
+                .map(drop)
+        });
+    }
+}
+
+/// Starts the thread that answers `stream`, or hands the caller to the thread
+/// that writes refusals when the machine will not start one.
+///
+/// `start` is handed the connection and says whether a thread took it. When
+/// it says no, the closure has gone with the error, and the connection and
+/// the slot inside it with it: the slot is given back, which [`Held`] counts
+/// on, and the connection was closed unread, which the caller saw as a reset.
+/// A server out of threads answered nothing where a full one says "too many
+/// connections", so an operator could not tell it from a network fault. What
+/// is handed on is a second handle on the same connection, kept for exactly
+/// this; when even that cannot be had, the machine is out of descriptors too
+/// and the caller is dropped as before.
+///
+/// Its own function so that a refused start can be asked for: what the
+/// machine refuses is not something a test can arrange, as the accept loop's
+/// own note says of descriptors.
+fn start_or_refuse<S>(
+    stream: TcpStream,
+    accepted: Instant,
+    refusals: &std::sync::mpsc::SyncSender<(TcpStream, Instant)>,
+    start: S,
+) where
+    S: FnOnce(TcpStream) -> io::Result<()>,
+{
+    let spare = stream.try_clone().ok();
+    if start(stream).is_err() {
+        if let Some(spare) = spare {
+            let _ = refusals.try_send((spare, accepted));
+        }
     }
 }
 
@@ -1360,8 +1396,8 @@ pub fn bind(address: SocketAddr) -> io::Result<TcpListener> {
 mod tests {
     use super::{
         answering, drain, let_go_of_the_done, one_machine, percent_decode, reason, refusal,
-        wait_on, would_wait, Request, Slots, Waiting, ANSWER_DEADLINE, DRAIN_BYTES, DRAIN_CHUNK,
-        MAX_CONNECTIONS, MAX_PER_HOST, REFUSALS_QUEUED,
+        start_or_refuse, wait_on, would_wait, Request, Slots, Waiting, ANSWER_DEADLINE,
+        DRAIN_BYTES, DRAIN_CHUNK, MAX_CONNECTIONS, MAX_PER_HOST, REFUSALS_QUEUED,
     };
     use std::collections::VecDeque;
     use std::fmt::Write as _;
@@ -1900,6 +1936,39 @@ mod tests {
         for kind in [ErrorKind::ConnectionReset, ErrorKind::BrokenPipe] {
             assert!(!would_wait(&Error::from(kind)), "{kind:?} is no");
         }
+    }
+
+    /// A caller the machine will not start a thread for is handed to the
+    /// thread that writes refusals, and a caller it will is not.
+    ///
+    /// The closure went with the error and the connection inside it, which
+    /// the caller read as a reset: a server out of threads answered nothing
+    /// where a full one says "too many connections", and dropping the caller
+    /// passed. What the machine refuses cannot be arranged in a test, so the
+    /// start is handed in.
+    #[test]
+    fn a_caller_the_machine_has_no_thread_for_is_refused_and_not_dropped() {
+        let (into, out) = std::sync::mpsc::sync_channel(4);
+
+        let (caller, server) = a_pair();
+        start_or_refuse(server, Instant::now(), &into, |_| {
+            Err(std::io::Error::other("no thread"))
+        });
+        let (handed, _) = out
+            .try_recv()
+            .expect("a caller with no thread to answer it was dropped without a word");
+        assert_eq!(
+            handed.peer_addr().unwrap(),
+            caller.local_addr().unwrap(),
+            "what was handed on is not the connection that had no thread"
+        );
+
+        let (_caller, server) = a_pair();
+        start_or_refuse(server, Instant::now(), &into, |_| Ok(()));
+        assert!(
+            out.try_recv().is_err(),
+            "a caller whose thread started was refused as well"
+        );
     }
 
     /// A caller cut off at the deadline is told that, and not that its
