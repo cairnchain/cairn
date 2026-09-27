@@ -11975,7 +11975,10 @@ mod peers_and_loops {
         node.shared.peers().insert(
             1,
             Peer {
-                archives: true,
+                keeps: Keeps {
+                    cold_set: true,
+                    ..Keeps::default()
+                },
                 ..stand_in(&socket, true)
             },
         );
