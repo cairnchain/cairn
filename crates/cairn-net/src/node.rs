@@ -1552,6 +1552,9 @@ struct Asking {
     /// dropped before it costs this node a look at the chain.
     asked: HashSet<PeerId>,
     /// Connections that answered, whatever they said.
+    ///
+    /// Written in the same turn as what the answer brought, so nothing that
+    /// reads this finds an answer counted and its paths still to come.
     answered: HashSet<PeerId>,
     /// Paths that folded.
     found: BTreeMap<u64, ForestProof>,
@@ -3085,24 +3088,7 @@ impl Shared {
     /// than while it is held, because the order the locks are taken in is the
     /// whole of what keeps two threads from waiting on each other.
     fn take_placed(&self, from: PeerId, placed: &[Placed]) {
-        let checking: Vec<(u64, Hash32, ForestProof)> = {
-            let mut asking = self.asking();
-            if !asking.asked.contains(&from) {
-                return;
-            }
-            asking.answered.insert(from);
-            placed
-                .iter()
-                .filter_map(|entry| {
-                    let leaf = *asking.wanted.get(&entry.position)?;
-                    Some((entry.position, leaf, entry.proof.clone()?))
-                })
-                .collect()
-        };
-        if checking.is_empty() {
-            return;
-        }
-        let folded: Vec<(u64, ForestProof, bool)> = {
+        self.take_placed_with(from, placed, |checking| {
             let chain = self.chain();
             let cold = chain.state().cold();
             checking
@@ -3112,8 +3098,53 @@ impl Shared {
                     (position, proof, holds)
                 })
                 .collect()
+        });
+    }
+
+    /// The same, with the check of each path handed in.
+    ///
+    /// Apart so a test can hold the check open while the question is looked
+    /// at, which is the moment the order here is about and one no machine can
+    /// be relied on to arrive at by itself.
+    ///
+    /// The peer is counted as having answered in the second turn, with what
+    /// its answer brought. It used to be counted in the first, and for as long
+    /// as the check took that was all [`Node::recover_proofs`] could see of
+    /// the answer: a look in between found everyone asked had answered and
+    /// ended the question without the paths. The second turn asks again
+    /// whether the peer was asked, because the question may have ended while
+    /// the chain was held, and an answer to a question nobody is waiting on is
+    /// not taken.
+    fn take_placed_with(
+        &self,
+        from: PeerId,
+        placed: &[Placed],
+        check: impl FnOnce(Vec<(u64, Hash32, ForestProof)>) -> Vec<(u64, ForestProof, bool)>,
+    ) {
+        let checking: Vec<(u64, Hash32, ForestProof)> = {
+            let mut asking = self.asking();
+            if !asking.asked.contains(&from) {
+                return;
+            }
+            let checking: Vec<(u64, Hash32, ForestProof)> = placed
+                .iter()
+                .filter_map(|entry| {
+                    let leaf = *asking.wanted.get(&entry.position)?;
+                    Some((entry.position, leaf, entry.proof.clone()?))
+                })
+                .collect();
+            if checking.is_empty() {
+                // Nothing to check, so the answer is already all it will be.
+                asking.answered.insert(from);
+                return;
+            }
+            checking
         };
+        let folded = check(checking);
         let mut asking = self.asking();
+        if !asking.asked.contains(&from) {
+            return;
+        }
         for (position, proof, holds) in folded {
             if holds {
                 asking.found.insert(position, proof);
@@ -3121,6 +3152,7 @@ impl Shared {
                 asking.refused = asking.refused.saturating_add(1);
             }
         }
+        asking.answered.insert(from);
     }
 
     /// Takes addresses out of the book, so they are not dialled again.
@@ -4390,6 +4422,19 @@ impl Node {
     /// and the answer is one round trip. It gives up early once every place
     /// has been answered for.
     pub fn recover_proofs(&self, wanted: &[(u64, Hash32)], patience: Duration) -> Recovered {
+        self.recover_proofs_with(wanted, patience, || thread::sleep(RECOVERY_POLL))
+    }
+
+    /// The same, with the wait between two looks at the question handed in.
+    ///
+    /// Apart so a test can tell when the question has been looked at, and
+    /// have it looked at again at the moment it chooses.
+    fn recover_proofs_with(
+        &self,
+        wanted: &[(u64, Hash32)],
+        patience: Duration,
+        between_looks: impl Fn(),
+    ) -> Recovered {
         if wanted.is_empty() {
             return Recovered::default();
         }
@@ -4439,7 +4484,7 @@ impl Node {
                 let mut asking = self.shared.asking();
                 return finished(&mut asking, archivists);
             }
-            thread::sleep(RECOVERY_POLL);
+            between_looks();
         }
     }
 
@@ -9857,6 +9902,61 @@ mod peers_and_loops {
         assert_eq!(reached, 0, "a node with every slot taken dialled another");
     }
 
+    /// A round dials neither the node itself nor an address it already holds a
+    /// connection to.
+    ///
+    /// Nothing put either in the book, so a round that took an address as a
+    /// candidate when it passed either one of the two tests passed: a node
+    /// dialling every peer it already holds once a round, and itself.
+    #[test]
+    fn a_round_dials_neither_the_node_itself_nor_a_peer_it_holds() {
+        let node = quiet();
+        let (socket, _far) = a_socket();
+        let (in_door, out_door) = (a_door(), a_door());
+        let came_in = in_door.local_addr().unwrap();
+        let went_out = out_door.local_addr().unwrap();
+        {
+            let mut peers = node.shared.peers();
+            // One that opened its connection here and said where it listens,
+            // and one this node dialled.
+            peers.insert(
+                1,
+                Peer {
+                    advertised: Some(came_in),
+                    ..stand_in(&socket, false)
+                },
+            );
+            peers.insert(
+                2,
+                Peer {
+                    dialled_to: Some(went_out),
+                    ..stand_in(&socket, true)
+                },
+            );
+        }
+        {
+            let mut book = node.shared.book();
+            for address in [came_in, went_out, node.address()] {
+                assert!(book.insert(address), "the address goes into the book");
+            }
+        }
+        node.shared.running.store(true, Ordering::SeqCst);
+        dial_from_book(&node.shared, 1_000);
+        let reached = dialled(&node);
+        let still_ready = node.shared.book().ready(1_000);
+        stop_all(&node);
+
+        assert_eq!(
+            reached, 1,
+            "a round opened a connection to an address the node already holds one to, \
+             or to itself"
+        );
+        assert!(
+            still_ready.contains(&node.address()),
+            "a round dialled the node's own address"
+        );
+    }
+
     /// A peer may send as many messages as a window allows, and the next one
     /// ends it.
     ///
@@ -10049,6 +10149,129 @@ mod peers_and_loops {
             told.len(),
             1,
             "the other peers were told something besides the block"
+        );
+    }
+
+    /// Two paths offered for a question about places 7 and 9: one that the
+    /// check will say folds, and one it will say does not.
+    fn an_answer_about_seven_and_nine() -> [Placed; 2] {
+        let path = || {
+            Some(ForestProof {
+                siblings: Vec::new(),
+            })
+        };
+        [
+            Placed {
+                position: 7,
+                proof: path(),
+            },
+            Placed {
+                position: 9,
+                proof: path(),
+            },
+        ]
+    }
+
+    /// What a check that folds place 7 and nothing else would say.
+    fn only_seven_folds(
+        checking: Vec<(u64, Hash32, ForestProof)>,
+    ) -> Vec<(u64, ForestProof, bool)> {
+        checking
+            .into_iter()
+            .map(|(position, _, proof)| (position, proof, position == 7))
+            .collect()
+    }
+
+    /// **An answer is counted with what it brought, whenever the question is
+    /// looked at.**
+    ///
+    /// The peer was counted as having answered before its paths were checked,
+    /// and what the check found was written after, under a second lock. A
+    /// look at the question in between found everyone asked had answered and
+    /// ended it without the answer: no path handed back for the place that
+    /// folded, and no refusal for the one that did not. The suite met it only
+    /// when a machine was slow at the wrong moment, and nothing held the check
+    /// open, so an order that let a look land inside it passed.
+    #[test]
+    fn an_answer_is_counted_with_what_it_brought_whenever_the_question_is_looked_at() {
+        let node = quiet();
+        let (socket, _far) = a_socket();
+        node.shared.peers().insert(1, stand_in(&socket, true));
+        let asker = &node;
+
+        let recovered = thread::scope(|scope| {
+            let (looked, looks) = mpsc::channel();
+            let (go_on, going_on) = mpsc::channel::<()>();
+            let asking = scope.spawn(move || {
+                let wanted = [(7, Hash32::ZERO), (9, Hash32::ZERO)];
+                asker.recover_proofs_with(&wanted, Duration::from_secs(10), move || {
+                    let _ = looked.send(());
+                    // Held between two looks until the test says to go on,
+                    // and paced as a node paces it once the test has let go.
+                    if going_on.recv().is_err() {
+                        thread::sleep(RECOVERY_POLL);
+                    }
+                })
+            });
+            // Put to the one peer, and looked at once with nothing back.
+            looks.recv().unwrap();
+            node.shared
+                .take_placed_with(1, &an_answer_about_seven_and_nine(), |checking| {
+                    // One look while the paths are being checked, and the
+                    // wait until it is over: the question was either left
+                    // open, and the next wait began, or it ended.
+                    go_on.send(()).unwrap();
+                    let _ = looks.recv();
+                    only_seven_folds(checking)
+                });
+            drop(go_on);
+            asking.join().unwrap()
+        });
+
+        assert_eq!(recovered.answered, 1, "the one peer asked answered");
+        assert!(
+            recovered.proofs.contains_key(&7),
+            "the question ended while the path that folded was being checked, and \
+             without it"
+        );
+        assert_eq!(
+            recovered.refused, 1,
+            "the question ended while the path that did not fold was being \
+             checked, and without counting it"
+        );
+    }
+
+    /// **An answer to a question that ended while it was being checked is not
+    /// taken.**
+    ///
+    /// A question ends when its patience does, whatever is on its way through
+    /// the check, and ending it empties what it will accept. What the check
+    /// found was written afterwards whatever had become of the question, so it
+    /// landed in whichever one stood by then. Nothing ended a question in the
+    /// middle of a check, so writing it there passed.
+    #[test]
+    fn an_answer_to_a_question_that_ended_while_it_was_checked_is_not_taken() {
+        let node = quiet();
+        *node.shared.asking() = Asking {
+            wanted: BTreeMap::from([(7, Hash32::ZERO), (9, Hash32::ZERO)]),
+            asked: HashSet::from([1]),
+            ..Asking::default()
+        };
+        node.shared
+            .take_placed_with(1, &an_answer_about_seven_and_nine(), |checking| {
+                // The patience runs out while the paths are being checked.
+                let _ = finished(&mut node.shared.asking(), 0);
+                only_seven_folds(checking)
+            });
+
+        let after = node.shared.asking();
+        assert!(
+            after.answered.is_empty(),
+            "a peer was counted as answering a question that had ended"
+        );
+        assert!(
+            after.found.is_empty() && after.refused == 0,
+            "what an answer to a question that had ended brought was taken"
         );
     }
 }
