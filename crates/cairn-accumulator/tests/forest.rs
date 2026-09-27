@@ -12,6 +12,7 @@
 use cairn_accumulator::forest::{empty_leaf, forest_leaf, MAX_HEIGHT};
 use cairn_accumulator::{Archive, Forest, ForestProof};
 use cairn_primitives::codec::{Decode, Encode};
+use cairn_primitives::hash::counting;
 use cairn_primitives::Hash32;
 
 fn leaf(index: u64) -> Hash32 {
@@ -312,6 +313,54 @@ fn the_order_spends_appear_in_changes_nothing() {
     let shuffled = build(&[60, 3, 127, 5, 4]);
     assert_eq!(forward, backward);
     assert_eq!(forward, shuffled);
+}
+
+/// A batch removal costs a few folds of each path it empties, however many
+/// of the paths share a tree.
+///
+/// Every later entry in the same tree was brought up to date by folding the
+/// emptied place's path again, once per pair, on the trial and again on the
+/// removal: a hundred and sixty spends in one tree of height seventeen hashed
+/// about four hundred thousand nodes, fifty times the three passes the comment
+/// on `remove_batch` priced it at, and nothing counted them. That passed.
+#[test]
+fn a_batch_removal_costs_a_few_passes_and_not_a_pass_per_pair() {
+    const HEIGHT: u64 = 16;
+    const BATCH: u64 = 160;
+    let places = 1u64 << HEIGHT;
+    let mut archive = Archive::new();
+    for index in 0..places {
+        archive.add(leaf(index)).unwrap();
+    }
+    // Scattered over the one tree, so most pairs meet low and some high.
+    let chosen: std::collections::BTreeSet<u64> = (0..BATCH)
+        .map(|turn| turn.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(17) % places)
+        .collect();
+    let removals: Vec<_> = chosen
+        .iter()
+        .map(|at| (*at, leaf(*at), archive.prove(*at).unwrap()))
+        .collect();
+    let mut node = archive.forest().roots_only();
+
+    counting::reset();
+    assert!(node.remove_batch(&removals), "the batch goes through");
+    // A node hash takes sixty four bytes, and the empty leaf takes none.
+    let hashed = counting::reset() / 64;
+
+    let entries = u64::try_from(removals.len()).unwrap();
+    assert!(entries > BATCH / 2, "the batch is mostly distinct places");
+    assert_eq!(node.len(), places - entries);
+    // Nine folds of each path: one to verify it, and on each of the trial and
+    // the removal one to verify it again, one to empty it, one to move the
+    // sibling it changes on watched paths, and one for the later entries to
+    // take their new sibling from.
+    let priced = 9 * entries * HEIGHT;
+    assert!(
+        hashed <= priced,
+        "a batch of {entries} in a tree of height {HEIGHT} hashed {hashed} nodes \
+         where nine folds of each path is {priced}: the later entries are being \
+         brought up to date by folding again for every pair"
+    );
 }
 
 #[test]
