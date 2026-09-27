@@ -581,6 +581,11 @@ fn a_head_that_never_ends_is_cut_off_at_the_cap() {
 /// say produces one: it needs the source itself to break, which on the real
 /// path is the deadline in `Timed`. This is the only thing in the file that
 /// reaches that branch.
+///
+/// A source that runs out of time while the body is read is a 408 too. It
+/// was a 400, "malformed request", because the body read mapped every error
+/// to that, and this test allowed either: a caller cut off at the deadline
+/// halfway through its form was told the form was malformed, and that passed.
 #[test]
 fn a_source_that_fails_is_a_timeout_and_not_a_malformed_request() {
     struct Failing {
@@ -613,8 +618,8 @@ fn a_source_that_fails_is_a_timeout_and_not_a_malformed_request() {
         };
         let answer = read_request(&mut source);
         assert!(
-            matches!(answer, Err(400 | 408) | Ok(Some(_))),
-            "a source that gave out answered {answer:?} (case {case})"
+            matches!(answer, Err(408) | Ok(Some(_))),
+            "a source that ran out of time answered {answer:?} (case {case})"
         );
         if answer == Err(408) {
             timed_out += 1;
@@ -622,10 +627,9 @@ fn a_source_that_fails_is_a_timeout_and_not_a_malformed_request() {
     });
 
     assert!(ran.cases >= 100, "the campaign ran {} cases", ran.cases);
-    // A source that fails while a line is being read is a timeout. One that
-    // fails during the body read is a 400, because `read_exact` cannot say
-    // which of the two it was. Both are reached; only the first is this
-    // test's subject.
+    // A source that fails while a line is being read is a timeout, and so is
+    // one that fails during the body read: `read_exact` hands back the error
+    // the source gave, and a deadline is told from a caller that hung up.
     assert!(
         timed_out > 0,
         "the timeout branch was never reached, so the assertion above is about \

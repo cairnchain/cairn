@@ -179,6 +179,15 @@ const DRAIN_POLL: Duration = Duration::from_millis(5);
 /// connection, taking the answer with it. It is spent on the thread that
 /// writes refusals and never in the accept loop.
 const REFUSAL_PATIENCE: Duration = Duration::from_millis(250);
+/// How long a refusal made while reading a request has to be written, from
+/// the moment it was made.
+///
+/// A refusal is a few hundred bytes to a caller that has been sent nothing
+/// yet, so it goes into the socket's buffer at once and needs none of this.
+/// It is a ceiling, and what it bounds is a caller that has stopped reading:
+/// one that was late asking holds its slot past [`REQUEST_DEADLINE`] by this
+/// much at most.
+const REFUSAL_WRITING: Duration = Duration::from_secs(1);
 /// Refusals waiting to be written at once.
 ///
 /// A ceiling on how many sockets that thread holds open. Past it a connection
@@ -544,18 +553,27 @@ where
             let asked = Instant::now();
             let response = answer(&request);
             thought = asked.elapsed();
-            (response, head_only)
+            (response, head_only, false)
         }
         // [`ANSWERS`], not a sentence written here. This said "only GET and
         // HEAD are served" for as long as this server has answered POST, which
         // is the sentence the module header was corrected for: the correction
         // reached the comment a maintainer reads and not the line a stranger
         // is sent.
-        Ok(None) => (Response::error(405, ANSWERS), false),
-        Err(status) => (Response::error(status, refusal(status)), false),
+        Ok(None) => (Response::error(405, ANSWERS), false, false),
+        Err(status) => (Response::error(status, refusal(status)), false, true),
     };
     let sent = if response.1 { 0 } else { response.0.body.len() };
     let until = deadline(accepted, answering(sent).saturating_add(thought));
+    // A refusal made while reading gets [`REFUSAL_WRITING`] from the moment it
+    // was made. The 408 is made exactly at the deadline above, so its writing
+    // budget was spent before its first byte and a caller that was late was
+    // told nothing at all.
+    let until = if response.2 {
+        until.max(refusal_deadline(Instant::now()))
+    } else {
+        until
+    };
     // A blocking write comes back only when the whole slice has gone, and the
     // socket's own timeout is reset by every byte that moves, so one write of
     // a long answer sails past the deadline while the caller sips at it. A
@@ -859,6 +877,18 @@ fn deadline(accepted: Instant, answering: Duration) -> Instant {
         .unwrap_or_else(Instant::now)
 }
 
+/// When a refusal made at `made`, while its request was being read, has to be
+/// written by.
+///
+/// Counted from when it was made and not from the accept, because the one
+/// made at the asking deadline had nothing left of that to be written in. The
+/// caller cannot move it: the refusal is made when the asking budget runs out
+/// or when the request is found wanting, and neither is later than the
+/// deadline above.
+fn refusal_deadline(made: Instant) -> Instant {
+    made.checked_add(REFUSAL_WRITING).unwrap_or(made)
+}
+
 /// What an answer of `bytes` is worth in time, which is how long it takes on
 /// the slowest link this server writes for, and never more than
 /// [`ANSWER_DEADLINE`].
@@ -1058,7 +1088,19 @@ fn read_request_as<R: io::Read>(reader: &mut R, bodies: Bodies) -> Result<Option
             return Err(413);
         }
         let mut bytes = vec![0u8; length];
-        reader.read_exact(&mut bytes).map_err(|_| 400u16)?;
+        // A deadline is a 408 here as it is on a line. Every failure was a
+        // 400, "malformed request", so a caller cut off halfway through its
+        // form was told the form was malformed; a caller that hung up short
+        // of its length is still one.
+        reader.read_exact(&mut bytes).map_err(
+            |error| {
+                if would_wait(&error) {
+                    408u16
+                } else {
+                    400u16
+                }
+            },
+        )?;
         body = String::from_utf8(bytes).map_err(|_| 400u16)?;
     }
 
