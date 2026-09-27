@@ -9743,6 +9743,7 @@ mod peers_and_loops {
     use crate::book::MAX_MISSES;
     use crate::message::{Handshake, PROTOCOL_VERSION};
     use crate::sync::JOIN_RATHER_THAN_READ;
+    use crate::wire::{read_message, Incoming};
 
     use super::*;
 
