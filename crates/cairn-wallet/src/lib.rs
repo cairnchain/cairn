@@ -4288,7 +4288,7 @@ mod tests {
         );
         assert!(
             !said.contains("still right"),
-            "and vouches for an amount that counts from a list it says has stopped: {said}"
+            "and vouches for an amount that counts from a list it says has stopped"
         );
         assert!(
             said.contains("still reading"),
