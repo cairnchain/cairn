@@ -1899,7 +1899,7 @@ pub fn on_message(
         return Reaction::idle();
     };
 
-    let mut reaction = answer(local, peer, message, now);
+    let mut reaction = answer(local, peer, message, charged, now);
     // Whatever the message was, and after it: a block of the batch arriving
     // at the last moment is still the batch arriving.
     if reaction.drop_peer.is_none() {
@@ -1910,7 +1910,16 @@ pub fn on_message(
 }
 
 /// What one message from an introduced peer that could afford it calls for.
-fn answer(local: &mut Local<'_>, peer: &mut PeerState, message: Message, now: u64) -> Reaction {
+///
+/// `charged` is what the message cost the peer, which a block this node asked
+/// for hands back once it is on the branch followed.
+fn answer(
+    local: &mut Local<'_>,
+    peer: &mut PeerState,
+    message: Message,
+    charged: u32,
+    now: u64,
+) -> Reaction {
     match message {
         // A pong needs no answer, a second introduction was already refused
         // above, and a piece of a join answer belongs to whoever is collecting

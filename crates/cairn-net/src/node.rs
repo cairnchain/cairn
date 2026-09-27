@@ -8074,8 +8074,13 @@ fn has_gone_silent(last_heard: &mut u64, now: u64) -> bool {
 /// A clock that went backwards counts as due, the reading [`has_gone_quiet`]
 /// takes of one: without it a node with no seed address and a clock put back
 /// an hour looked nobody up for that hour.
+///
+/// A lookup still out is never due, whatever the clock says: its mark,
+/// [`LOOKUP_UNDER_WAY`], is later than any clock, and read as a clock put back
+/// it started a second lookup beside the first.
 fn a_lookup_is_due(last: u64, now: u64) -> bool {
-    last == 0 || now < last || now.saturating_sub(last) >= NAME_LOOKUP_PERIOD
+    last != LOOKUP_UNDER_WAY
+        && (last == 0 || now < last || now.saturating_sub(last) >= NAME_LOOKUP_PERIOD)
 }
 
 /// Whether a join that last moved at `moved` has been quiet long enough to be
