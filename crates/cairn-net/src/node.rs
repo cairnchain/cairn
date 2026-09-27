@@ -1362,7 +1362,8 @@ struct Shared {
     /// as long as it ran.
     seed_names: Mutex<Vec<String>>,
     /// When those names were last looked up, so a machine with no name server
-    /// asks every so often rather than every round.
+    /// asks every so often rather than every round, and `u64::MAX` while a
+    /// lookup is still out.
     names_looked_up_at: AtomicU64,
     /// The book's change count as of the last write of it that got through.
     ///
@@ -4934,9 +4935,12 @@ impl Node {
         save_book(&self.shared);
         // Until the table stays empty. Nothing has to be woken: the accept
         // loop polls, and every peer thread is either reading with a deadline
-        // or on a socket just shut. What the round is for is a connection
-        // taken while this was joining, which adds its thread after the table
-        // was taken.
+        // or on a socket just shut. Upkeep finishes the round it is in, whose
+        // longest wait on the network is one wave of dials, `DIAL_TIMEOUT` at
+        // most, since it looks at `running` before each; a name lookup it
+        // asked for is on a thread of its own that this does not wait for.
+        // What the round is for is a connection taken while this was
+        // joining, which adds its thread after the table was taken.
         loop {
             for peer in self.shared.peers().values() {
                 let _ = peer.stream.shutdown(Shutdown::Both);
@@ -7847,8 +7851,21 @@ fn collect_finished(shared: &Arc<Shared>) {
 /// address lands it is kept for good and the book takes over, so this stops on
 /// its own and never runs again.
 ///
-/// A lookup can block, so it is spaced out rather than tried every round.
+/// A lookup can block for as long as the machine's resolver cares to try, and
+/// nothing here can put a deadline on it, so it is made on a thread of its own
+/// that nothing waits for: the round that asks goes on at once, and a stop
+/// does not wait on a name server. What the names answer lands in the book
+/// whenever it arrives. It is spaced out rather than tried every round, and
+/// never two at once.
 fn look_up_seed_names(shared: &Arc<Shared>, now: u64) {
+    look_up_seed_names_with(shared, now, crate::seeds::resolve);
+}
+
+/// [`look_up_seed_names`], with the lookup handed in.
+fn look_up_seed_names_with<R>(shared: &Arc<Shared>, now: u64, resolve: R)
+where
+    R: Fn(&str) -> Result<Vec<SocketAddr>, String> + Send + 'static,
+{
     if shared.book().has_seeds() {
         return;
     }
@@ -7856,21 +7873,47 @@ fn look_up_seed_names(shared: &Arc<Shared>, now: u64) {
     if last > 0 && now.saturating_sub(last) < NAME_LOOKUP_PERIOD {
         return;
     }
-    shared.names_looked_up_at.store(now, Ordering::Relaxed);
+    // Out until the lookup comes back, which no period ever reaches, so a
+    // resolver slower than the period is not asked twice at once.
+    shared
+        .names_looked_up_at
+        .store(LOOKUP_UNDER_WAY, Ordering::Relaxed);
 
     let names = shared.seed_names().clone();
-    for name in names {
-        // Outside the book lock: a lookup with no name server to answer it
-        // takes seconds, and nothing else should wait on that.
-        let Ok(addresses) = crate::seeds::resolve(&name) else {
-            continue;
-        };
-        let mut book = shared.book();
-        for address in addresses {
-            book.insert_seed(address);
-        }
+    // Weakly: a lookup nothing waits for must not be what keeps a stopped
+    // node's state alive for as long as a name server takes.
+    let node = Arc::downgrade(shared);
+    let started = thread::Builder::new()
+        .name("cairn-names".to_owned())
+        .spawn(move || {
+            for name in names {
+                // Outside the book lock: a lookup with no name server to
+                // answer it takes seconds, and nothing else should wait on
+                // that.
+                let Ok(addresses) = resolve(&name) else {
+                    continue;
+                };
+                let Some(shared) = node.upgrade() else {
+                    return;
+                };
+                let mut book = shared.book();
+                for address in addresses {
+                    book.insert_seed(address);
+                }
+            }
+            if let Some(shared) = node.upgrade() {
+                shared.names_looked_up_at.store(now, Ordering::Relaxed);
+            }
+        });
+    if started.is_err() {
+        // Asked again once the period is over, as a lookup that found
+        // nothing is.
+        shared.names_looked_up_at.store(now, Ordering::Relaxed);
     }
 }
+
+/// What [`Shared::names_looked_up_at`] holds while a lookup is out.
+const LOOKUP_UNDER_WAY: u64 = u64::MAX;
 
 fn dial_from_book(shared: &Arc<Shared>, now: u64) {
     dial_from_book_with(shared, now, &|address: &SocketAddr| {
@@ -11978,15 +12021,68 @@ mod tests {
         node.shared.seed_names().push("192.0.2.7:9944".to_owned());
 
         look_up_seed_names(&node.shared, last + NAME_LOOKUP_PERIOD - 1);
-        assert!(
-            !node.shared.book().has_seeds(),
+        assert_eq!(
+            node.shared.names_looked_up_at.load(Ordering::Relaxed),
+            last,
             "a lookup a second before its period was taken"
         );
+        // The answer lands from a thread of its own, so it is waited for.
         look_up_seed_names(&node.shared, last + NAME_LOOKUP_PERIOD);
+        let patience = Instant::now() + Duration::from_secs(10);
+        while !node.shared.book().has_seeds() && Instant::now() < patience {
+            thread::sleep(Duration::from_millis(10));
+        }
         assert!(
             node.shared.book().has_seeds(),
             "and the one its period allows was not"
         );
+    }
+
+    /// Looking names up does not hold the round that asks for it, so a stop
+    /// does not wait on a name server.
+    ///
+    /// `to_socket_addrs` has no deadline of its own, and the lookup ran on the
+    /// upkeep thread, which a stop joins: a node whose seed names would not
+    /// resolve could not be stopped until the resolver gave up, tens of
+    /// seconds against a name server that does not answer. Nothing asked how
+    /// long a stop can wait. The resolver is handed in, and this one does not
+    /// answer until the test lets it.
+    #[test]
+    fn a_name_lookup_does_not_hold_the_round_that_asks_for_it() {
+        // Stopped, so its own rounds do not look anything up beside this.
+        let node = Node::bind(ConsensusParams::testnet(), loopback()).unwrap();
+        node.shutdown();
+        node.shared
+            .seed_names()
+            .push("seed.invalid:9944".to_owned());
+        let (answer, answered) = mpsc::channel::<()>();
+        let finished = Arc::new(AtomicBool::new(false));
+        let done = Arc::clone(&finished);
+        look_up_seed_names_with(&node.shared, 1_000, move |_: &str| {
+            let _ = answered.recv_timeout(Duration::from_secs(5));
+            done.store(true, Ordering::SeqCst);
+            Ok(vec![SocketAddr::from((Ipv4Addr::new(192, 0, 2, 7), 9_944))])
+        });
+        let waited = finished.load(Ordering::SeqCst);
+        // A round due while that lookup is still out does not start another.
+        let again = Arc::new(AtomicBool::new(false));
+        let asked = Arc::clone(&again);
+        look_up_seed_names_with(&node.shared, 1_000 + NAME_LOOKUP_PERIOD, move |_: &str| {
+            asked.store(true, Ordering::SeqCst);
+            Err("not asked".to_owned())
+        });
+        let _ = answer.send(());
+        let patience = Instant::now() + Duration::from_secs(10);
+        while !node.shared.book().has_seeds() && Instant::now() < patience {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let landed = node.shared.book().has_seeds();
+        assert!(!waited, "the round waited for the name server to answer");
+        assert!(
+            !again.load(Ordering::SeqCst),
+            "a second lookup was started while the first was still out"
+        );
+        assert!(landed, "what the name answered never reached the book");
     }
 
     /// The threads of peers that have gone are collected.
