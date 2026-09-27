@@ -363,6 +363,38 @@ fn a_batch_removal_costs_a_few_passes_and_not_a_pass_per_pair() {
     );
 }
 
+/// The empty leaf is not a leaf anybody can add.
+///
+/// It is what an emptied place holds, and every other operation reads it so:
+/// a removal refuses it, the archive's index skips it, and undoing the append
+/// of one leaves the live count alone. `add` took it like any other leaf and
+/// counted it live, so an archive handed it and then undone held one live leaf
+/// among none, a forest its own decoder refuses. That passed.
+#[test]
+fn the_empty_leaf_cannot_be_added() {
+    let mut forest = Forest::new();
+    assert!(
+        forest.add(empty_leaf()).is_none(),
+        "a forest took the empty leaf as a leaf"
+    );
+    assert_eq!(forest, Forest::new(), "a refused addition moved the forest");
+
+    let mut archive = Archive::new();
+    archive.add(leaf(1)).unwrap();
+    let before = archive.commitment();
+    assert!(
+        archive.add(empty_leaf()).is_none(),
+        "an archive took the empty leaf as a leaf"
+    );
+    assert_eq!(archive.commitment(), before, "and moved for it");
+    assert_eq!(archive.leaf_at(1), None, "and kept what its forest refused");
+    assert!(archive.remove_last());
+    assert!(
+        Forest::decode(&archive.forest().encode()).is_ok(),
+        "undoing what the archive held left a forest the decoder refuses"
+    );
+}
+
 #[test]
 fn a_batch_with_one_bad_proof_changes_nothing() {
     let mut archive = Archive::new();

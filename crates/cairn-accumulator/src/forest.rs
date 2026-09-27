@@ -662,7 +662,19 @@ impl Forest {
     ///
     /// Only the roots are read and written, which is what lets a node that
     /// holds nothing else keep the commitment current.
+    ///
+    /// Nothing when the count is full, and nothing for the empty leaf. That
+    /// is what an emptied place holds, and every other operation here reads
+    /// it so: a removal refuses it, the archive's index leaves it out, and
+    /// undoing the append of one leaves the live count alone. Taken here and
+    /// counted live, it left an archive that was then undone holding one live
+    /// leaf among none, a forest [`Forest::decode`] refuses. No leaf a chain
+    /// adds is it, since each is hashed over bytes and it is the hash of
+    /// none, so refusing it changes what happens to nothing anybody can make.
     pub fn add(&mut self, leaf: Hash32) -> Option<(u64, ForestProof)> {
+        if leaf == empty_leaf() {
+            return None;
+        }
         let position = self.leaves;
         let next = self.leaves.checked_add(1)?;
 
