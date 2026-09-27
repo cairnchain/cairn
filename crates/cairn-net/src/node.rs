@@ -2976,13 +2976,32 @@ impl Shared {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Whether one more connection from `host` is welcome.
+    /// Whether this node may open one more connection to `host`.
+    ///
+    /// A connection on its way out to make room for a visitor still holds its
+    /// slot here, because that slot is the visitor's: between the moment it
+    /// was chosen and the moment the visitor is taken there is a gap, and a
+    /// dial made in it took the slot, the visitor was turned away, and the
+    /// connection let go of had been let go of for nobody.
+    fn has_room_for(&self, host: Option<IpAddr>) -> bool {
+        self.room_for(host, false)
+    }
+
+    /// Whether one more connection from `host`, somebody else's, is welcome
+    /// once room has been made for it.
     ///
     /// A connection on its way out to make room for a visitor holds nothing
     /// here: its slot went to the visitor the moment it was chosen.
-    fn has_room_for(&self, host: Option<IpAddr>) -> bool {
+    fn has_room_for_visitor(&self, host: Option<IpAddr>) -> bool {
+        self.room_for(host, true)
+    }
+
+    /// The table's ceiling and the host's share, counting a connection on its
+    /// way out only when `visiting` is false. See the two above.
+    fn room_for(&self, host: Option<IpAddr>, visiting: bool) -> bool {
         let peers = self.peers();
-        if peers.values().filter(|peer| !peer.leaving).count() >= MAX_PEERS {
+        let holding = || peers.values().filter(|peer| !visiting || !peer.leaving);
+        if holding().count() >= MAX_PEERS {
             return false;
         }
         let Some(host) = host else {
@@ -2991,13 +3010,7 @@ impl Shared {
         if !can_be_refused(host) {
             return true;
         }
-        room_beside(
-            peers
-                .values()
-                .filter(|peer| !peer.leaving)
-                .map(|peer| peer.host),
-            host,
-        )
+        room_beside(holding().map(|peer| peer.host), host)
     }
 
     /// Whether one more connection somebody else opened is welcome.
@@ -3038,7 +3051,7 @@ impl Shared {
         if held >= MAX_PEERS {
             return false;
         }
-        self.has_room_for(host)
+        self.has_room_for_visitor(host)
     }
 
     /// Lets go of one connection somebody else opened, to make room for a
@@ -13200,8 +13213,14 @@ mod peers_and_loops {
             "room was made by letting go of other than one"
         );
         assert!(
-            node.shared.has_room_for(Some(visitor)),
-            "the connection on its way out still held its slot"
+            node.shared.has_room_for_visitor(Some(visitor)),
+            "the connection on its way out still held its slot against the visitor"
+        );
+        assert!(
+            !node
+                .shared
+                .has_room_for(Some(IpAddr::from([198, 51, 100, 1]))),
+            "a dial took the slot made for the visitor"
         );
         assert!(
             !node.shared.make_room_for(IpAddr::from([192, 0, 2, 2])),
@@ -13228,8 +13247,12 @@ mod peers_and_loops {
             peer.leaving = true;
         }
         assert!(
-            node.shared.has_room_for(Some(host)),
+            node.shared.has_room_for_visitor(Some(host)),
             "the connection on its way out was counted in its machine's share"
+        );
+        assert!(
+            !node.shared.has_room_for(Some(host)),
+            "a dial to that machine took the share its visitor was let in for"
         );
     }
 
