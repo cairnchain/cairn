@@ -20,6 +20,7 @@
 )]
 
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use cairn_chain::{ChainStore, Outdated};
@@ -33,7 +34,7 @@ use cairn_ledger::validation::{
 use cairn_ledger::LedgerState;
 use cairn_net::message::{Handshake, Message, PROTOCOL_VERSION};
 use cairn_net::sync::{on_message, Local, PeerState};
-use cairn_net::wire::write_message;
+use cairn_net::wire::{read_message, write_message, Incoming, MAX_FRAME_BYTES};
 use cairn_net::Keeps;
 use cairn_net::Node;
 use cairn_primitives::Hash32;
@@ -147,7 +148,8 @@ fn hello(nonce: u64) -> Message {
 /// at fifteen seconds, at a minute, and at twenty milliseconds, each green on a
 /// quiet machine and red on a busy one. They are set far past anything a loaded
 /// runner does rather than near it.
-/// Reads everything a node sends down `socket` and answers nothing.
+/// Reads everything a node sends down `socket` and answers nothing, and hands
+/// on the number of every pong.
 ///
 /// A test that opens a socket, says one thing and then goes quiet is modelling
 /// a peer that has nothing to say. A socket nobody reads from is a different
@@ -155,24 +157,30 @@ fn hello(nonce: u64) -> Message {
 /// out and the connection is closed. That is the node behaving correctly and
 /// it has nothing to do with what this test is about, but it lands in the same
 /// place, `peer_count` going to zero, which this reads as the node having
-/// judged the peer.
+/// judged the peer. Reading the socket removes it rather than racing it, the
+/// same helper and the same reason as `audit_clock_drift.rs`.
 ///
-/// How long it takes depends on how much the node happens to send and when the
-/// scheduler runs it, so it is not a thing a deadline can be set around.
-/// Draining the socket removes it rather than racing it. The same helper, and
-/// the same reason, as `audit_clock_drift.rs`.
-fn drain(socket: &TcpStream) {
+/// The pongs are for a test asserting that a node did not hang up over a
+/// message: a ping written behind that message on the same connection is read
+/// after it, so its pong is the node saying it has read the message and dealt
+/// with it, and a node that hung up over the message never reads the ping.
+/// Waiting for the peer count to fall and asserting it did not could not tell
+/// a node that kept the peer from one that had not read the block yet.
+fn pongs(socket: &TcpStream) -> mpsc::Receiver<u64> {
+    let (heard, pongs) = mpsc::channel();
     let Ok(mut reading) = socket.try_clone() else {
-        return;
+        return pongs;
     };
     std::thread::spawn(move || {
-        let mut scratch = [0u8; 4096];
-        while let Ok(read) = std::io::Read::read(&mut reading, &mut scratch) {
-            if read == 0 {
-                return;
+        while let Ok(incoming) = read_message(&mut reading, params().network, MAX_FRAME_BYTES) {
+            if let Incoming::Message(Message::Pong(number)) = incoming {
+                if heard.send(number).is_err() {
+                    return;
+                }
             }
         }
     });
+    pongs
 }
 
 fn wait_until(patience: Duration, mut ready: impl FnMut() -> bool) -> bool {
@@ -184,6 +192,19 @@ fn wait_until(patience: Duration, mut ready: impl FnMut() -> bool) -> bool {
         std::thread::sleep(Duration::from_millis(20));
     }
     ready()
+}
+
+/// Whether the pong numbered `number` arrives within `patience`.
+fn ponged(pongs: &mpsc::Receiver<u64>, number: u64, patience: Duration) -> bool {
+    let deadline = Instant::now() + patience;
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        match pongs.recv_timeout(left) {
+            Ok(heard) if heard == number => return true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    false
 }
 
 /// The same, through a real node over a real socket.
@@ -205,7 +226,7 @@ fn a_real_node_keeps_the_peer_that_brought_it_a_block_it_cannot_read() {
     }
 
     let mut socket = TcpStream::connect(node.address()).unwrap();
-    drain(&socket);
+    let pongs = pongs(&socket);
     write_message(&mut socket, params().network, &hello(4_711)).unwrap();
     assert!(
         wait_until(Duration::from_secs(60), || node.peer_count() == 1),
@@ -218,29 +239,24 @@ fn a_real_node_keeps_the_peer_that_brought_it_a_block_it_cannot_read() {
         &Message::Block(Box::new(unreadable)),
     )
     .unwrap();
-
-    // Long enough that a connection being torn down would have been, and no
-    // longer. This is the one shape of deadline where more is worse: what is
-    // asserted is that nothing happened, so every second added is another
-    // second in which something unrelated may. A drop caused by this block is
-    // worked out in the peer's own thread as the message is read, which is
-    // milliseconds.
-    //
-    // It was three seconds, and a sweep that raised fifteen liveness deadlines
-    // raised it too. That sweep was right about the fourteen and exactly wrong
-    // about this one.
-    let dropped = wait_until(Duration::from_secs(10), || node.peer_count() == 0);
+    // Behind the block on the same connection, so its answer says the block
+    // was read. This used to wait ten seconds for the peer count to fall and
+    // assert that it had not, which a node that had not read the block yet
+    // passed as well as one that had kept the peer over it.
+    write_message(&mut socket, params().network, &Message::Ping(0x0b10c)).unwrap();
+    let read = ponged(&pongs, 0x0b10c, Duration::from_secs(120));
     let held = node.peer_count();
     let height = node.height();
     node.shutdown();
 
     assert!(
-        !dropped,
-        "the connection was closed and the host refused, for a block this build \
-         cannot read and an update would make readable: every peer that had \
-         updated would be dropped, one message each"
+        read,
+        "the ping behind the block was never answered: the connection was closed \
+         and the host refused, for a block this build cannot read and an update \
+         would make readable, so every peer that had updated would be dropped, \
+         one message each"
     );
-    assert_eq!(held, 1);
+    assert_eq!(held, 1, "the peer was let go of after its block was read");
     assert_eq!(height, Some(4), "and the block is still not followed");
 }
 

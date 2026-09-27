@@ -13,6 +13,7 @@ workspace = true
 
 # Deliberately empty, and this is the whole reason the crate exists as a crate
 # rather than as a dependency taken off a registry. It is a dev-dependency of
-# four crates whose release binaries must gain nothing, and the cheapest way to
-# be certain of that is to have nothing to gain.
+# every crate with a campaign, nine of them, three of which are the programs
+# that ship, and the cheapest way to be certain they gain nothing is to have
+# nothing to gain.
 [dependencies]

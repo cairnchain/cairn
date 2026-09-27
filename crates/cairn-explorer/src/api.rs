@@ -2836,3 +2836,66 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::arithmetic_side_effects)]
+mod owners_under_a_generator {
+    use cairn_crypto::SecretKey;
+    use cairn_fuzz::{mutate, Campaign};
+
+    use super::parse_owner;
+
+    /// An owner named in a path is read exactly as the wallet reads an
+    /// address, for any text at all.
+    ///
+    /// A person pastes the address their wallet shows into the explorer, and
+    /// the explorer's reading is its own copy of the wallet's: a text one of
+    /// them takes and the other does not is an address the explorer says has
+    /// nothing, or answers for somebody else. The wallet trims what it is
+    /// handed and a path has nothing to trim; beyond that they must agree.
+    /// Nothing held the two readings together. The node's reading of the key
+    /// it mines to is held to the wallet's the same way, in `cairnd`.
+    #[test]
+    fn an_owner_in_a_path_is_an_address_the_wallet_reads() {
+        let campaign = Campaign::named("explorer: owners");
+        let seed = campaign.seed();
+        let keys: Vec<String> = (1..=4u8)
+            .map(|n| {
+                cairn_primitives::hex::encode(
+                    SecretKey::from_bytes(&[n; 32]).public_key().as_bytes(),
+                )
+            })
+            .collect();
+        let corpus: Vec<Vec<u8>> = keys.iter().map(|key| key.clone().into_bytes()).collect();
+        let mut read = 0usize;
+        let ran = campaign.run(4_000, |case, rng| {
+            let text = match rng.below(5) {
+                0 => rng.pick(&keys).cloned().unwrap_or_default(),
+                1 => rng.pick(&keys).cloned().unwrap_or_default().to_uppercase(),
+                2 => cairn_primitives::hex::encode(&rng.array::<32>()),
+                3 => {
+                    let from = rng.pick(&corpus).cloned().unwrap_or_default();
+                    String::from_utf8_lossy(&mutate(rng, &from, &corpus)).into_owned()
+                }
+                _ => {
+                    let len = rng.below(80);
+                    rng.plausible_bytes(len)
+                        .into_iter()
+                        .map(char::from)
+                        .collect()
+                }
+            };
+            let text = text.trim();
+            let ours = parse_owner(text);
+            let wallet = cairn_wallet::parse_address(text).ok();
+            assert_eq!(
+                ours, wallet,
+                "case {case} of seed {seed:#x}: the explorer and the wallet read `{text}` \
+                 differently"
+            );
+            read += usize::from(ours.is_some());
+        });
+        assert!(ran.cases >= 1_000, "the campaign ran {} cases", ran.cases);
+        assert!(read > 0, "no text was ever read as an owner by either");
+    }
+}

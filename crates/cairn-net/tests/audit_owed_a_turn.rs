@@ -560,7 +560,20 @@ fn a_stranger_beside_the_proved_supplier_cannot_hold_the_node_off() {
             Step::Ask(peer, _) if peer == stranger => asked_at = Some(now),
             Step::Ask(peer, _) if peer == fresh => fresh_asked_at = Some(now),
             Step::Ask(_, _) | Step::Quiet => {}
-            Step::Nudge(_) => return,
+            // The choice made, which ends the hold as much as the supplier
+            // being shown does, and is held to the same ceiling. It used to
+            // end the test with the wait never compared, so a chooser that
+            // held the node off past the ceiling and then made its choice
+            // passed.
+            Step::Nudge(_) => {
+                let waited = now - proven_at;
+                assert!(
+                    waited <= HELD_OFF_AT_MOST,
+                    "a stranger sharing the supplier's address cost {waited}s, \
+                     past the {HELD_OFF_AT_MOST}s ceiling, before the choice was made"
+                );
+                return;
+            }
         }
         if asked_at.is_some_and(|at| now.saturating_sub(at) >= FIRST_ANSWER_WINDOW) {
             connected.retain(|other| *other != stranger);

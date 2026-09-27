@@ -38,7 +38,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cairn_http::http::MAX_CONNECTIONS;
 use cairn_http::Response;
@@ -357,8 +357,19 @@ fn every_caller_refused_at_once_is_told_so() {
         };
         holding.push(stream);
     }
-    // Long enough for the server to have taken every slot.
-    thread::sleep(Duration::from_millis(200));
+    // Until the server says it is full, which is every slot taken. It was a
+    // sleep of two hundred milliseconds, "long enough for the server to have
+    // taken every slot", which is a fact about the accept loop's scheduling
+    // and not about refusals: a caller below arriving before the last slot
+    // was taken was answered, and the count read as refusals lost.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !ask(address, b"GET / HTTP/1.1\r\nhost: cairn\r\n\r\n").starts_with("HTTP/1.1 503") {
+        assert!(
+            Instant::now() < deadline,
+            "the server never said it was full with {} connections held",
+            holding.len()
+        );
+    }
 
     // All of them at once, each sending a whole request and then holding the
     // socket open rather than closing its half: a browser, and the one shape

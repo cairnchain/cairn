@@ -1285,7 +1285,7 @@ pub fn bind(address: SocketAddr) -> io::Result<TcpListener> {
 mod tests {
     use super::{
         answering, drain, let_go_of_the_done, one_machine, percent_decode, reason, refusal,
-        wait_on, would_wait, Request, Slots, Waiting, ANSWER_DEADLINE, DRAIN_BYTES,
+        wait_on, would_wait, Request, Slots, Waiting, ANSWER_DEADLINE, DRAIN_BYTES, DRAIN_CHUNK,
         MAX_CONNECTIONS, MAX_PER_HOST, REFUSALS_QUEUED,
     };
     use std::collections::VecDeque;
@@ -1819,21 +1819,38 @@ mod tests {
     /// one. What the server does with the result is argued from this and from
     /// the reset semantics written on `hang_up`; what `drain` does is a number
     /// and is measured.
+    ///
+    /// The sender is told when to write rather than timed. It slept sixty
+    /// milliseconds and wrote, and the test had to accept, change the mode and
+    /// read inside those sixty for the first answer to be nought, and then be
+    /// answered inside half a second for the second: a margin on both sides,
+    /// which a loaded runner can take from either. It now writes only once the
+    /// first drain is over, and writes a read more than a drain clears, so the
+    /// second drain ends at its own ceiling as soon as the bytes are in, its
+    /// patience can be generous, and a drain that read past its ceiling says
+    /// so.
     #[test]
     fn a_drain_with_patience_clears_what_was_still_on_its_way() {
         use std::net::{Ipv4Addr, TcpListener};
-
-        const LATE: usize = 512;
+        use std::sync::mpsc;
 
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("a free port");
         let at = listener.local_addr().expect("the port it took");
+        let (go, told) = mpsc::channel::<()>();
+        let (done, finished) = mpsc::channel::<()>();
         let sending = std::thread::spawn(move || {
             let mut out = std::net::TcpStream::connect(at).expect("the listener is up");
+            if told.recv().is_err() {
+                return;
+            }
+            // A little after the drain has started, so what it clears is what
+            // arrived while it waited.
             std::thread::sleep(Duration::from_millis(60));
-            let _ = std::io::Write::write_all(&mut out, &[b'x'; LATE]);
+            let sent = vec![b'x'; DRAIN_BYTES.saturating_add(DRAIN_CHUNK)];
+            let _ = std::io::Write::write_all(&mut out, &sent);
             let _ = std::io::Write::flush(&mut out);
             // Held open, so nothing here is a close being read as an end.
-            std::thread::sleep(Duration::from_millis(600));
+            let _ = finished.recv();
         });
         let (taken, _) = listener.accept().expect("the connection above");
         taken
@@ -1843,15 +1860,23 @@ mod tests {
         assert_eq!(
             drain(&taken, Duration::ZERO),
             0,
-            "nothing has arrived yet, and without patience nothing is what is cleared"
+            "nothing has been sent yet, and without patience nothing is what is cleared"
         );
-        assert_eq!(
-            drain(&taken, Duration::from_millis(500)),
-            LATE,
-            "the caller's bytes arrived after the refusal was written, which is what \
-             every caller on a link with a round trip in it does"
+        go.send(()).expect("the sender is waiting");
+        // Its ceiling, and less than one more read past it: reads come a chunk
+        // at a time, so the last one can carry it over by less than a chunk.
+        let cleared = drain(&taken, Duration::from_secs(60));
+        assert!(
+            cleared >= DRAIN_BYTES,
+            "cleared {cleared} bytes: the caller's bytes arrived after the refusal was \
+             written, which is what every caller on a link with a round trip in it does"
+        );
+        assert!(
+            cleared < DRAIN_BYTES.saturating_add(DRAIN_CHUNK),
+            "cleared {cleared} bytes, a whole read past the most a drain is meant to clear"
         );
 
+        let _ = done.send(());
         drop(taken);
         let _ = sending.join();
     }

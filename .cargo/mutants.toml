@@ -44,6 +44,13 @@ exclude_re = [
     # The same comparison was `<` before the line was touched for a patience
     # the clock cannot count, and nothing about the boundary changed.
     "replace < with <= in Wallet::catch_up",
+    # `started.elapsed() < budget` as `<=` in a fuzzing campaign's timed run.
+    # The two differ only when the clock reads the budget to the nanosecond,
+    # and then by one more case in a run whose length is a number of seconds
+    # somebody chose: nothing a test can arrange or a person can tell apart.
+    # The line was touched only because the case it runs moved into
+    # `Campaign::one`; the comparison is the one it always was.
+    "replace < with <= in Campaign::run",
 ]
 
 # A mutant that makes a loop run forever is one the suite would have caught if

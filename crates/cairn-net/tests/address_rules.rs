@@ -131,66 +131,142 @@ fn hello(nonce: u64, listen: u16) -> Message {
 /// test rig, and everything behind one NAT gateway share a single window.
 ///
 /// One socket spends it with ordinary `GetPeers` messages; a second socket,
-/// a different program that has spent nothing, is then answered with silence.
+/// a different program that has spent nothing, is then answered with silence,
+/// and answered again once the next window opens.
+///
+/// The windows are ten seconds of the wall clock, and this used to depend on
+/// finishing inside the one it started in: on a loaded runner the reading ran
+/// into the next window, was answered from a fresh allowance, and failed as
+/// though the rule were broken, while a node too slow to answer anything
+/// passed. A try that crosses a boundary before it can say anything is now
+/// tried again, and the next window is part of the test: the same connection
+/// has to be answered there, so a node that answers nobody fails here rather
+/// than in a control run on another node.
 #[test]
 fn a_connection_opening_into_a_spent_window_waits_for_the_next_one() {
-    use std::net::TcpStream;
-    use std::time::SystemTime;
-
-    // Start inside a window rather than across a boundary.
-    let second = || {
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-    };
-    while second() % 10 > 2 {
-        thread::sleep(Duration::from_millis(100));
+    for attempt in 1..=3 {
+        if in_one_window() {
+            return;
+        }
+        println!("try {attempt} crossed a window boundary before it could say anything");
     }
+    panic!(
+        "three tries in a row crossed into the next window before the node had read \
+         the question, so whether a connection inherits a spent window was never asked"
+    );
+}
+
+/// The seconds of the wall clock, which is what the node's windows are cut
+/// from.
+fn wall_clock() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// One try at the rule above, inside one window. `false` when the try crossed
+/// into the next window before it could tell a connection that inherited the
+/// spend from one that was answered from a fresh allowance.
+fn in_one_window() -> bool {
+    use std::net::TcpStream;
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    use cairn_net::wire::Incoming;
+
+    // The node's windows are the wall clock's seconds in tens.
+    let window = || wall_clock() / 10;
+    // Start early in a window rather than across a boundary.
+    while wall_clock() % 10 > 1 {
+        thread::sleep(Duration::from_millis(50));
+    }
+    let spent_in = window();
 
     let node = cairn_net::Node::bind(params(), "127.0.0.1:0".parse().unwrap()).unwrap();
     let at = node.address();
 
     let mut hog = TcpStream::connect(at).unwrap();
-    hog.set_read_timeout(Some(Duration::from_millis(200)))
-        .unwrap();
     let mut reading = hog.try_clone().unwrap();
-    thread::spawn(
-        move || while read_message(&mut reading, params().network, MAX_FRAME_BYTES).is_ok() {},
-    );
+    let (answered, answers) = mpsc::channel();
+    thread::spawn(move || {
+        while let Ok(incoming) = read_message(&mut reading, params().network, MAX_FRAME_BYTES) {
+            if let Incoming::Message(Message::Peers(_)) = incoming {
+                if answered.send(()).is_err() {
+                    return;
+                }
+            }
+        }
+    });
     write_message(&mut hog, params().network, &hello(9_001, 4_242)).unwrap();
     // 128 * COST_PER_ADDRESS_SERVED * MAX_SHARED_ADDRESSES == the whole window.
     for _ in 0..128 {
         write_message(&mut hog, params().network, &Message::GetPeers).unwrap();
     }
-    thread::sleep(Duration::from_millis(300));
+    // Every one of them answered, which is the window spent. It was a sleep of
+    // three hundred milliseconds.
+    for answer in 0..128 {
+        assert!(
+            answers.recv_timeout(Duration::from_secs(60)).is_ok(),
+            "the node stopped answering the first connection at question {answer} of 128"
+        );
+    }
+    if window() != spent_in {
+        node.shutdown();
+        return false;
+    }
 
     let mut fresh = TcpStream::connect(at).unwrap();
     fresh
-        .set_read_timeout(Some(Duration::from_millis(500)))
+        .set_read_timeout(Some(Duration::from_millis(100)))
         .unwrap();
     write_message(&mut fresh, params().network, &hello(9_002, 4_343)).unwrap();
     write_message(&mut fresh, params().network, &Message::Ping(4_242)).unwrap();
 
-    let mut ponged = false;
-    for _ in 0..12 {
+    // Until the window it opened into is over.
+    let mut ponged_in = None;
+    while ponged_in.is_none() && window() == spent_in {
         match read_message(&mut fresh, params().network, MAX_FRAME_BYTES) {
-            Ok(cairn_net::wire::Incoming::Message(Message::Pong(4_242))) => {
-                ponged = true;
-                break;
-            }
+            Ok(Incoming::Message(Message::Pong(4_242))) => ponged_in = Some(window()),
             Ok(_) => {}
-            Err(_) => break,
+            Err(error) => panic!("the node hung up on the second connection: {error}"),
         }
     }
-    let straddled = second() % 10 < 3;
+    if let Some(answered_in) = ponged_in {
+        node.shutdown();
+        assert_ne!(
+            answered_in, spent_in,
+            "the window a connection opens into is not its own, so a peer could \
+             refill one by hanging up"
+        );
+        // Answered, but only once the window had turned: read late, which says
+        // nothing either way.
+        return false;
+    }
+
+    // The next window, on the same node and the same connection. A question
+    // now is answered, and it is read after the one above, so if that one
+    // were read only now it would be answered first.
+    write_message(&mut fresh, params().network, &Message::Ping(4_343)).unwrap();
+    // Three windows: the answer is due in the first of them.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut first = None;
+    while first.is_none() && Instant::now() < deadline {
+        match read_message(&mut fresh, params().network, MAX_FRAME_BYTES) {
+            Ok(Incoming::Message(Message::Pong(number))) => first = Some(number),
+            Ok(_) => {}
+            Err(error) => panic!("the node hung up on the second connection: {error}"),
+        }
+    }
     node.shutdown();
-    println!("fresh connection was answered: {ponged} (window straddled: {straddled})");
-    assert!(
-        !ponged,
-        "the window a connection opens into is not its own, so a peer could \
-         refill one by hanging up"
-    );
+    match first {
+        Some(4_343) => true,
+        Some(_) => false,
+        None => panic!(
+            "the node answered nothing on the second connection in the next window \
+             either, so its silence in the spent one says nothing about the window"
+        ),
+    }
 }
 
 /// **The control: the same second connection, on a node nobody has drained.**
