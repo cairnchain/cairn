@@ -10824,6 +10824,34 @@ mod peers_and_loops {
         assert_eq!(dials.load(Ordering::SeqCst), 16, "each was dialled once");
     }
 
+    /// Once a round's first wave comes back short, the waves after it are
+    /// twice the peers a node aims for, dialled at once.
+    ///
+    /// The width is what a slow refusal costs: sixteen addresses that take a
+    /// second each are one second side by side and two at ten. The test above
+    /// has sixteen, which fit the budget either way, so a narrower wave passed.
+    #[test]
+    fn a_wave_past_the_first_dials_twice_the_target_at_once() {
+        let wide = 2 * TARGET_PEERS;
+        let vacant: Vec<SocketAddr> = (0..=wide).map(|_| a_vacant_address()).collect();
+        let (node, _socket, _far) = one_short_knowing(&vacant);
+        let in_flight = AtomicUsize::new(0);
+        let most = AtomicUsize::new(0);
+        dial_from_book_with(&node.shared, 1_000, &|_: &SocketAddr| {
+            let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            most.fetch_max(now, Ordering::SeqCst);
+            thread::sleep(Duration::from_secs(1));
+            in_flight.fetch_sub(1, Ordering::SeqCst);
+            Err(io::ErrorKind::ConnectionRefused.into())
+        });
+        stop_all(&node);
+        assert_eq!(
+            most.load(Ordering::SeqCst),
+            wide,
+            "a wave after a short first one dialled a different number of addresses at once"
+        );
+    }
+
     /// A round that dials side by side opens what the node is short of and
     /// closes the rest, without holding their answer against them.
     ///
