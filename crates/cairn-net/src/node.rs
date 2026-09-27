@@ -11409,7 +11409,14 @@ mod peers_and_loops {
     fn an_answer_is_counted_with_what_it_brought_whenever_the_question_is_looked_at() {
         let node = quiet();
         let (socket, _far) = a_socket();
-        node.shared.peers().insert(1, stand_in(&socket, true));
+        // An archivist: nobody else is asked where a note sits.
+        node.shared.peers().insert(
+            1,
+            Peer {
+                archives: true,
+                ..stand_in(&socket, true)
+            },
+        );
         let asker = &node;
 
         let recovered = thread::scope(|scope| {
