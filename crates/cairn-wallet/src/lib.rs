@@ -1172,6 +1172,27 @@ pub const CATCH_UP_BATCH: u64 = 512;
 /// it counts against the number rather than against a copy of it.
 pub const SETTLED_FOR: Duration = Duration::from_secs(2);
 
+/// Peers a wallet's own book has to bring it before the seeds written into
+/// the program are left alone.
+///
+/// Two rather than one, so that a wallet does not read the chain from one
+/// peer only because that is the peer it met last time: the seed was the
+/// second opinion every run used to have. Public for the reason
+/// [`CATCH_UP_BATCH`] is.
+pub const FROM_THE_BOOK: usize = 2;
+
+/// How long a wallet gives the addresses it remembers before it goes to the
+/// seeds written into the program.
+///
+/// Its node dials its book a second after it starts and a dial gives up
+/// after three, so this is one round of dialling with room to spare. A
+/// wallet whose book has gone stale pays it once, and then reaches the seed
+/// as it always did.
+pub const BOOK_PATIENCE: Duration = Duration::from_secs(5);
+
+/// How often the wait for the book looks at who has arrived.
+const BOOK_POLL: Duration = Duration::from_millis(50);
+
 /// How far above what the network asks a fee may go before the wallet stops
 /// and makes sure it was meant.
 ///
@@ -1517,6 +1538,55 @@ impl Wallet {
     pub fn reach(&self, seed: SocketAddr) -> bool {
         self.node.remember_seed(seed);
         self.node.connect(seed).is_ok()
+    }
+
+    /// Starts this wallet's node from the addresses it remembers, and goes to
+    /// `seeds` only when those cannot bring it [`FROM_THE_BOOK`] peers within
+    /// `patience`.
+    ///
+    /// For the seeds written into the program, which a wallet told nothing
+    /// used to dial on every run. Whoever runs the machine behind them was
+    /// told of every session: the address it came from and when, and, since a
+    /// payment goes to every peer at once and on a first run the seed is the
+    /// only one, where each payment came from. A wallet that ran before has a
+    /// book of the addresses that answered it, written down when it stopped,
+    /// and its node dials them by itself within a second of starting. The seed
+    /// is for a wallet whose book is empty or has stopped answering.
+    ///
+    /// A book holding fewer addresses than this waits for cannot be enough,
+    /// so it goes to the seeds at once. `names` are handed to the node only
+    /// when the seeds are used, so only then does it look them up again later,
+    /// and `seeds` is not called otherwise: looking a name up is already a
+    /// question to somebody. A `patience` past what the clock can count waits
+    /// for as long as it takes.
+    ///
+    /// `None` when the book was enough, and otherwise how many of the seeds
+    /// were reached.
+    pub fn start_from_the_book(
+        &self,
+        patience: Duration,
+        names: Vec<String>,
+        seeds: impl FnOnce() -> Vec<SocketAddr>,
+    ) -> Option<usize> {
+        if self.node.known_addresses().len() >= FROM_THE_BOOK {
+            let deadline = Instant::now().checked_add(patience);
+            loop {
+                if self.node.peers_introduced() >= FROM_THE_BOOK {
+                    return None;
+                }
+                if deadline.is_some_and(|end| Instant::now() >= end) {
+                    break;
+                }
+                std::thread::sleep(BOOK_POLL);
+            }
+        }
+        self.node.start_from_names(names);
+        Some(
+            seeds()
+                .into_iter()
+                .filter(|address| self.reach(*address))
+                .count(),
+        )
     }
 
     /// Where the node has got to.
