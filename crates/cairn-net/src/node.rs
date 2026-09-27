@@ -1517,6 +1517,17 @@ struct Shared {
     /// node every address it has learned, so it comes back knowing only the
     /// seeds it was started with, and nothing anywhere said a word.
     unsaved_book: Mutex<Option<String>>,
+    /// Held across a save of the address book, so that two are one after the
+    /// other.
+    ///
+    /// Upkeep saves once a second and a stop saves again without waiting for
+    /// that round to end, and a save goes through one staged file beside the
+    /// book: two at once truncated each other's bytes, and whichever moved
+    /// the file into place second found nothing there and recorded a refusal
+    /// no disk had made. Taken before the book and never the other way round,
+    /// and apart from [`Shared::unsaved_book`] so that asking why the last
+    /// save failed never waits on the disk.
+    saving_book: Mutex<()>,
     /// Blocks this build turned out not to be able to read, and who sent them.
     ///
     /// Also a leaf, and for the same reason: it is written from the thread
@@ -4009,6 +4020,7 @@ impl Node {
             mended_nodes: AtomicU64::new(0),
             proofs_asked_for: AtomicU64::new(0),
             unsaved_book: Mutex::new(None),
+            saving_book: Mutex::new(()),
             unjudged: Mutex::new(Unreadable::default()),
             unweighed: Mutex::new(Unweighed::default()),
             out_of_step: Mutex::new(OutOfStep::default()),
@@ -6859,6 +6871,13 @@ fn save_book(shared: &Arc<Shared>) {
     let Some(directory) = shared.directory.as_ref() else {
         return;
     };
+    // One save at a time: see `saving_book`. Taken before the book is read,
+    // so a save that waited here finds the one before it written and, unless
+    // the book moved since, nothing left to do.
+    let _saving = shared
+        .saving_book
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     // Nothing is copied or written while the addresses stand where the last
     // write left them. The file is a list of addresses, so a round in which
     // none went in or out would write the same bytes over the same bytes, and
@@ -10511,6 +10530,62 @@ mod peers_and_loops {
             reached, 1,
             "a node one peer short of its target dialled more than one"
         );
+    }
+
+    /// Two saves of the address book at once leave it whole, and neither
+    /// says the disk refused it.
+    ///
+    /// Upkeep saves the book once a second, and a stop saves it again without
+    /// waiting for that round to end. Both wrote through one staged file: the
+    /// second truncated the first one's bytes under it, and whichever moved
+    /// it into place second found nothing there and recorded a refusal no
+    /// disk had made, or the file was left holding a garbled list. Nothing
+    /// asked what two savers do.
+    #[test]
+    fn two_saves_at_once_leave_the_book_whole_and_blame_no_disk() {
+        let directory =
+            std::env::temp_dir().join(format!("cairn-two-saves-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let (node, _) = Node::open(ConsensusParams::testnet(), local(), &directory).unwrap();
+        node.shutdown();
+        let refused = AtomicUsize::new(0);
+        thread::scope(|scope| {
+            for saver in 0..4u8 {
+                let shared = &node.shared;
+                let refused = &refused;
+                scope.spawn(move || {
+                    for turn in 0..25u8 {
+                        let address = SocketAddr::from((Ipv4Addr::new(10, saver, turn, 1), 9_944));
+                        shared.book().insert(address);
+                        save_book(shared);
+                        if node_refused_the_book(shared) {
+                            refused.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                });
+            }
+        });
+        let held: HashSet<SocketAddr> = node.shared.book().iter().collect();
+        let written: HashSet<SocketAddr> = AddressBook::load(&directory).iter().collect();
+        drop(node);
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            refused.load(Ordering::SeqCst),
+            0,
+            "a save running beside another was recorded as the disk refusing the book"
+        );
+        assert_eq!(
+            written, held,
+            "the book on disk is not the book the node held"
+        );
+    }
+
+    fn node_refused_the_book(shared: &Shared) -> bool {
+        shared
+            .unsaved_book
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
     }
 
     /// A node whose table is full dials nobody.
