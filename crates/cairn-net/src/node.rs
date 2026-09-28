@@ -4083,10 +4083,13 @@ impl Shared {
     /// outcome than letting it decide how much memory this node spends.
     /// Hands `message` to every peer but one, and says how many took it.
     ///
-    /// The count is peers whose outbound queue accepted it, which is as far as
-    /// this node can say synchronously and is a great deal further than
-    /// "somebody was connected". Callers that only broadcast ignore it; the
-    /// one that has to tell a person whether their money left does not.
+    /// The count is peers that have introduced themselves and whose outbound
+    /// queue accepted it, which is as far as this node can say synchronously
+    /// and is a great deal further than "somebody was connected". Callers that
+    /// only broadcast ignore it; the one that has to tell a person whether
+    /// their money left does not. A connection this node dialled is spoken to
+    /// before its far end has said a word, and was counted: a socket that
+    /// accepts and never answers made a payment "written to 1 peer".
     fn broadcast(&self, except: Option<PeerId>, message: &Message) -> usize {
         let mut taken = 0usize;
         for (id, peer) in self.peers().iter() {
@@ -4101,7 +4104,7 @@ impl Shared {
             // what it missed and a block above its tip asks for the chain, and
             // the second is already being cleared up by the thread that was
             // reading from it.
-            if peer.outbound.send_from_outside(message.clone()).is_ok() {
+            if peer.outbound.send_from_outside(message.clone()).is_ok() && peer.greeted {
                 taken = taken.saturating_add(1);
             }
         }
@@ -5373,7 +5376,8 @@ impl Node {
     }
 
     /// Offers a transfer this node already holds to every peer again, and says
-    /// how many took it into their queue.
+    /// how many peers that have introduced themselves took it into their
+    /// queue.
     ///
     /// [`Self::submit_transaction`] broadcasts once, at the instant the pool
     /// takes the transfer, to whoever is connected then. For a node that has
@@ -5384,7 +5388,8 @@ impl Node {
     /// money sat in one process's memory until that process stopped, while the
     /// person who sent it read that it had been handed to the network.
     ///
-    /// Nought means nobody was offered it. A transfer no longer in the pool,
+    /// Nought means no peer took it, a socket that has said nothing counting
+    /// as no peer. A transfer no longer in the pool,
     /// because a block carried it or because it was evicted, answers nought
     /// too: there is nothing to offer, and this says what happened rather than
     /// what it hoped.
@@ -11586,6 +11591,39 @@ mod peers_and_loops {
             "a question for the chain put to everyone was not written down for this loop"
         );
         node.shared.peers().clear();
+    }
+
+    /// A broadcast counts the peers that took it and have introduced
+    /// themselves, and not a connection this node dialled whose far end has
+    /// said nothing.
+    ///
+    /// A dialled connection is spoken to at once, and it was counted: a
+    /// wallet's payment offered to a socket that never answered was said to
+    /// be written to one peer. Nothing asked whom the count counted.
+    #[test]
+    fn a_broadcast_counts_only_peers_that_have_introduced_themselves() {
+        let node = quiet();
+        let (near, _far) = a_socket();
+        let (sender, _inbox) = mpsc::sync_channel(OUTBOUND_QUEUE);
+        node.shared.peers().insert(
+            1,
+            Peer {
+                outbound: Outbound::new(sender),
+                ..stand_in(&near, true)
+            },
+        );
+        let before = node.shared.broadcast(None, &Message::GetPeers);
+        if let Some(peer) = node.shared.peers().get_mut(&1) {
+            peer.greeted = true;
+        }
+        let after = node.shared.broadcast(None, &Message::GetPeers);
+        node.shared.peers().clear();
+        assert_eq!(
+            (before, after),
+            (0, 1),
+            "a connection whose far end said nothing was counted as a peer, or one that \
+             introduced itself was not"
+        );
     }
 
     /// A node that has reached nobody takes exactly as many connections from

@@ -1182,9 +1182,11 @@ pub struct Sent {
     /// Notes gathered to cover it, and how many needed a proof.
     pub notes: usize,
     pub from_cold: usize,
-    /// Whether this wallet got it as far as a peer: at least one connected
-    /// peer's outbound queue accepted it, and the wallet then waited for that
-    /// queue to be written to the socket.
+    /// Whether this wallet got it as far as a peer: the outbound queue of at
+    /// least one connected peer that had introduced itself accepted it. The
+    /// wallet then gives that queue half a second before a face that exits
+    /// shuts the node down, which is time for it to be written and not a
+    /// measure that it was.
     ///
     /// False means nobody was offered it: nobody has it. It used to be read
     /// off the peer count, which answers the question "was anybody connected
@@ -1196,7 +1198,10 @@ pub struct Sent {
     /// same here, and only a block confirms anything. Whatever shows this
     /// says "offered to", never "handed to the network".
     pub handed_on: bool,
-    /// How many peers it was written to.
+    /// How many peers that had introduced themselves took it into their
+    /// queue. A socket this wallet dialled that never said a word was counted
+    /// among them, and a payment no Cairn node had was said to be written to
+    /// one peer.
     pub offered: usize,
 }
 
@@ -3308,7 +3313,8 @@ impl Wallet {
             offered.set(self.node.offer_again(&id));
             offered.get() > 0
         });
-        // Long enough for the queue that took it to be written to the socket.
+        // Time for the queue that took it to be written to the socket before a
+        // face that exits shuts the node down; not a measure that it was.
         std::thread::sleep(Duration::from_millis(500));
 
         Ok(Sent {

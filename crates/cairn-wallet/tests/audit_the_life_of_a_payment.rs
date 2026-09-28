@@ -1206,6 +1206,46 @@ fn a_payment_the_record_cannot_keep_is_not_handed_to_anybody() {
     assert_eq!(after, before, "a payment nobody was handed holds notes");
 }
 
+/// A payment is not said to be written to a peer when the only thing
+/// connected is a socket that never introduced itself.
+///
+/// A connection the wallet dialled is spoken to before its far end says a
+/// word, and the count of queues that took the payment counted it. Both faces
+/// said "Written to 1 peer" while no Cairn node had it. Every test that sent a
+/// payment had a real peer beside it, or nobody.
+#[test]
+fn a_socket_that_never_introduced_itself_is_not_counted_as_a_peer_written_to() {
+    let (wallet, funded) = funded("silent-socket", 3, params());
+    // Accepts, holds each connection open, and never reads or says a word.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let held = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let holding = std::sync::Arc::clone(&held);
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            holding.lock().unwrap().push(stream);
+        }
+    });
+    assert!(wallet.reach(address), "fixture: the socket accepts");
+    assert!(
+        until(Duration::from_secs(20), || !held.lock().unwrap().is_empty()),
+        "fixture: the wallet's connection reached the socket"
+    );
+
+    let fee = wallet.fee_for(recipient(), cairn("10"));
+    let sent = wallet.send(recipient(), cairn("10"), fee).unwrap();
+    wallet.shutdown();
+    drop(wallet);
+    let _ = std::fs::remove_dir_all(&funded.directory);
+
+    assert_eq!(
+        (sent.offered, sent.handed_on),
+        (0, false),
+        "a payment is said to be written to a peer, and the only thing connected is a socket \
+         that never said a word"
+    );
+}
+
 /// A payment of this key's that the pool holds and the record does not is
 /// written down, so the next start lists it waiting, and it is named with
 /// what it takes from this key when it is not carried.
