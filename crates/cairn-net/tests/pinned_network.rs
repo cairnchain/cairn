@@ -28,7 +28,9 @@ use cairn_crypto::SecretKey;
 use cairn_ledger::block::Block;
 use cairn_ledger::note::Note;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
-use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
+use cairn_ledger::validation::{
+    assemble_block, connect_block, expected_difficulty, mine_block, ConsensusParams,
+};
 use cairn_ledger::LedgerState;
 use cairn_net::message::{Handshake, Keeps, Message, PROTOCOL_VERSION};
 use cairn_net::sync::{on_message, Local, PeerState, JOIN_RATHER_THAN_READ};
@@ -65,7 +67,23 @@ fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
     panic!("waited {PATIENCE:?} for {what}");
 }
 
-/// Mines on the devnet from its real first block, a minute apart.
+/// The difficulty the forge's miner holds the devnet at: it finds a block of
+/// this difficulty in the devnet's target time, a hundred and twenty eighth of
+/// the rate the devnet opens for. Enough that the band of work a weighing
+/// leaves unresolved lies where the chain holds rather than where it fell,
+/// and no more, since every block of it is mined.
+const SETTLES_AT: u64 = 1 << 16;
+
+/// Mines on the devnet from its real first block, as one steady machine
+/// slower than the one the devnet opens for: each block takes as long as its
+/// difficulty asks of that machine, and the retarget falls from the first
+/// block to what it can do and holds there.
+///
+/// It used to mine a block a minute whatever was asked, twelve times the
+/// devnet's pace, which walked the difficulty down to the floor; a newcomer
+/// refuses a tip that far below the run it stands on
+/// (`cairn_ledger::sampling::MOST_FALL`), and read that chain rather than
+/// being handed a ledger.
 #[derive(Clone)]
 struct Forge {
     state: LedgerState,
@@ -88,7 +106,8 @@ impl Forge {
         let params = params();
         let miner = SecretKey::from_bytes(&[1; 32]).public_key();
         let height = self.state.next_height().unwrap();
-        self.clock += 60;
+        let asked = expected_difficulty(&self.state, &params);
+        self.clock += (asked * params.target_block_time).div_ceil(SETTLES_AT);
         let now = wall_clock();
         assert!(self.clock < now, "the chain would run into the future");
         let coinbase =

@@ -188,26 +188,35 @@ use crate::validation::ConsensusParams;
 /// finds another tip and asks again, and a forger with `g` tips faces `g`
 /// times the chance of getting one through.
 ///
-/// A tip is cheaper than this paragraph used to say. It said a tip costs the
-/// tip's own work, so that even 2^80 tips were out of the question on a chain
-/// of any real difficulty. The run up to the tip is held to the difficulty the
-/// retarget demands, and the retarget lets a run whose stated gaps sit at the
-/// clamp ceiling walk that demand down to [`MIN_DIFFICULTY`], where every
-/// nonce is a valid tip. The walk is paid once: from 2^40, 826 blocks, 82
-/// hours of stated time, and about twenty one blocks' work at the difficulty
-/// it leaves, which a forger that forked deep has to spare. After it, a fresh
-/// tip costs one hash and the [`SAMPLES`] hashes of its own draw, 2^12, and
-/// nothing more.
+/// What a tip costs has been stated wrong twice. This paragraph first said a
+/// tip costs the tip's own work, so that even 2^80 tips were out of the
+/// question on a chain of any real difficulty. The run up to the tip is held
+/// to the difficulty the retarget demands, and the retarget lets a run whose
+/// stated gaps sit at the clamp ceiling walk that demand down to
+/// [`MIN_DIFFICULTY`], where every nonce is a valid tip: from 2^40, 826
+/// blocks, 82 hours of stated time and about twenty one blocks' work, paid
+/// once. It then said a tip costs one hash and the [`SAMPLES`] hashes of its
+/// draw, 2^12, which was still too much: a forger stops at the first question
+/// that lands in its invented work, about forty hashes in at 40%.
+///
+/// A newcomer now refuses a tip more than [`MOST_FALL`] times below the
+/// hardest header of its run, and that is what gives a seed a price: at least
+/// the band the draw leaves unresolved over 2^18, a thousandth of an average
+/// block on a chain that ran to schedule. Measured on a thirty year chain, the
+/// cheapest tip a forger can present costs 2^18 hashes at testnet-6's opening
+/// difficulty and 2^14 at the devnet's. [`MOST_FALL`] says why it is not the
+/// chain's difficulty, and what the tie costs an honest chain.
 ///
 /// So the figure is stated against a budget. At 40% the inequality above
-/// leaves 2^-161.9 a tip, which holds under 2^-128 against 2^33 tips, that is
-/// 2^45 hashes of grinding, and not against 2^34. The staircase the draw
-/// really is is worth more per question than the inequality, so that budget
-/// is a floor and not the budget; at the measured 42.96% there is none at
-/// all, since that is where one tip alone reaches 2^-128.
-/// `tests/grinding_at_the_floor.rs` holds the walk, the tip at the floor and
-/// the budget, and `adversarial_placement` measures grinding against
-/// forgeries that were built.
+/// leaves 2^-161.9 a tip, which holds under 2^-128 against 2^33 tips and not
+/// against 2^34; 2^33 tips cost 2^51 hashes on testnet-6 and 2^47 on the
+/// devnet at those difficulties. The staircase the draw really is is worth
+/// more per question than the inequality, so that budget is a floor and not
+/// the budget; at the measured 42.96% there is none at all, since that is
+/// where one tip alone reaches 2^-128. `tests/the_price_of_a_seed.rs`
+/// measures the price with and without the tie, `tests/grinding_at_the_floor.rs`
+/// holds the tie on chains that were mined, and `adversarial_placement`
+/// measures grinding against forgeries that were built.
 ///
 /// `cargo run --release -p cairn-ledger --example sampled_start` prints the
 /// derivation and forges chains against it;
@@ -313,7 +322,8 @@ pub struct SampledStart {
     /// the draw actually landed on, and walking upward under the retarget:
     /// each header carries the difficulty the window demands of it, dates
     /// after that window's median, adds its own work to the total, and
-    /// carries the version its height requires. The
+    /// carries the version its height requires, and the tip at the end of it
+    /// stands within [`MOST_FALL`] of its hardest header. The
     /// window below the pinned header comes along too, and is honest because
     /// those headers have to chain into it: a forger cannot swap them without
     /// having mined the pinned header on top of its own.
@@ -469,6 +479,12 @@ pub enum StartError {
     TipFromTheFuture { timestamp: u64 },
     #[error("nothing was opened, so there is nothing to measure the tip against")]
     NothingOpened,
+    #[error(
+        "the tip states difficulty {stated}, more than {} times below the {hardest} the run \
+         carried from the pinned header up",
+        MOST_FALL
+    )]
+    TipFellTooFar { stated: u64, hardest: u64 },
 }
 
 /// The longest run this will walk between the deepest thing the draw pinned
@@ -483,6 +499,51 @@ pub enum StartError {
 /// rather than hidden. A chain that has lost sixteen times its hash rate and
 /// not recovered is the shape that reaches it.
 pub const MOST_TAIL: u64 = 16 * SHALLOWEST + DIFFICULTY_WINDOW as u64;
+
+/// How far below the hardest header of the run a tip may stand, counting
+/// from the pinned header up.
+///
+/// The draw is seeded by the tip, so a forger that dislikes its questions
+/// buys another tip, and a tip costs its difficulty. The run is held to the
+/// retarget, and the retarget lets a run whose stated gaps sit at the clamp
+/// ceiling walk its demand down to [`MIN_DIFFICULTY`]: a few hundred blocks,
+/// paid once, after which every nonce is a tip and a fresh set of questions
+/// costs what it takes to see one of them land in the forger's invented work,
+/// about forty hashes. The documents said a tip costs the chain's difficulty,
+/// and nothing here held a tip to anything.
+///
+/// This is what does. The run above the pinned header has to carry the band
+/// of work the draw leaves unresolved, in at most [`MOST_TAIL`] headers
+/// counting the window below, so the hardest header from the pinned one up
+/// carries at least the band over 8 192, and a tip within this of it carries
+/// at least the band over 2^18. On a chain that ran to schedule the band is at
+/// least 256 times its mean difficulty, so a fresh seed costs at least a
+/// thousandth of an average block. Measured on a thirty year chain in
+/// `tests/the_price_of_a_seed.rs`, the cheapest tip a forger can present is
+/// 2^18 hashes at testnet-6's opening difficulty and 2^14 at the devnet's.
+/// That is not the chain's difficulty, and no tie of this kind makes it so: a
+/// run whose tip fell this far is what an honest chain looks like after a
+/// loss.
+///
+/// The hardest header rather than the pinned one, because a forger chooses
+/// where its difficulty is low. Held to the pinned header alone, it lays a
+/// cheap stretch where the deepest question lands, climbs out of it to carry
+/// the band, and walks back down to within the tie of the cheap header:
+/// measured the same way, that tip costs 2^10.3 hashes on testnet-6 and 2^7.3
+/// on the devnet.
+///
+/// What it costs an honest chain is a loss of hash rate it cannot be weighed
+/// across. The retarget follows a loss with noise of its own, and on chains
+/// with random block times the hardest header of the run stood up to twice as
+/// far above the tip as the loss alone puts it. So this is twice the sixteen
+/// [`MOST_TAIL`] is written for: no chain that lost sixteen times its hash
+/// rate was refused, sixty four of them on each network. One that lost twenty
+/// or more is refused on testnet-6 from about eight hours after the loss, for
+/// up to a day at twenty, about as long as the ceiling on the run refuses it
+/// anyway, and under six days at any loss beyond what the ceiling refuses. A
+/// newcomer reads such a chain rather than weighing it, where a peer keeps
+/// it. A rule about the reader, like the drift: it makes no block invalid.
+pub const MOST_FALL: u64 = 32;
 
 /// The least work `blocks` blocks can carry, starting from a block of this
 /// difficulty.
@@ -640,9 +701,9 @@ pub fn work_before(header: &BlockHeader) -> u128 {
 /// The seed the draw comes from.
 ///
 /// The tip's own identifier, which a prover can only choose by finding another
-/// tip. Finding one costs the work the tip states, which on a run the
-/// retarget has walked down to the floor is one hash: see [`SAMPLES`] for what
-/// a seed really costs and the budget the bound is stated against. This is
+/// tip. Finding one costs the work the tip states, and a tip may state no less
+/// than [`MOST_FALL`] allows below its run: see [`SAMPLES`] for what a seed
+/// really costs and the budget the bound is stated against. This is
 /// Fiat-Shamir:
 /// the questions are settled by the thing being questioned, so nobody has to
 /// be trusted to ask them honestly and no round trip is needed to agree on
@@ -1091,6 +1152,12 @@ const _: () = assert!(crate::pow::MEDIAN_TIME_WINDOW <= DIFFICULTY_WINDOW + 1);
 /// its height requires needs no window, so every header of the run is held to
 /// that, below the pinned header too.
 ///
+/// And once the whole run has been walked, the tip is held to it: no more
+/// than [`MOST_FALL`] times below the hardest header from the pinned one up.
+/// Each header can carry exactly what the retarget asks and the run still end
+/// on a tip at the floor, because the retarget asks less of long gaps, and a
+/// tip at the floor is a fresh set of questions for one hash.
+///
 /// Not the drift. A header of the run dated far past the reader's clock is
 /// refused by the block path when its block arrives, and taken once the clock
 /// catches up, which is what a rule about the reader should do; a refusal
@@ -1151,6 +1218,8 @@ fn check_the_tail(start: &SampledStart, params: &ConsensusParams) -> Result<(), 
     let mut summaries: Vec<HeaderSummary> = Vec::with_capacity(DIFFICULTY_WINDOW.saturating_add(1));
     let mut previous: Option<&BlockHeader> = None;
     let mut carried_the_pinned = false;
+    // The hardest header from the pinned one up, which the tip is held to.
+    let mut hardest = MIN_DIFFICULTY;
     // Whether this build can judge a version at all is settled once, against
     // the tip, the highest header here: a schedule rises in both height and
     // version, so no header below it is asked for more. A chain past this
@@ -1206,6 +1275,7 @@ fn check_the_tail(start: &SampledStart, params: &ConsensusParams) -> Result<(), 
                 {
                     return Err(StartError::TailWorkDoesNotAddUp { at: header.height });
                 }
+                hardest = hardest.max(header.difficulty);
             }
         }
         if header.height == pinned.height {
@@ -1213,6 +1283,7 @@ fn check_the_tail(start: &SampledStart, params: &ConsensusParams) -> Result<(), 
                 return Err(StartError::TailMissesWhatWasOpened { at: pinned.height });
             }
             carried_the_pinned = true;
+            hardest = header.difficulty;
         }
         summaries.push(HeaderSummary {
             height: header.height,
@@ -1231,7 +1302,19 @@ fn check_the_tail(start: &SampledStart, params: &ConsensusParams) -> Result<(), 
     if previous.is_some_and(|last| last.id() != tip.id()) {
         return Err(StartError::TailNotConsecutive { at: tip.height });
     }
+    if !within_the_fall(tip.difficulty, hardest) {
+        return Err(StartError::TipFellTooFar {
+            stated: tip.difficulty,
+            hardest,
+        });
+    }
     Ok(())
+}
+
+/// Whether a tip of difficulty `stated` stands within [`MOST_FALL`] of the
+/// hardest header of its run. Exactly that far is within it.
+fn within_the_fall(stated: u64, hardest: u64) -> bool {
+    u128::from(stated).saturating_mul(u128::from(MOST_FALL)) >= u128::from(hardest)
 }
 
 /// Checks that the tip stands at the end of the chain it names.
@@ -1570,6 +1653,32 @@ mod tests {
             ceiling * 3,
             "a difficulty a single climb cannot be stated past is the ceiling \
              for every block of the run"
+        );
+    }
+
+    /// A tip exactly [`MOST_FALL`] times below the hardest header of its run
+    /// is within the fall, and one past it is not.
+    ///
+    /// The chains that hold the tie are mined, and a mined run does not land
+    /// on the edge, so nothing there tells a tie that refuses at the edge from
+    /// one that takes it. Asked of the comparison itself, including at the top
+    /// of a `u64`, where a product taken in the same width would wrap and
+    /// refuse a tip level with its run.
+    #[test]
+    fn a_tip_exactly_the_fall_below_its_run_is_within_it_and_one_past_is_not() {
+        assert!(within_the_fall(1, MOST_FALL), "exactly the fall is allowed");
+        assert!(
+            !within_the_fall(1, MOST_FALL + 1),
+            "one past the fall is refused"
+        );
+        assert!(within_the_fall(3, 3), "a tip level with its run");
+        assert!(
+            within_the_fall(u64::MAX, u64::MAX),
+            "the product is taken where it cannot wrap"
+        );
+        assert!(
+            !within_the_fall(u64::MAX / MOST_FALL, u64::MAX),
+            "and one short of the fall at the top is refused there too"
         );
     }
 
