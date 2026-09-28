@@ -42,7 +42,8 @@
 # is a judgement and the taking is a fact.
 #
 # The tag message is the commit that changed the number, which is where the
-# reason for a release is already written.
+# reason for a release is already written, followed by any commit the release
+# carries that was merged after it.
 #
 # One run, one commit. A run checks, builds, attests and tags the commit it
 # was started for, and no other. The attestation cannot say anything else: it
@@ -649,20 +650,41 @@ jobs:
       # bumps the version and then fixes a typo released the typo's message as
       # its notes and as its tag, and the version this repository stands at
       # today was set fifteen commits before the current head.
+      #
+      # And then every commit the release carries that came after it. The
+      # commit released is not always the one that set the version: a push
+      # that lands before the release run starts, or after a release whose
+      # build failed, releases its own commit, and the version commit's
+      # account stops where that commit began. It was published as the whole
+      # account, and the tag said the same, of a release carrying a change it
+      # did not name.
       - name: Write the release notes
+        shell: bash
         run: |
+          set -euo pipefail
           version="${{ needs.decide.outputs.version }}"
-          git log -S"version = \"$version\"" -1 --format='%B' -- Cargo.toml > notes.md
-          if [ ! -s notes.md ]; then
+          set_by=$(git log -S"version = \"$version\"" -1 --format='%H' -- Cargo.toml)
+          if [ -z "$set_by" ]; then
             echo "could not find the commit that set version $version" >&2
             exit 1
+          fi
+          git log -1 --format='%B' "$set_by" > notes.md
+          after=$(git log "$set_by"..HEAD --no-merges --format='  %s')
+          if [ -n "$after" ]; then
+            # `%B` ends in a blank line already.
+            {
+              echo "Merged after the version was set, and in this release too:"
+              echo
+              printf '%s\n' "$after"
+            } >> notes.md
           fi
           cat deploy/RELEASE_FOOTER.md >> notes.md
           cat notes.md
 
       # Made here rather than by hand, from the number the release is named
       # after, so a tag cannot name one version over programs reporting
-      # another. Annotated with the commit that asked for the release.
+      # another. Annotated with the notes: the commit that asked for the
+      # release, and whatever it carries that came after.
       - name: Tag it
         if: needs.decide.outputs.release == 'true'
         run: |
