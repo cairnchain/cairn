@@ -169,18 +169,28 @@ jobs:
           #
           # And a timeout is not a survivor, which is what `.cargo/mutants.toml`
           # already says: a mutant that makes a loop run for ever is one the
-          # suite would have caught had it been allowed to finish. So exit 3
-          # (timeouts, nothing missed) passes, and exit 2 (a mutant the tests
-          # did not notice) and anything else still fails. This job reported
-          # failure on a pull request whose every missed mutant had been
-          # closed and whose two timeouts were both loops.
+          # suite would have caught had it been allowed to finish. This job
+          # reported failure on a pull request whose every missed mutant had
+          # been closed and whose two timeouts were both loops.
+          #
+          # But exit 3 does not mean "timeouts, nothing missed". cargo-mutants
+          # returns it whenever any mutant timed out, before it looks at the
+          # missed ones, so reading 3 as a pass let a pull request through with
+          # a missed mutant beside any timeout: three were merged that way. A
+          # timeout passes only when `missed.txt`, the tool's own list of
+          # survivors, is empty; everything else still fails.
           cargo mutants --in-diff pr.diff \
             --test-workspace=false \
             --minimum-test-timeout 120 \
             --timeout-multiplier 2 \
-            --in-place || { status=$?; test "$status" -eq 3 || exit "$status"; }
-      - name: The survivors, if any
-        if: failure()
+            --in-place || {
+              status=$?
+              test "$status" -eq 3 && ! test -s mutants.out/missed.txt || exit "$status"
+            }
+      # Kept whatever the verdict, so a run that passed on timeouts still shows
+      # which mutants timed out, and one that failed shows which survived.
+      - name: The survivors and the timeouts
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: mutants-in-diff
