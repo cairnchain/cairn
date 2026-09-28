@@ -13411,7 +13411,7 @@ mod peers_and_loops {
         node.shutdown();
         let (fresh, _) =
             Node::open(ConsensusParams::testnet(), local(), root.join("fresh")).unwrap();
-        let none = fresh.addresses_set_aside();
+        let nothing_aside = fresh.addresses_set_aside();
         fresh.shutdown();
         let kept_aside = aside.as_ref().is_some_and(|path| path.is_file());
         let _ = std::fs::remove_dir_all(&root);
@@ -13420,7 +13420,7 @@ mod peers_and_loops {
             "the list of peers that did not read is not said to be set aside where it is"
         );
         assert_eq!(
-            none, None,
+            nothing_aside, None,
             "a node with no list at all said it set one aside"
         );
     }
