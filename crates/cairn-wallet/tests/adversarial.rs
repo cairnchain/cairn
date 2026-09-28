@@ -1288,6 +1288,7 @@ fn a_wallet_that_has_not_checked_its_chain_says_so_before_anything_smaller() {
             unweighable: None,
             keeping_its_account: true,
             lost_its_account: None,
+            set_aside_before: Vec::new(),
             unread: None,
         };
         fill(&mut progress);

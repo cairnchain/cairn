@@ -419,3 +419,52 @@ fn the_account_is_never_written_through_a_link_at_its_partial_name() {
     );
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// An account set aside at one start is still said at the next, for as long
+/// as it stays set aside, and not once it is gone.
+///
+/// The wallet said so only at the start that moved the file. The next start
+/// found nothing to move and said nothing, while every fallen note that file
+/// alone could place was still missing from the balance: the balance that
+/// quietly went down, one `balance` after the warning. Nothing started the
+/// wallet a second time.
+#[test]
+fn an_account_set_aside_is_still_said_at_the_next_start() {
+    let directory = scratch("said-again");
+    let (key_file, data, _) = a_key(&directory);
+    std::fs::write(data.join("history.dat"), b"an account a disk changed").unwrap();
+    let first = {
+        let (wallet, _) = Wallet::open(&key_file, params(), &data).unwrap();
+        let said = wallet.progress().warning();
+        wallet.shutdown();
+        said
+    };
+    let second = {
+        let (wallet, _) = Wallet::open(&key_file, params(), &data).unwrap();
+        let said = wallet.progress().warning();
+        wallet.shutdown();
+        said
+    };
+    std::fs::remove_file(first_aside(&data)).unwrap();
+    let once_gone = {
+        let (wallet, _) = Wallet::open(&key_file, params(), &data).unwrap();
+        let said = wallet.progress().warning();
+        wallet.shutdown();
+        said
+    };
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert!(
+        first.is_some_and(|said| said.contains("history.dat.unread-1")),
+        "fixture: the start that set the account aside says where it went"
+    );
+    assert!(
+        second.is_some_and(|said| said.contains("history.dat.unread-1")),
+        "the next start says nothing of an account still set aside, whose fallen notes are \
+         missing from the balance"
+    );
+    assert_eq!(
+        once_gone, None,
+        "a start with no account set aside beside it still speaks of one"
+    );
+}

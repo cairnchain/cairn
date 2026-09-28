@@ -885,6 +885,15 @@ pub struct Progress {
     /// whatever the height says afterwards, until that file or a backup is
     /// put back.
     pub lost_its_account: Option<SetAside>,
+    /// Files this wallet set aside at an earlier start because they did not
+    /// read back as its account, still beside the account now.
+    ///
+    /// The line above is said at the start that moved the file, and it was
+    /// said at no start after: the next one found nothing to move, while every
+    /// fallen note only that file can place was still missing from the
+    /// balance. So it is looked for at every start, and said for as long as
+    /// it is there.
+    pub set_aside_before: Vec<PathBuf>,
 }
 
 /// The line for a wallet whose machine's clock is behind the network's.
@@ -915,6 +924,49 @@ fn clock_is_slow(behind: &Behind) -> String {
          Nothing is lost and the key file is not touched.",
         behind.blocks, behind.peers, behind.seconds, behind.drift,
     )
+}
+
+/// The line for a wallet beside whose account a file set aside at an earlier
+/// start still stands, at `kept`.
+fn still_set_aside(kept: &[PathBuf]) -> String {
+    let named = kept
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "An account this wallet could not read back at an earlier start is still set aside, at \
+         {named}. Where money this key was paid fell out of the set every node holds may be \
+         written down only there, and the balance beside this does not count what only that \
+         file can place. A backup of history.dat finds it again, and so does the version of \
+         this wallet that wrote the file, if that was a newer one: close the wallet, put it in \
+         the data directory as history.dat, and start it again. Once nothing in it is needed, \
+         move it out of the data directory and this line goes."
+    )
+}
+
+/// The files set aside beside `history_file` at an earlier start, other than
+/// `now`, the one this start set aside if it did.
+pub(crate) fn set_aside_beside(history_file: &Path, now: Option<&Path>) -> Vec<PathBuf> {
+    let (Some(directory), Some(name)) = (history_file.parent(), history_file.file_name()) else {
+        return Vec::new();
+    };
+    let mut prefix = name.to_os_string();
+    prefix.push(".unread-");
+    let prefix = prefix.to_string_lossy().into_owned();
+    let mut found: Vec<PathBuf> = std::fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+        })
+        .filter(|path| Some(path.as_path()) != now)
+        .collect();
+    found.sort();
+    found
 }
 
 /// The line for a wallet whose own account of what it was paid did not read
@@ -978,12 +1030,13 @@ impl Progress {
     /// network has left. Then the ones that mean the chain the number is
     /// counted from is sound and something else is at risk, the disk first
     /// because it can leave what is held back as stranded behind the chain,
-    /// and last the two about this wallet's own account. Those can mean money
-    /// missing from the number, which by that ranking would put them higher.
-    /// They stay last because each can sit there a long time, the lost
-    /// account's for the whole run, and above the others it would hide a full
-    /// disk or a slow clock, each mended by doing something now, for as long
-    /// as it sat there.
+    /// and last the three about this wallet's own account. Those can mean
+    /// money missing from the number, which by that ranking would put them
+    /// higher. They stay last because each can sit there a long time, the
+    /// lost account's for the whole run and one set aside before for as long
+    /// as the file stays, and above the others it would hide a full disk or a
+    /// slow clock, each mended by doing something now, for as long as it sat
+    /// there.
     ///
     /// Probation used to be last of all, under three lines that say in as many
     /// words that the balance is right. It is set whenever the node under this
@@ -994,6 +1047,7 @@ impl Progress {
     /// somebody's money. The line above the money must never be the one that
     /// vouches for it.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn warning(&self) -> Option<String> {
         if let Some(outdated) = self.outdated {
             return Some(too_old_for_this_chain(&outdated, self.height.is_some()));
@@ -1099,6 +1153,9 @@ impl Progress {
         }
         if let Some(lost) = &self.lost_its_account {
             return Some(lost_its_account(lost));
+        }
+        if !self.set_aside_before.is_empty() {
+            return Some(still_set_aside(&self.set_aside_before));
         }
         None
     }
@@ -1363,6 +1420,9 @@ pub struct Wallet {
     /// Why the account on disk was not read back at start, if it was not, and
     /// where it was moved.
     lost_its_account: Option<SetAside>,
+    /// Files set aside beside the account at an earlier start, found at this
+    /// one.
+    set_aside_before: Vec<PathBuf>,
     /// Paths somebody else rebuilt, for notes this wallet's node cannot place.
     ///
     /// Held here rather than handed to the node, because the node has no way
@@ -1503,6 +1563,10 @@ impl Wallet {
                     })
             })
             .transpose()?;
+        let set_aside_before = set_aside_beside(
+            &history_file,
+            lost_its_account.as_ref().map(|lost| lost.kept_as.as_path()),
+        );
         let pending_file = data.join(pending::PENDING_FILE);
         let (pending, pending_set_aside) = Pending::load(&pending_file);
         Ok((
@@ -1518,6 +1582,7 @@ impl Wallet {
                 rebuilt: Mutex::new(BTreeMap::new()),
                 last_recovery: Mutex::new(Asked::default()),
                 lost_its_account,
+                set_aside_before,
                 pending: Mutex::new(pending),
                 pending_file,
                 pending_set_aside,
@@ -1768,6 +1833,7 @@ impl Wallet {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             lost_its_account: self.lost_its_account.clone(),
+            set_aside_before: self.set_aside_before.clone(),
         }
     }
 
@@ -1874,7 +1940,19 @@ impl Wallet {
         // to learn thirty two bytes, and a log the node trims from the front,
         // so a block replaced and then trimmed away read as unchanged.
         let mut changed = false;
-        match history.fork(Some(tip), |height| self.node.id_at(height)) {
+        // Not asked of a chain with less work behind it than the newest block
+        // this account read had. That is a node that has not caught up, a
+        // restored account on a new disk or a node still reading its way up,
+        // and not a switch, which only ever goes to more work: read as one, a
+        // chain short of the account's blocks rewound the account to the
+        // node's height and wrote it over the file, every place above it
+        // dropped and every movement listed as taken back.
+        let fork = if self.node.total_work() < history.work() {
+            None
+        } else {
+            history.fork(Some(tip), |height| self.node.id_at(height))
+        };
+        match fork {
             None => {}
             Some(Fork::At(fork)) => {
                 history.rewind_to(fork);
@@ -2049,31 +2127,68 @@ impl Wallet {
     /// a wallet reading a chain from a ledger it was handed starts at the
     /// anchor, and its node comes out of that handover holding the notes that
     /// fell in the window below it. Those are taken up here, value and all.
+    ///
+    /// The node also knows notes paid by blocks this account has not read
+    /// yet, and one of those can be paid by a branch that goes on to lose. So
+    /// the list is read with the account held, account first and chain second
+    /// as `follow` takes them, with where the node stands, and a note the
+    /// account has not read the block for is taken up with a height a rewind
+    /// can reach: see `History::fell_by`. Read with the account let go of and
+    /// taken up with none, such a note stayed in the account for good.
     fn note_where_they_landed(&self) {
+        type Landed = Vec<(NoteId, u64, Amount)>;
+        type FellIn = Vec<(NoteId, u64, Hash32)>;
         let mine = self.address();
+        let mut history = self
+            .history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // The value travels with the place. A note this account never read the
         // block for is one the account cannot name without it, and those are
         // exactly the notes worth writing down: a wallet handed a ledger comes
         // out of the handover with a window of them that its node knows and
         // its own reading never saw.
-        let landed: Vec<(NoteId, u64, Amount)> = self.node.with_chain(|chain| {
-            chain
-                .state()
+        //
+        // And first, a place whose note fell in a block the chain no longer
+        // carries is let go of, before the node's word is taken: a branch that
+        // won put the note somewhere else, and only the node can say where.
+        // The grace window says which block each recent note fell in, which
+        // is what makes that question answerable later.
+        // Asked of the node, which reads its header log below what the chain
+        // holds in memory: a restart from a written ledger holds little.
+        let moved = history.let_go_of_moved_places(|height| self.node.id_at(height));
+        let (landed, tip, fell_in): (Landed, Option<u64>, FellIn) = self.node.with_chain(|chain| {
+            let state = chain.state();
+            let landed = state
                 .watched_notes()
                 .filter(|(_, _, note)| note.owner == mine)
                 .map(|(id, position, note)| (id, position, note.value))
-                .collect()
+                .collect();
+            let tip = chain.height();
+            let mut fell_in = Vec::new();
+            for (block, back) in state.grace_window().iter().rev().zip(0u64..) {
+                let Some(height) = tip.and_then(|tip| tip.checked_sub(back)) else {
+                    break;
+                };
+                let Some(id) = chain.id_at(height) else {
+                    continue;
+                };
+                for (note_id, _, note) in block {
+                    if note.owner == mine {
+                        fell_in.push((*note_id, height, id));
+                    }
+                }
+            }
+            (landed, tip, fell_in)
         });
-        if landed.is_empty() {
-            return;
-        }
-        let mut history = self
-            .history
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut learned = false;
-        for (id, position, value) in landed {
-            learned |= history.fell_at(id, value, position);
+        let mut learned = moved;
+        if let Some(tip) = tip {
+            for (id, position, value) in landed {
+                learned |= history.fell_by(id, value, position, tip);
+            }
+            for (id, height, block) in fell_in {
+                learned |= history.fell_in_block(id, height, block);
+            }
         }
         if learned {
             self.write_history(history);
@@ -4946,6 +5061,7 @@ mod tests {
         Progress {
             keeping_its_account: true,
             lost_its_account: None,
+            set_aside_before: Vec::new(),
             unwritten: None,
             unread: None,
             clock_behind: None,

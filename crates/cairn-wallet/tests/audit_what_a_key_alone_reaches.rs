@@ -115,6 +115,7 @@ fn catch_the_history_up(wallet: &Wallet) {
 }
 
 /// Mines blocks on a private ledger, paying whoever is named.
+#[derive(Clone)]
 struct Forge {
     params: ConsensusParams,
     state: LedgerState,
@@ -576,5 +577,216 @@ fn a_restore_from_what_the_backup_command_wrote_gets_every_note_back() {
         holdings.total(),
         whole,
         "a restore from the backup did not find every note the key was paid"
+    );
+}
+
+/// How many of the notes an account on disk holds carry a place.
+fn places(path: &Path) -> usize {
+    let (history, why) = cairn_wallet::history::History::load(path);
+    assert!(why.is_none(), "fixture: the account did not read back");
+    history
+        .held()
+        .filter(|(id, _)| history.where_it_fell(id).is_some())
+        .count()
+}
+
+/// **A restored account survives a look taken before its node has caught up
+/// to it.**
+///
+/// The backup says to put history.dat back in the data directory before the
+/// wallet starts. On a lost disk that directory is new, so the node under the
+/// wallet starts at the first block and reads its way up while the account
+/// stands where it was backed up. `balance` counts the money when its wait
+/// runs out whether or not the chain has arrived, and the page counts it on
+/// every redraw. The account read a chain that did not reach its blocks yet
+/// as a chain that had switched away from them, rewound itself, and was
+/// written over the restored file: every place above the node's height gone,
+/// and the movements above it listed as taken back by the chain. Nothing
+/// looked at a restored account before its node had caught up.
+#[test]
+fn a_restored_account_survives_a_look_taken_before_its_node_caught_up() {
+    let chain = a_chain_that_paid_this_key("restore-early");
+    let whole = {
+        let (wallet, _) = Wallet::open(&chain.key_file, params(), &chain.data).unwrap();
+        for block in chain.paid.iter().chain(&chain.moved_on) {
+            wallet.node().submit_block(block.clone()).unwrap();
+        }
+        catch_the_history_up(&wallet);
+        let total = wallet.holdings().total();
+        let_the_blocks_below_the_ledger_go(&wallet, (PAID - 1) as u64);
+        wallet.shutdown();
+        total
+    };
+    let into = chain.directory.join("the-backup");
+    let copies = cairn_wallet::keyfile::back_up(&chain.key_file, &chain.data, &into).unwrap();
+    let backed_up = places(&copies.account);
+    assert!(
+        backed_up > 1,
+        "fixture: the backup names where the notes fell"
+    );
+
+    // A new data directory holding the backup's account, whose node has the
+    // first three blocks when the money is counted.
+    let fresh = chain.directory.join("fresh");
+    std::fs::create_dir_all(&fresh).unwrap();
+    std::fs::copy(&copies.account, account(&fresh)).unwrap();
+    let undone_early = {
+        let (wallet, _) = Wallet::open(&chain.key_file, params(), &fresh).unwrap();
+        for block in chain.paid.iter().take(3) {
+            wallet.node().submit_block(block.clone()).unwrap();
+        }
+        let _ = wallet.holdings();
+        let undone = wallet.undone().len();
+        wallet.shutdown();
+        undone
+    };
+    let left_on_disk = places(&account(&fresh));
+
+    // And what that account is worth on the node that no longer holds the
+    // blocks that paid this key, where a node that joined by handover stands.
+    std::fs::copy(account(&fresh), account(&chain.data)).unwrap();
+    let after = {
+        let (wallet, _) = Wallet::open(&chain.key_file, params(), &chain.data).unwrap();
+        catch_the_history_up(&wallet);
+        let total = wallet.holdings().total();
+        wallet.shutdown();
+        total
+    };
+    let _ = std::fs::remove_dir_all(&chain.directory);
+
+    assert_eq!(
+        left_on_disk, backed_up,
+        "one look taken while the node was below the restored account wrote over it, and \
+         the places of the notes above the node's height are gone"
+    );
+    assert_eq!(
+        undone_early, 0,
+        "one look taken while the node was below the restored account listed its movements \
+         as taken back by the chain, which took nothing back"
+    );
+    assert_eq!(
+        after, whole,
+        "the account that look left behind finds less than the backup did"
+    );
+}
+
+/// **A restored account follows its node to the other side of a tie, where
+/// the node has as much work behind it as the account's newest block had.**
+///
+/// A restored account is left alone while its node has less work behind it
+/// than the account's newest block had, which is a node that has not caught
+/// up. With as much, the node's chain is the one it follows, and the account
+/// follows it too. The one test of a restored account had its node below it,
+/// so an account that never followed a node with as much work passed.
+#[test]
+fn a_restored_account_follows_its_node_to_the_other_side_of_a_tie() {
+    let directory = scratch("tie");
+    std::fs::create_dir_all(&directory).unwrap();
+    let key_file = directory.join("key");
+    let secret = SecretKey::from_bytes(&[3; 32]);
+    cairn_wallet::keyfile::write(&key_file, &secret).unwrap();
+    let mine = secret.public_key();
+    let stranger = SecretKey::from_bytes(&[11; 32]).public_key();
+    let mut forge = Forge::new();
+    let common = forge.mine_many(5, &mine);
+    let mut rival = forge.clone();
+    let ours = forge.mine(&mine);
+    let theirs = rival.mine(&stranger);
+
+    // A wallet that read the branch paying this key at the tie.
+    let data = directory.join("data");
+    {
+        let (wallet, _) = Wallet::open(&key_file, params(), &data).unwrap();
+        for block in common.iter().chain(std::iter::once(&ours)) {
+            wallet.node().submit_block(block.clone()).unwrap();
+        }
+        assert_eq!(wallet.history().len(), 6, "fixture: six rewards read");
+        wallet.shutdown();
+    }
+    // Its account restored beside a node that has only seen the other branch.
+    let fresh = directory.join("fresh");
+    std::fs::create_dir_all(&fresh).unwrap();
+    std::fs::copy(account(&data), account(&fresh)).unwrap();
+    let (wallet, _) = Wallet::open(&key_file, params(), &fresh).unwrap();
+    for block in common.iter().chain(std::iter::once(&theirs)) {
+        wallet.node().submit_block(block.clone()).unwrap();
+    }
+    let movements = wallet.history();
+    let undone = wallet.undone();
+    wallet.shutdown();
+    drop(wallet);
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert!(
+        undone
+            .iter()
+            .any(|movement| movement.id == ours.coinbase.id())
+            && movements.len() == 5,
+        "an account whose node stands on the other side of a tie, with as much work behind \
+         it, did not follow it"
+    );
+}
+
+/// **A place learned at a look that also knows an earlier one is written
+/// down.**
+///
+/// A look writes the account when it learns something: a place, or the block
+/// a note fell in. Two notes that fall at two looks leave the second look
+/// learning a new place beside a block it already knew, and nothing asked what
+/// the file held after it.
+#[test]
+fn a_second_place_is_written_down_beside_a_first() {
+    let directory = scratch("second-place");
+    std::fs::create_dir_all(&directory).unwrap();
+    let key_file = directory.join("key");
+    let secret = SecretKey::from_bytes(&[3; 32]);
+    cairn_wallet::keyfile::write(&key_file, &secret).unwrap();
+    let mine = secret.public_key();
+    let stranger = SecretKey::from_bytes(&[11; 32]).public_key();
+    let data = directory.join("data");
+    let (wallet, _) = Wallet::open(&key_file, params(), &data).unwrap();
+    let mut forge = Forge::new();
+
+    // A note of this key's, and blocks enough to let it fall; then another.
+    let first = forge.mine(&mine);
+    let mut blocks = vec![first.clone()];
+    blocks.extend(forge.mine_many(5, &stranger));
+    for block in &blocks {
+        wallet.node().submit_block(block.clone()).unwrap();
+    }
+    catch_the_history_up(&wallet);
+    let second = forge.mine(&mine);
+    let mut more = vec![second.clone()];
+    more.extend(forge.mine_many(5, &stranger));
+    for block in &more {
+        wallet.node().submit_block(block.clone()).unwrap();
+    }
+    catch_the_history_up(&wallet);
+    let (a, b) = (
+        first.coinbase.created_notes()[0].0,
+        second.coinbase.created_notes()[0].0,
+    );
+    let fell = (
+        wallet
+            .node()
+            .with_chain(|chain| chain.state().watched_position(&a)),
+        wallet
+            .node()
+            .with_chain(|chain| chain.state().watched_position(&b)),
+    );
+    wallet.shutdown();
+    drop(wallet);
+    let (written, why) = cairn_wallet::history::History::load(&account(&data));
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert!(why.is_none(), "fixture: the account read back");
+    assert!(
+        fell.0.is_some() && fell.1.is_some(),
+        "fixture: both notes fell"
+    );
+    assert_eq!(
+        (written.where_it_fell(&a), written.where_it_fell(&b)),
+        fell,
+        "a place learned at a look that knew an earlier one was not written down"
     );
 }

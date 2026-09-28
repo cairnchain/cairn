@@ -212,6 +212,33 @@ impl Decode for PaidAt {
     }
 }
 
+/// The block one of this key's notes fell in, for writing down. A triple
+/// would do everywhere except on the wire, like the pairs above.
+#[derive(Clone, Copy, Debug)]
+struct FellIn {
+    id: NoteId,
+    height: u64,
+    block: Hash32,
+}
+
+impl Encode for FellIn {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        self.id.encode_to(out);
+        self.height.encode_to(out);
+        self.block.encode_to(out);
+    }
+}
+
+impl Decode for FellIn {
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        Ok(Self {
+            id: NoteId::decode_from(reader)?,
+            height: u64::decode_from(reader)?,
+            block: Hash32::decode_from(reader)?,
+        })
+    }
+}
+
 /// One of this key's notes that a block this account read spent, with
 /// everything the account knew of it, so that undoing the block can put it
 /// back.
@@ -310,7 +337,39 @@ pub struct History {
     /// A note with no height here was never read in any block by this account:
     /// it came out of the window a handover carried, which sits below the
     /// anchor, so no reorganisation this node follows can take it away.
+    ///
+    /// That was said of every note taken up from the node's watch list, and
+    /// the list also holds notes paid by blocks this account has not read
+    /// yet, which is where an account more than a batch behind stands at the
+    /// end of every batch. Such a note from a branch that lost stayed for
+    /// good, as stranded money nobody had. One taken up ahead of an account
+    /// that reads every block from the first is given the next height to
+    /// read, so a rewind below it takes it out: see `ahead`.
     paid_at: BTreeMap<NoteId, u64>,
+    /// Notes taken up from the node's watch list ahead of this account, each
+    /// with the height the node stood at then.
+    ///
+    /// Only for an account that has read every block from the first, whose
+    /// notes are all paid by blocks it reads, so such a note was paid above
+    /// where it had read and at or below that height. A block it reads that
+    /// pays the note settles it; reading past the height without one means
+    /// the branch that paid it lost, and the note goes.
+    ahead: BTreeMap<NoteId, u64>,
+    /// The block each fallen note fell in, its height and identifier, for the
+    /// places the node could say that of.
+    ///
+    /// A place is fixed for as long as that block stands. A note paid below
+    /// the reach of any switch can fall inside it, and a branch that wins can
+    /// put it elsewhere. While the node remembers, its word replaces the
+    /// place; once it has forgotten, which a restart from a ledger written
+    /// more than the grace window after the fall does, nothing did, and the
+    /// account went on naming the losing branch's place, asking archivists
+    /// about somebody else's leaf. So a place whose block the chain no longer
+    /// carries is let go of: see [`History::let_go_of_moved_places`]. A node
+    /// says where a note fell for as long as the grace window holds it, so a
+    /// place learned later than that has no block here, and is kept as it
+    /// always was.
+    fell_in: BTreeMap<NoteId, (u64, Hash32)>,
     /// The height below which this account's list of movements may be missing
     /// entries, because it was moved past blocks it could not read.
     ///
@@ -407,6 +466,18 @@ pub struct History {
     /// records as the change coming back rather than as what left. Kept for as
     /// long as the block that spent it could still be undone, and no longer.
     spent: Vec<Spent>,
+    /// The work behind the newest block this account read, as its header
+    /// states it, or nought when that is not known.
+    ///
+    /// What tells a chain that switched away from the account's blocks from a
+    /// node that has not reached them yet. Work decides which branch wins, and
+    /// a node only ever switches to more, so a chain with as much work behind
+    /// it as the account's newest block had is the one to follow, even when it
+    /// ends below that block; one with less is still on its way. A restored
+    /// account on a new disk, or a node reading its way up, stands there, and
+    /// was read as a switch: the account was rewound to the node's height,
+    /// every place above it dropped, and written over the file.
+    work: u128,
 }
 
 /// Why a history file that was there was not used.
@@ -526,6 +597,7 @@ impl History {
         }
         self.next = self.next.saturating_add(1);
         self.recent.push_back(block.id());
+        self.work = block.header.total_work;
         if self.from.is_none() {
             self.from = Some(block.header.height);
         }
@@ -541,6 +613,7 @@ impl History {
             .fold(Amount::ZERO, |sum, (id, note)| {
                 self.held.insert(id, note.value);
                 self.paid_at.insert(id, height);
+                self.ahead.remove(&id);
                 sum.checked_add(note.value).unwrap_or(sum)
             });
         if mined > Amount::ZERO {
@@ -555,6 +628,21 @@ impl History {
 
         for transfer in &block.transfers {
             self.take_transfer(transfer, mine, height, at);
+        }
+        // Read past the height the node stood at when it named a note, and no
+        // block paid it: the branch that did lost.
+        let passed: Vec<NoteId> = self
+            .ahead
+            .iter()
+            .filter(|(_, stood_at)| **stood_at < self.next)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in passed {
+            self.ahead.remove(&id);
+            self.held.remove(&id);
+            self.fell.remove(&id);
+            self.paid_at.remove(&id);
+            self.unaccounted.remove(&id);
         }
         self.settle();
         true
@@ -602,6 +690,7 @@ impl History {
         let mut gave = Amount::ZERO;
         for input in &transfer.inputs {
             if let Some(value) = self.held.remove(&input.note_id) {
+                self.fell_in.remove(&input.note_id);
                 self.spent.push(Spent {
                     height,
                     id: input.note_id,
@@ -621,6 +710,7 @@ impl History {
             if note.owner == mine {
                 self.held.insert(id, note.value);
                 self.paid_at.insert(id, height);
+                self.ahead.remove(&id);
                 got = got.checked_add(note.value).unwrap_or(got);
             }
         }
@@ -672,6 +762,13 @@ impl History {
         self.missed_below
     }
 
+    /// The work behind the newest block this account read, or nought when
+    /// that is not known: see the field of the same name.
+    #[must_use]
+    pub(crate) const fn work(&self) -> u128 {
+        self.work
+    }
+
     /// Notes this account holds in name only, because it was moved past the
     /// blocks that would have said what became of them.
     pub fn unaccounted(&self) -> impl Iterator<Item = NoteId> + '_ {
@@ -721,7 +818,56 @@ impl History {
     /// file's for the same reason.
     pub fn fell_at(&mut self, id: NoteId, value: Amount, position: u64) -> bool {
         self.held.entry(id).or_insert(value);
-        self.fell.insert(id, position) != Some(position)
+        let moved = self.fell.insert(id, position) != Some(position);
+        if moved {
+            // The block written down for the place it had is not this one's.
+            self.fell_in.remove(&id);
+        }
+        moved
+    }
+
+    /// Writes down the block a note with a place fell in: `block`, at
+    /// `height`. Says whether that was news.
+    pub(crate) fn fell_in_block(&mut self, id: NoteId, height: u64, block: Hash32) -> bool {
+        if !self.fell.contains_key(&id) {
+            return false;
+        }
+        self.fell_in.insert(id, (height, block)) != Some((height, block))
+    }
+
+    /// Lets go of every place whose note fell in a block the chain no longer
+    /// carries, `chain` saying which block sits at a height, `None` where it
+    /// cannot say. The note is kept; only where it sits is no longer known.
+    /// Says whether anything went.
+    pub(crate) fn let_go_of_moved_places(&mut self, chain: impl Fn(u64) -> Option<Hash32>) -> bool {
+        let moved: Vec<NoteId> = self
+            .fell_in
+            .iter()
+            .filter(|(_, (height, block))| chain(*height).is_some_and(|now| now != *block))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &moved {
+            self.fell.remove(id);
+            self.fell_in.remove(id);
+        }
+        !moved.is_empty()
+    }
+
+    /// [`History::fell_at`], for the node's word on a note at a moment the
+    /// node stood at `tip`.
+    ///
+    /// A note this account does not hold, named while it reads every block
+    /// from the first and has not read to `tip`, was paid by a block it has
+    /// not read yet: it is taken up ahead, given the next height to read as
+    /// its height and `tip` as the height by which a block must pay it. See
+    /// `ahead`.
+    pub(crate) fn fell_by(&mut self, id: NoteId, value: Amount, position: u64, tip: u64) -> bool {
+        let reads_everything = self.from == Some(0) && self.missed_below.is_none();
+        if reads_everything && self.next <= tip && !self.held.contains_key(&id) {
+            self.ahead.insert(id, tip);
+            self.paid_at.insert(id, self.next);
+        }
+        self.fell_at(id, value, position)
     }
 
     /// Where a note landed, if this account saw it land.
@@ -734,7 +880,22 @@ impl History {
         // A block carries it, so whatever branch it was read on before, it is
         // on this one now and was never undone.
         self.undone.retain(|held| held.id != movement.id);
-        self.movements.push(movement);
+        // Read again after `forget` kept it: it is already here. Anything
+        // else goes in height order, which reading in order keeps at the end.
+        let from = self
+            .movements
+            .partition_point(|held| held.height < movement.height);
+        let same = self
+            .movements
+            .get(from..)
+            .unwrap_or_default()
+            .iter()
+            .take_while(|held| held.height == movement.height);
+        if same.clone().any(|held| held.id == movement.id) {
+            return;
+        }
+        let at = from.saturating_add(same.count());
+        self.movements.insert(at, movement);
         if self.movements.len() > MAX_MOVEMENTS {
             let over = self.movements.len().saturating_sub(MAX_MOVEMENTS);
             self.movements.drain(..over);
@@ -791,9 +952,12 @@ impl History {
         self.next = height;
         // Nothing read is adjacent to what comes next, so there is no block to
         // compare against any more, and no block below here that a switch
-        // this account can locate would undo.
+        // this account can locate would undo. Nor can a note taken up ahead
+        // be settled by reading any more: the blocks that would are skipped.
         self.recent.clear();
         self.spent.clear();
+        self.ahead.clear();
+        self.work = 0;
         if self.from.is_none() {
             self.from = Some(height);
         }
@@ -818,7 +982,10 @@ impl History {
     /// is why the tip is asked for as well as the blocks: work decides which
     /// branch wins, not length, so the branch that won can end below the one
     /// it replaced. Read from the blocks alone that case answers "nothing
-    /// there", which is the opposite of the truth.
+    /// there", which is the opposite of the truth. A chain with less work
+    /// behind it than the account's newest block had is the other case, a node
+    /// that has not caught up, and `Wallet::follow` does not ask this of it:
+    /// see `History::work`.
     pub fn fork(&self, tip: Option<u64>, chain: impl Fn(u64) -> Option<Hash32>) -> Option<Fork> {
         let newest = self.next.checked_sub(1)?;
         let mut height = newest;
@@ -854,11 +1021,15 @@ impl History {
         else {
             return;
         };
-        if above >= remembered {
+        // A fork at the newest block read undoes nothing.
+        if above == 0 || above >= remembered {
             return;
         }
         self.recent.truncate(remembered.saturating_sub(above));
         self.next = fork.saturating_add(1);
+        // The block it now ends at is one the chain still carries, and what
+        // stood behind it was not kept.
+        self.work = 0;
 
         let kept = self
             .movements
@@ -893,6 +1064,8 @@ impl History {
             self.fell.remove(&id);
             self.paid_at.remove(&id);
             self.unaccounted.remove(&id);
+            self.ahead.remove(&id);
+            self.fell_in.remove(&id);
         }
     }
 
@@ -909,14 +1082,23 @@ impl History {
     /// again is what the file exists to be cheaper than, not a thing that
     /// cannot be done.
     ///
-    /// What is not thrown away is the account itself. It is set aside as
-    /// undone, and every movement the chain still carries is taken back out of
-    /// it as the blocks are read again, so what is left at the end is what the
-    /// chain took away, less whatever sits below the first block the node can
-    /// still be read from, which is never read again and stays on the list.
+    /// What is not thrown away is the account itself. A movement below
+    /// `settled_below` is one no switch this node follows can reach, and stays
+    /// in the list; reading the chain again finds it there and does not write
+    /// it twice. The rest is set aside as undone, and every movement the chain
+    /// still carries is taken back out of it as the blocks are read again, so
+    /// what is left at the end is what the chain took away. It used to set the
+    /// whole list aside, and on a node whose log begins above the account's
+    /// oldest movements those were never read again: a one block tie told a
+    /// wallet upgraded from the release before that the chain had taken back
+    /// every reward below the log.
     pub fn forget(&mut self, settled_below: Option<u64>) {
+        let (kept, gone): (Vec<Movement>, Vec<Movement>) = std::mem::take(&mut self.movements)
+            .into_iter()
+            .partition(|movement| settled_below.is_some_and(|line| movement.height < line));
+        let from = if kept.is_empty() { None } else { self.from };
         let mut undone = std::mem::take(&mut self.undone);
-        undone.append(&mut self.movements);
+        undone.extend(gone);
         let over = undone.len().saturating_sub(MAX_UNDONE);
         undone.drain(..over);
 
@@ -947,12 +1129,19 @@ impl History {
             .into_iter()
             .filter(|(id, _)| fell.contains_key(id))
             .collect();
+        let fell_in: BTreeMap<NoteId, (u64, Hash32)> = std::mem::take(&mut self.fell_in)
+            .into_iter()
+            .filter(|(id, _)| fell.contains_key(id))
+            .collect();
 
         *self = Self {
             held,
             fell,
             paid_at,
+            fell_in,
             undone,
+            movements: kept,
+            from,
             ..Self::default()
         };
     }
@@ -1203,6 +1392,26 @@ impl Encode for History {
         let recent: Vec<Hash32> = self.recent.iter().copied().collect();
         recent.encode_to(out);
         self.spent.encode_to(out);
+        self.work.encode_to(out);
+        let ahead: Vec<PaidAt> = self
+            .ahead
+            .iter()
+            .map(|(id, height)| PaidAt {
+                id: *id,
+                height: *height,
+            })
+            .collect();
+        ahead.encode_to(out);
+        let fell_in: Vec<FellIn> = self
+            .fell_in
+            .iter()
+            .map(|(id, (height, block))| FellIn {
+                id: *id,
+                height: *height,
+                block: *block,
+            })
+            .collect();
+        fell_in.encode_to(out);
     }
 }
 
@@ -1228,6 +1437,9 @@ fn each_note_once<T>(items: &[T], id: impl Fn(&T) -> NoteId) -> bool {
 }
 
 impl Decode for History {
+    // One field after another, each read the way the release that added it
+    // wrote it; splitting it would split the one place the format is read.
+    #[allow(clippy::too_many_lines)]
     fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
         let next = u64::decode_from(reader)?;
         let from = u64::decode_from(reader)?;
@@ -1302,6 +1514,29 @@ impl Decode for History {
         } else {
             Vec::new()
         };
+        // The work behind the newest block read. A file written before this
+        // wallet kept it ends here, and is read as not knowing it, which
+        // judges a chain short of the account's blocks as every release
+        // before this one did.
+        let work = if reader.remaining() > 0 {
+            u128::decode_from(reader)?
+        } else {
+            0
+        };
+        // Notes taken up ahead of the account. A file written before this
+        // wallet kept them ends here, and reads as holding none.
+        let ahead = if reader.remaining() > 0 {
+            Vec::<PaidAt>::decode_from(reader)?
+        } else {
+            Vec::new()
+        };
+        // The blocks notes fell in. A file written before this wallet kept
+        // them ends here, and keeps every place as it was.
+        let fell_in = if reader.remaining() > 0 {
+            Vec::<FellIn>::decode_from(reader)?
+        } else {
+            Vec::new()
+        };
         let last = (last != Hash32::ZERO).then_some(last);
         let recent: VecDeque<Hash32> = if recent.is_empty() {
             last.into_iter().collect()
@@ -1320,6 +1555,8 @@ impl Decode for History {
             || !each_note_once(&fell, |fell| fell.id)
             || !each_note_once(&paid_at, |paid| paid.id)
             || !each_note_once(&unaccounted, |id| *id)
+            || !each_note_once(&ahead, |paid| paid.id)
+            || !each_note_once(&fell_in, |fell| fell.id)
         {
             return Err(CodecError::InvalidValue {
                 type_name: "History",
@@ -1343,6 +1580,15 @@ impl Decode for History {
             recent,
             undone,
             spent,
+            work,
+            ahead: ahead
+                .into_iter()
+                .map(|paid| (paid.id, paid.height))
+                .collect(),
+            fell_in: fell_in
+                .into_iter()
+                .map(|fell| (fell.id, (fell.height, fell.block)))
+                .collect(),
         })
     }
 }
@@ -2074,9 +2320,15 @@ mod tests {
 
         // The newest identifier is written twice, where every release has
         // written it and at the end with the others. The end is the list of
-        // three and then the empty list of what they spent.
+        // three, the list of what they spent, the work behind the newest,
+        // and the empty lists of notes taken up ahead and of the blocks notes
+        // fell in.
+        assert!(history.ahead.is_empty() && history.fell_in.is_empty());
         let mut bent = bytes.clone();
-        let newest_ends = bent.len() - history.spent.encode().len();
+        let newest_ends = bent.len()
+            - history.spent.encode().len()
+            - history.work.encode().len()
+            - 2 * 0u32.encode().len();
         bent[newest_ends - 1] ^= 1;
         assert!(
             History::decode(&bent).is_err(),
@@ -2320,6 +2572,82 @@ mod tests {
         );
     }
 
+    /// Starting over after a switch below what the account remembers keeps
+    /// every movement no switch can reach, and lists nothing twice when the
+    /// blocks are read again.
+    ///
+    /// An account written by the release before remembers its newest block
+    /// only, so the first switch that replaces that block starts it over.
+    /// Starting over set the whole list aside as taken back by the chain and
+    /// gave back only what reading the chain again found, so on a node whose
+    /// log begins above the account's oldest movements every reward below the
+    /// log stayed on the list of what the chain took back, beside a balance
+    /// that held it. The tests of starting over read the chain again from its
+    /// first block.
+    #[test]
+    fn starting_over_keeps_what_no_switch_can_reach_and_lists_nothing_twice() {
+        let mine = key(3);
+        let mut history = History::new();
+        let mut blocks = Vec::new();
+        for height in 0..40 {
+            let block = next_block(&history, height, mine, Vec::new());
+            assert!(history.take(&block, mine));
+            blocks.push(block);
+        }
+
+        // A switch no remembered block locates, on a chain whose reach ends at
+        // block 35 and whose log begins at block 32.
+        history.forget(Some(35));
+        history.skip_to(32);
+        for block in blocks.iter().skip(32) {
+            assert!(history.take(block, mine), "fixture: the block was read");
+        }
+
+        assert_eq!(
+            history.undone().count(),
+            0,
+            "movements no switch can reach are listed as taken back by the chain"
+        );
+        assert_eq!(
+            history.len(),
+            40,
+            "the list of what happened lost movements, or holds one twice"
+        );
+        let heights: Vec<u64> = history
+            .movements()
+            .map(|movement| movement.height)
+            .collect();
+        assert!(
+            heights.windows(2).all(|pair| pair[0] > pair[1]),
+            "the list is not newest first"
+        );
+        assert_eq!(
+            history.from(),
+            Some(0),
+            "an account that kept its oldest movements says it begins where they do not"
+        );
+
+        // At the line itself nothing is claimed, and a block there that is
+        // not read again stays on the list of what the chain took back.
+        let mut at_the_line = History::new();
+        for block in blocks.iter().take(40) {
+            assert!(at_the_line.take(block, mine));
+        }
+        at_the_line.forget(Some(35));
+        at_the_line.skip_to(36);
+        for block in blocks.iter().skip(36) {
+            assert!(at_the_line.take(block, mine));
+        }
+        assert_eq!(
+            at_the_line
+                .undone()
+                .map(|movement| movement.height)
+                .collect::<Vec<_>>(),
+            vec![35],
+            "a movement at the line was claimed settled, or one below it was not"
+        );
+    }
+
     /// And with no settled line at all, nothing is kept: a wallet that cannot
     /// say how deep the switch could have gone says nothing about any of them.
     #[test]
@@ -2481,6 +2809,149 @@ mod tests {
         let spend = Transfer::new(vec![Input::hot(id)], vec![Note::new(amount("49"), key(2))]);
         history.take(&next_block(&history, 1, key(2), vec![spend]), mine);
         assert_eq!(history.where_it_fell(&id), None);
+    }
+
+    /// A note taken up ahead of the account stays, with its place, until the
+    /// account has read the block the node stood at; a block paying it by
+    /// then settles it, and none paying it lets it go. Only an account that
+    /// reads every block from the first and is behind the node takes a note
+    /// up ahead, and only a note it does not hold.
+    ///
+    /// Taken up with no height, a note of a branch that lost stayed in the
+    /// account for good. The one test of it read past the node's height with
+    /// no block paying the note, so letting a note go a block early, or at
+    /// once, or taking up ahead notes the account could never settle, passed.
+    #[test]
+    fn a_note_taken_up_ahead_is_settled_or_let_go_of_at_the_height_the_node_stood_at() {
+        let mine = key(3);
+        let stranger = key(9);
+        let mut history = History::new();
+        for height in 0..5 {
+            assert!(history.take(&next_block(&history, height, stranger, Vec::new()), mine));
+        }
+        // The node, at 10, names a note the block at 10 pays.
+        let paid = block(10, mine, Vec::new()).coinbase.created_notes()[0].0;
+        assert!(history.fell_by(paid, amount("50"), 77, 10));
+        assert_eq!(
+            history.paid_at.get(&paid),
+            Some(&5),
+            "taken up with no height"
+        );
+        for height in 5..10 {
+            assert!(history.take(&next_block(&history, height, stranger, Vec::new()), mine));
+        }
+        assert_eq!(
+            history.where_it_fell(&paid),
+            Some(77),
+            "let go of before the block the node stood at was read"
+        );
+        assert!(history.take(&next_block(&history, 10, mine, Vec::new()), mine));
+        assert_eq!(
+            (history.where_it_fell(&paid), history.paid_at.get(&paid)),
+            (Some(77), Some(&10)),
+            "a note the block the node stood at pays lost its place or its height"
+        );
+        assert!(
+            history.ahead.is_empty(),
+            "a note a block paid is still ahead"
+        );
+
+        // One no block pays goes once the account has read past the height.
+        let lost = NoteId::new(Hash32::from_bytes([8; 32]), 0);
+        assert!(history.fell_by(lost, amount("50"), 78, 12));
+        assert!(history.take(&next_block(&history, 11, stranger, Vec::new()), mine));
+        assert!(
+            history.where_it_fell(&lost).is_some(),
+            "a note taken up ahead was let go of before the account read the height"
+        );
+        assert!(history.take(&next_block(&history, 12, stranger, Vec::new()), mine));
+        assert!(
+            !holds(&history, &lost) && history.where_it_fell(&lost).is_none(),
+            "a note no block paid, read past the height the node stood at, is still held"
+        );
+
+        // Not ahead: a note already held, an account caught up to the node,
+        // one that was moved past blocks, and one that does not read from
+        // the first block.
+        let held = paid;
+        history.fell_by(held, amount("50"), 79, 20);
+        assert_eq!(
+            history.paid_at.get(&held),
+            Some(&10),
+            "a held note was moved ahead"
+        );
+        let caught_up = NoteId::new(Hash32::from_bytes([7; 32]), 0);
+        history.fell_by(caught_up, amount("50"), 80, 12);
+        let mut not_from_the_first = history.clone();
+        not_from_the_first.from = Some(1);
+        let mut gapped = history.clone();
+        gapped.skip_to(20);
+        let late = NoteId::new(Hash32::from_bytes([6; 32]), 0);
+        gapped.fell_by(late, amount("50"), 81, 30);
+        not_from_the_first.fell_by(late, amount("50"), 81, 30);
+        assert!(
+            history.ahead.is_empty()
+                && gapped.ahead.is_empty()
+                && not_from_the_first.ahead.is_empty(),
+            "a note was taken up ahead by an account that can never settle it"
+        );
+    }
+
+    /// The block a note fell in is written down only for a note with a place,
+    /// and saying it again is not news.
+    #[test]
+    fn the_block_a_note_fell_in_is_news_once() {
+        let mut history = History::new();
+        let id = NoteId::new(Hash32::from_bytes([5; 32]), 0);
+        let block = Hash32::from_bytes([4; 32]);
+        assert!(
+            !history.fell_in_block(id, 3, block),
+            "a block was written down for a note with no place"
+        );
+        assert!(history.fell_at(id, amount("7"), 3));
+        assert!(
+            history.fell_in_block(id, 3, block),
+            "the block was not news"
+        );
+        assert!(
+            !history.fell_in_block(id, 3, block),
+            "the same block said again was news"
+        );
+        // Starting over keeps it with the place it belongs to, for a note no
+        // switch can take away.
+        let mut kept = history.clone();
+        kept.forget(Some(10));
+        assert_eq!(
+            kept.fell_in.get(&id),
+            Some(&(3, block)),
+            "starting over let go of the block a kept place fell in"
+        );
+        assert!(
+            history.let_go_of_moved_places(|_| Some(Hash32::ZERO)),
+            "a place whose block the chain no longer carries was kept"
+        );
+        assert_eq!(history.where_it_fell(&id), None);
+
+        // Two entries for one note, in either of the lists at the end of the
+        // file, are not an account this wallet wrote.
+        let bytes = History::new().encode();
+        let body = &bytes[..bytes.len() - 8];
+        let once = PaidAt { id, height: 1 };
+        let mut ahead_twice = body.to_vec();
+        ahead_twice.extend(vec![once, once].encode());
+        ahead_twice.extend(Vec::<FellIn>::new().encode());
+        let fell = FellIn {
+            id,
+            height: 1,
+            block,
+        };
+        let mut fell_twice = body.to_vec();
+        fell_twice.extend(Vec::<PaidAt>::new().encode());
+        fell_twice.extend(vec![fell, fell].encode());
+        assert!(
+            History::decode(&ahead_twice).is_err() && History::decode(&fell_twice).is_err(),
+            "an account naming one note twice at its end was read"
+        );
     }
 
     #[test]
