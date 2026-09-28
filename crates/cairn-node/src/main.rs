@@ -976,12 +976,24 @@ fn still_filling(filling: &Filling, directory: &str) -> String {
     } else {
         (String::new(), "")
     };
+    // And where what is missing comes from, which is the same split. A node
+    // whose headers begin at the first block takes none from its peers: it
+    // refuses every run a peer sends (see `Shared::fill_headers`), and writes
+    // its headers from its own chain as it takes each block. It was told it
+    // collects them from its peers, which sent an operator whose disk had
+    // refused a header write to wait on the network for something the network
+    // was never going to send.
+    let source = if filling.from > 0 {
+        "It collects what is missing from its peers as it runs"
+    } else {
+        "What is missing is written from its own chain as it takes blocks, and asked of \
+         nobody, unless its disk refuses the write, which a line of its own says"
+    };
     format!(
         "this node cannot yet show the chain to somebody arriving new. It holds the \
          headers from block {} up to block {}{collecting}, it can prove where {} of them \
-         sit, and the chain is at block {}. It collects what is missing from its peers as \
-         it runs, and nobody can join the network through this node until it has it \
-         all.{disk}{watch}",
+         sit, and the chain is at block {}. {source}, and nobody can join the network \
+         through this node until it has it all.{disk}{watch}",
         filling.from,
         filling.through.saturating_sub(1),
         filling.proved,
@@ -1959,13 +1971,18 @@ mod said_out_loud {
     }
 
     /// The line about filling in names how many headers have been collected,
-    /// and that is the number it tells the operator to watch.
+    /// and that is the number it tells the operator to watch; and a node
+    /// whose headers begin at the first block, which collects nothing, is not
+    /// told it collects from its peers.
     ///
     /// It named only the headers held, the headers proved and the chain,
     /// and the first two do not move until the whole collection has arrived.
     /// A node joined a million and a half blocks up collects for most of an
     /// hour, and for all of it the line said no peer held the part it was
-    /// missing and to connect to another one.
+    /// missing and to connect to another one. And every node it was printed
+    /// for was told it collects what is missing from its peers, which a node
+    /// whose headers begin at the first block never does: it refuses every
+    /// run of headers a peer sends.
     #[test]
     fn the_line_about_filling_in_watches_the_number_that_moves() {
         let midway = Filling {
@@ -1987,6 +2004,11 @@ mod said_out_loud {
             text.contains("the number collected does not"),
             "the line tells the operator to watch numbers a healthy fill leaves alone: {text}"
         );
+        assert!(
+            text.contains("It collects what is missing from its peers"),
+            "a node that joined above the first block is not told it collects from its peers: \
+             {text}"
+        );
 
         let short_at_the_top = Filling {
             from: 0,
@@ -1997,6 +2019,15 @@ mod said_out_loud {
         assert!(
             !text.contains("collected") && !text.contains("no peer this node has found"),
             "a node missing nothing below its headers is told about collecting from peers: {text}"
+        );
+        assert!(
+            !text.contains("from its peers"),
+            "a node whose headers begin at the first block, which takes none from its peers, \
+             is told it collects what is missing from them: {text}"
+        );
+        assert!(
+            text.contains("from its own chain"),
+            "the line does not say where the missing headers of such a node come from: {text}"
         );
     }
 
