@@ -5141,6 +5141,21 @@ impl Node {
             .count()
     }
 
+    /// Peers this node went out and reached itself, that have introduced
+    /// themselves: [`Self::peers_introduced`] without the connections somebody
+    /// else opened, and without a feeler, which is let go of once it answers.
+    ///
+    /// A connection somebody else opened is somebody else's choice, and
+    /// whether this node has reached the network is not a question a stranger
+    /// that dials in should answer for it: see what the miner waits for.
+    pub fn peers_reached(&self) -> usize {
+        self.shared
+            .peers()
+            .values()
+            .filter(|peer| peer.dialled && peer.greeted && !peer.feeler)
+            .count()
+    }
+
     /// Addresses this node knows about, whether or not it is connected to them.
     pub fn known_addresses(&self) -> Vec<SocketAddr> {
         self.shared.book().iter().collect()

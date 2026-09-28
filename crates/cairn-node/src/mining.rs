@@ -133,6 +133,10 @@ pub(crate) enum Waiting {
     /// it. Before this, a node started with `--mine` behind a firewall or
     /// while its seeds were down mined from its first block, printed `mined`
     /// for every block, and was a directory to be wiped a day later.
+    ///
+    /// A peer this node reached itself, and not one that dialled in: a
+    /// stranger that connects and says hello is not the network, and it ended
+    /// this wait for a node whose seeds did not answer.
     ForAPeer,
     /// The chain is still arriving: its newest block is dated long ago and it
     /// moved a moment ago. A block built now would be built on a chain the
@@ -159,9 +163,9 @@ impl fmt::Display for Waiting {
                  handed",
             ),
             Self::ForAPeer => out.write_str(
-                "mining waits until this node has a peer: a block mined with nobody to take it \
-                 starts a chain of this node's own, and once that chain is deeper than a node \
-                 will undo, this node can never follow the network again",
+                "mining waits until this node has a peer it reached itself: a block mined with \
+                 nobody to take it starts a chain of this node's own, and once that chain is \
+                 deeper than a node will undo, this node can never follow the network again",
             ),
             Self::ForTheChain => out.write_str(
                 "mining waits while the chain arrives: its newest block is dated long ago, and \
@@ -284,8 +288,8 @@ fn still_arriving(newest: Option<u64>, now: u64, still_for: Duration, block_time
 /// `alone` is a node with nowhere to start from: no seed was given and none is
 /// written in for its network. That node is the whole of its network, the way
 /// the throwaway network is run on one machine, and it mines alone because
-/// there is nobody else to wait for. Every other node waits for a peer, and
-/// then for the chain to stop arriving.
+/// there is nobody else to wait for. Every other node waits for a peer it
+/// reached itself, and then for the chain to stop arriving.
 fn held_back(on_probation: bool, peers: usize, alone: bool, arriving: bool) -> Option<Waiting> {
     if on_probation {
         Some(Waiting::ForProbation)
@@ -407,7 +411,7 @@ pub(crate) fn run(
         // like any other rather than a reason to build again.
         let built = match held_back(
             node.probation().is_some(),
-            node.peers_introduced(),
+            node.peers_reached(),
             alone,
             arriving,
         ) {
@@ -864,6 +868,51 @@ mod saying {
         });
     }
 
+    /// A stranger that dials in and introduces itself does not end a miner's
+    /// wait for a peer, and a peer this node reached itself does.
+    ///
+    /// The wait counted every peer that had introduced itself, whoever opened
+    /// the connection, so a node started with `--mine` whose seeds did not
+    /// answer mined a chain of its own once one stranger had said hello and
+    /// the chain had stood still for two block times: the harm the wait is
+    /// there for, behind a message anybody can send. Nothing asked who the
+    /// peer was.
+    #[test]
+    fn a_stranger_that_dials_in_does_not_end_a_miners_wait_for_a_peer() {
+        mining(ConsensusParams::testnet(), false, |node, told| {
+            assert_eq!(next(told), Heard::Waits(Waiting::ForAPeer));
+            let stranger =
+                Node::bind(ConsensusParams::testnet(), "127.0.0.1:0".parse().unwrap()).unwrap();
+            stranger.connect(node.address()).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while node.peers_introduced() == 0 && std::time::Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(
+                node.peers_introduced(),
+                1,
+                "fixture: the stranger never introduced itself"
+            );
+            // Rounds for a miner that took the stranger for a peer to say so.
+            thread::sleep(PAUSE * 5);
+            assert!(
+                told.try_recv().is_err(),
+                "a miner stopped waiting for a peer on the word of a stranger that dialled in"
+            );
+
+            let peer =
+                Node::bind(ConsensusParams::testnet(), "127.0.0.1:0".parse().unwrap()).unwrap();
+            node.connect(peer.address()).unwrap();
+            assert_eq!(
+                next(told),
+                Heard::Resumes,
+                "a peer this node reached itself did not end the wait"
+            );
+            stranger.shutdown();
+            peer.shutdown();
+        });
+    }
+
     /// A block this node's own chain refuses is said, with the reason under
     /// it.
     ///
@@ -1203,7 +1252,7 @@ mod saying {
     fn each_wait_says_what_it_is_waiting_for() {
         let said = |waiting: Waiting| Saying::Waits(&waiting).to_string();
         assert!(said(Waiting::ForProbation).contains("ledger it was handed"));
-        assert!(said(Waiting::ForAPeer).contains("until this node has a peer"));
+        assert!(said(Waiting::ForAPeer).contains("until this node has a peer it reached itself"));
         assert!(said(Waiting::ForAChain).contains("first block"));
         assert!(said(Waiting::ForTheClock).contains("waits for the clock"));
         assert!(said(Waiting::CannotAssemble("a reason".into())).contains("(a reason)"));
