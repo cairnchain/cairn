@@ -4743,8 +4743,9 @@ impl Node {
     /// An address resolved once at startup is an address a node has for good,
     /// including when the name later means something else, and no address at
     /// all when the lookup happened to fail. Held here, a name is asked again
-    /// while this node has no seed to dial, so one that starts before its
-    /// machine can resolve anything still joins on its own.
+    /// while this node has no seed and nobody in its book to dial, so one that
+    /// starts before its machine can resolve anything still joins on its own,
+    /// and one whose book can supply a peer does not ask.
     pub fn start_from_names(&self, names: Vec<String>) {
         *self.shared.seed_names() = names;
     }
@@ -8643,12 +8644,20 @@ fn collect_finished(shared: &Arc<Shared>) {
 
 /// Turns the names this node starts from into addresses it can dial.
 ///
-/// Only while the book holds no seed at all. That is the case this exists for:
-/// a node whose machine could not resolve anything at the moment it started
-/// has nothing to dial and no way to learn of anybody, and would sit there for
-/// as long as it ran, looking like a network that does not exist. Once one
-/// address lands it is kept for good and the book takes over, so this stops on
-/// its own and never runs again.
+/// Only while the book holds no seed and nobody else to dial. That is the case
+/// this exists for: a node whose machine could not resolve anything at the
+/// moment it started, or whose book has nobody left who answers, has nothing
+/// to dial and no way to learn of anybody, and would sit there for as long as
+/// it ran, looking like a network that does not exist. Once one address lands
+/// it is kept for good and the book takes over, so this stops on its own.
+///
+/// Not while the book can supply somebody. The names are the seeds written
+/// into the program, and looking them up is a question to whoever answers for
+/// them, which a node that has met anybody keeps its own book so as not to
+/// ask (see `seeds`). This ran whenever the book held no seed, so a node
+/// started with a book of its own and no seed named looked the list up in its
+/// first round, and every round of a node that had met the network only
+/// through its book.
 ///
 /// A lookup can block for as long as the machine's resolver cares to try, and
 /// nothing here can put a deadline on it, so it is made on a thread of its own
@@ -8665,8 +8674,16 @@ fn look_up_seed_names_with<R>(shared: &Arc<Shared>, now: u64, resolve: R)
 where
     R: Fn(&str) -> Result<Vec<SocketAddr>, String> + Send + 'static,
 {
-    if shared.book().has_seeds() {
-        return;
+    {
+        let book = shared.book();
+        if book.has_seeds()
+            || book
+                .ready(now)
+                .into_iter()
+                .any(|address| address != shared.address)
+        {
+            return;
+        }
     }
     let last = shared.names_looked_up_at.load(Ordering::Relaxed);
     if !a_lookup_is_due(last, now) {
@@ -14532,6 +14549,56 @@ mod tests {
         assert!(
             node.shared.book().has_seeds(),
             "and the one its period allows was not"
+        );
+    }
+
+    /// A node whose book holds somebody to dial does not look its names up,
+    /// and one whose book has nobody left to dial does.
+    ///
+    /// The names are the seeds written into the program, and asking for them
+    /// is a question to whoever answers for them. A node that has met anybody
+    /// keeps its own book, and the seeds are for when that book cannot supply
+    /// a peer. Nothing asked with a book full of addresses and no seed among
+    /// them, so a node that looked the names up whenever its book held no seed
+    /// passed, and a node started with a book of its own asked for them within
+    /// its first round.
+    #[test]
+    fn a_node_whose_book_can_supply_peers_does_not_look_its_names_up() {
+        // Stopped, so its own rounds do not look anything up beside this.
+        let node = Node::bind(ConsensusParams::testnet(), loopback()).unwrap();
+        node.shutdown();
+        node.shared
+            .seed_names()
+            .push("seed.invalid:9944".to_owned());
+        let met = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 9), 9_944));
+        node.shared.book().insert(met);
+
+        // A lookup is marked as out before its thread is started, so whether
+        // one began is read here without waiting on the thread.
+        look_up_seed_names_with(
+            &node.shared,
+            1_000,
+            |_: &str| Err("not answered".to_owned()),
+        );
+        let with_somebody_to_dial = node.shared.names_looked_up_at.load(Ordering::Relaxed) != 0;
+
+        // The one address failed a dial, so it waits before it is tried again
+        // and the book has nobody to dial meanwhile.
+        node.shared.book().missed(&met, 1_000);
+        let (answered, answer) = mpsc::channel();
+        look_up_seed_names_with(&node.shared, 1_000, move |_: &str| {
+            let _ = answered.send(());
+            Err("not answered".to_owned())
+        });
+        let with_nobody_to_dial = answer.recv_timeout(Duration::from_secs(10)).is_ok();
+
+        assert!(
+            !with_somebody_to_dial,
+            "a node whose book held an address to dial looked the seeds up"
+        );
+        assert!(
+            with_nobody_to_dial,
+            "a node whose book had nobody left to dial did not look the seeds up"
         );
     }
 

@@ -15,7 +15,9 @@ use cairn_net::node::BAD_BLOCK_WINDOW;
 use cairn_net::node::{
     Behind, Probation, Stranded, Unjudged, Unread, Unweighable, Unwritten, MAX_BEHIND,
 };
-use cairn_net::{Filling, Joined, Node, NodeError, Restored, TurnedAway, Unanswered};
+use cairn_net::{
+    seeds, Filling, Joined, Node, NodeError, Restored, TurnedAway, Unanswered, NAME_LOOKUP_PERIOD,
+};
 
 const TICK: Duration = Duration::from_millis(100);
 
@@ -214,10 +216,19 @@ fn run(arguments: &[String]) -> Result<Ending, Stopping> {
 
     // The names, not just what they resolved to: a node that could not look
     // anything up at this moment asks again while it runs, rather than sitting
-    // with nothing to dial for as long as it is up.
+    // with nothing to dial for as long as it is up. It asks only while its
+    // book has nobody to dial.
     node.start_from_names(options.seed_names.clone());
 
-    for seed in &options.seeds {
+    let known = node.known_addresses().len();
+    let seeds = seeds_to_dial(&options, known, || {
+        seeds::start_from(&[], options.params.network).unwrap_or_default()
+    });
+    if let Some(line) = what_the_seeds_came_to(&options, known, &seeds) {
+        say!("{line}");
+    }
+
+    for seed in &seeds {
         // Written down before it is dialled, so a seed that is down right now
         // is tried again later rather than never known at all.
         node.remember_seed(*seed);
@@ -249,6 +260,64 @@ fn run(arguments: &[String]) -> Result<Ending, Stopping> {
         Ending::Fault => say!("stopped on the fault above"),
     }
     Ok(ending)
+}
+
+/// The seeds this start dials, given how many addresses the node's own book
+/// holds: every one the operator named, whatever the book holds; the ones
+/// written into the program, looked up by `look_up`, only when the book holds
+/// nobody at all; and none otherwise.
+///
+/// The written-in list is a question to whoever answers for its names, and
+/// `seeds.rs` says a node that has met anybody keeps its own book and never
+/// reads that list again. This start looked the list up and dialled it at
+/// every start whatever the book held, as the wallet did before it was taught
+/// not to. The node itself looks the names up later only while its book has
+/// nobody to dial.
+fn seeds_to_dial(
+    options: &options::Options,
+    known: usize,
+    look_up: impl FnOnce() -> Vec<std::net::SocketAddr>,
+) -> Vec<std::net::SocketAddr> {
+    if options.seeds_asked_for {
+        return options.seeds.clone();
+    }
+    if known > 0 {
+        return Vec::new();
+    }
+    look_up()
+}
+
+/// What the start says about the seeds written into the program, where it
+/// has something to say: that they were not asked, because the book holds
+/// addresses, or that they did not resolve when they were.
+///
+/// Nothing about seeds the operator named, which are listed with the settings
+/// and dialled below, and nothing where none are written in, which the
+/// settings say.
+fn what_the_seeds_came_to(
+    options: &options::Options,
+    known: usize,
+    dialled: &[std::net::SocketAddr],
+) -> Option<String> {
+    if options.seeds_asked_for || options.seed_names.is_empty() {
+        return None;
+    }
+    if known > 0 {
+        return Some(format!(
+            "seeds        not asked: {known} addresses in this node's own book, and the ones \
+             written in only if those cannot supply a peer"
+        ));
+    }
+    // Not "none written in". The difference between having nowhere to start
+    // and having somewhere this machine could not look up is the whole
+    // diagnosis, and printing the first for the second sends an operator
+    // reading source code instead of checking a resolver.
+    dialled.is_empty().then(|| {
+        format!(
+            "seeds        {} did not resolve; asking again every {NAME_LOOKUP_PERIOD}s",
+            options.seed_names.join(", ")
+        )
+    })
 }
 
 /// Prints where the node stands, until it is asked to stop or stops itself.
@@ -2177,5 +2246,106 @@ mod what_an_operator_is_told {
             text.split_whitespace().collect::<Vec<_>>().join(" ")
         );
         assert!(wrapped("").is_empty());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod where_a_start_begins {
+    use std::cell::Cell;
+    use std::net::SocketAddr;
+
+    use super::{options, seeds_to_dial, what_the_seeds_came_to};
+
+    fn settings(arguments: &[&str]) -> options::Options {
+        let arguments: Vec<String> = arguments.iter().map(|word| (*word).to_owned()).collect();
+        options::resolve_options(&arguments).unwrap().unwrap()
+    }
+
+    /// A start dials the seeds written into the program only when its book
+    /// holds nobody, and the seeds an operator named whatever it holds.
+    ///
+    /// The written-in list is a question to whoever answers for its names,
+    /// and a node that has met anybody keeps its own book so as not to ask it.
+    /// Nothing asked with a book full of addresses, so a start that looked
+    /// the list up and dialled it every time passed.
+    #[test]
+    fn the_written_in_seeds_are_for_a_node_whose_book_holds_nobody() {
+        let written_in = settings(&[]);
+        let looked_up = Cell::new(0u32);
+        let found = SocketAddr::from(([192, 0, 2, 7], 9_944));
+        let look_up = || {
+            looked_up.set(looked_up.get().saturating_add(1));
+            vec![found]
+        };
+
+        assert!(
+            seeds_to_dial(&written_in, 3, look_up).is_empty(),
+            "a node with a book of its own was handed the written-in seeds"
+        );
+        assert_eq!(
+            looked_up.get(),
+            0,
+            "a node with a book of its own looked the written-in seeds up"
+        );
+        assert_eq!(
+            seeds_to_dial(&written_in, 0, look_up),
+            vec![found],
+            "a node whose book holds nobody was not handed the written-in seeds"
+        );
+        assert_eq!(looked_up.get(), 1, "and they were looked up once");
+
+        let named = settings(&["--seed", "127.0.0.1:1111"]);
+        assert_eq!(
+            seeds_to_dial(&named, 3, look_up),
+            named.seeds,
+            "a seed the operator named was not dialled because the book held addresses"
+        );
+        assert_eq!(
+            looked_up.get(),
+            1,
+            "and the written-in list was looked up beside the seed named"
+        );
+    }
+
+    /// The start says why it did not ask the seeds written in, or that they
+    /// did not resolve when it did, and nothing about seeds an operator named
+    /// or a network with none written in.
+    ///
+    /// New with the rule above: a node with a book of its own now starts
+    /// without a word about seeds, which read like a node that had none.
+    #[test]
+    fn the_start_says_what_became_of_the_written_in_seeds() {
+        let written_in = settings(&[]);
+        let found = [SocketAddr::from(([192, 0, 2, 7], 9_944))];
+
+        let from_the_book = what_the_seeds_came_to(&written_in, 3, &[]).unwrap();
+        assert!(
+            from_the_book.contains("not asked: 3 addresses"),
+            "a start with a book of its own does not say why the seeds were not asked: \
+             {from_the_book}"
+        );
+        let unresolved = what_the_seeds_came_to(&written_in, 0, &[]).unwrap();
+        assert!(
+            unresolved.contains("did not resolve"),
+            "a start whose seeds did not resolve does not say so: {unresolved}"
+        );
+        assert_eq!(
+            what_the_seeds_came_to(&written_in, 0, &found),
+            None,
+            "a start that reached for its seeds says more than the dials say"
+        );
+        let named = settings(&["--seed", "127.0.0.1:1111"]);
+        assert_eq!(
+            what_the_seeds_came_to(&named, 3, &[]),
+            None,
+            "a start speaks of the written-in seeds when the operator named one"
+        );
+        let alone = settings(&["--network", "devnet"]);
+        assert_eq!(
+            what_the_seeds_came_to(&alone, 0, &[]),
+            None,
+            "a start on a network with none written in speaks of them"
+        );
     }
 }

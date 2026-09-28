@@ -65,10 +65,16 @@ pub(crate) struct Options {
     pub(crate) data: PathBuf,
     pub(crate) listen: SocketAddr,
     pub(crate) http: SocketAddr,
+    /// What the seeds the operator named resolve to, and nothing when none
+    /// was named: the ones written into the program are looked up at the
+    /// start, and only when the node's own book cannot supply a peer.
     pub(crate) seeds: Vec<SocketAddr>,
-    /// The names those addresses came from, kept so the node can ask again if
-    /// none of them resolved at the moment it started.
+    /// The names to start from, named or written in, kept so the node can ask
+    /// again when its book has nobody to dial.
     pub(crate) seed_names: Vec<String>,
+    /// Whether any seed was named, rather than read off the list written into
+    /// the program.
+    pub(crate) seeds_asked_for: bool,
     pub(crate) params: ConsensusParams,
     /// Bytes of blocks to keep on disk, `u64::MAX` for every one of them.
     pub(crate) keep: u64,
@@ -186,9 +192,17 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
     })?;
 
     // After the network is settled: an explorer given no seed starts from the
-    // ones written into the program, like every other node.
+    // ones written into the program, like every other node. Only a seed named
+    // is looked up here; the list written in is a question to whoever answers
+    // for it, asked at the start and only when the node's own book cannot
+    // supply a peer, as `cairnd` does.
     let seed_names = seeds::names_for(given.all("seed"), params.network);
-    let seeds = seeds::start_from(given.all("seed"), params.network)?;
+    let seeds_asked_for = !given.all("seed").is_empty();
+    let seeds = if seeds_asked_for {
+        seeds::start_from(given.all("seed"), params.network)?
+    } else {
+        Vec::new()
+    };
 
     let keep = match given.first("keep") {
         None => KEEP_EVERYTHING,
@@ -201,6 +215,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         http,
         seeds,
         seed_names,
+        seeds_asked_for,
         params,
         keep,
         check: given.has("check"),
@@ -454,6 +469,32 @@ mod tests {
             ]))
             .is_ok(),
             "a second seed is another peer, and was refused as a second answer"
+        );
+    }
+
+    /// The seeds written into the program are not looked up when the settings
+    /// are read, and a seed the operator named is.
+    ///
+    /// The explorer looked the list up at every start, whatever its node's own
+    /// book held, as `cairnd` did. Nothing asked, so settings that looked the
+    /// list up passed.
+    #[test]
+    fn the_written_in_seeds_are_not_looked_up_when_the_settings_are_read() {
+        let options = resolve_options(&arguments(&[])).unwrap().unwrap();
+        assert!(
+            options.seeds.is_empty() && !options.seeds_asked_for,
+            "the seeds written into the program were looked up with the settings"
+        );
+        assert!(
+            !options.seed_names.is_empty(),
+            "and their names are not kept for the start to ask with"
+        );
+        let named = resolve_options(&arguments(&["--seed", "127.0.0.1:1111"]))
+            .unwrap()
+            .unwrap();
+        assert!(
+            named.seeds_asked_for && named.seeds.len() == 1,
+            "a seed the operator named was not read with the settings"
         );
     }
 
