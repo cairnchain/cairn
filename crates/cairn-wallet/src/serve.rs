@@ -27,7 +27,7 @@ use cairn_crypto::{random_bytes, PublicKey};
 use cairn_http::{Request, Response, Writer};
 use cairn_primitives::Amount;
 
-use crate::{parse_address, undone_note, Wallet, WalletError};
+use crate::{not_carried_note, parse_address, undone_note, Waiting, Wallet, WalletError};
 
 /// Bytes of secret in the address of the page.
 const SECRET_BYTES: usize = 24;
@@ -368,7 +368,8 @@ fn state(wallet: &Wallet) -> Response {
         holdings.notes.iter().filter(|held| held.is_cold()).count(),
     );
 
-    payments(&mut json, wallet);
+    let waiting = wallet.waiting();
+    payments(&mut json, wallet, &waiting);
     json.key("notes");
     json.begin_array();
     // Enough to show where the money sits without handing a page a list that
@@ -400,8 +401,30 @@ fn state(wallet: &Wallet) -> Response {
     json.end_array();
     json.field_usize("movements_held", movements.len());
 
-    // What the chain took back. A payment that was undone leaves the list
-    // above, and leaving with it is the only record anybody had of it.
+    taken_back(&mut json, wallet, &waiting);
+
+    let covered = wallet.history_covers();
+    match covered.from {
+        Some(from) => json.field_u64("history_from", from),
+        None => json.field_null("history_from"),
+    }
+    // Where the list may be short, which is apart from where it begins: a gap
+    // in the middle is a stretch the account read nothing of, and the
+    // movements on both sides of it are here.
+    match covered.missed_below {
+        Some(missed) => json.field_u64("history_missed_below", missed),
+        None => json.field_null("history_missed_below"),
+    }
+    json.field_u64("history_behind", covered.behind());
+    json.end_object();
+    json_response(200, json)
+}
+
+/// What the chain took back, with what the library says under it given the
+/// payments `waiting` for a block now.
+fn taken_back(json: &mut Writer, wallet: &Wallet, waiting: &[Waiting]) {
+    // A payment that was undone leaves the list of movements, and leaving
+    // with it is the only record anybody had of it.
     let undone = wallet.undone();
     json.key("undone");
     json.begin_array();
@@ -423,33 +446,21 @@ fn state(wallet: &Wallet) -> Response {
     // became of the money, which the library words for both faces. A payment
     // missing from it reads as a payment that went through.
     json.field_usize("undone_held", undone.len());
-    json.field_str("undoneNote", &undone_note(&undone).unwrap_or_default());
-
-    let covered = wallet.history_covers();
-    match covered.from {
-        Some(from) => json.field_u64("history_from", from),
-        None => json.field_null("history_from"),
-    }
-    // Where the list may be short, which is apart from where it begins: a gap
-    // in the middle is a stretch the account read nothing of, and the
-    // movements on both sides of it are here.
-    match covered.missed_below {
-        Some(missed) => json.field_u64("history_missed_below", missed),
-        None => json.field_null("history_missed_below"),
-    }
-    json.field_u64("history_behind", covered.behind());
-    json.end_object();
-    json_response(200, json)
+    json.field_str(
+        "undoneNote",
+        &undone_note(&undone, waiting).unwrap_or_default(),
+    );
 }
 
-/// The payments a wallet handed over that no block carries yet, and the ones
-/// it stopped waiting on without a block carrying them.
-fn payments(json: &mut Writer, wallet: &Wallet) {
+/// The payments a wallet handed over that no block carries yet, `waiting`,
+/// the ones a block it has not read may have carried, and the ones it stopped
+/// waiting on without a block carrying them.
+fn payments(json: &mut Writer, wallet: &Wallet, waiting: &[Waiting]) {
     // Payments handed over that no block carries yet. The one thing a person
     // watching an unmoved balance after pressing Send needs to be told.
     json.key("payments");
     json.begin_array();
-    for payment in wallet.waiting() {
+    for payment in waiting {
         json.begin_object();
         json.field_str("id", &payment.id.to_string());
         json.field_str("amount", &payment.amount.to_string());
@@ -466,20 +477,40 @@ fn payments(json: &mut Writer, wallet: &Wallet) {
         json.end_object();
     }
     json.end_array();
+    // The ones this wallet cannot yet say a block carried or not, with the
+    // library's words for them, which are neither the waiting box's nor the
+    // not-carried box's.
+    json.key("perhapsCarried");
+    json.begin_array();
+    for payment in wallet.perhaps_carried() {
+        json.begin_object();
+        json.field_str("id", &payment.id.to_string());
+        json.field_str("amount", &payment.amount.to_string());
+        json.field_u64("since", payment.since);
+        json.end_object();
+    }
+    json.end_array();
+    json.field_str("perhapsCarriedNote", crate::PERHAPS_CARRIED);
     // And the ones it stopped waiting on without a block carrying them. The
     // waiting box used to empty and the balance go back up, which is what a
     // carried payment looks like too.
+    let not_carried = wallet.not_carried();
     json.key("notCarried");
     json.begin_array();
-    for payment in wallet.not_carried() {
+    for payment in &not_carried {
         json.begin_object();
         json.field_str("id", &payment.id.to_string());
         json.field_str("amount", &payment.amount.to_string());
         json.field_str("why", &payment.why);
         json.field_u64("at", payment.at);
+        json.field_bool("notesHere", payment.notes_here);
         json.end_object();
     }
     json.end_array();
+    json.field_str(
+        "notCarriedNote",
+        &not_carried_note(&not_carried).unwrap_or_default(),
+    );
     match wallet.payments_unkept() {
         Some(unkept) => json.field_str("paymentsUnkept", &unkept),
         None => json.field_null("paymentsUnkept"),

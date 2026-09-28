@@ -18,8 +18,8 @@ use cairn_net::seeds;
 use cairn_primitives::Amount;
 use cairn_wallet::history::{Direction, Movement};
 use cairn_wallet::{
-    keyfile, serve, Covered, Holdings, NotCarried, Sent, Waited, Waiting, Wallet, WalletError,
-    BOOK_PATIENCE,
+    keyfile, serve, Covered, Holdings, NotCarried, PerhapsCarried, Sent, Waited, Waiting, Wallet,
+    WalletError, BOOK_PATIENCE,
 };
 
 const HELP: &str = "\
@@ -42,14 +42,16 @@ cairn-wallet, a Cairn wallet that is itself a node
       open the wallet as a page on this machine, and print its address
 
   cairn-wallet backup <key file> --into <directory> [--data <directory>]
-      copy the key file and this wallet's account, history.dat, into a
-      directory of their own. A restore needs both: see below
+      copy the key file, this wallet's account, history.dat, and its record
+      of payments waiting, pending.dat, into a directory of their own. A
+      restore needs them all: see below
 
 Network options
 
-  --data <directory>   where this wallet keeps its copy of the chain, and
+  --data <directory>   where this wallet keeps its copy of the chain,
                        history.dat, its own account of what this key was
-                       paid, which is half of its backup (default:
+                       paid, and pending.dat, its record of payments
+                       waiting, which its backup carries (default:
                        cairn-wallet-data, and it must not be the same
                        directory a node is using)
   --seed <address>     a peer to start from; repeat for more. Without one,
@@ -100,15 +102,20 @@ What the network learns
 
 Backing up
 
-  A wallet is two files. The key file spends the money, and it is plain
-  text with no passphrase: anyone who can read it, or a copy of it, holds
-  the money. history.dat, in the --data directory, is this wallet's own
-  account of what the key was paid, and the only record of where money
-  that has fallen out of the set every node holds now sits. A restore from
-  the key alone does not find that money, and nothing on the network can.
-  `backup` copies the two together and never writes over a file. Take it
-  again after the wallet has run, and restore by putting the key file back
-  and history.dat back in the --data directory before the wallet starts.";
+  A wallet is its key file and what its --data directory keeps beside the
+  chain. The key file spends the money, and it is plain text with no
+  passphrase: anyone who can read it, or a copy of it, holds the money.
+  history.dat, in the --data directory, is this wallet's own account of
+  what the key was paid, and the only record of where money that has
+  fallen out of the set every node holds now sits. A restore from the key
+  alone does not find that money, and nothing on the network can.
+  pending.dat, beside it once this wallet has paid anybody, is its record
+  of the payments no block has settled yet: without it a restore counts
+  their notes as spendable and nothing hands them over again. `backup`
+  copies them together and never writes over a file. Take it again after
+  the wallet has run, and restore by putting the key file back, and
+  history.dat and pending.dat back in the --data directory, before the
+  wallet starts.";
 
 fn main() {
     // Read as it comes rather than through `std::env::args`, which panics on
@@ -315,9 +322,10 @@ fn make_key(arguments: &[String]) -> Result<(), String> {
         "It is not all of this wallet. The first time the wallet runs it starts \
          history.dat in its data directory, its own account of what this key is paid, \
          and money that has fallen out of the set every node holds can only be found \
-         again with that file. So a backup is both, taken again after the wallet has \
-         run. This copies the two together, given the same --data as the wallet if it \
-         runs with one:",
+         again with that file; once it has paid anybody, pending.dat beside it holds the \
+         payments no block has settled yet. So a backup is the key and those files, \
+         taken again after the wallet has run. This copies them together, given the \
+         same --data as the wallet if it runs with one:",
     );
     println!();
     println!(
@@ -341,12 +349,25 @@ fn back_up(arguments: &[String]) -> Result<(), String> {
 
     println!("key       {}", copies.key.display());
     println!("account   {}", copies.account.display());
+    if let Some(payments) = &copies.payments {
+        println!("payments  {}", payments.display());
+    }
+    // Named rather than copied: this wallet could not read it, and what it
+    // holds is the only record of where some of this key's money fell.
+    for aside in &copies.left_out {
+        say(&format!(
+            "Not copied: {}, an account this wallet set aside at an earlier start because it did \
+             not read back. It may be the only record of where some of this key's money fell \
+             out of the set every node holds, so copy it by hand, beside this backup, to keep it.",
+            aside.display()
+        ));
+    }
     say(
-        "Those two files are this wallet. To restore it, put the key file back, and put \
-         history.dat back in the wallet's --data directory before the wallet starts. The \
-         account changes as the wallet reads the chain, and a note that falls out of the \
-         set every node holds later is recorded only in a newer copy, so back up again \
-         after the wallet has run.",
+        "Those files are this wallet. To restore it, put the key file back, and put \
+         history.dat, and pending.dat when there is one, back in the wallet's --data \
+         directory before the wallet starts. They change as the wallet reads the chain and \
+         pays: a note that falls out of the set every node holds later, or a payment made \
+         later, is recorded only in a newer copy, so back up again after the wallet has run.",
     );
     say(
         "The key file is plain text with no passphrase. Anyone who can read either copy of \
@@ -392,8 +413,10 @@ fn what_was_not_read(covered: &Covered, listed: usize) -> Vec<String> {
             "This wallet could not read every block up to {missed}, because the node had let \
              go of them by the time it looked. Anything that happened to this key in the ones \
              it missed is not in the list above. What can be spent is counted from the chain \
-             rather than from the list, so it is right whatever the list is missing; notes \
-             this wallet lost track of in those blocks are named apart rather than counted."
+             rather than from the list, so it is right whatever the list is missing. Notes \
+             this wallet lost track of in those blocks are named apart rather than counted, \
+             except one it saw fall: that one is still counted as stranded, and may have been \
+             paid away in those blocks."
         )));
     }
     lines
@@ -453,14 +476,16 @@ fn show_balance(arguments: &[String]) -> Result<(), String> {
     // reason they do not send a second time. It was read out of the pool,
     // which dies with the process, so on this face, where every payment is
     // made by a process that then exits, it could never print.
+    let waiting = wallet.waiting();
     for line in what_is_waiting(
-        &wallet.waiting(),
+        &waiting,
+        &wallet.perhaps_carried(),
         &wallet.not_carried(),
         wallet.payments_unkept(),
     ) {
         println!("{line}");
     }
-    for line in what_was_taken_back(&wallet.undone()) {
+    for line in what_was_taken_back(&wallet.undone(), &waiting) {
         println!("{line}");
     }
 
@@ -612,6 +637,7 @@ const MOVEMENTS_SHOWN: usize = 20;
 /// What `balance` says about the payments this wallet handed over.
 fn what_is_waiting(
     payments: &[Waiting],
+    perhaps: &[PerhapsCarried],
     not_carried: &[NotCarried],
     unkept: Option<String>,
 ) -> Vec<String> {
@@ -646,7 +672,27 @@ fn what_is_waiting(
              payment. Do not send one again while it is listed here.",
         ));
     }
-    if !not_carried.is_empty() {
+    // Neither waiting nor carried by no block: this wallet cannot say yet,
+    // and says that rather than either.
+    if !perhaps.is_empty() {
+        lines.push(String::new());
+        lines.push("Perhaps carried by a block this wallet has not read:".to_owned());
+        lines.push(String::new());
+        for payment in perhaps {
+            lines.push(format!(
+                "  {:<23} {}",
+                payment.amount.to_string(),
+                payment.id
+            ));
+            lines.push(format!(
+                "    Its notes were gone at block {}.",
+                payment.since
+            ));
+        }
+        lines.push(String::new());
+        lines.extend(wrapped(cairn_wallet::PERHAPS_CARRIED));
+    }
+    if let Some(note) = cairn_wallet::not_carried_note(not_carried) {
         lines.push(String::new());
         lines.push("Not carried by any block, so nobody was paid by them:".to_owned());
         lines.push(String::new());
@@ -656,18 +702,20 @@ fn what_is_waiting(
                 payment.amount.to_string(),
                 payment.id
             ));
+            let notes = if payment.notes_here {
+                "Its notes are this key's."
+            } else {
+                "Its notes are no longer this key's."
+            };
             for line in wrapped(&format!(
-                "Stopped waiting on at block {}: {}.",
+                "Stopped waiting on at block {}: {}. {notes}",
                 payment.at, payment.why
             )) {
                 lines.push(format!("    {line}"));
             }
         }
         lines.push(String::new());
-        lines.extend(wrapped(
-            "Their money is back in the balance above. If one of them should still be paid, \
-             send it again.",
-        ));
+        lines.extend(wrapped(&note));
     }
     lines
 }
@@ -677,8 +725,8 @@ fn what_is_waiting(
 /// A branch that lost takes its blocks with it, and this key's account of what
 /// happened went with them. What that means depends on which way the money
 /// went, and the library says it for both faces.
-fn what_was_taken_back(undone: &[Movement]) -> Vec<String> {
-    let Some(note) = cairn_wallet::undone_note(undone) else {
+fn what_was_taken_back(undone: &[Movement], waiting: &[Waiting]) -> Vec<String> {
+    let Some(note) = cairn_wallet::undone_note(undone, waiting) else {
         return Vec::new();
     };
     let mut lines = vec![
@@ -747,6 +795,12 @@ fn spend(arguments: &[String]) -> Result<(), String> {
     };
 
     let (wallet, waited) = joined(&flags)?;
+    // Before anything is built: a record that did not read back at this start
+    // hides payments already waiting, and one that will not write stops the
+    // payment below. `balance` and the page said so, and this did not.
+    if let Some(unkept) = wallet.payments_unkept() {
+        say(&unkept);
+    }
     // Not built from a chain still on its way. A payment spending a note
     // that has since fallen, or one another copy of this key has since spent,
     // is refused by every peer that has followed the chain, while this
@@ -820,27 +874,48 @@ fn spend(arguments: &[String]) -> Result<(), String> {
     // Nobody was offered it, and this process is about to take the pool with
     // it: the payment is nowhere, and is said to be nowhere below. Left on the
     // record, the next start would hand it over as well as the one sent again.
-    wallet.forget_if_unoffered(&sent);
+    let forgot = wallet.forget_if_unoffered(&sent);
     wallet.shutdown();
 
     println!();
-    // A spend that reached nobody leaves by the failing door. It used to print
-    // its own refusal and then exit nought, so a script that ran this and read
-    // the code was told the payment had gone.
-    if !sent.handed_on {
-        return Err(format!(
-            "no peer took it. This wallet offered the transfer to every peer it had \
-             for five seconds and reached nobody, so it is not sent, nobody has been \
-             paid, and the money is still here. Check the network and the --seed \
-             addresses, then run this command again. The transfer that was drafted is \
-             {}, and nothing on the chain carries it.",
-            sent.id
-        ));
+    if let Some(refusal) = when_nobody_took_it(&sent, forgot) {
+        return Err(refusal);
     }
     for line in after_sending(&sent) {
         println!("{line}");
     }
     Ok(())
+}
+
+/// What `send` answers for a payment no peer took, given whether the record
+/// on the disk let go of it; `None` for one a peer took.
+///
+/// A spend that reached nobody leaves by the failing door. It used to print
+/// its own refusal and then exit nought, so a script that ran this and read
+/// the code was told the payment had gone. And one the record could not let
+/// go of is offered again by the next start, so running the command again, as
+/// this used to say whatever the write came to, pays twice.
+fn when_nobody_took_it(sent: &Sent, forgot: bool) -> Option<String> {
+    if sent.handed_on {
+        return None;
+    }
+    if !forgot {
+        return Some(format!(
+            "no peer took it. This wallet offered the transfer to every peer it had for five \
+             seconds and reached nobody, and it could not take the payment off its record of \
+             payments, so the next start offers it to its peers again. Do not send it again: \
+             check the network and the --seed addresses, then run `cairn-wallet balance`, \
+             which offers it. The transfer is {}.",
+            sent.id
+        ));
+    }
+    Some(format!(
+        "no peer took it. This wallet offered the transfer to every peer it had for five \
+         seconds and reached nobody, so it is not sent, nobody has been paid, and the money \
+         is still here. Check the network and the --seed addresses, then run this command \
+         again. The transfer that was drafted is {}, and nothing on the chain carries it.",
+        sent.id
+    ))
 }
 
 /// What `send` says before it pays: who, how much, what carrying it costs,
@@ -995,7 +1070,7 @@ fn open_page(arguments: &[String]) -> Result<(), String> {
     // Ctrl+C ends the process, as it does for the node and the explorer.
     // Nothing is lost by that: every block this wallet accepted was written
     // as it arrived, and every payment it handed over was written down beside
-    // them the moment the pool took it, and is handed back to the pool and
+    // them before the pool took it, and is handed back to the pool and
     // offered again the next time the wallet opens.
     serve::run(&wallet, &listener, &opened, &running);
     serve::Opened::let_the_link_go(&data);
@@ -1118,10 +1193,11 @@ fn how_the_wait_ended(waited: Waited, patience: u64) -> Vec<String> {
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::what_was_taken_back;
+    use super::when_nobody_took_it;
     use super::{about_to_pay, answered_yes, ask, how_the_wait_ended, must_ask};
     use super::{after_sending, beside_the_balance, what_happened, what_is_waiting};
     use super::{stop_before_paying, Waited};
-    use super::{what_was_not_read, wrapped, Flags, NotCarried, Sent, Waiting};
+    use super::{what_was_not_read, wrapped, Flags, NotCarried, PerhapsCarried, Sent, Waiting};
     use super::{Amount, Covered, Direction, Holdings, Movement, MOVEMENTS_SHOWN};
     use cairn_primitives::Hash32;
 
@@ -1411,9 +1487,9 @@ mod tests {
     /// whatever the list held, and no test read what it printed.
     #[test]
     fn what_the_chain_took_back_is_said_with_what_became_of_the_money() {
-        assert!(what_was_taken_back(&[]).is_empty(), "nothing to say");
+        assert!(what_was_taken_back(&[], &[]).is_empty(), "nothing to say");
         let orphaned = [moved(7, Direction::Mined)];
-        let said = what_was_taken_back(&orphaned).join("\n");
+        let said = what_was_taken_back(&orphaned, &[]).join("\n");
         assert!(said.contains("took these back"), "{said}");
         assert!(said.contains("block 7"), "the movement is listed: {said}");
         assert!(
@@ -1499,6 +1575,14 @@ mod tests {
             says(&lines, "could not read every block up to 40"),
             "{lines:?}"
         );
+        // The stranded figure beside it counts a note with a place whatever
+        // became of it in the gap, and the sentence said every note lost
+        // track of was left out of it.
+        let flat = lines.join(" ");
+        assert!(
+            flat.contains("still counted as stranded"),
+            "the gap is said to leave every note lost track of out of the count: {flat}"
+        );
     }
 
     fn sent(offered: usize) -> Sent {
@@ -1512,6 +1596,26 @@ mod tests {
             handed_on: offered > 0,
             offered,
         }
+    }
+
+    /// A payment no peer took is refused, and told not to be sent again when
+    /// the record could not let go of it; one a peer took is not refused.
+    ///
+    /// The command line said to run it again whatever the record's write came
+    /// to, and the next start then offered the payment beside the one sent
+    /// again. Nothing made that write fail.
+    #[test]
+    fn a_payment_nobody_took_is_said_by_whether_the_record_let_go_of_it() {
+        let nobody = sent(0);
+        let forgotten = when_nobody_took_it(&nobody, true).unwrap_or_default();
+        assert!(forgotten.contains("run this command again"), "{forgotten}");
+        let kept = when_nobody_took_it(&nobody, false).unwrap_or_default();
+        assert!(
+            kept.contains("Do not send it again") && !kept.contains("run this command again"),
+            "a payment the next start offers again is said to be safe to send again: {kept}"
+        );
+        assert_eq!(when_nobody_took_it(&sent(1), false), None);
+        assert_eq!(when_nobody_took_it(&sent(1), true), None);
     }
 
     /// What `send` says once a payment has left is what was measured, and
@@ -1559,14 +1663,19 @@ mod tests {
     #[test]
     fn what_is_waiting_and_what_was_not_carried_are_said() {
         assert!(
-            what_is_waiting(&[], &[], None).is_empty(),
+            what_is_waiting(&[], &[], &[], None).is_empty(),
             "nothing waiting is nothing to say"
         );
-        let lines = what_is_waiting(&[waiting(None, None)], &[], None);
+        let lines = what_is_waiting(&[waiting(None, None)], &[], &[], None);
         assert!(says(&lines, "Waiting for a block"), "{lines:?}");
         assert!(!says(&lines, "Not held by"), "{lines:?}");
 
-        let lines = what_is_waiting(&[waiting(Some("it pays too little"), Some(40))], &[], None);
+        let lines = what_is_waiting(
+            &[waiting(Some("it pays too little"), Some(40))],
+            &[],
+            &[],
+            None,
+        );
         assert!(
             says(
                 &lines,
@@ -1586,8 +1695,9 @@ mod tests {
             amount: pebbles(707),
             why: "it pays too little".to_owned(),
             at: 46,
+            notes_here: true,
         };
-        let lines = what_is_waiting(&[], &[gone], Some("Not kept.".to_owned()));
+        let lines = what_is_waiting(&[], &[], &[gone], Some("Not kept.".to_owned()));
         assert!(says(&lines, "Not carried by any block"), "{lines:?}");
         let flat = lines
             .join(" ")
@@ -1600,6 +1710,47 @@ mod tests {
         );
         assert!(says(&lines, "Not kept."), "{lines:?}");
         assert!(!says(&lines, "Waiting for a block"), "{lines:?}");
+    }
+
+    /// A payment whose notes another payment spent is not said to have its
+    /// money back, and one a block this wallet has not read may have carried
+    /// is listed apart, never under "nobody was paid" or "send it again".
+    ///
+    /// Both were printed under the same heading and the same closing line,
+    /// "Their money is back in the balance above. If one of them should still
+    /// be paid, send it again", which of a payment a block carried is a second
+    /// payment on the wallet's own advice. Only the words of a payment whose
+    /// notes came back were ever read.
+    #[test]
+    fn what_is_said_of_a_payment_is_what_became_of_its_notes() {
+        let spent = NotCarried {
+            id: Hash32::ZERO,
+            amount: pebbles(707),
+            why: "another payment from this key spent them".to_owned(),
+            at: 46,
+            notes_here: false,
+        };
+        let flat = what_is_waiting(&[], &[], &[spent], None).join(" ");
+        assert!(
+            !flat.contains("back in the balance") && !flat.contains("send it again"),
+            "a payment whose notes are gone is said to have its money back: {flat}"
+        );
+        assert!(flat.contains("no longer this key's"), "{flat}");
+
+        let perhaps = PerhapsCarried {
+            id: Hash32::ZERO,
+            amount: pebbles(707),
+            since: 12,
+        };
+        let lines = what_is_waiting(&[], &[perhaps], &[], None);
+        let flat = lines.join(" ");
+        assert!(says(&lines, "Perhaps carried"), "{lines:?}");
+        assert!(
+            !flat.contains("nobody was paid")
+                && !flat.contains("send it again")
+                && !says(&lines, "Waiting for a block"),
+            "a payment a block may have carried is said to have paid nobody: {lines:?}"
+        );
     }
 
     /// `send` says who is paid, how much, the fee and the total before it

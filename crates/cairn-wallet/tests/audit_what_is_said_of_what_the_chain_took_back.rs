@@ -26,6 +26,7 @@ use cairn_ledger::note::Note;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
+use cairn_primitives::Amount;
 use cairn_wallet::history::Direction;
 use cairn_wallet::serve;
 use cairn_wallet::Wallet;
@@ -43,20 +44,17 @@ struct Forge {
 
 impl Forge {
     fn mine(&mut self, to: &PublicKey) -> Block {
+        self.carrying(to, Vec::new())
+    }
+
+    fn carrying(&mut self, to: &PublicKey, transfers: Vec<Transfer>) -> Block {
         let params = params();
         let height = self.state.next_height().unwrap();
         self.clock += 600;
         let coinbase =
             CoinbaseTransaction::new(height, vec![Note::new(params.initial_reward, *to)]);
-        let block = assemble_block(
-            &self.state,
-            coinbase,
-            Vec::<Transfer>::new(),
-            &params,
-            self.clock,
-            0,
-        )
-        .unwrap();
+        let block =
+            assemble_block(&self.state, coinbase, transfers, &params, self.clock, 0).unwrap();
         let block = mine_block(block, 1 << 22).unwrap();
         connect_block(&mut self.state, &block, &params, NOW).unwrap();
         block
@@ -122,7 +120,8 @@ fn a_reward_the_chain_took_back_is_not_said_to_be_back_in_the_balance() {
     assert_eq!(undone.len(), 1);
     assert_eq!(undone[0].direction, Direction::Mined);
 
-    let said = cairn_wallet::undone_note(&undone).expect("something is said under the list");
+    let said = cairn_wallet::undone_note(&undone, &wallet.waiting())
+        .expect("something is said under the list");
     assert!(
         !said.contains("back in the balance"),
         "a reward the chain took away is said to be back in the balance: {said}"
@@ -166,5 +165,81 @@ fn a_reward_the_chain_took_back_is_not_said_to_be_back_in_the_balance() {
     assert!(
         state.contains(&format!("\"undoneNote\":\"{said}\"")),
         "the page is not handed what the wallet says under the list"
+    );
+}
+
+/// A payment out the chain took back and put back in the pool is not said to
+/// be back in the balance, while its notes are held for it.
+///
+/// The chain offers the transfers of the blocks it undoes back to the pool,
+/// and the wallet counts the notes a pooled payment spends as waiting, not as
+/// spendable. The sentence under the list said the money was back in the
+/// balance above, beside a balance that did not hold it, and the one test of
+/// a payment out taken back never asked whether the payment was waiting again.
+#[test]
+fn a_payment_waiting_again_is_not_said_to_be_back_in_the_balance() {
+    let directory = std::env::temp_dir().join(format!(
+        "cairn-waiting-again-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let key_file = directory.join("key");
+    let secret = SecretKey::from_bytes(&[27; 32]);
+    let mine = secret.public_key();
+    let alice = SecretKey::from_bytes(&[9; 32]).public_key();
+    let stranger = SecretKey::from_bytes(&[7; 32]).public_key();
+    cairn_wallet::keyfile::write(&key_file, &secret).unwrap();
+    let (wallet, _) = Wallet::open(&key_file, params(), &directory.join("data")).unwrap();
+
+    let mut common = Forge {
+        state: LedgerState::new(),
+        clock: 1_000,
+    };
+    for _ in 0..4 {
+        wallet.node().submit_block(common.mine(&mine)).unwrap();
+    }
+    let amount = Amount::from_cairn("10").unwrap();
+    let fee = wallet.floor_for(alice, amount);
+    let sent = wallet.send(alice, amount, fee).unwrap();
+    let transfer = wallet
+        .node()
+        .with_chain(|chain| chain.pooled(&sent.id).cloned())
+        .expect("in the pool");
+    let mut losing = Forge {
+        state: common.state.clone(),
+        clock: common.clock,
+    };
+    wallet
+        .node()
+        .submit_block(losing.carrying(&stranger, vec![transfer]))
+        .unwrap();
+    assert!(wallet
+        .history()
+        .iter()
+        .any(|movement| movement.direction == Direction::Sent));
+    for _ in 0..3 {
+        wallet.node().submit_block(common.mine(&stranger)).unwrap();
+    }
+    let holdings = wallet.holdings();
+    let waiting = wallet.waiting();
+    let undone = wallet.undone();
+    wallet.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert!(
+        undone.iter().any(|movement| movement.id == sent.id),
+        "fixture: the payment was taken back"
+    );
+    assert!(
+        waiting.iter().any(|one| one.id == sent.id) && holdings.waiting > Amount::ZERO,
+        "fixture: the payment is waiting for a block again, its notes held"
+    );
+    let said = cairn_wallet::undone_note(&undone, &waiting).unwrap();
+    assert!(
+        !said.contains("back in the balance"),
+        "a payment waiting for a block again, whose notes are held for it and out of the \
+         balance, is said to be back in the balance: {said}"
     );
 }

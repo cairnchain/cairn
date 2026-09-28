@@ -284,22 +284,25 @@ Everything that touches money lives in the library, and both of those are faces
 on top of it. That is what makes a native application on a phone a matter of
 writing a face rather than writing spending a second time.
 
-A wallet is two files, and a backup is both. The key file spends the money. It
-is plain text with no passphrase, so anyone who can read it, or any copy of it,
-holds the money. The other is `history.dat` in the wallet's `--data` directory:
-the wallet's own account of what the key was paid, and the only record of where
-each note that has fallen out of the set every node holds now sits. That set
-carries no owner, so a restore from the key alone finds what is still in the
-set every node holds and nothing of what has fallen out of it, and no peer can
-supply it. Copy the two together, and again after the wallet has run:
+A wallet is its key file and what its `--data` directory keeps beside the
+chain, and a backup is all of it. The key file spends the money. It is plain
+text with no passphrase, so anyone who can read it, or any copy of it, holds
+the money. `history.dat` in the data directory is the wallet's own account of
+what the key was paid, and the only record of where each note that has fallen
+out of the set every node holds now sits. That set carries no owner, so a
+restore from the key alone finds what is still in the set every node holds and
+nothing of what has fallen out of it, and no peer can supply it. Once the
+wallet has paid anybody, `pending.dat` beside it holds the payments no block has
+settled yet; a restore without it counts their notes as spendable and nothing
+hands them over again. Copy them together, and again after the wallet has run:
 
 ```
 ./target/release/cairn-wallet backup alice.key --data wallet --into /media/stick/cairn
 ```
 
-Both copies are readable only by their owner, and it never writes over a file.
-To restore, put the key file back, and put `history.dat` back in the data
-directory before the wallet starts.
+Every copy is readable only by its owner, and it never writes over a file. To
+restore, put the key file back, and put `history.dat` and `pending.dat` back in
+the data directory before the wallet starts.
 
 Watch the same network in a browser, with the explorer alongside the node:
 

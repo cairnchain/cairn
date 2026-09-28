@@ -134,3 +134,56 @@ fn a_wallet_whose_book_cannot_be_enough_goes_to_the_seed_at_once() {
     seed.shutdown();
     only.shutdown();
 }
+
+/// **A wallet that went to the seed does not find it in its own book at the
+/// next run.**
+///
+/// The seed's address was written into the book as an ordinary one, so the
+/// next run, told nothing and with a book that looked enough, dialled it from
+/// there within a second of starting, and said no seed was asked. Its operator
+/// saw every session after the first, which is what going to the book first
+/// was for sparing it. Nothing looked at what the book held of the seed.
+#[test]
+fn a_wallet_that_went_to_the_seed_does_not_find_it_in_its_book_after() {
+    let seed = Node::bind(params(), loopback()).unwrap();
+    let first = Node::bind(params(), loopback()).unwrap();
+    let second = Node::bind(params(), loopback()).unwrap();
+    let directory = scratch("seed-kept-out");
+    let key_file = directory.join("key");
+    cairn_wallet::keyfile::write(&key_file, &SecretKey::from_bytes(&[5; 32])).unwrap();
+    let data = directory.join("data");
+
+    // Nothing in the book, so the seed; and two peers met besides.
+    {
+        let (wallet, _) = Wallet::open(&key_file, params(), &data).unwrap();
+        let started = wallet.start_from_the_book(LONG, Vec::new(), || vec![seed.address()]);
+        assert_eq!(started, Some(1), "fixture: the first run reached the seed");
+        for peer in [&first, &second] {
+            assert!(wallet.reach(peer.address()), "fixture: a peer answered");
+        }
+        wallet.shutdown();
+    }
+
+    let (wallet, _) = Wallet::open(&key_file, params(), &data).unwrap();
+    let book = wallet.node().known_addresses();
+    let looked_up = Cell::new(false);
+    let started = wallet.start_from_the_book(LONG, Vec::new(), || {
+        looked_up.set(true);
+        Vec::new()
+    });
+    wallet.shutdown();
+    for node in [&seed, &first, &second] {
+        node.shutdown();
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert!(
+        started.is_none() && !looked_up.get(),
+        "fixture: the book was enough and no seed was asked"
+    );
+    assert!(
+        !book.contains(&seed.address()),
+        "the seed a wallet went to is written into its book, and its node dials it first at \
+         every run after"
+    );
+}

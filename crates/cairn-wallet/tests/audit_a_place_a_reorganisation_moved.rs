@@ -385,3 +385,68 @@ fn a_place_a_reorganisation_moved_is_corrected_after_a_restart_that_still_rememb
     drop(wallet);
     let _ = std::fs::remove_dir_all(&scene.directory);
 }
+
+/// A place the losing branch gave a note is let go of after a restart that no
+/// longer remembers the fall, rather than kept and asked about.
+///
+/// The wallet noted the place on the branch that lost, and read nothing more
+/// while its node followed the switch and went on well past the window a
+/// written ledger carries. The node then started again from that ledger and
+/// had forgotten where the note fell on either branch, so nothing corrected
+/// the account: it kept the losing branch's place and put somebody else's
+/// leaf to archivists for good. The two tests above each had somebody who
+/// still knew.
+#[test]
+fn a_place_on_a_branch_that_lost_is_let_go_of_when_nobody_remembers_the_right_one() {
+    let mut scene = Scene::new("forgotten");
+    let first = {
+        let wallet = scene.open();
+        let first = scene.reorganise(&wallet);
+        // On past the grace window, with the account never read.
+        let beyond = u64::try_from(GRACE_BLOCKS).unwrap() + 2;
+        for _ in 0..beyond {
+            wallet
+                .node()
+                .submit_block(scene.rival.mine(&scene.other))
+                .unwrap();
+        }
+        assert_eq!(
+            written_at(&scene.data, &scene.ours),
+            Some(first),
+            "fixture: the account was meant to stop before reading the winning branch"
+        );
+        assert!(wallet.node().write_ledger(), "the node wrote its ledger");
+        wallet.shutdown();
+        first
+    };
+
+    let wallet = scene.open();
+    wallet.follow_to_the_tip();
+    let forgotten = watched_at(&wallet, &scene.ours).is_none();
+    let asked_about = wallet
+        .holdings()
+        .unprovable
+        .iter()
+        .find(|one| one.id == scene.ours)
+        .and_then(|one| one.fell_at);
+    wallet.shutdown();
+    drop(wallet);
+    let written = written_at(&scene.data, &scene.ours);
+    let _ = std::fs::remove_dir_all(&scene.directory);
+
+    assert!(
+        forgotten,
+        "fixture: the restarted node was meant to have forgotten where the note fell"
+    );
+    assert_ne!(
+        written,
+        Some(first),
+        "the account kept the place a losing branch gave the note, with nobody left to \
+         correct it"
+    );
+    assert_ne!(
+        asked_about,
+        Some(first),
+        "and it is the place archivists would be asked about"
+    );
+}

@@ -12,7 +12,7 @@
 //! second is what seeds are for.
 
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
@@ -98,8 +98,12 @@ const MAX_QUIET: u64 = 600;
 /// rest is not: a restart forgets which addresses were quiet and finds out
 /// again in a few seconds, which is a better trade than a file format carrying
 /// counters that mean nothing to the person reading it. Being a seed is not
-/// written down either: it is told to the book at every start by whoever
-/// started the node.
+/// written down either: it is told to the book, by whoever started the node,
+/// in the run that dials it. A seed the operator names is told at every start.
+/// The seeds written into the program are dialled, and told, only when the
+/// book cannot supply a peer, which is how the wallet, cairnd and the
+/// explorer all start; and a wallet leaves the ones it went to out of the file
+/// altogether, see `AddressBook::keep_off_the_file`.
 ///
 /// `heard` is the exception because it is what the book's guard stands on:
 /// only an address never heard from gives way to a stranger's. It was not
@@ -216,6 +220,9 @@ pub struct AddressBook {
     /// Whether the file this book was read from did not read and could not be
     /// moved out of the way either, so writing the book would write over it.
     held_back: bool,
+    /// Addresses dialled this run and never written to the file: see
+    /// [`Self::keep_off_the_file`].
+    unwritten: BTreeSet<SocketAddr>,
 }
 
 /// Where one address sits in the order it is dialled and handed on.
@@ -258,6 +265,7 @@ impl Default for AddressBook {
             salt: fresh_salt(),
             set_aside: None,
             held_back: false,
+            unwritten: BTreeSet::new(),
         }
     }
 }
@@ -524,6 +532,17 @@ impl AddressBook {
         if let Ok(at) = self.order.binary_search(&seat) {
             self.order.remove(at);
         }
+    }
+
+    /// Leaves an address out of every file this book writes, while it stays
+    /// in the book for this run.
+    ///
+    /// For the seeds a wallet told nothing reaches because its own book could
+    /// not start it. Written down as ordinary addresses, they were the first
+    /// dialled at every run after the first, so the machine behind them saw
+    /// every session the wallet said it had spared it.
+    pub(crate) fn keep_off_the_file(&mut self, address: SocketAddr) {
+        self.unwritten.insert(canonical(address));
     }
 
     /// Records an address the operator gave, which is never dropped.
@@ -987,6 +1006,9 @@ impl AddressBook {
         std::fs::create_dir_all(directory)?;
         let mut contents = String::new();
         for (address, known) in &self.known {
+            if self.unwritten.contains(address) {
+                continue;
+            }
             contents.push_str(&address.to_string());
             if known.heard > 0 {
                 contents.push(' ');
@@ -2331,6 +2353,34 @@ mod tests {
             text.lines().count(),
             2,
             "one address per line, readable by a person"
+        );
+    }
+
+    /// An address kept off the file is in the book and not in what it writes.
+    ///
+    /// A wallet that went to the seed wrote the seed's address into its book,
+    /// and dialled it from there at every run after, which is the seed seeing
+    /// every session the wallet meant to spare it. Nothing asked what a book
+    /// wrote of a seed.
+    #[test]
+    fn an_address_kept_off_the_file_is_dialled_and_not_written_down() {
+        let directory = scratch("unwritten");
+        let mut book = AddressBook::new();
+        book.insert_seed(address(1, 9000));
+        book.keep_off_the_file(address(1, 9000));
+        book.insert(address(2, 9000));
+        book.save(&directory).unwrap();
+        let read_back = AddressBook::load(&directory);
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert!(book.contains(&address(1, 9000)), "it left the book");
+        assert!(
+            !read_back.contains(&address(1, 9000)),
+            "an address kept off the file was written to it"
+        );
+        assert!(
+            read_back.contains(&address(2, 9000)),
+            "and took another with it"
         );
     }
 

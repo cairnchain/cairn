@@ -146,3 +146,217 @@ fn a_payment_made_behind_an_unreadable_block_is_not_counted_as_stranded() {
         "and the line above the balance says the amount is right: {warning}"
     );
 }
+
+/// A payment a block carried is not named as carried by no block while the
+/// account cannot read that block, and once the block can be read it is
+/// neither named nor waited on.
+///
+/// A payment whose notes are no longer this key's was ended whatever the
+/// account had read, and both faces list every ended payment under "Not
+/// carried by any block, so nobody was paid by them" and close with "send it
+/// again". Behind a block the disk will not give back, the notes a carried
+/// payment spent are exactly such notes, and nothing asked what was said of a
+/// payment made just before the account stopped: a wallet that told its owner
+/// to pay again what a block had already paid passed.
+#[test]
+fn a_payment_carried_by_a_block_the_account_cannot_read_is_not_said_to_be_uncarried() {
+    let directory = std::env::temp_dir().join(format!(
+        "cairn-carried-unread-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let key_file = directory.join("key");
+    let secret = SecretKey::from_bytes(&[23; 32]);
+    let mine = secret.public_key();
+    let stranger = SecretKey::from_bytes(&[7; 32]).public_key();
+    cairn_wallet::keyfile::write(&key_file, &secret).unwrap();
+    let (wallet, _) = Wallet::open(&key_file, params(), &directory.join("data")).unwrap();
+
+    let mut forge = Forge {
+        state: LedgerState::new(),
+        clock: 1_000,
+    };
+    for _ in 0..4 {
+        wallet
+            .node()
+            .submit_block(forge.mine(&mine, Vec::new()))
+            .unwrap();
+    }
+    assert_eq!(wallet.follow_to_the_tip(), 4);
+
+    let recipient = SecretKey::from_bytes(&[9; 32]).public_key();
+    let amount = Amount::from_cairn("10").unwrap();
+    let fee = wallet.floor_for(recipient, amount);
+    let sent = wallet.send(recipient, amount, fee).unwrap();
+    let transfer = wallet
+        .node()
+        .with_chain(|chain| chain.pooled(&sent.id).cloned())
+        .expect("in the pool");
+    wallet
+        .node()
+        .submit_block(forge.mine(&stranger, vec![transfer]))
+        .unwrap();
+    // The carrying block's last byte, the count of its transfers, goes bad.
+    let log = directory.join("data").join("blocks.log");
+    let flip = || {
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&log)
+            .unwrap();
+        let end = file.seek(SeekFrom::End(-1)).unwrap();
+        let mut last = [0u8; 1];
+        file.read_exact(&mut last).unwrap();
+        file.seek(SeekFrom::Start(end)).unwrap();
+        file.write_all(&[last[0] ^ 0xFF]).unwrap();
+        file.sync_all().unwrap();
+    };
+    flip();
+    wallet.follow_to_the_tip();
+    let through = wallet.history_covers().through;
+    // A look, which is what ends a payment, and then what the look left.
+    let waiting = wallet.waiting();
+    let named = wallet.not_carried();
+    let perhaps = wallet.perhaps_carried();
+
+    // The disk mended: the same byte put back.
+    flip();
+    wallet.follow_to_the_tip();
+    let read_after = wallet.history_covers().through;
+    let waiting_after = wallet.waiting();
+    let named_after = wallet.not_carried();
+    let perhaps_after = wallet.perhaps_carried();
+    wallet.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert_eq!(
+        through,
+        Some(3),
+        "fixture: the account is stuck behind the block it cannot read"
+    );
+    assert!(
+        named.iter().all(|one| one.id != sent.id),
+        "a payment a block carried is named as carried by no block, under a heading that says \
+         nobody was paid and a line that says to send it again, while the account cannot read \
+         the block that carried it"
+    );
+    assert!(
+        waiting.iter().all(|one| one.id != sent.id),
+        "a payment a block carried is listed as waiting for a block"
+    );
+    assert!(
+        perhaps.iter().any(|one| one.id == sent.id),
+        "a payment this wallet cannot yet say a block carried is not said to be that"
+    );
+    assert_eq!(read_after, Some(4), "fixture: the mended block was read");
+    assert!(
+        named_after.iter().all(|one| one.id != sent.id)
+            && waiting_after.iter().all(|one| one.id != sent.id)
+            && perhaps_after.iter().all(|one| one.id != sent.id),
+        "once the block that carried it is read, the payment is still named"
+    );
+}
+
+/// A note another copy of this key paid away, in a block the account cannot
+/// read, is named apart from the balance and not counted as stranded, and once
+/// the account has read that block it is neither.
+///
+/// While the account is behind the chain, a note it names that the node no
+/// longer holds may have been paid away in a block it has not read, and is
+/// left out of every count. The one test of it paid through this wallet,
+/// whose own record of the payment held the note as waiting whichever way the
+/// account's position was judged, so reading the account as behind when it
+/// was not, or as not behind when it was, passed alike.
+#[test]
+fn a_note_paid_away_behind_an_unreadable_block_is_named_apart_until_that_block_is_read() {
+    use cairn_ledger::transaction::Input;
+
+    let directory = std::env::temp_dir().join(format!(
+        "cairn-paid-by-a-copy-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let key_file = directory.join("key");
+    let secret = SecretKey::from_bytes(&[24; 32]);
+    let mine = secret.public_key();
+    let stranger = SecretKey::from_bytes(&[7; 32]).public_key();
+    cairn_wallet::keyfile::write(&key_file, &secret).unwrap();
+    let (wallet, _) = Wallet::open(&key_file, params(), &directory.join("data")).unwrap();
+
+    let mut forge = Forge {
+        state: LedgerState::new(),
+        clock: 1_000,
+    };
+    let first = forge.mine(&mine, Vec::new());
+    let reward = first.coinbase.created_notes()[0];
+    wallet.node().submit_block(first).unwrap();
+    for _ in 0..3 {
+        wallet
+            .node()
+            .submit_block(forge.mine(&mine, Vec::new()))
+            .unwrap();
+    }
+    assert_eq!(wallet.follow_to_the_tip(), 4);
+
+    // Another copy of the key pays the first reward away, in a block whose
+    // record then goes bad.
+    let value = reward.1.value;
+    let mut elsewhere = cairn_ledger::transaction::Transfer::new(
+        vec![Input::hot(reward.0)],
+        vec![Note::new(
+            value
+                .checked_sub(Amount::from_cairn("0.01").unwrap())
+                .unwrap(),
+            stranger,
+        )],
+    );
+    elsewhere.sign_input(params().network, 0, &reward.1, &secret);
+    wallet
+        .node()
+        .submit_block(forge.mine(&stranger, vec![elsewhere]))
+        .unwrap();
+    let log = directory.join("data").join("blocks.log");
+    let flip = || {
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&log)
+            .unwrap();
+        let end = file.seek(SeekFrom::End(-1)).unwrap();
+        let mut last = [0u8; 1];
+        file.read_exact(&mut last).unwrap();
+        file.seek(SeekFrom::Start(end)).unwrap();
+        file.write_all(&[last[0] ^ 0xFF]).unwrap();
+        file.sync_all().unwrap();
+    };
+    flip();
+    let behind = wallet.holdings();
+    let through = wallet.history_covers().through;
+    flip();
+    let caught_up = wallet.holdings();
+    let read = wallet.history_covers().through;
+    wallet.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert_eq!(
+        through,
+        Some(3),
+        "fixture: the account is stuck behind the block it cannot read"
+    );
+    assert_eq!(
+        (behind.stranded, behind.unaccounted.len()),
+        (Amount::ZERO, 1),
+        "a note paid away in a block the account has not read is counted as stranded money, \
+         or not named apart"
+    );
+    assert_eq!(read, Some(4), "fixture: the mended block was read");
+    assert_eq!(
+        (caught_up.stranded, caught_up.unaccounted.len()),
+        (Amount::ZERO, 0),
+        "a note the account read being paid away is still named"
+    );
+}

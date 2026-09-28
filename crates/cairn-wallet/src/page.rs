@@ -41,6 +41,7 @@ pub(crate) const HTML: &str = r#"<!doctype html>
     <div class="amount"><span id="spendable">…</span><span class="unit">CAIRN</span></div>
     <p class="note-line" id="held-line">Reading the chain.</p>
     <div class="stranded" id="waiting" hidden></div>
+    <div class="stranded" id="perhaps" hidden></div>
     <div class="stranded" id="not-carried" hidden></div>
     <div class="stranded" id="ripening" hidden></div>
     <div class="stranded" id="stranded" hidden></div>
@@ -356,21 +357,41 @@ async function refresh() {
     }
   }
 
+  // A payment whose notes are gone while the wallet has not read every block
+  // since it was made. A block it has not read may have carried it, so it is
+  // neither waiting nor carried by no block, and the words are the wallet's.
+  const perhaps = $("perhaps");
+  perhaps.hidden = state.perhapsCarried.length === 0;
+  perhaps.replaceChildren();
+  if (state.perhapsCarried.length > 0) {
+    const head = document.createElement("div");
+    head.innerHTML = "<b>Perhaps carried by a block this wallet has not read.</b>";
+    perhaps.append(head);
+    for (const p of state.perhapsCarried) {
+      perhaps.append(line(p.amount + ", its notes gone at block " + p.since + "."));
+    }
+    perhaps.append(line(state.perhapsCarriedNote));
+  }
+
   // A payment the wallet stopped waiting on without a block carrying it. The
   // box above used to empty and the balance go back up, which is exactly
   // what a carried payment looks like, and nobody was told it was not coming.
+  // What became of its money depends on where its notes are, which the
+  // wallet says: this closed every list with the money back in the balance
+  // and "send it again".
   const notCarried = $("not-carried");
   notCarried.hidden = state.notCarried.length === 0;
   notCarried.replaceChildren();
   if (state.notCarried.length > 0) {
     const head = document.createElement("div");
     head.innerHTML = "<b>Not carried by any block</b>, so nobody was paid by " +
-      (state.notCarried.length === 1 ? "it" : "them") + ". The money is back in " +
-      "the balance above; if one should still be paid, send it again.";
+      (state.notCarried.length === 1 ? "it" : "them") + ".";
     notCarried.append(head);
     for (const p of state.notCarried) {
-      notCarried.append(line(p.amount + ", stopped waiting on at block " + p.at + ": " + p.why + "."));
+      notCarried.append(line(p.amount + ", stopped waiting on at block " + p.at + ": " + p.why + ". " +
+        (p.notesHere ? "Its notes are this key's." : "Its notes are no longer this key's.")));
     }
+    notCarried.append(line(state.notCarriedNote));
   }
 
   // Money that moved and then did not, because the chain the wallet had read
@@ -475,7 +496,9 @@ async function refresh() {
     said.push("Could not read every block up to " + state.history_missed_below +
       ": the node had let go of them. Anything that happened to this key in the " +
       "ones it missed is not listed. What can be spent is counted from the chain, " +
-      "not from this list; notes this wallet lost track of there are named apart.");
+      "not from this list. Notes this wallet lost track of there are named apart, " +
+      "except one it saw fall, which is still counted as stranded and may have been " +
+      "paid away there.");
   }
   if (state.movements_held > state.movements.length) {
     said.push("Showing the newest " + state.movements.length + " of " + state.movements_held + ".");

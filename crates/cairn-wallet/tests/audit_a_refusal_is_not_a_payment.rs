@@ -204,6 +204,14 @@ fn a_pool_with_no_room_is_not_a_payment_the_network_took() {
              report a payment the network never took"
         ),
     }
+    // Written down before the pool was asked, and taken off again when it
+    // would not take it: nobody has it, and nothing is waiting.
+    let waiting = wallet.waiting();
+    let holdings = wallet.holdings();
+    assert!(
+        waiting.is_empty() && holdings.waiting == Amount::ZERO,
+        "a payment the pool had no room for is still on the record, holding its notes"
+    );
 
     drop(wallet);
     let _ = std::fs::remove_dir_all(&directory);

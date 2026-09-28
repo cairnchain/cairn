@@ -22,7 +22,8 @@
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
+    clippy::arithmetic_side_effects,
+    clippy::too_many_lines
 )]
 
 use cairn_fuzz::{mutate, Campaign};
@@ -97,12 +98,17 @@ fn written_with(held: &[(u8, u32, u64)], fell: &[(u8, u64)], paid_at: &[(u8, u64
 
     // The notes the account has stopped answering for, empty, the height
     // below which its list may be short, absent, and the blocks it remembers
-    // and what they spent, none. This is the format a wallet writes today,
-    // and the round trip below is written on that: a file that ends before
-    // any of them is read and is what an older wallet left, but it is not
-    // what this one would write back.
+    // and what they spent, none; the work behind the newest block read,
+    // none known; and the notes taken up ahead of the account and the blocks
+    // notes fell in, none. This is the format a wallet writes today, and the
+    // round trip below is written on that: a file that ends before any of
+    // them is read and is what an older wallet left, but it is not what this
+    // one would write back.
     bytes.extend_from_slice(&0u32.encode());
     bytes.extend_from_slice(&u64::MAX.encode());
+    bytes.extend_from_slice(&0u32.encode());
+    bytes.extend_from_slice(&0u32.encode());
+    bytes.extend_from_slice(&0u128.encode());
     bytes.extend_from_slice(&0u32.encode());
     bytes.extend_from_slice(&0u32.encode());
     bytes
@@ -158,12 +164,14 @@ fn arbitrary_bytes_are_refused_or_read_and_settle() {
 
 /// The documented exception, stated, once for each time this file has grown.
 ///
-/// Six fields have been added to the end of it since wallets started writing
+/// Nine fields have been added to the end of it since wallets started writing
 /// one, each read as absent when the bytes end before it: the places fallen
 /// notes landed at, the heights those notes were paid at, the notes the
 /// account has stopped answering for, the height below which its list of
-/// movements may be short, the blocks it remembers, and the notes those
-/// blocks spent. Every one of those older shapes is still an account.
+/// movements may be short, the blocks it remembers, the notes those blocks
+/// spent, the work behind the newest of them, the notes taken up ahead of the
+/// account, and the blocks notes fell in. Every one of those older shapes is
+/// still an account.
 ///
 /// Counted from the end, which is where a field is added, so every offset here
 /// moves when one is. Adding the third and leaving the offsets alone left this
@@ -177,16 +185,33 @@ fn a_history_from_before_any_of_the_fields_reads_and_grows_by_one_empty_field_ea
     // a four byte count; a height is eight bytes.
     const LIST: usize = 4;
     const HEIGHT: usize = 8;
+    const WORK: usize = 16;
 
     let full = History::new().encode();
-    let before_the_spent = &full[..full.len() - LIST];
-    let before_the_remembered = &full[..full.len() - LIST * 2];
-    let before_the_gap = &full[..full.len() - LIST * 2 - HEIGHT];
-    let before_the_unanswered = &full[..full.len() - LIST * 3 - HEIGHT];
-    let before_the_heights = &full[..full.len() - LIST * 4 - HEIGHT];
-    let before_the_places = &full[..full.len() - LIST * 5 - HEIGHT];
+    let before_the_blocks_fallen_in = &full[..full.len() - LIST];
+    let before_the_ahead = &full[..full.len() - LIST * 2];
+    let before_the_work = &full[..full.len() - LIST * 2 - WORK];
+    let newer = LIST * 2 + WORK;
+    let before_the_spent = &full[..full.len() - newer - LIST];
+    let before_the_remembered = &full[..full.len() - newer - LIST * 2];
+    let before_the_gap = &full[..full.len() - newer - LIST * 2 - HEIGHT];
+    let before_the_unanswered = &full[..full.len() - newer - LIST * 3 - HEIGHT];
+    let before_the_heights = &full[..full.len() - newer - LIST * 4 - HEIGHT];
+    let before_the_places = &full[..full.len() - newer - LIST * 5 - HEIGHT];
 
     for (older, what) in [
+        (
+            before_the_blocks_fallen_in,
+            "before the blocks notes fell in were kept",
+        ),
+        (
+            before_the_ahead,
+            "before notes taken up ahead of the account were kept",
+        ),
+        (
+            before_the_work,
+            "before the work behind the newest block read was kept",
+        ),
         (
             before_the_spent,
             "before the notes a block spent were kept for undoing it",
@@ -264,6 +289,24 @@ fn a_history_from_before_any_of_the_fields_reads_and_grows_by_one_empty_field_ea
     assert!(
         History::decode(&with_more).is_err(),
         "a list of one spent note with no note behind it has to be refused"
+    );
+    let mut with_more = before_the_work.to_vec();
+    with_more.extend_from_slice(&[0u8; WORK - 1]);
+    assert!(
+        History::decode(&with_more).is_err(),
+        "an amount of work one byte short of one has to be refused"
+    );
+    let mut with_more = before_the_ahead.to_vec();
+    with_more.extend_from_slice(&1u32.encode());
+    assert!(
+        History::decode(&with_more).is_err(),
+        "a list of one note taken up ahead with no note behind it has to be refused"
+    );
+    let mut with_more = before_the_blocks_fallen_in.to_vec();
+    with_more.extend_from_slice(&1u32.encode());
+    assert!(
+        History::decode(&with_more).is_err(),
+        "a list of one block a note fell in with no block behind it has to be refused"
     );
 }
 
