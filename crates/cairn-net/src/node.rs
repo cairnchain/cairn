@@ -1383,7 +1383,8 @@ struct Peer {
     /// and counting it as one of this node's own is how a stranger decides who
     /// it talks to.
     dialled: bool,
-    /// Whether this peer has introduced itself.
+    /// Whether this peer has introduced itself, whoever opened the
+    /// connection: what [`Node::peers_introduced`] counts.
     ///
     /// Read by [`Shared::broadcast`], and it has to be. A peer goes into this
     /// table the moment its socket is accepted, and the welcome is only queued
@@ -4080,6 +4081,24 @@ impl Shared {
         }
     }
 
+    /// Takes out of the book an address this node dialled whose node
+    /// introduced itself without a port, or marks it as heard from when the
+    /// book keeps it anyway, as it keeps a seed.
+    ///
+    /// A node naming port nought has said it is not to be dialled, and the
+    /// specification says a peer MUST NOT write an address down for it. The
+    /// book learned that a dialled address answered only once its peer named
+    /// a port, so this one was never marked, never counted a miss and never
+    /// dropped: it stayed first among the addresses never heard from, where a
+    /// feeler looks, and every feeler after the first went back to it. The
+    /// connection itself is kept; only the address goes.
+    fn forget_what_names_no_port(&self, reached: &SocketAddr, now: u64) {
+        let mut book = self.book();
+        if !book.remove(reached) {
+            book.answered(reached, now);
+        }
+    }
+
     /// Hands `message` to every peer but `except`.
     ///
     /// Queued rather than written here, so one unresponsive peer cannot hold up
@@ -4890,11 +4909,18 @@ impl Node {
     /// reached the network and the trouble must be elsewhere, and a node handed
     /// a ledger counted the same stranger as somebody it had asked for the
     /// blocks it was waiting on.
+    ///
+    /// Whoever opened the connection. One this node dialled is spoken to from
+    /// the moment it is in the table (see [`Peer::worth_speaking_to`]), and it
+    /// was counted from that moment too, whether or not the far end ever said
+    /// a word: a wallet whose book held two addresses that took a connection
+    /// and then said nothing counted two peers from its book, never asked the
+    /// seed, and answered from the chain on its disk.
     pub fn peers_introduced(&self) -> usize {
         self.shared
             .peers()
             .values()
-            .filter(|peer| peer.worth_speaking_to())
+            .filter(|peer| peer.greeted)
             .count()
     }
 
@@ -9737,6 +9763,7 @@ fn read_loop(
         // Whether this message is the introduction, before it is consumed:
         // what a peer claims is said there and nowhere else.
         let introduction = matches!(message, Message::Hello(_) | Message::Welcome(_));
+        let greeted_before = peer.greeted;
 
         // The chain is held for the decision and for writing the log, and let
         // go before anything is sent, so a slow peer never stalls the chain.
@@ -9757,6 +9784,13 @@ fn read_loop(
             note_claim(shared, id, &peer);
         }
         shared.remember(&reaction.learned);
+        // A node this one dialled that names no port has said it is not to be
+        // dialled: see `forget_what_names_no_port`.
+        if introduction && peer.greeted && !greeted_before && peer.advertised.is_none() {
+            if let Some(reached) = dialled {
+                shared.forget_what_names_no_port(&reached, last_heard);
+            }
+        }
         if introduction && peer.greeted {
             shared.note_what_it_keeps(id, peer.advertised, peer.keeps);
             shared.note_what_it_claims(id, peer.height, peer.total_work);
@@ -13869,6 +13903,36 @@ mod peers_and_loops {
         assert!(
             !node.shared.has_room_for(Some(host)),
             "a dial to that machine took the share its visitor was let in for"
+        );
+    }
+
+    /// An address whose node named no port leaves the book, unless it is a
+    /// seed, which the book keeps and now marks as heard from.
+    ///
+    /// A seed is never dropped, so the one kept here was left unmarked and
+    /// stayed first among the addresses a feeler goes to, which is the defect
+    /// this is for. Nothing asked what becomes of a seed that names no port.
+    #[test]
+    fn a_seed_that_names_no_port_is_kept_and_marked_as_heard_from() {
+        let node = quiet();
+        let seed = SocketAddr::from(([198, 51, 100, 1], 9_944));
+        let learned = SocketAddr::from(([198, 51, 100, 2], 9_944));
+        {
+            let mut book = node.shared.book();
+            book.insert_seed(seed);
+            book.insert(learned);
+        }
+        node.shared.forget_what_names_no_port(&seed, 1_000);
+        node.shared.forget_what_names_no_port(&learned, 1_000);
+        let book = node.shared.book();
+        assert!(
+            book.contains(&seed) && book.heard_from(&seed) == 1_000,
+            "a seed whose node names no port was left in the book unmarked, first in line \
+             for every feeler"
+        );
+        assert!(
+            !book.contains(&learned),
+            "a learned address whose node names no port was kept in the book"
         );
     }
 

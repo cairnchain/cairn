@@ -783,6 +783,21 @@ mod saying {
         node.shutdown();
     }
 
+    /// Waits until the peer `node` dialled has introduced itself, which is
+    /// when it counts as a peer at all: a connection is counted from its
+    /// introduction, not from the dial.
+    fn introduced(node: &Node) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while node.peers_introduced() == 0 && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            node.peers_introduced(),
+            1,
+            "fixture: the peer never introduced itself"
+        );
+    }
+
     /// The next thing the miner says. Half a minute is many times what any
     /// of these takes, and short enough that a miner saying nothing fails the
     /// test rather than outlasting whatever is timing it.
@@ -897,6 +912,7 @@ mod saying {
         }
         let peer = Node::bind(params, "127.0.0.1:0".parse().unwrap()).unwrap();
         node.connect(peer.address()).unwrap();
+        introduced(&node);
 
         let running = AtomicBool::new(true);
         let (tell, told) = mpsc::channel();
@@ -944,6 +960,7 @@ mod saying {
             .unwrap();
         let peer = Node::bind(params, "127.0.0.1:0".parse().unwrap()).unwrap();
         node.connect(peer.address()).unwrap();
+        introduced(&node);
 
         let running = AtomicBool::new(true);
         let (tell, told) = mpsc::channel();
