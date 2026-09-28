@@ -24,6 +24,11 @@
 # carried as it stands.
 
 set -eu
+# No word here is a file pattern. The installed command line is split into
+# words unquoted, and `[::]:9945`, an explorer listening on every IPv6
+# interface, is a pattern the shell would match against the files where this
+# is run.
+set -f
 
 REPO="${REPO:-https://github.com/cairnchain/cairn}"
 SRC="/usr/local/src/cairn"
@@ -268,14 +273,17 @@ if [ -f "$UNIT" ]; then
 fi
 
 # What the loops above cannot carry faithfully: quoting, which would split a
-# word differently from systemd, a variable or specifier systemd would expand,
-# or a pattern the shell would.
+# word differently from systemd, or a variable or specifier systemd would
+# expand. A pattern is carried as it stands, since nothing here globs
+# (`set -f` above) and systemd does not either: `[::]:9945` was refused, and
+# an explorer on IPv6 could not be updated by this script at all.
 case "$INSTALLED" in
-    *\"* | *\'* | *\\* | *\$* | *%* | *\** | *\?* | *\[*)
+    *\"* | *\'* | *\\* | *\$* | *%*)
         echo "the installed unit's command line has something this script cannot" >&2
         echo "carry as it stands:" >&2
         echo "  $INSTALLED" >&2
-        echo "write it without quotes, variables or patterns, and run this again." >&2
+        echo "write it without quotes, backslashes, variables or % specifiers, and" >&2
+        echo "run this again." >&2
         exit 1
         ;;
 esac

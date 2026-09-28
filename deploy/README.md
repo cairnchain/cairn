@@ -147,12 +147,20 @@ file, so an update takes none of them with it: `NETWORK`, `PORT`, `SEED` and
 `MINE` come back as they were. It prints what it kept, so a setting that went
 missing on its way through `sudo` is visible before anything is built.
 
+The unit is not the only place a node reads settings from: `cairnd` also
+reads `cairn.conf` in its data directory, and the command line wins over it.
+The update writes `--network` and `--listen` on every line, so those two
+belong on the command line and not in the file; the seeds of both are used.
+Before it installs anything, the update prints what the new build reads from
+the line and the file together, which is what the node will do.
+
 Every other argument on the unit's command line is carried as it stands, so a
 `--keep all`, an `--archive`, a `--data` on another disk or a `--listen` on one
-address survives an update, and the unit is allowed to write wherever `--data`
-points. What is not carried is a directive added to the unit itself, because
-the unit is written fresh from the one in this directory: put such a directive
-in a drop-in with `systemctl edit cairnd`, which an update never touches.
+address (`[::]:9944` for every IPv6 one included) survives an update, and the
+unit is allowed to write wherever `--data` points. What is not carried is a
+directive added to the unit itself, because the unit is written fresh from
+the one in this directory: put such a directive in a drop-in with
+`systemctl edit cairnd`, which an update never touches.
 
 The command line is the exception, and belongs in the unit, where the update
 reads it and writes it back. A drop-in that sets `ExecStart` runs instead of
@@ -176,7 +184,9 @@ sudo env MINE= sh /usr/local/src/cairn/deploy/install.sh       # stop mining
 
 A node that was mining therefore keeps mining, which is what a test network
 lives on: a miner that quietly stopped is how one goes still without anybody
-noticing. Stopping it is `MINE=`, said out loud, and nothing else.
+noticing. Stopping it is `MINE=`, said out loud, and nothing else. It writes
+`--mine off` on the command line, which also stops a key named in
+`cairn.conf`, and later updates carry it until `MINE` names a key again.
 
 When the network changes, because it was named or because the new build no
 longer has the old one, the old network's chain is moved aside to
