@@ -15,17 +15,14 @@
 //! refuses. That is the oracle here, beside no panic and an open that fails
 //! only for a file it could not reach.
 //!
-//! It does not hold today in one shape, and the oracle allows exactly that
-//! shape and counts it, rather than leaving it out of sight. The repair at
-//! every open, `mend_levels`, builds a missing node from the two nodes
-//! beneath it, so a node torn in place under a level whose write never
-//! landed is folded into a new node above it, and from then on the forest
-//! agrees with itself and hands out proofs of a root nobody has, with every
-//! leaf intact. `mend_below` is written the other way, from the leaves, for
-//! this reason, and `cairn_net`'s `proof_off_disk` says why in as many words.
-//! The shape allowed is a case where a level above the leaves was left
-//! shorter; `rebuilt_and_vouched` counts what it lets through, and when the
-//! repair at open builds from the leaves too, the allowance goes.
+//! It did not hold in one shape, which this campaign found and allowed by
+//! name until it was mended. The repair at every open, `mend_levels`, built a
+//! missing node from the two nodes beneath it, so a node torn in place under
+//! a level whose write never landed was folded into a new node above it, and
+//! from then on the forest agreed with itself and handed out proofs of a
+//! root nobody has, with every leaf intact. It builds from the leaves now, as
+//! `mend_below` does and for the reason `cairn_net`'s `proof_off_disk` gives,
+//! and the allowance is gone.
 //!
 //! Two arms: a forest written by `append` and left alone, which has to prove
 //! every position against every length exactly as `cairn_accumulator::Archive`
@@ -72,13 +69,11 @@ fn level(directory: &Path, height: usize) -> PathBuf {
     directory.join(format!("{HEADER_TREE}.{height}"))
 }
 
-/// Damages one level file the way a torn write or a stray byte would, and
-/// says whether it left the file shorter than it was.
-fn bend(rng: &mut Rng, path: &Path) -> bool {
+/// Damages one level file the way a torn write or a stray byte would.
+fn bend(rng: &mut Rng, path: &Path) {
     let Ok(mut bytes) = std::fs::read(path) else {
-        return false;
+        return;
     };
-    let before = bytes.len();
     match rng.below(5) {
         // Cut short, at a node's edge or inside one.
         0 => bytes.truncate(rng.below(bytes.len() + 1)),
@@ -103,9 +98,7 @@ fn bend(rng: &mut Rng, path: &Path) -> bool {
         }
         _ => {}
     }
-    let shorter = bytes.len() < before;
     std::fs::write(path, bytes).unwrap();
-    shorter
 }
 
 /// The forest of the first `count` leaves, as written.
@@ -128,10 +121,6 @@ struct Tally {
     /// which the forest cannot know about. Counted, so the arm is seen to
     /// reach the case the oracle has to allow.
     torn_and_vouched: usize,
-    /// Proofs with every leaf intact that disagree with the forest as
-    /// written, after a level above the leaves was shortened. The defect
-    /// described at the top of this file; it should be nought.
-    rebuilt_and_vouched: usize,
 }
 
 /// With its leaves intact, a proof the forest on disk hands out verifies
@@ -164,12 +153,10 @@ fn a_forest_on_disk_proves_only_what_its_leaves_prove() {
         }
 
         let damaged = rng.bool();
-        let mut shortened_above = false;
         if damaged {
             for height in 0..4 {
                 if rng.chance(2) {
-                    let shorter = bend(rng, &level(&directory, height));
-                    shortened_above |= shorter && height > 0;
+                    bend(rng, &level(&directory, height));
                 }
             }
         }
@@ -247,15 +234,13 @@ fn a_forest_on_disk_proves_only_what_its_leaves_prove() {
                             .is_some_and(|(written, leaf)| written.verify(at, *leaf, &proof));
                         if !sound && torn {
                             tally.torn_and_vouched += 1;
-                        } else if !sound {
-                            tally.rebuilt_and_vouched += 1;
                         }
                         assert!(
-                            sound || torn || shortened_above,
-                            "case {case} of seed {seed:#x}: with every leaf as written and \
-                             no level above them shortened, the forest handed out a proof of \
-                             leaf {position} among {length} that the forest as written does \
-                             not make, so damage above the leaves was vouched for"
+                            sound || torn,
+                            "case {case} of seed {seed:#x}: with every leaf as written, the \
+                             forest handed out a proof of leaf {position} among {length} that \
+                             the forest as written does not make, so damage above the leaves \
+                             was vouched for"
                         );
                         if !damaged {
                             assert_eq!(
