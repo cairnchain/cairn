@@ -282,35 +282,52 @@ fn an_argument_that_is_not_text_is_a_misread_command_line() {
 /// could have written nothing at all. A list of peers that will not write is
 /// the state used here: a directory standing where the file goes, which
 /// disturbs nothing else about the node.
+///
+/// Read until the words arrive, rather than for a run of six seconds. The
+/// list is written by a round of upkeep, and a round that dials the seed
+/// below waits out its refusal first: microseconds on most machines and about
+/// two seconds on Windows, where one run ended before the line was written.
 #[test]
 fn a_list_of_peers_that_will_not_write_is_said_under_the_status_line() {
     let directory = scratch("book");
     std::fs::create_dir_all(directory.join("peers.txt")).unwrap();
-    let output = run_to_the_end(
-        Command::new(env!("CARGO_BIN_EXE_cairnd"))
-            .args([
-                "--data",
-                &directory.to_string_lossy(),
-                "--network",
-                "devnet",
-                "--listen",
-                "127.0.0.1:0",
-                "--seed",
-                "127.0.0.1:9",
-                "--status",
-                "1",
-                "--run-for",
-                "6",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped()),
-    );
-    let _ = std::fs::remove_dir_all(&directory);
+    // The run is a bound on a node that never says it, and is not waited out.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cairnd"))
+        .args([
+            "--data",
+            &directory.to_string_lossy(),
+            "--network",
+            "devnet",
+            "--listen",
+            "127.0.0.1:0",
+            "--seed",
+            "127.0.0.1:9",
+            "--status",
+            "1",
+            "--run-for",
+            "300",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("cairnd runs");
+
     // One run of words, since the paragraph is wrapped where it falls.
-    let said = String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let mut said = String::new();
+    let stdout = child.stdout.take().unwrap();
+    for line in std::io::BufReader::new(stdout).lines() {
+        let Ok(line) = line else {
+            break;
+        };
+        said.push(' ');
+        said.push_str(&line.split_whitespace().collect::<Vec<_>>().join(" "));
+        if said.contains("is not being written") {
+            break;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&directory);
     assert!(
         said.contains("is not being written"),
         "a list of peers the disk would not take was not said under the status line: {said}"
