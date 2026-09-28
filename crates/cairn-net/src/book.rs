@@ -2334,6 +2334,33 @@ mod tests {
         );
     }
 
+    /// An address never heard from is written as the address alone, and one
+    /// heard from with the moment it last answered.
+    ///
+    /// Nought is what the book keeps for never, not a moment: written out, it
+    /// tells a person reading the file that the address answered in 1970.
+    /// The file read back the same either way, so a save that wrote it passed.
+    #[test]
+    fn an_address_never_heard_from_is_written_without_a_time() {
+        let directory = scratch("bare");
+        let mut book = AddressBook::new();
+        let (never, heard) = (address(7, 9000), address(8, 9000));
+        book.insert(never);
+        book.insert(heard);
+        book.answered(&heard, 1_000);
+        book.save(&directory).unwrap();
+        let text = std::fs::read_to_string(directory.join(PEER_FILE)).unwrap();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            text.lines().any(|line| line == never.to_string()),
+            "an address never heard from was written with a time: {text}"
+        );
+        assert!(
+            text.lines().any(|line| line == format!("{heard} 1000")),
+            "an address heard from was written without the moment: {text}"
+        );
+    }
+
     #[test]
     fn a_missing_or_broken_file_reads_as_an_empty_book() {
         let directory =

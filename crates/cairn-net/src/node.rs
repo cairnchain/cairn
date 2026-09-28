@@ -3054,6 +3054,17 @@ impl Shared {
         self.has_room_for_visitor(host)
     }
 
+    /// Whether a visitor from `host` is taken: when the table has room for
+    /// it, or when letting one connection go makes that room.
+    ///
+    /// Asked again after one is let go, because one is not always enough: a
+    /// table whose slots held for this node's own dials are taken by
+    /// connections from outside is past its share by more than one.
+    fn room_for_a_visitor(&self, host: IpAddr) -> bool {
+        self.has_room_to_accept(Some(host))
+            || (self.make_room_for(host) && self.has_room_to_accept(Some(host)))
+    }
+
     /// Lets go of one connection somebody else opened, to make room for a
     /// visitor from `visitor`, and says whether it did.
     ///
@@ -7602,11 +7613,7 @@ fn accept_loop(shared: &Arc<Shared>, listener: &TcpListener) {
                 let host = from.ip().to_canonical();
                 // A full table makes room rather than shutting the door, when
                 // there is somebody it may let go of: see `to_let_go`.
-                let room = || {
-                    shared.has_room_to_accept(Some(host))
-                        || (shared.make_room_for(host) && shared.has_room_to_accept(Some(host)))
-                };
-                if shared.refuses(host, unix_now()) || !room() {
+                if shared.refuses(host, unix_now()) || !shared.room_for_a_visitor(host) {
                     let _ = stream.shutdown(Shutdown::Both);
                     continue;
                 }
@@ -13197,6 +13204,10 @@ mod peers_and_loops {
             "the fixture is full"
         );
         assert!(
+            !node.shared.has_room_for_visitor(Some(visitor)),
+            "a full table took a visitor with nobody leaving to make room"
+        );
+        assert!(
             node.shared.make_room_for(visitor),
             "a full table made no room"
         );
@@ -13279,6 +13290,287 @@ mod peers_and_loops {
             "a connection was let go of for a visitor its own share turns away"
         );
         assert!(!node.shared.peers().values().any(|peer| peer.leaving));
+    }
+
+    /// A visitor is not let in on a table still past its share once one
+    /// connection has been let go for it.
+    ///
+    /// A node four dials short of its target holds four slots for them; when
+    /// connections from outside have taken those too, letting one go leaves
+    /// the table past what it takes. The accept loop asked the table again
+    /// after letting one go, and nothing asked why, so a loop that took the
+    /// visitor on the strength of having let somebody go passed.
+    #[test]
+    fn letting_one_go_is_not_room_on_a_table_still_past_its_share() {
+        let node = quiet();
+        let (socket, _far) = a_socket();
+        let crowd = |at: usize| IpAddr::from([203, 0, u8::try_from(at).unwrap(), 1]);
+        {
+            let mut peers = node.shared.peers();
+            for at in 0..MAX_PEERS - 4 {
+                peers.insert(u64::try_from(at).unwrap(), from_outside(&socket, crowd(at)));
+            }
+            for at in 0..4 {
+                peers.insert(1_000 + at, stand_in(&socket, true));
+            }
+        }
+        let visitor = IpAddr::from([192, 0, 2, 1]);
+        assert!(
+            !node.shared.room_for_a_visitor(visitor),
+            "a visitor was let in on a table still past its share after one connection was let go"
+        );
+        assert!(
+            node.shared.peers().values().any(|peer| peer.leaving),
+            "the fixture never reached the question: nobody was let go"
+        );
+    }
+
+    /// Only a connection this node dialled, that has introduced itself and is
+    /// not a feeler, is written down as an anchor.
+    ///
+    /// Anchors are what the next start dials first, so a dial that never said
+    /// who it was, or a feeler about to be let go, put there is a stranger
+    /// this node vouches for. Nothing asked which connections become anchors,
+    /// so either passed.
+    #[test]
+    fn only_a_greeted_dial_that_is_no_feeler_becomes_an_anchor() {
+        let node = quiet();
+        let (socket, _far) = a_socket();
+        let (kept, silent, felt) = (a_vacant_address(), a_vacant_address(), a_vacant_address());
+        {
+            let mut peers = node.shared.peers();
+            peers.insert(
+                1,
+                Peer {
+                    dialled_to: Some(kept),
+                    greeted: true,
+                    ..stand_in(&socket, true)
+                },
+            );
+            peers.insert(
+                2,
+                Peer {
+                    dialled_to: Some(silent),
+                    ..stand_in(&socket, true)
+                },
+            );
+            peers.insert(
+                3,
+                Peer {
+                    dialled_to: Some(felt),
+                    greeted: true,
+                    feeler: true,
+                    ..stand_in(&socket, true)
+                },
+            );
+        }
+        {
+            let mut book = node.shared.book();
+            for address in [kept, silent, felt] {
+                book.insert(address);
+            }
+        }
+        node.shared.anchor(1_000);
+        let book = node.shared.book();
+        assert_eq!(
+            book.heard_from(&kept),
+            1_000,
+            "a dial that introduced itself was not written down as an anchor"
+        );
+        assert_eq!(
+            book.heard_from(&silent),
+            0,
+            "a dial that never introduced itself was written down as an anchor"
+        );
+        assert_eq!(
+            book.heard_from(&felt),
+            0,
+            "a feeler was written down as an anchor"
+        );
+    }
+
+    /// A node says where it put a list of peers that did not read, and says
+    /// nothing when there was none.
+    ///
+    /// The book set the file aside and the node's accessor was read by
+    /// nobody in the tests, so an accessor that answered nothing, or a path
+    /// to nowhere, passed.
+    #[test]
+    fn a_list_of_peers_that_did_not_read_is_said_to_be_set_aside() {
+        let root = std::env::temp_dir().join(format!(
+            "cairn-set-aside-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let garbled = root.join("garbled");
+        std::fs::create_dir_all(&garbled).unwrap();
+        std::fs::write(garbled.join("peers.txt"), "not an address\n").unwrap();
+        let (node, _) = Node::open(ConsensusParams::testnet(), local(), &garbled).unwrap();
+        let aside = node.addresses_set_aside();
+        node.shutdown();
+        let (fresh, _) =
+            Node::open(ConsensusParams::testnet(), local(), root.join("fresh")).unwrap();
+        let none = fresh.addresses_set_aside();
+        fresh.shutdown();
+        let kept_aside = aside.as_ref().is_some_and(|path| path.is_file());
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            kept_aside,
+            "the list of peers that did not read is not said to be set aside where it is"
+        );
+        assert_eq!(
+            none, None,
+            "a node with no list at all said it set one aside"
+        );
+    }
+
+    /// Connections somebody else opened do not stand for the dials a node
+    /// makes for itself.
+    ///
+    /// A node counting them would stop dialling once eight strangers held
+    /// connections to it, and see the network through whoever they were.
+    /// Nothing held a node full of connections from outside to dialling, so
+    /// a count of every connection passed.
+    #[test]
+    fn connections_others_opened_do_not_stand_for_the_dials_a_node_makes() {
+        let node = quiet();
+        let (socket, _far) = a_socket();
+        {
+            let mut peers = node.shared.peers();
+            for at in 0..TARGET_PEERS {
+                peers.insert(1_000 + u64::try_from(at).unwrap(), stand_in(&socket, false));
+            }
+        }
+        let door = a_door();
+        node.shared.book().insert(door.local_addr().unwrap());
+        node.shared.running.store(true, Ordering::SeqCst);
+        dial_from_book(&node.shared, 1_000);
+        // Its own dials and not a feeler: a node that thinks it holds every
+        // dial it wants sends a feeler instead, to the same address.
+        let reached = node
+            .shared
+            .peers()
+            .values()
+            .filter(|peer| peer.dialled_to.is_some() && !peer.feeler)
+            .count();
+        stop_all(&node);
+        assert_eq!(
+            reached, 1,
+            "a node whose every connection somebody else opened dialled nobody for itself"
+        );
+    }
+
+    /// A dialling round lets go of a feeler that has answered, and of no other
+    /// connection.
+    ///
+    /// A feeler is dialled to find out whether an address answers and let go
+    /// once it has. Nothing held a peer that introduced itself and was no
+    /// feeler through a round, so a round that let go of every peer that had
+    /// introduced itself passed.
+    #[test]
+    fn a_round_lets_go_of_an_answered_feeler_and_of_nobody_else() {
+        let node = quiet();
+        let (kept_near, mut kept_far) = a_socket();
+        let (felt_near, mut felt_far) = a_socket();
+        {
+            let mut peers = node.shared.peers();
+            peers.insert(
+                1,
+                Peer {
+                    greeted: true,
+                    ..stand_in(&kept_near, true)
+                },
+            );
+            peers.insert(
+                2,
+                Peer {
+                    greeted: true,
+                    feeler: true,
+                    ..stand_in(&felt_near, true)
+                },
+            );
+        }
+        node.shared.running.store(true, Ordering::SeqCst);
+        dial_from_book(&node.shared, 1_000);
+        // Shut is what the far end reads as the end of the stream; a
+        // connection left alone reads nothing until the wait runs out.
+        let shut = |far: &mut TcpStream| {
+            far.set_read_timeout(Some(Duration::from_millis(300)))
+                .unwrap();
+            matches!(io::Read::read(far, &mut [0u8; 1]), Ok(0))
+        };
+        let felt_shut = shut(&mut felt_far);
+        let kept_shut = shut(&mut kept_far);
+        stop_all(&node);
+        assert!(felt_shut, "a feeler that had answered was kept");
+        assert!(
+            !kept_shut,
+            "a round let go of a peer that had introduced itself and was no feeler"
+        );
+    }
+
+    /// A node that has never sent a feeler sends one at its first round,
+    /// whatever its clock reads.
+    ///
+    /// Nought is when the last one was sent for a node that never sent one,
+    /// and read as a time it put the first one off a whole period on a clock
+    /// that read less than the period. Nothing ran a feeler on such a clock.
+    #[test]
+    fn a_node_that_never_felt_feels_at_its_first_round() {
+        let node = quiet();
+        let door = a_door();
+        node.shared.book().insert(door.local_addr().unwrap());
+        node.shared.running.store(true, Ordering::SeqCst);
+        feel(&node.shared, &HashSet::new(), 1);
+        let reached = dialled(&node);
+        stop_all(&node);
+        assert_eq!(
+            reached, 1,
+            "a node that had never sent a feeler waited a period before its first"
+        );
+    }
+
+    /// A feeler goes to nobody this node already holds a connection to, and
+    /// to nobody when the table has no room.
+    ///
+    /// Nothing put a connected address or a full table in front of a feeler,
+    /// so one that dialled a peer twice, or dialled past the ceiling, passed.
+    #[test]
+    fn a_feeler_goes_to_nobody_held_and_nowhere_without_room() {
+        let node = quiet();
+        let door = a_door();
+        let address = door.local_addr().unwrap();
+        node.shared.book().insert(address);
+        node.shared.running.store(true, Ordering::SeqCst);
+        feel(&node.shared, &HashSet::from([address]), 1_000);
+        let to_the_held = dialled(&node);
+        stop_all(&node);
+        assert_eq!(
+            to_the_held, 0,
+            "a feeler went to an address this node already holds a connection to"
+        );
+
+        let node = quiet();
+        let (socket, _far) = a_socket();
+        {
+            let mut peers = node.shared.peers();
+            for at in 0..MAX_PEERS {
+                peers.insert(1_000 + u64::try_from(at).unwrap(), stand_in(&socket, true));
+            }
+        }
+        let door = a_door();
+        node.shared.book().insert(door.local_addr().unwrap());
+        node.shared.running.store(true, Ordering::SeqCst);
+        feel(&node.shared, &HashSet::new(), 1_000);
+        let past_the_ceiling = node
+            .shared
+            .peers()
+            .values()
+            .filter(|peer| peer.dialled_to.is_some())
+            .count();
+        stop_all(&node);
+        assert_eq!(past_the_ceiling, 0, "a feeler dialled out of a full table");
     }
 }
 
