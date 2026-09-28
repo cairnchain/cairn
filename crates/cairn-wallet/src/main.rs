@@ -42,14 +42,16 @@ cairn-wallet, a Cairn wallet that is itself a node
       open the wallet as a page on this machine, and print its address
 
   cairn-wallet backup <key file> --into <directory> [--data <directory>]
-      copy the key file and this wallet's account, history.dat, into a
-      directory of their own. A restore needs both: see below
+      copy the key file, this wallet's account, history.dat, and its record
+      of payments waiting, pending.dat, into a directory of their own. A
+      restore needs them all: see below
 
 Network options
 
-  --data <directory>   where this wallet keeps its copy of the chain, and
+  --data <directory>   where this wallet keeps its copy of the chain,
                        history.dat, its own account of what this key was
-                       paid, which is half of its backup (default:
+                       paid, and pending.dat, its record of payments
+                       waiting, which its backup carries (default:
                        cairn-wallet-data, and it must not be the same
                        directory a node is using)
   --seed <address>     a peer to start from; repeat for more. Without one,
@@ -100,15 +102,20 @@ What the network learns
 
 Backing up
 
-  A wallet is two files. The key file spends the money, and it is plain
-  text with no passphrase: anyone who can read it, or a copy of it, holds
-  the money. history.dat, in the --data directory, is this wallet's own
-  account of what the key was paid, and the only record of where money
-  that has fallen out of the set every node holds now sits. A restore from
-  the key alone does not find that money, and nothing on the network can.
-  `backup` copies the two together and never writes over a file. Take it
-  again after the wallet has run, and restore by putting the key file back
-  and history.dat back in the --data directory before the wallet starts.";
+  A wallet is its key file and what its --data directory keeps beside the
+  chain. The key file spends the money, and it is plain text with no
+  passphrase: anyone who can read it, or a copy of it, holds the money.
+  history.dat, in the --data directory, is this wallet's own account of
+  what the key was paid, and the only record of where money that has
+  fallen out of the set every node holds now sits. A restore from the key
+  alone does not find that money, and nothing on the network can.
+  pending.dat, beside it once this wallet has paid anybody, is its record
+  of the payments no block has settled yet: without it a restore counts
+  their notes as spendable and nothing hands them over again. `backup`
+  copies them together and never writes over a file. Take it again after
+  the wallet has run, and restore by putting the key file back, and
+  history.dat and pending.dat back in the --data directory, before the
+  wallet starts.";
 
 fn main() {
     // Read as it comes rather than through `std::env::args`, which panics on
@@ -315,9 +322,10 @@ fn make_key(arguments: &[String]) -> Result<(), String> {
         "It is not all of this wallet. The first time the wallet runs it starts \
          history.dat in its data directory, its own account of what this key is paid, \
          and money that has fallen out of the set every node holds can only be found \
-         again with that file. So a backup is both, taken again after the wallet has \
-         run. This copies the two together, given the same --data as the wallet if it \
-         runs with one:",
+         again with that file; once it has paid anybody, pending.dat beside it holds the \
+         payments no block has settled yet. So a backup is the key and those files, \
+         taken again after the wallet has run. This copies them together, given the \
+         same --data as the wallet if it runs with one:",
     );
     println!();
     println!(
@@ -341,12 +349,25 @@ fn back_up(arguments: &[String]) -> Result<(), String> {
 
     println!("key       {}", copies.key.display());
     println!("account   {}", copies.account.display());
+    if let Some(payments) = &copies.payments {
+        println!("payments  {}", payments.display());
+    }
+    // Named rather than copied: this wallet could not read it, and what it
+    // holds is the only record of where some of this key's money fell.
+    for aside in &copies.left_out {
+        say(&format!(
+            "Not copied: {}, an account this wallet set aside at an earlier start because it did \
+             not read back. It may be the only record of where some of this key's money fell \
+             out of the set every node holds, so copy it by hand, beside this backup, to keep it.",
+            aside.display()
+        ));
+    }
     say(
-        "Those two files are this wallet. To restore it, put the key file back, and put \
-         history.dat back in the wallet's --data directory before the wallet starts. The \
-         account changes as the wallet reads the chain, and a note that falls out of the \
-         set every node holds later is recorded only in a newer copy, so back up again \
-         after the wallet has run.",
+        "Those files are this wallet. To restore it, put the key file back, and put \
+         history.dat, and pending.dat when there is one, back in the wallet's --data \
+         directory before the wallet starts. They change as the wallet reads the chain and \
+         pays: a note that falls out of the set every node holds later, or a payment made \
+         later, is recorded only in a newer copy, so back up again after the wallet has run.",
     );
     say(
         "The key file is plain text with no passphrase. Anyone who can read either copy of \
@@ -392,8 +413,10 @@ fn what_was_not_read(covered: &Covered, listed: usize) -> Vec<String> {
             "This wallet could not read every block up to {missed}, because the node had let \
              go of them by the time it looked. Anything that happened to this key in the ones \
              it missed is not in the list above. What can be spent is counted from the chain \
-             rather than from the list, so it is right whatever the list is missing; notes \
-             this wallet lost track of in those blocks are named apart rather than counted."
+             rather than from the list, so it is right whatever the list is missing. Notes \
+             this wallet lost track of in those blocks are named apart rather than counted, \
+             except one it saw fall: that one is still counted as stranded, and may have been \
+             paid away in those blocks."
         )));
     }
     lines
@@ -1551,6 +1574,14 @@ mod tests {
         assert!(
             says(&lines, "could not read every block up to 40"),
             "{lines:?}"
+        );
+        // The stranded figure beside it counts a note with a place whatever
+        // became of it in the gap, and the sentence said every note lost
+        // track of was left out of it.
+        let flat = lines.join(" ");
+        assert!(
+            flat.contains("still counted as stranded"),
+            "the gap is said to leave every note lost track of out of the count: {flat}"
         );
     }
 

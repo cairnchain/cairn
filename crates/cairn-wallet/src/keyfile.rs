@@ -228,26 +228,38 @@ pub fn write(path: &Path, secret: &SecretKey) -> Result<(), String> {
     Ok(())
 }
 
-/// Where a backup put the two files a wallet is made of.
+/// Where a backup put the files a wallet is made of.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackedUp {
     /// The copy of the key file.
     pub key: PathBuf,
     /// The copy of the account.
     pub account: PathBuf,
+    /// The copy of the record of payments handed over and not yet settled,
+    /// when there was one to copy.
+    pub payments: Option<PathBuf>,
+    /// Accounts set aside beside the account at an earlier start, because
+    /// they did not read back, which are not copied and are named instead.
+    pub left_out: Vec<PathBuf>,
 }
 
-/// Copies a key file and the account beside it into one directory, together.
+/// Copies a key file, and the account and record of payments beside it, into
+/// one directory, together.
 ///
-/// A wallet is two files and they live apart: the key wherever its owner put
-/// it, the account in the data directory. The key spends the money. The
-/// account is the only record of where a note that has fallen out of the set
-/// every node holds now sits, and without it that money cannot be found by
-/// this wallet, by an archivist or by anybody, because the set is a list of
-/// hashes with no owner attached. A restore from the key alone finds only
-/// what is still in the set every node holds, so a backup is both files or
-/// it is not a backup, and a key with no account beside it is refused rather
-/// than copied on its own.
+/// A wallet is its key and the files its data directory keeps beside the
+/// chain, and they live apart: the key wherever its owner put it, the rest in
+/// the data directory. The key spends the money. The account is the only
+/// record of where a note that has fallen out of the set every node holds now
+/// sits, and without it that money cannot be found by this wallet, by an
+/// archivist or by anybody, because the set is a list of hashes with no owner
+/// attached. A restore from the key alone finds only what is still in the set
+/// every node holds, so a backup is both or it is not a backup, and a key
+/// with no account beside it is refused rather than copied on its own. And
+/// once this wallet has paid anybody there is the record of the payments it
+/// handed over that the chain has not settled: a restore without it counts
+/// the notes a payment in flight spends as spendable and hands the payment
+/// over to nobody again, so it is copied too when it is there. A backup
+/// copied two files and was said to be the whole wallet.
 ///
 /// Neither copy is ever written over, and both names are checked before
 /// either is written, so a refusal leaves nothing behind: in particular no
@@ -273,14 +285,27 @@ pub fn back_up(key: &Path, data: &Path, into: &Path) -> Result<BackedUp, String>
         }
         Err(error) => return Err(format!("could not read {}: {error}", account.display())),
     };
+    let payments = data.join(crate::pending::PENDING_FILE);
+    let waiting = match std::fs::read(&payments) {
+        Ok(waiting) => Some(waiting),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("could not read {}: {error}", payments.display())),
+    };
     let named = key
         .file_name()
         .ok_or_else(|| format!("{} does not name a file", key.display()))?;
     let copies = BackedUp {
         key: into.join(named),
         account: into.join(crate::HISTORY_FILE),
+        payments: waiting
+            .as_ref()
+            .map(|_| into.join(crate::pending::PENDING_FILE)),
+        left_out: crate::set_aside_beside(&account, None),
     };
-    for copy in [&copies.key, &copies.account] {
+    for copy in [&copies.key, &copies.account]
+        .into_iter()
+        .chain(copies.payments.as_ref())
+    {
         if std::fs::symlink_metadata(copy).is_ok() {
             return Err(format!(
                 "{} is already there, and a backup never writes over a file: the copy it \
@@ -289,6 +314,18 @@ pub fn back_up(key: &Path, data: &Path, into: &Path) -> Result<BackedUp, String>
                 copy.display()
             ));
         }
+    }
+    // Read back as the wallet reads it. A file that does not is one the
+    // wallet sets aside at its next start, and it was copied and called the
+    // account a restore needs.
+    if !crate::history::History::reads_back(&held) {
+        return Err(format!(
+            "{} does not read back as this wallet's account, so nothing was copied: a restore \
+             from it would start an empty account. Run the wallet with this --data (`cairn-wallet \
+             balance` does): it moves that file aside under a name of its own, where it stays, \
+             and starts one it can read. Then back up, and keep the file it moved aside as well.",
+            account.display()
+        ));
     }
     make_private_directory(into)
         .map_err(|error| format!("could not create {}: {error}", into.display()))?;
@@ -301,6 +338,16 @@ pub fn back_up(key: &Path, data: &Path, into: &Path) -> Result<BackedUp, String>
             "could not write {}: {error}. Nothing was left behind.",
             copies.account.display()
         ));
+    }
+    if let (Some(copy), Some(waiting)) = (&copies.payments, &waiting) {
+        if let Err(error) = write_private(copy, waiting) {
+            let _ = std::fs::remove_file(&copies.key);
+            let _ = std::fs::remove_file(&copies.account);
+            return Err(format!(
+                "could not write {}: {error}. Nothing was left behind.",
+                copy.display()
+            ));
+        }
     }
     Ok(copies)
 }

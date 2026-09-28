@@ -1288,7 +1288,7 @@ fn current(
 
 /// What the history is written to, inside the wallet's own directory.
 ///
-/// Half of a wallet's backup: [`keyfile::back_up`] copies it with the key.
+/// Part of a wallet's backup: [`keyfile::back_up`] copies it with the key.
 const HISTORY_FILE: &str = "history.dat";
 
 /// How long a wallet waits for somebody to rebuild the paths it is missing.

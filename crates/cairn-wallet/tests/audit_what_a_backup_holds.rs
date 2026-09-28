@@ -1,9 +1,9 @@
 //! What a person is told to keep, and what the wallet keeps for them.
 //!
-//! A wallet is two files. The key spends the money. The account beside the
-//! chain, `history.dat` in the data directory, is the only record of where a
-//! note that has fallen out of the set every node holds now sits, and a
-//! restore that carries the key without it finds none of that money:
+//! A wallet is its key and the files beside its chain. The key spends the
+//! money. The account, `history.dat` in the data directory, is the only record
+//! of where a note that has fallen out of the set every node holds now sits,
+//! and a restore that carries the key without it finds none of that money:
 //! `audit_what_a_key_alone_reaches.rs` holds the mechanism.
 //!
 //! The wallet said the opposite. `new` printed "That file is the only copy",
@@ -310,4 +310,126 @@ fn a_key_without_its_account_is_not_called_a_backup() {
         "the key was copied on its own all the same"
     );
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A backup copies the record of payments waiting beside the account when
+/// there is one, and nothing the wallet says calls it a wallet of two files.
+///
+/// The record of the payments a wallet handed over and the chain has not
+/// settled is a third file beside the account. A restore without it counts
+/// the notes a payment in flight spends as spendable, lists nothing waiting,
+/// and hands the payment over to nobody again. The backup copied two files,
+/// and the help and the backup's own words said two were the wallet.
+#[test]
+fn backing_up_copies_the_payments_waiting_as_well() {
+    let home = scratch("payments");
+    let (key, data) = a_wallet_with_an_account(&home);
+    std::fs::write(data.join("pending.dat"), b"payments in flight").unwrap();
+    let into = home.join("wallet-backup");
+
+    let done = wallet(&[
+        "backup",
+        text(&key),
+        "--data",
+        text(&data),
+        "--into",
+        text(&into),
+    ]);
+    let told = said(&done).split_whitespace().collect::<Vec<_>>().join(" ");
+    let help = said(&wallet(&["help"]))
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let copied = std::fs::read(into.join("pending.dat")).ok();
+    // A record that is there and cannot be read is not taken for none.
+    std::fs::remove_file(data.join("pending.dat")).unwrap();
+    std::fs::create_dir(data.join("pending.dat")).unwrap();
+    let unreadable = wallet(&[
+        "backup",
+        text(&key),
+        "--data",
+        text(&data),
+        "--into",
+        text(&home.join("again")),
+    ]);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(done.status.success(), "the backup was refused");
+    assert!(
+        !unreadable.status.success(),
+        "a record of payments that could not be read was taken for no record, and the backup \
+         left it out"
+    );
+    assert_eq!(
+        copied.as_deref(),
+        Some(b"payments in flight".as_slice()),
+        "the backup left out the record of the payments waiting"
+    );
+    assert!(
+        told.contains("pending.dat"),
+        "the backup does not name the record of payments it copied"
+    );
+    for words in [&told, &help] {
+        assert!(
+            !words.contains("two files"),
+            "the wallet still says it is two files: {words}"
+        );
+    }
+    assert!(
+        help.contains("pending.dat"),
+        "the help does not name the record of payments waiting"
+    );
+}
+
+/// A backup refuses an account that does not read back, and names an account
+/// set aside beside the one it copies.
+///
+/// It copied the account's bytes as they were, so a file the wallet itself
+/// would set aside at its next start was copied and called the account a
+/// restore needs; and a file set aside at an earlier start, which may be the
+/// only record of where some of the money fell, was neither copied nor named.
+/// Every backup here was of an account that read back, with nothing beside it.
+#[test]
+fn a_backup_takes_only_an_account_that_reads_back_and_names_one_set_aside() {
+    let home = scratch("unread");
+    let (key, data) = a_wallet_with_an_account(&home);
+    let good = std::fs::read(data.join("history.dat")).unwrap();
+    std::fs::write(data.join("history.dat"), b"an account a disk changed").unwrap();
+    let into = home.join("refused");
+    let refused = wallet(&[
+        "backup",
+        text(&key),
+        "--data",
+        text(&data),
+        "--into",
+        text(&into),
+    ]);
+    let left_behind = into.exists();
+
+    std::fs::write(data.join("history.dat"), &good).unwrap();
+    std::fs::write(data.join("history.dat.unread-1"), b"set aside before").unwrap();
+    let into = home.join("taken");
+    let taken = wallet(&[
+        "backup",
+        text(&key),
+        "--data",
+        text(&data),
+        "--into",
+        text(&into),
+    ]);
+    let told = said(&taken)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(
+        !refused.status.success() && !left_behind,
+        "an account that does not read back was copied as the account a restore needs"
+    );
+    assert!(taken.status.success(), "the backup was refused");
+    assert!(
+        told.contains("history.dat.unread-1"),
+        "an account set aside beside the one copied is not named"
+    );
 }

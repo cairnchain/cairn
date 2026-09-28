@@ -11,8 +11,8 @@
 //! out of the set every node holds is spent with its place in the cold set,
 //! that set carries no owner, and the place is written down here and nowhere
 //! else. Reading the chain again rebuilds this account only as far back as the
-//! blocks the node still holds, so this file is half of a wallet's backup, and
-//! the key file is the other half.
+//! blocks the node still holds, so this file belongs in a wallet's backup with
+//! the key file, and with the record of payments waiting beside it.
 //!
 //! What it can say is bounded by what the wallet kept. A wallet that dropped
 //! old blocks, or that was handed a ledger rather than reading its way to one,
@@ -1227,6 +1227,11 @@ impl History {
             return false;
         };
         hash(Domain::WalletHistory, body).as_bytes() == stamp
+    }
+
+    /// Whether `bytes` are an account this build reads back, stamp and all.
+    pub(crate) fn reads_back(bytes: &[u8]) -> bool {
+        Self::verified(bytes).is_some()
     }
 
     fn verified(bytes: &[u8]) -> Option<Self> {
