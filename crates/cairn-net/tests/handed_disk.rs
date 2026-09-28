@@ -400,6 +400,7 @@ fn a_node_that_read_the_chain_shows_it_and_keeps_to_its_budget() {
 fn a_disk_exactly_at_its_budget_is_not_over_it() {
     let at = Filling {
         from: 32,
+        collected: 0,
         through: 160,
         proved: 0,
         reaches: 160,

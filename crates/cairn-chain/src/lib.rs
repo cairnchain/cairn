@@ -398,7 +398,7 @@ pub enum ChainError {
     )]
     ForkTooDeep { depth: usize, limit: u64 },
     #[error(
-        "a block at height {height} is below {floor}, the oldest this node could \
+        "a block at height {height} is not above {floor}, the oldest this node could \
          still reorganise onto"
     )]
     TooOld { height: u64, floor: u64 },
@@ -675,6 +675,33 @@ impl Decode for Located {
         let height = u64::decode_from(reader)?;
         let id = Hash32::decode_from(reader)?;
         Ok(Self { height, id })
+    }
+}
+
+/// The first height worth offering a peer, given the highest position in its
+/// locator this node agrees with, `floor`, the first height its log can hand a
+/// block for, and `held`, which says whether memory still holds the body of a
+/// block below that.
+///
+/// Just above the agreement, and not below the floor unless memory can hand
+/// that block over itself. Agreement is found in memory first, and memory
+/// still names one block every [`MILESTONE`] heights under a log that has been
+/// cut, the first block among them. A peer further behind than the cut was
+/// told to start just above such a block and asked for heights nobody here
+/// holds a body for: sent nothing, it asked again, and was pointed at the same
+/// heights for as long as it tried.
+///
+/// Memory is asked rather than the floor taken as the answer, because on a
+/// network whose burial is shallower than the window a node holds in full,
+/// the log is cut above bodies memory still holds and serves, and a peer just
+/// under the cut can be handed those.
+#[must_use]
+pub fn first_to_offer(agreed: Option<u64>, floor: u64, held: impl FnOnce(u64) -> bool) -> u64 {
+    let from = agreed.map_or(floor, |height| height.saturating_add(1));
+    if from >= floor || held(from) {
+        from
+    } else {
+        floor
     }
 }
 
@@ -1357,14 +1384,22 @@ impl ChainStore {
     /// regardless: a block carries what it is built on, so a chain of them
     /// proves its own order.
     ///
-    /// When nothing in the locator is recognised the answer starts at zero,
-    /// which is what a node syncing from scratch needs.
-    pub fn chain_after(&self, locator: &[Located], max: u64) -> (u64, u64) {
+    /// `floor` is the first height the caller's log can hand a block for, and
+    /// the answer starts below it only where this store holds the body in
+    /// memory: see [`first_to_offer`], which the node answering out of memory
+    /// and its disk together reads too.
+    ///
+    /// This said "when nothing in the locator is recognised the answer starts
+    /// at zero, which is what a node syncing from scratch needs", and started
+    /// there. The node had stopped giving that answer, because a node that has
+    /// cut its log holds no body at zero and pointed a newcomer at blocks
+    /// nobody here had, and this copy, read only by tests, went on giving it.
+    pub fn chain_after(&self, locator: &[Located], max: u64, floor: u64) -> (u64, u64) {
         let common = locator
             .iter()
             .find(|entry| self.agrees_with(entry))
             .map(|entry| entry.height);
-        let from = common.map_or(0, |height| height.saturating_add(1));
+        let from = first_to_offer(common, floor, |at| self.block_at(at).is_some());
         let count = self.branch.len().saturating_sub(from).min(max);
         (from, count)
     }
@@ -1882,10 +1917,12 @@ impl ChainStore {
     /// depth limit exists to refuse.
     ///
     /// The branch starts from the headers that came with the ledger, so this
-    /// node knows where it is and can be reorganised as far back as those go.
-    /// It holds no milestones, because it has no history to hold: it can say
-    /// what it is following and cannot answer about what came before, which is
-    /// the honest position for a node that was not there.
+    /// node knows where it is. It can be reorganised back onto the block it
+    /// was handed at, once it has applied blocks of its own above it, and no
+    /// further, since undoing a block takes the record of what it did. It
+    /// holds no milestones, because it has no history to hold: it can say what
+    /// it is following and cannot answer about what came before, which is the
+    /// honest position for a node that was not there.
     pub fn adopt(&mut self, state: LedgerState, recent: &[BlockHeader]) -> Result<(), ChainError> {
         if !self.holds_nothing_of_its_own() {
             return Err(ChainError::AlreadyFollowing);
@@ -2013,6 +2050,24 @@ impl ChainStore {
         self.applied.clear();
         self.blocks.clear();
         self.held_bytes = 0;
+        // Except the block it was handed at, which is held with no body for
+        // the reason [`HELD_WINDOW`] holds one more than a switch undoes: a
+        // rival forking exactly here arrives as a block whose parent it is,
+        // and `add_block` reads a parent's height and work out of this table.
+        // The branch names it and the undo records reach the block above it,
+        // so the rules allow that switch, and without this it was refused as
+        // a parent this node lacks, which the network layer reads as a block
+        // it has not caught up to and asks again for, for ever. Nothing is
+        // counted for it, since no body is held.
+        self.blocks.insert(
+            last.id(),
+            StoredBlock {
+                header: *last,
+                body: None,
+                total_work: last.total_work,
+                bytes: HELD_OVERHEAD,
+            },
+        );
         Ok(())
     }
 
@@ -2129,9 +2184,20 @@ impl ChainStore {
         // allows. Refusing it here costs one comparison; storing it costs
         // memory for a branch that ends in the same refusal, and a peer could
         // make a node hold a thousand of them by sending old history.
-        if let Some(tip) = self.height() {
-            let floor = tip.saturating_sub(self.undo_limit());
-            if block.header.height < floor {
+        //
+        // The floor is the deepest block a switch can land on, so a rival at
+        // the floor itself is one block too deep: taking it means undoing the
+        // block it would replace as well. This was `<` and let that one
+        // through, on the understanding that the window a node holds would
+        // turn it away for want of a parent. The window is `MAX_REORG_DEPTH`
+        // deep and the limit is the burial where that is shallower, and there
+        // the parent was held and the rival with it, refused as too deep only
+        // once the branch outweighed this one.
+        if let Some(floor) = self
+            .height()
+            .and_then(|tip| tip.checked_sub(self.undo_limit()))
+        {
+            if block.header.height <= floor {
                 return Err(ChainError::TooOld {
                     height: block.header.height,
                     floor,
@@ -2267,10 +2333,11 @@ impl ChainStore {
         // the undo record for a block this node no longer keeps one for would
         // read as a corrupt tree.
         //
-        // A branch this deep can no longer be assembled, since its first block
-        // is below the floor `add_block` refuses at. This stays as the last
-        // word on the rule it enforces, rather than as a check that happens to
-        // be unreachable today.
+        // A branch this deep cannot be started now, since its first block is
+        // at or below the floor `add_block` refuses at. It can still arrive
+        // here: a rival taken while it was within reach, made heavier after
+        // the tip had moved on, is this deep by the time it is weighed. So
+        // this is the last word on the rule it enforces, and it is reached.
         let keep = fork_position.map_or(0, |height| height.saturating_add(1));
         let depth = self.branch.len().saturating_sub(keep);
         if depth > self.undo_limit() {

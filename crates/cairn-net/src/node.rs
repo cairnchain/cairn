@@ -21,7 +21,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cairn_accumulator::forest::{Forest, ForestProof};
-use cairn_chain::{Accepted, Bodies, ChainError, ChainStore, Located, Outdated, MAX_REORG_DEPTH};
+use cairn_chain::{
+    first_to_offer, Accepted, Bodies, ChainError, ChainStore, Located, Outdated, MAX_REORG_DEPTH,
+};
 use cairn_crypto::PublicKey;
 use cairn_ledger::block::{Block, BlockHeader, BLOCK_VERSION};
 use cairn_ledger::genesis;
@@ -51,7 +53,8 @@ use crate::message::{
 };
 use crate::refusal::{can_be_refused, Refusals};
 use crate::sync::{
-    a_window_has_turned, local_handshake, on_message, Allowance, Local, PeerState, Reaction, Window,
+    a_window_has_turned, asked_for_the_chain, local_handshake, on_message, tick, Allowance, Local,
+    PeerState, Reaction, Window,
 };
 use crate::wire::{most_from, read_frame, write_message, Framed, WireError};
 
@@ -169,7 +172,8 @@ const FLOOD_WINDOW: u64 = 10;
 ///
 /// A peer this far behind is not keeping up, and queueing without limit would
 /// let it decide how much memory this node spends. Dropped announcements cost
-/// it nothing lasting: it asks for what it is missing on the next exchange.
+/// it nothing lasting: the next block it hears of hangs on the ones it missed,
+/// and a block above its tip is what makes it ask for the chain.
 const OUTBOUND_QUEUE: usize = 256;
 /// Bytes queued for one peer before further messages are dropped.
 ///
@@ -452,6 +456,19 @@ const BEHIND_SENDERS: usize = 64;
 /// up to a claim about this machine.
 const BEHIND_MEMORY: u64 = 3_600;
 
+/// Peers that said they can supply nothing just above this node's tip, before
+/// a person is told it may be further behind than the network keeps blocks
+/// for.
+///
+/// The same reasoning as [`UNJUDGED_PEERS`] and the same honest caveat:
+/// whoever holds two addresses meets it. What the line says to do is start
+/// again from an empty directory, which is the most a line here ever asks,
+/// so one machine's word is not enough to make it say so.
+const SHORT_PEERS: usize = 2;
+
+/// Addresses counted towards [`SHORT_PEERS`] at once.
+const SHORT_SENDERS: usize = 64;
+
 /// A gap between two rounds of maintenance that means the machine was away.
 ///
 /// A round takes a second. Thirty of them passing at once is not a busy
@@ -664,13 +681,22 @@ pub struct Filling {
     /// The lowest header this node holds. Everything below it is what it is
     /// still asking the network for.
     pub from: u64,
+    /// Headers collected so far towards what is below [`Self::from`], counted
+    /// from the first block up.
+    ///
+    /// The one number here that moves while a fill is going well. What is
+    /// collected is kept apart and merged whole once it reaches `from`, so the
+    /// three below do not move at all until then, which for a node that
+    /// joined a million and a half blocks up is most of an hour; a line that
+    /// told an operator to watch those told them a healthy fill was stuck.
+    pub collected: u64,
     /// One past the highest header it holds.
     pub through: u64,
     /// Leaves in the forest built over those headers, which is what a place in
     /// the chain is proved against.
     pub proved: u64,
-    /// How far the chain has got, so each of the three above can be said
-    /// against something rather than as "some".
+    /// How far the chain has got, so each of the three numbers above that say
+    /// what is held can be said against something rather than as "some".
     pub reaches: u64,
     /// Bytes of blocks on the disk now.
     pub bytes: u64,
@@ -1205,6 +1231,21 @@ struct Outbound {
     sender: SyncSender<(Message, usize)>,
     /// Bytes queued and not yet written.
     waiting: Arc<AtomicUsize>,
+    /// Set when this node asked the peer for its chain from outside the
+    /// connection's own loop, and taken by that loop before the next message
+    /// is decided on.
+    ///
+    /// The sync layer writes down a `GetChain` it sends itself, so the `Chain`
+    /// that answers is taken as an answer and the blocks it names are charged
+    /// as blocks this node went looking for. The node puts the same question
+    /// from four other places: the choice of whom to read from, the nudge
+    /// once the choice is made, the probation's question for the burial, and
+    /// the question after a handover lands. None of them could reach the
+    /// connection's state, so the answer to every one was taken as a peer
+    /// choosing heights for itself, and each block of the batch was priced as
+    /// a push: seven blocks at nine units each against a window holding
+    /// seven, refused in silence, the heights left outstanding.
+    asked_for_the_chain: Arc<AtomicBool>,
 }
 
 impl Outbound {
@@ -1212,7 +1253,33 @@ impl Outbound {
         Self {
             sender,
             waiting: Arc::new(AtomicUsize::new(0)),
+            asked_for_the_chain: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Queues a message this node composed outside the connection's own
+    /// loop, saying whether there was room for it.
+    ///
+    /// [`Self::try_send`], with a `GetChain` written down where the loop will
+    /// find it. See [`Self::asked_for_the_chain`].
+    fn send_from_outside(&self, message: Message) -> Result<(), ()> {
+        if !matches!(message, Message::GetChain { .. }) {
+            return self.try_send(message);
+        }
+        // Before the message is queued, so its answer cannot be read ahead of
+        // the mark; put back if it never went.
+        let before = self.asked_for_the_chain.swap(true, Ordering::SeqCst);
+        let sent = self.try_send(message);
+        if sent.is_err() {
+            self.asked_for_the_chain.store(before, Ordering::SeqCst);
+        }
+        sent
+    }
+
+    /// Whether this node asked the peer for its chain from outside the loop
+    /// since the loop last looked.
+    fn take_the_question_asked_from_outside(&self) -> bool {
+        self.asked_for_the_chain.swap(false, Ordering::SeqCst)
     }
 
     /// A queue nobody reads, for a connection this node has finished with.
@@ -1298,15 +1365,23 @@ struct Peer {
     /// hello inside `attach_peer`, and one channel is one order, so everything
     /// after it lands after it.
     greeted: bool,
-    /// Whether this peer said it keeps the cold set, and so can rebuild a path
-    /// for a note that fell long ago.
+    /// What this peer said it kept, once it has introduced itself: the cold
+    /// set, so it can rebuild a path for a note that fell long ago, and the
+    /// headers from the first block, so it can supply the ones from before
+    /// this node arrived.
     ///
-    /// A claim and nothing more, which is all it has to be: what such a peer
-    /// hands over is folded against a commitment this node worked out itself,
-    /// so a lie costs the liar a message and this node a comparison. What the
-    /// claim saves is asking every peer in turn and waiting on the ones that
-    /// were never going to answer.
-    archives: bool,
+    /// Claims and nothing more, which is all they have to be: what such a peer
+    /// hands over is folded or weighed against a commitment this node worked
+    /// out itself, so a lie costs the liar a message or its turn, and this
+    /// node a comparison. What a claim saves is asking every peer in turn and
+    /// waiting on the ones that were never going to answer.
+    ///
+    /// The headers claim was read into the chooser and dropped, so the turn to
+    /// supply the headers went to the next connection along whatever it had
+    /// said, half a minute each for a peer that said it could not answer: a
+    /// node that joined, surrounded by nodes that joined, handed the turn
+    /// round all of them for ever.
+    keeps: Keeps,
     /// The height and the work this peer said its chain had when it
     /// introduced itself, once it has.
     ///
@@ -1585,6 +1660,13 @@ struct Shared {
     /// A leaf as well, written from the thread reading a peer once the chain
     /// has been let go of, and once at start for this build's own first block.
     out_of_step: Mutex<OutOfStep>,
+    /// Peers that answered this node's question for the chain from above its
+    /// tip, each with the height the tip stood at when they did.
+    ///
+    /// Only the entries about where the tip stands now mean anything, and the
+    /// rest are dropped as soon as the tip moves. A leaf as well, written from
+    /// the thread reading a peer once the chain has been let go of.
+    short_of_the_tip: Mutex<HashMap<Sender, u64>>,
     /// What this node is asking the network about where fallen notes sit.
     ///
     /// Empty on a node nobody has asked to recover anything, which is every
@@ -2372,17 +2454,28 @@ impl Undertaking {
 ///
 /// Separated from everything that holds a lock so the rule can be read, and
 /// tested, on its own: it is three deadlines and their order matters.
+///
+/// `away` is whether the round found the machine was away since the last one:
+/// see [`was_away`].
 fn owed_this_round(
     held: &mut Undertaking,
     reached: u64,
     peers: usize,
     patience: u64,
     now: u64,
+    away: bool,
 ) -> Owed {
     // A clock that went backwards says nothing about how long this has been
     // waiting, so the waiting starts again rather than counting a negative.
     // The same reading [`has_gone_quiet`] takes of one.
-    if reached > held.reached || now < held.moved {
+    //
+    // And nor does a machine that was away: nobody was asked while it slept,
+    // so the gap is not time spent waiting with somebody to ask. It used to
+    // be read as that, and a laptop closed for an hour on a node on probation
+    // woke to the stranding patience spent, stopped, and told its operator to
+    // delete the data directory. The round that saw the gap forgave the
+    // address book and nothing else.
+    if reached > held.reached || now < held.moved || away {
         held.reached = held.reached.max(reached);
         held.moved = now;
         return Owed::Waiting;
@@ -2770,13 +2863,19 @@ impl Shared {
 
     /// One round of the undertaking: where the chain has got to, and what to
     /// do about it having got no further.
-    fn probation_round(&self, height: Option<u64>, peers: usize, now: u64) -> Option<Owed> {
+    fn probation_round(
+        &self,
+        height: Option<u64>,
+        peers: usize,
+        now: u64,
+        away: bool,
+    ) -> Option<Owed> {
         self.probation_at(height)?;
         let patience = self.stranding_patience.load(Ordering::Relaxed);
         let mut undertaking = self.undertaking();
         let held = undertaking.as_mut()?;
         let reached = height.unwrap_or(held.anchor);
-        let mut owed = owed_this_round(held, reached, peers, patience, now);
+        let mut owed = owed_this_round(held, reached, peers, patience, now, away);
         if let Owed::GivenUp(stranded) = &mut owed {
             stranded.out_of_reach = self.out_of_reach.load(Ordering::Relaxed);
         }
@@ -2796,7 +2895,7 @@ impl Shared {
     /// Queued and never waited on, for the same reason a broadcast is.
     fn send_to(&self, id: PeerId, message: Message) {
         if let Some(peer) = self.peers().get(&id) {
-            let _ = peer.outbound.try_send(message);
+            let _ = peer.outbound.send_from_outside(message);
         }
     }
 
@@ -2935,6 +3034,23 @@ impl Shared {
     fn cannot_judge(&self, from: Option<Sender>, version: u16, now: u64) {
         let mut met = self.unjudged.lock().unwrap_or_else(PoisonError::into_inner);
         count_unreadable(&mut met, from, version, now);
+    }
+
+    /// Writes down that a peer could supply nothing just above where this
+    /// node's chain stands. See [`Reaction::cannot_supply`].
+    fn cannot_supply(&self, from: Option<Sender>) {
+        let Some(from) = from else { return };
+        let Some(tip) = self.chain().height() else {
+            return;
+        };
+        let mut met = self
+            .short_of_the_tip
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        met.retain(|_, at| *at == tip);
+        if met.len() < SHORT_SENDERS || met.contains_key(&from) {
+            met.insert(from, tip);
+        }
     }
 
     /// Counts one block refused for standing further ahead than this node's
@@ -3158,8 +3274,10 @@ impl Shared {
 
     /// How far this node's branch runs past the first position in `locator`
     /// this node agrees with, which is the highest only on a locator ordered
-    /// from the tip down. See `ChainStore::chain_after`, which this answers
-    /// out of memory and the disk together.
+    /// from the tip down, and never from a block this node can hand over
+    /// neither from memory nor from its log. See `ChainStore::chain_after`,
+    /// which this answers out of memory and the disk together, by the same
+    /// rule.
     ///
     /// Memory first, which answers whenever the peer is anywhere near this
     /// node's tip. A peer far behind names heights this node no longer holds
@@ -3216,11 +3334,19 @@ impl Shared {
         // The same mistake as the one the walk above was fixed for, one step
         // further on: this node's disk stated as a fact about somebody else's
         // chain. What it can hand over starts where its log does.
+        //
+        // And one step further again, for a peer this node agrees with about
+        // something below that. Memory still names the first block, and one
+        // every thousand and twenty four heights after it, under a log that
+        // has been cut, so a peer further behind than the cut was pointed just
+        // above one of those and asked for blocks nobody here holds. Below the
+        // log, the answer starts where memory can still hand the block over,
+        // and at the log where it cannot.
         let floor = {
             let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
             log.as_ref().map_or(0, |store| store.blocks.first_height())
         };
-        let from = agreed.map_or(floor, |height| height.saturating_add(1));
+        let from = first_to_offer(agreed, floor, |at| self.chain().block_at(at).is_some());
         (from, reaches.saturating_sub(from).min(max))
     }
 
@@ -3376,15 +3502,15 @@ impl Shared {
     /// connected to nobody who can build one, has somewhere to knock. Neither
     /// is trusted for anything: what an archivist hands over is checked, and
     /// this only decides who is asked first.
-    fn note_what_it_keeps(&self, id: PeerId, advertised: Option<SocketAddr>, archives: bool) {
+    fn note_what_it_keeps(&self, id: PeerId, advertised: Option<SocketAddr>, keeps: Keeps) {
         if let Some(peer) = self.peers().get_mut(&id) {
-            peer.archives = archives;
+            peer.keeps = keeps;
             // Called once the introduction has been read, which is the moment
             // this connection is safe to send anything else down.
             peer.greeted = true;
         }
         if let Some(address) = advertised {
-            self.book().keeps_the_cold_set(&address, archives);
+            self.book().keeps_the_cold_set(&address, keeps.cold_set);
         }
     }
 
@@ -3410,7 +3536,7 @@ impl Shared {
     fn worth_asking(&self) -> Vec<PeerId> {
         self.peers()
             .iter()
-            .filter(|(_, peer)| peer.archives)
+            .filter(|(_, peer)| peer.keeps.cold_set)
             .map(|(id, _)| *id)
             .collect()
     }
@@ -3540,9 +3666,11 @@ impl Shared {
                 continue;
             }
             // A full queue and a gone peer are both left alone: the first
-            // catches up by asking, and the second is already being cleared up
-            // by the thread that was reading from it.
-            if peer.outbound.try_send(message.clone()).is_ok() {
+            // catches up by asking, since the next block it hears of hangs on
+            // what it missed and a block above its tip asks for the chain, and
+            // the second is already being cleared up by the thread that was
+            // reading from it.
+            if peer.outbound.send_from_outside(message.clone()).is_ok() {
                 taken = taken.saturating_add(1);
             }
         }
@@ -4086,6 +4214,7 @@ impl Node {
             unjudged: Mutex::new(Unreadable::default()),
             unweighed: Mutex::new(Unweighed::default()),
             out_of_step: Mutex::new(OutOfStep::default()),
+            short_of_the_tip: Mutex::new(HashMap::new()),
             asking: Mutex::new(Asking::default()),
             held_aside: Mutex::new(HeldAside::default()),
         });
@@ -4638,6 +4767,11 @@ impl Node {
         }
         Some(Filling {
             from: store.headers.first_height(),
+            collected: if store.filling.is_empty() {
+                0
+            } else {
+                store.filling.reaches()
+            },
             through: store.headers.reaches(),
             proved: store.forest.len(),
             reaches,
@@ -4649,10 +4783,34 @@ impl Node {
     /// Blocks this node was offered and can never reach.
     ///
     /// Zero on a healthy node. Anything else means somebody is following a
-    /// branch that parts from this one below the point this node was handed
-    /// on, which it cannot cross to however much of that branch arrives.
+    /// branch that parts from this one further back than this node can reach:
+    /// below the point it was handed on, or deeper than it will undo. It
+    /// cannot cross to that branch however much of it arrives. A few such
+    /// blocks are anybody's to send; a run of them from several peers is this
+    /// node on a branch the network has left.
     pub fn out_of_reach(&self) -> u64 {
         self.shared.out_of_reach.load(Ordering::Relaxed)
+    }
+
+    /// Peers that said they can supply nothing just above where this node's
+    /// chain stands, once [`SHORT_PEERS`] of them have.
+    ///
+    /// Every peer answers a node further behind than it keeps blocks for from
+    /// where its own log begins, and such a node can neither read across the
+    /// gap nor be handed a ledger, since it already follows a chain. It used
+    /// to print healthy lines under a height that did not move, and nothing
+    /// said why.
+    pub fn behind_what_peers_keep(&self) -> Option<usize> {
+        let tip = self.shared.chain().height()?;
+        let peers = self
+            .shared
+            .short_of_the_tip
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .filter(|at| **at == tip)
+            .count();
+        (peers >= SHORT_PEERS).then_some(peers)
     }
 
     /// Sets how long this node waits for the blocks above an anchor it was
@@ -4785,7 +4943,7 @@ impl Node {
         self.shared
             .peers()
             .values()
-            .filter(|peer| peer.archives)
+            .filter(|peer| peer.keeps.cold_set)
             .count()
     }
 
@@ -5044,7 +5202,9 @@ fn join_piece(shared: &Arc<Shared>, from: PeerId, message: Message, outbound: &O
     let Some(next) = take_join_part(shared, from, what, at, part, parts, bytes) else {
         return Taken::Handled;
     };
-    if outbound.try_send(next).is_err() {
+    // The question after a ledger lands is a `GetChain` this layer composed
+    // rather than the sync layer, and its answer is owed the price of one.
+    if outbound.send_from_outside(next).is_err() {
         return Taken::Failed;
     }
     Taken::Handled
@@ -6128,7 +6288,17 @@ impl Shared {
         // on: a node that has filled its headers in would otherwise throw away
         // an empty collection once a round for the rest of its life.
         let asking = self.wants_headers()?;
-        let previous = *self.filling_from();
+        // A clock that went backwards restarts the turn's patience from the
+        // present, rather than reading nought until the clock climbs back
+        // past the moment it was last renewed: read that way, a peer that had
+        // stopped delivering held the turn for as long as the step.
+        let previous = {
+            let mut held = self.filling_from();
+            if let Some(turn) = held.as_mut() {
+                turn.moved = turn.moved.min(now);
+            }
+            *held
+        };
         let keeps_turn = previous.is_some_and(|turn| {
             !turn.spoiled
                 && connected.contains(&turn.peer)
@@ -6137,16 +6307,32 @@ impl Shared {
         if let Some(turn) = previous.filter(|_| keeps_turn) {
             return Some((turn.peer, asking));
         }
+        // Among the peers that said they keep the headers, when any did. The
+        // claim is only a claim, which is why nobody claiming falls back to
+        // everybody, and why a lie costs only the turn: see [`Peer::keeps`].
+        let claiming: Vec<PeerId> = {
+            let peers = self.peers();
+            connected
+                .iter()
+                .copied()
+                .filter(|id| peers.get(id).is_some_and(|peer| peer.keeps.headers))
+                .collect()
+        };
+        let candidates = if claiming.is_empty() {
+            connected
+        } else {
+            &claiming
+        };
         let next = previous
             .map(|turn| turn.peer)
             .and_then(|peer| {
-                connected
+                candidates
                     .iter()
                     .copied()
                     .filter(|other| *other > peer)
                     .min()
             })
-            .or_else(|| connected.iter().copied().min())?;
+            .or_else(|| candidates.iter().copied().min())?;
         // A collection is one peer's work from end to end. What is left of the
         // last peer's goes when its turn does, because a run half from one
         // peer and half from another is the thing this whole arrangement
@@ -6226,9 +6412,15 @@ impl Shared {
             // that is the whole of the difference: renewing on one meant a peer
             // answering each question with a single header held the turn for
             // ever, and the node never filled its headers in at all.
+            //
+            // Counted from nought when the collection is below the mark. A
+            // write this node's disk refused throws the collection away and
+            // keeps the turn, and read against the old mark every run after it
+            // was nothing, so the turn was taken from a peer still delivering.
             Filled::Grew(reached) => {
                 if let Some(turn) = self.filling_from().as_mut() {
-                    if reached.saturating_sub(turn.marked) >= HEADER_RUN {
+                    let run = reached.checked_sub(turn.marked).unwrap_or(reached);
+                    if run >= HEADER_RUN {
                         turn.marked = reached;
                         turn.moved = now;
                     }
@@ -6246,7 +6438,9 @@ impl Shared {
             // against nobody. The turn stays where it is: the supplier has
             // done nothing wrong, and the patience on the turn still moves it
             // along if nothing else happens, so this cannot pin the node to
-            // one peer either.
+            // one peer either. What the supplier sends next starts the
+            // collection again from nought, and renews the turn as a run
+            // does: see the arm above.
             //
             // Reached with no lock held, which the write half needs: saying
             // what a write cost takes the chain and then the log.
@@ -7053,11 +7247,16 @@ fn maintenance_loop(shared: &Arc<Shared>) {
             return;
         }
         let now = unix_now();
-        // A machine that was away comes back holding nothing against anyone.
-        // Without this a laptop closed for a night wakes with an empty book
-        // and no way back onto the network: every address it knew failed while
-        // it slept, and an address that fails enough times is dropped.
-        if was_away(last_round, now) {
+        // A machine that was away comes back holding nothing against anyone
+        // for having been away. Without this a laptop closed for a night wakes
+        // with an empty book and no way back onto the network: every address
+        // it knew failed while it slept, and an address that fails enough
+        // times is dropped. The undertaking's wait starts again too, below.
+        // A refusal a host earned is kept, and no longer than a refusal lasts
+        // counted from now however the clock moved: see
+        // `Refusals::forget_expired`.
+        let away = was_away(last_round, now);
+        if away {
             shared.book().forgive_all();
         }
         last_round = now;
@@ -7089,7 +7288,7 @@ fn maintenance_loop(shared: &Arc<Shared>) {
         if let Some((peer, asking)) = shared.asks_headers_of(&connected, now) {
             shared.send_to(peer, asking);
         }
-        keep_the_undertaking(shared, &connected, now);
+        keep_the_undertaking(shared, &connected, now, away);
         ask_again_for_the_join(shared, now);
         drive_choosing(shared, now);
         shared.refusals().forget_expired(now);
@@ -7112,9 +7311,9 @@ fn maintenance_loop(shared: &Arc<Shared>) {
 /// a node already following a chain cannot adopt another, and the anchor was
 /// never the part in doubt. What is missing is the blocks above it, and anyone
 /// on that chain has them.
-fn keep_the_undertaking(shared: &Arc<Shared>, connected: &[PeerId], now: u64) {
+fn keep_the_undertaking(shared: &Arc<Shared>, connected: &[PeerId], now: u64, away: bool) {
     let height = shared.chain().height();
-    let Some(owed) = shared.probation_round(height, connected.len(), now) else {
+    let Some(owed) = shared.probation_round(height, connected.len(), now, away) else {
         return;
     };
     match owed {
@@ -7646,15 +7845,24 @@ fn in_file(file: &'static str) -> impl FnOnce(StoreError) -> NodeError {
 ///
 /// Also says who handed in a body held aside that this message made fail, so
 /// the connection that sent it can be ended and its address refused.
+///
+/// `asked` is whether this node asked the peer for its chain from outside the
+/// connection's loop since the last message, which is written down before
+/// this one is read in case it is the answer. See
+/// [`Outbound::asked_for_the_chain`].
 fn decide(
     shared: &Arc<Shared>,
     id: PeerId,
     peer: &mut PeerState,
     message: Message,
+    asked: bool,
 ) -> (Reaction, Vec<Transfer>, Option<HandedIn>) {
     // Chain first and log second, here and everywhere, so two threads never
     // take these two the other way round from each other.
     let mut chain = shared.chain();
+    if asked {
+        asked_for_the_chain(&chain, peer);
+    }
 
     // The log is taken twice rather than held across the decision, because the
     // decision may itself read a block body off it: a chain that let go of a
@@ -7847,6 +8055,34 @@ fn drive_choosing(shared: &Arc<Shared>, now: u64) {
     }
 }
 
+/// Whether a peer last heard from at `last_heard` has been silent for
+/// [`PEER_SILENCE`] by `now`.
+///
+/// A clock that went backwards restarts the silence from the present rather
+/// than reading nought until the clock climbs back past the last word. Read
+/// the other way, a connection that died just before a step back of an hour
+/// was kept for that hour, and counted among the peers this node has, so
+/// nobody was dialled in its place.
+fn has_gone_silent(last_heard: &mut u64, now: u64) -> bool {
+    *last_heard = (*last_heard).min(now);
+    now.saturating_sub(*last_heard) >= PEER_SILENCE.as_secs()
+}
+
+/// Whether the names a node starts from are due to be looked up, given when
+/// they last were, nought for never.
+///
+/// A clock that went backwards counts as due, the reading [`has_gone_quiet`]
+/// takes of one: without it a node with no seed address and a clock put back
+/// an hour looked nobody up for that hour.
+///
+/// A lookup still out is never due, whatever the clock says: its mark,
+/// [`LOOKUP_UNDER_WAY`], is later than any clock, and read as a clock put back
+/// it started a second lookup beside the first.
+fn a_lookup_is_due(last: u64, now: u64) -> bool {
+    last != LOOKUP_UNDER_WAY
+        && (last == 0 || now < last || now.saturating_sub(last) >= NAME_LOOKUP_PERIOD)
+}
+
 /// Whether a join that last moved at `moved` has been quiet long enough to be
 /// given up on.
 ///
@@ -7912,7 +8148,7 @@ where
         return;
     }
     let last = shared.names_looked_up_at.load(Ordering::Relaxed);
-    if last > 0 && now.saturating_sub(last) < NAME_LOOKUP_PERIOD {
+    if !a_lookup_is_due(last, now) {
         return;
     }
     // Out until the lookup comes back, which no period ever reaches, so a
@@ -8277,7 +8513,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
             host: remote,
             advertised: None,
             dialled_to: dialled,
-            archives: false,
+            keeps: Keeps::default(),
             claims: None,
         },
     );
@@ -8358,10 +8594,11 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
     true
 }
 
-/// Writes down the three blocks a node refuses without blaming anybody.
+/// Writes down the three blocks a node refuses without blaming anybody, and
+/// the one answer about the chain it cannot use.
 ///
-/// All three are here rather than among the reasons to drop a peer because
-/// none of them is the peer's doing, and all three used to pass in silence: an
+/// All four are here rather than among the reasons to drop a peer because
+/// none of them is the peer's doing, and all four used to pass in silence: an
 /// operator saw a height that had stopped moving and nothing else. Counted, so
 /// a run of them from several peers can be read for what it is.
 fn note_what_was_not_taken(
@@ -8391,6 +8628,12 @@ fn note_what_was_not_taken(
     // ever mentions one.
     if let Some(ahead) = reaction.ahead_of_the_clock {
         shared.clock_looks_behind(from, ahead, now);
+    }
+    // Not a block, and not refused: a peer that can supply nothing just above
+    // this node's tip. A run of these from several peers is a node further
+    // behind than the network keeps blocks for, which nothing else said.
+    if reaction.cannot_supply.is_some() {
+        shared.cannot_supply(from);
     }
 }
 
@@ -8576,7 +8819,7 @@ fn read_loop(
                 frame
             }
             Ok(Framed::Quiet) => {
-                if unix_now().saturating_sub(last_heard) >= PEER_SILENCE.as_secs() {
+                if !still_there_after_a_quiet_read(shared, &mut peer, outbound, &mut last_heard) {
                     break;
                 }
                 continue;
@@ -8620,7 +8863,8 @@ fn read_loop(
 
         // The chain is held for the decision and for writing the log, and let
         // go before anything is sent, so a slow peer never stalls the chain.
-        let (mut reaction, passing, blamed) = decide(shared, id, &mut peer, message);
+        let asked = outbound.take_the_question_asked_from_outside();
+        let (mut reaction, passing, blamed) = decide(shared, id, &mut peer, message, asked);
         shared.turn_away(blamed);
 
         // Paths offered back for places this node asked about, folded now that
@@ -8636,7 +8880,7 @@ fn read_loop(
         }
         shared.remember(&reaction.learned);
         if introduction && peer.greeted {
-            shared.note_what_it_keeps(id, peer.advertised, peer.keeps.cold_set);
+            shared.note_what_it_keeps(id, peer.advertised, peer.keeps);
             shared.note_what_it_claims(id, peer.height, peer.total_work);
         }
         shared.forget(&reaction.forget);
@@ -8695,6 +8939,30 @@ fn read_loop(
     // Always, however the loop ended. It is what frees the writing thread: a
     // write on a socket just shut fails at once, wherever in a frame it was.
     let _ = stream.shutdown(Shutdown::Both);
+}
+
+/// Whether a connection goes on after a read that came back with nothing to
+/// read.
+///
+/// Two things are owed to the clock here rather than to anything the peer
+/// says. A peer silent for [`PEER_SILENCE`] is not quiet but gone. And a batch
+/// it owes is given up on at its patience, and the chain asked for again,
+/// rather than at the peer's next word about its chain, which may never come:
+/// see [`tick`].
+fn still_there_after_a_quiet_read(
+    shared: &Arc<Shared>,
+    peer: &mut PeerState,
+    outbound: &Outbound,
+    last_heard: &mut u64,
+) -> bool {
+    let now = unix_now();
+    if has_gone_silent(last_heard, now) {
+        return false;
+    }
+    let due = tick(&shared.chain(), peer, now);
+    due.reply
+        .into_iter()
+        .all(|reply| outbound.try_send(reply).is_ok())
 }
 
 /// What the node holds against an address once its connection has ended.
@@ -9193,6 +9461,30 @@ mod disk_and_headers {
         );
     }
 
+    /// What a node reports while it fills its old headers in carries how much
+    /// of them it has collected.
+    ///
+    /// The report carried only what a fill leaves alone until it is complete,
+    /// so a node collecting at the honest rate read the same for most of an
+    /// hour as one that had found nobody to collect from.
+    #[test]
+    fn a_node_filling_its_headers_in_says_how_many_it_has_collected() {
+        let headers = linked(30);
+        let directory = scratch("filling-collected");
+        let node = started(
+            store_in(&directory, &headers[20..], &headers[..8]),
+            &directory,
+        );
+        let filling = node.filling();
+        finish(node, &directory);
+        let filling = filling.expect("a node holding headers from 20 up cannot show the chain");
+        assert_eq!(filling.from, 20);
+        assert_eq!(
+            filling.collected, 8,
+            "the eight headers collected so far were not in what the node reports"
+        );
+    }
+
     /// A collection that leads nowhere is thrown away at the start: one left
     /// beside a header log that already begins at the first block, and one
     /// that does not begin at the first block itself.
@@ -9576,6 +9868,112 @@ mod disk_and_headers {
             (0, 6),
             "a position the disk holds another block at was agreed with"
         );
+    }
+
+    /// A peer is never pointed at a block this node can hand over neither
+    /// from memory nor from its log, and is pointed at one memory still holds.
+    ///
+    /// The locator walk agrees in memory first, and memory still names one
+    /// block every thousand and twenty four heights under a log this node has
+    /// cut, the first block among them. A peer further behind than the cut
+    /// was told to start just above such a block, asked for heights nobody
+    /// here holds a body for, was sent nothing, and asked again for ever. The
+    /// newcomer's empty locator was answered from the floor already; this is
+    /// the same mistake one step on. The second half holds the other edge: a
+    /// body memory still holds under the log is still offered.
+    #[test]
+    fn a_peer_further_behind_than_the_log_is_pointed_at_the_log() {
+        let params = ConsensusParams::testnet().with_burial(8);
+        let (blocks, _) = forged(100, params);
+        let directory = scratch("behind-the-log");
+        let node = holding(&blocks, params, &directory);
+        node.keep_blocks(1);
+        node.shared.trim_history();
+        wait_until("the log to be trimmed", || {
+            node.blocks_from().unwrap_or(0) > 60
+        });
+        let floor = node.blocks_from().unwrap();
+        let (gone, kept) =
+            node.with_chain(|chain| (chain.block_at(1).is_none(), chain.block_at(51).is_some()));
+        let from_the_first = node
+            .shared
+            .chain_after(&[Located::new(0, blocks[0].id())], 100);
+        let from_memory = node
+            .shared
+            .chain_after(&[Located::new(50, blocks[50].id())], 100);
+        finish(node, &directory);
+
+        assert!(
+            gone && kept,
+            "the fixture needs the body at 1 let go of and the one at 51 still held"
+        );
+        assert_eq!(
+            from_the_first,
+            (floor, 100 - floor),
+            "a peer holding only the first block was pointed at blocks this node holds \
+             neither in memory nor on its disk"
+        );
+        assert_eq!(
+            from_memory,
+            (51, 49),
+            "a peer was not offered blocks this node still holds in memory under its log"
+        );
+    }
+
+    /// A node says it is further behind than its peers keep blocks for once
+    /// two peers have said they can supply nothing just above its tip, and
+    /// stops saying so once its tip moves.
+    ///
+    /// Such a node asked every peer for heights none of them held, took
+    /// blocks it could not connect, and asked again after each batch, with
+    /// nothing said at all. What is said now tells the operator to start
+    /// again, so one peer's word is not enough and a word about a tip since
+    /// left behind is not kept.
+    #[test]
+    fn two_peers_short_of_the_tip_are_said_and_a_tip_that_moved_is_not() {
+        let params = ConsensusParams::testnet();
+        let (blocks, _) = forged(4, params);
+        let directory = scratch("short-of-the-tip");
+        let node = holding(&blocks[..3], params, &directory);
+        let peer = |last: u8| Some(SocketAddr::from(([198, 51, 100, last], 9_000)));
+
+        node.shared.cannot_supply(peer(1));
+        let one = node.behind_what_peers_keep();
+        node.shared.cannot_supply(peer(1));
+        let one_twice = node.behind_what_peers_keep();
+        node.shared.cannot_supply(peer(2));
+        let two = node.behind_what_peers_keep();
+        node.submit_block(blocks[3].clone()).unwrap();
+        let moved = node.behind_what_peers_keep();
+        for last in 0..=u8::MAX {
+            node.shared.cannot_supply(peer(last));
+        }
+        let held = node
+            .shared
+            .short_of_the_tip
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len();
+        finish(node, &directory);
+
+        assert_eq!(
+            one, None,
+            "one peer's word told the operator to start again"
+        );
+        assert_eq!(
+            one_twice, None,
+            "one peer saying it twice was counted as two"
+        );
+        assert_eq!(
+            two,
+            Some(2),
+            "two peers that can supply nothing above the tip went unsaid"
+        );
+        assert_eq!(
+            moved, None,
+            "a word about a tip since left behind was still said"
+        );
+        assert_eq!(held, SHORT_SENDERS, "the table grew past its ceiling");
     }
 
     /// A block on this node's disk is read back off it.
@@ -10041,7 +10439,7 @@ mod peers_and_loops {
             dialled_to: None,
             dialled,
             greeted: false,
-            archives: false,
+            keeps: Keeps::default(),
             claims: None,
         }
     }
@@ -10263,6 +10661,52 @@ mod peers_and_loops {
         );
     }
 
+    /// A question for the chain this node sends from outside a connection's
+    /// loop is written down for that loop, and nothing else is.
+    ///
+    /// Nothing could be. The loop's state is its own, and the places the
+    /// node asks from outside it (the choice of whom to read from, the nudge,
+    /// the probation, the landing of a ledger) only queued a message, so the
+    /// batch answering each was priced as a push.
+    #[test]
+    fn a_question_for_the_chain_sent_from_outside_the_loop_is_written_down_for_it() {
+        let node = quiet();
+        let (near, _far) = a_socket();
+        let (sender, _inbox) = mpsc::sync_channel(OUTBOUND_QUEUE);
+        let outbound = Outbound::new(sender);
+        node.shared.peers().insert(
+            1,
+            Peer {
+                outbound: outbound.clone(),
+                ..stand_in(&near, true)
+            },
+        );
+        let asking = || Message::GetChain {
+            locator: Vec::new(),
+        };
+
+        node.shared.send_to(1, Message::GetPeers);
+        assert!(
+            !outbound.take_the_question_asked_from_outside(),
+            "a question that was not for the chain was written down as one"
+        );
+        node.shared.send_to(1, asking());
+        assert!(
+            outbound.take_the_question_asked_from_outside(),
+            "a question for the chain handed to one peer was not written down for its loop"
+        );
+        assert!(
+            !outbound.take_the_question_asked_from_outside(),
+            "a question written down once was taken twice"
+        );
+        node.shared.broadcast(None, &asking());
+        assert!(
+            outbound.take_the_question_asked_from_outside(),
+            "a question for the chain put to everyone was not written down for this loop"
+        );
+        node.shared.peers().clear();
+    }
+
     /// A node that has reached nobody takes exactly as many connections from
     /// outside as `MOST_FROM_OUTSIDE` says.
     ///
@@ -10347,19 +10791,19 @@ mod peers_and_loops {
     fn the_burial_is_asked_for_once_a_second_and_again_after_the_clock_steps_back() {
         let mut held = Undertaking::resumed(100, 1_124, Some(100), 1_000).unwrap();
         assert!(matches!(
-            owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, 1_040),
+            owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, 1_040, false),
             Owed::AskAgain
         ));
         assert!(
             matches!(
-                owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, 1_040),
+                owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, 1_040, false),
                 Owed::Waiting
             ),
             "the burial was asked for twice in one second"
         );
         assert!(
             matches!(
-                owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, 1_020),
+                owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, 1_020, false),
                 Owed::AskAgain
             ),
             "a clock put back behind the last question left the node waiting on it"
@@ -10516,6 +10960,124 @@ mod peers_and_loops {
             "the turn was taken away inside its patience"
         );
         assert_eq!(after, Some(2), "the turn was kept past its patience");
+    }
+
+    /// The turn to fill the headers in goes first to peers that say they keep
+    /// them, and to anybody when none does.
+    ///
+    /// Every peer says so in its greeting and the node read it for the
+    /// chooser and dropped it, so the turn went to the next connection along
+    /// whatever it had claimed. A peer that joined and has not filled in
+    /// answers with nothing, and each such peer cost half a minute a round.
+    #[test]
+    fn the_turn_to_fill_the_headers_in_goes_first_to_a_peer_that_says_it_keeps_them() {
+        let (node, directory) = holding_headers(10, 3, "turn-claim");
+        let (near, _far) = a_socket();
+        for id in 1..=3 {
+            node.shared.peers().insert(id, stand_in(&near, true));
+        }
+        let keeps = |headers| Keeps {
+            headers,
+            cold_set: false,
+        };
+        node.shared.note_what_it_keeps(1, None, keeps(false));
+        node.shared.note_what_it_keeps(2, None, keeps(true));
+        node.shared.note_what_it_keeps(3, None, keeps(false));
+        let first = node
+            .shared
+            .asks_headers_of(&[1, 2, 3], 1_000)
+            .map(|(peer, _)| peer);
+        node.shared.note_what_it_keeps(2, None, keeps(false));
+        let spoiled = node.shared.filling_from().map(|turn| Turn {
+            spoiled: true,
+            ..turn
+        });
+        *node.shared.filling_from() = spoiled;
+        let with_nobody_claiming = node
+            .shared
+            .asks_headers_of(&[1, 2, 3], 1_001)
+            .map(|(peer, _)| peer);
+        node.shared.peers().clear();
+        drop(node);
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            first,
+            Some(2),
+            "the turn went to a peer that said it cannot show the chain, ahead of one that can"
+        );
+        assert_eq!(
+            with_nobody_claiming,
+            Some(3),
+            "with nobody claiming the headers, the turn stopped going round"
+        );
+    }
+
+    /// A full run renews a turn whose collection went back to nothing,
+    /// however far the collection had reached before.
+    ///
+    /// A write this node's disk refused throws the collection away and keeps
+    /// the turn, on purpose, and the mark of how far the turn had got stayed
+    /// where it was. The supplier's runs then started from nought, each one
+    /// read as nothing against a mark above it, and the turn was taken from a
+    /// peer still delivering: the misattribution the refusal keeps the turn
+    /// to avoid.
+    #[test]
+    fn a_full_run_renews_a_turn_whose_collection_started_again() {
+        let (node, directory) = holding_headers(2_000, 3, "turn-again");
+        *node.shared.filling_from() = Some(Turn {
+            peer: 1,
+            moved: 1_000,
+            marked: 1_536,
+            spoiled: false,
+        });
+        let run = headers_from(0, HEADER_RUN, NetworkId::TESTNET);
+        node.shared.take_headers(1, 0, &run, 1_020);
+        let turn = (*node.shared.filling_from()).unwrap();
+        drop(node);
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            turn.moved, 1_020,
+            "a full run from a supplier whose collection had started again did not renew its turn"
+        );
+        assert_eq!(
+            turn.marked, HEADER_RUN,
+            "and the mark is where the collection is"
+        );
+    }
+
+    /// The turn to fill the headers in passes on one patience after the clock
+    /// steps back, and not one patience after the clock climbs back past the
+    /// moment it was last renewed.
+    ///
+    /// The patience read nought while the clock stood behind that moment, so
+    /// a step back of an hour let a peer that had stopped delivering hold the
+    /// one exchange that lets this node take a newcomer in for that hour.
+    #[test]
+    fn the_turn_to_fill_the_headers_in_passes_on_one_patience_after_the_clock_steps_back() {
+        let (node, directory) = holding_headers(10, 3, "turn-back");
+        *node.shared.filling_from() = Some(Turn {
+            peer: 1,
+            moved: 10_000,
+            marked: 0,
+            spoiled: false,
+        });
+        let stepped_back = 10_000 - 3_600;
+        let at_the_step = node
+            .shared
+            .asks_headers_of(&[1, 2], stepped_back)
+            .map(|(peer, _)| peer);
+        let one_patience_on = node
+            .shared
+            .asks_headers_of(&[1, 2], stepped_back + HEADER_PATIENCE)
+            .map(|(peer, _)| peer);
+        drop(node);
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(at_the_step, Some(1), "the step itself took the turn away");
+        assert_eq!(
+            one_patience_on,
+            Some(2),
+            "a patience after the clock stepped back an hour, the turn was still held"
+        );
     }
 
     /// A ledger in two pieces is taken whole, and a piece naming another
@@ -11413,7 +11975,10 @@ mod peers_and_loops {
         node.shared.peers().insert(
             1,
             Peer {
-                archives: true,
+                keeps: Keeps {
+                    cold_set: true,
+                    ..Keeps::default()
+                },
                 ..stand_in(&socket, true)
             },
         );
@@ -11807,12 +12372,12 @@ mod undertaking_tests {
     fn the_blocks_above_the_anchor_are_asked_for_at_once_and_then_again() {
         let mut held = taken(1_000);
         assert!(matches!(
-            owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, 1_000),
+            owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, 1_000, false),
             Owed::AskAgain
         ));
         assert!(
             matches!(
-                owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, 1_001),
+                owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, 1_001, false),
                 Owed::Waiting
             ),
             "and not again a second later"
@@ -11824,7 +12389,8 @@ mod undertaking_tests {
                     100,
                     1,
                     STRANDING_PATIENCE,
-                    1_000 + BURIAL_PATIENCE
+                    1_000 + BURIAL_PATIENCE,
+                    false
                 ),
                 Owed::AskAgain
             ),
@@ -11838,7 +12404,7 @@ mod undertaking_tests {
     fn a_node_with_no_peers_is_neither_asked_nor_given_up_on() {
         let mut held = taken(1_000);
         assert!(matches!(
-            owed_this_round(&mut held, 100, 0, 0, 1_000 + STRANDING_PATIENCE),
+            owed_this_round(&mut held, 100, 0, 0, 1_000 + STRANDING_PATIENCE, false),
             Owed::Waiting
         ));
     }
@@ -11850,12 +12416,12 @@ mod undertaking_tests {
         let mut held = taken(1_000);
         let nearly = 1_000 + STRANDING_PATIENCE - 1;
         assert!(matches!(
-            owed_this_round(&mut held, 400, 1, STRANDING_PATIENCE, nearly),
+            owed_this_round(&mut held, 400, 1, STRANDING_PATIENCE, nearly, false),
             Owed::Waiting
         ));
         assert!(
             matches!(
-                owed_this_round(&mut held, 400, 1, STRANDING_PATIENCE, nearly + 1),
+                owed_this_round(&mut held, 400, 1, STRANDING_PATIENCE, nearly + 1, false),
                 Owed::AskAgain
             ),
             "one block arrived, so the hour is counted from there"
@@ -11869,11 +12435,11 @@ mod undertaking_tests {
         let mut held = taken(1_000);
         let waited = 1_000 + STRANDING_PATIENCE;
         assert!(matches!(
-            owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, waited - 1),
+            owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, waited - 1, false),
             Owed::AskAgain | Owed::Waiting
         ));
         let Owed::GivenUp(stranded) =
-            owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, waited)
+            owed_this_round(&mut held, 100, 1, STRANDING_PATIENCE, waited, false)
         else {
             panic!("an hour of nothing, with peers to ask, is not something to wait out");
         };
@@ -11888,8 +12454,50 @@ mod undertaking_tests {
     fn a_clock_that_went_backwards_starts_the_waiting_again() {
         let mut held = taken(1_000);
         assert!(matches!(
-            owed_this_round(&mut held, 100, 1, 0, 900),
+            owed_this_round(&mut held, 100, 1, 0, 900, false),
             Owed::Waiting
+        ));
+    }
+
+    /// A machine that was away comes back to a wait that starts again, not to
+    /// a wait as long as its absence.
+    ///
+    /// The round that saw the gap forgave the address book and nothing else,
+    /// so a laptop closed for an hour on a node on probation woke, counted the
+    /// hour as waiting with peers to ask, stopped, and told its operator to
+    /// delete the data directory. The same round without the mark still gives
+    /// up, which is the claim above kept.
+    #[test]
+    fn a_node_that_was_away_for_an_hour_starts_its_wait_again() {
+        let woke = 1_000 + STRANDING_PATIENCE;
+        let mut away = taken(1_000);
+        assert!(
+            matches!(
+                owed_this_round(&mut away, 100, 1, STRANDING_PATIENCE, woke, true),
+                Owed::Waiting
+            ),
+            "an hour the machine was away was counted as an hour of waiting"
+        );
+        assert_eq!(away.moved, woke, "the wait starts again from waking");
+        assert!(
+            matches!(
+                owed_this_round(
+                    &mut away,
+                    100,
+                    1,
+                    STRANDING_PATIENCE,
+                    woke + STRANDING_PATIENCE,
+                    false
+                ),
+                Owed::GivenUp(_)
+            ),
+            "and an hour of nothing after waking is still an hour of nothing"
+        );
+
+        let mut here = taken(1_000);
+        assert!(matches!(
+            owed_this_round(&mut here, 100, 1, STRANDING_PATIENCE, woke, false),
+            Owed::GivenUp(_)
         ));
     }
 }
@@ -11897,7 +12505,10 @@ mod undertaking_tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod quiet_tests {
-    use super::{has_gone_quiet, JOIN_PATIENCE};
+    use super::{
+        a_lookup_is_due, has_gone_quiet, has_gone_silent, JOIN_PATIENCE, NAME_LOOKUP_PERIOD,
+        PEER_SILENCE,
+    };
 
     #[test]
     fn a_join_is_given_up_on_only_once_it_has_gone_quiet() {
@@ -11917,6 +12528,47 @@ mod quiet_tests {
         assert!(
             has_gone_quiet(Some(1_000), 900),
             "a clock that went backwards says how long it waited is worthless"
+        );
+    }
+
+    /// A connection is given up for silence one silence after the clock steps
+    /// back, and not one silence after the clock climbs back past the last
+    /// word.
+    ///
+    /// The silence read nought while the clock stood behind that word, so a
+    /// connection that died just before a step back of an hour was kept for
+    /// that hour, and counted among the peers this node has, so nobody was
+    /// dialled in its place.
+    #[test]
+    fn a_silence_is_counted_from_the_step_when_the_clock_goes_back() {
+        let silence = PEER_SILENCE.as_secs();
+        let mut last_heard = 10_000;
+        let stepped_back = 10_000 - 3_600;
+        assert!(!has_gone_silent(&mut last_heard, stepped_back));
+        assert!(
+            has_gone_silent(&mut last_heard, stepped_back + silence),
+            "a silence after the clock stepped back an hour, the connection was still kept"
+        );
+
+        let mut last_heard = 10_000;
+        assert!(!has_gone_silent(&mut last_heard, 10_000 + silence - 1));
+        assert!(has_gone_silent(&mut last_heard, 10_000 + silence));
+    }
+
+    /// The names a node starts from are looked up once a period, and at once
+    /// when the clock has gone back behind the last lookup.
+    ///
+    /// The period read nought while the clock stood behind the last lookup, so
+    /// a node with no seed address and a clock put back an hour looked nobody
+    /// up for that hour.
+    #[test]
+    fn a_name_is_looked_up_again_once_the_clock_has_gone_back() {
+        assert!(a_lookup_is_due(0, 10_000), "a node that never looked looks");
+        assert!(!a_lookup_is_due(10_000, 10_000 + NAME_LOOKUP_PERIOD - 1));
+        assert!(a_lookup_is_due(10_000, 10_000 + NAME_LOOKUP_PERIOD));
+        assert!(
+            a_lookup_is_due(10_000, 10_000 - 3_600),
+            "a clock put back an hour held the next lookup off for that hour"
         );
     }
 }

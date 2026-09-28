@@ -50,6 +50,16 @@ pub struct PeerState {
     /// it has.
     pub greeted: bool,
     pub height: u64,
+    /// The most work this peer has claimed for its chain: what it wrote in
+    /// its greeting, raised by any block it delivers above what this node
+    /// holds that claims more.
+    ///
+    /// It was the greeting and nothing else, and nothing revised it. Every
+    /// long-lived connection of a node at the tip was greeted at equal work,
+    /// so a node that missed one block, lost a tie at one height, or refused
+    /// a block for its timestamp heard the next block from that peer, found
+    /// its parent missing, and asked for nothing, for as long as the
+    /// connection lived.
     pub total_work: u128,
     /// What the peer said it kept. Choosing whom to join has to know the
     /// first about everyone who spoke, and a wallet looking for somebody to
@@ -97,15 +107,19 @@ pub struct PeerState {
     /// one that was closed.
     ///
     /// Set where a `GetChain` is sent, which is only ever this node's own
-    /// doing, and taken by the `Chain` that answers it.
+    /// doing, and taken by the `Chain` that answers it. This layer sends one
+    /// from `greet` and `follow_up`; the node sends one from outside it, and
+    /// says so through [`asked_for_the_chain`], which it could not do until
+    /// that was written: every answer to the node's own questions was priced
+    /// as a push.
     ///
     /// This said "nothing a peer says sets it", which was true of the
     /// assignment and false of what causes it. `follow_up` asks again whenever
     /// nothing is outstanding and `total_work` says the peer is ahead, and
-    /// `total_work` is a number the peer wrote in its own greeting and nothing
-    /// ever revises. So a peer claiming the most work there is kept the gate
-    /// open for good, and emptied `awaiting` itself by sending a block at each
-    /// height it had named: every block it pushed, fully decoded and never
+    /// `total_work` is a number the peer writes, in its greeting and in the
+    /// blocks it delivers. So a peer claiming the most work there is kept the
+    /// gate open for good, and emptied `awaiting` itself by sending a block at
+    /// each height it had named: every block it pushed, fully decoded and never
     /// applied because its parent was invented, re-armed the discount for the
     /// next hundred and twenty eight. One unit a block, against a frame
     /// ceiling two thousand times larger than a unit pays for.
@@ -122,21 +136,40 @@ pub struct PeerState {
     /// `GetChain` still goes out, because this node does want the chain from a
     /// peer that says it has more, but its answer pays what any push pays.
     pub work_when_asked: Option<u128>,
-    /// When the outstanding batch was asked for.
+    /// When the outstanding batch was asked for, or when the last block of it
+    /// arrived, whichever is later.
     ///
     /// A peer that answers everything else but never delivers the blocks it
     /// was asked for would otherwise hold this node mid batch indefinitely,
     /// which is a way of stalling a sync without ever looking unresponsive.
     ///
-    /// The only time this struct keeps, and deliberately. When a peer last
-    /// said anything is a different question with a different answer, and the
-    /// answer is `last_heard` in the connection loop, which is where the
-    /// decision that reads it is made: ninety seconds of quiet ends the
-    /// connection. A `last_message` was kept here as well, written on every
-    /// message from every peer and read by nothing, which is two records of
-    /// one fact where only one of them decides. Whoever wants a rule about a
-    /// quiet peer wants the one in the loop.
+    /// Renewed by a block of the batch arriving, which is the reading the
+    /// wire's own patience takes: a link that keeps delivering is still going.
+    /// Measured from the ask alone, a peer sending a full batch more slowly
+    /// than one batch a patience was asked for the chain again while it was
+    /// still sending, sent the same blocks twice, and paid for both.
+    ///
+    /// One of two times this struct keeps, both about what this node is waiting
+    /// on, and deliberately. When a peer last said anything is a different
+    /// question with a different answer, and the answer is `last_heard` in the
+    /// connection loop, which is where the decision that reads it is made:
+    /// ninety seconds of quiet ends the connection. A `last_message` was kept
+    /// here as well, written on every message from every peer and read by
+    /// nothing, which is two records of one fact where only one of them
+    /// decides. Whoever wants a rule about a quiet peer wants the one in the
+    /// loop.
     pub asked_at: u64,
+    /// The moment this node's clock allows a block this peer sent that it
+    /// refused for being dated ahead of it, while that moment is still to
+    /// come.
+    ///
+    /// The chain is not asked of this peer before then. Every block above the
+    /// refused one hangs on it, so each arrived with its parent missing and
+    /// asked for the chain, whose answer named the refused block again, to be
+    /// refused again: a batch a round trip for as long as the clock was
+    /// behind. And once the wait was over nothing asked, so the refused block
+    /// came back only with the peer's next announcement.
+    pub clock_allows_at: Option<u64>,
     /// Where the connection came from, filled in by whoever opened it.
     pub remote: Option<IpAddr>,
     /// Whether this node went out and opened this connection.
@@ -938,6 +971,21 @@ pub struct Reaction {
     /// the same reason [`Self::unjudged`] is: one of these is a number a
     /// stranger writes in a field.
     pub ahead_of_the_clock: Option<u64>,
+    /// The first height a peer said it can supply, when that is above this
+    /// node's tip, in answer to this node's own question for its chain.
+    ///
+    /// A peer answers from where its log begins when that is above anything
+    /// this node agrees with, and a node further behind than its peers keep
+    /// blocks for is answered that way by all of them. It used to ask for
+    /// those heights all the same, take blocks whose parents it would never
+    /// hold, and ask for the chain again after each batch, for as long as it
+    /// ran, printing healthy lines under a height that did not move. It
+    /// cannot be handed a ledger either, since it already follows a chain.
+    ///
+    /// Named rather than acted on, and counted where peers are counted: one
+    /// of these is a number a peer writes, and what a node should conclude
+    /// from several is a question about the node.
+    pub cannot_supply: Option<u64>,
 }
 
 impl Reaction {
@@ -1093,7 +1141,9 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
 
 /// How long a batch of blocks may be outstanding before the node gives up on
 /// it and asks again.
-const BATCH_PATIENCE: u64 = 60;
+///
+/// Public so a test names this number rather than restating it.
+pub const BATCH_PATIENCE: u64 = 60;
 
 /// The chain length past which being handed a ledger beats reading one.
 ///
@@ -1116,7 +1166,15 @@ const BATCH_PATIENCE: u64 = 60;
 /// with nothing cannot back out of once it follows it. That is why a
 /// newcomer facing a chain past this length does not ask on the handshake,
 /// and lets [`crate::choosing`] decide whom to ask instead.
+///
+/// Held to that by the build below rather than by this sentence alone, as the
+/// other two numbers tied to the same depth are (`MAX_BEHIND` and the
+/// handover's burial): a change to either end that forgot the other would
+/// leave a newcomer committing, on a handshake, to a chain it can no longer
+/// back out of.
 pub const JOIN_RATHER_THAN_READ: u64 = 1_024;
+
+const _: () = assert!(JOIN_RATHER_THAN_READ == cairn_chain::MAX_REORG_DEPTH as u64);
 
 /// Heights one peer may have outstanding at any moment.
 ///
@@ -1219,7 +1277,7 @@ fn request_range(
         .count()
         > room
     {
-        // Not a dead end. `BATCH_PATIENCE` is read in `follow_up` and nowhere
+        // Not a dead end. `BATCH_PATIENCE` was read in `follow_up` and nowhere
         // else, so returning nothing here left a peer that had filled the set
         // to its ceiling in a state the node never left: the patience was
         // never evaluated and the chain was never asked for again. Its sibling
@@ -1296,17 +1354,24 @@ fn request_announced(
 
 /// Once a batch has landed, asks for the next one if this node is still behind.
 ///
-/// This is what drives a sync forward without any timer: each answer produces
-/// the next question, and the questions stop when the node has caught up.
+/// This is what drives a sync forward: each answer produces the next question,
+/// and the questions stop when the node has caught up.
 ///
 /// The one exception is a batch that never arrives. A peer answering
 /// everything else while quietly never sending the blocks it was asked for
 /// looks perfectly healthy and stalls the sync all the same, so an outstanding
 /// batch is abandoned after [`BATCH_PATIENCE`] and the question asked again.
+/// That half needs a clock rather than an answer, and [`tick`] is what runs it
+/// when no answer comes.
 fn follow_up(chain: &ChainStore, peer: &mut PeerState, now: u64) -> Reaction {
-    if !peer.awaiting.is_empty() && now.saturating_sub(peer.asked_at) >= BATCH_PATIENCE {
-        peer.awaiting.clear();
-        peer.offered.clear();
+    give_up_on_a_stalled_batch(peer, now);
+    // Asking now would bring back a block this node's clock still refuses.
+    // See [`PeerState::clock_allows_at`].
+    if let Some(at) = peer.clock_allows_at {
+        if now < at {
+            return Reaction::idle();
+        }
+        peer.clock_allows_at = None;
     }
     if peer.awaiting.is_empty() && peer.total_work > chain.total_work() {
         let now_work = chain.total_work();
@@ -1318,6 +1383,60 @@ fn follow_up(chain: &ChainStore, peer: &mut PeerState, now: u64) -> Reaction {
         return Reaction::reply(vec![Message::GetChain {
             locator: chain.locator(),
         }]);
+    }
+    Reaction::idle()
+}
+
+/// Writes down that this node asked `peer` for its chain from outside this
+/// layer, so the `Chain` that answers is taken as an answer.
+///
+/// By the same rule `follow_up` keeps: the discount is for a peer asked for
+/// the first time or whose last round moved this node's chain, so a question
+/// the node repeats while nothing arrives, which the probation does every half
+/// minute, does not buy a peer a batch at a unit a block each time. A mark
+/// already standing is kept, so a greeting's question still outstanding is not
+/// unmarked by one put from outside after it.
+pub fn asked_for_the_chain(chain: &ChainStore, peer: &mut PeerState) {
+    let now_work = chain.total_work();
+    let earned = peer.work_when_asked.is_none_or(|before| now_work > before);
+    peer.chain_asked = peer.chain_asked || earned;
+    peer.work_when_asked = Some(now_work);
+}
+
+/// Abandons the outstanding batch once [`BATCH_PATIENCE`] has passed without a
+/// block of it arriving, and says whether it did.
+///
+/// A clock that went back says nothing about how long the batch has been
+/// out, so the wait starts again from the present rather than reading nought
+/// until the clock climbs back past the ask. The chooser pulls every moment it
+/// holds to the present for the same reason, and the probation restarts its
+/// wait; this one did neither, so a step back of an hour added an hour to the
+/// sixty seconds a quiet peer was given.
+fn give_up_on_a_stalled_batch(peer: &mut PeerState, now: u64) -> bool {
+    peer.asked_at = peer.asked_at.min(now);
+    if peer.awaiting.is_empty() || now.saturating_sub(peer.asked_at) < BATCH_PATIENCE {
+        return false;
+    }
+    peer.awaiting.clear();
+    peer.offered.clear();
+    true
+}
+
+/// What the passing of time alone owes one peer: a batch past its patience
+/// given up on and the chain asked for again, and the chain asked for once
+/// the clock allows a block it refused.
+///
+/// Run after every message this layer answers, and by the connection's loop
+/// whenever a read comes back with nothing to read. The patience used to be
+/// read only where a `Chain`, an `Announce` or a `Block` arrived, so a peer
+/// that had answered everything it was asked and went on talking about
+/// anything else, or said nothing at all, held this node mid batch until its
+/// next announcement: a block interval away, whatever the patience said.
+pub fn tick(chain: &ChainStore, peer: &mut PeerState, now: u64) -> Reaction {
+    let gave_up = give_up_on_a_stalled_batch(peer, now);
+    let allowed = peer.clock_allows_at.is_some_and(|at| now >= at);
+    if gave_up || allowed {
+        return follow_up(chain, peer, now);
     }
     Reaction::idle()
 }
@@ -1344,7 +1463,12 @@ fn below_everything_held(chain: &ChainStore, height: u64) -> bool {
 fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64) -> Reaction {
     let id = block.id();
     let height = block.header.height;
-    peer.awaiting.remove(&height);
+    let claimed = block.header.total_work;
+    // A block of the batch arriving is the batch still coming. See
+    // [`PeerState::asked_at`].
+    if peer.awaiting.remove(&height) {
+        peer.asked_at = now;
+    }
     peer.offered.remove(&height);
     // Whether a body is already held under this identifier, in which case the
     // one this peer sent is not the one kept.
@@ -1369,12 +1493,27 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
         // simply has not caught up to where it hangs. Asking again from a fresh
         // locator resolves it.
         //
+        // Asked of this peer because this peer sent it. A block claiming more
+        // work than this node's whole chain says the peer that delivered it is
+        // ahead, whatever it said when it introduced itself, and the greeting
+        // used to be the only figure `follow_up` read. Every connection a node
+        // at the tip keeps was greeted at equal work, so a missed announcement,
+        // a tie at one height settled the other way, or a block refused for
+        // its timestamp left the next block hanging on a parent nobody would
+        // ever name again. The claim is the peer's word, as its greeting was,
+        // and the price of the batch that answers is kept by
+        // [`PeerState::work_when_asked`] rather than by it.
+        //
         // Unless it hangs below everything this node holds, which is not
         // history it is missing but history it can never have. Nothing is held
         // against the peer there either; the difference is only that waiting
-        // will not fix it, and that used to go unrecorded.
+        // will not fix it, and that used to go unrecorded. Nor is the chain
+        // asked for there: its answer would be the same branch, refused again.
         Err(ChainError::UnknownParent(_) | ChainError::NotGenesis) => {
             let out_of_reach = below_everything_held(chain, height);
+            if !out_of_reach {
+                peer.total_work = peer.total_work.max(claimed);
+            }
             let mut reaction = follow_up(chain, peer, now);
             if out_of_reach {
                 reaction.unreachable = Some(height);
@@ -1467,19 +1606,33 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
         // back, be offered the same block, and refuse it again, which is a
         // loop that costs both ends a connection each time round; and there is
         // nothing to end the connection for, since the peer is right and this
-        // node is the one that has to wait. The block is offered again by
-        // whoever announces the next one, and by then the wait is usually
-        // over.
+        // node is the one that has to wait.
+        //
+        // What brings the block back is this peer being asked for the chain
+        // once the clock allows the block, and not before. This said "the
+        // block is offered again by whoever announces the next one", and what
+        // is offered is the next block, whose parent is this one: it asked
+        // nothing of a peer greeted as an equal, and of any other it asked at
+        // once, for an answer naming this block again, refused again.
+        //
+        // The block claims more work than this node holds, as a block above
+        // the tip does, so it is counted as the peer being ahead: see the arm
+        // for a missing parent.
         //
         // Said, though, because this is the only place in the node that can
         // see a clock is wrong. See [`Reaction::ahead_of_the_clock`].
         Err(ChainError::InvalidBlock {
-            source: BlockError::TimestampTooFarAhead { timestamp, .. },
+            source: BlockError::TimestampTooFarAhead { timestamp, drift },
             ..
-        }) => Reaction {
-            ahead_of_the_clock: Some(timestamp.saturating_sub(now)),
-            ..Reaction::idle()
-        },
+        }) => {
+            peer.total_work = peer.total_work.max(claimed);
+            let allowed = timestamp.saturating_sub(drift);
+            peer.clock_allows_at = Some(peer.clock_allows_at.map_or(allowed, |at| at.max(allowed)));
+            Reaction {
+                ahead_of_the_clock: Some(timestamp.saturating_sub(now)),
+                ..Reaction::idle()
+            }
+        }
         // A block below this one failed, not this one. It was held aside
         // unjudged, which is every block of a branch lighter than the one
         // followed, and this delivery made its branch the heaviest, so the
@@ -1746,6 +1899,27 @@ pub fn on_message(
         return Reaction::idle();
     };
 
+    let mut reaction = answer(local, peer, message, charged, now);
+    // Whatever the message was, and after it: a block of the batch arriving
+    // at the last moment is still the batch arriving.
+    if reaction.drop_peer.is_none() {
+        let due = tick(local.chain, peer, now);
+        reaction.reply.extend(due.reply);
+    }
+    reaction
+}
+
+/// What one message from an introduced peer that could afford it calls for.
+///
+/// `charged` is what the message cost the peer, which a block this node asked
+/// for hands back once it is on the branch followed.
+fn answer(
+    local: &mut Local<'_>,
+    peer: &mut PeerState,
+    message: Message,
+    charged: u32,
+    now: u64,
+) -> Reaction {
     match message {
         // A pong needs no answer, a second introduction was already refused
         // above, and a piece of a join answer belongs to whoever is collecting
@@ -1791,6 +1965,18 @@ pub fn on_message(
             // Taken rather than read, so one `GetChain` pays for one answer
             // and a peer that sends five gets the price of a push for four.
             let prompted = std::mem::take(&mut peer.chain_asked);
+            let have = local.chain.height().map_or(0, |tip| tip.saturating_add(1));
+            // Nothing this node holds connects to a stretch that starts above
+            // its tip, so none of it is asked for: see
+            // [`Reaction::cannot_supply`]. Not the chain again either, which
+            // would only bring the same answer back. A node with no chain has
+            // a chooser to ask somebody else, and is left to it.
+            if from > have && !local.chain.is_empty() {
+                return Reaction {
+                    cannot_supply: prompted.then_some(from),
+                    ..Reaction::idle()
+                };
+            }
             if start >= end {
                 follow_up(local.chain, peer, now)
             } else {

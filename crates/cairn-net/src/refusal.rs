@@ -100,8 +100,19 @@ impl Refusals {
         self.until.get(&host).is_some_and(|until| *until > now)
     }
 
+    /// Forgets the refusals that are over, and brings back any that would
+    /// outlast a refusal counted from `now`.
+    ///
+    /// Only a clock that went backwards leaves one of those. Its deadline
+    /// stands where the old clock put it, and read against the new one a
+    /// step back of an hour held every host refused before it for an hour
+    /// and ten minutes.
     pub(crate) fn forget_expired(&mut self, now: u64) {
         self.until.retain(|_, until| *until > now);
+        let longest = now.saturating_add(REFUSAL_SECONDS);
+        for until in self.until.values_mut() {
+            *until = (*until).min(longest);
+        }
     }
 
     #[cfg(test)]
@@ -149,6 +160,25 @@ mod tests {
         assert_eq!(refusals.len(), 2);
         refusals.forget_expired(1_000 + REFUSAL_SECONDS);
         assert!(refusals.is_empty());
+    }
+
+    /// A refusal written before the clock went back lasts no longer than one
+    /// written now.
+    ///
+    /// Its deadline stood where the old clock put it, so a step back of an
+    /// hour held every host refused before it for an hour and ten minutes.
+    #[test]
+    fn a_refusal_outlives_a_step_back_of_the_clock_by_nothing() {
+        let mut refusals = Refusals::new();
+        refusals.refuse(host(1), 10_000);
+        let stepped_back = 10_000 - 3_600;
+        refusals.forget_expired(stepped_back);
+        assert!(refusals.refuses(host(1), stepped_back + REFUSAL_SECONDS - 1));
+        assert!(
+            !refusals.refuses(host(1), stepped_back + REFUSAL_SECONDS),
+            "a host refused before the clock stepped back an hour was still refused past a \
+             whole refusal counted from the step"
+        );
     }
 
     #[test]

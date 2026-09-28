@@ -18,7 +18,10 @@ use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
 use cairn_net::message::{Handshake, Message, PeerAddress, Placed, MAX_CHAIN, PROTOCOL_VERSION};
-use cairn_net::sync::{local_handshake, on_message, DropReason, Local, PeerState};
+use cairn_net::sync::{
+    asked_for_the_chain, local_handshake, on_message, tick, DropReason, Local, PeerState,
+    BATCH_PATIENCE,
+};
 use cairn_net::wire::{read_message, write_message, Incoming, WireError, MAX_FRAME_BYTES};
 use cairn_net::Keeps;
 use cairn_primitives::codec::{Decode, Encode};
@@ -50,6 +53,16 @@ impl Forge {
     }
 
     fn mine(&mut self) -> Block {
+        self.mine_judged_at(NOW)
+    }
+
+    /// The next block, checked against a clock that agrees with its own date,
+    /// so a block can be dated further ahead than a node at `NOW` allows.
+    fn mine_by_its_own_clock(&mut self) -> Block {
+        self.mine_judged_at(self.clock + 600)
+    }
+
+    fn mine_judged_at(&mut self, now: u64) -> Block {
         let miner = SecretKey::from_bytes(&[1; 32]);
         let height = self.state.next_height().unwrap();
         self.clock += 600;
@@ -67,12 +80,23 @@ impl Forge {
         )
         .unwrap();
         let block = mine_block(block, ATTEMPTS).unwrap();
-        connect_block(&mut self.state, &block, &self.params, NOW).unwrap();
+        connect_block(&mut self.state, &block, &self.params, now).unwrap();
         block
     }
 
     fn mine_many(&mut self, count: usize) -> Vec<Block> {
         (0..count).map(|_| self.mine()).collect()
+    }
+
+    /// A second miner starting from the same ledger, whose next block is
+    /// dated a few seconds apart, so it is a different block at the same
+    /// height.
+    fn fork(&self) -> Self {
+        Self {
+            params: self.params,
+            state: self.state.clone(),
+            clock: self.clock + 7,
+        }
     }
 }
 
@@ -127,7 +151,7 @@ fn exchange(
 fn resolve(reaction: cairn_net::sync::Reaction, chain: &ChainStore) -> Vec<Message> {
     let mut out = reaction.reply;
     if let Some(locator) = reaction.locate.as_ref() {
-        let (from, count) = chain.chain_after(locator, MAX_CHAIN);
+        let (from, count) = chain.chain_after(locator, MAX_CHAIN, 0);
         out.push(Message::Chain { from, count });
     }
     for height in &reaction.fetch {
@@ -161,6 +185,19 @@ fn greeted_peer(work: u128, height: u64) -> PeerState {
         total_work: work,
         ..PeerState::default()
     }
+}
+
+/// A peer that introduced itself when it stood exactly where this node
+/// stands, so the greeting asked it for nothing. It is the state every
+/// long-lived connection of a node at the tip is in.
+fn greeted_as_equal(chain: &ChainStore) -> PeerState {
+    greeted_peer(chain.total_work(), chain.height().unwrap())
+}
+
+fn asks_for_the_chain(reply: &[Message]) -> bool {
+    reply
+        .iter()
+        .any(|said| matches!(said, Message::GetChain { .. }))
 }
 
 #[test]
@@ -580,6 +617,444 @@ fn a_block_whose_parent_is_missing_is_not_held_against_the_peer() {
     assert!(
         matches!(reaction.reply.first(), Some(Message::GetChain { .. })),
         "it asks again from where it actually stands"
+    );
+}
+
+/// A block delivered above this node's tip says the peer that delivered it
+/// is ahead, whatever the peer said when it introduced itself.
+///
+/// The test above holds the same promise for a peer that greeted as ahead,
+/// and that was the only fixture there was. Nothing asked it of a peer that
+/// greeted as an equal, which is every long-lived connection of a node at
+/// the tip: the work a peer wrote in its greeting was the only figure the
+/// asking read, and nothing revised it, so a node that missed one
+/// announcement asked nothing and stayed behind for as long as its
+/// connections lived.
+#[test]
+fn a_block_above_the_tip_from_a_peer_greeted_as_an_equal_asks_for_the_chain() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(6);
+    let mut node = store_with(params, &blocks[..3]);
+    let mut peer = greeted_as_equal(&node);
+
+    // The peer has since applied 3, 4 and 5, and this node heard only of 5.
+    let announced = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Announce(vec![Located::new(5, blocks[5].id())]),
+        NOW,
+    );
+    assert!(
+        matches!(announced.reply.first(), Some(Message::GetBlocks(_))),
+        "the announced block is asked for"
+    );
+    let arrived = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Block(Box::new(blocks[5].clone())),
+        NOW + 1,
+    );
+
+    assert!(arrived.drop_peer.is_none(), "the peer did nothing wrong");
+    assert_eq!(
+        node.height(),
+        Some(2),
+        "the block hangs on a missing parent"
+    );
+    assert!(
+        asks_for_the_chain(&arrived.reply),
+        "a block three heights above this node's tip, from the peer that announced it, is \
+         evidence the peer is ahead, and nothing was asked of it: the asking read only the \
+         work the peer wrote in its greeting"
+    );
+}
+
+/// A peer that can supply blocks only from above this node's tip is not
+/// asked for them.
+///
+/// A node further behind than its peers keep blocks for is answered from
+/// where their logs begin, above its own tip. It asked for those heights all
+/// the same, took blocks whose parents it would never hold, and asked again
+/// for the chain after each batch, for as long as it ran, with nothing said.
+#[test]
+fn a_peer_that_can_supply_only_from_above_the_tip_is_not_asked_for_those_blocks() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(3);
+    let mut node = store_with(params, &blocks);
+    let mut peer = greeted_peer(u128::MAX / 2, 5_000);
+    peer.chain_asked = true;
+
+    let answered = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Chain {
+            from: 4_000,
+            count: 1_000,
+        },
+        NOW,
+    );
+    assert!(
+        !answered
+            .reply
+            .iter()
+            .any(|said| matches!(said, Message::GetBlocks(_))),
+        "heights no block this node holds can connect to were asked for"
+    );
+    assert!(peer.awaiting.is_empty(), "and are waited on for nothing");
+    assert_eq!(
+        answered.cannot_supply,
+        Some(4_000),
+        "a peer that cannot supply what is above this node's tip was not said to"
+    );
+
+    // The same answer nobody asked for is a number a peer wrote, and is not
+    // passed up as evidence of anything.
+    let unasked = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Chain {
+            from: 4_000,
+            count: 1_000,
+        },
+        NOW,
+    );
+    assert_eq!(unasked.cannot_supply, None);
+}
+
+/// A tie at one height that the network resolved the other way is followed
+/// onto the branch that won.
+///
+/// A block that lands as a side branch is announced by nobody, so this node
+/// hears of the winning branch only through the block that settles the tie,
+/// and that block's parent is the side of the tie it never saw. Nothing
+/// asked for the chain there from a peer greeted as an equal, so a node that
+/// took the losing block first kept the branch the network had left.
+#[test]
+fn a_tie_resolved_the_other_way_asks_for_the_branch_that_won() {
+    let params = params();
+    let mut miner_a = Forge::new(params);
+    let shared = miner_a.mine_many(3);
+    let mut miner_b = miner_a.fork();
+    let a3 = miner_a.mine();
+    let b3 = miner_b.mine();
+    let b4 = miner_b.mine();
+    assert_ne!(a3.id(), b3.id(), "two different blocks at height 3");
+
+    let mut node = store_with(params, &shared);
+    node.add_block(a3, NOW).unwrap();
+    // Greeted while both stood on the same height, before the tie resolved.
+    let mut peer = greeted_as_equal(&node);
+
+    on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Announce(vec![Located::new(4, b4.id())]),
+        NOW + 60,
+    );
+    let arrived = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Block(Box::new(b4)),
+        NOW + 61,
+    );
+
+    assert!(arrived.drop_peer.is_none());
+    assert_eq!(
+        node.height(),
+        Some(3),
+        "B4 hangs on B3, which this node never saw"
+    );
+    assert!(
+        asks_for_the_chain(&arrived.reply),
+        "the network settled a tie on the other branch, and the one message that would bring \
+         the block this node missed is a request for the chain, which was not sent"
+    );
+}
+
+/// A block refused for being dated ahead of this node's clock is asked for
+/// again once the clock allows it.
+///
+/// The refusal said "the block is offered again by whoever announces the
+/// next one". What the next announcement offers is the next block, whose
+/// parent is the refused one, and a missing parent from a peer greeted as an
+/// equal asked for nothing, so the refused block was never named again.
+#[test]
+fn a_block_refused_for_its_timestamp_is_asked_for_again_once_the_clock_allows_it() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let settled = forge.mine_many(3);
+    forge.clock = NOW + params.max_timestamp_drift + 600;
+    let ahead = forge.mine_by_its_own_clock();
+    let next = forge.mine_by_its_own_clock();
+
+    let mut node = store_with(params, &settled);
+    let mut peer = greeted_as_equal(&node);
+    let refused = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Block(Box::new(ahead)),
+        NOW,
+    );
+    assert!(
+        refused.ahead_of_the_clock.is_some(),
+        "the fixture has to reach the timestamp refusal"
+    );
+
+    // Later, with this node's clock past the refused block's date less the
+    // drift, the peer announces the block after it.
+    let later = NOW + params.max_timestamp_drift + 1_800;
+    on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Announce(vec![Located::new(4, next.id())]),
+        later,
+    );
+    let arrived = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Block(Box::new(next)),
+        later + 1,
+    );
+
+    assert!(arrived.drop_peer.is_none());
+    assert_eq!(
+        node.height(),
+        Some(2),
+        "block 4 hangs on the refused block 3"
+    );
+    assert!(
+        asks_for_the_chain(&arrived.reply),
+        "the refused block only comes back through a request for the chain, and none was sent"
+    );
+}
+
+/// A peer whose block this node's clock refused is not asked for the chain
+/// again until the clock allows that block, and is asked the moment it does.
+///
+/// Every block above the refused one hangs on it, so each arrives with its
+/// parent missing and asks for the chain, and the answer names the refused
+/// block again, to be refused again: a batch a round trip for as long as
+/// the clock is behind. Nothing held a peer greeted as ahead back from that,
+/// and nothing asked again once the wait was over except the peer's next
+/// announcement.
+#[test]
+fn a_peer_whose_block_the_clock_refused_is_asked_again_when_the_clock_allows_it() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let settled = forge.mine_many(3);
+    forge.clock = NOW + params.max_timestamp_drift + 600;
+    let ahead = forge.mine_by_its_own_clock();
+    let next = forge.mine_by_its_own_clock();
+    let allowed = ahead.header.timestamp - params.max_timestamp_drift;
+
+    let mut node = store_with(params, &settled);
+    let mut peer = greeted_as_equal(&node);
+    let refused = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Block(Box::new(ahead)),
+        NOW,
+    );
+    assert!(refused.ahead_of_the_clock.is_some());
+    let hanging = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Block(Box::new(next)),
+        NOW + 1,
+    );
+    assert!(
+        !asks_for_the_chain(&hanging.reply),
+        "the block this one hangs on is still ahead of the clock, so asking for the chain \
+         brings it back only to be refused again"
+    );
+    let early = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Ping(1),
+        allowed - 1,
+    );
+    assert!(
+        !asks_for_the_chain(&early.reply),
+        "one second before the clock allows the refused block, the chain was asked for"
+    );
+
+    let on_time = on_message(&mut solo(&mut node), &mut peer, Message::Ping(2), allowed);
+    assert!(
+        asks_for_the_chain(&on_time.reply),
+        "the clock allows the refused block now, and nothing asked for it again"
+    );
+}
+
+/// A batch past its patience is given up on, and the chain asked for again,
+/// on whatever the peer says next.
+///
+/// The patience was read where a `Chain`, an `Announce` or a `Block` arrived
+/// and nowhere else, so a peer that had answered everything it was asked and
+/// went on talking about anything else held this node mid batch until its
+/// next announcement, a block interval away whatever the patience said.
+#[test]
+fn a_batch_past_its_patience_is_asked_again_on_the_next_word_from_the_peer() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(4);
+    let mut node = store_with(params, &blocks[..1]);
+    let mut peer = greeted_peer(blocks[3].header.total_work, 3);
+    let asked = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Chain { from: 1, count: 3 },
+        NOW,
+    );
+    assert!(matches!(asked.reply.first(), Some(Message::GetBlocks(_))));
+
+    let inside = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Ping(1),
+        NOW + BATCH_PATIENCE - 1,
+    );
+    assert!(
+        !asks_for_the_chain(&inside.reply) && peer.awaiting.len() == 3,
+        "a batch inside its patience was given up on"
+    );
+
+    let past = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Ping(2),
+        NOW + BATCH_PATIENCE,
+    );
+    assert!(
+        matches!(past.reply.first(), Some(Message::Pong(2))),
+        "the ping is still answered first"
+    );
+    assert!(
+        asks_for_the_chain(&past.reply) && peer.awaiting.is_empty(),
+        "a batch past its patience is still held against a peer that keeps talking, because \
+         the patience is read only when the peer speaks of its chain"
+    );
+}
+
+/// The same with nothing said at all: the loop that reads a quiet
+/// connection gives the batch its patience too.
+///
+/// Nothing ran the patience without a message to run it, so a peer that went
+/// silent owing a batch held it until the connection was dropped for
+/// silence, a minute and a half later, and nobody was asked meanwhile.
+#[test]
+fn a_batch_past_its_patience_is_asked_again_when_the_peer_says_nothing() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(4);
+    let mut node = store_with(params, &blocks[..1]);
+    let mut peer = greeted_peer(blocks[3].header.total_work, 3);
+    on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Chain { from: 1, count: 3 },
+        NOW,
+    );
+
+    let inside = tick(&node, &mut peer, NOW + BATCH_PATIENCE - 1);
+    assert!(
+        inside.reply.is_empty() && peer.awaiting.len() == 3,
+        "a batch inside its patience was given up on"
+    );
+    let past = tick(&node, &mut peer, NOW + BATCH_PATIENCE);
+    assert!(
+        asks_for_the_chain(&past.reply) && peer.awaiting.is_empty(),
+        "a batch past its patience is held for as long as the peer says nothing"
+    );
+}
+
+/// A batch whose blocks keep arriving is not given up on, however long the
+/// whole of it takes.
+///
+/// The patience ran from the ask, so a peer delivering a long batch more
+/// slowly than one batch a patience was asked for the chain again while
+/// still sending, and sent everything twice. The wire's own patience renews
+/// on progress for that reason, and this one now does the same.
+#[test]
+fn a_peer_still_delivering_its_batch_is_not_asked_for_the_chain_again() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(6);
+    let mut node = store_with(params, &blocks[..1]);
+    let mut peer = greeted_peer(blocks[5].header.total_work, 5);
+    on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Chain { from: 1, count: 5 },
+        NOW,
+    );
+    assert_eq!(peer.awaiting.len(), 5, "five heights outstanding");
+
+    // One block every fifty seconds, each well inside the patience measured
+    // from the one before it.
+    let mut now = NOW;
+    for block in &blocks[1..5] {
+        now += BATCH_PATIENCE - 10;
+        let before = peer.awaiting.len();
+        let landed = on_message(
+            &mut solo(&mut node),
+            &mut peer,
+            Message::Block(Box::new(block.clone())),
+            now,
+        );
+        assert_eq!(node.height(), Some(block.header.height), "the block landed");
+        assert!(
+            !asks_for_the_chain(&landed.reply) && peer.awaiting.len() == before - 1,
+            "a peer delivering its batch a block every fifty seconds was given up on in the \
+             middle of it: the patience ran from the ask rather than from the last block"
+        );
+    }
+}
+
+/// A batch owed by a quiet peer is given up on one patience after the clock
+/// steps back, and not one patience after the clock climbs back past the ask.
+///
+/// The chooser pulls every moment it holds to the present when the clock
+/// steps back, and the probation restarts its wait. The batch patience did
+/// neither, so an hour's step was an hour added to the sixty seconds.
+#[test]
+fn a_batch_owed_by_a_quiet_peer_is_asked_again_one_patience_after_the_clock_stepped_back() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(4);
+    let mut node = store_with(params, &blocks[..1]);
+    let mut peer = greeted_peer(blocks[3].header.total_work, 3);
+    on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Chain { from: 1, count: 3 },
+        NOW,
+    );
+    assert_eq!(peer.awaiting.len(), 3);
+
+    // Any word from the peer reaches the patience (the test above), and a
+    // ping asks nothing that could stand in for the batch. A `Chain` from
+    // nought did, until a stretch a peer names inside one batch of the tip
+    // came to be asked for as its branch.
+    let nothing_new = |nonce| Message::Ping(nonce);
+    let stepped_back = NOW - 3_600;
+    on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        nothing_new(1),
+        stepped_back,
+    );
+    let later = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        nothing_new(2),
+        stepped_back + BATCH_PATIENCE + 1,
+    );
+    assert!(
+        asks_for_the_chain(&later.reply) && peer.awaiting.is_empty(),
+        "sixty one seconds after the clock stepped back an hour, the quiet peer still holds \
+         the batch: the wait read nought until the clock climbed back past the ask"
     );
 }
 
@@ -1079,6 +1554,119 @@ fn blocks_this_node_asked_for_do_not_use_up_its_allowance() {
     }
     assert_eq!(store.height(), Some(2), "all three landed");
     assert_eq!(peer.spent, 3, "one apiece, not the price of a stranger's");
+}
+
+/// Spends `peer`'s window down to `left` units with asks whose prices this
+/// file already holds: a request for addresses and a ping.
+fn spend_the_window_down_to(chain: &mut ChainStore, peer: &mut PeerState, left: u32, now: u64) {
+    let target = 8_192 - left;
+    while peer.spent + 64 <= target {
+        on_message(&mut solo(chain), peer, Message::GetPeers, now);
+    }
+    while peer.spent < target {
+        on_message(
+            &mut solo(chain),
+            peer,
+            Message::Ping(peer.spent.into()),
+            now,
+        );
+    }
+    assert_eq!(
+        peer.spent, target,
+        "the fixture spends exactly what it says"
+    );
+}
+
+/// Seven blocks answering a question this node asked, delivered against a
+/// window holding seven units, and the height they took the chain to.
+fn seven_blocks_against_seven_units(asked_from_outside: bool) -> Option<u64> {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(8);
+    let mut node = store_with(params, &blocks[..1]);
+    let mut peer = greeted_peer(u128::MAX / 2, 1_000);
+    if asked_from_outside {
+        asked_for_the_chain(&node, &mut peer);
+    }
+    let asked = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Chain { from: 1, count: 7 },
+        NOW,
+    );
+    assert!(matches!(asked.reply.first(), Some(Message::GetBlocks(_))));
+    spend_the_window_down_to(&mut node, &mut peer, 7, NOW);
+    for block in &blocks[1..] {
+        on_message(
+            &mut solo(&mut node),
+            &mut peer,
+            Message::Block(Box::new(block.clone())),
+            NOW,
+        );
+    }
+    node.height()
+}
+
+/// A batch answering a question the node put from outside this layer is
+/// charged as an answer, a unit a block.
+///
+/// The layer marked the questions it sent itself and nothing else could mark
+/// one, so the answer to the node's own questions (the choice of whom to
+/// read from, the nudge after it, the probation's question for the burial,
+/// the question after a handover lands) was priced as a push, and a busy
+/// window refused the batch. The unmarked half here is that price, which is
+/// right for a question nobody asked.
+#[test]
+fn a_batch_answering_a_question_the_node_asked_from_outside_is_charged_as_an_answer() {
+    assert_eq!(
+        seven_blocks_against_seven_units(true),
+        Some(7),
+        "seven blocks answering this node's own question were priced as pushes"
+    );
+    assert_eq!(
+        seven_blocks_against_seven_units(false),
+        Some(0),
+        "seven blocks nobody asked for were taken at the price of an answer"
+    );
+}
+
+/// A question put from outside is marked by the rule the layer keeps for its
+/// own: once for a peer whose last round moved nothing, and never by undoing
+/// a mark already standing.
+///
+/// The probation asks everyone every half minute while nothing arrives, and
+/// a discount on every one of those would be a peer choosing a batch at a
+/// unit a block, twice a minute, for nothing it delivered.
+#[test]
+fn a_question_repeated_while_nothing_arrives_buys_one_answer_at_the_discount() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(2);
+    let mut node = store_with(params, &blocks[..1]);
+    let mut peer = greeted_peer(u128::MAX / 2, 1_000);
+
+    asked_for_the_chain(&node, &mut peer);
+    assert!(peer.chain_asked, "the first question is marked");
+    peer.chain_asked = false;
+    asked_for_the_chain(&node, &mut peer);
+    assert!(
+        !peer.chain_asked,
+        "a question repeated with nothing moved in between was given the discount again"
+    );
+    peer.chain_asked = true;
+    asked_for_the_chain(&node, &mut peer);
+    assert!(
+        peer.chain_asked,
+        "a question from outside took away the mark of one still outstanding"
+    );
+
+    peer.chain_asked = false;
+    node.add_block(blocks[1].clone(), NOW).unwrap();
+    asked_for_the_chain(&node, &mut peer);
+    assert!(
+        peer.chain_asked,
+        "a question after the chain moved was not given the discount"
+    );
 }
 
 /// The wire has to carry what the rules allow.

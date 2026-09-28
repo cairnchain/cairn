@@ -444,11 +444,23 @@ fn say_what_the_numbers_do_not(node: &Node, directory: &str) {
     // And once it has arrived, the height it shows is the anchor's rather than
     // this node's, which without this reads as a healthy node. It is not one
     // until the line below stops appearing.
+    //
+    // Blocks from a chain this node cannot switch to are said in that line
+    // on probation and in their own line off it. They were counted on every
+    // node and said only on probation, so a node that read its chain and was
+    // cut off from the rest of the network for the better part of a day kept
+    // its branch, as the rules say it must, and nothing told its operator the
+    // network was elsewhere.
+    let out_of_reach = node.out_of_reach();
     if let Some(probation) = node.probation() {
-        say!(
-            "           {}",
-            probation_line(&probation, node.out_of_reach())
-        );
+        say!("           {}", probation_line(&probation, out_of_reach));
+    } else if let Some(text) = cannot_switch_to(out_of_reach) {
+        say(&text);
+    }
+    // And a node further behind than its peers keep blocks for, which reads
+    // exactly like a healthy one with a height that has stopped.
+    if let Some(peers) = node.behind_what_peers_keep() {
+        say(&further_behind_than_peers_keep(peers));
     }
     // And a node that has arrived and still cannot answer the question a
     // newcomer asks. Every other state above has had a line here for longer
@@ -557,6 +569,39 @@ fn probation_line(probation: &Probation, out_of_reach: u64) -> String {
         return format!("probation {probation}");
     }
     format!("probation {probation}, and {out_of_reach} blocks arrived from a chain it cannot reach")
+}
+
+/// What an operator is told about blocks from a chain this node cannot
+/// switch to, on a node that is not on probation, or nothing when there are
+/// none.
+///
+/// A count and not a verdict. A block a stranger mines at the lowest
+/// difficulty, far enough below the tip, is counted here too, so the line
+/// says what a run of them means rather than what one does.
+fn cannot_switch_to(blocks: u64) -> Option<String> {
+    (blocks > 0).then(|| {
+        format!(
+            "{blocks} blocks arrived from a chain this node cannot switch to: it parts from \
+             the branch this node follows further back than this node can reach, which the \
+             rules call settled. A few are anybody's to send. If they keep coming from \
+             several peers while the rest of the network is not heard from, this node is on \
+             a branch the network has left, and starting again from an empty directory is \
+             the only way onto theirs."
+        )
+    })
+}
+
+/// What an operator is told when several peers can supply nothing just above
+/// this node's tip.
+fn further_behind_than_peers_keep(peers: usize) -> String {
+    format!(
+        "{peers} peers can supply nothing just above this node's tip: each keeps blocks \
+         only from further up the chain. If the height above is not moving, this node is \
+         further behind than the network keeps blocks for and cannot catch up by reading, \
+         and a node that already follows a chain cannot be handed one. Connecting it to a \
+         node that keeps more of the chain, or starting again from an empty directory, is \
+         the way back onto it."
+    )
 }
 
 /// What the disk held when this node opened it.
@@ -794,14 +839,33 @@ fn still_filling(filling: &Filling, directory: &str) -> String {
     // headers stop short of the tip. Naming any of them as the cause would be
     // wrong two times in three. The numbers say which it is without guessing,
     // and the two that are somebody's fault already have lines of their own.
+    //
+    // Only the first is collecting anything from its peers, and what it
+    // collects is kept apart and merged whole: the headers held and the
+    // headers proved do not move until it is complete, which for a node that
+    // joined far up the chain is most of an hour. So the number to watch is
+    // the one collected, and this used to tell the operator to watch the
+    // others, and that no peer held the part it was missing, all through a
+    // healthy fill.
+    let (collecting, watch) = if filling.from > 0 {
+        (
+            format!(
+                ", it has collected {} of the {} before them so far",
+                filling.collected, filling.from
+            ),
+            " If the height above keeps moving and the number collected does not, no peer \
+             this node has found holds the part it is missing, and connecting it to one that \
+             does is the only thing to do.",
+        )
+    } else {
+        (String::new(), "")
+    };
     format!(
         "this node cannot yet show the chain to somebody arriving new. It holds the \
-         headers from block {} up to block {}, it can prove where {} of them sit, and the \
-         chain is at block {}. It collects what is missing from its peers as it runs, and \
-         nobody can join the network through this node until it has it all.{disk} If the \
-         height above keeps moving and these numbers do not, no peer this node has found \
-         holds the part it is missing, and connecting it to one that does is the only \
-         thing to do.",
+         headers from block {} up to block {}{collecting}, it can prove where {} of them \
+         sit, and the chain is at block {}. It collects what is missing from its peers as \
+         it runs, and nobody can join the network through this node until it has it \
+         all.{disk}{watch}",
         filling.from,
         filling.through.saturating_sub(1),
         filling.proved,
@@ -1709,6 +1773,7 @@ mod said_out_loud {
     fn the_line_about_filling_in_names_the_disk_only_when_the_disk_is_over() {
         let over = Filling {
             from: 32,
+            collected: 0,
             through: 160,
             proved: 0,
             reaches: 160,
@@ -1757,6 +1822,48 @@ mod said_out_loud {
         assert!(
             text.contains("cannot yet show the chain"),
             "but it is still told the thing it cannot do"
+        );
+    }
+
+    /// The line about filling in names how many headers have been collected,
+    /// and that is the number it tells the operator to watch.
+    ///
+    /// It named only the headers held, the headers proved and the chain,
+    /// and the first two do not move until the whole collection has arrived.
+    /// A node joined a million and a half blocks up collects for most of an
+    /// hour, and for all of it the line said no peer held the part it was
+    /// missing and to connect to another one.
+    #[test]
+    fn the_line_about_filling_in_watches_the_number_that_moves() {
+        let midway = Filling {
+            from: 1_500_000,
+            collected: 512_000,
+            through: 1_500_900,
+            proved: 900,
+            reaches: 1_500_900,
+            bytes: 500,
+            keep: 1_000,
+        };
+        let text = still_filling(&midway, "/var/lib/cairn");
+        eprintln!("{}", wrapped(&text).join("\n"));
+        assert!(
+            text.contains("collected 512000 of the 1500000"),
+            "the line does not say how much of what is missing has been collected: {text}"
+        );
+        assert!(
+            text.contains("the number collected does not"),
+            "the line tells the operator to watch numbers a healthy fill leaves alone: {text}"
+        );
+
+        let short_at_the_top = Filling {
+            from: 0,
+            collected: 0,
+            ..midway
+        };
+        let text = still_filling(&short_at_the_top, "/var/lib/cairn");
+        assert!(
+            !text.contains("collected") && !text.contains("no peer this node has found"),
+            "a node missing nothing below its headers is told about collecting from peers: {text}"
         );
     }
 
@@ -1863,8 +1970,8 @@ mod what_the_exit_code_says {
 #[allow(clippy::unwrap_used)]
 mod what_an_operator_is_told {
     use super::{
-        addresses_not_written, clock, nobody_can_get_in, probation_line, short, stamp,
-        will_not_read_back, wrapped,
+        addresses_not_written, cannot_switch_to, clock, further_behind_than_peers_keep,
+        nobody_can_get_in, probation_line, short, stamp, will_not_read_back, wrapped,
     };
     use cairn_net::node::{Probation, Reading, Unread};
     use cairn_net::Unanswered;
@@ -1932,6 +2039,42 @@ mod what_an_operator_is_told {
             probation_line(&probation, 5),
             format!("probation {probation}, and 5 blocks arrived from a chain it cannot reach")
         );
+    }
+
+    /// Blocks from a chain the node cannot switch to are said on a node that
+    /// is not on probation too, and only when there are some.
+    ///
+    /// They were counted on every node and shown only in the probation line,
+    /// so a node that read its chain and then spent the better part of a day
+    /// cut off from the rest of the network kept its branch, as the rules
+    /// say it must, and its operator was never told the network was
+    /// elsewhere.
+    #[test]
+    fn blocks_from_a_chain_the_node_cannot_switch_to_are_said_off_probation() {
+        assert_eq!(cannot_switch_to(0), None, "a healthy node says nothing");
+        let said = cannot_switch_to(4).unwrap_or_default();
+        eprintln!("{}", wrapped(&said).join("\n"));
+        assert!(said.contains("4 blocks arrived"), "{said}");
+        assert!(
+            said.contains("anybody's to send"),
+            "a count a stranger can raise does not read as a verdict: {said}"
+        );
+        assert!(said.contains("empty directory"), "{said}");
+    }
+
+    /// Peers that can supply nothing above the tip are said, with what to
+    /// do about it.
+    ///
+    /// A node further behind than its peers keep blocks for printed healthy
+    /// lines under a height that never moved, and the one way back, which
+    /// is not waiting, went unsaid.
+    #[test]
+    fn peers_that_cannot_supply_what_is_above_the_tip_are_said() {
+        let said = further_behind_than_peers_keep(3);
+        eprintln!("{}", wrapped(&said).join("\n"));
+        assert!(said.contains("3 peers"), "{said}");
+        assert!(said.contains("keeps more of the chain"), "{said}");
+        assert!(said.contains("empty directory"), "{said}");
     }
 
     /// How long the node has run, and an identifier cut to its first twelve.

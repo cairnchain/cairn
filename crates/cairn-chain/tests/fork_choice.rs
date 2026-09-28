@@ -548,6 +548,108 @@ fn a_branch_forking_deeper_than_the_limit_is_refused_at_once() {
     assert_eq!(store.height(), Some((MAX_REORG_DEPTH + 50) as u64));
 }
 
+/// A block at the floor is refused, and not held, on a network whose burial
+/// is shallower than the window a node holds in full.
+///
+/// The floor check let it through, one block loose, on the understanding that
+/// the held window would turn it away for want of a parent. That holds only
+/// where the limit and the window are the same number. Where the burial is
+/// shallower the parent is held, so the rival was taken into memory with
+/// everything built on it, and refused as too deep only once the branch
+/// outweighed this one.
+#[test]
+fn a_block_at_the_floor_is_not_held_where_the_window_holds_its_parent() {
+    let rules = params().with_burial(8);
+    let miner = wallet(1);
+    let rival = wallet(2);
+    let mut ours = Branch::new(rules);
+    let mut blocks = ours.mine_empty(&miner, 3, 600);
+    let mut under = ours.fork();
+    blocks.extend(ours.mine_empty(&miner, 1, 600));
+    let mut level = ours.fork();
+    blocks.extend(ours.mine_empty(&miner, 8, 600));
+
+    let mut store = ChainStore::new(rules);
+    feed(&mut store, &blocks);
+    let floor = store.height().unwrap() - store.undo_limit();
+    assert_eq!(floor, 3, "the rivals are not aimed where they were meant");
+
+    let above = level.mine_empty(&rival, 1, 600);
+    assert_eq!(above[0].header.height, floor + 1);
+    let held = store.len();
+    let lowest = store.add_block(above[0].clone(), NOW);
+    assert!(
+        matches!(lowest, Ok(Accepted::SideBranch)),
+        "the deepest fork this node may take was refused: {lowest:?}"
+    );
+    assert_eq!(
+        store.len(),
+        held + 1,
+        "and held, as a rival within reach is"
+    );
+
+    let at_floor = under.mine_empty(&rival, 1, 600);
+    assert_eq!(at_floor[0].header.height, floor);
+    let refused = store.add_block(at_floor[0].clone(), NOW);
+    assert!(
+        matches!(refused, Err(ChainError::TooOld { .. })),
+        "a block no switch can be made through was not refused as too old: {refused:?}"
+    );
+    assert_eq!(
+        store.len(),
+        held + 1,
+        "a block no switch can be made through was taken into memory"
+    );
+}
+
+/// A rival forking exactly at the block a node was handed its ledger at is
+/// followed when the rules allow the depth.
+///
+/// The branch names that block and the undo records reach the one above it,
+/// so the switch is within the node's own limit, but the block table was
+/// emptied on adopting and the rival's parent is read out of it: the rival
+/// was refused as a block whose parent this node lacks, which the network
+/// layer reads as not caught up yet, and asks again for ever. The window a
+/// running node holds keeps that one block for exactly this reason.
+#[test]
+fn a_rival_forking_at_the_block_a_ledger_was_handed_at_is_followed() {
+    let rules = params().with_burial(8);
+    let miner = wallet(1);
+    let stranger = wallet(9);
+    let mut source = Branch::new(rules);
+    let blocks = source.mine_empty(&miner, 20, 600);
+    let anchor = blocks[19].header.height;
+    let recent: Vec<BlockHeader> = blocks[8..].iter().map(|block| block.header).collect();
+    let at_the_anchor = source.fork();
+
+    let mut store = ChainStore::new(rules);
+    store.adopt(source.state.clone(), &recent).unwrap();
+    for block in source.mine_empty(&miner, 6, 600) {
+        assert_eq!(store.add_block(block, NOW), Ok(Accepted::Extended));
+    }
+    assert!(
+        store.height().unwrap() - anchor <= store.undo_limit(),
+        "a switch onto the anchor is within this node's own limit"
+    );
+
+    let mut rival_source = at_the_anchor;
+    let rival = rival_source.mine_empty(&stranger, 7, 600);
+    let first = store.add_block(rival[0].clone(), NOW);
+    assert!(
+        !matches!(first, Err(ChainError::UnknownParent(_))),
+        "the rival's parent is the block this node was handed its ledger at, and it was \
+         refused as a parent this node lacks"
+    );
+    for block in &rival[1..] {
+        let _ = store.add_block(block.clone(), NOW);
+    }
+    assert_eq!(
+        store.tip(),
+        Some(rival[6].id()),
+        "the node did not switch onto the heavier branch forking at its anchor"
+    );
+}
+
 /// The work the chain adds up for itself, and the work the tip's header
 /// states, must be the same number.
 ///
@@ -700,7 +802,12 @@ fn a_node_handed_a_ledger_knows_it_is_on_a_chain() {
     joined.adopt(state, &recent).unwrap();
 
     assert!(!joined.is_empty(), "and it is on a chain, holding no block");
-    assert_eq!(joined.len(), 0);
+    assert_eq!(joined.bodies_held(), 0);
+    assert_eq!(
+        joined.len(),
+        1,
+        "and an entry for the block it was handed at, which a rival forking there needs"
+    );
     assert_eq!(joined.held_bytes(), 0, "and counts none");
     assert_eq!(joined.height(), source.height());
     assert_eq!(
@@ -939,11 +1046,14 @@ fn a_block_from_rules_this_build_lacks_is_named_as_such_and_not_as_a_bad_block()
 /// stores and walks branches it can never reach the bottom of.
 ///
 /// The floor is `tip - undo_limit()`, which is the block a switch lands on
-/// rather than the shallowest rival it could take. That is one block loose on
-/// purpose: a rival *at* the floor would have this node undo one more block
-/// than it may, and it is turned away, but by the held window rather than by
-/// this check. Three rivals, at the floor and on either side of it, so the
-/// looseness is written down rather than discovered by whoever tightens it.
+/// rather than the shallowest rival it could take, so a rival *at* the floor
+/// would have this node undo one more block than it may, and it is refused
+/// there. That used to be one block loose on purpose, the rival at the floor
+/// turned away by the held window rather than by this check. The window holds
+/// `MAX_REORG_DEPTH` heights and the limit is the burial where that is
+/// shallower, so on such a network the parent was held and the rival with it,
+/// and refused only as too deep once something heavier was built on it.
+/// Three rivals, at the floor and on either side of it.
 #[test]
 fn the_floor_is_the_deepest_block_a_switch_could_still_land_on() {
     let miner = wallet(1);
@@ -991,16 +1101,20 @@ fn the_floor_is_the_deepest_block_a_switch_could_still_land_on() {
          on its own that a branch the network may switch to is not worth looking at"
     );
 
-    // At the floor: one block more than may be undone. Not refused here, by
-    // design, and refused all the same: its parent is one below the window
-    // this node holds in full, which is the same verdict by another route.
+    // At the floor: one block more than may be undone, refused by name.
     let level = level.mine_empty(&rival, 1, 600);
     assert_eq!(level[0].header.height, floor);
     match store.add_block(level[0].clone(), NOW) {
-        Err(ChainError::UnknownParent(_)) => {}
+        Err(ChainError::TooOld {
+            height,
+            floor: named,
+        }) => {
+            assert_eq!(height, floor);
+            assert_eq!(named, floor);
+        }
         other => panic!(
-            "a rival at the floor would undo one block past the limit; expected the \
-             held window to turn it away, got {other:?}"
+            "a rival at the floor would undo one block past the limit and was not refused \
+             as too old: {other:?}"
         ),
     }
 
