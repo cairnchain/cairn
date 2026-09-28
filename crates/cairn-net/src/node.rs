@@ -14339,6 +14339,21 @@ mod quiet_tests {
             "a clock put back an hour held the next lookup off for that hour"
         );
     }
+
+    /// A lookup made this second is not due again this second.
+    ///
+    /// A clock that stands where the last lookup left it has not gone back,
+    /// and the period has not passed. Nothing asked at the very second of the
+    /// last lookup, so reading a clock that had not moved as one put back
+    /// passed, and a round landing in the same second as the one before it
+    /// started a second lookup behind the first.
+    #[test]
+    fn a_lookup_made_this_second_is_not_due_again_this_second() {
+        assert!(
+            !a_lookup_is_due(10_000, 10_000),
+            "a clock standing at the last lookup was read as a clock put back"
+        );
+    }
 }
 
 #[cfg(test)]
