@@ -1775,7 +1775,10 @@ impl Wallet {
     /// only one, where each payment came from. A wallet that ran before has a
     /// book of the addresses that answered it, written down when it stopped,
     /// and its node dials them by itself within a second of starting. The seed
-    /// is for a wallet whose book is empty or has stopped answering.
+    /// is for a wallet whose book is empty or has stopped answering, and it
+    /// is dialled for this run only: written into the book as an ordinary
+    /// address, it was dialled first at every run after, so its operator saw
+    /// every session all the same.
     ///
     /// A book holding fewer addresses than this waits for cannot be enough,
     /// so it goes to the seeds at once. `names` are handed to the node only
@@ -1808,7 +1811,10 @@ impl Wallet {
         Some(
             seeds()
                 .into_iter()
-                .filter(|address| self.reach(*address))
+                .filter(|address| {
+                    self.node.remember_seed_for_this_run(*address);
+                    self.node.connect(*address).is_ok()
+                })
                 .count(),
         )
     }

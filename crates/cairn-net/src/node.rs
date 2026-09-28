@@ -4760,6 +4760,19 @@ impl Node {
         self.shared.book().insert_seed(address);
     }
 
+    /// Writes down a seed for this run only: dialled and kept as a seed
+    /// while this node runs, and left out of the book it writes.
+    ///
+    /// For a wallet told nothing, which goes to the seeds written into the
+    /// program only when its own book cannot start it. Written down, the seed
+    /// was an ordinary address in that book at the next run and was dialled
+    /// first, so its operator saw every session after the first.
+    pub fn remember_seed_for_this_run(&self, address: SocketAddr) {
+        let mut book = self.shared.book();
+        book.insert_seed(address);
+        book.keep_off_the_file(address);
+    }
+
     /// Names to start from, kept as names rather than as the addresses they
     /// stand for today.
     ///
@@ -11623,6 +11636,36 @@ mod peers_and_loops {
             (0, 1),
             "a connection whose far end said nothing was counted as a peer, or one that \
              introduced itself was not"
+        );
+    }
+
+    /// A seed remembered for this run is in the book, and not in what the
+    /// book writes.
+    ///
+    /// A wallet told nothing goes to the seed only when its own book cannot
+    /// start it, and the seed it went to was written into that book as an
+    /// ordinary address, dialled first at every run after.
+    #[test]
+    fn a_seed_for_this_run_is_in_the_book_and_not_in_its_file() {
+        let node = quiet();
+        let seed = SocketAddr::from(([10, 0, 0, 5], 9_000));
+        node.remember_seed_for_this_run(seed);
+        let directory = std::env::temp_dir().join(format!(
+            "cairn-node-seed-for-this-run-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        let saved = node.shared.book().save(&directory);
+        let written = crate::book::AddressBook::load(&directory);
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(saved.is_ok(), "fixture: the book was written");
+        assert!(
+            node.known_addresses().contains(&seed),
+            "a seed for this run is not in the book to be dialled"
+        );
+        assert!(
+            !written.contains(&seed),
+            "a seed for this run was written into the book"
         );
     }
 
