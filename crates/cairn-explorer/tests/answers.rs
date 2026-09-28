@@ -209,6 +209,25 @@ impl Archiving {
     }
 }
 
+impl Archiving {
+    /// The same site over a node that does not archive, which is the kind of
+    /// node that trims its log to a budget: an archiving one keeps every
+    /// block whatever it is handed.
+    fn trimming(params: ConsensusParams, name: &str) -> Self {
+        let directory =
+            std::env::temp_dir().join(format!("cairn-answers-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let (node, _) = Node::open(params, address, &directory)
+            .expect("a node on a free port and a fresh directory");
+        Self {
+            explorer: Explorer::new(node),
+            directory,
+        }
+    }
+}
+
 impl Drop for Archiving {
     fn drop(&mut self) {
         self.explorer.node().shutdown();
@@ -2071,8 +2090,10 @@ fn kept_range(explorer: &Explorer) -> (u64, u64) {
 /// **A transaction or a block this explorer no longer keeps is not called
 /// absent from the chain.**
 ///
-/// The index reads the chain once and keeps what it read, and under `--keep`
-/// the log is then trimmed to its budget. A transaction the index still
+/// The index reads the chain once and keeps what it read, and a node that
+/// does not archive then trims its log to its budget. The explorer's own node
+/// archives and keeps every block, so this is a site over a node that does
+/// not. A transaction the index still
 /// located, in a block no longer held in memory or on disk, was answered "no
 /// such transaction" with `coverage.whole` true, which the page prints as
 /// "There is nothing on this chain with that name". `/api/block` answered the
@@ -2087,7 +2108,7 @@ fn a_transaction_in_a_block_this_explorer_no_longer_keeps_is_not_called_absent()
     let mut forge = Forge::new(params);
     let blocks = forge.mine_many(&miner, 200);
 
-    let held = Archiving::open(params, "trimmed-tx");
+    let held = Archiving::trimming(params, "trimmed-tx");
     let explorer = &held.explorer;
     feed(explorer, &blocks);
     explorer.refresh();
@@ -2096,7 +2117,7 @@ fn a_transaction_in_a_block_this_explorer_no_longer_keeps_is_not_called_absent()
         "the index read the whole chain before anything was trimmed"
     );
 
-    // Then the operator's budget applies, and upkeep drops the oldest blocks.
+    // Then the budget applies, and upkeep drops the oldest blocks.
     explorer.node().keep_blocks(1);
     let mut from = 0;
     for _ in 0..150 {

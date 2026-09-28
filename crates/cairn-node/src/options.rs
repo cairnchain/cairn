@@ -477,7 +477,9 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
     // built by reading every block from the first at every start, so a budget
     // that dropped any of them turned an archivist into an ordinary node at
     // its next start, with nothing said. A node refuses that start now, and
-    // this is what keeps an archivist from reaching it.
+    // an archiving node keeps every block whatever budget it is handed
+    // (`Node::keep_blocks`); this is what has the settings printed below say
+    // so, rather than a budget the node will not keep.
     let keep = if archive { u64::MAX } else { keep };
 
     Ok(Some(Options {

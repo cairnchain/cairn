@@ -84,6 +84,26 @@ fn main() {
     }
 }
 
+/// Why the node would not open, in the words an explorer's operator can act on.
+///
+/// The node's refusal of a directory whose blocks do not begin at the first
+/// ends with "or start this one without keeping the cold set", which is
+/// advice for `cairnd --archive`: an explorer always keeps the cold set, so
+/// the one way it has is a directory of its own. It was passed on as it was,
+/// and an explorer trimmed by its own `--keep` was told to do something it
+/// cannot.
+fn could_not_open(error: &NodeError) -> String {
+    match error {
+        NodeError::CannotArchive { from } => format!(
+            "could not start: the blocks in this directory begin at height {from}, and an \
+             explorer keeps the cold set, which it builds by reading every block from the \
+             first at every start. Nothing has been changed. Start it with --data naming a \
+             directory of its own, where it reads the chain from the first block"
+        ),
+        other => format!("could not start: {other}"),
+    }
+}
+
 /// Waits for the node to stop itself and says why, or for this program to be
 /// asked to stop.
 ///
@@ -170,18 +190,14 @@ fn run(arguments: &[String]) -> Result<(), Stopping> {
     }
 
     let (node, restored) = Node::open_archiving(options.params, options.listen, &options.data)
-        .map_err(|error| Stopping::CouldNotStart(format!("could not start: {error}")))?;
-    // Before anything else this node does. A node's own budget is a gigabyte
-    // and it drops the oldest blocks past it, which for an explorer is the
-    // blocks it needs most: the index is built by walking from the first block
-    // up, so a trimmed log costs it not the blocks that were trimmed but every
-    // block there is.
-    node.keep_blocks(options.keep);
+        .map_err(|error| Stopping::CouldNotStart(could_not_open(&error)))?;
+    // Nothing handed to the node about its disk. It archives, and an archiving
+    // node keeps every block whatever budget it is given, because the archive
+    // is read from every block at every start. `--keep` used to be handed
+    // straight through, and the node trimmed to it, which for an explorer was
+    // the blocks it needs most and a directory it could not start on again.
     println!("listening    {}", node.address());
-    println!(
-        "blocks       {}",
-        options::kept(options.keep, &options.params)
-    );
+    println!("blocks       {}", options::kept(options.keep));
     let directory = options.data.display().to_string();
     say_what_the_start_found(&node, &restored, &options.params, &directory);
 
@@ -309,7 +325,39 @@ fn run(arguments: &[String]) -> Result<(), Stopping> {
 mod tests {
     use std::sync::atomic::AtomicBool;
 
-    use super::watch;
+    use cairn_net::NodeError;
+
+    use super::{could_not_open, watch};
+
+    /// An explorer refused a directory whose blocks do not begin at the first
+    /// is told what an explorer can do about it, and the refusal of anything
+    /// else is passed on as the node said it.
+    ///
+    /// The node's own words end by suggesting a start without the cold set,
+    /// which an explorer cannot make. Nothing read what the explorer said, so
+    /// passing that on passed.
+    #[test]
+    fn an_explorer_refused_its_directory_is_told_what_an_explorer_can_do() {
+        let said = could_not_open(&NodeError::CannotArchive { from: 32 });
+        assert!(
+            said.contains("height 32") && said.contains("directory of its own"),
+            "the refusal does not say where the blocks begin, or that a directory of its own \
+             is the way: {said}"
+        );
+        assert!(
+            !said.contains("without keeping the cold set"),
+            "an explorer was told to start without the cold set, which it always keeps: {said}"
+        );
+
+        let other = NodeError::UnusableLedger {
+            because: "the ledger is short".to_owned(),
+        };
+        assert_eq!(
+            could_not_open(&other),
+            format!("could not start: {other}"),
+            "a refusal about anything else was not passed on as the node said it"
+        );
+    }
 
     /// The explorer stops when its node stops itself, and says why.
     ///

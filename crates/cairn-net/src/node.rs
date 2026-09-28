@@ -1500,7 +1500,9 @@ struct Shared {
     /// which is what a node that offers the history to others does.
     ///
     /// Settable while running, because it is an operator's choice about disk
-    /// rather than anything the rules have an opinion on.
+    /// rather than anything the rules have an opinion on. Except on an
+    /// archivist, which keeps everything from the start and whatever it is
+    /// handed afterwards: see [`Node::keep_blocks`].
     keep_bytes: AtomicU64,
     /// Held for as long as the node runs, so no second process writes to the
     /// same directory.
@@ -4551,6 +4553,15 @@ impl Node {
     ) -> Result<Self, NodeError> {
         let listener = TcpListener::bind(address)?;
         let address = listener.local_addr()?;
+        // An archivist keeps every block from the moment it opens, and not
+        // from whenever somebody hands it a budget: one opened with none kept
+        // a node's gigabyte, and past it trimmed the blocks its next start
+        // reads the archive from.
+        let keeps = if chain.is_archiving() {
+            u64::MAX
+        } else {
+            KEEP_BLOCK_BYTES
+        };
 
         let shared = Arc::new(Shared {
             params,
@@ -4566,7 +4577,7 @@ impl Node {
             names_looked_up_at: AtomicU64::new(0),
             book_written_at: AtomicU64::new(u64::MAX),
             directory,
-            keep_bytes: AtomicU64::new(KEEP_BLOCK_BYTES),
+            keep_bytes: AtomicU64::new(keeps),
             _lock: lock,
             peers: Mutex::new(HashMap::new()),
             windows: Mutex::new(HashMap::new()),
@@ -4871,7 +4882,16 @@ impl Node {
     /// `u64::MAX` keeps every block ever accepted, which is what a node
     /// offering the history to others does and what the disk cost of the chain
     /// is measured against.
+    ///
+    /// An archivist keeps every block whatever it is handed. Its archive is
+    /// built by reading every block from the first at every start, and a start
+    /// whose blocks do not begin there is refused ([`NodeError::CannotArchive`]),
+    /// so a budget taken here was an archivist that trimmed its way into never
+    /// starting again. `cairn-explorer` handed its `--keep` straight through
+    /// and did exactly that; `cairnd` kept its own rule for `--archive`, and
+    /// the rule is here now, for every caller.
     pub fn keep_blocks(&self, bytes: u64) {
+        let bytes = if self.is_archiving() { u64::MAX } else { bytes };
         self.shared.keep_bytes.store(bytes, Ordering::Relaxed);
     }
 
@@ -10445,6 +10465,59 @@ mod disk_and_headers {
             (0, 30, 30, 0),
             "a run offered through the test door that checks out was not merged in front of \
              the headers, with the forest built over the whole"
+        );
+    }
+
+    /// An archivist keeps every block whatever budget it is handed, and so
+    /// can start again as an archivist.
+    ///
+    /// The archive is built by reading every block from the first at every
+    /// start, and a start whose blocks do not begin there is refused. Nothing
+    /// asked whether an archiving node trims, so one handed a budget, which is
+    /// what `cairn-explorer --keep 8GB` did, dropped its oldest blocks at the
+    /// next round of upkeep and was refused at every start after it. One
+    /// handed no budget at all trimmed at a gigabyte, the default of a node
+    /// that does not archive.
+    #[test]
+    fn an_archivist_keeps_every_block_whatever_budget_it_is_handed() {
+        let params = ConsensusParams::testnet().with_burial(8);
+        let (blocks, _) = forged(40, params);
+        let directory = scratch("archivist-budget");
+        let (node, _) = Node::open_archiving(params, loopback(), &directory).unwrap();
+        let unbudgeted = node.shared.keep_bytes.load(Ordering::Relaxed);
+        for block in &blocks {
+            node.submit_block(block.clone()).unwrap();
+        }
+        wait_until("every block to be on the disk", || {
+            node.written_through() == Some(39)
+        });
+
+        node.keep_blocks(1);
+        node.shared.trim_history();
+        let kept_from = node.blocks_from();
+        node.shutdown();
+        drop(node);
+
+        let again = Node::open_archiving(params, loopback(), &directory).map(|(node, _)| {
+            let archiving = node.is_archiving();
+            node.shutdown();
+            archiving
+        });
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert_eq!(
+            unbudgeted,
+            u64::MAX,
+            "an archivist handed no budget keeps a node's gigabyte and drops the blocks past it"
+        );
+        assert_eq!(
+            kept_from,
+            Some(0),
+            "an archivist handed a budget of one byte dropped its oldest blocks"
+        );
+        assert!(
+            matches!(again, Ok(true)),
+            "and the archivist could not start again as one"
         );
     }
 

@@ -1,11 +1,11 @@
 //! What `cairn-explorer` says it keeps on disk when it is given a budget.
 //!
-//! A node keeps the blocks a reorganisation may still have to read back
-//! whatever size it is given, because the chain lets go of block bodies from
-//! memory on the promise that the log still holds them. `cairnd` was mended to
-//! say so beside the figure, after `--keep 1MB` printed "1 MB on disk, older
-//! ones dropped" and held a hundred and twenty eight times that. The explorer
-//! trims through the same node and printed the same figure without the floor.
+//! An explorer keeps the cold set, and the cold set is built by reading every
+//! block from the first at every start, so an explorer keeps every block
+//! whatever `--keep` says: a node that archives refuses to start over blocks
+//! that do not begin at the first. The explorer used to hand its budget to
+//! the node, which trimmed, and to print the budget as what it kept; the next
+//! start was refused. It says what it keeps now, and why the budget is not it.
 //!
 //! The line is printed after the node is started, so this runs the program,
 //! reads until the line after it, and stops it.
@@ -22,8 +22,6 @@ use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-
-use cairn_ledger::validation::ConsensusParams;
 
 /// Everything the explorer printed before its restore line, or before it
 /// stopped, whichever came first.
@@ -79,14 +77,15 @@ fn scratch(name: &str) -> std::path::PathBuf {
     directory
 }
 
-/// The floor under `--keep` is said where the explorer says what it keeps, as
-/// `cairnd` says it, and `all` has none to state.
+/// An explorer given a budget says it keeps every block, whatever the budget,
+/// and one keeping everything says so plainly.
 ///
-/// Nothing asked this, so an explorer given a megabyte printed that it kept a
-/// megabyte, on a network where the blocks it cannot drop come to several.
+/// It printed the budget, with the floor under it, as what it kept. Nothing
+/// asked whether that was true, and it was not: the node trimmed to it, and
+/// the explorer could not start again on that directory, since an archive is
+/// built from every block.
 #[test]
-fn the_floor_under_what_the_site_keeps_is_said_beside_the_figure() {
-    let devnet = ConsensusParams::for_network("devnet").unwrap();
+fn an_explorer_given_a_budget_says_it_keeps_every_block() {
     let directory = scratch("one-megabyte");
     let data = directory.to_string_lossy().into_owned();
     let common = [
@@ -106,17 +105,12 @@ fn the_floor_under_what_the_site_keeps_is_said_beside_the_figure() {
     arguments.extend(["--keep", "1MB"]);
     let said = start_up(&arguments).join("\n");
     assert!(
-        said.contains("blocks       1 MB"),
-        "the budget is not where the explorer says what it keeps"
+        said.contains("blocks       every one ever accepted, whatever --keep says"),
+        "an explorer given a budget does not say it keeps every block: {said}"
     );
     assert!(
-        said.contains(&format!("never below the last {} blocks", devnet.burial)),
-        "the explorer says it keeps a megabyte, and not that it never drops the \
-         blocks a reorganisation may read back, which weigh more"
-    );
-    assert!(
-        said.contains("up to "),
-        "the explorer does not say what the floor comes to on this network"
+        !said.contains("older ones dropped") && !said.contains("never below"),
+        "an explorer given a budget says it drops blocks, which it does not: {said}"
     );
 
     let _ = std::fs::remove_dir_all(&directory);
@@ -130,8 +124,8 @@ fn the_floor_under_what_the_site_keeps_is_said_beside_the_figure() {
         "an explorer keeping everything does not say so"
     );
     assert!(
-        !said.contains("never below"),
-        "an explorer that drops nothing states a floor under what it drops"
+        !said.contains("whatever --keep says"),
+        "an explorer given no budget speaks of one"
     );
     let _ = std::fs::remove_dir_all(&directory);
 }
