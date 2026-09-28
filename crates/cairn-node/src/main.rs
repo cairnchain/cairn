@@ -1167,11 +1167,12 @@ fn clock_is_slow(behind: &Behind) -> String {
 /// asked, peers dropped, and a height that takes hours to move.
 fn cannot_weigh(unweighable: &Unweighable) -> String {
     format!(
-        "no peer has been able to show this node what work stands behind the chain. {} showings          from {} peers, over {}, were all refused with the same words: {}. Nothing has          stopped. This node is reading the chain block by block instead, which is how nodes          worked before the shorter way existed, and it checks more rather than less; what it          costs is time and bandwidth. Peers making chains up is one reason for this line. The          other is a chain whose difficulty has fallen far below what it once ran at, which needs          a longer run of headers than this build will take: that one mends itself as the chain          catches up, and until it does every honest node answering is refused in exactly this          way.",
+        "no peer has been able to show this node what work stands behind the chain. {} showings          from {} peers, over {}, were all refused with the same words: {}. Nothing has          stopped. This node is reading the chain block by block instead, which is how nodes          worked before the shorter way existed, and it checks more rather than less; what it          costs is time and bandwidth. Peers making chains up is one reason for this line. The          other is a chain whose difficulty has fallen far below what it once ran at, which needs a longer run of headers than this build will take, or whose tip stands more than {} times below the run it stands on because its miners left: that one mends itself as the chain catches up, and until it does every honest node answering is refused in exactly this way. A tip that far below its run is held against none of the peers that showed it.",
         unweighable.showings,
         unweighable.peers,
         roughly(unweighable.over),
         unweighable.because,
+        cairn_ledger::sampling::MOST_FALL,
     )
 }
 
@@ -1709,6 +1710,20 @@ mod said_out_loud {
         assert!(
             text.contains("making chains up"),
             "and so does the one that is: {text}"
+        );
+        // The second way a collapsed chain fails, and the one refusal here
+        // that its peers are not held to. The line named only the run of
+        // headers, and said nothing of who was blamed.
+        assert!(
+            text.contains(&format!(
+                "more than {} times below the run",
+                cairn_ledger::sampling::MOST_FALL
+            )),
+            "a tip fallen below its run is a chain whose miners left: {text}"
+        );
+        assert!(
+            text.contains("held against none of the peers"),
+            "and the peers that showed it are not held to it: {text}"
         );
     }
 

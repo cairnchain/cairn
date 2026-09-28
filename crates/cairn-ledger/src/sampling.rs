@@ -479,9 +479,13 @@ pub enum StartError {
     TipFromTheFuture { timestamp: u64 },
     #[error("nothing was opened, so there is nothing to measure the tip against")]
     NothingOpened,
+    /// The words leave the two difficulties out on purpose: every showing of a
+    /// chain whose hash rate collapsed fails here with different ones, and a
+    /// node counts showings in the same words to tell its operator that the
+    /// chain, and not the peers, is what cannot be weighed.
     #[error(
-        "the tip states difficulty {stated}, more than {} times below the {hardest} the run \
-         carried from the pinned header up",
+        "the tip stands more than {} times below the hardest header of the run from the \
+         pinned header up, which is a chain whose miners left",
         MOST_FALL
     )]
     TipFellTooFar { stated: u64, hardest: u64 },
@@ -1653,6 +1657,35 @@ mod tests {
             ceiling * 3,
             "a difficulty a single climb cannot be stated past is the ceiling \
              for every block of the run"
+        );
+    }
+
+    /// A tip too far below its run is refused in the same words whatever the
+    /// two difficulties were.
+    ///
+    /// A node counts showings that fail in the same words from several peers
+    /// and tells its operator the chain itself cannot be weighed, and a change
+    /// of words starts that count again. Every honest archivist serving a
+    /// chain whose hash rate collapsed fails here, but the tip's difficulty
+    /// moves with every block and the hardest header of the run with every
+    /// draw, so words carrying the two numbers were new words at nearly every
+    /// showing and the count never added up. Nothing asked this, so a refusal
+    /// whose words changed with the chain passed.
+    #[test]
+    fn a_tip_fallen_too_far_is_refused_in_the_same_words_whatever_the_chain() {
+        let one = StartError::TipFellTooFar {
+            stated: 1,
+            hardest: 1_698,
+        };
+        let other = StartError::TipFellTooFar {
+            stated: 4_000,
+            hardest: 200_000,
+        };
+        assert_eq!(
+            one.to_string(),
+            other.to_string(),
+            "two showings of a collapsed chain were refused in different words, so a node \
+             never counts them as one chain"
         );
     }
 
