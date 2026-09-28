@@ -2449,16 +2449,26 @@ impl TurningAway {
                 Some(DropReason::Unannounced { .. }) => &mut counted.unannounced,
                 Some(DropReason::RepeatedHandshake) => &mut counted.introduced_twice,
                 Some(DropReason::BadBlock { .. }) => {
-                    if self.bad_blocks.len() >= BAD_BLOCK_HOSTS {
-                        self.bad_blocks.pop_front();
-                    }
-                    self.bad_blocks.push_back((now, machine_of(host)));
-                    &mut counted.bad_blocks
+                    self.bad_block(host, now);
+                    return;
                 }
                 _ => return,
             }
         };
         *slot = slot.saturating_add(1);
+    }
+
+    /// Counts one host turned away for a block this node rejects.
+    ///
+    /// Apart from [`Self::count`] because one such refusal is not made where
+    /// a connection ends: the sender of a body held aside that fails a switch
+    /// is refused where the switch fails. See [`Shared::turn_away`].
+    fn bad_block(&mut self, host: IpAddr, now: u64) {
+        if self.bad_blocks.len() >= BAD_BLOCK_HOSTS {
+            self.bad_blocks.pop_front();
+        }
+        self.bad_blocks.push_back((now, machine_of(host)));
+        self.counted.bad_blocks = self.counted.bad_blocks.saturating_add(1);
     }
 
     /// What has been counted, with the machines turned away for a bad block
@@ -3162,15 +3172,25 @@ impl Shared {
     ///
     /// It is this peer that is refused, and not the one whose message made the
     /// switch, which delivered the block above that body and is asked again
-    /// for its chain. Ended and refused like any peer that sent a block this
-    /// node rejects, which is what that body was.
+    /// for its chain. Ended, refused and counted like any peer that sent a
+    /// block this node rejects, which is what that body was.
+    ///
+    /// Counted here because it is counted nowhere else. The connection hung
+    /// up here ends on a socket this node shut, with no reason of its own,
+    /// so [`note_the_ending`] sees nothing to count, and the refusal
+    /// [`TurnedAway`] was written to show while it happens went unshown.
     fn turn_away(&self, handed: Option<HandedIn>) {
         let Some(handed) = handed else {
             return;
         };
         self.hang_up(handed.peer);
         if let Some(host) = handed.host {
-            self.refuse(host, unix_now());
+            let now = unix_now();
+            self.refuse(host, now);
+            // Only where the refusal is real, as `note_the_ending` counts.
+            if can_be_refused(host) {
+                self.turning_away().bad_block(host, now);
+            }
         }
     }
 
@@ -12929,6 +12949,39 @@ mod peers_and_loops {
                 .bad_block_hosts_lately,
             4,
             "machines turned away inside the window were forgotten early"
+        );
+    }
+
+    /// A host turned away for a body that failed a switch is counted as one
+    /// turned away for a block this node rejects.
+    ///
+    /// Such a host is refused where the switch fails rather than where its
+    /// connection ends, and the connection it is hung up on ends with nothing
+    /// said about why, so the count of whom this node turns away never saw
+    /// it. It is the one refusal the count was written to show while it is
+    /// happening: this node holding a body aside and judging it wrongly later
+    /// refuses an honest sender. Nothing asked this, so a node that refused
+    /// every sender of such a body in silence passed.
+    #[test]
+    fn a_host_turned_away_for_a_body_that_failed_a_switch_is_counted() {
+        let node = quiet();
+        for at in [1, 2] {
+            node.shared.turn_away(Some(HandedIn {
+                peer: u64::from(at),
+                host: Some(IpAddr::from([198, 51, 100, at])),
+            }));
+        }
+        // The loopback is never turned away, so it is not counted either.
+        node.shared.turn_away(Some(HandedIn {
+            peer: 3,
+            host: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        }));
+        let said = node.refused_hosts();
+        assert_eq!(
+            (said.bad_blocks, said.bad_block_hosts_lately),
+            (2, 2),
+            "hosts refused for a body that failed a switch were not counted among those \
+             turned away for a block this node rejects"
         );
     }
 
