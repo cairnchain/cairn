@@ -2736,8 +2736,10 @@ it, and SHOULD NOT decode a frame the peer's window cannot pay for. That charge
 counts toward the price of the message the frame carried, so a message pays the
 larger of the two and never both. Two frames are not charged: a peer's frames
 before it has introduced itself, which may only be a handshake, and a
-`JoinPart`, which is taken outside the allowance as the answer to a question
-this node asked that one peer.
+`JoinPart` from the peer this node is collecting a join from, which is taken
+outside the allowance as the answer to a question this node asked that one
+peer. A `JoinPart` from any other peer is charged like any other frame: what
+marks a frame as a piece is its first byte, which anybody can write.
 
 <table>
   <thead><tr><th>Message</th><th>Cost</th></tr></thead>
@@ -2756,7 +2758,7 @@ this node asked that one peer.
     <tr><td>Block this node asked for</td><td>1 per 512 bytes of the message, rounded up, and 1 once it is on the branch this node follows</td></tr>
     <tr><td>Block nobody asked for, or announced and then asked for</td><td>8, plus 1 per 512 bytes of the message, rounded up</td></tr>
     <tr><td>Ping, Pong, Chain</td><td>1</td></tr>
-    <tr><td>Hello, Welcome, JoinPart</td><td>nothing</td></tr>
+    <tr><td>Hello, Welcome, and a JoinPart from the peer asked for it</td><td>nothing</td></tr>
   </tbody>
 </table>
 

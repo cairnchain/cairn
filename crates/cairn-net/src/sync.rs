@@ -153,6 +153,14 @@ pub struct PeerState {
     /// than one batch a patience was asked for the chain again while it was
     /// still sending, sent the same blocks twice, and paid for both.
     ///
+    /// Not renewed by what the peer volunteers. An ask starts the patience of
+    /// a batch when none is out, or when it answers a `GetChain` this node
+    /// sent; a `Chain` nobody asked for, or an announcement, adds its heights
+    /// to a batch already out and leaves its patience where it was. Both used
+    /// to renew it, whatever heights they named, so a peer that never sent a
+    /// block of its batch and named the same heights again once a minute held
+    /// this node mid batch for as long as it cared to.
+    ///
     /// One of two times this struct keeps, both about what this node is waiting
     /// on, and deliberately. When a peer last said anything is a different
     /// question with a different answer, and the answer is `last_heard` in the
@@ -706,13 +714,25 @@ impl PeerState {
     /// Two frames are not charged. One from a peer that has not introduced
     /// itself, because it may only be a handshake, which is free, a few
     /// hundred bytes, and the only frame such a peer may send at all. And a
-    /// piece of a join answer, which is taken before the allowance as the
-    /// answer to a question this node asked one named peer: charging it here
-    /// would have that peer's window refuse pieces this node went and asked
-    /// for, and decoding one is a copy of its bytes.
-    pub fn afford_reading(&mut self, frame: &[u8], now: u64) -> bool {
+    /// piece of a join answer from the peer this node is collecting one from,
+    /// which is taken before the allowance as the answer to a question this
+    /// node asked that peer by name: charging it here would have that peer's
+    /// window refuse pieces this node went and asked for, and decoding one is
+    /// a copy of its bytes. `collecting` answers whether this is that peer,
+    /// and is asked only of a frame tagged as a piece.
+    ///
+    /// Only that peer. The tag is the first byte of the frame and anybody can
+    /// write it, so any greeted peer had every frame it tagged as a piece read
+    /// and decoded outside its allowance, a megabyte at a time up to the flood
+    /// ceiling, to be dropped only afterwards as a piece nobody had asked for.
+    pub fn afford_reading(
+        &mut self,
+        frame: &[u8],
+        now: u64,
+        collecting: impl FnOnce() -> bool,
+    ) -> bool {
         self.paid_to_read = 0;
-        if !self.greeted || carries_a_join_part(frame) {
+        if !self.greeted || (carries_a_join_part(frame) && collecting()) {
             return true;
         }
         let deposit = what_the_wire_costs(frame.len());
@@ -1289,13 +1309,17 @@ fn request_range(
         // `request_announced` has always ended this way; this one did not.
         return follow_up(chain, peer, now);
     }
+    // Read before the heights go in: see [`PeerState::asked_at`].
+    let starts_a_batch = prompted || peer.awaiting.is_empty();
     peer.awaiting.extend(batch.iter().copied());
     if !prompted {
         // Nobody asked for this, so the heights in it are the peer's to
         // choose and the blocks that follow pay the price of a push.
         peer.offered.extend(batch.iter().copied());
     }
-    peer.asked_at = now;
+    if starts_a_batch {
+        peer.asked_at = now;
+    }
     Reaction::reply(vec![Message::GetBlocks(batch)])
 }
 
@@ -1349,11 +1373,16 @@ fn request_announced(
     if wanted.is_empty() {
         return follow_up(chain, peer, now);
     }
+    // An announcement is always the peer's own doing, so it starts a batch's
+    // patience only where none is out: see [`PeerState::asked_at`].
+    let starts_a_batch = peer.awaiting.is_empty();
     peer.awaiting.extend(wanted.iter().copied());
     // Written down as offered, so that the ask this is about to send is not
     // mistaken later for one this node went looking for.
     peer.offered.extend(wanted.iter().copied());
-    peer.asked_at = now;
+    if starts_a_batch {
+        peer.asked_at = now;
+    }
     Reaction::reply(vec![Message::GetBlocks(wanted)])
 }
 
@@ -2785,7 +2814,7 @@ mod what_a_frame_costs {
         let ask = Message::GetBlocks((0..128).collect());
         let frame = ask.encode();
         let mut peer = greeted();
-        assert!(peer.afford_reading(&frame, NOW));
+        assert!(peer.afford_reading(&frame, NOW, || false));
         assert_eq!(peer.spent, what_the_wire_costs(frame.len()));
         on_message(&mut local(&mut chain), &mut peer, ask, NOW);
         assert_eq!(peer.spent, 128, "an ask paid its frame and its price both");
@@ -2796,7 +2825,7 @@ mod what_a_frame_costs {
         let mut padded = pong.encode();
         padded.resize(4 * 512, 0);
         let mut peer = greeted();
-        assert!(peer.afford_reading(&padded, NOW));
+        assert!(peer.afford_reading(&padded, NOW, || false));
         on_message(&mut local(&mut chain), &mut peer, pong, NOW);
         assert_eq!(
             peer.spent, 4,
@@ -2806,10 +2835,10 @@ mod what_a_frame_costs {
         // A window that cannot pay for the frame is not charged for it, and
         // says so.
         let mut peer = greeted();
-        assert!(peer.afford_reading(&vec![0u8; 512 * 8_000], NOW));
+        assert!(peer.afford_reading(&vec![0u8; 512 * 8_000], NOW, || false));
         let before = peer.spent;
         assert!(
-            !peer.afford_reading(&vec![0u8; 512 * 193], NOW),
+            !peer.afford_reading(&vec![0u8; 512 * 193], NOW, || false),
             "a window with 192 units left paid for a frame of 193"
         );
         assert_eq!(peer.spent, before);
@@ -2820,14 +2849,14 @@ mod what_a_frame_costs {
     }
 
     /// Two frames are not charged: a stranger's, which may only be a
-    /// handshake, and a piece of a join answer, which this node asked one
-    /// named peer for.
+    /// handshake, and a piece of a join answer from the peer this node asked
+    /// for one.
     ///
     /// Charging the second would have the answering peer's window refuse the
     /// pieces this node went and asked for, and a collector left waiting for
     /// a piece that was read and thrown away blames the peer that sent it.
     #[test]
-    fn a_handshake_and_a_join_piece_are_read_for_nothing() {
+    fn a_handshake_and_a_join_piece_asked_for_are_read_for_nothing() {
         let piece = Message::JoinPart {
             what: Joining::Ledger,
             at: Hash32::ZERO,
@@ -2836,17 +2865,45 @@ mod what_a_frame_costs {
             bytes: vec![0u8; crate::message::JOIN_PART_BYTES],
         };
         let mut peer = greeted();
-        assert!(peer.afford_reading(&piece.encode(), NOW));
+        assert!(peer.afford_reading(&piece.encode(), NOW, || true));
         assert_eq!(
             peer.spent, 0,
-            "a piece of a join answer was charged for its bytes"
+            "a piece of a join answer this node asked for was charged for its bytes"
         );
 
         let mut stranger = PeerState::default();
-        assert!(stranger.afford_reading(&vec![0u8; 4 * 1024], NOW));
+        assert!(stranger.afford_reading(&vec![0u8; 4 * 1024], NOW, || false));
         assert_eq!(
             stranger.spent, 0,
             "a peer that had not said who it was was charged"
+        );
+    }
+
+    /// A piece of a join answer from a peer this node did not ask is charged
+    /// for its bytes like any other frame.
+    ///
+    /// The piece goes free because this node went and asked one named peer
+    /// for it, and the tag says nothing about who was asked: it is the first
+    /// byte of the frame, and anybody can write it. Nothing asked, so a peer
+    /// nobody was collecting from had every frame tagged as a piece read and
+    /// decoded outside its allowance, a megabyte at a time up to the flood
+    /// ceiling, and dropped only after.
+    #[test]
+    fn a_join_piece_nobody_asked_for_is_charged_for_its_bytes() {
+        let piece = Message::JoinPart {
+            what: Joining::Ledger,
+            at: Hash32::ZERO,
+            part: 0,
+            parts: 1,
+            bytes: vec![0u8; crate::message::JOIN_PART_BYTES],
+        };
+        let frame = piece.encode();
+        let mut unasked = greeted();
+        assert!(unasked.afford_reading(&frame, NOW, || false));
+        assert_eq!(
+            unasked.spent,
+            what_the_wire_costs(frame.len()),
+            "a piece of a join answer from a peer nobody asked was read for nothing"
         );
     }
 }

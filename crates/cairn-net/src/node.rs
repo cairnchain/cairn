@@ -3971,6 +3971,15 @@ impl Shared {
     /// whether the peer was asked, because the question may have ended while
     /// the chain was held, and an answer to a question nobody is waiting on is
     /// not taken.
+    ///
+    /// And it keeps a verdict only where the question standing then still
+    /// wants, at that place, the leaf the path was checked against. The
+    /// protocol names no question, so one that ended during the check and a
+    /// next one put to the same peer look alike from here: the second let the
+    /// first's answer in, a path checked for one note was written down for
+    /// another, or counted against the peer as a refusal, and the peer was
+    /// counted as having answered a question it had not yet heard. A peer none
+    /// of whose verdicts are kept has not answered this question.
     fn take_placed_with(
         &self,
         from: PeerId,
@@ -3996,19 +4005,30 @@ impl Shared {
             }
             checking
         };
+        let checked_against: BTreeMap<u64, Hash32> = checking
+            .iter()
+            .map(|(position, leaf, _)| (*position, *leaf))
+            .collect();
         let folded = check(checking);
         let mut asking = self.asking();
         if !asking.asked.contains(&from) {
             return;
         }
+        let mut kept = false;
         for (position, proof, holds) in folded {
+            if asking.wanted.get(&position) != checked_against.get(&position) {
+                continue;
+            }
+            kept = true;
             if holds {
                 asking.found.insert(position, proof);
             } else {
                 asking.refused = asking.refused.saturating_add(1);
             }
         }
-        asking.answered.insert(from);
+        if kept {
+            asking.answered.insert(from);
+        }
     }
 
     /// Takes addresses out of the book, so they are not dialled again.
@@ -5670,7 +5690,9 @@ fn join_piece(shared: &Arc<Shared>, from: PeerId, message: Message, outbound: &O
 /// is the right trade for a join piece: it is a piece of an answer to a
 /// question this node put to one named peer, anybody else's copy is dropped on
 /// a comparison, and the alternative is a node that cannot be handed a chain
-/// without paying for every stranger who offers it one.
+/// without paying for every stranger who offers it one. Anybody else's copy
+/// has been charged for its bytes by then, at the read, like any frame: only
+/// the peer asked reads its pieces for nothing ([`PeerState::afford_reading`]).
 ///
 /// It was the wrong trade for a run of paths, and nothing said so because the
 /// set had no name. `Proofs` was taken here too, which carried it past
@@ -9290,13 +9312,16 @@ fn is_peer_fault(error: &WireError) -> bool {
 /// `None` when the peer's window cannot pay for the frame, and then nothing in
 /// it is decoded or looked at: the peer is answered with the silence any ask
 /// past its window gets, and the frame costs this node the copy that brought
-/// it in. See [`PeerState::afford_reading`] for what is charged and why.
+/// it in. See [`PeerState::afford_reading`] for what is charged and why, and
+/// why whether this node is collecting a join from `id` is part of it.
 fn paid_and_decoded(
+    shared: &Shared,
+    id: PeerId,
     peer: &mut PeerState,
     frame: &[u8],
     now: u64,
 ) -> Result<Option<Message>, WireError> {
-    if !peer.afford_reading(frame, now) {
+    if !peer.afford_reading(frame, now, || shared.choosing().asked_join(id)) {
         return Ok(None);
     }
     Ok(Some(Message::decode(frame)?))
@@ -9463,7 +9488,7 @@ fn read_loop(
         // used to be asked only once the message was built, by which time a
         // greeted peer's megabyte of notes had cost what it costs whatever the
         // budget then said.
-        let message = match paid_and_decoded(&mut peer, &frame, last_heard) {
+        let message = match paid_and_decoded(shared, id, &mut peer, &frame, last_heard) {
             Ok(Some(message)) => message,
             Ok(None) => continue,
             Err(error) => {
@@ -13291,6 +13316,53 @@ mod peers_and_loops {
         assert!(
             after.found.is_empty() && after.refused == 0,
             "what an answer to a question that had ended brought was taken"
+        );
+    }
+
+    /// An answer checked against one question is not taken by the next one
+    /// put to the same peer, where that question wants another leaf at the
+    /// place.
+    ///
+    /// The protocol names no question, so a peer asked again is let in by the
+    /// second question whatever its answer was about. A path checked against
+    /// the first question's leaf was written into the second, which wants
+    /// another leaf there: kept as a path that folds for a note it was never
+    /// checked for, or counted against the peer as a refusal, and the peer
+    /// counted as having answered a question it had not yet heard. Nothing put
+    /// a second question while the first answer was being checked, so writing
+    /// it into whichever question stood passed.
+    #[test]
+    fn an_answer_checked_against_one_question_is_not_taken_by_the_next() {
+        let node = quiet();
+        *node.shared.asking() = Asking {
+            wanted: BTreeMap::from([(7, Hash32::ZERO), (9, Hash32::ZERO)]),
+            asked: HashSet::from([1]),
+            ..Asking::default()
+        };
+        node.shared
+            .take_placed_with(1, &an_answer_about_seven_and_nine(), |checking| {
+                // The first question ends while the paths are checked, and the
+                // next one asks the same peer about the same places, where
+                // other notes now sit.
+                let _ = finished(&mut node.shared.asking(), 0);
+                let elsewhere = Hash32::from_bytes([1; 32]);
+                *node.shared.asking() = Asking {
+                    wanted: BTreeMap::from([(7, elsewhere), (9, elsewhere)]),
+                    asked: HashSet::from([1]),
+                    ..Asking::default()
+                };
+                only_seven_folds(checking)
+            });
+
+        let after = node.shared.asking();
+        assert!(
+            after.found.is_empty() && after.refused == 0,
+            "a path checked against one question's leaf was taken by the next question, which \
+             wants another leaf there"
+        );
+        assert!(
+            after.answered.is_empty(),
+            "the peer was counted as answering a question its answer was not checked against"
         );
     }
 

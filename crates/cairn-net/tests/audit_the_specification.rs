@@ -82,7 +82,7 @@ fn greeted() -> PeerState {
 fn charged_to(peer: &mut PeerState, chain: &mut ChainStore, message: Message) -> u32 {
     let before = peer.spent;
     assert!(
-        peer.afford_reading(&message.encode(), NOW),
+        peer.afford_reading(&message.encode(), NOW, || false),
         "a fresh window could not pay for reading a {}",
         message.kind()
     );
@@ -212,7 +212,10 @@ fn every_row_of_the_allowance_table_is_what_the_implementation_charges() {
             "8, plus 1 per 512 bytes of the message, rounded up",
         ),
         row("Ping, Pong, Chain", "1"),
-        row("Hello, Welcome, JoinPart", "nothing"),
+        row(
+            "Hello, Welcome, and a JoinPart from the peer asked for it",
+            "nothing",
+        ),
     ];
     for stated in &rows {
         assert!(
@@ -331,7 +334,7 @@ fn every_row_of_the_allowance_table_is_what_the_implementation_charges() {
     ] {
         let mut stranger = PeerState::default();
         let mut chain = ChainStore::new(params());
-        assert!(stranger.afford_reading(&introduction.encode(), NOW));
+        assert!(stranger.afford_reading(&introduction.encode(), NOW, || false));
         let mut local = Local {
             chain: &mut chain,
             keeps: Keeps::default(),
@@ -341,9 +344,10 @@ fn every_row_of_the_allowance_table_is_what_the_implementation_charges() {
         on_message(&mut local, &mut stranger, introduction, NOW);
         assert_eq!(stranger.spent, 0, "an introduction was charged");
     }
-    // And nothing for a piece of a join answer, which a node takes before the
-    // allowance and never hands to the layer that prices messages, so reading
-    // it is the only charge there could be.
+    // And nothing for a piece of a join answer from the peer asked for it,
+    // which a node takes before the allowance and never hands to the layer
+    // that prices messages, so reading it is the only charge there could be.
+    // From anybody else it is a frame like any other.
     let piece = Message::JoinPart {
         what: Joining::Ledger,
         at: Hash32::ZERO,
@@ -352,10 +356,17 @@ fn every_row_of_the_allowance_table_is_what_the_implementation_charges() {
         bytes: vec![0; 64 * 1024],
     };
     let mut peer = greeted();
-    assert!(peer.afford_reading(&piece.encode(), NOW));
+    assert!(peer.afford_reading(&piece.encode(), NOW, || true));
     assert_eq!(
         peer.spent, 0,
-        "reading a piece of a join answer was charged"
+        "reading a piece of a join answer from the peer asked was charged"
+    );
+    let mut unasked = greeted();
+    assert!(unasked.afford_reading(&piece.encode(), NOW, || false));
+    assert_eq!(
+        unasked.spent,
+        per_512_bytes(&piece),
+        "reading a piece of a join answer from a peer nobody asked was not charged by its size"
     );
 }
 
@@ -396,7 +407,7 @@ fn the_window_and_the_rate_a_frame_is_charged_at_are_the_ones_stated() {
     // whose own price is less pays that and no more.
     for (bytes, units) in [(1, 1), (512, 1), (513, 2), (4_096, 8)] {
         let mut peer = greeted();
-        assert!(peer.afford_reading(&vec![0; bytes], NOW));
+        assert!(peer.afford_reading(&vec![0; bytes], NOW, || false));
         assert_eq!(peer.spent, units, "a frame of {bytes} bytes");
         let mut chain = ChainStore::new(params());
         let mut local = Local {
