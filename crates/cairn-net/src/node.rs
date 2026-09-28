@@ -5199,6 +5199,10 @@ impl Node {
     /// gap nor be handed a ledger, since it already follows a chain. It used
     /// to print healthy lines under a height that did not move, and nothing
     /// said why.
+    ///
+    /// Counted only for a node with a chain of its own. One holding nothing,
+    /// or only the first block its network pins, can be handed a ledger, and
+    /// is left to its chooser.
     pub fn behind_what_peers_keep(&self) -> Option<usize> {
         let tip = self.shared.chain().height()?;
         let peers = self

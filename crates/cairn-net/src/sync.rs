@@ -985,6 +985,7 @@ pub struct Reaction {
     /// hold, and ask for the chain again after each batch, for as long as it
     /// ran, printing healthy lines under a height that did not move. It
     /// cannot be handed a ledger either, since it already follows a chain.
+    /// Never set for a node that holds nothing of its own, which can be.
     ///
     /// Named rather than acted on, and counted where peers are counted: one
     /// of these is a number a peer writes, and what a node should conclude
@@ -1995,9 +1996,15 @@ fn answer(
             // Nothing this node holds connects to a stretch that starts above
             // its tip, so none of it is asked for: see
             // [`Reaction::cannot_supply`]. Not the chain again either, which
-            // would only bring the same answer back. A node with no chain has
-            // a chooser to ask somebody else, and is left to it.
-            if from > have && !local.chain.is_empty() {
+            // would only bring the same answer back. A node with no chain of
+            // its own has a chooser to ask somebody else, and is left to it.
+            //
+            // No chain of its own includes the first block a named network
+            // pins, as at the handshake. Asking whether the chain was empty
+            // counted a newcomer on a real network among the nodes further
+            // behind than their peers keep, which follow a chain and cannot
+            // be handed one, where it holds nothing and can be.
+            if from > have && !local.chain.holds_nothing_of_its_own() {
                 return Reaction {
                     cannot_supply: prompted.then_some(from),
                     ..Reaction::idle()
