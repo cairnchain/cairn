@@ -15,7 +15,11 @@
 //! old: a loss of twenty four to forty eight times the hash rate, depending on
 //! the chain's length, makes it unweighable from about eleven days after the
 //! loss until months or years after it, and every honest archivist alive then
-//! fails in exactly the same words.
+//! fails in exactly the same words. And a newcomer refuses a tip more than
+//! `cairn_ledger::sampling::MOST_FALL` times below the run it stands on, which
+//! a chain that lost more than about sixteen times its hash rate shows from
+//! hours after the loss; that refusal holds in every other respect, so it is
+//! held against nobody.
 
 #![allow(
     clippy::unwrap_used,
@@ -647,5 +651,98 @@ fn a_showing_that_fails_at_its_own_date_is_not_taken_for_the_clock() {
         !unweighable.because.starts_with("the tip is dated"),
         "a showing that does not weigh at any date was refused for its date alone: {}",
         unweighable.because
+    );
+}
+
+/// A real showing of a chain that climbed, held, and then lost its miners:
+/// every header at the difficulty the retarget demanded, the last of them
+/// walked down to the floor by long gaps, and the tip dated in the past.
+fn a_showing_of_a_chain_that_fell() -> SampledStart {
+    let params = params();
+    let target = params.target_block_time;
+    let mut forge = Forge {
+        params,
+        state: LedgerState::new(),
+        clock: unix_now() - 3 * 24 * 3_600,
+    };
+    let mut headers: Vec<BlockHeader> = Vec::new();
+    // `mine_many` states six hundred seconds a block; this states `gap`.
+    let mut spaced = |forge: &mut Forge, gap: u64| {
+        forge.clock = forge.clock + gap - 600;
+        headers.push(forge.mine_many(1)[0].header);
+    };
+    for _ in 0..6 {
+        spaced(&mut forge, 1);
+    }
+    for _ in 0..100 {
+        spaced(&mut forge, target);
+    }
+    while cairn_ledger::validation::expected_difficulty(&forge.state, &params)
+        > cairn_ledger::pow::MIN_DIFFICULTY
+    {
+        spaced(&mut forge, 6 * target);
+    }
+    spaced(&mut forge, 6 * target);
+    let tip = *headers.last().unwrap();
+
+    let mut archive = Archive::new();
+    for header in &headers {
+        archive.add(header_leaf(&header.id()));
+    }
+    let start = open_start(
+        &tip,
+        forge.state.headers_before_tip(),
+        SAMPLES,
+        &params,
+        |height| headers.get(usize::try_from(height).ok()?).copied(),
+        |height| archive.prove_in(height, tip.height),
+    )
+    .expect("a chain this short can be shown");
+    assert!(
+        matches!(
+            check_start(&start, unix_now(), &params),
+            Err(StartError::TipFellTooFar { .. })
+        ),
+        "the premise: the showing fails the tie and nothing else"
+    );
+    start
+}
+
+/// **Showings of a chain whose miners left are said to be about the chain, in
+/// words that stay the same from one showing to the next.**
+///
+/// A tip more than `MOST_FALL` times below its run is a verdict about the
+/// chain: it holds in every other respect, and every honest archivist serving
+/// that chain shows the same. So the node holds it against none of them and
+/// counts it towards the line that tells its operator the chain itself cannot
+/// be weighed. That line waits for several showings in the same words, and the
+/// words carried the tip's difficulty and the run's, which move with every
+/// block and every draw. Nothing asked this, so a refusal the count could
+/// never add up passed.
+#[test]
+fn showings_of_a_chain_whose_miners_left_are_said_to_be_about_the_chain() {
+    let (newcomer, peers) = a_newcomer_shown(&a_showing_of_a_chain_that_fell());
+    let (unweighable, behind) = what_it_says(&newcomer);
+    for peer in &peers {
+        peer.stop();
+    }
+    newcomer.shutdown();
+
+    assert!(
+        behind.is_none(),
+        "a chain whose miners left was taken for this machine's clock"
+    );
+    let unweighable = unweighable.expect(
+        "honest showings of a chain whose miners left were not reported as a chain nobody can \
+         weigh",
+    );
+    assert_eq!(
+        unweighable.because,
+        StartError::TipFellTooFar {
+            stated: 0,
+            hardest: 0
+        }
+        .to_string(),
+        "the showings were refused in words that name the numbers of one showing"
     );
 }

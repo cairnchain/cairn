@@ -49,17 +49,24 @@ claim from 45.7% to 40%. And it said the derivation accounted for neither
 adversarial placement under moving difficulty nor grinding of the Fiat-Shamir
 seed. Both are measured now, in `crates/cairn-ledger/examples/adversarial_placement.rs`.
 
-The grinding measurement counts tips and was first priced wrong. A tip was
+The grinding measurement counts tips and was priced wrong twice. A tip was
 said to cost the tip's own work, which on a chain of real difficulty put 2^80
-tips out of reach. The run up to the tip is held to the retarget, and the
-retarget lets a forger walk that run down to the difficulty floor in a few
-hundred blocks of long stated gaps, paid once; after that every nonce is a tip
-and a tip costs the 4 096 hashes of its own draw. So the 40% figure is quoted
-against a budget: 2^-161.9 a tip, which holds under 2^-128 against 2^33 tips
-and not 2^34, and nothing at all at the measured 42.96%. The specification's
-section on what the bound is worth says so, and
-`crates/cairn-ledger/tests/grinding_at_the_floor.rs` holds the walk and the
-budget.
+tips out of reach, but the retarget let a forger walk the run up to the tip
+down to the difficulty floor in a few hundred blocks of long stated gaps, paid
+once, after which every nonce was a tip. It was then said to cost the 4 096
+hashes of its draw, which a forger that stops at the first question landing in
+its invented work does not spend: about forty, at 40%. A newcomer now refuses a
+tip more than 32 times below the hardest header of its run, which puts a floor
+under a tip at the band the draw leaves unresolved over 2^18: measured, 2^18
+hashes on testnet-6 and 2^14 on the devnet at their opening difficulties, where
+tying the tip to the pinned header alone would have left 2^10.3 and 2^7.3. The
+40% figure is quoted against a budget: 2^-161.9 a tip, which holds under
+2^-128 against 2^33 tips and not 2^34, and nothing at all at the measured
+42.96%. The specification's section on what the bound is worth says so and
+says what the tie costs an honest chain that loses hash rate;
+`crates/cairn-ledger/tests/the_price_of_a_seed.rs` measures the price with and
+without the tie, and `crates/cairn-ledger/tests/grinding_at_the_floor.rs`
+holds it on chains that were mined.
 
 What is worth knowing about that measurement is that it was itself wrong until
 recently, and in a way no test caught: it built a forgery by re-mining headers

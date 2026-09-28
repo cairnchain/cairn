@@ -1180,14 +1180,19 @@ pub struct Unjudged {
 /// ordinarily the sender's doing: the chooser stops counting its claim and the
 /// next claimant is asked. That stays, whatever this says, because the peer
 /// did send something this node could not use and the hold-off is what stops
-/// a stranger occupying a newcomer's attention.
+/// a stranger occupying a newcomer's attention. The exception is a showing
+/// that holds in every respect but its tip, which stands further below its
+/// run than a newcomer takes: that is the chain's doing, every honest peer
+/// serving it shows the same, and its sender is held off nothing.
 ///
 /// What did not exist is the other reading. When every showing fails with the
 /// same words, the peers are not the thing they have in common: the chain is.
 /// This build takes a run of headers up to a fixed length, and a chain whose
-/// difficulty has fallen far below what it ran at needs a longer one, so an
-/// honest archivist serving an honest chain is refused and looks exactly like
-/// a liar. The node still gets its chain, by reading it block by block, which
+/// difficulty has fallen far below what it ran at needs a longer one; and it
+/// takes a tip no more than `cairn_ledger::sampling::MOST_FALL` times below
+/// the run it stands on, which a chain whose miners have just left is not. In
+/// the first case an honest archivist serving an honest chain is refused and
+/// looks exactly like a liar. The node still gets its chain, by reading it block by block, which
 /// is slower and no less safe. Before this, nothing about any of it reached
 /// the person running it: both errors were dropped where they were made, and
 /// the only trace was a join that took hours.
@@ -3503,7 +3508,8 @@ impl Shared {
     /// Beside the chooser rather than instead of it. The peer still loses its
     /// turn where it always did: this node was handed bytes it could not use,
     /// and whether that is the sender's fault is exactly what it cannot tell
-    /// from one showing. What this adds is the reading it could never make
+    /// from one showing, except for a tip fallen too far below its run, which
+    /// is said to be the chain's and holds nobody off. What this adds is the reading it could never make
     /// before, which needs more than one showing to make.
     fn could_not_weigh(&self, from: Option<Sender>, because: &str, now: u64) {
         let mut met = self
@@ -5928,9 +5934,10 @@ fn weigh_what_was_shown(
     // its turn, which is right; what nobody got was the reason, and the two
     // readings of it are not the same afternoon. A sample in the wrong place
     // is somebody making a chain up. A run of headers longer than this build
-    // takes is this build meeting a chain whose difficulty has fallen far
-    // below what it ran at, where every archivist alive fails identically and
-    // honestly. See [`Unweighable`] for what that costs and how long it lasts.
+    // takes, or a tip standing too far below the run it stands on, is this
+    // build meeting a chain whose difficulty has fallen far below what it ran
+    // at, where every archivist alive fails identically and honestly. See
+    // [`Unweighable`] for what that costs and how long it lasts.
     //
     // The address is read and let go of before either count is taken, so the
     // tables of these stay the leaves their own comments say they are.
@@ -5940,7 +5947,9 @@ fn weigh_what_was_shown(
         Shown::AheadOfThisClock { ahead } => {
             shared.clock_looks_behind(shared.sender_for(from), *ahead, now);
         }
-        Shown::Refused(because) => shared.could_not_weigh(shared.sender_for(from), because, now),
+        Shown::Refused(because) | Shown::Fallen(because) => {
+            shared.could_not_weigh(shared.sender_for(from), because, now);
+        }
     }
     let mut joining = shared.joining();
     // The attempt may have been given up on while this was being weighed:
@@ -5961,7 +5970,15 @@ fn weigh_what_was_shown(
         // way a ledger from past this build's rules does: nobody can hand this
         // node that chain until its clock is right, and asking again would be
         // a loop.
-        Shown::AheadOfThisClock { .. } => {
+        //
+        // A tip fallen too far below its run is the same kind of verdict, about
+        // the chain rather than this node's clock: the showing held in every
+        // other respect, and every honest archivist serving a chain whose
+        // miners left shows the same one. So the claim stops counting and the
+        // address pays nothing, and the refusal is still counted above,
+        // because a run of them is exactly what the line about a chain nobody
+        // can weigh is for.
+        Shown::AheadOfThisClock { .. } | Shown::Fallen(_) => {
             shared.choosing().cannot_be_taken(from, now);
             *joining = Progress::Idle;
             return None;
@@ -6005,6 +6022,11 @@ enum Shown {
     /// It weighs at the date its tip carries, and that date stands `ahead`
     /// seconds past this node's clock, which is further than a node takes.
     AheadOfThisClock { ahead: u64 },
+    /// It holds in every respect but the last: its tip stands further below
+    /// the run it stands on than a newcomer takes. A verdict about the chain,
+    /// in the words given, since every honest peer serving a chain whose
+    /// miners left shows the same.
+    Fallen(String),
     /// It does not weigh, for the reason given.
     Refused(String),
 }
@@ -6040,10 +6062,150 @@ fn weigh(whole: &[u8], now: u64, params: &ConsensusParams) -> Shown {
                 Ok(_) => Shown::AheadOfThisClock {
                     ahead: timestamp.saturating_sub(now),
                 },
-                Err(error) => Shown::Refused(error.to_string()),
+                Err(error) => refused(error),
             }
         }
-        Err(error) => Shown::Refused(error.to_string()),
+        Err(error) => refused(error),
+    }
+}
+
+/// What a weighing's refusal says about whoever showed it.
+///
+/// A tip too far below its run is the last thing a weighing asks, so a
+/// showing refused for it held in every other respect: its questions were
+/// answered by headers that really sit where they say, its run was mined
+/// under the retarget, and what is wrong is that the chain's miners left.
+/// Every honest peer serving that chain shows the same, so it is a verdict
+/// about the chain, and it was taken for the sender's doing like any other.
+/// A tip dated ahead of this clock as well is still this: the chain would
+/// fall at its own date too.
+fn refused(error: StartError) -> Shown {
+    match error {
+        StartError::TipFellTooFar { .. } => Shown::Fallen(error.to_string()),
+        _ => Shown::Refused(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+mod weighing_tests {
+    use cairn_accumulator::Archive;
+    use cairn_ledger::block::{BlockHeader, BLOCK_VERSION};
+    use cairn_ledger::pow::{next_difficulty, DIFFICULTY_WINDOW, MIN_DIFFICULTY};
+    use cairn_ledger::sampling::{check_start, open_start, SampledStart, StartError, SAMPLES};
+    use cairn_ledger::state::header_leaf;
+    use cairn_ledger::validation::{mine_header, ConsensusParams};
+    use cairn_primitives::codec::Encode;
+    use cairn_primitives::Hash32;
+
+    use super::{weigh, Shown};
+
+    /// A chain that climbs, holds, and walks the retarget's demand down to the
+    /// floor with every header at the difficulty demanded of it, which is
+    /// what an honest chain whose miners all but left looks like to a
+    /// newcomer, and a real showing of its tip.
+    fn a_showing_of_a_chain_that_fell() -> SampledStart {
+        let params = ConsensusParams::testnet();
+        let target = params.target_block_time;
+        let mut archive = Archive::new();
+        let mut headers: Vec<BlockHeader> = Vec::new();
+        let header =
+            |previous: Option<&BlockHeader>, history: Hash32, gap: u64, difficulty: u64| {
+                let candidate = BlockHeader {
+                    version: BLOCK_VERSION,
+                    network: params.network,
+                    height: previous.map_or(0, |below| below.height + 1),
+                    previous: previous.map_or(Hash32::ZERO, BlockHeader::id),
+                    transactions_root: Hash32::ZERO,
+                    state_root: Hash32::ZERO,
+                    history,
+                    timestamp: previous.map_or(1_000_000, |below| below.timestamp + gap),
+                    difficulty,
+                    total_work: previous.map_or(0, |below| below.total_work)
+                        + u128::from(difficulty),
+                    nonce: 0,
+                };
+                mine_header(candidate, 1 << 24).unwrap()
+            };
+        let demanded = |headers: &[BlockHeader]| {
+            let from = headers.len().saturating_sub(DIFFICULTY_WINDOW + 1);
+            let window: Vec<_> = headers[from..].iter().map(BlockHeader::summary).collect();
+            next_difficulty(&window, target)
+        };
+        let genesis = header(None, archive.forest().commitment(), 0, MIN_DIFFICULTY);
+        archive.add(header_leaf(&genesis.id()));
+        headers.push(genesis);
+        let gaps = std::iter::repeat_n(1, 6).chain(std::iter::repeat_n(target, 100));
+        for gap in gaps {
+            let asked = demanded(&headers);
+            let next = header(headers.last(), archive.forest().commitment(), gap, asked);
+            archive.add(header_leaf(&next.id()));
+            headers.push(next);
+        }
+        while demanded(&headers) > MIN_DIFFICULTY {
+            let asked = demanded(&headers);
+            let next = header(
+                headers.last(),
+                archive.forest().commitment(),
+                6 * target,
+                asked,
+            );
+            archive.add(header_leaf(&next.id()));
+            headers.push(next);
+        }
+        let tip = header(
+            headers.last(),
+            archive.forest().commitment(),
+            6 * target,
+            MIN_DIFFICULTY,
+        );
+        // The run a showing carries ends at the tip, so it is read like any
+        // other header; the forest is the one from before it.
+        headers.push(tip);
+        open_start(
+            &tip,
+            archive.forest().roots_only(),
+            SAMPLES,
+            &params,
+            |height| headers.get(usize::try_from(height).ok()?).copied(),
+            |height| archive.prove_in(height, tip.height),
+        )
+        .expect("a chain this short can be shown")
+    }
+
+    /// A showing whose tip fell too far below its run is not taken for the
+    /// sender's doing.
+    ///
+    /// It holds in every other respect, since the tie is the last thing a
+    /// weighing asks, so what it says is that the chain's hash rate
+    /// collapsed, and every honest archivist serving that chain shows the
+    /// same. A refusal is the reading that ends in `Chooser::failed`, which
+    /// pauses the sender's address for a growing interval as if it had made
+    /// the chain up. Nothing asked this, so a newcomer that held every honest
+    /// archivist off for a chain's collapse passed.
+    #[test]
+    fn a_tip_fallen_below_its_run_is_not_taken_for_the_senders_doing() {
+        let params = ConsensusParams::testnet();
+        let start = a_showing_of_a_chain_that_fell();
+        let now = start.tip.timestamp;
+        assert!(
+            matches!(
+                check_start(&start, now, &params),
+                Err(StartError::TipFellTooFar { .. })
+            ),
+            "the premise: the showing fails the tie and nothing else"
+        );
+        let shown = weigh(&start.encode(), now, &params);
+        assert!(
+            matches!(shown, Shown::Fallen(_)),
+            "a showing refused only for a tip fallen below its run was taken as the sender's \
+             doing"
+        );
     }
 }
 
