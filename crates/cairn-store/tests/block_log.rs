@@ -964,3 +964,92 @@ fn the_size_of_a_block_is_known_before_it_is_read() {
     );
     assert_eq!(log.bytes_at(8).unwrap(), None, "a height past its end");
 }
+
+/// A record set aside is left on the disk with everything after it, the log
+/// answers for the records before it, and the next open reads them all back.
+///
+/// For a replay that met a record this log will not stand behind: the same
+/// answer recovery gives one that will not decode, so the bytes wait for the
+/// block at that height to arrive from somebody else and are written over
+/// then, and a start that misread them can read them again. Nothing in this
+/// crate asked it, so a set aside that cut the log, or that left the index
+/// naming the records it had set aside, would have passed here. The log
+/// begins above the first block, as a joined node's does, so a height and a
+/// place in the log are two numbers.
+#[test]
+fn a_record_set_aside_is_left_on_the_disk_and_read_back_at_the_next_open() {
+    let directory = scratch("set-aside");
+    let blocks = chain(8);
+    {
+        let (mut log, _) = BlockLog::open(&directory).unwrap();
+        for block in &blocks[2..] {
+            log.append(block).unwrap();
+        }
+    }
+    let whole = std::fs::read(directory.join(BLOCK_LOG)).unwrap();
+    let record = |block: &Block| u64::try_from(block.encode().len() + 4).unwrap();
+
+    let (mut log, _) = BlockLog::open(&directory).unwrap();
+    let past_the_log = log.set_aside_from(8).unwrap();
+    assert_eq!(
+        (past_the_log.blocks, past_the_log.unreadable, log.len()),
+        (6, None, 6),
+        "a height the log does not hold set something aside"
+    );
+    let set_aside = log.set_aside_from(5).unwrap();
+    let first_kept = std::fs::read(directory.join(BLOCK_LOG)).unwrap();
+    let held = (
+        log.len(),
+        log.first_height(),
+        log.reaches(),
+        log.holds(5),
+        log.read_at(4).unwrap(),
+    );
+    drop(log);
+
+    assert_eq!(
+        (
+            set_aside.blocks,
+            set_aside.unreadable,
+            set_aside.discarded_bytes,
+            set_aside.left_in_place,
+        ),
+        (3, Some(3), 0, blocks[5..].iter().map(record).sum::<u64>()),
+        "the record was not reported as left unread, from its place in the log on, with the \
+         three before it kept"
+    );
+    assert_eq!(
+        held,
+        (3, 2, 5, false, Some(blocks[4].clone())),
+        "the log answers for records past the one set aside, or not for the ones before it"
+    );
+    assert!(
+        first_kept == whole,
+        "a record set aside had the log cut under it"
+    );
+
+    let (mut log, _) = BlockLog::open(&directory).unwrap();
+    assert_eq!(log.len(), 6, "the next open did not read the records back");
+    // Written over once the block at that height arrives.
+    log.set_aside_from(5).unwrap();
+    log.append(&blocks[5]).unwrap();
+    assert_eq!(log.read_at(5).unwrap(), Some(blocks[5].clone()));
+    drop(log);
+    let (mut log, _) = BlockLog::open(&directory).unwrap();
+    assert_eq!(
+        log.len(),
+        4,
+        "the records past the one written over came back from bytes the append should have \
+         let go of"
+    );
+
+    // And from the first record on, which leaves a log holding nothing.
+    let everything = log.set_aside_from(2).unwrap();
+    assert_eq!(
+        (everything.unreadable, log.len(), log.first_height()),
+        (Some(0), 0, 0),
+        "a log set aside from its first record does not hold nothing"
+    );
+    drop(log);
+    let _ = std::fs::remove_dir_all(&directory);
+}

@@ -665,8 +665,8 @@ fn what_was_restored(restored: &Restored, directory: &str) -> Vec<String> {
     )];
     if restored.rejoining {
         said.push(
-            "             the stored blocks start partway up the chain, so this \
-             node joins again rather than reading its way back"
+            "             the stored blocks start partway up the chain, so they \
+             were deleted and this node joins again rather than reading its way back"
                 .to_owned(),
         );
     }
@@ -1331,7 +1331,9 @@ mod said_out_loud {
         );
 
         let cases: [Case; 8] = [
-            ("rejoining", |r| r.rejoining = true, "partway"),
+            // "Deleted", because that is what happened to them: the log is cut
+            // to nothing, and the line said only that the node joins again.
+            ("rejoining", |r| r.rejoining = true, "were deleted"),
             // "Cut", because that is what happened to them. The line said
             // "set aside", which is this report's word for bytes it kept.
             ("refused", |r| r.refused = 4, "cut from the log"),

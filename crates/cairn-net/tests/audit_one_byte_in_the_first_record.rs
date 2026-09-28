@@ -13,10 +13,15 @@
 //! Two causes are named and priced as partial. A third is a byte that changed
 //! in place, which is the damage the store's own `read_at` was hardened
 //! against because "1681 of 1984 flips inside the log answered a height with a
-//! block nobody mined". On the replay path the same byte is a refusal, and the
-//! cut runs from the refused record to the end of the log. For the archivist,
-//! "the one role that cannot" ask for a block again in the store's words, a
-//! byte in the first record is the whole history.
+//! block nobody mined". On the replay path the same byte was a refusal, and
+//! the cut ran from the refused record to the end of the log. For the
+//! archivist, "the one role that cannot" ask for a block again in the store's
+//! words, a byte in the first record was the whole history.
+//!
+//! The replay asks the store now before it reads a refusal, and a record the
+//! store will not stand behind is left where it is with everything after it,
+//! as a record that will not decode is: the start goes on from the records
+//! before it and cuts nothing.
 //!
 //! Measured here rather than argued, with the byte in the first record and in
 //! the seventh.
@@ -183,8 +188,9 @@ fn one_byte_in_the_first_record_costs_an_archivist_every_block_it_kept() {
 
     assert_eq!(
         (seventh.0, seventh.1, seventh.2 .0),
-        (6, 6, 6),
-        "a byte in the seventh record costs the six records after it"
+        (6, 0, 12),
+        "a byte in the seventh record cost the records after it, where it is damage the \
+         store names and the start leaves on the disk"
     );
     assert_eq!(
         (first.0, first.1, first.2 .0, first.3),
@@ -208,8 +214,8 @@ fn one_byte_in_the_first_record_costs_an_archivist_every_block_it_kept() {
     assert_eq!(
         (seventh.3, first.3),
         (0, 12),
-        "and the two are told apart: a byte inside the log is a refusal from \
-         that record on, a byte in the first one is a log that does not know \
-         where it starts"
+        "and the two are told apart: a byte inside the log is a record left \
+         unread from there on, a byte in the first one is a log that does not \
+         know where it starts"
     );
 }

@@ -545,7 +545,11 @@ pub enum NodeError {
     /// remedy for a damaged file; the same build refuses the same blocks from
     /// the network, so neither cured anything and both cost blocks.
     #[error(
-        "{file} was written under rules this build does not have: {because}. Nothing on          the disk has been changed. Start it again with a build that has the rules for          that height, and the chain here is picked up where it was left; deleting          anything would not help, because this build refuses the same blocks from the          network"
+        "{file} was written under rules this build does not have: {because}. Nothing on \
+         the disk has been changed. Start it again with a build that has the rules for \
+         that height, and the chain here is picked up where it was left; deleting \
+         anything would not help, because this build refuses the same blocks from the \
+         network"
     )]
     OtherRules { file: &'static str, because: String },
     /// A node asked to keep the whole cold set, over blocks that do not begin
@@ -573,7 +577,9 @@ pub enum NodeError {
     /// first record, cut the log to nothing and write this network's first
     /// block in its place.
     #[error(
-        "{file} holds another network's chain: {because}. Nothing on the disk has been          changed. If that is the network meant, start this node for it; if not, this          node needs a directory of its own, because this one is that network's"
+        "{file} holds another network's chain: {because}. Nothing on the disk has been \
+         changed. If that is the network meant, start this node for it; if not, this \
+         node needs a directory of its own, because this one is that network's"
     )]
     OtherNetwork { file: &'static str, because: String },
     /// The ledger this node starts from is there and cannot be used.
@@ -949,7 +955,7 @@ pub struct Restored {
     /// for an archivist the whole history, which is the one role that cannot
     /// ask for it back.
     pub blocks_set_aside: usize,
-    /// Whether the log was set aside because it does not start at the first
+    /// Whether the log was deleted because it does not start at the first
     /// block of the chain.
     ///
     /// A node handed a ledger writes its log from the height it was handed.
@@ -4253,8 +4259,9 @@ impl Node {
         //
         // Not every end is a cut. A refusal about this build or this command
         // line stops the start with the disk as it was, a record that will
-        // not decode is left where it is, and a read the disk refuses stops
-        // the start; each is said where it is met below.
+        // not decode is left where it is, so is one that decodes and that the
+        // store will not stand behind, and a read the disk refuses stops the
+        // start; each is said where it is met below.
         //
         // A node handed a ledger cannot read its way back to it, because the
         // blocks it holds build on a ledger it never applied. So it keeps the
@@ -4339,6 +4346,12 @@ impl Node {
         let rejoining = !log.is_empty() && log.first_height() > start;
         let mut applied = 0usize;
         let mut unreadable = false;
+        // A record that decodes and that the store will not stand behind:
+        // see `stands_behind`.
+        let mut damaged = None;
+        // Opened before the replay, because the header log is what speaks for
+        // the last record, which has no record after it to name it.
+        let mut headers = HeaderLog::open(&directory).map_err(in_file(HEADER_LOG))?;
         if !rejoining {
             // From the ledger's tip rather than from the first record: what
             // is below it is in the ledger already, and on a node that keeps
@@ -4393,26 +4406,41 @@ impl Node {
                 // wrong. The same shape as `ChainStore::reapply`, one crate up.
                 let its_own_clock = block.header.timestamp;
                 let height = block.header.height;
-                match chain.add_block(block, its_own_clock) {
-                    Ok(Accepted::Extended) => applied = applied.saturating_add(1),
-                    // A refusal about this build or this command line rather
-                    // than about the block stops the start here, with nothing
-                    // cut. The same build refuses the same blocks from the
-                    // network, so what a cut would have asked for again could
-                    // never have been taken back, and the blocks it deleted
-                    // were valid ones some other build had written.
-                    Err(error) => {
-                        if let Some(stop) = about_the_reader(height, applied == 0, &error) {
-                            return Err(stop);
-                        }
-                        break;
+                let refused = match chain.add_block(block, its_own_clock) {
+                    Ok(Accepted::Extended) => {
+                        applied = applied.saturating_add(1);
+                        continue;
                     }
-                    Ok(_) => break,
+                    Err(error) => Some(error),
+                    Ok(_) => None,
+                };
+                // Damage first. A record that changed in place and still
+                // decodes is refused by the chain like a block, and read that
+                // way it was cut with every valid record after it, or, where
+                // the byte was the version's, taken for a build too old and
+                // every start stopped. The store can tell the two apart.
+                if !stands_behind(&log, &headers, height) {
+                    damaged = Some(height);
+                    break;
                 }
+                // A refusal about this build or this command line rather than
+                // about the block stops the start here, with nothing cut. The
+                // same build refuses the same blocks from the network, so what
+                // a cut would have asked for again could never have been taken
+                // back, and the blocks it deleted were valid ones some other
+                // build had written.
+                if let Some(error) = refused {
+                    if let Some(stop) = about_the_reader(height, applied == 0, &error) {
+                        return Err(stop);
+                    }
+                }
+                break;
             }
         }
         let read_again = if unreadable {
             Some(log.read_again().map_err(in_file(BLOCK_LOG))?)
+        } else if let Some(height) = damaged {
+            Some(log.set_aside_from(height).map_err(in_file(BLOCK_LOG))?)
         } else {
             None
         };
@@ -4454,7 +4482,6 @@ impl Node {
         // is filled in from the blocks that are still there. Everything older
         // than those is gone, which costs this node the ability to answer a
         // newcomer about that stretch and nothing else.
-        let mut headers = HeaderLog::open(&directory).map_err(in_file(HEADER_LOG))?;
         let headers_set_aside = headers_the_store_will_not_stand_behind(&headers);
         let CaughtUp {
             dropped: headers_dropped,
@@ -7880,6 +7907,30 @@ fn build_ledger(
         .ok()
 }
 
+/// Whether the store stands behind the record at `height`, for a replay that
+/// met a refusal there.
+///
+/// [`BlockLog::read_at`] checks the record's height, its transactions against
+/// its own header, and that the record after it names it, which covers every
+/// byte of the header. The last record has nobody after it and is checked
+/// only against the one before, which names its parent and nothing else, so
+/// there the header log speaks for the rest where it holds a header at that
+/// height: it is written from the same headers, and a record that differs
+/// from it changed on one disk or the other. Where neither can say, the
+/// record is taken at its word, which is what the replay did before.
+fn stands_behind(log: &BlockLog, headers: &HeaderLog, height: u64) -> bool {
+    let Ok(Some(block)) = log.read_at(height) else {
+        return false;
+    };
+    if log.holds(height.saturating_add(1)) {
+        return true;
+    }
+    match headers.read_at(height) {
+        Ok(Some(held)) => held == block.header,
+        _ => true,
+    }
+}
+
 /// Records a header log holds and will not answer for.
 ///
 /// Asked before the log is filled in from the blocks, because filling it in is
@@ -7986,9 +8037,17 @@ fn catch_up_headers(headers: &mut HeaderLog, blocks: &BlockLog) -> CaughtUp {
 /// Walked back from there and no further than a reorganisation can reach,
 /// since that is the only way the two come apart. A record either side will
 /// not read ends the walk with nothing to cut: that is the disk's news, and
-/// the first block this node accepts reads the same record and says so. So
-/// does finding no height within that reach where the two agree, which no
-/// reorganisation leaves and which the blocks could not mend anyway.
+/// the first block this node accepts reads the same record and says so.
+///
+/// The height the two last agree at can lie one below the walk. A node that
+/// keeps only the blocks a reorganisation may undo, reorganised as deep as
+/// the rules allow, parts from the old branch right under the lowest block it
+/// holds, so nothing inside the walk agrees. The block at the bottom names its
+/// parent, though, and where the header log holds that parent the fork is at
+/// the bottom. Without it the walk found nothing, cut nothing, and the old
+/// branch's headers were filled in after the new one's. Finding nothing even
+/// then is what no reorganisation leaves, and what the blocks could not mend
+/// anyway.
 fn off_the_branch(headers: &HeaderLog, blocks: &BlockLog) -> Option<u64> {
     let top = headers.reaches().min(blocks.reaches());
     let bottom = headers
@@ -8003,7 +8062,12 @@ fn off_the_branch(headers: &HeaderLog, blocks: &BlockLog) -> Option<u64> {
             return (fork < top).then_some(fork);
         }
     }
-    None
+    if bottom >= top {
+        return None;
+    }
+    let parent = headers.read_at(bottom.checked_sub(1)?).ok()??;
+    let block = blocks.read_at(bottom).ok()??;
+    (block.header.previous == parent.id()).then_some(bottom)
 }
 
 /// What filling the header log in from the blocks did.
@@ -8237,7 +8301,9 @@ fn ledger_refused(error: &HandoverError) -> NodeError {
 /// and the first record of the log belonging to another network, which is one
 /// start under a mistyped `--network`. Only the first: a record further up
 /// the log that names another network is not a directory of another network,
-/// it is a record that changed, and it is refused like any other.
+/// it is a record that changed, and it is refused like any other. Asked only
+/// of a record the store stands behind: one it will not is damage, and is
+/// left on the disk before this is reached (see `stands_behind`).
 fn about_the_reader(height: u64, first: bool, error: &ChainError) -> Option<NodeError> {
     let ChainError::InvalidBlock { source, .. } = error else {
         return None;
@@ -9827,6 +9893,33 @@ mod disk_and_headers {
             thread::sleep(Duration::from_millis(20));
         }
         panic!("waited for {what} and it never happened");
+    }
+
+    /// The two refusals a start stops on read as sentences, with no run of
+    /// spaces inside them.
+    ///
+    /// Both were written over several lines and joined without the
+    /// continuations that drop the next line's indent, so an operator read
+    /// "Nothing on          the disk has been changed". The tests read whether
+    /// they named the height and the cure, and not the words between, so the
+    /// runs passed.
+    #[test]
+    fn a_start_that_stops_on_the_reader_says_so_without_runs_of_spaces() {
+        let because = "because".to_owned();
+        for said in [
+            NodeError::OtherRules {
+                file: BLOCK_LOG,
+                because: because.clone(),
+            }
+            .to_string(),
+            NodeError::OtherNetwork {
+                file: BLOCK_LOG,
+                because,
+            }
+            .to_string(),
+        ] {
+            assert!(!said.contains("  "), "a run of spaces in: {said}");
+        }
     }
 
     /// A chain that already holds its first block is not given it again, and
