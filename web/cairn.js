@@ -2158,9 +2158,6 @@ function trouble(status) {
   if (node.joining && node.joining !== 'no' && node.joining !== 'done') {
     return t('warn.joining');
   }
-  if (node.outOfReach > 0) {
-    return t('warn.outOfReach', { blocks: count(node.outOfReach) });
-  }
   // A disk that gave back something other than what was written to it. The
   // chain is not in doubt and the mending is exact, which is why this is worth
   // a line rather than a silence: every answer on this site comes off that
@@ -2179,6 +2176,14 @@ function trouble(status) {
   }
   if (index.behind > BEHIND_ENOUGH) {
     return t('warn.indexBehind', { blocks: count(index.behind) });
+  }
+  // Below the notices that say the figures on this page are not all there,
+  // which are true of every figure, rather than above them, where one of these
+  // took their place: a count any two machines can raise, said instead of the
+  // sentence telling a reader that a balance is missing what came before the
+  // index began.
+  if (node.outOfReach > 0) {
+    return t('warn.outOfReach', { blocks: count(node.outOfReach) });
   }
   if (!status.peers) return t('warn.alone');
 

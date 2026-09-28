@@ -489,6 +489,31 @@ const SHORT_PEERS: usize = 2;
 /// Addresses counted towards [`SHORT_PEERS`] at once.
 const SHORT_SENDERS: usize = 64;
 
+/// Machines that have to have sent blocks from a branch this node cannot
+/// reach before anybody is told about them.
+///
+/// One is a stranger's doing and costs it a hash. A block at or below the
+/// deepest point this node would undo is refused as too old after its work is
+/// checked against the difficulty the block itself declares, and before its
+/// parent is looked for, so a block with a made-up parent, an old height and
+/// the easiest difficulty was counted as a block from a chain: one greeted
+/// stranger made every status line of cairnd and every page of an explorer
+/// say the node might be on a branch the network had left, for as long as it
+/// ran. Two machines rather than two addresses, which is what its siblings
+/// count: what the line tells an operator to do is start again from an empty
+/// directory, and one machine claiming two ports is still one party.
+const UNREACHABLE_MACHINES: usize = 2;
+
+/// Machines counted towards [`UNREACHABLE_MACHINES`] at once.
+const UNREACHABLE_SENDERS: usize = 64;
+
+/// Seconds of meeting none of them before the count starts again, and after
+/// which what was counted is no longer said.
+///
+/// A branch the network has moved to renews its own evidence with every block
+/// it makes. A handful met long ago is not that.
+const UNREACHABLE_MEMORY: u64 = 3_600;
+
 /// A gap between two rounds of maintenance that means the machine was away.
 ///
 /// A round takes a second. Thirty of them passing at once is not a busy
@@ -1603,7 +1628,10 @@ struct Shared {
     /// complete silence: the peer is not blamed, which is right, and nothing
     /// else was said either, which is how an operator ends up watching a
     /// healthy-looking height that never moves.
-    out_of_reach: AtomicU64,
+    ///
+    /// Counted with the machines they came from, and said only once several
+    /// sent them: see [`UNREACHABLE_MACHINES`].
+    out_of_reach: Mutex<Unreachable>,
     /// Set once, if this node turns out to be somewhere it cannot get on from.
     ///
     /// Kept rather than only acted on, for the same reason [`Shared::outdated`]
@@ -2143,6 +2171,49 @@ mod ending_a_question {
         );
         assert!(asking.found.is_empty() && asking.answered.is_empty());
         assert_eq!(asking.refused, 0);
+    }
+}
+
+/// Blocks from a branch this node can never reach, and the machines they
+/// came from.
+///
+/// Counted rather than acted on, and said only as [`unreachable_lately`]
+/// decides.
+#[derive(Debug, Default)]
+struct Unreachable {
+    blocks: u64,
+    /// The machines they came from, up to [`UNREACHABLE_SENDERS`].
+    machines: HashSet<IpAddr>,
+    /// When the last of them arrived.
+    last: u64,
+}
+
+/// Counts one block from a branch this node can never reach, and the machine
+/// it came from.
+fn count_unreachable(met: &mut Unreachable, from: Option<IpAddr>, now: u64) {
+    let lapsed = now < met.last || now.saturating_sub(met.last) > UNREACHABLE_MEMORY;
+    if lapsed {
+        *met = Unreachable::default();
+    }
+    met.blocks = met.blocks.saturating_add(1);
+    met.last = now;
+    if let Some(from) = from {
+        if met.machines.len() < UNREACHABLE_SENDERS {
+            met.machines.insert(machine_of(from));
+        }
+    }
+}
+
+/// The blocks from a branch this node can never reach that are worth saying
+/// at `now`: all of them, once [`UNREACHABLE_MACHINES`] machines or more sent
+/// them and the last arrived within [`UNREACHABLE_MEMORY`], and nought
+/// otherwise.
+fn unreachable_lately(met: &Unreachable, now: u64) -> u64 {
+    let lately = now.saturating_sub(met.last) <= UNREACHABLE_MEMORY;
+    if lately && met.machines.len() >= UNREACHABLE_MACHINES {
+        met.blocks
+    } else {
+        0
     }
 }
 
@@ -3433,7 +3504,13 @@ impl Shared {
         let reached = height.unwrap_or(held.anchor);
         let mut owed = owed_this_round(held, reached, peers, patience, now, away);
         if let Owed::GivenUp(stranded) = &mut owed {
-            stranded.out_of_reach = self.out_of_reach.load(Ordering::Relaxed);
+            stranded.out_of_reach = unreachable_lately(
+                &self
+                    .out_of_reach
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner),
+                now,
+            );
         }
         Some(owed)
     }
@@ -4824,7 +4901,7 @@ impl Node {
             join_asked_again_at: AtomicU64::new(0),
             probation: Mutex::new(probation),
             stranding_patience: AtomicU64::new(STRANDING_PATIENCE),
-            out_of_reach: AtomicU64::new(0),
+            out_of_reach: Mutex::new(Unreachable::default()),
             stranded: Mutex::new(None),
             filling_from: Mutex::new(None),
             threads: Mutex::new(Vec::new()),
@@ -5455,16 +5532,25 @@ impl Node {
         })
     }
 
-    /// Blocks this node was offered and can never reach.
+    /// Blocks this node was offered and can never reach, once they have come
+    /// from [`UNREACHABLE_MACHINES`] machines or more, the last within
+    /// [`UNREACHABLE_MEMORY`] seconds.
     ///
-    /// Zero on a healthy node. Anything else means somebody is following a
+    /// Zero on a healthy node. Anything else means peers are following a
     /// branch that parts from this one further back than this node can reach:
     /// below the point it was handed on, or deeper than it will undo. It
-    /// cannot cross to that branch however much of it arrives. A few such
-    /// blocks are anybody's to send; a run of them from several peers is this
-    /// node on a branch the network has left.
+    /// cannot cross to that branch however much of it arrives. One machine's
+    /// blocks are not said at all: a stranger makes one for the price of a
+    /// hash. A run of them from several is this node on a branch the network
+    /// has left, or a party holding several machines, which nothing here can
+    /// tell apart.
     pub fn out_of_reach(&self) -> u64 {
-        self.shared.out_of_reach.load(Ordering::Relaxed)
+        let met = self
+            .shared
+            .out_of_reach
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        unreachable_lately(&met, unix_now())
     }
 
     /// Peers that said they can supply nothing just above where this node's
@@ -9671,7 +9757,11 @@ fn note_what_was_not_taken(
     // never moves while these arrive has been handed a chain nobody else is
     // on, and until this there was nowhere that showed.
     if reaction.unreachable.is_some() {
-        shared.out_of_reach.fetch_add(1, Ordering::Relaxed);
+        let mut met = shared
+            .out_of_reach
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        count_unreachable(&mut met, from.map(|sender| sender.ip()), now);
     }
     // A block written under rules this build does not have. It is carrying
     // what its own chain carries, and this node is the one that cannot read
@@ -12216,12 +12306,87 @@ mod peers_and_loops {
             unreachable: Some(5),
             ..Reaction::default()
         };
-        note_what_was_not_taken(&node.shared, &unreachable, None, 2_000);
-        note_what_was_not_taken(&node.shared, &unreachable, None, 2_001);
+        let now = unix_now();
+        let from = |last: u8| Some(SocketAddr::from(([203, 0, 113, last], 9_944)));
+        note_what_was_not_taken(&node.shared, &unreachable, from(1), now);
+        note_what_was_not_taken(&node.shared, &unreachable, from(2), now);
         assert_eq!(
             node.out_of_reach(),
             2,
             "blocks from a branch this node cannot reach went uncounted"
+        );
+    }
+
+    /// Blocks from a branch this node cannot reach are said once they have
+    /// come from two machines lately, and not while they come from one,
+    /// however many there are and however many ports it claims.
+    ///
+    /// They were counted one per block from anybody, and never went down: one
+    /// greeted stranger, for one hash a block at the easiest difficulty, made
+    /// cairnd say on every status line and the explorer on every page that
+    /// the node may be on a branch the network has left. Nothing asked who
+    /// sent them.
+    #[test]
+    fn blocks_out_of_reach_are_said_only_once_two_machines_sent_them_lately() {
+        let mut met = Unreachable::default();
+        let one = IpAddr::from([203, 0, 113, 1]);
+        for _ in 0..50 {
+            count_unreachable(&mut met, Some(one), 1_000);
+        }
+        count_unreachable(&mut met, None, 1_000);
+        assert_eq!(
+            unreachable_lately(&met, 1_000),
+            0,
+            "blocks one machine sent were said as a branch the network is on"
+        );
+        let mut from_one_v6 = Unreachable::default();
+        for last in [1, 2] {
+            let address = IpAddr::from([0x2001, 0xdb8, 0, 1, 0, 0, 0, last]);
+            count_unreachable(&mut from_one_v6, Some(address), 1_000);
+        }
+        assert_eq!(
+            unreachable_lately(&from_one_v6, 1_000),
+            0,
+            "two addresses of one IPv6 machine were counted as two machines"
+        );
+        count_unreachable(&mut met, Some(IpAddr::from([198, 51, 100, 7])), 1_001);
+        assert_eq!(unreachable_lately(&met, 1_001), 52);
+        assert_eq!(
+            unreachable_lately(&met, 1_001 + UNREACHABLE_MEMORY),
+            52,
+            "blocks from two machines were forgotten before their memory was up"
+        );
+        assert_eq!(
+            unreachable_lately(&met, 1_002 + UNREACHABLE_MEMORY),
+            0,
+            "blocks nobody has sent for longer than the memory were still said"
+        );
+        // And the count starts again once the memory has lapsed.
+        count_unreachable(&mut met, Some(one), 1_002 + UNREACHABLE_MEMORY);
+        assert_eq!((met.blocks, met.machines.len()), (1, 1));
+        count_unreachable(&mut met, Some(one), 1_002 + UNREACHABLE_MEMORY * 2);
+        assert_eq!(met.blocks, 2, "a count was started again inside its memory");
+        count_unreachable(&mut met, Some(one), 1_000);
+        assert_eq!(met.blocks, 1, "a clock that went back kept the count");
+    }
+
+    /// The machines counted towards blocks out of reach stop at a ceiling.
+    #[test]
+    fn the_machines_counted_out_of_reach_stop_at_a_ceiling() {
+        let mut met = Unreachable::default();
+        for at in 0..UNREACHABLE_SENDERS + 10 {
+            let host = IpAddr::from([
+                10,
+                0,
+                u8::try_from(at / 256).unwrap(),
+                u8::try_from(at % 256).unwrap(),
+            ]);
+            count_unreachable(&mut met, Some(host), 1_000);
+        }
+        assert_eq!(
+            met.machines.len(),
+            UNREACHABLE_SENDERS,
+            "the table grew past its ceiling"
         );
     }
 

@@ -689,17 +689,20 @@ fn probation_line(probation: &Probation, out_of_reach: u64) -> String {
 /// none.
 ///
 /// A count and not a verdict. A block a stranger mines at the lowest
-/// difficulty, far enough below the tip, is counted here too, so the line
-/// says what a run of them means rather than what one does.
+/// difficulty, far enough below the tip, is one of these, so the node counts
+/// them only once they have come from two machines lately, and the line says
+/// what a run of them means rather than what one does. It used to ask the
+/// operator to judge whether they came from several peers, which nothing it
+/// printed could answer.
 fn cannot_switch_to(blocks: u64) -> Option<String> {
     (blocks > 0).then(|| {
         format!(
-            "{blocks} blocks arrived from a chain this node cannot switch to: it parts from \
-             the branch this node follows further back than this node can reach, which the \
-             rules call settled. A few are anybody's to send. If they keep coming from \
-             several peers while the rest of the network is not heard from, this node is on \
-             a branch the network has left, and starting again from an empty directory is \
-             the only way onto theirs."
+            "{blocks} blocks arrived, from at least two machines within the last hour, from \
+             a chain this node cannot switch to: it parts from the branch this node follows \
+             further back than this node can reach, which the rules call settled. Two \
+             machines can still be one party. If they keep coming while the rest of the \
+             network is not heard from, this node is on a branch the network has left, and \
+             starting again from an empty directory is the only way onto theirs."
         )
     })
 }
@@ -2211,8 +2214,8 @@ mod what_an_operator_is_told {
         eprintln!("{}", wrapped(&said).join("\n"));
         assert!(said.contains("4 blocks arrived"), "{said}");
         assert!(
-            said.contains("anybody's to send"),
-            "a count a stranger can raise does not read as a verdict: {said}"
+            said.contains("at least two machines") && said.contains("can still be one party"),
+            "the line does not say what the count took, or that it is not a verdict: {said}"
         );
         assert!(said.contains("empty directory"), "{said}");
     }

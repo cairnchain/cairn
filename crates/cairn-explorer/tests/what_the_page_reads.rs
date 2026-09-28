@@ -213,6 +213,29 @@ fn what_an_address_was_paid_is_a_floor_where_the_answer_says_so() {
     }
 }
 
+/// **A count of blocks from a branch the node cannot reach does not take the
+/// place of the notices that say the figures are not all there.**
+///
+/// The page shows one notice, the first that applies, and blocks out of reach
+/// came before every notice about the index: a node handed such blocks showed
+/// that instead of the sentence telling a reader that a balance is missing
+/// what came before the index began. Nothing asked the order.
+#[test]
+fn blocks_out_of_reach_do_not_hide_what_the_index_is_missing() {
+    let trouble = js_fn("trouble");
+    let at = |key: &str| {
+        trouble
+            .find(key)
+            .unwrap_or_else(|| panic!("trouble() names {key}"))
+    };
+    for index in ["warn.indexEmpty", "warn.indexPartial", "warn.indexBehind"] {
+        assert!(
+            at(index) < at("warn.outOfReach"),
+            "blocks out of reach are said in place of {index}"
+        );
+    }
+}
+
 /// **The pool page shows how much is waiting and a way to the rest.**
 ///
 /// `/api/pool` answers with `count` and a `next` cursor because the pool has
