@@ -96,6 +96,59 @@ fn a_node_nobody_is_reading_runs_to_the_end_and_exits_nought() {
     );
 }
 
+/// A node whose list of peers is set aside at its start runs to the end
+/// when nobody reads what it writes.
+///
+/// The line saying the list was set aside was written with `println!`, the
+/// one line of the start that was, so with its reader gone the node panicked
+/// on it, which the shipped build turns into an abort before the node has
+/// done anything. Nothing started a node over a list that does not read as
+/// text with nobody reading, so the line passed.
+#[test]
+fn a_node_whose_list_of_peers_is_set_aside_runs_on_with_nobody_reading() {
+    let directory = scratch("aside");
+    std::fs::create_dir_all(&directory).unwrap();
+    // Not text, so the start sets the file aside.
+    std::fs::write(directory.join("peers.txt"), [0xFF, 0xFE, 0xFD, b'\n']).unwrap();
+
+    let output = run_to_the_end(
+        Command::new(env!("CARGO_BIN_EXE_cairnd"))
+            .args([
+                "--data",
+                &directory.to_string_lossy(),
+                "--network",
+                "devnet",
+                "--listen",
+                "127.0.0.1:0",
+                "--status",
+                "1",
+                "--run-for",
+                "2",
+            ])
+            .stdout(nobody_reading())
+            .stderr(Stdio::piped()),
+    );
+    let set_aside = directory.join("peers.txt.unread-1").exists();
+    let _ = std::fs::remove_dir_all(&directory);
+    let complained = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        set_aside,
+        "the list of peers was not set aside at this start"
+    );
+    assert!(
+        !complained.contains("panicked"),
+        "a node whose list of peers was set aside panicked on the line saying so, with \
+         nobody reading: {complained}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a node whose list of peers was set aside, with nobody reading, did not run to the \
+         end and exit nought: {complained}"
+    );
+}
+
 /// And the same when the reader goes away while the node is running, which
 /// is the way it happens: the node has printed its start and its first status
 /// line, and whatever was reading them stops.

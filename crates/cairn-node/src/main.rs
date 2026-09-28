@@ -175,7 +175,7 @@ fn run(arguments: &[String]) -> Result<Ending, Stopping> {
         say!("{line}");
     }
     if let Some(aside) = node.addresses_set_aside() {
-        println!("{}", addresses_set_aside(&aside.display().to_string()));
+        say!("{}", addresses_set_aside(&aside.display().to_string()));
     }
     // Before the node has answered anybody, because filling the headers in
     // from the blocks is the first thing that reads them back, and a refusal
