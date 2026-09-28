@@ -181,9 +181,24 @@ name_of() {
 # setting forward is right until the build stops accepting it, and then it is
 # a service that will not start. The explorer itself is asked, since it is the
 # only thing that knows which names this build has.
+#
+# Only a refusal of the line is taken to mean the name is gone, for the reason
+# `install.sh` gives beside the same lines: the explorer exits 2 for a command
+# line it will not read and 1 for a start that failed. This took any failure
+# for the first after `install.sh` had stopped doing so, and the next reason
+# the check could fail would have moved the machine to another network and
+# set its chain aside, without a word about why.
 settle_the_network() {
-    if (cd / && "$1" --check --network "$NETWORK") >/dev/null 2>&1; then
+    refused=0
+    (cd / && "$1" --check --network "$NETWORK") >/dev/null 2>&1 || refused=$?
+    if [ "$refused" -eq 0 ]; then
         return 0
+    fi
+    if [ "$refused" -ne 2 ]; then
+        echo "network  cairn-explorer --check --network $NETWORK failed for a reason other" >&2
+        echo "         than the name, so nothing is installed. It said:" >&2
+        (cd / && "$1" --check --network "$NETWORK") >&2 || true
+        exit 1
     fi
     # Asked, not written down, for the reason `install.sh` carries beside the
     # same lines: the day testnet-6 is retired, a rescue that hands back
