@@ -167,6 +167,13 @@ pub enum WalletError {
          yours"
     )]
     NoRandomness,
+    #[error(
+        "nothing was sent: this wallet writes a payment down before it hands it to anybody, and \
+         it could not write this one down: {0}. A payment it has not written down is one the \
+         next start would not know is waiting, and whose notes it would count as spendable \
+         again. Mend that, then send it"
+    )]
+    Unrecorded(String),
 }
 
 /// What a person is told when this build has no rules for the chain it is on.
@@ -237,36 +244,55 @@ fn waiting_note(waiting: Amount) -> String {
 }
 
 /// What to say under the list of movements the chain took back, or `None`
-/// when there are none.
+/// when there are none, given the payments `waiting` for a block now.
 ///
-/// Said by the way the money went, because the two ways are opposite pieces
-/// of news. A payment out that the chain took back goes back to waiting for a
-/// block, so its money is back in the balance and whoever was being paid has
-/// not been paid. A reward or a payment in left the balance with the block
-/// that paid it. Both faces closed the list with the first sentence whatever
-/// was on it, which told a miner whose block was orphaned that the reward was
-/// back in the balance while the balance beside it had just gone down by it.
+/// Said by the way the money went, because the ways are different pieces of
+/// news. A payment out the chain took back is offered back to the pool, and
+/// one this wallet is waiting on again holds its notes out of the balance,
+/// while whoever was being paid has not been paid yet. One that is not
+/// waiting has left the pool, and what of it is still this key's is back in
+/// the balance. A reward or a payment in left the balance with the block that
+/// paid it. Both faces closed the list with one sentence whatever was on it,
+/// which told a miner whose block was orphaned that the reward was back in the
+/// balance while the balance beside it had just gone down by it, and then told
+/// somebody whose payment was waiting for a block again that its money was
+/// back in a balance that did not hold it.
 ///
 /// Here rather than on each face so the page and the command line cannot say
 /// two different things about the same list.
 #[must_use]
-pub fn undone_note(undone: &[Movement]) -> Option<String> {
-    let paid_out = undone
+pub fn undone_note(undone: &[Movement], waiting: &[Waiting]) -> Option<String> {
+    let again = |movement: &Movement| waiting.iter().any(|one| one.id == movement.id);
+    let out = undone
         .iter()
-        .any(|movement| movement.direction == Direction::Sent);
+        .filter(|movement| movement.direction == Direction::Sent);
+    let waiting_again = out.clone().any(again);
+    let left = out.clone().any(|movement| !again(movement));
     let paid_in = undone
         .iter()
         .any(|movement| movement.direction != Direction::Sent);
-    let out = "What was paid out is back in the balance above, and whoever you were paying has \
-               not been paid.";
-    let came_in = "What was paid to you is not in the balance any more: the block that paid it \
-                   is gone.";
-    match (paid_out, paid_in) {
-        (true, true) => Some(format!("{out} {came_in}")),
-        (true, false) => Some(out.to_owned()),
-        (false, true) => Some(came_in.to_owned()),
-        (false, false) => None,
+    let mut said: Vec<&str> = Vec::new();
+    if waiting_again {
+        said.push(
+            "A payment out that is listed as waiting for a block is waiting again, and its \
+             notes are held for it: whoever you were paying has not been paid yet, and is once a \
+             block carries it.",
+        );
     }
+    if left {
+        said.push(
+            "A payment out that is not listed as waiting has left the pool: whoever you were \
+             paying has not been paid by it, and what of its money is still this key's on the \
+             chain as it stands is back in the balance above.",
+        );
+    }
+    if paid_in {
+        said.push(
+            "What was paid to you is not in the balance any more: the block that paid it is \
+             gone.",
+        );
+    }
+    (!said.is_empty()).then(|| said.join(" "))
 }
 
 /// One note this wallet owns, and what it takes to spend it.
@@ -691,6 +717,72 @@ pub struct NotCarried {
     pub why: String,
     /// The block at which it did.
     pub at: u64,
+    /// Whether the notes it spends are this key's on the chain as it stands.
+    ///
+    /// Then its money is back in the balance, and the payment as it was made
+    /// is still one a block can carry: a pool let go of it, and no block is
+    /// held to what a pool asks. When they are not, another payment spent
+    /// them or the block that paid them was undone, it can never be carried,
+    /// and its money is not in the balance. Both faces said the first of
+    /// every payment on the list.
+    pub notes_here: bool,
+}
+
+/// A payment this wallet handed over whose notes are no longer this key's,
+/// while it has not read every block since it was made.
+///
+/// One of those blocks may have carried it. Such a payment was ended and
+/// listed as carried by no block, under words telling its owner that nobody
+/// had been paid and to send it again, which for a payment a block did carry
+/// is a second payment on the wallet's own advice.
+#[derive(Clone, Debug)]
+pub struct PerhapsCarried {
+    pub id: Hash32,
+    /// What it takes from this key if a block carried it: the payment and
+    /// its fee.
+    pub amount: Amount,
+    /// The block at which its notes were found gone.
+    pub since: u64,
+}
+
+/// What both faces say under the payments this wallet cannot yet say were
+/// carried.
+pub const PERHAPS_CARRIED: &str = "The notes these spend are no longer this key's on the chain \
+     as it stands, and this wallet has not read every block since it handed them over, so it \
+     cannot say yet whether one of those blocks carried them and paid whoever they were for. The \
+     balance above is counted from the chain and is right either way. Do not send one again: if a \
+     block carried it, it has been paid. This wallet says which once it has read those blocks; \
+     one it cannot find out about is named here for a day, and its identifier is what to look \
+     for on the chain.";
+
+/// What to say under the list of payments no block carried, or `None` when
+/// there are none.
+///
+/// Said by where each payment's notes are, because the two cases are opposite
+/// pieces of news. Both faces closed the list with "Their money is back in
+/// the balance above. If one of them should still be paid, send it again",
+/// which is false of a payment whose notes another payment spent, and which
+/// for one whose notes are still here led to a second payment a block could
+/// carry beside the first. Here rather than on each face, as
+/// [`undone_note`] is.
+#[must_use]
+pub fn not_carried_note(not_carried: &[NotCarried]) -> Option<String> {
+    let here = not_carried.iter().any(|one| one.notes_here);
+    let gone = not_carried.iter().any(|one| !one.notes_here);
+    let back = "Where a payment's notes are still this key's, its money is back in the balance \
+                above, and the payment as it was made can still be carried until one of those \
+                notes is spent: the next payment this wallet makes spends one of them first, so \
+                the two can never both be carried. If one of them should still be paid, send it \
+                again.";
+    let spent = "Where a payment's notes are no longer this key's, another payment spent them or \
+                 the block that paid them was undone: it can never be carried, and its money is \
+                 not in the balance above.";
+    match (here, gone) {
+        (true, true) => Some(format!("{back} {spent}")),
+        (true, false) => Some(back.to_owned()),
+        (false, true) => Some(spent.to_owned()),
+        (false, false) => None,
+    }
 }
 
 /// An account this wallet had written down and did not read back, and where
@@ -1292,6 +1384,14 @@ pub struct Wallet {
     wrote_pending: Mutex<bool>,
     /// How many peers the waiting payments were last offered to, and when.
     offered: Mutex<(usize, Option<Instant>)>,
+    /// What this wallet's node last said against a payment it would not take
+    /// back, when that was not a refusal of the payment, in words.
+    ///
+    /// A node still checking a ledger it was handed carries no payment, and
+    /// says why; that is rightly not written down as a refusal, and was
+    /// thrown away, so the payment was said to be out of the pool "most often
+    /// because it had no room for it". Memory only: the next start asks again.
+    said: Mutex<BTreeMap<Hash32, String>>,
 }
 
 /// The places one question to the network carries, out of everything this
@@ -1418,6 +1518,7 @@ impl Wallet {
                 pending_set_aside,
                 wrote_pending: Mutex::new(true),
                 offered: Mutex::new((0, None)),
+                said: Mutex::new(BTreeMap::new()),
             },
             restored.blocks,
         ))
@@ -1528,6 +1629,12 @@ impl Wallet {
     /// bytes whether it has been made or not, so what this measures is what
     /// the finished transfer weighs. Selection order costs nothing either,
     /// because shuffling moves bytes around without adding any.
+    ///
+    /// A payment named as not carried whose notes are all still here can
+    /// still be carried as it was made, so the draft spends one note of each
+    /// such payment first: whatever it pays, the two can never both be
+    /// carried. The payment sent again after one was named reached for other
+    /// notes, and a block carrying both paid its recipient twice.
     fn draft(
         &self,
         holdings: &Holdings,
@@ -1535,8 +1642,12 @@ impl Wallet {
         amount: Amount,
         needed: Amount,
     ) -> Result<Draft, NoDraft> {
-        let (spending, gathered) =
-            select(&holdings.notes, needed, self.params.max_inputs_per_transfer)?;
+        let (spending, gathered) = select_first(
+            &holdings.notes,
+            &self.to_replace(&holdings.notes),
+            needed,
+            self.params.max_inputs_per_transfer,
+        )?;
         let change = gathered.checked_sub(needed).ok_or(NoDraft::Short)?;
         let mut outputs = vec![Note::new(amount, recipient)];
         if change > Amount::ZERO {
@@ -1555,6 +1666,26 @@ impl Wallet {
             spending,
             change,
         })
+    }
+
+    /// One note of every payment named as not carried whose notes are all
+    /// among `notes`, a hot one where it has one, for a spend to reach for
+    /// first.
+    fn to_replace(&self, notes: &[Held]) -> Vec<NoteId> {
+        let ended: Vec<Vec<NoteId>> = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .ended()
+            .map(|one| {
+                one.transfer
+                    .inputs
+                    .iter()
+                    .map(|input| input.note_id)
+                    .collect()
+            })
+            .collect();
+        one_note_of_each(&ended, notes)
     }
 
     /// Reaches for a peer, and remembers it whether or not it answers now.
@@ -2031,24 +2162,55 @@ impl Wallet {
     #[must_use]
     pub fn not_carried(&self) -> Vec<NotCarried> {
         let mine = self.address();
-        let mut named: Vec<NotCarried> = self
+        let ended: Vec<Handed> = self
             .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .ended()
+            .cloned()
+            .collect();
+        let mut named: Vec<NotCarried> = self.node.with_chain(|chain| {
+            let state = chain.state();
+            ended
+                .iter()
+                .filter_map(|one| {
+                    let (at, why) = one.ended.clone()?;
+                    let notes_here = one.transfer.inputs.iter().all(|input| {
+                        state.hot_note(&input.note_id).is_some()
+                            || state.watched_position(&input.note_id).is_some()
+                    });
+                    Some(NotCarried {
+                        id: one.id(),
+                        amount: taken_from_this_key(one, mine),
+                        why,
+                        at,
+                        notes_here,
+                    })
+                })
+                .collect()
+        });
+        named.reverse();
+        named
+    }
+
+    /// The payments whose notes are no longer this key's while this wallet
+    /// has not read every block since they were made, newest first.
+    ///
+    /// As the last look at the money left them, as [`Self::not_carried`]
+    /// is. Neither waiting nor carried by no block: see [`PerhapsCarried`].
+    #[must_use]
+    pub fn perhaps_carried(&self) -> Vec<PerhapsCarried> {
+        let mine = self.address();
+        let mut named: Vec<PerhapsCarried> = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .perhaps_carried()
             .filter_map(|one| {
-                let (at, why) = one.ended.clone()?;
-                // A payment to this key's own address takes only its fee.
-                let amount = if one.to == mine {
-                    one.fee
-                } else {
-                    one.amount.checked_add(one.fee).unwrap_or(one.amount)
-                };
-                Some(NotCarried {
+                Some(PerhapsCarried {
                     id: one.id(),
-                    amount,
-                    why,
-                    at,
+                    amount: taken_from_this_key(one, mine),
+                    since: one.perhaps?,
                 })
             })
             .collect();
@@ -2081,9 +2243,10 @@ impl Wallet {
             Some(pending::NotReadBack::Stuck) => Some(
                 "This wallet's record of the payments it handed over did not read back and could \
                  not be moved out of the way, so it is left as it is and nothing is written over \
-                 it. Payments made now are kept in memory only, and a payment made before this \
-                 start and not carried yet is not listed here: do not pay the same thing again \
-                 until the chain shows whether it arrived."
+                 it. This wallet sends nothing until it can write a payment down: move that file \
+                 somewhere safe and start the wallet again. A payment made before this start and \
+                 not carried yet is not listed here: do not pay the same thing again until the \
+                 chain shows whether it arrived."
                     .to_owned(),
             ),
             None if !wrote => Some(
@@ -2097,7 +2260,7 @@ impl Wallet {
     }
 
     /// Forgets a payment if nobody was offered it, for a face about to close
-    /// that says so. Says whether it forgot it.
+    /// that says so. Says whether the record on the disk no longer holds it.
     ///
     /// The command line exits once it has answered, and the pool goes with
     /// it, so a payment no peer's queue ever took is one nobody has: it tells
@@ -2106,6 +2269,13 @@ impl Wallet {
     /// would pay a second time from other notes. A payment any peer was
     /// offered may be carried whatever this wallet forgets, so that one is
     /// kept.
+    ///
+    /// Forgotten only if the record on the disk is written without it. It
+    /// said it forgot a payment whatever the write came to, and the command
+    /// line then told the person to run it again, while the record on the
+    /// disk still held the payment and the next start handed it over beside
+    /// the one sent again. Kept in memory too when the write fails, so what
+    /// this process says is what the next start will do.
     pub fn forget_if_unoffered(&self, sent: &Sent) -> bool {
         if sent.handed_on {
             return false;
@@ -2114,26 +2284,36 @@ impl Wallet {
             .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let forgot = pending.settle(&sent.id);
-        if forgot {
-            self.write_pending(&pending);
+        let before = pending.clone();
+        if !pending.settle(&sent.id) {
+            return false;
         }
-        forgot
+        if self.write_pending(&pending).is_err() {
+            *pending = before;
+            return false;
+        }
+        true
     }
 
-    /// Writes the record of payments down, and remembers if it could not.
+    /// Writes the record of payments down, remembers if it could not, and
+    /// says why not.
     ///
     /// Not over a record that was there and did not read back and could not
     /// be moved out of the way: what it held may be payments still waiting.
-    fn write_pending(&self, pending: &Pending) {
+    fn write_pending(&self, pending: &Pending) -> Result<(), String> {
         if self.pending_set_aside == Some(pending::NotReadBack::Stuck) {
-            return;
+            return Err(
+                "the record of payments did not read back and could not be moved aside, so \
+                 nothing is written over it"
+                    .to_owned(),
+            );
         }
-        let kept = pending.save(&self.pending_file).is_ok();
+        let saved = pending.save(&self.pending_file);
         *self
             .wrote_pending
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = kept;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = saved.is_ok();
+        saved.map_err(|error| error.to_string())
     }
 
     /// Counts the money, and looks after every payment this wallet handed
@@ -2141,9 +2321,13 @@ impl Wallet {
     ///
     /// Four things, each of which used to be nobody's job.
     ///
-    /// A payment a block carried is taken off the record, and one whose notes
+    /// A payment a block this wallet read carried is marked with that block's
+    /// height, and stays on the record until no switch can undo it; if the chain
+    /// takes the block back, the payment is waited on again. One whose notes
     /// something else spent is said to be not carried, since nothing will
-    /// carry it now.
+    /// carry it now, but only once this wallet has read every block since it
+    /// was made: before that, a block it has not read may have carried it,
+    /// and it is said to be that rather than carried by none.
     ///
     /// A payment the pool no longer holds is handed to it again, with fresh
     /// evidence for each note it spends. What identifies a transfer, and what
@@ -2172,42 +2356,45 @@ impl Wallet {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
+        let reach = self.node.with_chain(ChainStore::undo_limit);
+        let read = {
+            let history = self
+                .history
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            ReadOf {
+                carried: history
+                    .movements()
+                    .filter(|movement| before.holds(&movement.id))
+                    .map(|movement| (movement.id, movement.height))
+                    .collect(),
+                undone: history
+                    .undone()
+                    .filter(|movement| before.holds(&movement.id))
+                    .map(|movement| movement.id)
+                    .collect(),
+                next: history.next(),
+                missed_below: history.missed_below(),
+            }
+        };
         // Whether anything was handed back, which changes what the pool
         // holds and so what the money comes to.
         let mut handed_back = false;
-        let live: Vec<Handed> = before.live().cloned().collect();
-        for one in &live {
-            let id = one.id();
-            let pooled = reckoned
-                .waiting
-                .iter()
-                .any(|waiting| waiting.id == id && waiting.pooled);
-            if reckoned.gone.contains(&id) {
-                self.settle_or_end(&id, one.made_at, tip);
-            } else if pooled {
-                // Taken back by some other road, a peer passing it on again
-                // among them, and so no longer refused: the wait before its
-                // notes come back would otherwise run on and let go of a
-                // payment the pool is holding.
-                self.pending
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .taken_back(&id);
-            } else {
-                self.hand_back(one, &reckoned.promised, tip);
-                handed_back = true;
-            }
+        for one in before.all() {
+            handed_back |= self.tend(one, &read, &reckoned, tip);
         }
-        self.settle_the_carried();
+        self.adopt(&reckoned.waiting, &before, tip);
         let changed = {
             let mut pending = self
                 .pending
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            pending.age(tip);
+            pending.age(tip, reach);
             let changed = *pending != before;
             if changed {
-                self.write_pending(&pending);
+                // A write that fails is remembered and said beside the
+                // payments; the look goes on from memory.
+                let _ = self.write_pending(&pending);
             }
             changed
         };
@@ -2220,67 +2407,137 @@ impl Wallet {
         reckoned
     }
 
-    /// Takes a payment whose notes are no longer this key's off the record:
-    /// settled if a block this wallet read carried it, and named as not
-    /// carried if not.
-    fn settle_or_end(&self, id: &Hash32, made_at: u64, tip: u64) {
-        let (carried, read_all_of_it) = {
-            let history = self
-                .history
+    /// Looks after one payment on the record at `tip`, from what this
+    /// account `read` and what the money came to. Says whether it was handed
+    /// back to the pool.
+    fn tend(&self, one: &Handed, read: &ReadOf, reckoned: &Reckoned, tip: u64) -> bool {
+        let id = one.id();
+        // A block this account read carries it: carried, whatever was said of
+        // it before, and at the height it was read at, which a switch that
+        // carries it again elsewhere moves.
+        if let Some(height) = read.carried.get(&id).copied() {
+            self.pending
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let carried = history.movements().any(|movement| movement.id == *id);
-            let read_all_of_it =
-                read_every_block_since(history.next(), history.missed_below(), made_at, tip);
-            (carried, read_all_of_it)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .carried(&id, height);
+            return false;
+        }
+        let waited_on = match one.carried {
+            // Taken back only on the evidence of the account, which follows
+            // every switch the node makes: it set the movement aside as undone.
+            // A movement the list let go of for its length is not that, and a
+            // payment the chain still carries stays so.
+            Some(_) => {
+                let taken_back = read.undone.contains(&id);
+                if taken_back {
+                    self.pending
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .uncarried(&id);
+                }
+                taken_back
+            }
+            None => one.ended.is_none(),
         };
+        if !waited_on {
+            return false;
+        }
+        let ours = one
+            .transfer
+            .inputs
+            .iter()
+            .all(|input| reckoned.ours.contains(&input.note_id));
+        if !ours {
+            let all = read_every_block_since(read.next, read.missed_below, one.made_at, tip);
+            self.gone_from(one, tip, all);
+            return false;
+        }
+        let pooled = self.node.with_chain(|chain| chain.pooled(&id).is_some());
         let mut pending = self
             .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if carried {
-            pending.settle(id);
-            return;
+        // Its notes are this key's again: a block that spent them was undone
+        // before this wallet read it.
+        pending.not_perhaps(&id);
+        if pooled {
+            // Taken back by some other road, a peer passing it on again or a
+            // switch putting it back among them, and so no longer refused: the
+            // wait before its notes come back would otherwise run on and let
+            // go of a payment the pool is holding.
+            pending.taken_back(&id);
+            return false;
         }
-        let why = if read_all_of_it {
-            "the notes it spends are no longer this key's on the chain as it stands, and no \
-             block this wallet read carried it: another payment from this key spent them, or \
-             the block that paid them was undone"
-        } else {
-            "the notes it spends are no longer this key's on the chain as it stands. This wallet \
-             could not read every block since it was handed over, so whether one of them \
-             carried it is not something it can say; the balance is counted from the chain and \
-             is right either way"
-        };
-        pending.end(id, tip, why);
+        drop(pending);
+        self.hand_back(one, &reckoned.promised, tip);
+        true
     }
 
-    /// Takes off the record every payment named as not carried that a block
-    /// this wallet read carried after all, from a peer that still held it.
-    fn settle_the_carried(&self) {
-        let ended: Vec<Hash32> = self
-            .pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .ended()
-            .map(Handed::id)
-            .collect();
-        let carried: Vec<Hash32> = {
-            let history = self
-                .history
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            ended
-                .into_iter()
-                .filter(|id| history.movements().any(|movement| movement.id == *id))
-                .collect()
-        };
+    /// Says what became of a payment waited on whose notes are no longer
+    /// this key's and that no block this wallet read carried, at `tip`.
+    ///
+    /// Carried by no block only when this wallet has `read_all_of_it`, every
+    /// block since it was made: then another payment spent its notes, or the
+    /// block that paid them was undone. Otherwise a block it has not read may
+    /// have carried it, and it is marked as that, and neither ended nor
+    /// waited on: its notes are gone either way, and the balance is counted
+    /// from the chain.
+    fn gone_from(&self, one: &Handed, tip: u64, read_all_of_it: bool) {
         let mut pending = self
             .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for id in &carried {
-            pending.settle(id);
+        if read_all_of_it {
+            pending.end(
+                &one.id(),
+                tip,
+                "the notes it spends are no longer this key's on the chain as it stands, and no \
+                 block this wallet read carried it: another payment from this key spent them, or \
+                 the block that paid them was undone",
+            );
+        } else {
+            pending.perhaps(&one.id(), tip);
+        }
+    }
+
+    /// Writes down every payment of this key's the pool holds that the
+    /// record does not, as handed over at `tip`.
+    ///
+    /// Another copy of this key made it, or the record lost it. Seen only
+    /// through this process's pool, which dies with the process, a payment
+    /// was listed as waiting by the run that saw it and forgotten by the next,
+    /// with its notes counted as spendable while peers could still carry it.
+    fn adopt(&self, waiting: &[Waiting], on_record: &Pending, tip: u64) {
+        let mine = self.address();
+        // What is waiting and not on the record is what the pool holds: see
+        // `waiting_on`. Asked of the pool again for the transfer itself.
+        for one in waiting.iter().filter(|one| !on_record.holds(&one.id)) {
+            let Some(transfer) = self.node.with_chain(|chain| chain.pooled(&one.id).cloned())
+            else {
+                continue;
+            };
+            let paid = transfer.outputs.iter().filter(|note| note.owner != mine);
+            let to = paid.clone().next().map_or(mine, |note| note.owner);
+            let amount = paid.fold(Amount::ZERO, |sum, note| {
+                sum.checked_add(note.value).unwrap_or(sum)
+            });
+            let out = transfer.outputs.iter().fold(Amount::ZERO, |sum, note| {
+                sum.checked_add(note.value).unwrap_or(sum)
+            });
+            self.pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .hand(Handed {
+                    transfer,
+                    to,
+                    amount,
+                    fee: one.committed.checked_sub(out).unwrap_or(Amount::ZERO),
+                    made_at: tip,
+                    refused: None,
+                    ended: None,
+                    carried: None,
+                    perhaps: None,
+                });
         }
     }
 
@@ -2306,7 +2563,7 @@ impl Wallet {
             differs,
             || self.node.submit_transaction(fresh),
         );
-        note_the_answer(
+        let said = note_the_answer(
             &mut self
                 .pending
                 .lock()
@@ -2315,6 +2572,14 @@ impl Wallet {
             tip,
             &answer,
         );
+        let mut words = self
+            .said
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match said {
+            Some(said) => words.insert(id, said),
+            None => words.remove(&id),
+        };
     }
 
     /// Offers every payment this wallet's node holds for it to its peers, when
@@ -2584,7 +2849,12 @@ impl Wallet {
             .live()
             .cloned()
             .collect();
-        let (holdings, waiting, answered, gone, promised_notes) = self.node.with_chain(|chain| {
+        let said = self
+            .said
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let (holdings, waiting, answered, promised_notes) = self.node.with_chain(|chain| {
             let state = chain.state();
             let behind = chain.height().is_some_and(|tip| reading <= tip);
             let mut held: Vec<Held> = state
@@ -2715,7 +2985,7 @@ impl Wallet {
             // a balance going quietly down.
             let answered_after_all: Vec<NoteId> = values.keys().copied().collect();
 
-            let (committed, waiting, gone) = waiting_on(chain, &values, mine, &handed);
+            let (committed, waiting) = waiting_on(chain, &values, mine, &handed, &said);
 
             let mut notes = Vec::with_capacity(held.len());
             let mut spendable = Amount::ZERO;
@@ -2777,7 +3047,6 @@ impl Wallet {
                 },
                 waiting,
                 answered_after_all,
-                gone,
                 promised_notes,
             )
         });
@@ -2802,7 +3071,7 @@ impl Wallet {
         Reckoned {
             holdings,
             waiting,
-            gone,
+            ours: answered.into_iter().collect(),
             promised: promised_notes,
         }
     }
@@ -2974,36 +3243,56 @@ impl Wallet {
             made_at: self.node.height().unwrap_or(0),
             refused: None,
             ended: None,
+            carried: None,
+            perhaps: None,
         };
+        // Written down before the pool has it, so that no later start can
+        // count its notes as spendable again: see `pending`. The pool passes a
+        // transfer to every connected peer the moment it takes it, so a record
+        // written after that left a payment peers held that no start knew of,
+        // whenever the disk refused the write or the wallet stopped between
+        // the two, and the command line said it had written it down. One it
+        // cannot write down is not handed over at all. One already on the
+        // record is this exact payment made before, and its record is left as
+        // it is.
+        let written_before = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .holds(&id);
+        if !written_before {
+            let mut pending = self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            pending.hand(handed);
+            if let Err(why) = self.write_pending(&pending) {
+                pending.settle(&id);
+                return Err(WalletError::Unrecorded(why));
+            }
+        }
         // The answer matters. A pool that already holds this identifier, and a
         // full pool that would rather keep what it has, both leave nothing
         // pooled and nothing broadcast, and both say so by returning false
         // rather than by failing. Read as success, that is a wallet reporting
         // a payment the network never took, which is how somebody hands over
         // two things for one payment.
+        //
+        // Nobody was offered one the pool did not take, so nothing is waiting:
+        // it goes off the record again, unless it was there before this.
         let taken = self
             .node
             .submit_transaction(transfer)
-            .map_err(|error| WalletError::Refused(said_plainly(&error)))?;
+            .map_err(|error| WalletError::Refused(said_plainly(&error)))
+            .inspect_err(|_| self.not_handed(&id, written_before))?;
         if !taken {
+            self.not_handed(&id, written_before);
             let already = self.node.with_chain(|chain| chain.pooled(&id).is_some());
             return Err(if already {
                 WalletError::AlreadyWaiting { id }
             } else {
                 WalletError::NoRoom
             });
-        }
-
-        // Written down the moment the pool has it, before anybody is offered
-        // it, so that no later start can count its notes as spendable again.
-        // See `pending`.
-        {
-            let mut pending = self
-                .pending
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            pending.hand(handed);
-            self.write_pending(&pending);
         }
 
         // Offered until somebody takes it, rather than waited on until a peer
@@ -3032,6 +3321,20 @@ impl Wallet {
             handed_on,
             offered: offered.get(),
         })
+    }
+
+    /// Takes a payment the pool did not take off the record again, unless it
+    /// was `written_before` this attempt to hand it over.
+    fn not_handed(&self, id: &Hash32, written_before: bool) {
+        if written_before {
+            return;
+        }
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        pending.settle(id);
+        let _ = self.write_pending(&pending);
     }
 
     pub fn shutdown(&self) {
@@ -3196,6 +3499,69 @@ fn select(held: &[Held], needed: Amount, most: usize) -> Result<(Vec<Held>, Amou
     Err(NoDraft::Short)
 }
 
+/// One note of every payment that spends `payments`, each a list of the notes
+/// it spends, whose notes are all among `notes`: a hot one where it has one,
+/// since a fallen note travels with a proof the fee has to pay for. Each note
+/// once, in order.
+fn one_note_of_each(payments: &[Vec<NoteId>], notes: &[Held]) -> Vec<NoteId> {
+    let here: BTreeMap<NoteId, bool> = notes
+        .iter()
+        .map(|held| (held.id, !held.is_cold()))
+        .collect();
+    let mut first: Vec<NoteId> = payments
+        .iter()
+        .filter(|spends| spends.iter().all(|id| here.contains_key(id)))
+        .filter_map(|spends| {
+            spends
+                .iter()
+                .find(|id| here.get(id).copied().unwrap_or(false))
+                .or_else(|| spends.first())
+                .copied()
+        })
+        .collect();
+    first.sort_unstable();
+    first.dedup();
+    first
+}
+
+/// [`select`], with the notes named in `first` taken before any other.
+///
+/// For the notes of payments named as not carried that a block could still
+/// carry as they were made: see `Wallet::draft`. What they come to counts
+/// toward `needed`, and what is left is chosen as [`select`] chooses.
+fn select_first(
+    held: &[Held],
+    first: &[NoteId],
+    needed: Amount,
+    most: usize,
+) -> Result<(Vec<Held>, Amount), NoDraft> {
+    let (mut chosen, rest): (Vec<Held>, Vec<Held>) = held
+        .iter()
+        .cloned()
+        .partition(|one| first.contains(&one.id));
+    chosen.truncate(most);
+    let taken = chosen
+        .iter()
+        .try_fold(Amount::ZERO, |sum, one| sum.checked_add(one.note.value))
+        .ok_or(NoDraft::Short)?;
+    // What they come to may pass what is needed, and then the rest is nothing.
+    let Some(still) = needed.checked_sub(taken) else {
+        return Ok((chosen, taken));
+    };
+    match select(&rest, still, most.saturating_sub(chosen.len())) {
+        Ok((more, gathered)) => {
+            let gathered = gathered.checked_add(taken).ok_or(NoDraft::Short)?;
+            chosen.extend(more);
+            Ok((chosen, gathered))
+        }
+        Err(NoDraft::SpreadTooThin { over, reach }) => Err(NoDraft::SpreadTooThin {
+            over: over.saturating_add(chosen.len()),
+            reach: reach.checked_add(taken).unwrap_or(reach),
+        }),
+        Err(NoDraft::Short) => Err(NoDraft::Short),
+    }
+}
+
 /// Takes notes off an already ordered list until `needed` is covered, giving
 /// up rather than gathering more than `most` of them.
 fn take_until(sorted: &[Held], needed: Amount, most: usize) -> Option<(Vec<Held>, Amount)> {
@@ -3284,10 +3650,9 @@ fn shuffle<T>(items: &mut [T]) -> Result<(), WalletError> {
 ///
 /// The types underneath print for whoever is debugging them: a note comes out
 /// as a `Debug` struct thirty two bytes wide, and "unknown or already spent"
-/// is said about a note this wallet spent itself a moment ago. Neither belongs
-/// in front of somebody trying to pay for something, and in the one case that
-/// happens most the fact that matters, that a second payment has to wait for a
-/// block, is in neither of them.
+/// says nothing of why. Neither belongs in front of somebody trying to pay for
+/// something, and neither says what happened: a block landed while the
+/// payment was being built.
 fn said_plainly(refusal: &Refused) -> String {
     match refusal {
         Refused::OnProbation(probation) => format!(
@@ -3298,11 +3663,16 @@ fn said_plainly(refusal: &Refused) -> String {
             probation.owed(),
             probation.anchor
         ),
+        // Not a payment of this wallet's still waiting for a block, which is
+        // what this said first: the record of what it handed over keeps the
+        // notes of every such payment out of the draft, so the draft never
+        // reaches for one. What is left is a block landing between the draft
+        // and the handing over, with a payment from another copy of this key.
         Refused::Transfer(TransferError::UnknownNote(_) | TransferError::MissingProof { .. }) => {
-            "one of the notes this payment is made of is not there any more. Almost always that \
-             means a payment you have already made is still waiting for a block: until one \
-             carries it, the notes it holds cannot be spent again. Nothing was sent. Wait a few \
-             minutes and look at the balance before trying again."
+            "one of the notes this payment is made of is not there any more: a block that \
+             arrived while it was being built spent it, most often carrying a payment from \
+             another copy of this key. Nothing was sent. Look at the balance, which is counted \
+             afresh, before trying again: a payment waiting for a block is listed there."
                 .to_owned()
         }
         Refused::Transfer(TransferError::FeeBelowFloor { floor, .. }) => format!(
@@ -3359,14 +3729,36 @@ fn said_plainly(refusal: &Refused) -> String {
 struct Reckoned {
     holdings: Holdings,
     waiting: Vec<Waiting>,
-    /// Payments on the record whose notes are no longer this key's.
-    gone: Vec<Hash32>,
+    /// Every note this key holds, spendable or not, which is what says
+    /// whether a payment's notes are still this key's.
+    ours: BTreeSet<NoteId>,
     /// The notes waiting payments hold, with what it takes to spend each now.
     promised: BTreeMap<NoteId, Held>,
 }
 
-/// The notes promised to payments no block carries yet, the payments, and the
-/// ones on this wallet's record whose notes are no longer this key's.
+/// What this wallet's account read of the payments on its record, for
+/// `Wallet::tend`.
+struct ReadOf {
+    /// The height of the block it read each carried by.
+    carried: BTreeMap<Hash32, u64>,
+    /// The ones it set aside as taken back by the chain.
+    undone: BTreeSet<Hash32>,
+    /// How far it has read, and below where it may have missed blocks.
+    next: u64,
+    missed_below: Option<u64>,
+}
+
+/// What a payment takes from the key `mine` if a block carries it: what it
+/// pays and its fee, or only the fee when it pays this key itself.
+fn taken_from_this_key(one: &Handed, mine: PublicKey) -> Amount {
+    if one.to == mine {
+        one.fee
+    } else {
+        one.amount.checked_add(one.fee).unwrap_or(one.amount)
+    }
+}
+
+/// The notes promised to payments no block carries yet, and the payments.
 ///
 /// Two places a payment can be waiting, and both are read. This wallet's own
 /// record comes first: it is what survives the process, and a payment on it is
@@ -3377,12 +3769,16 @@ struct Reckoned {
 ///
 /// An input names a note and not its owner, so which pooled transfers are ours
 /// is decided by which notes they reach for.
+///
+/// `said` is what this wallet's node last said against a payment it did not
+/// take back when that was not a refusal of it: see [`why_not_held`].
 fn waiting_on(
     chain: &ChainStore,
     values: &BTreeMap<NoteId, Amount>,
     mine: PublicKey,
     handed: &[Handed],
-) -> (BTreeSet<NoteId>, Vec<Waiting>, Vec<Hash32>) {
+    said: &BTreeMap<Hash32, String>,
+) -> (BTreeSet<NoteId>, Vec<Waiting>) {
     let worth = |notes: &[NoteId]| {
         notes.iter().fold(Amount::ZERO, |sum, note_id| {
             values
@@ -3404,7 +3800,6 @@ fn waiting_on(
 
     let mut committed: BTreeSet<NoteId> = BTreeSet::new();
     let mut waiting: Vec<Waiting> = Vec::new();
-    let mut gone: Vec<Hash32> = Vec::new();
     for one in handed {
         let id = one.id();
         let spends: Vec<NoteId> = one
@@ -3413,8 +3808,9 @@ fn waiting_on(
             .iter()
             .map(|input| input.note_id)
             .collect();
+        // Its notes are no longer this key's: `Wallet::tended` says what
+        // became of it.
         if !spends.iter().all(|note_id| values.contains_key(note_id)) {
-            gone.push(id);
             continue;
         }
         let pooled = chain.pooled(&id).is_some();
@@ -3425,11 +3821,8 @@ fn waiting_on(
             amount: leaves(&one.transfer, gave),
             committed: gave,
             pooled,
-            why: (!pooled).then(|| {
-                one.refused
-                    .as_ref()
-                    .map_or_else(|| NOT_IN_THE_POOL.to_owned(), |(_, why)| why.clone())
-            }),
+            why: (!pooled)
+                .then(|| why_not_held(one.refused.as_ref(), said.get(&id).map(String::as_str))),
             held_until: one.held_until(),
         });
     }
@@ -3457,7 +3850,7 @@ fn waiting_on(
             held_until: None,
         });
     }
-    (committed, waiting, gone)
+    (committed, waiting)
 }
 
 /// Whether an account reading from `next`, with nothing missed below
@@ -3521,19 +3914,40 @@ fn offer_due(peers: usize, last: (usize, Option<Instant>), now: Instant) -> bool
 
 /// Writes down what this wallet's own node said when a payment was handed
 /// back to it at `tip`: taken, or refused for a reason that is the payment's,
-/// or neither.
-fn note_the_answer(pending: &mut Pending, id: &Hash32, tip: u64, answer: &Result<bool, Refused>) {
+/// or neither. Returns the words for what it said when it refused something
+/// other than the payment, which are not written down but are what a face
+/// shows beside it.
+fn note_the_answer(
+    pending: &mut Pending,
+    id: &Hash32,
+    tip: u64,
+    answer: &Result<bool, Refused>,
+) -> Option<String> {
     match answer {
         Ok(true) => {
             pending.taken_back(id);
+            None
         }
         Err(refusal) if refuses_the_payment(refusal) => {
             pending.refused(id, tip, &held_back_because(refusal));
+            None
         }
-        // Already there, no room, or a node that carries nothing yet. None of
-        // them is a refusal of the payment: see `refuses_the_payment`.
-        Ok(false) | Err(_) => {}
+        // A node that carries nothing yet: not a refusal of the payment, see
+        // `refuses_the_payment`, and still the reason it is not held.
+        Err(refusal) => Some(held_back_because(refusal)),
+        // Already there, or no room, which `NOT_IN_THE_POOL` says.
+        Ok(false) => None,
     }
+}
+
+/// Why this wallet's node does not hold a payment it handed over: what it
+/// `refused` it over, or else what it last `said` against it that was not a
+/// refusal, or else the usual reason, when it said nothing.
+fn why_not_held(refused: Option<&(u64, String)>, said: Option<&str>) -> String {
+    refused
+        .map(|(_, why)| why.clone())
+        .or_else(|| said.map(str::to_owned))
+        .unwrap_or_else(|| NOT_IN_THE_POOL.to_owned())
 }
 
 /// Whether a refusal from this wallet's own node is a refusal of the payment,
@@ -3732,6 +4146,38 @@ mod tests {
         }
     }
 
+    /// Of each payment named as not carried whose notes are all still here, a
+    /// spend reaches first for one note, a hot one where there is one, and for
+    /// no note of a payment one of whose notes is gone.
+    ///
+    /// A payment sent again reached for other notes than the one it replaced,
+    /// and a block carried both. Only the one payment the test of that paid
+    /// was asked about, with one note, so which note was chosen, and whether a
+    /// payment that can never be carried was chosen from, passed either way.
+    #[test]
+    fn a_spend_reaches_first_for_one_note_of_each_payment_that_could_still_be_carried() {
+        let (cold, hot, other, gone) = (
+            note(1, cairn("5"), true),
+            note(2, cairn("5"), false),
+            note(3, cairn("5"), true),
+            NoteId::new(Hash32::ZERO, 9),
+        );
+        let notes = [cold.clone(), hot.clone(), other.clone()];
+        let payments = vec![
+            vec![cold.id, hot.id],
+            vec![other.id],
+            vec![hot.id, gone],
+            vec![hot.id],
+        ];
+        assert_eq!(
+            super::one_note_of_each(&payments, &notes),
+            vec![hot.id, other.id],
+            "a cold note was reached for where a hot one would do, a note of a payment that \
+             can never be carried was reached for, or one was reached for twice"
+        );
+        assert!(super::one_note_of_each(&[], &notes).is_empty());
+    }
+
     /// Spending a note the nodes still hold costs no proof, so those come
     /// first whatever their size. That preference is free while there are
     /// notes to spare and is not free at the count the network carries: a
@@ -3884,9 +4330,9 @@ mod tests {
 
     /// A `Debug` struct thirty two bytes wide used to go straight from the
     /// ledger's refusal into what the page showed, saying "already spent"
-    /// about a note this wallet had spent itself half a minute earlier. The
-    /// fact that mattered, that a second payment has to wait for a block, was
-    /// nowhere in it.
+    /// about a note with no word of why. The words that replaced it first
+    /// named a payment of this wallet's still waiting for a block, which the
+    /// record of what it handed over has since kept out of every draft.
     #[test]
     fn a_refusal_reaches_a_person_in_words() {
         let unknown = Refused::Transfer(TransferError::UnknownNote(NoteId::new(
@@ -3897,7 +4343,13 @@ mod tests {
         assert!(!said.contains("NoteId"), "{said}");
         assert!(!said.contains("Hash32"), "{said}");
         assert!(!said.contains("already spent"), "{said}");
-        assert!(said.contains("waiting for a block"), "{said}");
+        // The record keeps a waiting payment's notes out of every draft, so
+        // that is not why a note is missing, and it was the first reason
+        // given; a block landing mid spend is.
+        assert!(
+            !said.contains("already made is still waiting") && said.contains("block that arrived"),
+            "{said}"
+        );
         assert!(said.contains("Nothing was sent"), "{said}");
 
         // A payment too large for a block had a hand-written answer and its
@@ -4042,7 +4494,9 @@ mod tests {
     /// alike. Written down as a refusal of this one, it started the wait
     /// before the notes come back, and a wallet restarted into a long check
     /// let go of a payment its peers may be carrying. Nothing reached that
-    /// branch, so it could have been either way round.
+    /// branch, so it could have been either way round. And what the node said
+    /// was then thrown away, so the payment was said to be out of the pool
+    /// "most often because it had no room for it".
     #[test]
     fn what_the_node_says_of_a_payment_handed_back_is_written_down_as_what_it_is() {
         use crate::pending::{Handed, Pending};
@@ -4058,6 +4512,8 @@ mod tests {
             made_at: 10,
             refused: None,
             ended: None,
+            carried: None,
+            perhaps: None,
         };
         let id = one.id();
         let mut pending = Pending::default();
@@ -4069,11 +4525,24 @@ mod tests {
             settles_at: 1000,
             reached: 940,
         }));
-        super::note_the_answer(&mut pending, &id, 20, &checking);
+        let said = super::note_the_answer(&mut pending, &id, 20, &checking);
         assert_eq!(
             held(&pending),
             None,
             "a node still checking was taken to refuse this payment"
+        );
+        // Not a refusal, and still the reason the node does not hold it: it
+        // was thrown away, and the payment was said to be out of the pool for
+        // want of room.
+        let shown = super::why_not_held(None, said.as_deref());
+        assert!(
+            shown.contains("has not finished checking"),
+            "what a node still checking said of a payment is not what is shown: {shown}"
+        );
+        assert_eq!(
+            super::why_not_held(None, None),
+            super::NOT_IN_THE_POOL,
+            "a node that said nothing is given words"
         );
         super::note_the_answer(&mut pending, &id, 20, &Ok(false));
         assert_eq!(
@@ -4275,13 +4744,75 @@ mod tests {
             "nothing to say before a write failed"
         );
         wallet.pending_file = directory.join("no-such-directory").join("pending.dat");
-        wallet.write_pending(&crate::pending::Pending::default());
+        assert!(
+            wallet
+                .write_pending(&crate::pending::Pending::default())
+                .is_err(),
+            "a record that did not write is said to have written"
+        );
         let said = wallet.payments_unkept();
         wallet.shutdown();
         let _ = std::fs::remove_dir_all(&directory);
         assert!(
             said.is_some_and(|said| said.contains("cannot write down the payments")),
             "a record of payments that did not write was not said"
+        );
+    }
+
+    /// A payment nobody was offered is forgotten only once the record on the
+    /// disk is written without it.
+    ///
+    /// It was forgotten in memory whatever the write came to, and the command
+    /// line then said the payment was not sent and to run it again, while the
+    /// record on the disk still held it and the next start handed it over
+    /// beside the one sent again. Nothing made that write fail.
+    #[test]
+    fn a_payment_is_forgotten_only_once_the_disk_lets_go_of_it() {
+        use crate::pending::Handed;
+        use cairn_ledger::transaction::{Input, Transfer};
+
+        let (mut wallet, directory) = opened("forget-unwritten");
+        let to = SecretKey::generate().unwrap().public_key();
+        let spends = NoteId::new(Hash32::from_bytes([3; 32]), 0);
+        let one = Handed {
+            transfer: Transfer::new(vec![Input::hot(spends)], vec![Note::new(cairn("1"), to)]),
+            to,
+            amount: cairn("1"),
+            fee: cairn("0.001"),
+            made_at: 1,
+            refused: None,
+            ended: None,
+            carried: None,
+            perhaps: None,
+        };
+        let sent = super::Sent {
+            id: one.id(),
+            amount: cairn("1"),
+            fee: cairn("0.001"),
+            change: Amount::ZERO,
+            notes: 1,
+            from_cold: 0,
+            handed_on: false,
+            offered: 0,
+        };
+        wallet.pending.lock().unwrap().hand(one.clone());
+        let written = directory.join("data").join("pending.dat");
+        wallet.pending_file = directory.join("no-such-directory").join("pending.dat");
+        let forgot = wallet.forget_if_unoffered(&sent);
+        let kept = wallet.pending.lock().unwrap().holds(&one.id());
+        wallet.pending_file = written;
+        let forgot_after = wallet.forget_if_unoffered(&sent);
+        let gone = !wallet.pending.lock().unwrap().holds(&one.id());
+        wallet.shutdown();
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert!(
+            !forgot && kept,
+            "a payment was said to be forgotten when the record on the disk still held it"
+        );
+        assert!(
+            forgot_after && gone,
+            "a payment the record on the disk let go of was not forgotten"
         );
     }
 
@@ -4615,20 +5146,70 @@ mod tests {
         };
         let back = "back in the balance";
         let gone = "not in the balance any more";
-        assert_eq!(super::undone_note(&[]), None, "nothing on the list");
+        assert_eq!(super::undone_note(&[], &[]), None, "nothing on the list");
 
-        let out = super::undone_note(&[movement(Direction::Sent)]).unwrap();
+        let out = super::undone_note(&[movement(Direction::Sent)], &[]).unwrap();
         assert!(out.contains(back) && !out.contains(gone), "{out}");
         for direction in [Direction::Mined, Direction::Received] {
-            let came_in = super::undone_note(&[movement(direction)]).unwrap();
+            let came_in = super::undone_note(&[movement(direction)], &[]).unwrap();
             assert!(
                 came_in.contains(gone) && !came_in.contains(back),
                 "{came_in}"
             );
         }
-        let both =
-            super::undone_note(&[movement(Direction::Mined), movement(Direction::Sent)]).unwrap();
+        let both = super::undone_note(
+            &[movement(Direction::Mined), movement(Direction::Sent)],
+            &[],
+        )
+        .unwrap();
         assert!(both.contains(back) && both.contains(gone), "{both}");
+
+        // A payment out the pool took back holds its notes again, out of the
+        // balance: it is waiting, not back.
+        let waiting = super::Waiting {
+            id: Hash32::ZERO,
+            amount: cairn("50"),
+            committed: cairn("50"),
+            pooled: true,
+            why: None,
+            held_until: None,
+        };
+        let again = super::undone_note(&[movement(Direction::Sent)], &[waiting]).unwrap();
+        assert!(
+            again.contains("waiting again") && !again.contains(back),
+            "a payment waiting for a block again is said to be back in the balance: {again}"
+        );
+    }
+
+    /// What is said under the payments no block carried depends on where
+    /// each one's notes are, and each case is said only when it is there.
+    ///
+    /// Both faces closed the list with the money back in the balance and
+    /// "send it again" whatever was on it, and nothing read what they said of
+    /// a payment whose notes another payment had spent.
+    #[test]
+    fn what_is_said_of_the_payments_not_carried_is_where_their_notes_are() {
+        let one = |notes_here| super::NotCarried {
+            id: Hash32::ZERO,
+            amount: cairn("1"),
+            why: "it pays too little".to_owned(),
+            at: 3,
+            notes_here,
+        };
+        let back = "back in the balance above";
+        let spent = "no longer this key's";
+        assert_eq!(super::not_carried_note(&[]), None, "nothing on the list");
+        let here = super::not_carried_note(&[one(true)]).unwrap();
+        assert!(
+            here.contains(back)
+                && here.contains("spends one of them first")
+                && !here.contains(spent),
+            "{here}"
+        );
+        let gone = super::not_carried_note(&[one(false)]).unwrap();
+        assert!(gone.contains(spent) && !gone.contains(back), "{gone}");
+        let both = super::not_carried_note(&[one(true), one(false)]).unwrap();
+        assert!(both.contains(back) && both.contains(spent), "{both}");
     }
 
     #[test]

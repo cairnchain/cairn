@@ -13,10 +13,14 @@
 //! which is also what a payment that was carried looks like.
 //!
 //! So every payment the pool takes is written here, with everything it takes
-//! to hand it over again, and kept until a block carries it or it is plainly
-//! not going to be carried. It is this wallet's own record, beside its account
-//! and written the same way: nothing in the protocol changes and no peer ever
-//! sees it.
+//! to hand it over again, and kept until the chain has settled it or it is
+//! plainly not going to be carried. Settled is not the first block that
+//! carries it: a reorganisation can undo that block, and the chain then puts
+//! the payment back in every pool that saw it, so a carried payment is kept,
+//! marked with the height of the block that carried it, until that block is
+//! deeper than any switch this node follows. It is this wallet's own record, beside its
+//! account and written the same way: nothing in the protocol changes and no
+//! peer ever sees it.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -40,9 +44,10 @@ const MAGIC: &[u8; 16] = b"cairn pending v1";
 
 /// Payments the record keeps.
 ///
-/// Past this the oldest that is no longer waited on goes first, and only if
-/// there is none does a payment still being waited on go. A wallet with this
-/// many payments in flight at once is not one anybody runs by hand.
+/// Past this the oldest named as not carried goes first, then the oldest a
+/// block carried, and only if there is neither does a payment still being
+/// waited on go. A wallet with this many payments in flight at once is not one
+/// anybody runs by hand.
 const MOST_KEPT: usize = 256;
 
 /// Words kept about one payment, in bytes. What goes in is this wallet's own
@@ -52,12 +57,19 @@ const MOST_WORDS: usize = 4096;
 /// Blocks a payment this wallet's own node will not take back is still held
 /// for, counted from the first block at which it would not.
 ///
-/// A pool asks every transfer it holds again after every block, against rules
-/// every node applies alike: what this node refuses on the chain as it stands,
-/// a peer on the same chain has dropped too. The wait is for the peer that is
-/// a block or two behind, and for this node being the one that is behind. Past
-/// it the notes come back to the balance, and the payment is named as not
-/// carried rather than left holding them for ever.
+/// A pool asks every transfer it holds again after every block, and a pool
+/// running this code on the chain as it stands drops what this node refuses.
+/// The wait is for the peer that is a block or two behind, and for this node
+/// being the one that is behind. Past it the notes come back to the balance,
+/// and the payment is named as not carried rather than left holding them for
+/// ever.
+///
+/// That is a pool's word and not the chain's. What a pool refuses a payment
+/// over is most often its fee floor, which no block is held to, so the
+/// transfer as it was made stays one a miner may carry for as long as its
+/// notes are unspent. So the next payment this wallet builds spends one of
+/// them first, and the two can never both be carried: see
+/// `Wallet::send`.
 pub const HELD_AFTER_REFUSAL: u64 = 6;
 
 /// Blocks a payment that was not carried is still named for, once it stopped
@@ -91,11 +103,32 @@ pub(crate) struct Handed {
     pub(crate) refused: Option<(u64, String)>,
     /// The height at which it stopped being waited on, and why, if it has.
     pub(crate) ended: Option<(u64, String)>,
+    /// The height of the block this wallet read carrying it, if one did.
+    ///
+    /// It used to be taken off the record at that block. A switch that undoes
+    /// the block puts the payment back in the pool of every node that saw it,
+    /// where any miner may carry it again, and the next start knew nothing
+    /// of it: it listed nothing waiting and counted its notes as spendable.
+    /// So it stays, and goes once the block is deeper than a switch reaches.
+    pub(crate) carried: Option<u64>,
+    /// The height at which its notes were found to be no longer this key's
+    /// while this wallet had not read every block since it was made.
+    ///
+    /// One of those blocks may have carried it, and whoever it pays may have
+    /// been paid. Ending it, which is what this state replaced, named it as
+    /// carried by no block and told its owner to send it again.
+    pub(crate) perhaps: Option<u64>,
 }
 
 impl Handed {
     pub(crate) fn id(&self) -> Hash32 {
         self.transfer.id()
+    }
+
+    /// Whether it is still being waited on: handed over, and neither ended,
+    /// carried, nor gone where this wallet cannot yet say.
+    pub(crate) const fn is_live(&self) -> bool {
+        self.ended.is_none() && self.carried.is_none() && self.perhaps.is_none()
     }
 
     /// The block from which its notes come back to the balance, if its own
@@ -173,6 +206,8 @@ impl Decode for Handed {
             made_at: u64::decode_from(reader)?,
             refused: decode_moment(reader)?,
             ended: decode_moment(reader)?,
+            carried: None,
+            perhaps: None,
         })
     }
 }
@@ -181,6 +216,63 @@ impl Decode for Handed {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Pending {
     handed: Vec<Handed>,
+}
+
+/// What the record says of a payment past what its first version kept, for
+/// writing down.
+///
+/// Written after the list of payments rather than inside each of them, so a
+/// record written before these states existed ends where they would begin and
+/// is read as it was.
+#[derive(Clone, Copy, Debug)]
+struct Mark {
+    id: Hash32,
+    carried: Option<u64>,
+    perhaps: Option<u64>,
+}
+
+impl Encode for Mark {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        self.id.encode_to(out);
+        match self.carried {
+            None => 0u8.encode_to(out),
+            Some(height) => {
+                1u8.encode_to(out);
+                height.encode_to(out);
+            }
+        }
+        match self.perhaps {
+            None => 0u8.encode_to(out),
+            Some(since) => {
+                1u8.encode_to(out);
+                since.encode_to(out);
+            }
+        }
+    }
+}
+
+impl Decode for Mark {
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        let refused = || CodecError::InvalidValue {
+            type_name: "a mark on a payment",
+        };
+        let id = Hash32::decode_from(reader)?;
+        let carried = match u8::decode_from(reader)? {
+            0 => None,
+            1 => Some(u64::decode_from(reader)?),
+            _ => return Err(refused()),
+        };
+        let perhaps = match u8::decode_from(reader)? {
+            0 => None,
+            1 => Some(u64::decode_from(reader)?),
+            _ => return Err(refused()),
+        };
+        Ok(Self {
+            id,
+            carried,
+            perhaps,
+        })
+    }
 }
 
 /// What became of a record that was there and could not be read back.
@@ -195,9 +287,20 @@ pub enum NotReadBack {
 }
 
 impl Pending {
+    /// Every payment on the record, oldest first.
+    pub(crate) fn all(&self) -> impl Iterator<Item = &Handed> {
+        self.handed.iter()
+    }
+
     /// Payments still being waited on, oldest first.
     pub(crate) fn live(&self) -> impl Iterator<Item = &Handed> {
-        self.handed.iter().filter(|one| one.ended.is_none())
+        self.handed.iter().filter(|one| one.is_live())
+    }
+
+    /// Payments whose notes are gone while this wallet has not read every
+    /// block since they were made, oldest first.
+    pub(crate) fn perhaps_carried(&self) -> impl Iterator<Item = &Handed> {
+        self.handed.iter().filter(|one| one.perhaps.is_some())
     }
 
     /// Payments that stopped being waited on without a block carrying them,
@@ -210,7 +313,12 @@ impl Pending {
         self.handed.iter_mut().find(|one| one.id() == *id)
     }
 
-    /// Writes down a payment the pool has just taken.
+    /// Whether a payment is on the record, in any state.
+    pub(crate) fn holds(&self, id: &Hash32) -> bool {
+        self.handed.iter().any(|one| one.id() == *id)
+    }
+
+    /// Writes down a payment about to be handed to the pool.
     pub(crate) fn hand(&mut self, handed: Handed) {
         let id = handed.id();
         self.handed.retain(|one| one.id() != id);
@@ -220,13 +328,14 @@ impl Pending {
                 .handed
                 .iter()
                 .position(|one| one.ended.is_some())
+                .or_else(|| self.handed.iter().position(|one| one.carried.is_some()))
                 .unwrap_or(0);
             self.handed.remove(oldest);
         }
     }
 
-    /// Takes a payment off the record, because a block carried it or because
-    /// nobody was ever offered it. Says whether it was there.
+    /// Takes a payment off the record: the chain settled it, or nobody was
+    /// ever offered it. Says whether it was there.
     pub(crate) fn settle(&mut self, id: &Hash32) -> bool {
         let before = self.handed.len();
         self.handed.retain(|one| one.id() != *id);
@@ -254,26 +363,69 @@ impl Pending {
         changed
     }
 
-    /// Stops waiting on a payment, at `tip`, for `why`. Its notes come back
-    /// to the balance and it is named as not carried for [`NAMED_FOR`]
-    /// blocks. Says whether that changed anything.
+    /// Stops waiting on a payment, at `tip`, for `why`, and names it as not
+    /// carried for [`NAMED_FOR`] blocks. Says whether that changed anything.
+    ///
+    /// Only a payment no block this wallet read carried: a carried one is
+    /// taken back first, by [`Pending::uncarried`].
     pub(crate) fn end(&mut self, id: &Hash32, tip: u64, why: &str) -> bool {
         match self.find(id) {
-            Some(one) if one.ended.is_none() => {
+            Some(one) if one.ended.is_none() && one.carried.is_none() => {
                 one.ended = Some((tip, why.to_owned()));
+                one.perhaps = None;
                 true
             }
             _ => false,
         }
     }
 
-    /// Stops waiting on every payment refused for long enough, at `tip`, and
-    /// forgets every one named for long enough. Says whether anything
-    /// changed.
-    pub(crate) fn age(&mut self, tip: u64) -> bool {
+    /// Marks a payment as carried by the block at `height`, whatever was said
+    /// of it before.
+    pub(crate) fn carried(&mut self, id: &Hash32, height: u64) {
+        if let Some(one) = self.find(id) {
+            one.carried = Some(height);
+            one.ended = None;
+            one.perhaps = None;
+            one.refused = None;
+        }
+    }
+
+    /// Takes back that a block carried a payment, because the chain no longer
+    /// carries that block. It is waited on again. Says whether that changed
+    /// anything.
+    pub(crate) fn uncarried(&mut self, id: &Hash32) -> bool {
+        self.find(id)
+            .is_some_and(|one| one.carried.take().is_some())
+    }
+
+    /// Marks a payment whose notes are gone, at `tip`, as one this wallet
+    /// cannot yet say a block carried. Says whether that changed anything.
+    pub(crate) fn perhaps(&mut self, id: &Hash32, tip: u64) -> bool {
+        match self.find(id) {
+            Some(one) if one.is_live() => {
+                one.perhaps = Some(tip);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Waits on a payment again whose notes came back to this key after it
+    /// was marked as one a block may have carried.
+    pub(crate) fn not_perhaps(&mut self, id: &Hash32) {
+        if let Some(one) = self.find(id) {
+            one.perhaps = None;
+        }
+    }
+
+    /// Stops waiting on every payment refused for long enough, at `tip`;
+    /// forgets every one named for long enough, and every one a block carried
+    /// that is `reach` blocks or more below the tip, which no switch this
+    /// node follows can undo. Says whether anything changed.
+    pub(crate) fn age(&mut self, tip: u64, reach: u64) -> bool {
         let mut changed = false;
         for one in &mut self.handed {
-            if one.ended.is_some() {
+            if !one.is_live() {
                 continue;
             }
             let (Some(until), Some((_, why))) = (one.held_until(), one.refused.as_ref()) else {
@@ -286,9 +438,16 @@ impl Pending {
         }
         let before = self.handed.len();
         self.handed.retain(|one| {
-            one.ended
+            let named = one
+                .ended
                 .as_ref()
-                .is_none_or(|(at, _)| tip < at.saturating_add(NAMED_FOR))
+                .map(|(at, _)| *at)
+                .or(one.perhaps)
+                .is_none_or(|at| tip < at.saturating_add(NAMED_FOR));
+            let unsettled = one
+                .carried
+                .is_none_or(|height| tip < height.saturating_add(reach));
+            named && unsettled
         });
         changed || self.handed.len() != before
     }
@@ -353,14 +512,44 @@ impl Pending {
 impl Encode for Pending {
     fn encode_to(&self, out: &mut Vec<u8>) {
         self.handed.encode_to(out);
+        let marks: Vec<Mark> = self
+            .handed
+            .iter()
+            .filter(|one| one.carried.is_some() || one.perhaps.is_some())
+            .map(|one| Mark {
+                id: one.id(),
+                carried: one.carried,
+                perhaps: one.perhaps,
+            })
+            .collect();
+        marks.encode_to(out);
     }
 }
 
 impl Decode for Pending {
     fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
-        Ok(Self {
-            handed: cairn_primitives::codec::take_at_most(reader, MOST_KEPT, "payments")?,
-        })
+        let mut handed: Vec<Handed> =
+            cairn_primitives::codec::take_at_most(reader, MOST_KEPT, "payments")?;
+        // A record written before a payment could be marked ends here.
+        let marks: Vec<Mark> = if reader.remaining() > 0 {
+            cairn_primitives::codec::take_at_most(reader, MOST_KEPT, "marks on payments")?
+        } else {
+            Vec::new()
+        };
+        for mark in marks {
+            // Each mark names a payment on the record, once.
+            let Some(one) = handed
+                .iter_mut()
+                .find(|one| one.id() == mark.id && one.carried.is_none() && one.perhaps.is_none())
+            else {
+                return Err(CodecError::InvalidValue {
+                    type_name: "a mark on a payment",
+                });
+            };
+            one.carried = mark.carried;
+            one.perhaps = mark.perhaps;
+        }
+        Ok(Self { handed })
     }
 }
 
@@ -394,6 +583,10 @@ fn set_aside(path: &Path) -> NotReadBack {
 mod tests {
     use super::{Handed, NotReadBack, Pending, HELD_AFTER_REFUSAL, MOST_KEPT, NAMED_FOR};
     use cairn_crypto::SecretKey;
+    use cairn_primitives::codec::Encode as _;
+
+    /// How deep a switch reaches, in the tests of what the record keeps.
+    const REACH: u64 = 1_024;
     use cairn_ledger::note::{Note, NoteId};
     use cairn_ledger::transaction::{Input, Transfer};
     use cairn_primitives::{Amount, Hash32};
@@ -428,6 +621,8 @@ mod tests {
             made_at,
             refused: None,
             ended: None,
+            carried: None,
+            perhaps: None,
         }
     }
 
@@ -458,6 +653,109 @@ mod tests {
         );
         assert_eq!(again.live().count(), 2);
         assert_eq!(again.ended().count(), 1);
+    }
+
+    /// A payment a block carried is kept, marked with that block, until the
+    /// block is deeper than a switch reaches, and one marked as perhaps
+    /// carried is named for as long as one not carried is; both marks read
+    /// back, and a record written before them still reads.
+    ///
+    /// The record let go of a payment at the first block that carried it, so
+    /// a switch undoing that block left the payment in every pool that saw it
+    /// and on no record. Nothing asked what the record held once a block had
+    /// carried a payment.
+    #[test]
+    fn a_carried_payment_is_kept_until_its_block_is_past_the_reach_of_a_switch() {
+        let directory = scratch("carried");
+        let path = directory.join(super::PENDING_FILE);
+        let mut pending = Pending::default();
+        let (one, two, three) = (handed(1, 10), handed(2, 10), handed(3, 10));
+        // The one with no mark first, so a mark read back onto the first
+        // payment without one, rather than onto the one it names, is seen.
+        pending.hand(three.clone());
+        pending.hand(one.clone());
+        pending.hand(two.clone());
+        pending.carried(&one.id(), 11);
+        assert!(pending.perhaps(&two.id(), 12));
+        assert!(
+            !pending.perhaps(&two.id(), 20),
+            "a payment already marked was marked again"
+        );
+        assert!(
+            !pending.perhaps(&one.id(), 20),
+            "a payment a block carried was marked as perhaps carried"
+        );
+        assert_eq!(
+            pending.live().count(),
+            1,
+            "a carried payment is still waited on"
+        );
+
+        pending.save(&path).unwrap();
+        let (again, set_aside) = Pending::load(&path);
+        assert_eq!(set_aside, None);
+        assert_eq!(again, pending, "the marks did not read back");
+
+        // Written as the release before the marks wrote it: the list alone.
+        let mut old = b"cairn pending v1".to_vec();
+        let plain: Vec<Handed> = pending
+            .all()
+            .cloned()
+            .map(|mut one| {
+                one.carried = None;
+                one.perhaps = None;
+                one
+            })
+            .collect();
+        plain.encode_to(&mut old);
+        let stamp =
+            cairn_primitives::hash::hash(cairn_primitives::hash::Domain::WalletHistory, &old);
+        old.extend_from_slice(stamp.as_bytes());
+        std::fs::write(&path, &old).unwrap();
+        let (older, set_aside) = Pending::load(&path);
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            set_aside, None,
+            "a record from before the marks was set aside"
+        );
+        assert_eq!(older.live().count(), 3, "and did not read as it was");
+
+        assert!(!pending.age(12 + NAMED_FOR - 1, REACH));
+        assert!(
+            pending.perhaps_carried().any(|kept| kept.id() == two.id()),
+            "a payment perhaps carried was let go of before it was named for long enough"
+        );
+        assert!(pending.age(12 + NAMED_FOR, REACH));
+        assert_eq!(
+            pending.perhaps_carried().count(),
+            0,
+            "a payment perhaps carried is named past the day it is named for"
+        );
+
+        assert!(!pending.age(11 + REACH - 1, REACH));
+        assert!(
+            pending.all().any(|kept| kept.id() == one.id()),
+            "let go of while a switch could still undo the block that carried it"
+        );
+        assert!(pending.uncarried(&one.id()));
+        assert!(!pending.uncarried(&one.id()), "taken back twice");
+        assert!(
+            pending.live().any(|kept| kept.id() == one.id()),
+            "a payment whose block was undone is not waited on again"
+        );
+        // Marked as perhaps carried, and then its notes came back.
+        assert!(pending.perhaps(&one.id(), 30));
+        pending.not_perhaps(&one.id());
+        assert!(
+            pending.live().any(|kept| kept.id() == one.id()),
+            "a payment whose notes came back is not waited on again"
+        );
+        pending.carried(&one.id(), 11);
+        assert!(pending.age(11 + REACH, REACH));
+        assert!(
+            pending.all().all(|kept| kept.id() != one.id()),
+            "kept past the reach of any switch"
+        );
     }
 
     /// Words longer than the record keeps are cut at a whole character, so
@@ -639,9 +937,9 @@ mod tests {
             "the wait is counted from the first refusal, not the last"
         );
 
-        assert!(!pending.age(20 + HELD_AFTER_REFUSAL - 1));
+        assert!(!pending.age(20 + HELD_AFTER_REFUSAL - 1, REACH));
         assert_eq!(pending.live().count(), 1, "let go of a block early");
-        assert!(pending.age(20 + HELD_AFTER_REFUSAL));
+        assert!(pending.age(20 + HELD_AFTER_REFUSAL, REACH));
         assert_eq!(pending.live().count(), 0, "held past the wait");
         let ended = pending.ended().next().unwrap().ended.clone();
         assert_eq!(
@@ -651,13 +949,13 @@ mod tests {
         );
 
         let over = 20 + HELD_AFTER_REFUSAL;
-        assert!(!pending.age(over + NAMED_FOR - 1));
+        assert!(!pending.age(over + NAMED_FOR - 1, REACH));
         assert_eq!(
             pending.ended().count(),
             1,
             "stopped naming it a block early"
         );
-        assert!(pending.age(over + NAMED_FOR));
+        assert!(pending.age(over + NAMED_FOR, REACH));
         assert_eq!(
             pending.ended().count(),
             0,
@@ -680,7 +978,7 @@ mod tests {
             "a refusal after being taken back starts the wait again"
         );
         assert!(
-            !taken.age(20 + HELD_AFTER_REFUSAL),
+            !taken.age(20 + HELD_AFTER_REFUSAL, REACH),
             "and the old wait is gone"
         );
     }

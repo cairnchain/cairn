@@ -74,6 +74,7 @@ fn until(patience: Duration, mut ready: impl FnMut() -> bool) -> bool {
 }
 
 /// Mines blocks on a private ledger, paying whoever is named.
+#[derive(Clone)]
 struct Forge {
     params: ConsensusParams,
     state: LedgerState,
@@ -524,15 +525,22 @@ fn a_payment_its_node_will_not_take_back_is_named_as_not_carried() {
         vec![sent.id],
         "the next start did not read back that the payment was not carried"
     );
+    assert!(
+        not_carried[0].notes_here,
+        "the notes of a payment its node let go of are not said to be this key's"
+    );
 }
 
-/// A payment a block carried leaves the record, and is not named as waiting
-/// or as not carried, in this run or the next.
+/// A payment a block carried is not named as waiting or as not carried, in
+/// this run or the next.
 ///
 /// The other half of the record: without it, every payment made would stay
-/// listed as waiting, holding notes a block had already spent.
+/// listed as waiting, holding notes a block had already spent. It stays on the
+/// record, marked with the block that carried it, until no switch can undo
+/// that block: `a_payment_a_reorganisation_put_back_is_still_waiting_at_the_next_start`
+/// holds why.
 #[test]
-fn a_payment_a_block_carried_leaves_the_record() {
+fn a_payment_a_block_carried_is_neither_waiting_nor_named_as_not_carried() {
     let (wallet, mut funded) = funded("carried", 3, params());
     let miner = somebody();
     let fee = wallet.floor_for(recipient(), cairn("10"));
@@ -701,7 +709,7 @@ fn a_wallet_waits_while_a_peer_says_its_chain_has_more_work() {
 /// beside a `sent` line for the same payment, it would tell its owner to pay
 /// again what had been paid.
 #[test]
-fn a_payment_named_as_not_carried_that_a_block_carries_after_all_leaves_the_record() {
+fn a_payment_named_as_not_carried_that_a_block_carries_after_all_is_named_no_more() {
     let (wallet, mut funded) = funded("carried-after-all", 4, small_hot_set());
     let stranger = somebody();
     let fee = wallet.floor_for(recipient(), cairn("10"));
@@ -832,6 +840,12 @@ fn the_page_is_told_what_became_of_its_payments() {
         state.contains("\"notCarried\":[]") && state.contains("\"paymentsUnkept\":null"),
         "the payments not carried, and whether the record is kept, are not said"
     );
+    assert!(
+        state.contains("\"perhapsCarried\":[]")
+            && state.contains("\"perhapsCarriedNote\":")
+            && state.contains("\"notCarriedNote\":"),
+        "the payments a block may have carried, and the words for each list, are not said"
+    );
 }
 
 /// A payment whose notes another payment from the same key spent is named
@@ -889,6 +903,14 @@ fn a_payment_whose_notes_another_spent_is_named_as_not_carried() {
             .why
             .contains("another payment from this key spent them"),
         "the reason a payment was not carried is not said"
+    );
+    let said = cairn_wallet::not_carried_note(&named).unwrap_or_default();
+    assert!(
+        !named[0].notes_here
+            && said.contains("no longer this key's")
+            && !said.contains("back in the balance above, and"),
+        "a payment whose notes another payment spent is said to have its money back in the \
+         balance: {said}"
     );
 }
 
@@ -1014,5 +1036,238 @@ fn of_two_payments_the_one_not_taken_back_is_let_go_of_on_its_own() {
     assert!(
         later.iter().any(|one| one.id == generous.id),
         "the payment its node still holds stopped being listed as waiting"
+    );
+}
+
+/// A payment whose block a reorganisation undid, and which the chain put
+/// back in the pool, is still waiting at the next start, with its notes held.
+///
+/// The record let go of a payment at the first block that carried it. A
+/// switch that undoes that block puts the transfer back in the pool of every
+/// node that saw it, this one's included, where the page showed it waiting;
+/// nothing wrote it back onto the record, and the pool dies with the process.
+/// Nothing asked what the next start knew after a switch, so a wallet whose
+/// next command listed nothing waiting and counted the notes as spendable,
+/// while peers could still hand the transfer to a miner, passed.
+#[test]
+fn a_payment_a_reorganisation_put_back_is_still_waiting_at_the_next_start() {
+    let (wallet, mut funded) = funded("undone-and-pooled", 3, params());
+    let stranger = somebody();
+    // Where the two branches part.
+    let mut rival = funded.forge.clone();
+    let fee = wallet.floor_for(recipient(), cairn("10"));
+    let sent = wallet.send(recipient(), cairn("10"), fee).unwrap();
+    let transfer = pooled(&wallet, &sent.id).unwrap();
+    wallet
+        .node()
+        .submit_block(funded.forge.mine(&stranger, vec![transfer]))
+        .unwrap();
+    let once_carried = wallet.waiting();
+    // A heavier branch without it.
+    for _ in 0..2 {
+        wallet
+            .node()
+            .submit_block(rival.mine(&stranger, Vec::new()))
+            .unwrap();
+    }
+    let height = wallet.progress().height;
+    let waiting_here = wallet.waiting();
+    let undone = wallet.undone();
+    wallet.shutdown();
+    drop(wallet);
+
+    // The next command: a new process on the same key and directory.
+    let again = funded.open();
+    let waiting_next = again.waiting();
+    let holdings_next = again.holdings();
+    again.shutdown();
+    drop(again);
+    let _ = std::fs::remove_dir_all(&funded.directory);
+
+    assert!(
+        once_carried.iter().all(|one| one.id != sent.id),
+        "fixture: once a block carried it, the payment was not waiting"
+    );
+    assert_eq!(
+        height,
+        Some(4),
+        "fixture: the node followed the heavier branch"
+    );
+    assert!(
+        undone.iter().any(|one| one.id == sent.id),
+        "fixture: the account lists the payment as taken back"
+    );
+    assert!(
+        waiting_here
+            .iter()
+            .any(|one| one.id == sent.id && one.pooled),
+        "fixture: the switch put the payment back in this process's pool"
+    );
+    assert!(
+        waiting_next.iter().any(|one| one.id == sent.id),
+        "a payment a reorganisation undid and the pool took back is not on the record: the \
+         next start does not list it as waiting"
+    );
+    assert!(
+        holdings_next.waiting > Amount::ZERO,
+        "the next start counts the notes of a payment peers may still carry as spendable"
+    );
+}
+
+/// A payment sent again after the wallet named the first as not carried
+/// spends one of the first one's notes, so no block can carry both.
+///
+/// A payment its node would not take back is let go of after a few blocks
+/// and its money comes back to the balance. What the node refused it over is
+/// its pool's fee floor, which no block is held to, so the transfer as it was
+/// made is still one a miner may carry. The payment made next reached for
+/// other notes, and nothing asked whether the two could both be carried: a
+/// block carrying both paid the recipient twice.
+#[test]
+fn a_payment_sent_again_after_one_was_let_go_of_cannot_be_carried_beside_it() {
+    let (wallet, mut funded) = funded("sent-again", 4, small_hot_set());
+    let stranger = somebody();
+    let fee = wallet.floor_for(recipient(), cairn("10"));
+    let first = wallet.send(recipient(), cairn("10"), fee).unwrap();
+    let as_made = pooled(&wallet, &first.id).unwrap();
+
+    let mut blocks = 0;
+    while wallet.not_carried().is_empty() && blocks < 40 {
+        wallet
+            .node()
+            .submit_block(funded.forge.mine(&stranger, Vec::new()))
+            .unwrap();
+        let _ = wallet.waiting();
+        blocks += 1;
+    }
+    let named = wallet.not_carried();
+    // Somebody pays this wallet meanwhile, so it holds a note the first
+    // payment does not spend.
+    let owner = funded.secret.public_key();
+    wallet
+        .node()
+        .submit_block(funded.forge.mine(&owner, Vec::new()))
+        .unwrap();
+
+    let fee_again = wallet.fee_for(recipient(), cairn("10"));
+    let again = wallet.send(recipient(), cairn("10"), fee_again).unwrap();
+    let sent_again = pooled(&wallet, &again.id).unwrap();
+    wallet.shutdown();
+    drop(wallet);
+    let _ = std::fs::remove_dir_all(&funded.directory);
+
+    assert_eq!(
+        named.iter().map(|one| one.id).collect::<Vec<_>>(),
+        vec![first.id],
+        "fixture: after {blocks} blocks the first payment was named as not carried"
+    );
+    assert!(
+        !inputs_of(&as_made).is_disjoint(&inputs_of(&sent_again)),
+        "the payment sent again spends none of the notes of the one it replaces, which a block \
+         may still carry: both can be carried and the recipient paid twice"
+    );
+}
+
+/// A payment whose record cannot be written is not handed to anybody.
+///
+/// The pool passes a transfer to every connected peer the moment it takes it,
+/// and the record was written after that. A record that would not write, on a
+/// full disk or a directory the wallet cannot write to, was noted in memory
+/// and the payment went on: a peer held it, the command line said "This
+/// wallet has written it down", and the next start listed nothing waiting and
+/// counted its notes as spendable. Nothing made the record refuse a write
+/// during a payment.
+#[test]
+fn a_payment_the_record_cannot_keep_is_not_handed_to_anybody() {
+    let (wallet, funded) = funded("unrecorded", 3, params());
+    let peer = peer_beside(&wallet, &funded);
+    // What a full disk, or a directory that is not writable, does to the
+    // record: its partial file cannot be made.
+    std::fs::create_dir_all(funded.data().join("pending.part").join("in-the-way")).unwrap();
+    let before = wallet.holdings().spendable;
+    let fee = wallet.fee_for(recipient(), cairn("10"));
+    let sent = wallet.send(recipient(), cairn("10"), fee);
+    let pooled_here = wallet.node().with_chain(cairn_chain::ChainStore::pool_len);
+    let after = wallet.holdings().spendable;
+    wallet.shutdown();
+    drop(wallet);
+    peer.shutdown();
+    let _ = std::fs::remove_dir_all(&funded.directory);
+
+    assert!(
+        matches!(sent, Err(cairn_wallet::WalletError::Unrecorded(_))),
+        "a payment whose record could not be written was handed over, and the next start \
+         would not know it is waiting"
+    );
+    assert_eq!(
+        pooled_here, 0,
+        "the pool, which passes a payment to every peer the moment it takes it, took it"
+    );
+    assert_eq!(after, before, "a payment nobody was handed holds notes");
+}
+
+/// A payment of this key's that the pool holds and the record does not is
+/// written down, so the next start lists it waiting, and it is named with
+/// what it takes from this key when it is not carried.
+///
+/// Another copy of the key, or a record that lost it, leaves a payment this
+/// process's pool holds and nothing wrote down: the run that saw it listed it
+/// waiting, the next listed nothing and counted its notes as spendable while
+/// peers could still carry it. Nothing handed a wallet's node a payment the
+/// wallet had not made itself.
+#[test]
+fn a_payment_the_pool_holds_and_the_record_does_not_is_written_down() {
+    use cairn_ledger::transaction::Input;
+
+    let (wallet, mut funded) = funded("adopted", 2, params());
+    let owner = funded.secret.public_key();
+    let reward = funded.blocks[0].coinbase.created_notes()[0];
+    let value = reward.1.value;
+    let (paid, fee) = (cairn("10"), cairn("0.01"));
+    let change = value.checked_sub(paid).unwrap().checked_sub(fee).unwrap();
+    let signed = |outputs: Vec<Note>| {
+        let mut transfer = Transfer::new(vec![Input::hot(reward.0)], outputs);
+        transfer.sign_input(funded.params.network, 0, &reward.1, &funded.secret);
+        transfer
+    };
+    // Made by another copy of this key, and handed to this wallet's node.
+    let elsewhere = signed(vec![Note::new(paid, recipient()), Note::new(change, owner)]);
+    assert!(
+        matches!(
+            wallet.node().submit_transaction(elsewhere.clone()),
+            Ok(true)
+        ),
+        "fixture: the pool took it"
+    );
+    let _ = wallet.waiting();
+    wallet.shutdown();
+    drop(wallet);
+
+    let again = funded.open();
+    let waiting = again.waiting();
+    // A third copy spends the same note, and a block carries that instead.
+    let rival = signed(vec![Note::new(value.checked_sub(fee).unwrap(), somebody())]);
+    again
+        .node()
+        .submit_block(funded.forge.mine(&somebody(), vec![rival]))
+        .unwrap();
+    let _ = again.waiting();
+    let named = again.not_carried();
+    again.shutdown();
+    drop(again);
+    let _ = std::fs::remove_dir_all(&funded.directory);
+
+    assert!(
+        waiting.iter().any(|one| one.id == elsewhere.id()),
+        "a payment of this key's the pool held is not on the record: the next start does not \
+         list it as waiting"
+    );
+    assert_eq!(
+        named
+            .iter()
+            .map(|one| (one.id, one.amount))
+            .collect::<Vec<_>>(),
+        vec![(elsewhere.id(), paid.checked_add(fee).unwrap())],
+        "a payment written down from the pool is not named with what it takes from this key"
     );
 }
