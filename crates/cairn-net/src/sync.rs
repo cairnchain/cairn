@@ -1666,7 +1666,14 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
         // body in, unless the verdict is about this node rather than about
         // the body, and this peer is asked again for its chain, which is
         // where the real body is.
+        //
+        // Asked because the block it delivered made its branch the heaviest,
+        // so it claims more work than this node's chain, and that is counted
+        // as the peer being ahead: see the arm for a missing parent. Without
+        // it only a peer greeted as ahead was asked, and every long-lived
+        // connection of a node at the tip was greeted as an equal.
         Err(ChainError::InvalidBlock { id: failed, source }) if failed != id => {
+            peer.total_work = peer.total_work.max(claimed);
             let mut reaction = follow_up(chain, peer, now);
             reaction.failed_below = dropped_for(&source, failed)
                 .is_misbehaviour()

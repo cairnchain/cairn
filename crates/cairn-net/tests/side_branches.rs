@@ -346,7 +346,8 @@ fn a_peer_that_agrees_a_batch_or_more_below_the_tip_is_asked_only_past_it() {
 }
 
 /// The peer that delivers the block making a branch the heaviest is not
-/// blamed when the switch fails on a body somebody else sent first.
+/// blamed when the switch fails on a body somebody else sent first, and is
+/// asked again for its chain.
 ///
 /// The copy is held without being judged, and the block above it arrives from
 /// an honest peer. The switch reads the copy, fails, and the refusal names the
@@ -355,6 +356,11 @@ fn a_peer_that_agrees_a_batch_or_more_below_the_tip_is_asked_only_past_it() {
 /// was disconnected and its host refused, and the sender of the copy had been
 /// answered `SideBranch`. Nothing asked this, so a node that turned away the
 /// peers carrying the heavier branch for a body none of them sent passed.
+///
+/// The honest peer is greeted at this node's own work, which is how every
+/// long-lived connection of a node at the tip was greeted. This greeted it
+/// with all the work there is, so a node that asked a peer greeted as an
+/// equal nothing after the switch failed passed as well.
 #[test]
 fn the_peer_that_delivers_a_valid_block_is_not_blamed_for_a_body_another_sent() {
     let fork = a_fork();
@@ -377,7 +383,7 @@ fn the_peer_that_delivers_a_valid_block_is_not_blamed_for_a_body_another_sent() 
         "the node did not name the body it now holds aside, so nothing could say who sent it"
     );
 
-    let mut honest = greeted(u128::MAX, 13);
+    let mut honest = greeted(victim.total_work(), 12);
     let real = on_message(
         &mut local(&mut victim),
         &mut honest,
@@ -412,7 +418,8 @@ fn the_peer_that_delivers_a_valid_block_is_not_blamed_for_a_body_another_sent() 
             .iter()
             .any(|message| matches!(message, Message::GetChain { .. })),
         "and it was not asked again for the branch it carries, which is where the real \
-         body is"
+         body is: a peer greeted as an equal was not counted as ahead for the work the \
+         block it delivered claims"
     );
     assert_eq!(
         delivered.failed_below,
