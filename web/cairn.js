@@ -1435,14 +1435,28 @@ function atLeast(data, text) {
 /*
   What an address was paid, or paid out, as far as this site can tell.
 
-  Both only grow, so a figure off part of the chain is at least the real one,
-  and so is one that has passed what a count of pebbles holds, which the API
-  says with `turnoverCounted`. Both were printed bare beside a note count that
-  already carried the sign.
+  Both only grow, so the real figure is at least one read off part of the
+  chain, and at least one that has passed what a count of pebbles holds,
+  which the API says with `turnoverCounted`. Both were printed bare beside a
+  note count that already carried the sign.
 */
 function turnover(data, pebbles) {
   const floor = data.turnoverCounted === false || (data.coverage && data.coverage.whole === false);
   return (floor ? '\u2265\u202f' : '') + cairn(pebbles) + ' CAIRN';
+}
+
+/*
+  What an address holds, as far as this site can tell.
+
+  An index that began reading above the first block counted no note made
+  before it began, and a spend of one it never counted takes nothing off, so
+  the real balance is at least the one shown. It was printed bare beside the
+  two turnovers that carried the sign, and the notice that says so for the
+  whole page is one that others take the place of.
+*/
+function balance(data) {
+  const floor = data.coverage && data.coverage.from > 0;
+  return (floor ? '\u2265\u202f' : '') + cairn(data.balance) + ' CAIRN';
 }
 
 async function address(owner, parameters) {
@@ -1477,7 +1491,7 @@ async function address(owner, parameters) {
       el(
         'div',
         { class: 'stats' },
-        stat(t('stat.balance'), cairn(data.balance) + ' CAIRN'),
+        stat(t('stat.balance'), balance(data)),
         stat(t('stat.received'), turnover(data, data.received)),
         stat(t('stat.sent'), turnover(data, data.spent)),
         stat(t('stat.notesHeld'), atLeast(data, count(data.unspentNotes)), t('stat.notesHeld.note', { total: count(data.notes) }))

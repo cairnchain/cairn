@@ -213,6 +213,27 @@ fn what_an_address_was_paid_is_a_floor_where_the_answer_says_so() {
     }
 }
 
+/// **What an address holds is shown as a floor on an index that began above
+/// the first block.**
+///
+/// A note made before the index began is not counted, and a spend of one it
+/// never counted takes nothing off, so the balance is at least the figure.
+/// The page printed it bare beside the two turnovers that carried the sign.
+/// Nothing asked it, so a balance read off part of the chain passed as the
+/// whole of one.
+#[test]
+fn what_an_address_holds_is_a_floor_on_an_index_that_began_above_the_first_block() {
+    let balance = js_fn("balance");
+    assert!(
+        balance.contains("coverage.from > 0") && balance.contains("\\u2265"),
+        "the balance does not read whether the index began above the first block"
+    );
+    assert!(
+        js_fn("address").contains("stat(t('stat.balance'), balance(data))"),
+        "the address page prints the balance without asking whether it is a floor"
+    );
+}
+
 /// **A count of blocks from a branch the node cannot reach does not take the
 /// place of the notices that say the figures are not all there.**
 ///
