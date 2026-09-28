@@ -1064,12 +1064,17 @@ fn a_node_writes_its_ledger_down_and_stops_keeping_every_block() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// An archivist no longer has to carry the blocks. What it proves things about
-/// is headers, and those are kept in their own log now, so a node offering the
-/// archive service pays for the headers and the fallen notes rather than for
-/// every block that ever went by.
+/// A plain node lets its blocks go under a budget, and an archivist keeps them
+/// whatever budget it is handed, so it starts again as an archivist.
+///
+/// This said the opposite: an archivist no longer had to carry the blocks,
+/// since what it proves things about is headers, kept in their own log. True
+/// for as long as it ran. The archive itself is held in memory and built by
+/// reading every block from the first at every start, so an archivist that
+/// let its blocks go could never start again as one, and is refused
+/// (`NodeError::CannotArchive`). Held without a restart, this passed.
 #[test]
-fn an_archivist_does_not_have_to_keep_the_blocks() {
+fn an_archivist_keeps_the_blocks_it_builds_its_archive_from() {
     let params = params();
     let root = std::env::temp_dir().join(format!("cairn-keeps-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -1083,24 +1088,33 @@ fn an_archivist_does_not_have_to_keep_the_blocks() {
         plain.submit_block(block).unwrap();
     }
 
-    // The plain node lets blocks go once it has written its ledger down; the
-    // archivist cannot, because proving where a header sits means reading it.
     for node in [&plain, &keeper] {
         node.keep_blocks(1);
     }
-    for node in [&plain, &keeper] {
-        wait_for("the node to drop what it no longer needs", || {
-            node.archived_at(0).is_none()
-        });
-    }
-    assert!(
-        keeper.with_chain(cairn_chain::ChainStore::is_archiving),
-        "and it is still an archivist, having dropped them"
-    );
-
+    wait_for("the plain node to drop what it no longer needs", || {
+        plain.archived_at(0).is_none()
+    });
+    let kept = keeper.blocks_from();
     keeper.shutdown();
     plain.shutdown();
+    drop(keeper);
+
+    let again = Node::open_archiving(params, loopback(), root.join("keeper")).map(|(node, _)| {
+        let archiving = node.is_archiving();
+        node.shutdown();
+        archiving
+    });
     let _ = std::fs::remove_dir_all(&root);
+
+    assert_eq!(
+        kept,
+        Some(0),
+        "an archivist handed a budget let go of the blocks its archive is built from"
+    );
+    assert!(
+        matches!(again, Ok(true)),
+        "and could not start again as an archivist"
+    );
 }
 
 /// Writing the ledger down and dropping the blocks below it are two steps, and
@@ -1286,8 +1300,12 @@ fn a_node_keeps_its_headers_after_it_has_dropped_the_blocks() {
 /// The point of keeping headers apart from blocks: a node that has dropped
 /// every block it applied can still show a newcomer which chain carries the
 /// most work, and still hand over the ledger.
+///
+/// An archivist was the node here, from when an archivist was said not to
+/// have to keep its blocks. It keeps them now, whatever budget it is handed,
+/// so the node that drops them is a plain one.
 #[test]
-fn a_newcomer_joins_through_an_archivist_that_kept_no_blocks() {
+fn a_newcomer_joins_through_a_node_that_kept_no_blocks() {
     let params = params();
     let mut forge = Forge::new(params);
     let blocks =
@@ -1297,13 +1315,13 @@ fn a_newcomer_joins_through_an_archivist_that_kept_no_blocks() {
     let root = std::env::temp_dir().join(format!("cairn-lean-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
 
-    let (keeper, _) = Node::open_archiving(params, loopback(), root.join("keeper")).unwrap();
+    let (keeper, _) = Node::open(params, loopback(), root.join("keeper")).unwrap();
     for block in &blocks {
         keeper.submit_block(block.clone()).unwrap();
     }
 
     keeper.keep_blocks(1);
-    wait_for("the archivist to drop its blocks", || {
+    wait_for("the node to drop its blocks", || {
         keeper.archived_at(0).is_none()
     });
     assert!(

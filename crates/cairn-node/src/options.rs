@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use cairn_crypto::PublicKey;
 use cairn_ledger::validation::ConsensusParams;
-use cairn_net::{seeds, KEEP_BLOCK_BYTES, NAME_LOOKUP_PERIOD};
+use cairn_net::{seeds, KEEP_BLOCK_BYTES};
 
 pub(crate) const CONFIG_FILE: &str = "cairn.conf";
 
@@ -143,9 +143,12 @@ run-for. The command line wins over the file.";
 pub(crate) struct Options {
     pub(crate) data: PathBuf,
     pub(crate) listen: SocketAddr,
+    /// What the seeds the operator named resolve to, and nothing when none
+    /// was named: the ones written into the program are looked up at the
+    /// start, and only when this node's own book cannot supply a peer.
     pub(crate) seeds: Vec<SocketAddr>,
-    /// The names those addresses came from, kept so the node can ask again if
-    /// none of them resolved at the moment it started.
+    /// The names to start from, named or written in, kept so the node can ask
+    /// again when its book has nobody to dial.
     pub(crate) seed_names: Vec<String>,
     /// Whether those seeds were named by the operator or read off the list
     /// written into the program.
@@ -430,7 +433,16 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
     // the one a machine booting ahead of its resolver meets: without it the
     // node retries by itself, and with it the unit spends its five starts in
     // twenty five seconds and stays down.
-    let seeds = seeds::start_from(&asked, params.network).map_err(Stopping::CouldNotStart)?;
+    //
+    // Only a seed named is looked up here. The list written into the program
+    // is a question to whoever answers for it, and a node that has met anybody
+    // keeps its own book so as not to ask it: whether this one has is known
+    // once its directory is open, so the start decides (`seeds_to_dial`).
+    let seeds = if seeds_asked_for {
+        seeds::start_from(&asked, params.network).map_err(Stopping::CouldNotStart)?
+    } else {
+        Vec::new()
+    };
 
     // `off` for the same reason `--archive no` exists: a key in the file was
     // otherwise a miner nothing typed could stop for a run.
@@ -477,7 +489,9 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
     // built by reading every block from the first at every start, so a budget
     // that dropped any of them turned an archivist into an ordinary node at
     // its next start, with nothing said. A node refuses that start now, and
-    // this is what keeps an archivist from reaching it.
+    // an archiving node keeps every block whatever budget it is handed
+    // (`Node::keep_blocks`); this is what has the settings printed below say
+    // so, rather than a budget the node will not keep.
     let keep = if archive { u64::MAX } else { keep };
 
     Ok(Some(Options {
@@ -555,27 +569,21 @@ pub(crate) fn describe(options: &Options) -> String {
     let _ = writeln!(text, "data         {}", options.data.display());
     let _ = writeln!(text, "listen       {}", options.listen);
     let _ = writeln!(text, "block time   {} s", options.params.target_block_time);
-    if options.seeds.is_empty() {
-        if options.seed_names.is_empty() {
-            let _ = writeln!(
-                text,
-                "seeds        none, and none written in for this network"
-            );
-        } else {
-            // Not "none written in". The difference between having nowhere to
-            // start and having somewhere this machine could not look up is the
-            // whole diagnosis, and printing the first for the second sends an
-            // operator reading source code instead of checking a resolver.
-            let _ = writeln!(
-                text,
-                "seeds        {} did not resolve; asking again every {NAME_LOOKUP_PERIOD}s",
-                options.seed_names.join(", ")
-            );
-        }
+    if options.seed_names.is_empty() {
+        let _ = writeln!(
+            text,
+            "seeds        none, and none written in for this network"
+        );
+    } else if !options.seeds_asked_for {
+        // Not looked up here: see `seeds_to_dial`, which says at the start
+        // what it did, and whether the names resolved when it asked.
+        let _ = writeln!(
+            text,
+            "seeds        written into the program, none given: {}, asked only when this \
+             node's own book cannot supply a peer",
+            options.seed_names.join(", ")
+        );
     } else {
-        if !options.seeds_asked_for {
-            let _ = writeln!(text, "seeds        written into the program, none given");
-        }
         for seed in &options.seeds {
             let _ = writeln!(text, "seed         {seed}");
         }
@@ -677,6 +685,34 @@ mod tests {
 
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    /// The seeds written into the program are not looked up when the settings
+    /// are read, and a seed the operator named is.
+    ///
+    /// Looking the written-in names up is a question to whoever answers for
+    /// them, and whether this node should ask it depends on its own book,
+    /// which is not open yet here. They were looked up here at every start.
+    /// Nothing asked, so settings that looked the list up passed.
+    #[test]
+    fn the_written_in_seeds_are_not_looked_up_when_the_settings_are_read() {
+        let options = resolve_options(&[]).unwrap().unwrap();
+        assert!(
+            options.seeds.is_empty(),
+            "the seeds written into the program were looked up with the settings"
+        );
+        assert!(
+            !options.seed_names.is_empty(),
+            "and their names are not kept for the start to ask with"
+        );
+        let named = resolve_options(&args(&["--seed", "127.0.0.1:1111"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            named.seeds,
+            vec![SocketAddr::from(([127, 0, 0, 1], 1_111))],
+            "a seed the operator named was not read with the settings"
+        );
     }
 
     #[test]

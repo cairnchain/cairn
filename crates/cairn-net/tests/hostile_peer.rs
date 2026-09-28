@@ -137,6 +137,8 @@ fn getheaders_is_charged_far_below_the_disk_it_serves() {
 // extends `awaiting` by up to MAX_REQUESTED and resets `asked_at`, so the
 // BATCH_PATIENCE clear (which reads that same `asked_at`) never fires. The set
 // grows without bound: per-peer memory exhaustion charged one unit a message.
+// (It is capped now, and a `Chain` nobody asked for no longer resets
+// `asked_at` for a batch already out either.)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -207,10 +209,16 @@ fn a_peer_cannot_grow_the_awaiting_set_without_bound() {
 /// of those is fresh and the ceiling is what stops them. A height already
 /// outstanding costs nothing by design, so a set filled with the same heights
 /// would measure that rule instead of this one.
-fn one_place_short(peer: &mut PeerState) {
+///
+/// Asked for at `now`, as either path would have written down. An
+/// announcement adds to a batch already out without restarting its patience,
+/// so a set left dated nought is a batch a minute past it, given up on by the
+/// next message before anything is measured.
+fn one_place_short(peer: &mut PeerState, now: u64) {
     for height in 0..(MAX_AWAITING as u64 - 1) {
         peer.awaiting.insert(height);
     }
+    peer.asked_at = now;
     assert_eq!(peer.awaiting.len(), MAX_AWAITING - 1);
 }
 
@@ -218,7 +226,7 @@ fn one_place_short(peer: &mut PeerState) {
 fn an_announcement_cannot_push_the_awaiting_set_past_the_ceiling_either() {
     let mut chain = ChainStore::new(params());
     let mut peer = greeted();
-    one_place_short(&mut peer);
+    one_place_short(&mut peer, 2_000_000_000);
 
     // Every height fresh, every identifier one this node has never held, which
     // is what an announcement from a peer ahead of it looks like.

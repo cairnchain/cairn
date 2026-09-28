@@ -1097,6 +1097,84 @@ fn a_batch_owed_by_a_quiet_peer_is_asked_again_one_patience_after_the_clock_step
     );
 }
 
+/// A `Chain` nobody asked for does not renew the patience of a batch already
+/// outstanding.
+///
+/// The patience is renewed by a block of the batch arriving, which is the
+/// batch still coming. An answer to a question this node did not put renewed
+/// it too, whatever heights it named, so a peer that never sent a block of
+/// its batch and sent the same `Chain` again once a minute held this node mid
+/// batch for as long as it cared to. Nothing sent one inside the patience.
+#[test]
+fn a_chain_nobody_asked_for_does_not_hold_a_batch_past_its_patience() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(4);
+    let mut node = store_with(params, &blocks[..1]);
+    let mut peer = greeted_peer(blocks[3].header.total_work, 3);
+    on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Chain { from: 1, count: 3 },
+        NOW,
+    );
+    assert_eq!(peer.awaiting.len(), 3, "three heights outstanding");
+
+    // The same stretch again, a second inside the patience, asked for by
+    // nobody.
+    on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Chain { from: 1, count: 3 },
+        NOW + BATCH_PATIENCE - 1,
+    );
+    let past = tick(&node, &mut peer, NOW + BATCH_PATIENCE);
+    assert!(
+        asks_for_the_chain(&past.reply) && peer.awaiting.is_empty(),
+        "a batch no block of which arrived is still held a patience after it was asked for, \
+         because a `Chain` nobody asked for renewed the wait"
+    );
+}
+
+/// The same for an announcement of the heights already outstanding: it is
+/// the peer's own doing and does not renew the patience either.
+///
+/// It renewed it the way the `Chain` did, so the same peer held the batch by
+/// announcing its heights once a minute instead. Nothing announced inside the
+/// patience of a batch already out.
+#[test]
+fn an_announcement_does_not_hold_a_batch_past_its_patience() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(4);
+    let mut node = store_with(params, &blocks[..1]);
+    let mut peer = greeted_peer(blocks[3].header.total_work, 3);
+    on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Chain { from: 1, count: 3 },
+        NOW,
+    );
+    assert_eq!(peer.awaiting.len(), 3, "three heights outstanding");
+
+    let announced = blocks[1..]
+        .iter()
+        .map(|block| Located::new(block.header.height, block.id()))
+        .collect();
+    on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Announce(announced),
+        NOW + BATCH_PATIENCE - 1,
+    );
+    let past = tick(&node, &mut peer, NOW + BATCH_PATIENCE);
+    assert!(
+        asks_for_the_chain(&past.reply) && peer.awaiting.is_empty(),
+        "a batch no block of which arrived is still held a patience after it was asked for, \
+         because an announcement of its heights renewed the wait"
+    );
+}
+
 #[test]
 fn a_peer_sending_an_invalid_block_is_dropped() {
     let params = params();

@@ -403,6 +403,119 @@ fn a_record_that_will_not_decode_is_left_on_the_disk_and_not_cut() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// Where the high byte of a header's version sits inside a record: four bytes
+/// of length, then the version, little end first.
+const VERSION_HIGH_BYTE_IN_RECORD: usize = 4 + 1;
+
+/// Where the state root sits inside a record: four bytes of length, then
+/// version, network, height, previous and transactions root.
+const STATE_ROOT_IN_RECORD: usize = 4 + 2 + 4 + 8 + 32 + 32;
+
+/// An archivist that wrote twelve blocks, with one bit of one record changed
+/// in place after it stopped, and the log's bytes after the change.
+fn twelve_blocks_with_a_bit_changed(
+    name: &str,
+    record: usize,
+    offset: usize,
+) -> (PathBuf, Vec<u8>) {
+    let directory = scratch(name);
+    let (node, _) = Node::open_archiving(params(), loopback(), &directory).unwrap();
+    for block in &chain(&params(), 12) {
+        node.submit_block(block.clone()).unwrap();
+    }
+    node.shutdown();
+    drop(node);
+    let index = bytes_of(&directory, BLOCK_INDEX);
+    let start = if record == 0 {
+        0
+    } else {
+        let end = index[(record - 1) * 8..record * 8].try_into().unwrap();
+        usize::try_from(u64::from_le_bytes(end)).unwrap()
+    };
+    let mut log = bytes_of(&directory, BLOCK_LOG);
+    log[start + offset] ^= 0x01;
+    std::fs::write(directory.join(BLOCK_LOG), &log).unwrap();
+    (directory, log)
+}
+
+/// What a start reported: blocks replayed, blocks cut, and the record left
+/// unread, or the refusal it said.
+type Started = Result<(usize, usize, Option<usize>), String>;
+
+/// Two starts over the same directory, each as the report it gave or the
+/// refusal it said.
+fn two_starts(directory: &Path) -> [Started; 2] {
+    let start = || {
+        Node::open_archiving(params(), loopback(), directory)
+            .map(|(node, restored)| {
+                node.shutdown();
+                (restored.blocks, restored.refused, restored.unreadable)
+            })
+            .map_err(|error| error.to_string())
+    };
+    [start(), start()]
+}
+
+/// A record that changed in place and still decodes is left on the disk,
+/// and the start goes on from the blocks before it, as it does for one that
+/// will not decode.
+///
+/// The store refuses such a record by itself: the record after it no longer
+/// names it. The start asked only the chain, which refused the block, and the
+/// log was cut there, so one changed byte of a state root deleted it and the
+/// five valid records after it. On an archivist those are the copy nobody
+/// else has. Nothing asked the store, so a start that cut passed.
+#[test]
+fn a_record_that_changed_in_place_is_left_on_the_disk_and_not_cut() {
+    let (directory, log) =
+        twelve_blocks_with_a_bit_changed("changed-root", 6, STATE_ROOT_IN_RECORD);
+
+    let starts = two_starts(&directory);
+    let kept = bytes_of(&directory, BLOCK_LOG) == log;
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert_eq!(
+        starts,
+        [Ok((6, 0, Some(6))), Ok((6, 0, Some(6)))],
+        "a record the store will not stand behind was not reported unreadable, with the \
+         six before it replayed and nothing cut, at both starts"
+    );
+    assert!(kept, "the log was cut under a record that changed in place");
+}
+
+/// A version byte that changed in place is damage, and not a block from rules
+/// this build does not have.
+///
+/// Fifteen of the version's sixteen bits make a number above any version
+/// there is, and the start read that as a build too old for the chain: every
+/// start stopped, telling the operator to find a build with version 257,
+/// which no build has, and that deleting nothing would help, although the
+/// network's block at that height would have mended it. The last record has
+/// no record after it to name it, so the header log is what says it changed.
+/// Nothing asked either, so a start that stopped for good passed.
+#[test]
+fn a_version_byte_that_changed_is_damage_and_not_a_newer_build() {
+    for record in [6, 11] {
+        let (directory, log) = twelve_blocks_with_a_bit_changed(
+            &format!("changed-version-{record}"),
+            record,
+            VERSION_HIGH_BYTE_IN_RECORD,
+        );
+
+        let starts = two_starts(&directory);
+        let kept = bytes_of(&directory, BLOCK_LOG) == log;
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert_eq!(
+            starts,
+            [Ok((record, 0, Some(record))), Ok((record, 0, Some(record)))],
+            "a version byte that changed in record {record} was not read as damage at both \
+             starts"
+        );
+        assert!(kept, "the log was cut under a version byte that changed");
+    }
+}
+
 /// A build without the next version in its schedule at all, started on a log
 /// a newer build wrote past the activation, stops the same way and cuts
 /// nothing.
@@ -454,11 +567,14 @@ fn a_ledger_from_before_this_network_opened_is_answered_with_the_network() {
 }
 
 /// A record further up the log that names another network is a record that
-/// changed, and is cut like one: the start goes on from the blocks before it.
+/// changed, and is left on the disk like one: the start goes on from the
+/// blocks before it.
 ///
 /// Only the first record decides whether a directory is another network's.
 /// Nothing held that, so a start that stopped on any such record would have
-/// passed, and a node would refuse to start over one changed byte.
+/// passed, and a node would refuse to start over one changed byte. The record
+/// after it no longer names it, so the store will not stand behind it, and it
+/// is left where it is rather than cut with the records after it.
 #[test]
 fn a_record_of_another_network_further_up_the_log_is_cut_and_the_start_goes_on() {
     let directory = scratch("changed-network");
@@ -475,9 +591,10 @@ fn a_record_of_another_network_further_up_the_log_is_cut_and_the_start_goes_on()
     let _ = std::fs::remove_dir_all(&directory);
 
     assert_eq!(
-        (restored.blocks, restored.refused),
-        (5, 3),
-        "the start did not go on from the five blocks before the changed record"
+        (restored.blocks, restored.refused, restored.unreadable),
+        (5, 0, Some(5)),
+        "the start did not go on from the five blocks before the changed record, leaving it \
+         and the records after it on the disk"
     );
 }
 
@@ -686,6 +803,78 @@ fn a_stop_in_the_middle_of_a_reorganisation_leaves_no_seam_in_the_headers() {
         restored.headers_replaced,
         u64::try_from(SIDE).unwrap(),
         "and the start does not say it cut the abandoned branch's headers"
+    );
+}
+
+/// The same after the deepest reorganisation a node keeping the fewest blocks
+/// can make: one that parts right under the lowest block it kept.
+///
+/// The mend walked the heights both logs hold, looking for one where they
+/// agree, and after that reorganisation there is none: the two last agreed at
+/// the block below the lowest one kept. Nothing asked it, so the walk found
+/// nothing, cut nothing, and filled the old branch's headers in after the new
+/// one's, the seam the mend above is there to prevent.
+#[test]
+fn a_stop_in_the_deepest_reorganisation_leaves_no_seam_in_the_headers() {
+    const HELD: usize = 30;
+    const WRITTEN: usize = 3;
+    let main = chain(&params(), HELD + 1);
+
+    let directory = scratch("deepest-seam");
+    let (node, _) = Node::open(params(), loopback(), &directory).unwrap();
+    for block in &main[..HELD] {
+        node.submit_block(block.clone()).unwrap();
+    }
+    // The fewest blocks a node keeps, which is the undo window.
+    node.keep_blocks(1);
+    wait_for("the running node to trim to its budget", || {
+        node.blocks_from().unwrap_or(0) > 0
+    });
+    let from = usize::try_from(node.blocks_from().unwrap()).unwrap();
+    node.shutdown();
+    drop(node);
+
+    // A branch parting right under the lowest block kept, undoing every one
+    // of them, of which three headers and no block reached the disk.
+    let side = side_branch(&main, from, HELD - from + 1);
+    assert_eq!(side[0].header.previous, main[from - 1].id());
+    {
+        let mut headers = HeaderLog::open(&directory).unwrap();
+        headers.keep_below(u64::try_from(from).unwrap()).unwrap();
+        for block in &side[..WRITTEN] {
+            headers.append(&block.header).unwrap();
+        }
+        let mut forest = HeaderTree::open(&directory).unwrap();
+        forest.keep_first(u64::try_from(from).unwrap()).unwrap();
+    }
+
+    let (node, restored) = Node::open(params(), loopback(), &directory).unwrap();
+    node.submit_block(main[HELD].clone()).unwrap();
+    node.shutdown();
+    drop(node);
+
+    let headers = HeaderLog::open(&directory).unwrap();
+    let disagree = (0..=HELD)
+        .filter(|height| {
+            headers
+                .read_at(u64::try_from(*height).unwrap())
+                .ok()
+                .flatten()
+                != Some(main[*height].header)
+        })
+        .count();
+    drop(headers);
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert_eq!(
+        disagree, 0,
+        "after a reorganisation parting under the lowest block kept, the start left the \
+         header log disagreeing with the chain"
+    );
+    assert_eq!(
+        restored.headers_replaced,
+        u64::try_from(WRITTEN).unwrap(),
+        "and it does not say it cut the abandoned branch's headers"
     );
 }
 

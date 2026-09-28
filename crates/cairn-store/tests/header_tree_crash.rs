@@ -238,7 +238,8 @@ fn bytes_that_do_not_make_a_whole_node_are_not_one() {
 /// The bound on the mending, and where the bound used to leak.
 ///
 /// Only the nodes a level is short of are worked out again, so an ordinary
-/// open costs nothing and a torn append costs a handful of hashes. An open
+/// open costs nothing and a torn append costs the leaves beneath the nodes it
+/// left out. An open
 /// still does not rehash the history, and it is not going to: that is the cost
 /// this forest exists to avoid.
 ///
@@ -287,4 +288,52 @@ fn a_node_changed_in_place_is_caught_when_a_proof_folds_through_it() {
     assert!(tree.prove_in(0, 2).unwrap().is_some());
 
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// A node changed in place under a level whose write never landed is not
+/// folded into the node the open builds above it.
+///
+/// The open builds a missing node, and it used to build it from the two
+/// nodes beneath, on trust. With one of those two changed in place, the node
+/// it built agreed with the change, so no fold ever disagreed with it again:
+/// the forest handed out a proof carrying the changed node, which folds to a
+/// root nobody has, with every leaf intact. Nothing asked with both kinds of
+/// damage at once, so an open that folded the change in passed; the campaign
+/// over bent forests found it and allowed it by name.
+#[test]
+fn a_node_changed_under_a_level_that_fell_short_is_not_folded_into_it() {
+    let directory = scratch("changed-under-short");
+    built(&directory, 4).unwrap();
+    put(
+        &level(&directory, 1),
+        0,
+        Hash32::from_bytes([0xcd; 32]).as_bytes(),
+    );
+    cut_to(&level(&directory, 2), 0);
+
+    let tree = HeaderTree::open(&directory).unwrap();
+    let archive = memory(4);
+    let proof = tree.prove_in(2, 4);
+    let root = fold(leaf(0), 0, &archive.prove_in(0, 4).unwrap().siblings);
+    let built_above = std::fs::read(level(&directory, 2)).unwrap();
+    drop(tree);
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert_eq!(
+        built_above,
+        root.as_bytes().to_vec(),
+        "the open built the top of the forest from a node changed in place rather than \
+         from the leaves"
+    );
+    assert!(
+        !matches!(proof, Ok(None)),
+        "a leaf the forest holds was answered with nothing"
+    );
+    if let Ok(Some(proof)) = proof {
+        assert_eq!(
+            Some(proof.siblings),
+            archive.prove_in(2, 4).map(|owed| owed.siblings),
+            "a proof through the changed node was handed out"
+        );
+    }
 }

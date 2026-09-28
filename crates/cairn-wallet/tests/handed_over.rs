@@ -144,11 +144,22 @@ fn funded(name: &str, seed: u8) -> (Wallet, Vec<Block>, PathBuf) {
 /// The peer count says the opposite, and the peer count is what this used to
 /// read. One stranger opening a socket to a wallet was enough to have it
 /// report every payment made through it as handed to the network.
+///
+/// Once, under load, the count read nought at the end. Nothing the node sends
+/// or decides reaches a socket that has not introduced itself inside a run
+/// this short: it is sent nothing, it is not let go of to make room in a
+/// table this empty, and it is ended for silence only after ninety seconds of
+/// wall clock. What is left is a thread the machine would not start for the
+/// connection, which takes the entry out again and counts a visitor turned
+/// away, and a wall clock that jumped. The last assertion says which, so the
+/// next occurrence names its cause.
 #[test]
 fn a_socket_that_says_nothing_is_not_the_network() {
     let (wallet, _blocks, directory) = funded("silent-peer", 3);
     let recipient = SecretKey::from_bytes(&[9; 32]).public_key();
 
+    let connected = Instant::now();
+    let wall_clock = std::time::SystemTime::now();
     let quiet = TcpStream::connect(reachable(wallet.node().address())).unwrap();
     // Reads what the node sends and answers nothing, which is what "says
     // nothing" means here. A socket nobody reads from is a different thing:
@@ -178,10 +189,16 @@ fn a_socket_that_says_nothing_is_not_the_network() {
         "nobody was offered it, so nobody has been paid and the person has to \
          be told that"
     );
+    let peers = wallet.node().peer_count();
+    let turned_away = wallet.node().turned_away();
+    let unanswered = wallet.node().unanswered().map(|said| said.because);
+    let waited = connected.elapsed().as_secs();
+    let wall = wall_clock.elapsed().map_or(0, |passed| passed.as_secs());
     assert_eq!(
-        wallet.node().peer_count(),
-        1,
-        "and the peer count still said otherwise the whole time"
+        peers, 1,
+        "and the peer count still said otherwise the whole time. The connection was let go \
+         of: {turned_away} visitors turned away ({unanswered:?}), {waited} s on the monotonic \
+         clock against {wall} s on the wall clock the node reads for silence"
     );
 
     drop(quiet);

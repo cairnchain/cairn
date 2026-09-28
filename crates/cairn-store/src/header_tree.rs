@@ -63,7 +63,7 @@ impl HeaderTree {
     /// above that one is a function of it, so a level that disagrees is put
     /// back into line rather than believed: one that reaches too far is cut,
     /// one that falls short has the nodes it is missing worked out again from
-    /// the level beneath it.
+    /// the leaves beneath them.
     pub fn open(directory: impl AsRef<Path>) -> Result<Self, StoreError> {
         let directory = directory.as_ref().to_path_buf();
         std::fs::create_dir_all(&directory)?;
@@ -369,15 +369,25 @@ impl HeaderTree {
     /// Two kinds of disagreement, and they need opposite answers. A level that
     /// reaches past what the leaves account for is cut, which is what a
     /// reorganisation asks for and what an interrupted append leaves behind. A
-    /// level that falls short is written again from the level beneath it,
-    /// which is the one thing `set_len` must never be asked to do: it extends
-    /// a short file with zero bytes as readily as it truncates a long one, and
-    /// a zero where a node hash belongs is a proof that folds to the wrong
-    /// root, served silently and for good.
+    /// level that falls short is written again from the leaves, which is the
+    /// one thing `set_len` must never be asked to do: it extends a short file
+    /// with zero bytes as readily as it truncates a long one, and a zero where
+    /// a node hash belongs is a proof that folds to the wrong root, served
+    /// silently and for good.
+    ///
+    /// From the leaves and not from the level beneath, which is what this did
+    /// and what [`Self::mend_below`] explains is wrong: a node beneath that
+    /// was torn in place, holding the wrong bytes at the right length, was
+    /// folded into the node built over it, the two then agreed, no fold ever
+    /// disagreed with them again, and the forest handed out proofs of a root
+    /// nobody has with every leaf intact. A missing node built from the leaves
+    /// disagrees with a torn node beneath it, which [`Self::prove_in`] refuses.
     ///
     /// Only the nodes actually missing are worked out again, so an ordinary
-    /// open touches nothing and an append torn between two levels costs a
-    /// handful of hashes. Damage deeper than that costs proportionally more,
+    /// open touches nothing, and a node of height `k` costs the `2^k` leaves
+    /// beneath it: an append torn after its leaf costs twice the leaves its
+    /// highest node covers, and only the rare append that completes a tall
+    /// tree costs much. Damage deeper than that costs proportionally more,
     /// which is the price of not trusting a file that cannot account for
     /// itself.
     ///
@@ -411,16 +421,62 @@ impl HeaderTree {
                 file.sync_data()?;
             }
             // Level zero is the record itself, and there is nothing beneath it
-            // to rebuild from. Above it the loop runs upward so that a level
-            // is only ever built from one that has already been put right.
+            // to rebuild from.
             if height == 0 {
                 continue;
             }
             for index in keep..want {
-                self.rebuild(height, index)?;
+                let folded = self.folded_from_the_leaves(height, index)?;
+                self.write(height, index, folded)?;
             }
         }
         Ok(())
+    }
+
+    /// The node at this height and index, folded from the leaves beneath it
+    /// and from nothing else.
+    ///
+    /// Read in one pass over level zero, with one node in hand for each height
+    /// on the way up.
+    fn folded_from_the_leaves(&self, height: usize, index: u64) -> Result<Hash32, StoreError> {
+        let missing = StoreError::MissingNode { height, start: 0 };
+        let span = 1u64
+            .checked_shl(u32::try_from(height).unwrap_or(u32::MAX))
+            .ok_or(StoreError::MissingNode { height, start: 0 })?;
+        let start = index.checked_mul(span).ok_or(missing)?;
+        let Some(file) = self.levels.first() else {
+            return Err(StoreError::MissingNode { height: 0, start });
+        };
+        let held = file.metadata()?.len();
+        let reaches = start
+            .checked_add(span)
+            .and_then(|past| past.checked_mul(NODE_BYTES));
+        if reaches.is_none_or(|past| past > held) {
+            return Err(StoreError::MissingNode { height: 0, start });
+        }
+        let mut reader = std::io::BufReader::new(file);
+        reader.seek(SeekFrom::Start(start.saturating_mul(NODE_BYTES)))?;
+        // Each entry a node of the height beside it, still waiting for the one
+        // to its right.
+        let mut waiting: Vec<(usize, Hash32)> = Vec::with_capacity(height.saturating_add(1));
+        for _ in 0..span {
+            let mut bytes = [0u8; 32];
+            reader.read_exact(&mut bytes)?;
+            let mut carry = (0usize, Hash32::from_bytes(bytes));
+            while let Some(&(level, left)) = waiting.last() {
+                if level != carry.0 {
+                    break;
+                }
+                waiting.pop();
+                carry = (level.saturating_add(1), node_hash(left, carry.1));
+            }
+            waiting.push(carry);
+        }
+        // A run of leaves a power of two long folds to exactly one node.
+        match waiting.as_slice() {
+            [(_, folded)] => Ok(*folded),
+            _ => Err(StoreError::MissingNode { height, start }),
+        }
     }
 
     /// Writes the node at this height and index from the two beneath it.

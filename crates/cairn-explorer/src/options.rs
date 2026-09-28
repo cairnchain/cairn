@@ -33,19 +33,16 @@ cairn-explorer, a Cairn node that also serves a website
                          (default: 127.0.0.1:8080)
   --seed <address>       a peer to start from; repeat for more. Without one,
                        the addresses written into the program are used
-  --keep <size|all>      how much of the chain to keep on disk, in bytes, or
-                         `all` (default: all). A plain node keeps a gigabyte
-                         and drops the oldest blocks past it, because it does
-                         not need them: it has the ledger they add up to. An
-                         explorer does need them, and this is the one program
-                         whose whole job is answering about every block ever,
-                         so it keeps every block unless an operator says
-                         otherwise. Below `all` the oldest blocks are let
-                         go of: the index keeps what it read of them, a
-                         restart reads only what is kept, and a page that
-                         needs a block no longer kept says it is on the
-                         chain and not kept here, rather than reporting a
-                         shorter chain as the whole of it.
+  --keep <size|all>      read, and not a budget: an explorer keeps every
+                         block whatever this says. A plain node keeps a
+                         gigabyte and drops the oldest blocks past it,
+                         because it does not need them: it has the ledger
+                         they add up to. An explorer keeps the cold set,
+                         which is built by reading every block from the
+                         first at every start, and a directory whose blocks
+                         do not begin at the first cannot build it, so the
+                         explorer would not start there again. A size is
+                         still read, so one that is not a size stops it.
                          Accepts suffixes: 512MB, 8GB
   --check                work out what this explorer would do and print it,
                          then stop without starting anything. Exits with an
@@ -68,10 +65,16 @@ pub(crate) struct Options {
     pub(crate) data: PathBuf,
     pub(crate) listen: SocketAddr,
     pub(crate) http: SocketAddr,
+    /// What the seeds the operator named resolve to, and nothing when none
+    /// was named: the ones written into the program are looked up at the
+    /// start, and only when the node's own book cannot supply a peer.
     pub(crate) seeds: Vec<SocketAddr>,
-    /// The names those addresses came from, kept so the node can ask again if
-    /// none of them resolved at the moment it started.
+    /// The names to start from, named or written in, kept so the node can ask
+    /// again when its book has nobody to dial.
     pub(crate) seed_names: Vec<String>,
+    /// Whether any seed was named, rather than read off the list written into
+    /// the program.
+    pub(crate) seeds_asked_for: bool,
     pub(crate) params: ConsensusParams,
     /// Bytes of blocks to keep on disk, `u64::MAX` for every one of them.
     pub(crate) keep: u64,
@@ -189,9 +192,17 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
     })?;
 
     // After the network is settled: an explorer given no seed starts from the
-    // ones written into the program, like every other node.
+    // ones written into the program, like every other node. Only a seed named
+    // is looked up here; the list written in is a question to whoever answers
+    // for it, asked at the start and only when the node's own book cannot
+    // supply a peer, as `cairnd` does.
     let seed_names = seeds::names_for(given.all("seed"), params.network);
-    let seeds = seeds::start_from(given.all("seed"), params.network)?;
+    let seeds_asked_for = !given.all("seed").is_empty();
+    let seeds = if seeds_asked_for {
+        seeds::start_from(given.all("seed"), params.network)?
+    } else {
+        Vec::new()
+    };
 
     let keep = match given.first("keep") {
         None => KEEP_EVERYTHING,
@@ -204,13 +215,14 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         http,
         seeds,
         seed_names,
+        seeds_asked_for,
         params,
         keep,
         check: given.has("check"),
     }))
 }
 
-/// What an explorer keeps unless it is told otherwise: all of it.
+/// What an explorer keeps, whatever it is told: all of it.
 ///
 /// A node's default is a gigabyte, and it is right for a node: what it needs
 /// is the ledger those blocks add up to, and it holds that. It keeps any
@@ -221,6 +233,11 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
 /// the first reorganisation left it with an index it could not rebuild. The
 /// index takes a shallow one back block by block now; one deeper than it keeps
 /// the means for is still a rebuild, from the first block up.
+///
+/// And its node archives, which settles it: the archive is built from every
+/// block at every start, so an archiving node keeps them all whatever budget
+/// it is handed (`Node::keep_blocks`). `--keep` below `all` was handed
+/// through, trimmed, and left an explorer that could not start again.
 pub(crate) const KEEP_EVERYTHING: u64 = u64::MAX;
 
 /// A size as an operator writes one.
@@ -246,15 +263,6 @@ fn parse_size(text: &str) -> Result<u64, String> {
     Ok(count.saturating_mul(scale))
 }
 
-/// A size as an operator would read it back.
-pub(crate) fn size(bytes: u64) -> String {
-    if bytes == KEEP_EVERYTHING {
-        "every one ever accepted".to_owned()
-    } else {
-        format!("{}, older ones dropped", in_units(bytes))
-    }
-}
-
 /// A number of bytes in the largest unit it fills.
 fn in_units(bytes: u64) -> String {
     if bytes >= 1_000_000_000 {
@@ -266,77 +274,60 @@ fn in_units(bytes: u64) -> String {
     }
 }
 
-/// What this explorer keeps on disk, as its start says it: the budget, and
-/// under a budget the floor the trim never cuts into.
+/// What this explorer keeps on disk, as its start says it: every block, and
+/// under a budget, that the budget is not one.
 ///
-/// The trim keeps the last [`ConsensusParams::burial`] blocks whatever it is
-/// given, because the chain lets go of block bodies from memory on the promise
-/// that the log still holds them. `cairnd` says so beside its own budget, after
-/// `--keep 1MB` printed a megabyte and held a hundred and twenty eight times
-/// that. This explorer trims through the same node and printed the megabyte
-/// alone.
-pub(crate) fn kept(keep: u64, params: &ConsensusParams) -> String {
+/// It printed the budget, with the floor the trim never cuts into under it,
+/// and handed the budget to its node, which trimmed to it; the next start was
+/// refused, since an archive is built from every block. The node keeps every
+/// block now whatever it is handed, and this says that rather than a figure
+/// nothing holds to.
+pub(crate) fn kept(keep: u64) -> String {
     if keep == KEEP_EVERYTHING {
-        return size(keep);
+        return EVERY_BLOCK.to_owned();
     }
     format!(
-        "{}\n             never below the last {} blocks, whatever they weigh: up to {} on \
-         this network",
-        size(keep),
-        params.burial,
-        in_units(params.burial_bytes()),
+        "{EVERY_BLOCK}, whatever --keep says\n             an explorer keeps the cold set, \
+         built by reading every block from the first at every start, so {} is not a budget here",
+        in_units(keep),
     )
 }
+
+/// What an explorer keeps, said the way its start says it.
+const EVERY_BLOCK: &str = "every one ever accepted";
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{
-        kept, parse_arguments, resolve_options, size, ConsensusParams, HELP, KEEP_EVERYTHING,
-    };
+    use super::{kept, parse_arguments, resolve_options, HELP, KEEP_EVERYTHING};
 
-    /// A size is said back the way an operator would write it.
+    /// Under a budget the explorer says it keeps every block all the same, and
+    /// that the budget is not one; keeping everything it says only that.
     ///
-    /// It is the line that tells somebody how much of the chain this explorer
-    /// keeps, and nothing read it: saying every size in bytes passed, as did
-    /// saying every one as a gigabyte count of nought.
+    /// It printed the budget, and the floor under it, as what it kept, and
+    /// handed the budget to its node, which trimmed to it and was refused at
+    /// the next start: an archive is built from every block. Nothing asked
+    /// whether the line was true, so a line naming a size the node was about
+    /// to trim to passed.
     #[test]
-    fn a_size_is_said_the_way_it_would_be_written() {
-        assert_eq!(size(KEEP_EVERYTHING), "every one ever accepted");
-        assert_eq!(size(8_000_000_000), "8 GB, older ones dropped");
-        assert_eq!(size(1_000_000_000), "1 GB, older ones dropped");
-        assert_eq!(size(999_999_999), "999 MB, older ones dropped");
-        assert_eq!(size(1_000_000), "1 MB, older ones dropped");
-        assert_eq!(size(999_999), "999999 bytes, older ones dropped");
-    }
-
-    /// Under a budget the explorer states the floor the trim never cuts into,
-    /// and keeping everything it states none.
-    ///
-    /// Its start said the budget alone. Nothing asked it, so an explorer given
-    /// a megabyte said it kept a megabyte on a network whose last blocks, the
-    /// ones no budget drops, weigh several, which `cairnd` had stopped saying
-    /// after the same figure misled its own operators.
-    #[test]
-    fn a_budget_is_said_with_the_floor_under_it() {
-        let params = ConsensusParams::testnet()
-            .with_burial(8)
-            .with_max_block_bytes(1_000_000);
-        let said = kept(1_000_000, &params);
+    fn a_budget_is_said_to_be_no_budget_for_an_explorer() {
+        let said = kept(1_000_000);
         assert!(
-            said.starts_with("1 MB, older ones dropped\n"),
-            "the budget is not the first thing said: {said}"
+            said.starts_with("every one ever accepted, whatever --keep says\n"),
+            "an explorer given a budget does not say first that it keeps every block: {said}"
         );
         assert!(
-            said.contains(
-                "never below the last 8 blocks, whatever they weigh: up to 8 MB on this network"
-            ),
-            "the floor under the budget is not said, or not as the rules make it: {said}"
+            said.contains("so 1 MB is not a budget here"),
+            "and does not say the budget it was given is not one: {said}"
+        );
+        assert!(
+            !said.contains("dropped") && !said.contains("never below"),
+            "an explorer given a budget says it drops blocks: {said}"
         );
         assert_eq!(
-            kept(KEEP_EVERYTHING, &params),
+            kept(KEEP_EVERYTHING),
             "every one ever accepted",
-            "an explorer that drops nothing states a floor under what it drops"
+            "an explorer given no budget speaks of one"
         );
     }
 
@@ -366,9 +357,11 @@ mod tests {
     /// blocks, and then cannot rebuild its index after a reorganisation too
     /// deep to take back: it walks from the first block up, and the first
     /// block is the one it no longer has. So the default here is the opposite of
-    /// the node's, and an operator who cannot afford it says so.
+    /// the node's. A size given is still read, and one that is not a size
+    /// stops the program, though the explorer keeps every block whatever it
+    /// says: see `kept`.
     #[test]
-    fn an_explorer_keeps_every_block_unless_told_otherwise() {
+    fn the_keep_setting_is_read_and_is_every_block_unless_given() {
         let options = resolve_options(&arguments(&[])).unwrap().unwrap();
         assert_eq!(options.keep, super::KEEP_EVERYTHING);
 
@@ -476,6 +469,32 @@ mod tests {
             ]))
             .is_ok(),
             "a second seed is another peer, and was refused as a second answer"
+        );
+    }
+
+    /// The seeds written into the program are not looked up when the settings
+    /// are read, and a seed the operator named is.
+    ///
+    /// The explorer looked the list up at every start, whatever its node's own
+    /// book held, as `cairnd` did. Nothing asked, so settings that looked the
+    /// list up passed.
+    #[test]
+    fn the_written_in_seeds_are_not_looked_up_when_the_settings_are_read() {
+        let options = resolve_options(&arguments(&[])).unwrap().unwrap();
+        assert!(
+            options.seeds.is_empty() && !options.seeds_asked_for,
+            "the seeds written into the program were looked up with the settings"
+        );
+        assert!(
+            !options.seed_names.is_empty(),
+            "and their names are not kept for the start to ask with"
+        );
+        let named = resolve_options(&arguments(&["--seed", "127.0.0.1:1111"]))
+            .unwrap()
+            .unwrap();
+        assert!(
+            named.seeds_asked_for && named.seeds.len() == 1,
+            "a seed the operator named was not read with the settings"
         );
     }
 

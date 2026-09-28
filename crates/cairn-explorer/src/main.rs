@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use cairn_net::{Node, NodeError};
+use cairn_net::{seeds, Node, NodeError, NAME_LOOKUP_PERIOD};
 
 use crate::api::Explorer;
 
@@ -81,6 +81,71 @@ fn main() {
             std::process::exit(2);
         }
         std::process::exit(1);
+    }
+}
+
+/// The seeds this start dials, given how many addresses the node's own book
+/// holds: every one the operator named, whatever the book holds; the ones
+/// written into the program, looked up by `look_up`, only when the book holds
+/// nobody at all; and none otherwise. `cairnd`'s rule, for the same reason:
+/// the written-in list is a question to whoever answers for it, and a node
+/// that has met anybody keeps its own book so as not to ask it.
+fn seeds_to_dial(
+    options: &options::Options,
+    known: usize,
+    look_up: impl FnOnce() -> Vec<std::net::SocketAddr>,
+) -> Vec<std::net::SocketAddr> {
+    if options.seeds_asked_for {
+        return options.seeds.clone();
+    }
+    if known > 0 {
+        return Vec::new();
+    }
+    look_up()
+}
+
+/// What the start says about the seeds written into the program, where it
+/// has something to say: that they were not asked, because the book holds
+/// addresses, or that they did not resolve when they were. `cairnd`'s words.
+fn what_the_seeds_came_to(
+    options: &options::Options,
+    known: usize,
+    dialled: &[std::net::SocketAddr],
+) -> Option<String> {
+    if options.seeds_asked_for || options.seed_names.is_empty() {
+        return None;
+    }
+    if known > 0 {
+        return Some(format!(
+            "seeds        not asked: {known} addresses in this node's own book, and the ones \
+             written in only if those cannot supply a peer"
+        ));
+    }
+    dialled.is_empty().then(|| {
+        format!(
+            "seeds        {} did not resolve; asking again every {NAME_LOOKUP_PERIOD}s",
+            options.seed_names.join(", ")
+        )
+    })
+}
+
+/// Why the node would not open, in the words an explorer's operator can act on.
+///
+/// The node's refusal of a directory whose blocks do not begin at the first
+/// ends with "or start this one without keeping the cold set", which is
+/// advice for `cairnd --archive`: an explorer always keeps the cold set, so
+/// the one way it has is a directory of its own. It was passed on as it was,
+/// and an explorer trimmed by its own `--keep` was told to do something it
+/// cannot.
+fn could_not_open(error: &NodeError) -> String {
+    match error {
+        NodeError::CannotArchive { from } => format!(
+            "could not start: the blocks in this directory begin at height {from}, and an \
+             explorer keeps the cold set, which it builds by reading every block from the \
+             first at every start. Nothing has been changed. Start it with --data naming a \
+             directory of its own, where it reads the chain from the first block"
+        ),
+        other => format!("could not start: {other}"),
     }
 }
 
@@ -170,26 +235,31 @@ fn run(arguments: &[String]) -> Result<(), Stopping> {
     }
 
     let (node, restored) = Node::open_archiving(options.params, options.listen, &options.data)
-        .map_err(|error| Stopping::CouldNotStart(format!("could not start: {error}")))?;
-    // Before anything else this node does. A node's own budget is a gigabyte
-    // and it drops the oldest blocks past it, which for an explorer is the
-    // blocks it needs most: the index is built by walking from the first block
-    // up, so a trimmed log costs it not the blocks that were trimmed but every
-    // block there is.
-    node.keep_blocks(options.keep);
+        .map_err(|error| Stopping::CouldNotStart(could_not_open(&error)))?;
+    // Nothing handed to the node about its disk. It archives, and an archiving
+    // node keeps every block whatever budget it is given, because the archive
+    // is read from every block at every start. `--keep` used to be handed
+    // straight through, and the node trimmed to it, which for an explorer was
+    // the blocks it needs most and a directory it could not start on again.
     println!("listening    {}", node.address());
-    println!(
-        "blocks       {}",
-        options::kept(options.keep, &options.params)
-    );
+    println!("blocks       {}", options::kept(options.keep));
     let directory = options.data.display().to_string();
     say_what_the_start_found(&node, &restored, &options.params, &directory);
 
     // The names, not just what they resolved to, so a machine that could not
-    // look anything up at this moment asks again while it runs.
+    // look anything up at this moment asks again while it runs. The node asks
+    // only while its book has nobody to dial.
     node.start_from_names(options.seed_names.clone());
 
-    for seed in &options.seeds {
+    let known = node.known_addresses().len();
+    let seeds = seeds_to_dial(&options, known, || {
+        seeds::start_from(&[], options.params.network).unwrap_or_default()
+    });
+    if let Some(line) = what_the_seeds_came_to(&options, known, &seeds) {
+        println!("{line}");
+    }
+
+    for seed in &seeds {
         node.remember_seed(*seed);
         // Three lines and not two. A dial that completes and a peer this node
         // holds are different things, and `connect` used to answer `Ok(())`
@@ -306,10 +376,104 @@ fn run(arguments: &[String]) -> Result<(), Stopping> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use std::sync::atomic::AtomicBool;
 
-    use super::watch;
+    use std::cell::Cell;
+    use std::net::SocketAddr;
+
+    use cairn_net::NodeError;
+
+    use super::{could_not_open, options, seeds_to_dial, watch, what_the_seeds_came_to};
+
+    /// A start dials the seeds written into the program only when its book
+    /// holds nobody, and the seeds an operator named whatever it holds, as
+    /// `cairnd` does.
+    ///
+    /// The explorer looked the written-in list up and dialled it at every
+    /// start. Nothing asked with a book full of addresses, so that passed.
+    #[test]
+    fn the_written_in_seeds_are_for_a_node_whose_book_holds_nobody() {
+        let arguments = |words: &[&str]| -> Vec<String> {
+            words.iter().map(|word| (*word).to_owned()).collect()
+        };
+        let written_in = options::resolve_options(&arguments(&[])).unwrap().unwrap();
+        let looked_up = Cell::new(0u32);
+        let found = SocketAddr::from(([192, 0, 2, 7], 9_944));
+        let look_up = || {
+            looked_up.set(looked_up.get().saturating_add(1));
+            vec![found]
+        };
+
+        assert!(
+            seeds_to_dial(&written_in, 3, look_up).is_empty() && looked_up.get() == 0,
+            "a node with a book of its own looked the written-in seeds up"
+        );
+        assert_eq!(
+            seeds_to_dial(&written_in, 0, look_up),
+            vec![found],
+            "a node whose book holds nobody was not handed the written-in seeds"
+        );
+        let named = options::resolve_options(&arguments(&["--seed", "127.0.0.1:1111"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            seeds_to_dial(&named, 3, look_up),
+            named.seeds,
+            "a seed the operator named was not dialled because the book held addresses"
+        );
+        assert_eq!(looked_up.get(), 1, "the written-in list was looked up once");
+
+        // And what the start says of it, in `cairnd`'s words.
+        let from_the_book = what_the_seeds_came_to(&written_in, 3, &[]).unwrap();
+        assert!(
+            from_the_book.contains("not asked: 3 addresses"),
+            "a start with a book of its own does not say why the seeds were not asked: \
+             {from_the_book}"
+        );
+        assert!(
+            what_the_seeds_came_to(&written_in, 0, &[])
+                .is_some_and(|said| said.contains("did not resolve")),
+            "a start whose seeds did not resolve does not say so"
+        );
+        assert_eq!(what_the_seeds_came_to(&written_in, 0, &[found]), None);
+        assert_eq!(what_the_seeds_came_to(&named, 3, &[]), None);
+        let alone = options::resolve_options(&arguments(&["--network", "devnet"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(what_the_seeds_came_to(&alone, 0, &[]), None);
+    }
+
+    /// An explorer refused a directory whose blocks do not begin at the first
+    /// is told what an explorer can do about it, and the refusal of anything
+    /// else is passed on as the node said it.
+    ///
+    /// The node's own words end by suggesting a start without the cold set,
+    /// which an explorer cannot make. Nothing read what the explorer said, so
+    /// passing that on passed.
+    #[test]
+    fn an_explorer_refused_its_directory_is_told_what_an_explorer_can_do() {
+        let said = could_not_open(&NodeError::CannotArchive { from: 32 });
+        assert!(
+            said.contains("height 32") && said.contains("directory of its own"),
+            "the refusal does not say where the blocks begin, or that a directory of its own \
+             is the way: {said}"
+        );
+        assert!(
+            !said.contains("without keeping the cold set"),
+            "an explorer was told to start without the cold set, which it always keeps: {said}"
+        );
+
+        let other = NodeError::UnusableLedger {
+            because: "the ledger is short".to_owned(),
+        };
+        assert_eq!(
+            could_not_open(&other),
+            format!("could not start: {other}"),
+            "a refusal about anything else was not passed on as the node said it"
+        );
+    }
 
     /// The explorer stops when its node stops itself, and says why.
     ///

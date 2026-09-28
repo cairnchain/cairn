@@ -140,8 +140,8 @@ pub(crate) fn what_was_restored(restored: &Restored, directory: &str) -> Vec<Str
     )];
     if restored.rejoining {
         said.push(
-            "             the stored blocks start partway up the chain, so this \
-             node joins again rather than reading its way back"
+            "             the stored blocks start partway up the chain, so they \
+             were deleted and this node joins again rather than reading its way back"
                 .to_owned(),
         );
     }
@@ -516,7 +516,7 @@ mod tests {
         assert!(first.contains("12 blocks") && first.contains("3 addresses"));
 
         let cases: [Case; 9] = [
-            ("rejoining", |r| r.rejoining = true, "partway"),
+            ("rejoining", |r| r.rejoining = true, "were deleted"),
             ("refused", |r| r.refused = 4, "cut from the log"),
             ("discarded_bytes", |r| r.discarded_bytes = 96, "unfinished"),
             ("left_in_place", |r| r.left_in_place = 96, "unread"),

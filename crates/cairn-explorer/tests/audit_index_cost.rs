@@ -478,10 +478,11 @@ fn fresh_owners(count: usize) -> Vec<PublicKey> {
 /// `counted: true`, and the home page showed a real issued supply beside
 /// `Addresses holding: 0`.
 ///
-/// Both halves are repaired. The explorer keeps every block unless an
-/// operator says otherwise, so the trim below does not happen on a default
-/// build at all; and where an operator has asked for a budget, the walk steps
-/// over what was dropped and the index says where it starts.
+/// Both halves are repaired. The explorer keeps every block, since its node
+/// archives and an archiving node keeps them all whatever budget it is
+/// handed, so the trim below does not happen to an explorer at all; and over a
+/// node that does trim, the walk steps over what was dropped and the index
+/// says where it starts.
 #[test]
 fn a_trimmed_log_costs_the_index_only_the_blocks_that_were_trimmed() {
     let miner = wallet(1);

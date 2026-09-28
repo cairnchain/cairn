@@ -692,7 +692,7 @@
       "body": {
         "plain": ["This website is one of the three programs in the folder you downloaded. It serves these exact pages from your own machine, reading your own node. Nothing here needs to be taken on trust either."],
         "curious": ["The explorer is a node that also builds an index and serves the site. The index is a cost that grows with the chain, which is precisely why it lives here and not in the node everybody runs."],
-        "technical": ["The site is compiled into the binary; nothing is read from disk at runtime. The HTTP layer is standard library only, one thread per connection, GET, HEAD and POST, with a body read only for a POST and capped.", "Unlike a node, the explorer keeps every block on disk by default rather than a gigabyte of them. It builds its index by walking the chain from the first block up, so blocks dropped off the bottom are the ones it needs most. Use --keep to bound it anyway; the site then says on every page that it has only read the chain from the oldest block it still holds."]
+        "technical": ["The site is compiled into the binary; nothing is read from disk at runtime. The HTTP layer is standard library only, one thread per connection, GET, HEAD and POST, with a body read only for a POST and capped.", "Unlike a node, the explorer keeps every block on disk rather than a gigabyte of them. It builds its index by walking the chain from the first block up, so blocks dropped off the bottom are the ones it needs most. It also keeps the cold set, which it builds by reading every block from the first at every start, so it keeps every block whatever --keep says."]
       }
     },
     "build": {

@@ -245,7 +245,9 @@ pub struct Recovered {
     /// whether the damage cost one block or a day of them.
     pub left_in_place: u64,
     /// The record a walk of the log stopped at, when what stopped it was a
-    /// whole record that would not decode rather than one cut short.
+    /// whole record that would not decode rather than one cut short, or the
+    /// record a replay found the log would not stand behind
+    /// ([`BlockLog::set_aside_from`]).
     ///
     /// This is damage, not an interrupted write, and the two must not be
     /// reported to an operator in the same words. Nothing is cut for it: the
@@ -1476,6 +1478,57 @@ impl BlockLog {
     pub fn read_again(&mut self) -> Result<Recovered, StoreError> {
         self.still_on_its_files()?;
         self.rebuild()
+    }
+
+    /// Leaves the record at `height` and everything after it on the disk,
+    /// unread, and holds the log to the records before it.
+    ///
+    /// For a record that decodes and that this log will not stand behind
+    /// ([`BlockLog::read_at`] refuses it), met by a replay: it is the same
+    /// damage as a record that will not decode, which [`BlockLog::read_again`]
+    /// leaves in place, and is answered the same way. Only the index is cut,
+    /// so the next open reads the records back and the replay meets the record
+    /// again; the bytes go when the log grows over them, which is when the
+    /// block at that height arrives from somebody else. The count comes back
+    /// as [`Recovered::unreadable`], with what is standing there unread.
+    ///
+    /// A height the log does not hold leaves it as it is.
+    pub fn set_aside_from(&mut self, height: u64) -> Result<Recovered, StoreError> {
+        self.still_on_its_files()?;
+        // `bounds` answers nothing for a record past the last one, so a
+        // height past the log needs no check of its own here.
+        let place = height
+            .checked_sub(self.first)
+            .and_then(|at| usize::try_from(at).ok());
+        let found = match place {
+            Some(from) => self.bounds(from)?.map(|(start, _)| (from, start)),
+            None => None,
+        };
+        let Some((from, start)) = found else {
+            return Ok(Recovered {
+                blocks: self.count,
+                ..Recovered::default()
+            });
+        };
+        let total = self.file.metadata()?.len();
+        let entries = u64::try_from(from)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(OFFSET_BYTES);
+        self.index.set_len(entries)?;
+        self.index.sync_data()?;
+        self.count = from;
+        self.end = start;
+        self.trailing = total.saturating_sub(start);
+        if from == 0 {
+            self.first = 0;
+        }
+        Ok(Recovered {
+            blocks: from,
+            discarded_bytes: 0,
+            left_in_place: self.trailing,
+            unreadable: Some(from),
+            blocks_set_aside: 0,
+        })
     }
 
     /// Reads every record the log holds and writes the index out again from

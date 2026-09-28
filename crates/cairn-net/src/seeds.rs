@@ -11,8 +11,12 @@
 //! addresses of other nodes, and blocks. Both are checked here against rules
 //! written in this repository, so a seed that lies is a seed that gets
 //! dropped, not a seed that is believed. And it is needed once: a node that
-//! has met anybody at all keeps its own book of addresses and never reads this
-//! list again.
+//! has met anybody at all keeps its own book of addresses and reads this list
+//! again only when that book has nobody left to dial. `cairnd` and the
+//! explorer start from their book when it holds anybody, the wallet when it
+//! brings two peers, and a running node looks these names up only while its
+//! book has nobody to dial; a seed an operator names is dialled at every start
+//! whatever the book holds.
 //!
 //! Names, and no addresses behind them. An address written here would be a
 //! machine somebody rents today and somebody else rents in two years, and

@@ -568,7 +568,9 @@ struct Health {
     /// Every answer carried what the index had read and nothing about what
     /// the disk held, so a transaction the index had located, in a block
     /// trimmed off under `--keep`, was "no such transaction" with the
-    /// coverage saying the whole chain had been read.
+    /// coverage saying the whole chain had been read. The explorer's own node
+    /// archives and keeps every block now, whatever `--keep` says, so this is
+    /// for a site over a node that does not.
     blocks_from: Option<u64>,
     /// Places in its header history this node found torn and built again.
     ///

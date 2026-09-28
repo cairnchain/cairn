@@ -545,7 +545,11 @@ pub enum NodeError {
     /// remedy for a damaged file; the same build refuses the same blocks from
     /// the network, so neither cured anything and both cost blocks.
     #[error(
-        "{file} was written under rules this build does not have: {because}. Nothing on          the disk has been changed. Start it again with a build that has the rules for          that height, and the chain here is picked up where it was left; deleting          anything would not help, because this build refuses the same blocks from the          network"
+        "{file} was written under rules this build does not have: {because}. Nothing on \
+         the disk has been changed. Start it again with a build that has the rules for \
+         that height, and the chain here is picked up where it was left; deleting \
+         anything would not help, because this build refuses the same blocks from the \
+         network"
     )]
     OtherRules { file: &'static str, because: String },
     /// A node asked to keep the whole cold set, over blocks that do not begin
@@ -573,7 +577,9 @@ pub enum NodeError {
     /// first record, cut the log to nothing and write this network's first
     /// block in its place.
     #[error(
-        "{file} holds another network's chain: {because}. Nothing on the disk has been          changed. If that is the network meant, start this node for it; if not, this          node needs a directory of its own, because this one is that network's"
+        "{file} holds another network's chain: {because}. Nothing on the disk has been \
+         changed. If that is the network meant, start this node for it; if not, this \
+         node needs a directory of its own, because this one is that network's"
     )]
     OtherNetwork { file: &'static str, because: String },
     /// The ledger this node starts from is there and cannot be used.
@@ -949,7 +955,7 @@ pub struct Restored {
     /// for an archivist the whole history, which is the one role that cannot
     /// ask for it back.
     pub blocks_set_aside: usize,
-    /// Whether the log was set aside because it does not start at the first
+    /// Whether the log was deleted because it does not start at the first
     /// block of the chain.
     ///
     /// A node handed a ledger writes its log from the height it was handed.
@@ -1500,7 +1506,9 @@ struct Shared {
     /// which is what a node that offers the history to others does.
     ///
     /// Settable while running, because it is an operator's choice about disk
-    /// rather than anything the rules have an opinion on.
+    /// rather than anything the rules have an opinion on. Except on an
+    /// archivist, which keeps everything from the start and whatever it is
+    /// handed afterwards: see [`Node::keep_blocks`].
     keep_bytes: AtomicU64,
     /// Held for as long as the node runs, so no second process writes to the
     /// same directory.
@@ -3983,6 +3991,15 @@ impl Shared {
     /// whether the peer was asked, because the question may have ended while
     /// the chain was held, and an answer to a question nobody is waiting on is
     /// not taken.
+    ///
+    /// And it keeps a verdict only where the question standing then still
+    /// wants, at that place, the leaf the path was checked against. The
+    /// protocol names no question, so one that ended during the check and a
+    /// next one put to the same peer look alike from here: the second let the
+    /// first's answer in, a path checked for one note was written down for
+    /// another, or counted against the peer as a refusal, and the peer was
+    /// counted as having answered a question it had not yet heard. A peer none
+    /// of whose verdicts are kept has not answered this question.
     fn take_placed_with(
         &self,
         from: PeerId,
@@ -4008,19 +4025,30 @@ impl Shared {
             }
             checking
         };
+        let checked_against: BTreeMap<u64, Hash32> = checking
+            .iter()
+            .map(|(position, leaf, _)| (*position, *leaf))
+            .collect();
         let folded = check(checking);
         let mut asking = self.asking();
         if !asking.asked.contains(&from) {
             return;
         }
+        let mut kept = false;
         for (position, proof, holds) in folded {
+            if asking.wanted.get(&position) != checked_against.get(&position) {
+                continue;
+            }
+            kept = true;
             if holds {
                 asking.found.insert(position, proof);
             } else {
                 asking.refused = asking.refused.saturating_add(1);
             }
         }
-        asking.answered.insert(from);
+        if kept {
+            asking.answered.insert(from);
+        }
     }
 
     /// Takes addresses out of the book, so they are not dialled again.
@@ -4271,8 +4299,9 @@ impl Node {
         //
         // Not every end is a cut. A refusal about this build or this command
         // line stops the start with the disk as it was, a record that will
-        // not decode is left where it is, and a read the disk refuses stops
-        // the start; each is said where it is met below.
+        // not decode is left where it is, so is one that decodes and that the
+        // store will not stand behind, and a read the disk refuses stops the
+        // start; each is said where it is met below.
         //
         // A node handed a ledger cannot read its way back to it, because the
         // blocks it holds build on a ledger it never applied. So it keeps the
@@ -4357,6 +4386,12 @@ impl Node {
         let rejoining = !log.is_empty() && log.first_height() > start;
         let mut applied = 0usize;
         let mut unreadable = false;
+        // A record that decodes and that the store will not stand behind:
+        // see `stands_behind`.
+        let mut damaged = None;
+        // Opened before the replay, because the header log is what speaks for
+        // the last record, which has no record after it to name it.
+        let mut headers = HeaderLog::open(&directory).map_err(in_file(HEADER_LOG))?;
         if !rejoining {
             // From the ledger's tip rather than from the first record: what
             // is below it is in the ledger already, and on a node that keeps
@@ -4411,26 +4446,41 @@ impl Node {
                 // wrong. The same shape as `ChainStore::reapply`, one crate up.
                 let its_own_clock = block.header.timestamp;
                 let height = block.header.height;
-                match chain.add_block(block, its_own_clock) {
-                    Ok(Accepted::Extended) => applied = applied.saturating_add(1),
-                    // A refusal about this build or this command line rather
-                    // than about the block stops the start here, with nothing
-                    // cut. The same build refuses the same blocks from the
-                    // network, so what a cut would have asked for again could
-                    // never have been taken back, and the blocks it deleted
-                    // were valid ones some other build had written.
-                    Err(error) => {
-                        if let Some(stop) = about_the_reader(height, applied == 0, &error) {
-                            return Err(stop);
-                        }
-                        break;
+                let refused = match chain.add_block(block, its_own_clock) {
+                    Ok(Accepted::Extended) => {
+                        applied = applied.saturating_add(1);
+                        continue;
                     }
-                    Ok(_) => break,
+                    Err(error) => Some(error),
+                    Ok(_) => None,
+                };
+                // Damage first. A record that changed in place and still
+                // decodes is refused by the chain like a block, and read that
+                // way it was cut with every valid record after it, or, where
+                // the byte was the version's, taken for a build too old and
+                // every start stopped. The store can tell the two apart.
+                if !stands_behind(&log, &headers, height) {
+                    damaged = Some(height);
+                    break;
                 }
+                // A refusal about this build or this command line rather than
+                // about the block stops the start here, with nothing cut. The
+                // same build refuses the same blocks from the network, so what
+                // a cut would have asked for again could never have been taken
+                // back, and the blocks it deleted were valid ones some other
+                // build had written.
+                if let Some(error) = refused {
+                    if let Some(stop) = about_the_reader(height, applied == 0, &error) {
+                        return Err(stop);
+                    }
+                }
+                break;
             }
         }
         let read_again = if unreadable {
             Some(log.read_again().map_err(in_file(BLOCK_LOG))?)
+        } else if let Some(height) = damaged {
+            Some(log.set_aside_from(height).map_err(in_file(BLOCK_LOG))?)
         } else {
             None
         };
@@ -4472,7 +4522,6 @@ impl Node {
         // is filled in from the blocks that are still there. Everything older
         // than those is gone, which costs this node the ability to answer a
         // newcomer about that stretch and nothing else.
-        let mut headers = HeaderLog::open(&directory).map_err(in_file(HEADER_LOG))?;
         let headers_set_aside = headers_the_store_will_not_stand_behind(&headers);
         let CaughtUp {
             dropped: headers_dropped,
@@ -4571,6 +4620,15 @@ impl Node {
     ) -> Result<Self, NodeError> {
         let listener = TcpListener::bind(address)?;
         let address = listener.local_addr()?;
+        // An archivist keeps every block from the moment it opens, and not
+        // from whenever somebody hands it a budget: one opened with none kept
+        // a node's gigabyte, and past it trimmed the blocks its next start
+        // reads the archive from.
+        let keeps = if chain.is_archiving() {
+            u64::MAX
+        } else {
+            KEEP_BLOCK_BYTES
+        };
 
         let shared = Arc::new(Shared {
             params,
@@ -4586,7 +4644,7 @@ impl Node {
             names_looked_up_at: AtomicU64::new(0),
             book_written_at: AtomicU64::new(u64::MAX),
             directory,
-            keep_bytes: AtomicU64::new(KEEP_BLOCK_BYTES),
+            keep_bytes: AtomicU64::new(keeps),
             _lock: lock,
             peers: Mutex::new(HashMap::new()),
             windows: Mutex::new(HashMap::new()),
@@ -4705,8 +4763,9 @@ impl Node {
     /// An address resolved once at startup is an address a node has for good,
     /// including when the name later means something else, and no address at
     /// all when the lookup happened to fail. Held here, a name is asked again
-    /// while this node has no seed to dial, so one that starts before its
-    /// machine can resolve anything still joins on its own.
+    /// while this node has no seed and nobody in its book to dial, so one that
+    /// starts before its machine can resolve anything still joins on its own,
+    /// and one whose book can supply a peer does not ask.
     pub fn start_from_names(&self, names: Vec<String>) {
         *self.shared.seed_names() = names;
     }
@@ -4891,7 +4950,16 @@ impl Node {
     /// `u64::MAX` keeps every block ever accepted, which is what a node
     /// offering the history to others does and what the disk cost of the chain
     /// is measured against.
+    ///
+    /// An archivist keeps every block whatever it is handed. Its archive is
+    /// built by reading every block from the first at every start, and a start
+    /// whose blocks do not begin there is refused ([`NodeError::CannotArchive`]),
+    /// so a budget taken here was an archivist that trimmed its way into never
+    /// starting again. `cairn-explorer` handed its `--keep` straight through
+    /// and did exactly that; `cairnd` kept its own rule for `--archive`, and
+    /// the rule is here now, for every caller.
     pub fn keep_blocks(&self, bytes: u64) {
+        let bytes = if self.is_archiving() { u64::MAX } else { bytes };
         self.shared.keep_bytes.store(bytes, Ordering::Relaxed);
     }
 
@@ -5647,7 +5715,9 @@ fn join_piece(shared: &Arc<Shared>, from: PeerId, message: Message, outbound: &O
 /// is the right trade for a join piece: it is a piece of an answer to a
 /// question this node put to one named peer, anybody else's copy is dropped on
 /// a comparison, and the alternative is a node that cannot be handed a chain
-/// without paying for every stranger who offers it one.
+/// without paying for every stranger who offers it one. Anybody else's copy
+/// has been charged for its bytes by then, at the read, like any frame: only
+/// the peer asked reads its pieces for nothing ([`PeerState::afford_reading`]).
 ///
 /// It was the wrong trade for a run of paths, and nothing said so because the
 /// set had no name. `Proofs` was taken here too, which carried it past
@@ -7887,6 +7957,30 @@ fn build_ledger(
         .ok()
 }
 
+/// Whether the store stands behind the record at `height`, for a replay that
+/// met a refusal there.
+///
+/// [`BlockLog::read_at`] checks the record's height, its transactions against
+/// its own header, and that the record after it names it, which covers every
+/// byte of the header. The last record has nobody after it and is checked
+/// only against the one before, which names its parent and nothing else, so
+/// there the header log speaks for the rest where it holds a header at that
+/// height: it is written from the same headers, and a record that differs
+/// from it changed on one disk or the other. Where neither can say, the
+/// record is taken at its word, which is what the replay did before.
+fn stands_behind(log: &BlockLog, headers: &HeaderLog, height: u64) -> bool {
+    let Ok(Some(block)) = log.read_at(height) else {
+        return false;
+    };
+    if log.holds(height.saturating_add(1)) {
+        return true;
+    }
+    match headers.read_at(height) {
+        Ok(Some(held)) => held == block.header,
+        _ => true,
+    }
+}
+
 /// Records a header log holds and will not answer for.
 ///
 /// Asked before the log is filled in from the blocks, because filling it in is
@@ -7993,9 +8087,17 @@ fn catch_up_headers(headers: &mut HeaderLog, blocks: &BlockLog) -> CaughtUp {
 /// Walked back from there and no further than a reorganisation can reach,
 /// since that is the only way the two come apart. A record either side will
 /// not read ends the walk with nothing to cut: that is the disk's news, and
-/// the first block this node accepts reads the same record and says so. So
-/// does finding no height within that reach where the two agree, which no
-/// reorganisation leaves and which the blocks could not mend anyway.
+/// the first block this node accepts reads the same record and says so.
+///
+/// The height the two last agree at can lie one below the walk. A node that
+/// keeps only the blocks a reorganisation may undo, reorganised as deep as
+/// the rules allow, parts from the old branch right under the lowest block it
+/// holds, so nothing inside the walk agrees. The block at the bottom names its
+/// parent, though, and where the header log holds that parent the fork is at
+/// the bottom. Without it the walk found nothing, cut nothing, and the old
+/// branch's headers were filled in after the new one's. Finding nothing even
+/// then is what no reorganisation leaves, and what the blocks could not mend
+/// anyway.
 fn off_the_branch(headers: &HeaderLog, blocks: &BlockLog) -> Option<u64> {
     let top = headers.reaches().min(blocks.reaches());
     let bottom = headers
@@ -8010,7 +8112,12 @@ fn off_the_branch(headers: &HeaderLog, blocks: &BlockLog) -> Option<u64> {
             return (fork < top).then_some(fork);
         }
     }
-    None
+    if bottom >= top {
+        return None;
+    }
+    let parent = headers.read_at(bottom.checked_sub(1)?).ok()??;
+    let block = blocks.read_at(bottom).ok()??;
+    (block.header.previous == parent.id()).then_some(bottom)
 }
 
 /// What filling the header log in from the blocks did.
@@ -8244,7 +8351,9 @@ fn ledger_refused(error: &HandoverError) -> NodeError {
 /// and the first record of the log belonging to another network, which is one
 /// start under a mistyped `--network`. Only the first: a record further up
 /// the log that names another network is not a directory of another network,
-/// it is a record that changed, and it is refused like any other.
+/// it is a record that changed, and it is refused like any other. Asked only
+/// of a record the store stands behind: one it will not is damage, and is
+/// left on the disk before this is reached (see `stands_behind`).
 fn about_the_reader(height: u64, first: bool, error: &ChainError) -> Option<NodeError> {
     let ChainError::InvalidBlock { source, .. } = error else {
         return None;
@@ -8562,12 +8671,20 @@ fn collect_finished(shared: &Arc<Shared>) {
 
 /// Turns the names this node starts from into addresses it can dial.
 ///
-/// Only while the book holds no seed at all. That is the case this exists for:
-/// a node whose machine could not resolve anything at the moment it started
-/// has nothing to dial and no way to learn of anybody, and would sit there for
-/// as long as it ran, looking like a network that does not exist. Once one
-/// address lands it is kept for good and the book takes over, so this stops on
-/// its own and never runs again.
+/// Only while the book holds no seed and nobody else to dial. That is the case
+/// this exists for: a node whose machine could not resolve anything at the
+/// moment it started, or whose book has nobody left who answers, has nothing
+/// to dial and no way to learn of anybody, and would sit there for as long as
+/// it ran, looking like a network that does not exist. Once one address lands
+/// it is kept for good and the book takes over, so this stops on its own.
+///
+/// Not while the book can supply somebody. The names are the seeds written
+/// into the program, and looking them up is a question to whoever answers for
+/// them, which a node that has met anybody keeps its own book so as not to
+/// ask (see `seeds`). This ran whenever the book held no seed, so a node
+/// started with a book of its own and no seed named looked the list up in its
+/// first round, and every round of a node that had met the network only
+/// through its book.
 ///
 /// A lookup can block for as long as the machine's resolver cares to try, and
 /// nothing here can put a deadline on it, so it is made on a thread of its own
@@ -8584,8 +8701,16 @@ fn look_up_seed_names_with<R>(shared: &Arc<Shared>, now: u64, resolve: R)
 where
     R: Fn(&str) -> Result<Vec<SocketAddr>, String> + Send + 'static,
 {
-    if shared.book().has_seeds() {
-        return;
+    {
+        let book = shared.book();
+        if book.has_seeds()
+            || book
+                .ready(now)
+                .into_iter()
+                .any(|address| address != shared.address)
+        {
+            return;
+        }
     }
     let last = shared.names_looked_up_at.load(Ordering::Relaxed);
     if !a_lookup_is_due(last, now) {
@@ -9231,13 +9356,16 @@ fn is_peer_fault(error: &WireError) -> bool {
 /// `None` when the peer's window cannot pay for the frame, and then nothing in
 /// it is decoded or looked at: the peer is answered with the silence any ask
 /// past its window gets, and the frame costs this node the copy that brought
-/// it in. See [`PeerState::afford_reading`] for what is charged and why.
+/// it in. See [`PeerState::afford_reading`] for what is charged and why, and
+/// why whether this node is collecting a join from `id` is part of it.
 fn paid_and_decoded(
+    shared: &Shared,
+    id: PeerId,
     peer: &mut PeerState,
     frame: &[u8],
     now: u64,
 ) -> Result<Option<Message>, WireError> {
-    if !peer.afford_reading(frame, now) {
+    if !peer.afford_reading(frame, now, || shared.choosing().asked_join(id)) {
         return Ok(None);
     }
     Ok(Some(Message::decode(frame)?))
@@ -9404,7 +9532,7 @@ fn read_loop(
         // used to be asked only once the message was built, by which time a
         // greeted peer's megabyte of notes had cost what it costs whatever the
         // budget then said.
-        let message = match paid_and_decoded(&mut peer, &frame, last_heard) {
+        let message = match paid_and_decoded(shared, id, &mut peer, &frame, last_heard) {
             Ok(Some(message)) => message,
             Ok(None) => continue,
             Err(error) => {
@@ -9834,6 +9962,33 @@ mod disk_and_headers {
             thread::sleep(Duration::from_millis(20));
         }
         panic!("waited for {what} and it never happened");
+    }
+
+    /// The two refusals a start stops on read as sentences, with no run of
+    /// spaces inside them.
+    ///
+    /// Both were written over several lines and joined without the
+    /// continuations that drop the next line's indent, so an operator read
+    /// "Nothing on          the disk has been changed". The tests read whether
+    /// they named the height and the cure, and not the words between, so the
+    /// runs passed.
+    #[test]
+    fn a_start_that_stops_on_the_reader_says_so_without_runs_of_spaces() {
+        let because = "because".to_owned();
+        for said in [
+            NodeError::OtherRules {
+                file: BLOCK_LOG,
+                because: because.clone(),
+            }
+            .to_string(),
+            NodeError::OtherNetwork {
+                file: BLOCK_LOG,
+                because,
+            }
+            .to_string(),
+        ] {
+            assert!(!said.contains("  "), "a run of spaces in: {said}");
+        }
     }
 
     /// A chain that already holds its first block is not given it again, and
@@ -10472,6 +10627,59 @@ mod disk_and_headers {
             (0, 30, 30, 0),
             "a run offered through the test door that checks out was not merged in front of \
              the headers, with the forest built over the whole"
+        );
+    }
+
+    /// An archivist keeps every block whatever budget it is handed, and so
+    /// can start again as an archivist.
+    ///
+    /// The archive is built by reading every block from the first at every
+    /// start, and a start whose blocks do not begin there is refused. Nothing
+    /// asked whether an archiving node trims, so one handed a budget, which is
+    /// what `cairn-explorer --keep 8GB` did, dropped its oldest blocks at the
+    /// next round of upkeep and was refused at every start after it. One
+    /// handed no budget at all trimmed at a gigabyte, the default of a node
+    /// that does not archive.
+    #[test]
+    fn an_archivist_keeps_every_block_whatever_budget_it_is_handed() {
+        let params = ConsensusParams::testnet().with_burial(8);
+        let (blocks, _) = forged(40, params);
+        let directory = scratch("archivist-budget");
+        let (node, _) = Node::open_archiving(params, loopback(), &directory).unwrap();
+        let unbudgeted = node.shared.keep_bytes.load(Ordering::Relaxed);
+        for block in &blocks {
+            node.submit_block(block.clone()).unwrap();
+        }
+        wait_until("every block to be on the disk", || {
+            node.written_through() == Some(39)
+        });
+
+        node.keep_blocks(1);
+        node.shared.trim_history();
+        let kept_from = node.blocks_from();
+        node.shutdown();
+        drop(node);
+
+        let again = Node::open_archiving(params, loopback(), &directory).map(|(node, _)| {
+            let archiving = node.is_archiving();
+            node.shutdown();
+            archiving
+        });
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert_eq!(
+            unbudgeted,
+            u64::MAX,
+            "an archivist handed no budget keeps a node's gigabyte and drops the blocks past it"
+        );
+        assert_eq!(
+            kept_from,
+            Some(0),
+            "an archivist handed a budget of one byte dropped its oldest blocks"
+        );
+        assert!(
+            matches!(again, Ok(true)),
+            "and the archivist could not start again as one"
         );
     }
 
@@ -13188,6 +13396,53 @@ mod peers_and_loops {
         );
     }
 
+    /// An answer checked against one question is not taken by the next one
+    /// put to the same peer, where that question wants another leaf at the
+    /// place.
+    ///
+    /// The protocol names no question, so a peer asked again is let in by the
+    /// second question whatever its answer was about. A path checked against
+    /// the first question's leaf was written into the second, which wants
+    /// another leaf there: kept as a path that folds for a note it was never
+    /// checked for, or counted against the peer as a refusal, and the peer
+    /// counted as having answered a question it had not yet heard. Nothing put
+    /// a second question while the first answer was being checked, so writing
+    /// it into whichever question stood passed.
+    #[test]
+    fn an_answer_checked_against_one_question_is_not_taken_by_the_next() {
+        let node = quiet();
+        *node.shared.asking() = Asking {
+            wanted: BTreeMap::from([(7, Hash32::ZERO), (9, Hash32::ZERO)]),
+            asked: HashSet::from([1]),
+            ..Asking::default()
+        };
+        node.shared
+            .take_placed_with(1, &an_answer_about_seven_and_nine(), |checking| {
+                // The first question ends while the paths are checked, and the
+                // next one asks the same peer about the same places, where
+                // other notes now sit.
+                let _ = finished(&mut node.shared.asking(), 0);
+                let elsewhere = Hash32::from_bytes([1; 32]);
+                *node.shared.asking() = Asking {
+                    wanted: BTreeMap::from([(7, elsewhere), (9, elsewhere)]),
+                    asked: HashSet::from([1]),
+                    ..Asking::default()
+                };
+                only_seven_folds(checking)
+            });
+
+        let after = node.shared.asking();
+        assert!(
+            after.found.is_empty() && after.refused == 0,
+            "a path checked against one question's leaf was taken by the next question, which \
+             wants another leaf there"
+        );
+        assert!(
+            after.answered.is_empty(),
+            "the peer was counted as answering a question its answer was not checked against"
+        );
+    }
+
     /// A peer that handed over a block this node took is written down as
     /// having done so, and as nothing else.
     ///
@@ -14144,6 +14399,21 @@ mod quiet_tests {
             "a clock put back an hour held the next lookup off for that hour"
         );
     }
+
+    /// A lookup made this second is not due again this second.
+    ///
+    /// A clock that stands where the last lookup left it has not gone back,
+    /// and the period has not passed. Nothing asked at the very second of the
+    /// last lookup, so reading a clock that had not moved as one put back
+    /// passed, and a round landing in the same second as the one before it
+    /// started a second lookup behind the first.
+    #[test]
+    fn a_lookup_made_this_second_is_not_due_again_this_second() {
+        assert!(
+            !a_lookup_is_due(10_000, 10_000),
+            "a clock standing at the last lookup was read as a clock put back"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -14354,6 +14624,56 @@ mod tests {
         assert!(
             node.shared.book().has_seeds(),
             "and the one its period allows was not"
+        );
+    }
+
+    /// A node whose book holds somebody to dial does not look its names up,
+    /// and one whose book has nobody left to dial does.
+    ///
+    /// The names are the seeds written into the program, and asking for them
+    /// is a question to whoever answers for them. A node that has met anybody
+    /// keeps its own book, and the seeds are for when that book cannot supply
+    /// a peer. Nothing asked with a book full of addresses and no seed among
+    /// them, so a node that looked the names up whenever its book held no seed
+    /// passed, and a node started with a book of its own asked for them within
+    /// its first round.
+    #[test]
+    fn a_node_whose_book_can_supply_peers_does_not_look_its_names_up() {
+        // Stopped, so its own rounds do not look anything up beside this.
+        let node = Node::bind(ConsensusParams::testnet(), loopback()).unwrap();
+        node.shutdown();
+        node.shared
+            .seed_names()
+            .push("seed.invalid:9944".to_owned());
+        let met = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 9), 9_944));
+        node.shared.book().insert(met);
+
+        // A lookup is marked as out before its thread is started, so whether
+        // one began is read here without waiting on the thread.
+        look_up_seed_names_with(
+            &node.shared,
+            1_000,
+            |_: &str| Err("not answered".to_owned()),
+        );
+        let with_somebody_to_dial = node.shared.names_looked_up_at.load(Ordering::Relaxed) != 0;
+
+        // The one address failed a dial, so it waits before it is tried again
+        // and the book has nobody to dial meanwhile.
+        node.shared.book().missed(&met, 1_000);
+        let (answered, answer) = mpsc::channel();
+        look_up_seed_names_with(&node.shared, 1_000, move |_: &str| {
+            let _ = answered.send(());
+            Err("not answered".to_owned())
+        });
+        let with_nobody_to_dial = answer.recv_timeout(Duration::from_secs(10)).is_ok();
+
+        assert!(
+            !with_somebody_to_dial,
+            "a node whose book held an address to dial looked the seeds up"
+        );
+        assert!(
+            with_nobody_to_dial,
+            "a node whose book had nobody left to dial did not look the seeds up"
         );
     }
 
