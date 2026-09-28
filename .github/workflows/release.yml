@@ -42,7 +42,19 @@
 # is a judgement and the taking is a fact.
 #
 # The tag message is the commit that changed the number, which is where the
-# reason for a release is already written.
+# reason for a release is already written, followed by any commit the release
+# carries that was merged after it.
+#
+# One run, one commit. A run checks, builds, attests and tags the commit it
+# was started for, and no other. The attestation cannot say anything else: it
+# names the commit GitHub started the run for, which is fixed before the run
+# does anything. So a scheduled run that moves the number builds nothing
+# itself. It writes the number on main and starts a second run there, which
+# finds a version with no release and releases it, as a push of that commit
+# would. The scheduled run used to build the version commit it had just made,
+# and every release it published was attested as built from the commit below
+# the one it was built from and tagged on, whose Cargo.toml says the version
+# before.
 
 name: release
 
@@ -55,11 +67,18 @@ on:
   # fighting over the same line of Cargo.toml.
   schedule:
     - cron: "0 6 * * *"
+  # By hand for a dry run, which names a version and publishes nothing; and by
+  # the scheduled run, with no version, to release the one it has just written.
+  # A dispatch is the one kind of run the token a workflow is given may start.
   workflow_dispatch:
     inputs:
       version:
-        description: Version to build, for a dry run
-        required: true
+        description: >-
+          Version to build for a dry run, which publishes nothing. Left empty,
+          the run is asked what a push is asked: whether the version on main
+          has a release yet.
+        required: false
+        default: ""
 
 # Granted per job rather than here. Everything this file does apart from the
 # last step is a build, and a build that can write releases and mint an OIDC
@@ -72,12 +91,18 @@ env:
 
 # One run at a time, the rest waiting rather than cancelled. Two runs that
 # overlapped both found the same tag missing, both built, both recorded an
-# attestation in the public log, and the second failed at the tag; and a
-# scheduled run's version commit could meet a push on its way to the branch.
+# attestation in the public log, and the second failed at the tag.
 # Waiting, the second run decides after the first has tagged, and finds the
 # work done. What it costs: GitHub keeps one run waiting and replaces it with
 # a newer one, so a scheduled run still waiting when a push arrives is not
-# made, and the day's release waits for the next day's.
+# made, and the day's release waits for the next day's. The run a scheduled
+# run starts to release its version can be replaced the same way, and that
+# costs nothing: the push that replaces it finds the version without a
+# release, and releases it together with its own commit.
+#
+# It does not keep merges out, and cannot: a merge is not a run of this file.
+# The checks take two hours, and anything merged meanwhile moves main from
+# under the version commit. That is `bump`'s to deal with.
 concurrency:
   group: release
   cancel-in-progress: false
@@ -88,7 +113,8 @@ jobs:
   # A push that did not change the version is an ordinary push and stops here.
   # So is one whose version already has a release, which is what makes this
   # safe to re-run: publishing is decided by what does not yet exist rather
-  # than by what just happened.
+  # than by what just happened. A dispatch that names no version is asked the
+  # same question, and that is how a scheduled run's version gets released.
   decide:
     runs-on: ubuntu-latest
     permissions:
@@ -97,6 +123,7 @@ jobs:
       release: ${{ steps.look.outputs.release }}
       version: ${{ steps.look.outputs.version }}
       bump: ${{ steps.look.outputs.bump }}
+      dry: ${{ steps.look.outputs.dry }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -104,6 +131,8 @@ jobs:
 
       - id: look
         shell: bash
+        env:
+          DRY_RUN_OF: ${{ inputs.version }}
         run: |
           # Read from inside [workspace.package] rather than from the first
           # line in the file that starts with the word: the release is named
@@ -115,20 +144,23 @@ jobs:
             exit 1
           fi
           # The number as it stands. A scheduled run that decides to move it
-          # writes the new one over this below.
+          # leaves the next one to `bump`, which works it out from main as it
+          # is when the checks have passed rather than as it was now.
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ -n "$DRY_RUN_OF" ]; then
+            echo "dry=true" >> "$GITHUB_OUTPUT"
             echo "bump=false" >> "$GITHUB_OUTPUT"
             echo "release=false" >> "$GITHUB_OUTPUT"
-            echo "a dry run of ${{ inputs.version }}, publishing nothing"
+            echo "a dry run of $DRY_RUN_OF, publishing nothing"
             exit 0
           fi
+          echo "dry=false" >> "$GITHUB_OUTPUT"
           if ! git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
-            # Somebody set the number by hand. Publishing it is what this file
-            # has always done and is left exactly as it was.
+            # Somebody set the number, by hand or through a scheduled run's
+            # version commit, and it has no release yet: this commit is it.
             echo "bump=false" >> "$GITHUB_OUTPUT"
             echo "release=true" >> "$GITHUB_OUTPUT"
-            echo "v$version has no release yet, so this push is one"
+            echo "v$version has no release yet, so this run makes it, from $GITHUB_SHA"
             exit 0
           fi
 
@@ -185,7 +217,14 @@ jobs:
           # rendered from, which is in no program.
           # `release_decision_sees_every_file_a_program_is_built_from` in the
           # explorer's tests holds this list against what the sources include.
-          paths="$paths Cargo.lock rust-toolchain.toml Cargo.toml web docs/*.html docs/*.css"
+          #
+          # And what goes into every archive beside the programs, which is
+          # downloaded as surely as they are: the two licences, and the notes
+          # that tell a person how to check what they downloaded
+          # (`deploy/DOWNLOAD.txt`, as README.txt). A correction to those
+          # waited here for an unrelated change to the code. The step that
+          # gathers the archive copies exactly these three.
+          paths="$paths Cargo.lock rust-toolchain.toml Cargo.toml web docs/*.html docs/*.css LICENSE-MIT LICENSE-APACHE deploy/DOWNLOAD.txt"
           echo "built from:" $built
 
           # Unquoted on purpose: this is a list of paths and not one path.
@@ -197,29 +236,12 @@ jobs:
             exit 0
           fi
 
-          # Something did. How far the number moves is the one thing the
-          # commit messages decide, because it is a judgement rather than a
-          # fact, and it is the author who made it.
-          step=patch
-          if git log "v$version"..HEAD --no-merges --format=%s \
-            | grep -qE '^feat(\(|!|:)'; then
-            step=minor
-          fi
-          major=${version%%.*}
-          rest=${version#*.}
-          minor=${rest%%.*}
-          patch=${rest#*.}
-          if [ "$step" = minor ]; then
-            minor=$((minor + 1))
-            patch=0
-          else
-            patch=$((patch + 1))
-          fi
-          next="$major.$minor.$patch"
-          echo "version=$next" >> "$GITHUB_OUTPUT"
+          # Something did. The next number is `bump`'s to work out, from main
+          # as it stands once the checks have passed: what is merged in the
+          # meantime goes into the version too, and can move it further.
           echo "bump=true" >> "$GITHUB_OUTPUT"
-          echo "release=true" >> "$GITHUB_OUTPUT"
-          echo "v$version is released and the programs have changed since, so this is v$next"
+          echo "release=false" >> "$GITHUB_OUTPUT"
+          echo "v$version is released and the programs have changed since, so a version is written once the checks pass"
 
   # The checks, before anything is built for people to download.
   #
@@ -231,38 +253,66 @@ jobs:
   # good build" in it. It never said that. Now the release cannot happen
   # unless it is true.
   #
+  # A scheduled release passes through here twice. Once in the scheduled run,
+  # on the commit it found, before any number is written; and once in the run
+  # it starts, on the version commit itself, which is what is then built. The
+  # second is the one the release rests on: main can move while the first
+  # runs, and the version commit is then made on a tree the first never saw.
+  #
   # Called rather than copied: the gate a release passes is the same text as
   # the gate a merge passes.
   verify:
     needs: decide
-    if: needs.decide.outputs.release == 'true' || github.event_name == 'workflow_dispatch'
+    if: >-
+      needs.decide.outputs.release == 'true'
+      || needs.decide.outputs.bump == 'true'
+      || needs.decide.outputs.dry == 'true'
     permissions:
       contents: read
     uses: ./.github/workflows/check.yml
 
-  # The number, written down once the checks it will be attested against have
-  # passed.
+  # The number, written down once the checks have passed, and then released by
+  # a run of its own.
   #
-  # After `verify` and not before it, so that what reaches the branch is a
-  # version whose tree was green. And the commit it makes is what the release
-  # notes and the tag message are read from further down, which is why its
-  # message is the account of what changed rather than the word "bump": for a
-  # release carrying a day's work the reason is plural, and the reason is what
+  # After `verify` and not before it, so that no version is written on a tree
+  # whose checks failed. And the commit it makes is what the release notes and
+  # the tag message are read from further down, which is why its message is
+  # the account of what changed rather than the word "bump": for a release
+  # carrying a day's work the reason is plural, and the reason is what
   # somebody deciding whether to take a download is looking for.
   #
+  # On main as it stands when the checks end, not on the commit they ran on.
+  # They take two hours, and a version commit made on the commit this run
+  # started from was refused as soon as anything had been merged in between:
+  # the run of 27 September failed that way with four merges behind it, and
+  # nothing tried again, so no release was made while the fixes that most
+  # needed one went on being merged. The commits it lands on have not been
+  # through this run's checks, and they do not have to be: the run started
+  # below checks the version commit itself before building it, and builds
+  # nothing if they fail. If main moves again between reading it and pushing,
+  # the version is written again on the new tip, a few times at most. If what
+  # was merged set a version itself, this writes none: that one is released by
+  # the run for its own commit.
+  #
   # A push, not a pull request. A pull request opened with this token has no
-  # checks run against it, because a token given to a workflow deliberately
-  # cannot start another one, and a release proposal nobody can verify is
-  # worse than none. That same rule is why this job lives here rather than in
-  # a file of its own: a push made there would never reach this one.
+  # checks run against it, because a push or a pull request made with the
+  # token a workflow is given deliberately starts no workflow, and a release
+  # proposal nobody can verify is worse than none. The same rule means the
+  # push below starts no run of this file either. A dispatch is the one
+  # exception GitHub makes, so the release run is started by one, and it
+  # finds the version with no release and makes it, from the version commit,
+  # exactly as a push of that commit would.
   bump:
     needs: [decide, verify]
     if: needs.decide.outputs.bump == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # For the dispatch that starts the run releasing the version.
+      actions: write
     outputs:
       sha: ${{ steps.write.outputs.sha }}
+      version: ${{ steps.write.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -270,67 +320,143 @@ jobs:
 
       - id: write
         shell: bash
+        env:
+          WAS: ${{ needs.decide.outputs.version }}
         run: |
           set -euo pipefail
-          was=$(awk '/^\[workspace\.package\]/{s=1;next} /^\[/{s=0} s && /^version[[:space:]]*=/{split($0,a,"\"");print a[2];exit}' Cargo.toml)
-          next="${{ needs.decide.outputs.version }}"
+          checked="$GITHUB_SHA"
+          attempt=0
+          while :; do
+            attempt=$((attempt + 1))
+            git fetch --quiet origin main
+            git reset --quiet --hard origin/main
+            now=$(awk '/^\[workspace\.package\]/{s=1;next} /^\[/{s=0} s && /^version[[:space:]]*=/{split($0,a,"\"");print a[2];exit}' Cargo.toml)
+            if [ "$now" != "$WAS" ]; then
+              echo "::notice::main was set to version $now while the checks ran on $checked, so this run writes none: v$now is released by the run for the commit that set it"
+              exit 0
+            fi
+            if [ "$(git rev-parse HEAD)" != "$checked" ]; then
+              echo "::notice::main moved while the checks ran on $checked; the version is written on $(git rev-parse HEAD), which the run started below checks before building it"
+              git log --no-merges --format='  %h %s' "$checked..HEAD"
+            fi
 
-          # Inside [workspace.package] and nowhere else, which is the same
-          # place and the same reason the number is read from above.
-          # `to` and not `next`, which is a word awk keeps for itself and which
-          # this used until a dry run said so.
-          awk -v to="$next" '
-            /^\[workspace\.package\]/{s=1}
-            /^\[/{ if ($0 != "[workspace.package]") s=0 }
-            s && /^version[[:space:]]*=/ && !done { print "version = \"" to "\""; done=1; next }
-            { print }
-          ' Cargo.toml > Cargo.toml.next
-          mv Cargo.toml.next Cargo.toml
-          grep -q "version = \"$next\"" Cargo.toml
+            # How far the number moves is the one thing the commit messages
+            # decide, because it is a judgement rather than a fact, and it is
+            # the author who made it. Read to the end rather than with
+            # `grep -q`, which stops at the first match and can leave git
+            # writing into a closed pipe, which `pipefail` reports as no match.
+            step=patch
+            if git log "v$WAS"..HEAD --no-merges --format=%s \
+              | grep -E '^feat(\(|!|:)' > /dev/null; then
+              step=minor
+            fi
+            major=${WAS%%.*}
+            rest=${WAS#*.}
+            minor=${rest%%.*}
+            patch=${rest#*.}
+            if [ "$step" = minor ]; then
+              minor=$((minor + 1))
+              patch=0
+            else
+              patch=$((patch + 1))
+            fi
+            next="$major.$minor.$patch"
+            echo "v$WAS is released and the programs have changed since, so this is v$next"
 
-          # The lock carries every one of our crates at that number too.
-          cargo metadata --format-version 1 --quiet > /dev/null
+            # Inside [workspace.package] and nowhere else, which is the same
+            # place and the same reason the number is read from above.
+            # `to` and not `next`, which is a word awk keeps for itself and
+            # which this used until a dry run said so.
+            awk -v to="$next" '
+              /^\[workspace\.package\]/{s=1}
+              /^\[/{ if ($0 != "[workspace.package]") s=0 }
+              s && /^version[[:space:]]*=/ && !done { print "version = \"" to "\""; done=1; next }
+              { print }
+            ' Cargo.toml > Cargo.toml.next
+            mv Cargo.toml.next Cargo.toml
+            grep -q "version = \"$next\"" Cargo.toml
 
-          {
-            echo "chore: $next, for what changed since v$was"
-            echo
-            printf '%s commits since v%s:\n' \
-              "$(git log "v$was"..HEAD --no-merges --oneline | wc -l | tr -d ' ')" "$was"
-            echo
-            git log "v$was"..HEAD --no-merges --format=%s \
-              | sed 's/[(:].*//' | sort | uniq -c | sort -rn \
-              | awk '{printf "  %s %s\n", $1, $2}'
-            echo
-            echo "What is different in the programs:"
-            echo
-            git log "v$was"..HEAD --no-merges --format=%s \
-              | grep -E '^(feat|fix|perf)(\(|!|:)' \
-              | sed 's/^/  /'
-          } > message.txt
-          cat message.txt
+            # The lock carries every one of our crates at that number too.
+            cargo metadata --format-version 1 --quiet > /dev/null
 
-          git -c user.name="cairn releases" \
-              -c user.email="releases@cairnchain.org" \
-              commit -q -a -F message.txt
-          # Guarded, because this script is worth running by hand before it is
-          # trusted and a script that pushes when it is read is not. A dry run
-          # sets CAIRN_DRY_RUN and gets everything but the branch moving. The
-          # first dry run of it pushed a version bump onto a clone's origin,
-          # which was somebody's working copy.
-          if [ -n "${CAIRN_DRY_RUN:-}" ]; then
-            echo "a dry run: the branch is left where it was"
-          else
-            git push origin HEAD:main
-          fi
+            # `|| true` after the filter: a day whose changes are all labelled
+            # something else has no line to show, and under `pipefail` an
+            # empty `grep` ended the step before the version was written.
+            {
+              echo "chore: $next, for what changed since v$WAS"
+              echo
+              printf '%s commits since v%s:\n' \
+                "$(git log "v$WAS"..HEAD --no-merges --oneline | wc -l | tr -d ' ')" "$WAS"
+              echo
+              git log "v$WAS"..HEAD --no-merges --format=%s \
+                | sed 's/[(:].*//' | sort | uniq -c | sort -rn \
+                | awk '{printf "  %s %s\n", $1, $2}'
+              echo
+              echo "What is different in the programs:"
+              echo
+              git log "v$WAS"..HEAD --no-merges --format=%s \
+                | { grep -E '^(feat|fix|perf)(\(|!|:)' || true; } \
+                | sed 's/^/  /'
+            } > message.txt
+            cat message.txt
+
+            git -c user.name="cairn releases" \
+                -c user.email="releases@cairnchain.org" \
+                commit -q -a -F message.txt
+            # Guarded, because this script is worth running by hand before it
+            # is trusted and a script that pushes when it is read is not. A dry
+            # run sets CAIRN_DRY_RUN and gets everything but the branch moving.
+            # The first dry run of it pushed a version bump onto a clone's
+            # origin, which was somebody's working copy.
+            if [ -n "${CAIRN_DRY_RUN:-}" ]; then
+              echo "a dry run: the branch is left where it was"
+              break
+            fi
+            if git push origin HEAD:main; then
+              break
+            fi
+            # Refused. Tried again only when main has moved, which is the one
+            # refusal writing the version again can mend; anything else would
+            # be refused again, and is said.
+            git fetch --quiet origin main
+            if [ "$(git rev-parse origin/main)" = "$(git rev-parse HEAD^)" ]; then
+              echo "the push was refused and main is still where the version was written on, so it was refused for another reason; no version is written" >&2
+              exit 1
+            fi
+            if [ "$attempt" -ge 5 ]; then
+              echo "main moved under $attempt pushes running; no version is written, and the next scheduled run tries again" >&2
+              exit 1
+            fi
+            echo "main moved between reading it and pushing; writing the version again on the new tip"
+          done
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+
+      # With no version, so that the run is asked what a push is asked: it
+      # finds v<next> without a release and makes it, from the commit main is
+      # at when it starts. That is the version commit, or a commit merged on
+      # top of it in the seconds between, which the release then carries too.
+      - name: Start the run that releases it
+        if: steps.write.outputs.sha != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.write.outputs.sha }}
+          VERSION: ${{ steps.write.outputs.version }}
+        run: |
+          set -euo pipefail
+          workflow=${GITHUB_WORKFLOW_REF%@*}
+          workflow=${workflow##*/}
+          gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/dispatches" \
+            -f ref=main
+          echo "::notice::v$VERSION is written on main as $SHA, and the run that releases it has been started"
 
   build:
-    needs: [decide, verify, bump]
+    needs: [decide, verify]
     # An ordinary push builds nothing here. The checks that run on every commit
-    # are a different file; this one exists to make what people download.
-    if: |
-      !cancelled() && !failure()
-      && (needs.decide.outputs.release == 'true' || github.event_name == 'workflow_dispatch')
+    # are a different file; this one exists to make what people download. Nor
+    # does a scheduled run that writes a version: the run it starts builds it.
+    if: needs.decide.outputs.release == 'true' || needs.decide.outputs.dry == 'true'
     permissions:
       contents: read
     strategy:
@@ -358,53 +484,19 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       # A release has to be one commit built five times, and it is the commit
-      # the number was written in when `bump` wrote one. The default ref is
-      # not that: it is the commit this run was started for, and a scheduled
-      # run's version commit is made on top of it a minute before. Every
-      # scheduled build checked out the commit before the number, refused it
-      # as foreign, and built nothing; the release then waited for the next
-      # push and was tagged on a later commit its notes did not describe.
+      # this run was started for: the one `verify` checked, the one the
+      # attestation below will name, and the one the tag goes on. The default
+      # ref, and nothing else.
       #
-      # Named, then, and vouched for below: the one commit above the tree
-      # `verify` passed, changing nothing in it but version numbers.
-      # `fetch-depth: 2` so that tree is here to compare with.
-      #
-      # A dry run cannot show any of this, since it makes no version commit:
-      # only a scheduled run that bumps goes down this road.
+      # It was the version commit a scheduled run had just made, checked out by
+      # name, one commit above the one this run was started for. The build
+      # vouched that the two differed in version numbers only, and they did,
+      # but the attestation is GitHub's account of the run and named the
+      # commit below: every scheduled release was attested as built from a
+      # tree whose Cargo.toml gives the version before. A version commit is
+      # released now by a run started for it (see `bump`), so there is no
+      # other commit to name here.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ needs.bump.outputs.sha || github.sha }}
-          fetch-depth: 2
-
-      - name: The commit this release is
-        if: needs.bump.outputs.sha != ''
-        shell: bash
-        run: |
-          set -euo pipefail
-          here=$(git rev-parse HEAD)
-          want="${{ needs.bump.outputs.sha }}"
-          if [ "$here" != "$want" ]; then
-            echo "this machine has $here and the release is $want; nothing is built" >&2
-            exit 1
-          fi
-          if [ "$(git rev-parse HEAD^)" != "$GITHUB_SHA" ]; then
-            echo "$want is not the one commit above $GITHUB_SHA, which the checks passed;" >&2
-            echo "something else reached the branch between the two; nothing is built" >&2
-            exit 1
-          fi
-          if ! git diff --quiet "$GITHUB_SHA" HEAD -- . ':(exclude)Cargo.toml' ':(exclude)Cargo.lock'; then
-            echo "$want changes more than Cargo.toml and Cargo.lock; nothing is built" >&2
-            exit 1
-          fi
-          other=$(git diff -U0 "$GITHUB_SHA" HEAD -- Cargo.toml Cargo.lock \
-            | grep -E '^[-+]' | grep -vE '^(\+\+\+|---) ' \
-            | grep -vE '^[-+]version = "[0-9]+\.[0-9]+\.[0-9]+"$' || true)
-          if [ -n "$other" ]; then
-            echo "$want changes more than version numbers; nothing is built:" >&2
-            echo "$other" >&2
-            exit 1
-          fi
-          echo "building $here, the version written on $GITHUB_SHA"
 
       - name: Install the toolchain this repository pins
         run: rustup show
@@ -423,8 +515,10 @@ jobs:
       - name: Gather what goes in the archive
         shell: bash
         run: |
+          # A dispatch is a dry run only when it names a version: the one a
+          # scheduled run starts names none, and releases the version on main.
           version="${{ needs.decide.outputs.version }}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ "${{ needs.decide.outputs.dry }}" = "true" ]; then
             version="${{ inputs.version }}"
           fi
           # The folder carries the version; the archive does not, so the
@@ -440,6 +534,8 @@ jobs:
           for program in cairnd cairn-wallet cairn-explorer; do
             cp "target/${{ matrix.target }}/release/${program}${suffix}" "$folder/"
           done
+          # Every file copied here from the repository is in the list of
+          # paths `decide` compares, or a change to it is never released.
           cp LICENSE-MIT LICENSE-APACHE "$folder/"
           cp deploy/DOWNLOAD.txt "$folder/README.txt"
           printf '%s\n' "$version" > "$folder/VERSION"
@@ -462,15 +558,10 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [decide, bump, build]
-    # The same condition `build` carries, and for the same reason it grew one:
-    # `bump` does not run on a push, and a job whose dependency was skipped is
-    # skipped with it unless it says otherwise. Saying otherwise without saying
-    # this as well would have run the publishing on every ordinary push, with
-    # nothing built to publish.
-    if: |
-      !cancelled() && !failure()
-      && (needs.decide.outputs.release == 'true' || github.event_name == 'workflow_dispatch')
+    needs: [decide, build]
+    # The condition `build` carries: a job whose dependencies all succeeded,
+    # on a run that releases or is a dry run.
+    if: needs.decide.outputs.release == 'true' || needs.decide.outputs.dry == 'true'
     runs-on: ubuntu-latest
     # The only job that writes anything: the release, and the attestation that
     # says which build produced it.
@@ -480,26 +571,35 @@ jobs:
       attestations: write
     steps:
       # The commit the machines built, for the same reason they build it: what
-      # is tagged and published has to be what was built, and the notes have
-      # to describe what is tagged.
+      # is tagged and published has to be what was built and what the
+      # attestation names, and the notes have to describe what is tagged.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ needs.bump.outputs.sha || github.sha }}
           # The commit that changed the version becomes the release notes and
           # the tag's message, so the whole history has to be here.
           fetch-depth: 0
 
+      # The attestation names the commit this run was started for, whatever is
+      # checked out, and the tag goes on what is checked out. They are the same
+      # commit or nothing is published. And that commit is the version the
+      # release is named after, so the programs inside say what the tag says.
       - name: The commit this release is
-        if: needs.bump.outputs.sha != ''
         shell: bash
+        env:
+          VERSION: ${{ needs.decide.outputs.version }}
         run: |
           set -euo pipefail
           here=$(git rev-parse HEAD)
-          want="${{ needs.bump.outputs.sha }}"
-          if [ "$here" != "$want" ]; then
-            echo "this machine has $here and the release is $want" >&2
+          if [ "$here" != "$GITHUB_SHA" ]; then
+            echo "this machine has $here and the attestation will name $GITHUB_SHA; nothing is published" >&2
             exit 1
           fi
+          holds=$(awk '/^\[workspace\.package\]/{s=1;next} /^\[/{s=0} s && /^version[[:space:]]*=/{split($0,a,"\"");print a[2];exit}' Cargo.toml)
+          if [ "$holds" != "$VERSION" ]; then
+            echo "$here holds version $holds and the release is v$VERSION; nothing is published" >&2
+            exit 1
+          fi
+          echo "releasing $here, which holds v$VERSION"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -523,9 +623,33 @@ jobs:
       # archives, so unattested it caught a download that went wrong and not
       # one that was swapped, while the notes offered it as the same check.
       - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        id: attest
         if: needs.decide.outputs.release == 'true'
         with:
           subject-path: "downloads/*.tar.gz, downloads/*.zip, downloads/SHA256SUMS"
+
+      # Read back from the attestation itself, before anything is tagged: the
+      # commit it names is the commit about to be tagged and published. The
+      # download notes tell people this is what the attestation says, and for
+      # every scheduled release until this was read it was not.
+      - name: The commit the attestation names
+        if: needs.decide.outputs.release == 'true'
+        shell: bash
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          here=$(git rev-parse HEAD)
+          named=$(jq -r '.dsseEnvelope.payload' "$BUNDLE" \
+            | while read -r payload; do
+                printf '%s' "$payload" | base64 -d \
+                  | jq -r '.predicate.buildDefinition.resolvedDependencies[].digest.gitCommit // empty'
+              done | sort -u)
+          if [ "$named" != "$here" ]; then
+            echo "the attestation names ${named:-no commit} and the release is $here; nothing is tagged or published" >&2
+            exit 1
+          fi
+          echo "the attestation names $here, the commit built and about to be tagged"
 
       # The commit that changed the version, followed by the same closing note
       # every time: how to check these files without having to believe anyone.
@@ -535,20 +659,41 @@ jobs:
       # bumps the version and then fixes a typo released the typo's message as
       # its notes and as its tag, and the version this repository stands at
       # today was set fifteen commits before the current head.
+      #
+      # And then every commit the release carries that came after it. The
+      # commit released is not always the one that set the version: a push
+      # that lands before the release run starts, or after a release whose
+      # build failed, releases its own commit, and the version commit's
+      # account stops where that commit began. It was published as the whole
+      # account, and the tag said the same, of a release carrying a change it
+      # did not name.
       - name: Write the release notes
+        shell: bash
         run: |
+          set -euo pipefail
           version="${{ needs.decide.outputs.version }}"
-          git log -S"version = \"$version\"" -1 --format='%B' -- Cargo.toml > notes.md
-          if [ ! -s notes.md ]; then
+          set_by=$(git log -S"version = \"$version\"" -1 --format='%H' -- Cargo.toml)
+          if [ -z "$set_by" ]; then
             echo "could not find the commit that set version $version" >&2
             exit 1
+          fi
+          git log -1 --format='%B' "$set_by" > notes.md
+          after=$(git log "$set_by"..HEAD --no-merges --format='  %s')
+          if [ -n "$after" ]; then
+            # `%B` ends in a blank line already.
+            {
+              echo "Merged after the version was set, and in this release too:"
+              echo
+              printf '%s\n' "$after"
+            } >> notes.md
           fi
           cat deploy/RELEASE_FOOTER.md >> notes.md
           cat notes.md
 
       # Made here rather than by hand, from the number the release is named
       # after, so a tag cannot name one version over programs reporting
-      # another. Annotated with the commit that asked for the release.
+      # another. Annotated with the notes: the commit that asked for the
+      # release, and whatever it carries that came after.
       - name: Tag it
         if: needs.decide.outputs.release == 'true'
         run: |

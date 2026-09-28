@@ -28,6 +28,10 @@
 # key that spends them.
 
 set -eu
+# No word here is a file pattern. The installed command line is split into
+# words unquoted, and `[::]:9944`, a node listening on every IPv6 interface,
+# is a pattern the shell would match against the files where this is run.
+set -f
 
 REPO="${REPO:-https://github.com/cairnchain/cairn}"
 SRC="/usr/local/src/cairn"
@@ -37,11 +41,20 @@ BIN=/usr/local/bin/cairnd
 
 say() { printf '\n== %s\n' "$1"; }
 
-# The installed unit is the only record of what this machine was told to do:
-# NETWORK, PORT, SEED and MINE are written down nowhere else. So a setting
-# this run does not name is read back out of it rather than reset to the
-# default. An update that says nothing changes nothing, which is what makes
-# the update line printed at the end safe to follow.
+# The installed unit is the record of what this script told the machine:
+# NETWORK, PORT, SEED and MINE are written on its command line and nowhere
+# else. So a setting this run does not name is read back out of it rather
+# than reset to the default. An update that says nothing changes nothing,
+# which is what makes the update line printed at the end safe to follow.
+#
+# It is not all that the node reads. cairnd also reads cairn.conf in its data
+# directory: the command line wins over the file, the seeds of both are used,
+# and a key the file names is mined to unless the line says `--mine off`.
+# This script does not write that file, and used to speak as if it did not
+# exist: it printed `mining   off` over a node that went on mining to the key
+# in it. So a miner stopped out loud is stopped with `--mine off`, and the
+# summary ends with what the new build reads from the line and the file
+# together.
 #
 # An unset variable and an empty one are different things here. Unset says
 # nothing about a setting. Empty says put it back to the default.
@@ -291,19 +304,45 @@ if [ -f "$UNIT" ]; then
 fi
 
 # What the loops above cannot carry faithfully: quoting, which would split a
-# word differently from systemd, a variable or specifier systemd would expand,
-# or a pattern the shell would.
+# word differently from systemd, or a variable or specifier systemd would
+# expand. A pattern is carried as it stands, since nothing here globs
+# (`set -f` above) and systemd does not either. It was refused, `[::]:9944`
+# with it, with advice to move the setting into cairn.conf, where the
+# `--listen` this script always writes then overrode it: the node moved to
+# every IPv4 interface and no IPv6 one.
 case "$INSTALLED" in
-    *\"* | *\'* | *\\* | *\$* | *%* | *\** | *\?* | *\[*)
+    *\"* | *\'* | *\\* | *\$* | *%*)
         echo "the installed unit's command line has something this script cannot" >&2
         echo "carry as it stands:" >&2
         echo "  $INSTALLED" >&2
-        echo "write it without quotes, variables or patterns, or move the setting" >&2
-        echo "into cairn.conf in the data directory, and run this again." >&2
+        echo "write it without quotes, backslashes, variables or % specifiers, and" >&2
+        echo "run this again." >&2
         exit 1
         ;;
 esac
 
+# The command line systemd runs, when it is not the unit's own. A drop-in
+# that sets ExecStart runs instead of the line in the unit, and this script
+# reads, carries and rewrites only that one: it would carry settings from,
+# set aside the chain of, and print as running, a command that does not run.
+# README sends every other directive to a drop-in (`systemctl edit cairnd`),
+# so the command line is the one thing refused there.
+dropped_in=$(systemctl cat cairnd 2>/dev/null | awk -v unit="$UNIT" '
+    /^# \// { file = substr($0, 3); next }
+    file != unit && /^[[:space:]]*ExecStart[[:space:]]*=/ { print file }
+' | sort -u)
+if [ -n "$dropped_in" ]; then
+    echo "the command line cairnd runs is set outside $UNIT, which is" >&2
+    echo "the one this script reads and writes:" >&2
+    echo "$dropped_in" | sed 's/^/  /' >&2
+    echo "move it into the unit, take ExecStart out of the file above, run" >&2
+    echo "systemctl daemon-reload, and run this again. Nothing is changed." >&2
+    exit 1
+fi
+
+# Whether this run named MINE at all, which `resolve` cannot say afterwards:
+# named empty and not named both leave it empty.
+MINE_SAID=${MINE+named}
 the_settings
 
 # The network the directory holds, in the words of the build that is running
@@ -320,15 +359,21 @@ if [ -n "$named" ]; then
     WAS=${WAS:-$named}
 fi
 
-# MINE=off said stop mining before an empty value said it for every setting.
-if [ "$MINE" = "off" ]; then
-    MINE=""
+# Mining stopped out loud: MINE named empty, or `off`, which said it before
+# an empty value said it for every setting, or a `--mine off` carried from the
+# unit. Written as `--mine off`, the one thing that stops a key cairn.conf
+# names. An empty MINE only left `--mine` off the line, and the node went on
+# mining to the file's key under a summary saying `mining   off`. Not named
+# and not carried, MINE stays empty and the line says nothing about mining:
+# cairn.conf decides, as it always has.
+if [ -n "$MINE_SAID" ] && [ -z "$MINE" ]; then
+    MINE=off
 fi
 
 # A key that is not a key produces a service that will not start, and systemd
 # reports that as a failure to launch rather than as a bad argument. Asked
 # here as well as by `--check` below, because this is before the build.
-if [ -n "$MINE" ]; then
+if [ -n "$MINE" ] && [ "$MINE" != off ]; then
     case "$MINE" in
         *[!0-9a-fA-F]* | "")
             echo "MINE is not a public key: $MINE" >&2
@@ -357,12 +402,12 @@ esac
 echo "network  $NETWORK"
 echo "listen   $ADDRESS:$PORT"
 echo "data     $DATADIR"
-echo "seeds    ${SEED:-none given, the written-in ones are used}"
-if [ -n "$MINE" ]; then
-    echo "mining   to $MINE"
-else
-    echo "mining   off"
-fi
+echo "seeds    ${SEED:-none on the command line}"
+case "$MINE" in
+    off) echo "mining   off, whatever cairn.conf says" ;;
+    "") echo "mining   not on the command line: cairn.conf decides, and the build says below" ;;
+    *) echo "mining   to $MINE" ;;
+esac
 if [ -n "$KEPT" ]; then
     echo "kept     ${KEPT# }, which this run did not name"
 fi
@@ -454,6 +499,13 @@ settle_the_network "$BUILT"
 NOW=$(name_of "$BUILT" "$NETWORK")
 ARGS=$(the_line)
 check_the_line "$BUILT"
+# What the node will do, in the words of the build about to be installed:
+# the line and the cairn.conf beside the chain, read together. The lines
+# printed at the start are what this run was told and carried, which is not
+# the whole of it.
+echo "cairnd reads this line, and $DATADIR/cairn.conf where there is one, as:"
+# shellcheck disable=SC2086
+"$BUILT" --check $ARGS 2>/dev/null | grep -E '^(network|listen|seeds?|mining) ' | sed 's/^/  /' || true
 
 if ! id cairn >/dev/null 2>&1; then
     useradd --system --home-dir "$DATA" --shell /usr/sbin/nologin cairn

@@ -24,6 +24,11 @@
 # carried as it stands.
 
 set -eu
+# No word here is a file pattern. The installed command line is split into
+# words unquoted, and `[::]:9945`, an explorer listening on every IPv6
+# interface, is a pattern the shell would match against the files where this
+# is run.
+set -f
 
 REPO="${REPO:-https://github.com/cairnchain/cairn}"
 SRC="/usr/local/src/cairn"
@@ -181,9 +186,24 @@ name_of() {
 # setting forward is right until the build stops accepting it, and then it is
 # a service that will not start. The explorer itself is asked, since it is the
 # only thing that knows which names this build has.
+#
+# Only a refusal of the line is taken to mean the name is gone, for the reason
+# `install.sh` gives beside the same lines: the explorer exits 2 for a command
+# line it will not read and 1 for a start that failed. This took any failure
+# for the first after `install.sh` had stopped doing so, and the next reason
+# the check could fail would have moved the machine to another network and
+# set its chain aside, without a word about why.
 settle_the_network() {
-    if (cd / && "$1" --check --network "$NETWORK") >/dev/null 2>&1; then
+    refused=0
+    (cd / && "$1" --check --network "$NETWORK") >/dev/null 2>&1 || refused=$?
+    if [ "$refused" -eq 0 ]; then
         return 0
+    fi
+    if [ "$refused" -ne 2 ]; then
+        echo "network  cairn-explorer --check --network $NETWORK failed for a reason other" >&2
+        echo "         than the name, so nothing is installed. It said:" >&2
+        (cd / && "$1" --check --network "$NETWORK") >&2 || true
+        exit 1
     fi
     # Asked, not written down, for the reason `install.sh` carries beside the
     # same lines: the day testnet-6 is retired, a rescue that hands back
@@ -253,17 +273,39 @@ if [ -f "$UNIT" ]; then
 fi
 
 # What the loops above cannot carry faithfully: quoting, which would split a
-# word differently from systemd, a variable or specifier systemd would expand,
-# or a pattern the shell would.
+# word differently from systemd, or a variable or specifier systemd would
+# expand. A pattern is carried as it stands, since nothing here globs
+# (`set -f` above) and systemd does not either: `[::]:9945` was refused, and
+# an explorer on IPv6 could not be updated by this script at all.
 case "$INSTALLED" in
-    *\"* | *\'* | *\\* | *\$* | *%* | *\** | *\?* | *\[*)
+    *\"* | *\'* | *\\* | *\$* | *%*)
         echo "the installed unit's command line has something this script cannot" >&2
         echo "carry as it stands:" >&2
         echo "  $INSTALLED" >&2
-        echo "write it without quotes, variables or patterns, and run this again." >&2
+        echo "write it without quotes, backslashes, variables or % specifiers, and" >&2
+        echo "run this again." >&2
         exit 1
         ;;
 esac
+
+# The command line systemd runs, when it is not the unit's own. A drop-in
+# that sets ExecStart runs instead of the line in the unit, and this script
+# reads, carries and rewrites only that one: it would carry settings from,
+# set aside the chain of, and print as running, a command that does not run.
+# README sends every other directive to a drop-in (`systemctl edit cairn-explorer`),
+# so the command line is the one thing refused there.
+dropped_in=$(systemctl cat cairn-explorer 2>/dev/null | awk -v unit="$UNIT" '
+    /^# \// { file = substr($0, 3); next }
+    file != unit && /^[[:space:]]*ExecStart[[:space:]]*=/ { print file }
+' | sort -u)
+if [ -n "$dropped_in" ]; then
+    echo "the command line cairn-explorer runs is set outside $UNIT, which is" >&2
+    echo "the one this script reads and writes:" >&2
+    echo "$dropped_in" | sed 's/^/  /' >&2
+    echo "move it into the unit, take ExecStart out of the file above, run" >&2
+    echo "systemctl daemon-reload, and run this again. Nothing is changed." >&2
+    exit 1
+fi
 
 the_settings
 
@@ -306,7 +348,9 @@ if [ -n "$REST" ]; then
 fi
 
 say "Source"
+before=none
 if [ -d "$SRC/.git" ]; then
+    before=$(git -C "$SRC" rev-parse HEAD)
     branch=$(git -C "$SRC" symbolic-ref --short HEAD 2>/dev/null || echo main)
     git -C "$SRC" fetch --quiet origin
     git -C "$SRC" reset --hard --quiet "origin/$branch"
@@ -314,7 +358,23 @@ else
     rm -rf "$SRC"
     git clone --quiet "$REPO" "$SRC"
 fi
+after=$(git -C "$SRC" rev-parse HEAD)
 echo "at $(git -C "$SRC" rev-parse --short HEAD)"
+
+# A shell reads its script as it goes, so the update just fetched is not the
+# one running: this script has already been read from the file it overwrote.
+# If it moved, hand over to the new one, as `install.sh` does beside the same
+# lines. This one went on with the version that was on the machine, so every
+# change to it reached a machine one update late: the first update after one
+# built the new explorer and then wrote its unit and its Caddyfile the old way.
+if [ "${CAIRN_INSTALLER_REEXEC:-}" != "1" ] && [ "$before" != "none" ] &&
+   [ "$before" != "$after" ] &&
+   ! git -C "$SRC" diff --quiet "$before" "$after" -- deploy/explorer.sh; then
+    echo "this script changed; running the new one"
+    CAIRN_INSTALLER_REEXEC=1
+    export CAIRN_INSTALLER_REEXEC
+    exec sh "$SRC/deploy/explorer.sh"
+fi
 
 if [ -f "$HOME/.cargo/env" ]; then
     # shellcheck disable=SC1091
