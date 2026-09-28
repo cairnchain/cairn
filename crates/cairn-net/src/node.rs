@@ -7496,8 +7496,11 @@ fn answer_deferred(
     // ten seconds for about six and a half kilobytes a second of asking.
     //
     // What it could not afford is not read, and the peer asks again against a
-    // fresh window. A short batch is what it already gets for heights this
-    // node no longer holds, so nothing downstream is new.
+    // fresh window once its patience with the batch runs out, from past what
+    // arrived: a branch it follows has moved its locator on, and one it holds
+    // aside is remembered in `PeerState::aside`. A short batch is what it
+    // already gets for heights this node no longer holds, so nothing
+    // downstream is new.
     for (block, weight) in
         shared.blocks_at(&reaction.fetch, |weight| peer.afford_serving(weight, now))
     {
