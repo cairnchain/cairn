@@ -306,7 +306,9 @@ if [ -n "$REST" ]; then
 fi
 
 say "Source"
+before=none
 if [ -d "$SRC/.git" ]; then
+    before=$(git -C "$SRC" rev-parse HEAD)
     branch=$(git -C "$SRC" symbolic-ref --short HEAD 2>/dev/null || echo main)
     git -C "$SRC" fetch --quiet origin
     git -C "$SRC" reset --hard --quiet "origin/$branch"
@@ -314,7 +316,23 @@ else
     rm -rf "$SRC"
     git clone --quiet "$REPO" "$SRC"
 fi
+after=$(git -C "$SRC" rev-parse HEAD)
 echo "at $(git -C "$SRC" rev-parse --short HEAD)"
+
+# A shell reads its script as it goes, so the update just fetched is not the
+# one running: this script has already been read from the file it overwrote.
+# If it moved, hand over to the new one, as `install.sh` does beside the same
+# lines. This one went on with the version that was on the machine, so every
+# change to it reached a machine one update late: the first update after one
+# built the new explorer and then wrote its unit and its Caddyfile the old way.
+if [ "${CAIRN_INSTALLER_REEXEC:-}" != "1" ] && [ "$before" != "none" ] &&
+   [ "$before" != "$after" ] &&
+   ! git -C "$SRC" diff --quiet "$before" "$after" -- deploy/explorer.sh; then
+    echo "this script changed; running the new one"
+    CAIRN_INSTALLER_REEXEC=1
+    export CAIRN_INSTALLER_REEXEC
+    exec sh "$SRC/deploy/explorer.sh"
+fi
 
 if [ -f "$HOME/.cargo/env" ]; then
     # shellcheck disable=SC1091
