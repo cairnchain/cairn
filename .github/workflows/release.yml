@@ -217,7 +217,14 @@ jobs:
           # rendered from, which is in no program.
           # `release_decision_sees_every_file_a_program_is_built_from` in the
           # explorer's tests holds this list against what the sources include.
-          paths="$paths Cargo.lock rust-toolchain.toml Cargo.toml web docs/*.html docs/*.css"
+          #
+          # And what goes into every archive beside the programs, which is
+          # downloaded as surely as they are: the two licences, and the notes
+          # that tell a person how to check what they downloaded
+          # (`deploy/DOWNLOAD.txt`, as README.txt). A correction to those
+          # waited here for an unrelated change to the code. The step that
+          # gathers the archive copies exactly these three.
+          paths="$paths Cargo.lock rust-toolchain.toml Cargo.toml web docs/*.html docs/*.css LICENSE-MIT LICENSE-APACHE deploy/DOWNLOAD.txt"
           echo "built from:" $built
 
           # Unquoted on purpose: this is a list of paths and not one path.
@@ -527,6 +534,8 @@ jobs:
           for program in cairnd cairn-wallet cairn-explorer; do
             cp "target/${{ matrix.target }}/release/${program}${suffix}" "$folder/"
           done
+          # Every file copied here from the repository is in the list of
+          # paths `decide` compares, or a change to it is never released.
           cp LICENSE-MIT LICENSE-APACHE "$folder/"
           cp deploy/DOWNLOAD.txt "$folder/README.txt"
           printf '%s\n' "$version" > "$folder/VERSION"
