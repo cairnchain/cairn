@@ -26,7 +26,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufReader, Read, Write};
-use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
@@ -42,7 +42,9 @@ pub const MAX_LINE_BYTES: usize = 2 * 1024;
 /// Connections served at once. Beyond this a caller is turned away rather than
 /// queued, so a flood costs threads that are already bounded.
 pub const MAX_CONNECTIONS: usize = 64;
-/// Connections held at once from any one address.
+/// Connections held at once from any one machine: one IPv4 address, or one
+/// IPv6 /64, which is what a provider hands a single customer. See
+/// `one_machine`.
 ///
 /// The ceiling above says what a flood costs; this says that one machine
 /// cannot be the whole flood. Without it a single host takes all
@@ -61,9 +63,9 @@ pub const MAX_CONNECTIONS: usize = 64;
 /// flood arriving through the proxy wears the proxy's address too. There the
 /// protection is the deadline above and whatever the proxy imposes in front.
 /// This ceiling is for the other deployment, a node answering on a public
-/// port with nothing in front of it, which is where one address really is one
-/// machine and where holding every slot is an attack somebody can mount from
-/// a laptop.
+/// port with nothing in front of it, which is where one address, or one /64,
+/// really is one machine and where holding every slot is an attack somebody
+/// can mount from a laptop.
 const MAX_PER_HOST: usize = 16;
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a caller has, from being accepted, to finish asking.
@@ -488,9 +490,23 @@ struct Counts {
 /// capped at [`MAX_PER_HOST`] readers at a time. The note above that constant
 /// calls the exemption "the whole reason this number can stay this low", and
 /// the one deployment it was written for is the one it never reached.
+///
+/// And an IPv6 caller is its /64. Every home line and every rented machine is
+/// handed one at least, so the whole address was a key one machine could
+/// change at every connection, and a node answering on a public port had no
+/// ceiling per machine at all for anybody calling over IPv6. The loopback is
+/// left whole, since `::1` is inside the /64 of nothing and is the one address
+/// the exemption above has to recognise.
 fn one_machine(host: IpAddr) -> IpAddr {
     match host {
-        IpAddr::V6(within) => within.to_ipv4_mapped().map_or(host, IpAddr::V4),
+        IpAddr::V6(within) => match within.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None if within.is_loopback() => host,
+            None => {
+                let [a, b, c, d, ..] = within.segments();
+                IpAddr::V6(Ipv6Addr::new(a, b, c, d, 0, 0, 0, 0))
+            }
+        },
         IpAddr::V4(already) => IpAddr::V4(already),
     }
 }
@@ -1402,7 +1418,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::fmt::Write as _;
     use std::io::Write as _;
-    use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener, TcpStream};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -2034,6 +2050,42 @@ mod tests {
             MAX_CONNECTIONS,
             "the proxy was counted as one visitor and the site was capped at \
              {MAX_PER_HOST} readers"
+        );
+    }
+
+    /// One IPv6 machine is one caller, however many of its addresses it
+    /// calls from.
+    ///
+    /// Every home line and every rented machine is handed a /64 at least,
+    /// which is 2^64 addresses on one machine. Counted by the whole address,
+    /// that machine had no ceiling at all on a node answering on a public
+    /// port: a fresh address for every connection took every slot there is.
+    /// Nothing asked about two addresses in one /64, so that passed.
+    #[test]
+    fn one_ipv6_machine_is_one_caller_whichever_of_its_addresses_it_uses() {
+        let within = |last: u16| {
+            Some(IpAddr::V6(Ipv6Addr::new(
+                0x2001, 0xdb8, 0, 1, 0, 0, 0, last,
+            )))
+        };
+        let slots = Arc::new(Slots::default());
+        let held: Vec<_> = (1..=u16::try_from(MAX_PER_HOST).unwrap())
+            .filter_map(|last| slots.take(within(last)))
+            .collect();
+        assert_eq!(held.len(), MAX_PER_HOST);
+        assert!(
+            slots.take(within(0xffff)).is_none(),
+            "one machine took a slot past its share by calling from another address \
+             in its own /64"
+        );
+        let next_door = Some(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 2, 0, 0, 0, 1)));
+        assert!(
+            slots.take(next_door).is_some(),
+            "a caller in another /64 was counted with the first"
+        );
+        assert!(
+            one_machine(IpAddr::V6(Ipv6Addr::LOCALHOST)).is_loopback(),
+            "this machine's own v6 loopback stopped being the loopback"
         );
     }
 

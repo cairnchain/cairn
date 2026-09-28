@@ -32,12 +32,15 @@ use std::io::{Cursor, Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
+use cairn_chain::Located;
 use cairn_ledger::validation::ConsensusParams;
 use cairn_primitives::codec::Encode;
+use cairn_primitives::Hash32;
 
-use cairn_net::message::Message;
+use cairn_net::message::{Message, MAX_ANNOUNCED};
 use cairn_net::wire::{
-    most_from, read_message, WireError, FRAME_PATIENCE, MAX_FRAME_BYTES, MOST_BEFORE_A_NAME,
+    most_from, read_message, write_message, Incoming, WireError, FRAME_PATIENCE, MAX_FRAME_BYTES,
+    MOST_BEFORE_A_NAME,
 };
 
 fn params() -> ConsensusParams {
@@ -186,5 +189,72 @@ fn a_peer_that_said_who_it_was_gets_the_whole_frame() {
     assert!(
         most_from(false) < most_from(true),
         "the two are the same number, so naming them apart bought nothing"
+    );
+}
+
+/// Reads from `reading` until a message `wanted` accepts arrives, saying why
+/// the connection failed first if it did.
+///
+/// Counted in messages rather than in time: each read waits for as long as a
+/// slow runner needs, and a node that has hung up answers the next read at
+/// once with the reason.
+fn read_until(reading: &mut TcpStream, wanted: impl Fn(&Message) -> bool) -> Result<(), String> {
+    reading
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    for _ in 0..1_000 {
+        match read_message(reading, params().network, MAX_FRAME_BYTES) {
+            Ok(Incoming::Message(message)) if wanted(&message) => return Ok(()),
+            Ok(_) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("a thousand messages went by without the one waited for".to_owned())
+}
+
+/// A peer that introduced itself without naming a port it listens on is read
+/// under the protocol's frame cap from then on, like any other peer.
+///
+/// What lifted the stranger's cap was the port rather than the introduction:
+/// the reading loop set its flag once the peer had an address worth writing
+/// down, which a handshake saying `listen: 0` never gives it. So a peer that
+/// said who it was and does not listen, which is what a wallet on a phone is,
+/// could never hand this node a block, and its first one cost it the
+/// connection and its address a refusal. Nothing sent such a peer anything
+/// past four kilobytes, so the node that did this passed.
+#[test]
+fn a_peer_that_introduced_itself_without_a_port_gets_the_whole_frame_too() {
+    let node = cairn_net::Node::bind(params(), "127.0.0.1:0".parse().unwrap()).unwrap();
+    let mut writing = TcpStream::connect(node.address()).unwrap();
+    let mut reading = writing.try_clone().unwrap();
+
+    write_message(&mut writing, params().network, &hello(7_002, 0)).unwrap();
+    let welcomed = read_until(&mut reading, |message| {
+        matches!(message, Message::Welcome(_))
+    });
+
+    // A legal message past the stranger's cap and inside the protocol's: an
+    // announcement of as many blocks as one may name.
+    let announcement = Message::Announce(
+        (1..=u64::try_from(MAX_ANNOUNCED).unwrap())
+            .map(|height| Located::new(height, Hash32::from_bytes([7; 32])))
+            .collect(),
+    );
+    let size = announcement.encode().len();
+    write_message(&mut writing, params().network, &announcement).unwrap();
+    write_message(&mut writing, params().network, &Message::Ping(42)).unwrap();
+    let answered = read_until(&mut reading, |message| *message == Message::Pong(42));
+    node.shutdown();
+
+    assert!(welcomed.is_ok(), "the peer was not welcomed at all");
+    assert!(
+        size > MOST_BEFORE_A_NAME && size <= MAX_FRAME_BYTES,
+        "the announcement is not between the two caps, so it measures nothing"
+    );
+    assert!(
+        answered.is_ok(),
+        "a peer that introduced itself with no listening port was still held to the \
+         stranger's cap, and the node hung up on it over a legal frame: {}",
+        answered.err().unwrap_or_default()
     );
 }

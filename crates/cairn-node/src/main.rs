@@ -11,10 +11,11 @@ use std::time::{Duration, Instant};
 use cairn_chain::{Accepted, Outdated};
 use cairn_ledger::block::BLOCK_VERSION;
 use cairn_ledger::validation::ConsensusParams;
+use cairn_net::node::BAD_BLOCK_WINDOW;
 use cairn_net::node::{
     Behind, Probation, Stranded, Unjudged, Unread, Unweighable, Unwritten, MAX_BEHIND,
 };
-use cairn_net::{Filling, Joined, Node, NodeError, Restored, Unanswered};
+use cairn_net::{Filling, Joined, Node, NodeError, Restored, TurnedAway, Unanswered};
 
 const TICK: Duration = Duration::from_millis(100);
 
@@ -172,6 +173,9 @@ fn run(arguments: &[String]) -> Result<Ending, Stopping> {
     say!("listening    {}", node.address());
     for line in what_was_restored(&restored, &options.data.display().to_string()) {
         say!("{line}");
+    }
+    if let Some(aside) = node.addresses_set_aside() {
+        println!("{}", addresses_set_aside(&aside.display().to_string()));
     }
     // Before the node has answered anybody, because filling the headers in
     // from the blocks is the first thing that reads them back, and a refusal
@@ -419,6 +423,13 @@ fn say_what_the_numbers_do_not(node: &Node, directory: &str) {
     if let Some(unjudged) = node.unjudged() {
         say(&too_old(&unjudged));
     }
+    // And a node turning away machine after machine for blocks it rejects,
+    // which is how the node looks when it is the one out of step: every
+    // other line here is the line a healthy node prints, and the peers it
+    // refuses are the ones that could have told it.
+    if let Some(line) = refusing_the_network(&node.refused_hosts()) {
+        say(&line);
+    }
     // A disk that dropped a write and was put right. Nothing is wrong now,
     // which is exactly why it has to be said: `Node::mended_nodes` has been
     // there since the mending was written, with a doc comment saying a disk
@@ -476,6 +487,39 @@ fn say_what_the_numbers_do_not(node: &Node, directory: &str) {
     if let Some(because) = node.unsaved_addresses() {
         say(&addresses_not_written(&because, directory));
     }
+}
+
+/// Machines turned away for a bad block within the window, from which it is
+/// said.
+///
+/// One is a broken or hostile peer, and two can be; three different machines
+/// in ten minutes is the network, or this node, and either is worth a line.
+const SEVERAL_REFUSED: usize = 3;
+
+/// What an operator is told when this node has turned several machines away
+/// for blocks it rejects, or nothing.
+fn refusing_the_network(turned: &TurnedAway) -> Option<String> {
+    if turned.bad_block_hosts_lately < SEVERAL_REFUSED {
+        return None;
+    }
+    Some(format!(
+        "{} different machines were turned away in the last {} minutes for sending a block \
+         this node rejects ({} in all since it started). One is a broken or hostile peer; \
+         several at once is more often this node disagreeing with the network. Check that it \
+         runs the current release and that the machine's clock is right, and compare its \
+         height with another node's.",
+        turned.bad_block_hosts_lately,
+        BAD_BLOCK_WINDOW / 60,
+        turned.bad_blocks,
+    ))
+}
+
+/// What an operator is told when the list of peers did not read at start.
+fn addresses_set_aside(aside: &str) -> String {
+    format!(
+        "             the list of peers did not read as a whole, so it was moved to \
+         {aside} rather than written over; what did read is in use"
+    )
 }
 
 /// What an operator is told when the list of peers will not write.
@@ -1970,10 +2014,12 @@ mod what_the_exit_code_says {
 #[allow(clippy::unwrap_used)]
 mod what_an_operator_is_told {
     use super::{
-        addresses_not_written, cannot_switch_to, clock, further_behind_than_peers_keep,
-        nobody_can_get_in, probation_line, short, stamp, will_not_read_back, wrapped,
+        addresses_not_written, addresses_set_aside, cannot_switch_to, clock,
+        further_behind_than_peers_keep, nobody_can_get_in, probation_line, refusing_the_network,
+        short, stamp, will_not_read_back, wrapped, SEVERAL_REFUSED,
     };
     use cairn_net::node::{Probation, Reading, Unread};
+    use cairn_net::TurnedAway;
     use cairn_net::Unanswered;
     use std::time::Instant;
 
@@ -1988,6 +2034,29 @@ mod what_an_operator_is_told {
     fn each_message_carries_what_it_was_given() {
         let said = addresses_not_written("no space left on device", "/var/lib/cairn");
         assert!(said.contains("no space left on device") && said.contains("/var/lib/cairn"));
+
+        let said = addresses_set_aside("/var/lib/cairn/peers.txt.unread-1");
+        assert!(said.contains("/var/lib/cairn/peers.txt.unread-1"), "{said}");
+
+        let turned = TurnedAway {
+            bad_blocks: 17,
+            bad_block_hosts_lately: SEVERAL_REFUSED,
+            ..TurnedAway::default()
+        };
+        let said = refusing_the_network(&turned).unwrap();
+        assert!(said.starts_with("3 different machines"), "{said}");
+        assert!(
+            said.contains("last 10 minutes") && said.contains("17 in all"),
+            "{said}"
+        );
+        assert!(
+            refusing_the_network(&TurnedAway {
+                bad_block_hosts_lately: SEVERAL_REFUSED - 1,
+                ..turned
+            })
+            .is_none(),
+            "one or two peers turned away is said as though it were the network"
+        );
 
         let refused = Unanswered {
             because: "too many open files".to_owned(),

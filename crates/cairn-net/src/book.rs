@@ -14,7 +14,7 @@
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use cairn_store::write_beside_and_move;
 
@@ -62,6 +62,19 @@ pub const MAX_PER_GROUP: usize = 32;
 /// a bad connection would empty the book.
 pub(crate) const MAX_MISSES: u8 = 3;
 
+/// Dials in a row that were taken and shut before a word, before an address
+/// is dropped.
+///
+/// Counted apart from misses, because the two are different news. A dial
+/// nothing answered is a machine that may be gone; a dial that was taken and
+/// shut is somebody there, and it is what a node with no room does. Booked as
+/// a miss, a full honest node left the book of everybody who tried it three
+/// times, in about five minutes, while the strangers holding its slots stayed
+/// in theirs. Allowed far more, so such a node is tried again for hours; and
+/// still counted, so an address that takes every connection and shuts it is
+/// dropped in the end.
+pub(crate) const MAX_TURNED_AWAY: u8 = 32;
+
 /// How long an address is left alone after one failed dial.
 ///
 /// It doubles twice over per further miss, so an address that has just missed
@@ -81,15 +94,24 @@ const MAX_QUIET: u64 = 600;
 
 /// What is known about one address beyond the address itself.
 ///
-/// None of this is written down. A restart forgets which addresses were quiet
-/// and finds out again in a few seconds, which is a better trade than a file
-/// format carrying counters that mean nothing to the person reading it. Being
-/// a seed is not written down either: it is told to the book at every start by
-/// whoever started the node.
+/// Only when it was last heard from is written down, beside the address. The
+/// rest is not: a restart forgets which addresses were quiet and finds out
+/// again in a few seconds, which is a better trade than a file format carrying
+/// counters that mean nothing to the person reading it. Being a seed is not
+/// written down either: it is told to the book at every start by whoever
+/// started the node.
+///
+/// `heard` is the exception because it is what the book's guard stands on:
+/// only an address never heard from gives way to a stranger's. It was not
+/// written down either, and a restart turned every address in the book into
+/// one never heard from, which is the moment an attacker who filled the book
+/// is waiting for.
 #[derive(Clone, Copy, Debug, Default)]
 struct Known {
     /// Failed dials in a row, cleared by any peer that introduces itself.
     misses: u8,
+    /// Dials in a row taken and shut before a word, cleared the same way.
+    turned_away: u8,
     /// When it last spoke, or when it was first written down.
     heard: u64,
     /// The moment before which this address is not dialled again.
@@ -117,10 +139,15 @@ struct Known {
 
 impl Known {
     /// How long to leave an address alone after `misses` failures running.
+    ///
+    /// A multiplication rather than a shift of the delay itself. A shift
+    /// narrower than the number is answered even when every bit went out the
+    /// top, so thirty two misses came back as no wait at all; a product that
+    /// does not fit says so.
     fn quiet_for(misses: u8) -> u64 {
         let steps = u32::from(misses.saturating_sub(1)).saturating_mul(2);
-        RETRY_DELAY
-            .checked_shl(steps)
+        1u64.checked_shl(steps)
+            .and_then(|factor| RETRY_DELAY.checked_mul(factor))
             .unwrap_or(MAX_QUIET)
             .min(MAX_QUIET)
     }
@@ -158,12 +185,12 @@ pub struct AddressBook {
     /// so a peer naming five hundred addresses in one message costs five
     /// hundred lookups and not five hundred passes over the book.
     groups: BTreeMap<Group, usize>,
-    /// How many times the addresses held have changed.
+    /// How many times what the file is written from has changed.
     ///
-    /// What the file is written from is the list of addresses and nothing
-    /// else, so this counts the two things that change it: one going in and
-    /// one going out. Misses, seed marks and the rest move what is known
-    /// about an address and leave the file identical.
+    /// The file is the list of addresses and when each was last heard from,
+    /// so this counts the three things that change it: one going in, one
+    /// going out, and one answering. Misses, seed marks and the rest move
+    /// what is known about an address and leave the file identical.
     ///
     /// It is here so that upkeep can tell a book that has changed from one
     /// that has not. Every round used to copy the whole book, turn four
@@ -174,14 +201,21 @@ pub struct AddressBook {
     /// A number this node draws when it starts and never says.
     ///
     /// It decides where each address sits among the ones nothing is known
-    /// about, and that is a decision somebody was making for this node. When
-    /// an address was last heard from is not written to the file, on purpose,
-    /// so every address in a book read back from a disk carries the same
-    /// nothing; ordering those by the address itself put whoever holds the
-    /// lowest numbers at the front of the book on every restart, first to be
-    /// dialled and first to be passed on, for the price of renting the right
-    /// range. Drawn rather than derived, so it is not a thing to aim at.
+    /// about, and that is a decision somebody was making for this node. Every
+    /// address never heard from carries the same nothing, and so did every
+    /// address in a book read back from a disk before when it was heard from
+    /// was written down; ordering those by the address itself put whoever
+    /// holds the lowest numbers at the front of the book on every restart,
+    /// first to be dialled and first to be passed on, for the price of
+    /// renting the right range. Drawn rather than derived, so it is not a
+    /// thing to aim at.
     salt: u64,
+    /// Where the file this book was read from was moved to, because it did
+    /// not read, whole or in part.
+    set_aside: Option<PathBuf>,
+    /// Whether the file this book was read from did not read and could not be
+    /// moved out of the way either, so writing the book would write over it.
+    held_back: bool,
 }
 
 /// Where one address sits in the order it is dialled and handed on.
@@ -222,6 +256,8 @@ impl Default for AddressBook {
             groups: BTreeMap::new(),
             changes: 0,
             salt: fresh_salt(),
+            set_aside: None,
+            held_back: false,
         }
     }
 }
@@ -232,7 +268,7 @@ impl Default for AddressBook {
 /// read like a v4 range is not counted against that range. The two are
 /// different stretches of the book, and what makes room in a full
 /// neighbourhood reads one stretch.
-type Group = [u8; 5];
+pub(crate) type Group = [u8; 5];
 
 /// One number standing for a whole address, before the book's own draw is
 /// mixed into it.
@@ -298,7 +334,13 @@ fn neighbourhood_of(address: &SocketAddr) -> (SocketAddr, SocketAddr) {
 
 /// Which neighbourhood an address belongs to.
 fn group_of(address: &SocketAddr) -> Group {
-    match address.ip() {
+    group_of_host(address.ip())
+}
+
+/// Which neighbourhood a host belongs to: the rule the book groups by, for
+/// the rules beside it that need the same answer.
+pub(crate) fn group_of_host(ip: IpAddr) -> Group {
+    match ip {
         IpAddr::V4(ip) => {
             let octets = ip.octets();
             [4, octets[0], octets[1], 0, 0]
@@ -308,6 +350,47 @@ fn group_of(address: &SocketAddr) -> Group {
             [6, octets[0], octets[1], octets[2], octets[3]]
         }
     }
+}
+
+/// Where a neighbourhood sits in an order this node draws for itself, so
+/// which neighbourhoods come first is nothing anybody outside can aim at.
+pub(crate) fn drawn_place(group: Group, salt: u64) -> u64 {
+    group.iter().fold(mixed(salt), |carried, byte| {
+        mixed(carried ^ u64::from(*byte))
+    })
+}
+
+/// The one machine an address stands for, to every rule that counts, pauses
+/// or turns away one party.
+///
+/// Two things are taken off. An IPv4 address wearing an IPv6 hat is that
+/// IPv4 address, for the reason [`realm_of`] gives: a listener bound to `[::]`
+/// hands every IPv4 peer over as `::ffff:a.b.c.d`, and a rule that read the
+/// two spellings apart was a rule with a spelling anybody could use. And an
+/// IPv6 address is its /64. Every home line and every rented machine is
+/// handed one at least, which is 2^64 addresses on one machine, so a rule
+/// keyed on the whole address was one that machine passed as often as it
+/// liked: its share of connections, its refusal, its allowance and its pause
+/// all came fresh with the next address. Only the book grouped addresses at
+/// all, and nothing beside it did.
+///
+/// The loopback is left whole. `::1` is inside nobody's /64, and it is the
+/// one address several rules exist to recognise.
+pub(crate) fn machine_of(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) if !v6.is_loopback() => {
+            let [a, b, c, d, ..] = v6.segments();
+            IpAddr::V6(Ipv6Addr::new(a, b, c, d, 0, 0, 0, 0))
+        }
+        other => other,
+    }
+}
+
+/// An address as the book keeps it: an IPv4 one wearing an IPv6 hat is
+/// written as the IPv4 address it is, so one machine is one entry and sits in
+/// its own neighbourhood.
+fn canonical(address: SocketAddr) -> SocketAddr {
+    SocketAddr::new(address.ip().to_canonical(), address.port())
 }
 
 impl AddressBook {
@@ -349,6 +432,7 @@ impl AddressBook {
     /// only ever an address this node has never heard a word from. A book
     /// full of peers that answered is a book a stranger cannot move.
     pub fn insert(&mut self, address: SocketAddr) -> bool {
+        let address = canonical(address);
         if !is_dialable(&address) || self.known.contains_key(&address) {
             return false;
         }
@@ -448,6 +532,7 @@ impl AddressBook {
     /// back from disk before the seeds are known, so the same addresses are
     /// usually already there as plain entries.
     pub(crate) fn insert_seed(&mut self, address: SocketAddr) -> bool {
+        let address = canonical(address);
         if !is_dialable(&address) {
             return false;
         }
@@ -546,12 +631,14 @@ impl AddressBook {
             return;
         };
         known.misses = 0;
+        known.turned_away = 0;
         known.quiet_until = 0;
         let before = known.heard;
         known.heard = now;
         if before != now {
             self.unseat(address, before);
             self.seat(*address, now);
+            self.changes = self.changes.saturating_add(1);
         }
     }
 
@@ -570,6 +657,39 @@ impl AddressBook {
         }
         self.remove(address);
         true
+    }
+
+    /// Notes that a dial to this address was taken and shut before the far
+    /// end said a word.
+    ///
+    /// Returns whether that was the last chance it had. Waits as a miss does,
+    /// and is allowed [`MAX_TURNED_AWAY`] of them rather than
+    /// [`MAX_MISSES`]: see the first for why.
+    pub(crate) fn turned_away(&mut self, address: &SocketAddr, now: u64) -> bool {
+        let Some(known) = self.known.get_mut(address) else {
+            return false;
+        };
+        known.turned_away = known.turned_away.saturating_add(1);
+        known.quiet_until = now.saturating_add(Known::quiet_for(known.turned_away));
+        if known.turned_away < MAX_TURNED_AWAY || known.seed {
+            return false;
+        }
+        self.remove(address);
+        true
+    }
+
+    /// Notes that this address answered a dial from another protocol
+    /// version, another network or another first block.
+    ///
+    /// Nothing is counted against it. A node there has done nothing wrong and
+    /// may be on this one tomorrow, and counting the ending as a miss took it
+    /// out of the book on the third. It is left alone for the longest wait,
+    /// so a node does not spend a dial every round on a peer it cannot yet
+    /// talk to.
+    pub(crate) fn belongs_elsewhere(&mut self, address: &SocketAddr, now: u64) {
+        if let Some(known) = self.known.get_mut(address) {
+            known.quiet_until = now.saturating_add(MAX_QUIET);
+        }
     }
 
     /// Writes down what an address said about keeping the cold set.
@@ -611,6 +731,7 @@ impl AddressBook {
     pub(crate) fn forgive_all(&mut self) {
         for known in self.known.values_mut() {
             known.misses = 0;
+            known.turned_away = 0;
             known.quiet_until = 0;
         }
     }
@@ -637,6 +758,36 @@ impl AddressBook {
             .filter(|(_, known)| known.quiet_until <= now)
             .map(|(address, _)| address)
             .collect()
+    }
+
+    /// Addresses worth dialling right now that nothing has ever been heard
+    /// from, in the order this book drew for them.
+    ///
+    /// What a feeler dials: see `node::feel`. Read off the tail of the
+    /// order, where every address never heard from sits.
+    pub(crate) fn not_yet_heard(&self, now: u64) -> Vec<SocketAddr> {
+        let unheard = self
+            .order
+            .iter()
+            .rev()
+            .take_while(|seat| seat.0 == Reverse(0))
+            .count();
+        self.order
+            .iter()
+            .skip(self.order.len().saturating_sub(unheard))
+            .filter(|seat| {
+                self.known
+                    .get(&seat.2)
+                    .is_some_and(|known| known.quiet_until <= now)
+            })
+            .map(|seat| seat.2)
+            .collect()
+    }
+
+    /// When an address was last heard from, nought for never.
+    #[cfg(test)]
+    pub(crate) fn heard_from(&self, address: &SocketAddr) -> u64 {
+        self.known.get(address).map_or(0, |known| known.heard)
     }
 
     /// Every address, most recently heard from first.
@@ -720,21 +871,78 @@ impl AddressBook {
         (chosen.into_iter().map(PeerAddress).collect(), read)
     }
 
-    /// Reads the book from `directory`, treating an unreadable or missing file
-    /// as an empty one. A lost address book costs a node its head start, never
-    /// its chain.
+    /// Reads the book from `directory`, treating a missing file as an empty
+    /// one. A lost address book costs a node its head start, never its chain.
+    ///
+    /// Each line is an address, and when it was last heard from if it ever
+    /// was: see [`Self::save`]. A file an older build wrote has only the first
+    /// column, and reads.
+    ///
+    /// A file that does not read, whole or in part, is moved aside before
+    /// anything can write the book over it, and [`Self::set_aside`] says
+    /// where. What did read is kept. It used to be read as far as it went and
+    /// then written over by the first round of upkeep: a file that would not
+    /// read as text was an empty book, a line that did not parse was skipped,
+    /// and an operator who typed a name into the file, or whose disk garbled
+    /// it, lost what was there without a word.
     pub fn load(directory: impl AsRef<Path>) -> Self {
         let path = directory.as_ref().join(PEER_FILE);
-        let Ok(contents) = std::fs::read_to_string(path) else {
-            return Self::new();
-        };
         let mut book = Self::new();
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            // No file at all, or something other than a file, which no save
+            // writes over either: it is refused, and the refusal is said.
+            Err(_) if !path.is_file() => return book,
+            Err(_) => {
+                book.put_aside(&path);
+                return book;
+            }
+        };
+        let mut all_read = true;
         for line in contents.lines() {
-            if let Ok(address) = line.trim().parse::<SocketAddr>() {
-                book.insert(address);
+            match read_line(line) {
+                Some(Some((address, heard))) => {
+                    book.insert(address);
+                    book.recall(&address, heard);
+                }
+                Some(None) => {}
+                None => all_read = false,
             }
         }
+        if !all_read {
+            book.put_aside(&path);
+        }
         book
+    }
+
+    /// Moves the file at `path` out of the way of the next save, or holds the
+    /// next save back when it cannot be moved.
+    fn put_aside(&mut self, path: &Path) {
+        match set_aside(path) {
+            Ok(aside) => self.set_aside = Some(aside),
+            Err(_) => self.held_back = true,
+        }
+    }
+
+    /// Where the file this book was read from was moved to because it did not
+    /// read, if it did not.
+    pub fn set_aside(&self) -> Option<&Path> {
+        self.set_aside.as_deref()
+    }
+
+    /// Puts back when an address read from the file was last heard from.
+    fn recall(&mut self, address: &SocketAddr, heard: u64) {
+        let address = canonical(*address);
+        let Some(known) = self.known.get_mut(&address) else {
+            return;
+        };
+        let before = known.heard;
+        if heard <= before {
+            return;
+        }
+        known.heard = heard;
+        self.unseat(&address, before);
+        self.seat(address, heard);
     }
 
     /// How many times the addresses held have changed.
@@ -753,10 +961,13 @@ impl AddressBook {
         self.known.values().any(|known| known.seed)
     }
 
-    /// Writes the book to `directory`, one address per line.
+    /// Writes the book to `directory`, one address per line, followed by when
+    /// it was last heard from if it ever was, in seconds since 1970.
     ///
     /// Plain text on purpose: an operator should be able to read and edit the
-    /// list of machines their node will talk to.
+    /// list of machines their node will talk to. The second column is there
+    /// because the book's guard against a stranger stands on it; an operator
+    /// adding a line need not write one.
     ///
     /// Written beside the file and moved onto it. It used to be written
     /// straight over it, which truncates first: a disk with nothing left, or a
@@ -766,15 +977,73 @@ impl AddressBook {
     /// with nothing to dial and no way onto the network. Losing the book is
     /// meant to cost a head start; losing it this way costs the way back.
     pub fn save(&self, directory: impl AsRef<Path>) -> std::io::Result<()> {
+        if self.held_back {
+            return Err(std::io::Error::other(
+                "the file of peers did not read and could not be moved aside, so it is \
+                 left as it is rather than written over",
+            ));
+        }
         let directory = directory.as_ref();
         std::fs::create_dir_all(directory)?;
         let mut contents = String::new();
-        for address in self.known.keys() {
+        for (address, known) in &self.known {
             contents.push_str(&address.to_string());
+            if known.heard > 0 {
+                contents.push(' ');
+                contents.push_str(&known.heard.to_string());
+            }
             contents.push('\n');
         }
         write_beside_and_move(&directory.join(PEER_FILE), contents.as_bytes())
     }
+}
+
+/// One line of the file of peers: nothing, for a blank line; an address and
+/// when it was last heard from, nought for never; or `None` for a line that
+/// does not read.
+#[allow(clippy::option_option)]
+fn read_line(line: &str) -> Option<Option<(SocketAddr, u64)>> {
+    let mut words = line.split_whitespace();
+    let Some(first) = words.next() else {
+        return Some(None);
+    };
+    let address = first.parse::<SocketAddr>().ok()?;
+    let heard = match words.next() {
+        Some(word) => word.parse::<u64>().ok()?,
+        None => 0,
+    };
+    if words.next().is_some() {
+        return None;
+    }
+    Some(Some((address, heard)))
+}
+
+/// Names tried for a file of peers set aside before giving up.
+const SET_ASIDE_NAMES: u32 = 64;
+
+/// Moves a file of peers that did not read to a name nothing writes to, and
+/// says where it went.
+///
+/// The name is the file's with `.unread-` and the first number nothing stands
+/// at, as the wallet does for an account it could not read, so one set aside
+/// before keeps its own.
+fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a file name"))?;
+    for count in 1..=SET_ASIDE_NAMES {
+        let mut aside = name.to_os_string();
+        aside.push(format!(".unread-{count}"));
+        let aside = path.with_file_name(aside);
+        if std::fs::symlink_metadata(&aside).is_err() {
+            std::fs::rename(path, &aside)?;
+            return Ok(aside);
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "every name a file of peers is set aside under is taken",
+    ))
 }
 
 /// Whether an address is an address at all.
@@ -1694,6 +1963,136 @@ mod tests {
         assert_eq!(book.ready(last + MAX_QUIET), vec![address(1, 9000)]);
     }
 
+    /// However many dials an address has missed, it is left alone at least as
+    /// long as it was after the miss before, and never past the longest wait.
+    ///
+    /// The wait is `RETRY_DELAY` shifted left, and a shift narrower than the
+    /// number is answered even when every bit of it went out the top: at
+    /// thirty two misses the wait came back as nothing. Nothing asked past
+    /// twenty, so a seed that had missed thirty two dials in a row passed
+    /// while being dialled again at once.
+    #[test]
+    fn the_wait_after_a_miss_never_shrinks_however_many_there_were() {
+        let mut before = 0;
+        for misses in 1..=u8::MAX {
+            let wait = Known::quiet_for(misses);
+            assert!(
+                wait >= before,
+                "the wait after a miss went back down, so an address that has missed \
+                 dial after dial is dialled again sooner than one that missed once"
+            );
+            assert!(wait <= MAX_QUIET, "the wait went past the longest one");
+            before = wait;
+        }
+        assert_eq!(
+            before, MAX_QUIET,
+            "a long run of misses ends at the longest wait"
+        );
+    }
+
+    /// An address that takes dials and shuts them before a word is kept for
+    /// far more of them than one nothing answers at, is left alone between
+    /// them as after a miss, and is dropped in the end.
+    ///
+    /// Nothing asked. A book that dropped it on the third passed, which is a
+    /// full honest node forgotten by everybody who tried it, and so did one
+    /// that kept it for ever or dialled it again at once.
+    #[test]
+    fn an_address_that_shuts_the_door_is_tried_for_longer_and_then_dropped() {
+        let mut book = AddressBook::new();
+        let busy = address(1, 9000);
+        book.insert(busy);
+        let mut now = 1_000;
+        for _ in 1..MAX_TURNED_AWAY {
+            assert!(
+                !book.turned_away(&busy, now),
+                "an address that took the connection was dropped before its last chance"
+            );
+            assert!(book.ready(now).is_empty(), "it was dialled again at once");
+            now += MAX_QUIET;
+            assert_eq!(book.ready(now), vec![busy], "and never again");
+        }
+        assert!(
+            book.turned_away(&busy, now),
+            "an address that shuts every connection was never dropped"
+        );
+        assert!(!book.contains(&busy));
+    }
+
+    /// What is held against an address that shut the door goes the way a
+    /// miss does: when it answers, and when this machine was away.
+    ///
+    /// Nothing asked, so a count that outlived both passed, and a node
+    /// dropped an address that had answered it since.
+    #[test]
+    fn a_door_shut_earlier_is_forgotten_once_the_address_answers() {
+        let mut book = AddressBook::new();
+        let busy = address(1, 9000);
+        book.insert(busy);
+        for _ in 1..MAX_TURNED_AWAY {
+            book.turned_away(&busy, 1_000);
+        }
+        book.answered(&busy, 2_000);
+        for _ in 1..MAX_TURNED_AWAY {
+            book.turned_away(&busy, 3_000);
+        }
+        book.forgive_all();
+        assert!(
+            !book.turned_away(&busy, 4_000),
+            "the doors shut before it answered, or before the machine was away, were \
+             still counted"
+        );
+        assert!(book.contains(&busy));
+    }
+
+    /// A seed that shuts the door is kept however often it does.
+    #[test]
+    fn a_seed_that_shuts_the_door_is_never_dropped() {
+        let mut book = AddressBook::new();
+        let seed = address(1, 9000);
+        book.insert_seed(seed);
+        for _ in 0..u16::from(MAX_TURNED_AWAY) * 2 {
+            assert!(
+                !book.turned_away(&seed, 1_000),
+                "a seed was given a last chance"
+            );
+        }
+        assert!(book.contains(&seed));
+    }
+
+    /// An address that answered from another version, network or first
+    /// block is left alone for the longest wait, and nothing is counted
+    /// against it.
+    ///
+    /// Nothing asked. A book that counted it as a miss passed, and dropped
+    /// on the third a node that may be on this network tomorrow; so did one
+    /// that dialled it again every round.
+    #[test]
+    fn an_address_from_elsewhere_is_left_alone_and_not_counted() {
+        let mut book = AddressBook::new();
+        let elsewhere = address(1, 9000);
+        book.insert(elsewhere);
+        for _ in 1..MAX_MISSES {
+            book.missed(&elsewhere, 1_000);
+        }
+        for _ in 0..u16::from(MAX_MISSES) * 2 {
+            book.belongs_elsewhere(&elsewhere, 2_000);
+        }
+        assert!(
+            book.contains(&elsewhere),
+            "an address from elsewhere was dropped"
+        );
+        assert!(
+            book.ready(2_000 + MAX_QUIET - 1).is_empty(),
+            "an address from elsewhere was dialled again before the longest wait was over"
+        );
+        assert_eq!(book.ready(2_000 + MAX_QUIET), vec![elsewhere]);
+        assert!(
+            book.missed(&elsewhere, 3_000),
+            "the misses it had before were forgotten, so answering from elsewhere washed them"
+        );
+    }
+
     /// A machine restarting must not cost its address a place in the book.
     #[test]
     fn answering_clears_what_was_held_against_an_address() {
@@ -1836,6 +2235,82 @@ mod tests {
         assert!(book.is_empty());
     }
 
+    /// Where a neighbourhood sits in the order a node draws moves with every
+    /// bit of the neighbourhood and with the draw.
+    ///
+    /// The order decides which neighbourhoods a full node keeps a connection
+    /// from, and it is only worth anything if nobody outside can aim at it. A
+    /// place that ignored the draw, or some bits of the neighbourhood, passed
+    /// every test of what is kept, because those tests hold for any order.
+    #[test]
+    fn every_bit_of_a_neighbourhood_and_the_draw_move_its_place() {
+        const BITS: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
+        for salt in 0..64u64 {
+            let group: Group = [4, 203, u8::try_from(salt).unwrap(), 0, 0];
+            let place = drawn_place(group, salt);
+            assert_ne!(
+                drawn_place(group, salt ^ 1),
+                place,
+                "another draw put the neighbourhood in the same place"
+            );
+            for at in 0..group.len() {
+                for bit in BITS {
+                    let mut other = group;
+                    if let Some(byte) = other.get_mut(at) {
+                        *byte ^= bit;
+                    }
+                    assert_ne!(
+                        drawn_place(other, salt),
+                        place,
+                        "two neighbourhoods one bit apart drew the same place"
+                    );
+                }
+            }
+        }
+    }
+
+    /// An IPv4 address spelt as IPv6 is the same address in the book, and
+    /// sits in its own neighbourhood.
+    ///
+    /// A listener bound to `[::]` hands an IPv4 peer over as
+    /// `::ffff:a.b.c.d`. The book kept the two spellings as two addresses,
+    /// and put every mapped one in a single neighbourhood of its own, so one
+    /// machine was two entries and thirty two mapped addresses from anywhere
+    /// shut every other mapped one out. Nothing asked, so that passed.
+    #[test]
+    fn an_address_spelt_both_ways_is_one_address() {
+        let plain = Ipv4Addr::new(203, 0, 113, 1);
+        let as_v4 = SocketAddr::from((plain, 9_000));
+        let as_v6 = SocketAddr::from((plain.to_ipv6_mapped(), 9_000));
+        let mut book = AddressBook::new();
+        assert!(book.insert(as_v6));
+        assert!(
+            !book.insert(as_v4),
+            "one address went into the book twice, once under each spelling"
+        );
+        assert!(book.contains(&as_v4));
+        assert_eq!(book.len(), 1);
+        assert!(
+            !book.insert_seed(as_v6) || book.len() == 1,
+            "a seed spelt the other way went in beside the address it names"
+        );
+        assert_eq!(book.len(), 1);
+
+        // Mapped addresses from all over are as many neighbourhoods as their
+        // IPv4 selves.
+        let mut spread_out = AddressBook::new();
+        for index in 0..=MAX_PER_GROUP {
+            let far_apart = Ipv4Addr::new(203, u8::try_from(index).unwrap(), 0, 1);
+            spread_out.insert(SocketAddr::from((far_apart.to_ipv6_mapped(), 9_000)));
+        }
+        assert_eq!(
+            spread_out.len(),
+            MAX_PER_GROUP + 1,
+            "IPv4 addresses from different neighbourhoods were crowded into one because \
+             they arrived spelt as IPv6"
+        );
+    }
+
     #[test]
     fn the_book_survives_a_round_trip_through_a_file() {
         let directory =
@@ -1859,6 +2334,33 @@ mod tests {
         );
     }
 
+    /// An address never heard from is written as the address alone, and one
+    /// heard from with the moment it last answered.
+    ///
+    /// Nought is what the book keeps for never, not a moment: written out, it
+    /// tells a person reading the file that the address answered in 1970.
+    /// The file read back the same either way, so a save that wrote it passed.
+    #[test]
+    fn an_address_never_heard_from_is_written_without_a_time() {
+        let directory = scratch("bare");
+        let mut book = AddressBook::new();
+        let (never, heard) = (address(7, 9000), address(8, 9000));
+        book.insert(never);
+        book.insert(heard);
+        book.answered(&heard, 1_000);
+        book.save(&directory).unwrap();
+        let text = std::fs::read_to_string(directory.join(PEER_FILE)).unwrap();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            text.lines().any(|line| line == never.to_string()),
+            "an address never heard from was written with a time: {text}"
+        );
+        assert!(
+            text.lines().any(|line| line == format!("{heard} 1000")),
+            "an address heard from was written without the moment: {text}"
+        );
+    }
+
     #[test]
     fn a_missing_or_broken_file_reads_as_an_empty_book() {
         let directory =
@@ -1874,6 +2376,169 @@ mod tests {
         .unwrap();
         let book = AddressBook::load(&directory);
         assert_eq!(book.len(), 1, "the readable lines are kept");
+    }
+
+    /// A scratch directory of its own.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("cairn-book-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    /// Every file in `directory`, as bytes.
+    fn everything_in(directory: &Path) -> Vec<Vec<u8>> {
+        std::fs::read_dir(directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read(entry.path()).ok())
+            .collect()
+    }
+
+    /// A book full of peers that answered is still a book a stranger cannot
+    /// move after a restart.
+    ///
+    /// `make_room` gives up only an address never heard from, and the file
+    /// carried the addresses and nothing else, so every address read back
+    /// was one never heard from and the same stranger's insert that a full
+    /// book refused before the restart was taken after it, in place of a peer
+    /// that had answered for months. That is the shape of the Heilman attack:
+    /// fill the book, wait for the restart. The round trip test held the
+    /// addresses and nothing the book does with them, so that passed.
+    #[test]
+    fn a_book_of_peers_that_answered_is_not_a_strangers_to_move_after_a_restart() {
+        let mut book = AddressBook::new();
+        for index in 0..MAX_ADDRESSES {
+            assert!(book.insert(spread(index)));
+            book.answered(&spread(index), 1_000 + u64::try_from(index).unwrap());
+        }
+        let stranger: SocketAddr = "203.0.113.7:9000".parse().unwrap();
+        assert!(
+            !book.insert(stranger),
+            "the fixture should refuse the stranger"
+        );
+
+        let directory = scratch("restart");
+        book.save(&directory).unwrap();
+        let mut revived = AddressBook::load(&directory);
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            revived.len(),
+            MAX_ADDRESSES,
+            "the file carried every address"
+        );
+        assert!(
+            !revived.insert(stranger),
+            "after a restart a stranger's address was taken in place of one that had \
+             answered, because the file does not say which addresses were heard from"
+        );
+        assert_eq!(
+            revived.ready(0).first(),
+            Some(&spread(MAX_ADDRESSES - 1)),
+            "the address heard from last was not the first dialled after the restart"
+        );
+    }
+
+    /// A file that did not read, whole or in part, is set aside before
+    /// anything writes the book over it.
+    ///
+    /// It was read as far as it went: a file that would not read as text was
+    /// an empty book, a line that did not parse was skipped, and the first
+    /// round of upkeep wrote the book over the file. An operator who typed a
+    /// name into it, or whose disk garbled it, lost what was there, seeds
+    /// included, and was told nothing. Nothing looked at the file after a
+    /// save, so that passed.
+    #[test]
+    fn a_file_that_did_not_read_is_set_aside_and_never_written_over() {
+        let typed = "seed.example.org:9944\n203.0.113.1:9000\n";
+        let garbled: &[u8] = &[0xff, 0xfe, b'\n', b'1'];
+        for (name, contents) in [("typed", typed.as_bytes()), ("garbled", garbled)] {
+            let directory = scratch(name);
+            std::fs::write(directory.join(PEER_FILE), contents).unwrap();
+            let book = AddressBook::load(&directory);
+            book.save(&directory).unwrap();
+            let kept = everything_in(&directory)
+                .iter()
+                .any(|file| file.as_slice() == contents);
+            let said = book.set_aside().is_some();
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(
+                kept,
+                "a file of peers that did not read was written over, and what it held is gone"
+            );
+            assert!(said, "a file of peers was set aside and nothing said where");
+        }
+        assert_eq!(
+            {
+                let directory = scratch("typed-again");
+                std::fs::write(directory.join(PEER_FILE), typed).unwrap();
+                let book = AddressBook::load(&directory);
+                let _ = std::fs::remove_dir_all(&directory);
+                book.len()
+            },
+            1,
+            "the lines that did read are kept"
+        );
+    }
+
+    /// A file that did not read, and that there is no name left to move it
+    /// to, is left where it is and the book is not written over it.
+    #[test]
+    fn a_file_that_did_not_read_and_cannot_be_moved_is_not_written_over() {
+        let directory = scratch("no-names-left");
+        for count in 1..=SET_ASIDE_NAMES {
+            std::fs::write(directory.join(format!("{PEER_FILE}.unread-{count}")), "").unwrap();
+        }
+        let garbled: &[u8] = &[0xff, 0xfe];
+        std::fs::write(directory.join(PEER_FILE), garbled).unwrap();
+        let book = AddressBook::load(&directory);
+        let saved = book.save(&directory);
+        let left = std::fs::read(directory.join(PEER_FILE)).unwrap();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            saved.is_err(),
+            "the book was written over a file that did not read"
+        );
+        assert_eq!(left.as_slice(), garbled, "and the file was changed");
+    }
+
+    /// Something at the book's path that is not a file is left where it is.
+    ///
+    /// No save writes over it either, and the refusal to is what the node
+    /// reports. Moving it aside would move somebody's directory.
+    #[test]
+    fn what_is_not_a_file_is_not_set_aside() {
+        let directory = scratch("a-directory");
+        std::fs::create_dir_all(directory.join(PEER_FILE)).unwrap();
+        let book = AddressBook::load(&directory);
+        let still_there = directory.join(PEER_FILE).is_dir();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(book.set_aside().is_none(), "a directory was set aside");
+        assert!(still_there, "a directory at the book's path was moved");
+    }
+
+    /// A file that reads is not set aside, whether an older build wrote it or
+    /// this one did.
+    #[test]
+    fn a_file_that_reads_is_left_where_it_is() {
+        let directory = scratch("reads");
+        std::fs::write(
+            directory.join(PEER_FILE),
+            "203.0.113.1:9000\n\n203.0.113.2:9000 1700000000\n",
+        )
+        .unwrap();
+        let book = AddressBook::load(&directory);
+        let files = everything_in(&directory).len();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(book.len(), 2);
+        assert!(book.set_aside().is_none(), "a file that read was set aside");
+        assert_eq!(files, 1, "a file that read was copied somewhere");
+        assert_eq!(
+            book.ready(0).first(),
+            Some(&"203.0.113.2:9000".parse::<SocketAddr>().unwrap()),
+            "when an address was heard from was not read back"
+        );
     }
 
     #[test]

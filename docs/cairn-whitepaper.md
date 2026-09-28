@@ -1040,6 +1040,17 @@ which chain carries the most work takes the headers from the first block,
 and a node handed a ledger has them only from where it was handed on. It
 can become one by reading the chain; nothing else is lost.
 
+**The wire is neither private nor bound to a peer.** Nothing between
+two nodes is encrypted or authenticated, so whoever sits on the path, a
+provider, a host or the network in a café, can be every peer a node has
+without running a node at all: it can withhold or delay blocks, and it
+reads every transfer a wallet sends as it leaves. What it cannot do is
+forge, since every block carries its work and every transfer its
+signatures. The rules that keep one party from filling a node's peers are
+rules about addresses, and this adversary needs none. Whether to encrypt
+the transport is a decision this project has not taken; Bitcoin took it
+in BIP 324.
+
 **The theorem's cost is real.** A wallet offline long enough,
 or one that lost its records, must ask an archivist. Nobody is paid for
 that service and the network runs without it, which bounds the problem
@@ -1051,7 +1062,7 @@ proportional to the depth of the set rather than its size. Over half of
 what a hot note costs is the tree that commits to it, which is where the
 room left is.
 
-The implementation is roughly 68 000 lines of Rust with 2 000 tests, no
+The implementation is roughly 77 000 lines of Rust with 2 250 tests, no
 unsafe code, no asynchronous runtime, and five dependencies. Arithmetic
 side effects, slice indexing, and panicking helpers are denied at the
 workspace level. It is small enough to be read, which is the point: a

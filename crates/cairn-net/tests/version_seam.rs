@@ -287,3 +287,88 @@ fn a_version_below_the_rules_is_the_senders_problem_and_is_not_counted() {
          updated node banning most of the network"
     );
 }
+
+/// **The second peer to offer a block from the other side of a rule change is
+/// not refused for it either.**
+///
+/// The specification: a `WrongVersion` verdict is remembered against the
+/// block, and MUST NOT be held against the peer. The chain remembers it in its
+/// set of refused blocks, and answered every later delivery of it with
+/// `KnownBad`, which carries no reason; the reading layer has no arm for that
+/// and fell through to `BadBlock`, which refuses the host. So the first
+/// un-updated peer was let go politely and every one after it was refused for
+/// ten minutes, one exchange each, on the day an update most needs its peers.
+/// Only the first delivery was held, so that passed.
+#[test]
+fn the_second_peer_to_offer_a_block_below_the_rules_is_not_refused_for_it() {
+    let rules = ConsensusParams::testnet();
+    let miner = wallet(2);
+
+    let mut chain = ChainStore::new(rules);
+    let mut state = LedgerState::archiving();
+    let mut clock = 1_000u64;
+    for _ in 0..5 {
+        let height = state.next_height().unwrap();
+        clock += 600;
+        let coinbase = CoinbaseTransaction::new(
+            height,
+            vec![Note::new(rules.initial_reward, miner.public_key())],
+        );
+        let block = assemble_block(&state, coinbase, Vec::new(), &rules, clock, 0).unwrap();
+        let block = mine_block(block, 1 << 22).unwrap();
+        connect_block(&mut state, &block, &rules, NOW).unwrap();
+        chain.add_block(block, NOW).unwrap();
+    }
+    let height = state.next_height().unwrap();
+    let coinbase = CoinbaseTransaction::new(
+        height,
+        vec![Note::new(rules.initial_reward, miner.public_key())],
+    );
+    let mut under = assemble_block(&state, coinbase, Vec::new(), &rules, clock + 600, 0).unwrap();
+    under.header.version = BLOCK_VERSION - 1;
+    let under = mine_block(under, 1 << 22).unwrap();
+
+    let mut deliver = |at: u64| {
+        let mut peer = PeerState {
+            greeted: true,
+            ..PeerState::default()
+        };
+        on_message(
+            &mut Local {
+                keeps: Keeps {
+                    headers: true,
+                    cold_set: false,
+                },
+                nonce: 1,
+                chain: &mut chain,
+                listen: 4242,
+            },
+            &mut peer,
+            Message::Block(Box::new(under.clone())),
+            at,
+        )
+        .drop_peer
+    };
+    let first = deliver(NOW);
+    let second = deliver(NOW + 1);
+    assert!(
+        matches!(
+            first,
+            Some(cairn_net::sync::DropReason::ForeignRules { .. })
+        ),
+        "the fixture should be the first delivery the existing test holds"
+    );
+    assert!(
+        matches!(
+            second,
+            Some(cairn_net::sync::DropReason::ForeignRules { .. })
+        ),
+        "the second peer to offer a block from the other side of a rule change was \
+         dropped for another reason than the first"
+    );
+    assert!(
+        second.is_none_or(|reason| !reason.is_misbehaviour()),
+        "the second peer to offer a block from the other side of a rule change was \
+         refused as a misbehaving host"
+    );
+}

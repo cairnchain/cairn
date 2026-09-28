@@ -17,5 +17,6 @@ pub mod wire;
 pub use joining::Joined;
 pub use message::{Keeps, Message, PeerAddress, MAX_PROVEN, PROTOCOL_VERSION};
 pub use node::{
-    Filling, Node, NodeError, Restored, Unanswered, KEEP_BLOCK_BYTES, NAME_LOOKUP_PERIOD,
+    Filling, Node, NodeError, Restored, TurnedAway, Unanswered, KEEP_BLOCK_BYTES,
+    NAME_LOOKUP_PERIOD,
 };

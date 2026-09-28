@@ -11,7 +11,7 @@
 //! has to be all or nothing. A switch that fails halfway would leave a node
 //! following neither branch, with a state matching no block anyone agrees on.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
 use cairn_ledger::block::{Block, BlockHeader, BLOCK_VERSION};
@@ -363,6 +363,42 @@ pub const MAX_SIDE_BYTES: usize = 32 * 1024 * 1024;
 /// being published after this one moved.
 pub const WARM_BODIES: u64 = 64;
 
+/// Why a block was refused, as far as a later delivery of it needs to know.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Condemned {
+    /// By a rule every version of this software reads the same way.
+    Bad,
+    /// For carrying a version its height's rules do not ask for, which is
+    /// what every node that has not updated sends on the day a rule changes.
+    Foreign {
+        height: u64,
+        found: u16,
+        required: u16,
+    },
+}
+
+impl Condemned {
+    /// What to remember about a block refused with `error`.
+    fn for_(error: &ChainError) -> Self {
+        match error {
+            ChainError::InvalidBlock {
+                source:
+                    BlockError::WrongVersion {
+                        height,
+                        found,
+                        required,
+                    },
+                ..
+            } => Self::Foreign {
+                height: *height,
+                found: *found,
+                required: *required,
+            },
+            _ => Self::Bad,
+        }
+    }
+}
+
 /// Identifiers of blocks known to be invalid, held before the set is cleared.
 ///
 /// Remembering a bad block is what stops it being revalidated every time it
@@ -411,6 +447,26 @@ pub enum ChainError {
     BrokenRun { height: u64 },
     #[error("block {id} was refused once already, and every branch through it with it")]
     KnownBad { id: Hash32 },
+    /// A block refused once already for carrying a version its height's rules
+    /// do not ask for, and every branch through it with it.
+    ///
+    /// Told apart from [`ChainError::KnownBad`] because the two call for
+    /// opposite answers to whoever sent it. A block the rules condemn is sent
+    /// by a peer that is broken or probing. This one is sent in good faith by
+    /// every node that has not updated, on the day a rule changes, and the
+    /// specification says it MUST NOT be held against the peer: answered as
+    /// `KnownBad`, the first un-updated peer to offer it was let go and every
+    /// one after it was refused.
+    #[error(
+        "block {id} was refused once already: it carries version {found} at height \
+         {height}, where the rules ask for version {required}"
+    )]
+    KnownForeign {
+        id: Hash32,
+        height: u64,
+        found: u16,
+        required: u16,
+    },
     #[error("the block tree lost a block it had recorded")]
     Corrupt,
 }
@@ -921,8 +977,9 @@ pub struct ChainStore {
     /// them. Without one it keeps every body it may still need, which is what
     /// a chain with no disk behind it does.
     bodies: Option<Arc<dyn Bodies>>,
-    /// Blocks that failed to apply. Kept so the same block is never retried.
-    invalid: HashSet<Hash32>,
+    /// Blocks that failed to apply, and the one thing about why that a later
+    /// delivery needs told apart. Kept so the same block is never retried.
+    invalid: HashMap<Hash32, Condemned>,
     /// The branch this node follows, held as far back as it can still change
     /// and sampled before that.
     branch: Branch,
@@ -1006,7 +1063,7 @@ impl ChainStore {
             blocks: HashMap::new(),
             held_bytes: 0,
             bodies: None,
-            invalid: HashSet::new(),
+            invalid: HashMap::new(),
             branch: Branch::default(),
             applied: HashMap::new(),
             undo_from: 0,
@@ -2175,8 +2232,8 @@ impl ChainStore {
         //
         // Refused here, beside the other two things that can never become
         // valid, and for the reason written over them.
-        if self.invalid.contains(&id) {
-            return Err(ChainError::KnownBad { id });
+        if let Some(known) = self.known_refused(id) {
+            return Err(known);
         }
 
         // A block this far below the tip cannot be followed whatever is built
@@ -2365,7 +2422,7 @@ impl ChainStore {
                         if self.invalid.len() >= MAX_INVALID {
                             self.invalid.clear();
                         }
-                        self.invalid.insert(*id);
+                        self.invalid.insert(*id, Condemned::for_(&error));
                     }
                     // And the block goes, unless the only thing wrong with it
                     // is that this node is too old to judge it.
@@ -2423,6 +2480,23 @@ impl ChainStore {
         })
     }
 
+    /// The answer for a block already refused, if `id` is one.
+    fn known_refused(&self, id: Hash32) -> Option<ChainError> {
+        Some(match self.invalid.get(&id)? {
+            Condemned::Bad => ChainError::KnownBad { id },
+            Condemned::Foreign {
+                height,
+                found,
+                required,
+            } => ChainError::KnownForeign {
+                id,
+                height: *height,
+                found: *found,
+                required: *required,
+            },
+        })
+    }
+
     /// The blocks between the followed branch and `target`, oldest first,
     /// along with the position on the followed branch they all descend from.
     ///
@@ -2440,13 +2514,15 @@ impl ChainStore {
                 .blocks
                 .get(&cursor)
                 .ok_or(ChainError::UnknownParent(cursor))?;
-            if self.invalid.contains(&cursor) {
-                // What is remembered is that this block failed, not why: the
-                // set holds identifiers and nothing else. Naming a cause here
-                // would mean inventing one, and an invented cause is worse
-                // than none: it is read by whoever has to tell a bad peer
-                // from a node that is out of date.
-                return Err(ChainError::KnownBad { id: cursor });
+            if let Some(known) = self.known_refused(cursor) {
+                // What is remembered is that this block failed, and of why
+                // only the one thing that changes who is to blame: whether
+                // the rules condemned it or it carries another version's
+                // number. Naming any other cause here would mean inventing
+                // one, and an invented cause is worse than none: it is read by
+                // whoever has to tell a bad peer from a node that is out of
+                // date.
+                return Err(known);
             }
             branch.push(cursor);
             if stored.header.height == 0 {
@@ -3783,7 +3859,7 @@ mod tests {
 
         // A block already known to be bad taints every branch through it, so
         // the heaviest chain in memory is worth nothing if it runs over one.
-        store.invalid.insert(rival_ids[1]);
+        store.invalid.insert(rival_ids[1], Condemned::Bad);
         assert!(
             matches!(
                 store.branch_to(rival_ids[2]),

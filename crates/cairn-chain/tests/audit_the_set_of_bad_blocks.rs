@@ -285,10 +285,21 @@ fn every_refusal_a_peer_can_earn_for_a_header_is_remembered() {
             matches!(&first, Err(ChainError::InvalidBlock { source, .. }) if names(source)),
             "{what} earned {first:?}, which is not the refusal this row is about"
         );
-        assert_eq!(
-            store.add_block(bent, NOW),
-            Err(ChainError::KnownBad { id }),
+        let again = store.add_block(bent, NOW);
+        assert!(
+            matches!(
+                again,
+                Err(ChainError::KnownBad { id: known } | ChainError::KnownForeign { id: known, .. })
+                    if known == id
+            ),
             "{what} was judged again rather than answered from the set"
+        );
+        // And answered as what it was: another version's block is the one
+        // refusal here that is not the sender's fault.
+        assert_eq!(
+            matches!(again, Err(ChainError::KnownForeign { .. })),
+            what == "a version these rules do not require",
+            "{what} was remembered as the wrong kind of refusal"
         );
     }
 }

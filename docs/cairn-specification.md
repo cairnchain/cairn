@@ -2572,7 +2572,8 @@ Two refusals are about the conversation rather than about a message. A node
 MUST refuse any message other than `Hello` or `Welcome` from a peer that has not
 introduced itself, and MUST refuse a second introduction on one connection.
 Both are broken or probing behaviour and a node SHOULD hold them against the
-address for a while.
+address for a while, reading an IPv6 address as its /64 for the reason given
+under the allowance below.
 
 An introduction is examined in this order, and the order is what keeps a node
 from spending a connection on itself. First, whether the peer has already
@@ -2717,7 +2718,10 @@ again a moment later against a fresh window.
 The window belongs to the address and not to the socket. A connection's first
 ask SHOULD begin where its address left off in the current window, or a peer
 refills by hanging up and dialling back, which costs it a handshake and earns it
-no refusal. Two connections open at once SHOULD each spend their own and the
+no refusal. An IPv6 address SHOULD be read as its /64 here, since that is what a
+provider hands one customer: read whole, one machine refills by dialling back
+from the next of its 2^64 addresses. An IPv4 address that arrives spelt as IPv6
+(`::ffff:a.b.c.d`) is that IPv4 address. Two connections open at once SHOULD each spend their own and the
 address SHOULD keep the larger rather than the sum, because that is what an
 honest pair of nodes behind one address is, and pooling makes two people behind
 one carrier gateway invisible to each other.
