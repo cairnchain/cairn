@@ -154,6 +154,13 @@ points. What is not carried is a directive added to the unit itself, because
 the unit is written fresh from the one in this directory: put such a directive
 in a drop-in with `systemctl edit cairnd`, which an update never touches.
 
+The command line is the exception, and belongs in the unit, where the update
+reads it and writes it back. A drop-in that sets `ExecStart` runs instead of
+it, so an update would carry the settings of a line that does not run, and
+print that line as the one running. The update refuses while a drop-in sets
+`ExecStart`, names the file, and changes nothing. The same holds for the
+explorer's unit and `explorer.sh`.
+
 Before anything on the machine changes, the new build is asked whether it
 would run the line the update is about to install. A line it refuses is
 printed with the reason and nothing is installed.

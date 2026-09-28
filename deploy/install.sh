@@ -304,6 +304,25 @@ case "$INSTALLED" in
         ;;
 esac
 
+# The command line systemd runs, when it is not the unit's own. A drop-in
+# that sets ExecStart runs instead of the line in the unit, and this script
+# reads, carries and rewrites only that one: it would carry settings from,
+# set aside the chain of, and print as running, a command that does not run.
+# README sends every other directive to a drop-in (`systemctl edit cairnd`),
+# so the command line is the one thing refused there.
+dropped_in=$(systemctl cat cairnd 2>/dev/null | awk -v unit="$UNIT" '
+    /^# \// { file = substr($0, 3); next }
+    file != unit && /^[[:space:]]*ExecStart[[:space:]]*=/ { print file }
+' | sort -u)
+if [ -n "$dropped_in" ]; then
+    echo "the command line cairnd runs is set outside $UNIT, which is" >&2
+    echo "the one this script reads and writes:" >&2
+    echo "$dropped_in" | sed 's/^/  /' >&2
+    echo "move it into the unit, take ExecStart out of the file above, run" >&2
+    echo "systemctl daemon-reload, and run this again. Nothing is changed." >&2
+    exit 1
+fi
+
 the_settings
 
 # The network the directory holds, in the words of the build that is running
