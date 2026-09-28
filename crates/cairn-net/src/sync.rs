@@ -163,6 +163,24 @@ pub struct PeerState {
     /// decides. Whoever wants a rule about a quiet peer wants the one in the
     /// loop.
     pub asked_at: u64,
+    /// The last block this peer delivered that this node holds off the
+    /// branch it follows, until the next `Chain` this peer sends takes it.
+    ///
+    /// What lets a branch that parts below the tip arrive a window at a
+    /// time. A peer serves a batch only as far as the asker's window pays
+    /// for, and a block off the branch followed is never handed its price
+    /// back, so of a branch of full blocks one round brings what one window
+    /// buys, about thirty two blocks. The next round asked from where the
+    /// branches part, as every round does, and brought the same blocks
+    /// again: a heavier branch weighing more than a window was never taken.
+    /// It is asked from past this block instead, while everything below it
+    /// down to the branch followed is still held. See [`past_what_arrived`].
+    ///
+    /// Taken rather than read, so a block that is not on the branch the peer
+    /// now offers steers one round at most. A round asked past it that
+    /// brings nothing to hold leaves nothing here, and the next is asked
+    /// from where the branches part.
+    pub aside: Option<Located>,
     /// The moment this node's clock allows a block this peer sent that it
     /// refused for being dated ahead of it, while that moment is still to
     /// come.
@@ -678,8 +696,10 @@ impl PeerState {
     /// Called as a batch is served rather than after it, so a peer that has
     /// spent its window is handed what it could afford and the rest is not
     /// read, not encoded and not queued. A peer that gets a short batch asks
-    /// for the rest of it, which is what it already does about the heights
-    /// this node no longer holds.
+    /// for the rest of it once its patience with the batch runs out, which is
+    /// what it already does about the heights this node no longer holds, and
+    /// from past what arrived, whether that went onto the branch it follows
+    /// or was held aside: see [`PeerState::aside`].
     pub(crate) fn afford_serving(&mut self, bytes: usize, now: u64) -> bool {
         self.afford(what_the_wire_costs(bytes), now)
     }
@@ -985,6 +1005,7 @@ pub struct Reaction {
     /// hold, and ask for the chain again after each batch, for as long as it
     /// ran, printing healthy lines under a height that did not move. It
     /// cannot be handed a ledger either, since it already follows a chain.
+    /// Never set for a node that holds nothing of its own, which can be.
     ///
     /// Named rather than acted on, and counted where peers are counted: one
     /// of these is a number a peer writes, and what a node should conclude
@@ -1224,12 +1245,18 @@ pub const MAX_AWAITING: usize = MAX_REQUESTED * 4;
 /// Where the locator skips heights, the peer agrees below where the branches
 /// part rather than at it, so the first of what comes back is already here.
 /// That is less than one batch: `from` is taken only within a batch of the
-/// tip, so the batch asked from it always reaches past the tip, and brings
+/// tip, so the batch asked from it always reaches past the tip, and asks for
 /// more blocks of the other branch than this node holds of its own above
-/// where the two part, or all of them. More blocks and not more work: a branch
-/// whose blocks are so much lighter than this node's that a batch of them
-/// still weighs less is asked for the same batch every round, and is not taken
-/// from this answer either.
+/// where the two part, or all of them.
+///
+/// Asks for, and is not always sent. A peer serves a batch only as far as the
+/// asker's window pays for, which of full blocks is about thirty two, so a
+/// round that starts here every time is sent the same first blocks every
+/// time. The next round starts from past what arrived instead: see
+/// [`past_what_arrived`]. More blocks are not more work either: a branch
+/// whose blocks are so much lighter than this node's that two batches of them
+/// still weigh less is asked for the same two batches in turn, and is not
+/// taken from this answer.
 ///
 /// A batch or more below the tip, only what lies above the tip is asked for.
 /// A peer that recognises nothing it was shown answers from nought, which a
@@ -1246,6 +1273,49 @@ fn first_wanted(chain: &ChainStore, from: u64) -> u64 {
     } else {
         have
     }
+}
+
+/// Where a round of asking for a peer's branch from `start` goes on from,
+/// given `arrived`, the last block that peer delivered off the branch this
+/// node follows.
+///
+/// Past that block, when every block from it down to where it meets the
+/// branch followed is still held, and it meets that branch no lower than
+/// just below `start`: everything in between is here already, and asking for
+/// it again is what kept a heavier branch weighing more than one window away
+/// for good. `start` otherwise. A body that failed a switch is dropped, and so
+/// are the lowest blocks off the branch when too many are held, so a stretch
+/// with a hole in it is asked for again from where it parts, which is where
+/// the hole is. A block of a branch that parts lower is not on the branch the
+/// peer offers now, and is not followed either.
+///
+/// The walk is a batch at most, the bound [`first_wanted`] draws, so what it
+/// costs is about what asking for the batch it spares costs. A longer stretch
+/// is asked from `start`, and what arrives for that leaves a block within a
+/// batch of it for the round after.
+fn past_what_arrived(chain: &ChainStore, start: u64, arrived: Option<Located>) -> u64 {
+    let Some(last) = arrived else {
+        return start;
+    };
+    let mut at = last;
+    for _ in 0..=MAX_REQUESTED {
+        if chain.agrees_with(&at) {
+            // Where what is held meets the branch followed. At `last` itself,
+            // nothing is held aside at all.
+            return if at.height == last.height {
+                start
+            } else {
+                last.height.saturating_add(1)
+            };
+        }
+        match (chain.block(&at.id), at.height.checked_sub(1)) {
+            (Some(block), Some(below)) if at.height >= start => {
+                at = Located::new(below, block.header.previous);
+            }
+            _ => return start,
+        }
+    }
+    start
 }
 
 /// Asks for a stretch of a peer's branch, starting at `from`.
@@ -1666,7 +1736,14 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
         // body in, unless the verdict is about this node rather than about
         // the body, and this peer is asked again for its chain, which is
         // where the real body is.
+        //
+        // Asked because the block it delivered made its branch the heaviest,
+        // so it claims more work than this node's chain, and that is counted
+        // as the peer being ahead: see the arm for a missing parent. Without
+        // it only a peer greeted as ahead was asked, and every long-lived
+        // connection of a node at the tip was greeted as an equal.
         Err(ChainError::InvalidBlock { id: failed, source }) if failed != id => {
+            peer.total_work = peer.total_work.max(claimed);
             let mut reaction = follow_up(chain, peer, now);
             reaction.failed_below = dropped_for(&source, failed)
                 .is_misbehaviour()
@@ -1857,7 +1934,8 @@ fn cost_of(message: &Message, peer: &PeerState) -> u32 {
 
 /// Takes a block a peer was `charged` for, and hands the price back down to
 /// one unit if it was an answer this node asked for and is now on the branch
-/// this node follows.
+/// this node follows. One held off that branch instead is written down as the
+/// last this peer delivered there: see [`PeerState::aside`].
 ///
 /// Handed back only for a block on that branch, which it cannot be without the
 /// work its header claims at the difficulty this chain demands. Everything
@@ -1880,6 +1958,13 @@ fn on_block_charged(
     let reaction = on_block(chain, peer, block, now);
     if asked && chain.id_at(at) == Some(id) {
         peer.hand_back(charged.saturating_sub(COST_TRIVIAL), now);
+    }
+    // Held, and not where the branch followed is: new here, or a body this
+    // node already held from this peer or from another. Not a block hanging
+    // on a parent nobody has sent yet, which is not held at all, and would
+    // otherwise put what did arrive out of reach of the next round.
+    if chain.block(&id).is_some() && chain.id_at(at) != Some(id) {
+        peer.aside = Some(Located::new(at, id));
     }
     reaction
 }
@@ -1979,7 +2064,9 @@ fn answer(
             ..Reaction::idle()
         },
         Message::Chain { from, count } => {
-            let start = first_wanted(local.chain, from);
+            // Taken whatever this answer comes to: see [`PeerState::aside`].
+            let arrived = peer.aside.take();
+            let start = past_what_arrived(local.chain, first_wanted(local.chain, from), arrived);
             let end = from.saturating_add(count);
             // Taken rather than read, so one `GetChain` pays for one answer
             // and a peer that sends five gets the price of a push for four.
@@ -1988,9 +2075,15 @@ fn answer(
             // Nothing this node holds connects to a stretch that starts above
             // its tip, so none of it is asked for: see
             // [`Reaction::cannot_supply`]. Not the chain again either, which
-            // would only bring the same answer back. A node with no chain has
-            // a chooser to ask somebody else, and is left to it.
-            if from > have && !local.chain.is_empty() {
+            // would only bring the same answer back. A node with no chain of
+            // its own has a chooser to ask somebody else, and is left to it.
+            //
+            // No chain of its own includes the first block a named network
+            // pins, as at the handshake. Asking whether the chain was empty
+            // counted a newcomer on a real network among the nodes further
+            // behind than their peers keep, which follow a chain and cannot
+            // be handed one, where it holds nothing and can be.
+            if from > have && !local.chain.holds_nothing_of_its_own() {
                 return Reaction {
                     cannot_supply: prompted.then_some(from),
                     ..Reaction::idle()

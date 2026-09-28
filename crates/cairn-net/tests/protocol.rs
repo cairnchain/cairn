@@ -723,6 +723,45 @@ fn a_peer_that_can_supply_only_from_above_the_tip_is_not_asked_for_those_blocks(
     assert_eq!(unasked.cannot_supply, None);
 }
 
+/// A newcomer holding only the first block its network pins is not counted
+/// as further behind than its peers keep, when a peer can supply only from
+/// above its tip.
+///
+/// Such a node holds nothing of its own and can be handed a ledger, as a node
+/// with no chain at all can, and is left to its chooser the same way. The
+/// check asked whether the chain was empty, which it never is on a network
+/// that pins its first block, so two such answers had the node tell its
+/// operator it already follows a chain and cannot be handed one. Nothing
+/// asked this on a pinned network, so that node passed.
+#[test]
+fn a_newcomer_holding_only_its_networks_first_block_is_not_counted_short_of_the_tip() {
+    let devnet = ConsensusParams::for_network("devnet").unwrap();
+    let first = cairn_ledger::genesis::block(devnet.network).unwrap();
+    let mut node = store_with(devnet, &[first]);
+    assert!(
+        node.holds_nothing_of_its_own() && !node.is_empty(),
+        "the premise: the node holds only the pinned block"
+    );
+    let mut peer = greeted_peer(u128::MAX / 2, 5_000);
+    peer.chain_asked = true;
+
+    let answered = on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Chain {
+            from: 4_000,
+            count: 1_000,
+        },
+        NOW,
+    );
+    assert_eq!(
+        answered.cannot_supply, None,
+        "a newcomer holding only its network's pinned first block was counted as a node \
+         further behind than its peers keep, which is said only of a node that already \
+         follows a chain"
+    );
+}
+
 /// A tie at one height that the network resolved the other way is followed
 /// onto the branch that won.
 ///
