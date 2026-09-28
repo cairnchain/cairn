@@ -126,7 +126,7 @@ fn a_connection_this_node_let_go_of_is_not_a_peer_reached() {
     // crowded node's table holds.
     let crowded = Node::bind(params(), loopback()).unwrap();
     let mut held = Vec::new();
-    for _ in 0..MAX_PEERS {
+    for _ in 0..MOST_FROM_OUTSIDE {
         held.push(TcpStream::connect(crowded.address()).unwrap());
     }
     // As full as somebody else can make it, which is `MOST_FROM_OUTSIDE`: a
