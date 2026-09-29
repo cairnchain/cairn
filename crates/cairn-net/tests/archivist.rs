@@ -176,7 +176,6 @@ fn a_handshake(listen: u16, nonce: u64, keeps: Keeps) -> Message {
         version: PROTOCOL_VERSION,
         network: params().network,
         genesis: Hash32::ZERO,
-        tip: Hash32::ZERO,
         height: 0,
         total_work: 0,
         listen,

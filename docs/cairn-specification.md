@@ -2538,9 +2538,9 @@ the same either way; read late it is a rule about what to throw away.
 A frame is at most 1 048 576 bytes whatever it carries, so these ceilings bound
 what is built and the frame bounds what is read.
 
-A handshake is 108 bytes and carries the protocol version as a `u32`, the
-network as a `u32`, the first block of the branch this node follows, its tip,
-its height, the work behind that tip as a `u128`, the port it listens on as a
+A handshake is 76 bytes and carries the protocol version as a `u32`, the
+network as a `u32`, the first block of the branch this node follows, the
+height of its tip, the work behind that tip as a `u128`, the port it listens on as a
 `u16`, a `u64` nonce drawn once when the node started, and two `u8` claims about
 what it kept. A node that does not offer itself to be dialled, as a wallet's
 does not, names port `0`, and a peer MUST NOT write an address down for it. A decoder MUST refuse either claim byte if it is neither `0` nor
@@ -2672,7 +2672,7 @@ There are two version numbers in this protocol and they are compared
 differently.
 
 **The protocol version is compared for equality.** It is a `u32` in the
-handshake, it is 9 today, and a node MUST close the connection with a peer
+handshake, it is 10 today, and a node MUST close the connection with a peer
 carrying anything else. What that costs is that a node on one version and a node
 on the next turn each other away rather than talking; what it buys is that a message
 whose meaning changed is never read under the old meaning. The alternative,

@@ -1059,7 +1059,6 @@ pub fn local_handshake(chain: &ChainStore, keeps: Keeps, listen: u16, nonce: u64
         version: PROTOCOL_VERSION,
         network: chain.params().network,
         genesis: first_block(chain).unwrap_or(Hash32::ZERO),
-        tip: chain.tip().unwrap_or(Hash32::ZERO),
         height: chain.height().unwrap_or_default(),
         total_work: chain.total_work(),
         keeps,

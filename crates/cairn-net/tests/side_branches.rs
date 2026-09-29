@@ -908,7 +908,6 @@ impl Forwarder {
                 version: PROTOCOL_VERSION,
                 network,
                 genesis,
-                tip: Hash32::ZERO,
                 height: 0,
                 total_work: 1,
                 listen: 0,

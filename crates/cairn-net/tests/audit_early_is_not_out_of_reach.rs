@@ -44,7 +44,6 @@ use cairn_ledger::LedgerState;
 use cairn_net::message::{Handshake, Message, PROTOCOL_VERSION};
 use cairn_net::sync::{on_message, Local, PeerState};
 use cairn_net::Keeps;
-use cairn_primitives::Hash32;
 
 const NOW: u64 = 2_000_000_000;
 
@@ -160,7 +159,6 @@ fn a_block_this_node_is_early_for_is_not_one_it_can_never_reach() {
         version: PROTOCOL_VERSION,
         network: params().network,
         genesis: ours.blocks[0].id(),
-        tip: Hash32::ZERO,
         height: u64::try_from(rival.blocks.len()).unwrap() - 1,
         total_work: rival.state.total_work(),
         listen: 0,

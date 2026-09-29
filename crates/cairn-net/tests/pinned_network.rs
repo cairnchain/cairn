@@ -153,7 +153,6 @@ fn asks_at_the_handshake(chain: &mut ChainStore) -> bool {
         version: PROTOCOL_VERSION,
         network,
         genesis: Hash32::ZERO,
-        tip: Hash32::from_bytes([1; 32]),
         height: JOIN_RATHER_THAN_READ + 40,
         total_work: chain.total_work().saturating_mul(1_000).max(1_000_000),
         listen: 0,

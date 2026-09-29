@@ -3165,9 +3165,9 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
     </p>
 
     <p>
-      A handshake is 108 bytes and carries the protocol version as a <code>u32</code>, the
-      network as a <code>u32</code>, the first block of the branch this node follows, its tip,
-      its height, the work behind that tip as a <code>u128</code>, the port it listens on as a
+      A handshake is 76 bytes and carries the protocol version as a <code>u32</code>, the
+      network as a <code>u32</code>, the first block of the branch this node follows, the
+      height of its tip, the work behind that tip as a <code>u128</code>, the port it listens on as a
       <code>u16</code>, a <code>u64</code> nonce drawn once when the node started, and two <code>u8</code> claims about
       what it kept. A node that does not offer itself to be dialled, as a wallet's
       does not, names port <code>0</code>, and a peer MUST NOT write an address down for it. A decoder MUST refuse either claim byte if it is neither <code>0</code> nor
@@ -3337,7 +3337,7 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
 
     <p>
       <strong>The protocol version is compared for equality.</strong> It is a <code>u32</code> in the
-      handshake, it is 9 today, and a node MUST close the connection with a peer
+      handshake, it is 10 today, and a node MUST close the connection with a peer
       carrying anything else. What that costs is that a node on one version and a node
       on the next turn each other away rather than talking; what it buys is that a message
       whose meaning changed is never read under the old meaning. The alternative,
