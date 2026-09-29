@@ -58,8 +58,13 @@ pub struct BlockHeader {
     pub network: NetworkId,
     pub height: u64,
     pub previous: Hash32,
-    /// Merkle root over the coinbase identifier followed by every transfer
-    /// identifier, in the order they appear in the block.
+    /// Merkle root over the coinbase identifier followed by the commitment to
+    /// every transfer, in the order they appear in the block.
+    ///
+    /// A commitment covers the transfer's whole encoding, signatures and
+    /// witnesses included, which its identifier leaves out. So a header names
+    /// one body, and a copy that changes only a signature or a proof is a body
+    /// this root refuses. See [`transfer_commitment`].
     pub transactions_root: Hash32,
     /// Commitment to the whole note set as it stands after this block.
     pub state_root: Hash32,
@@ -203,16 +208,34 @@ impl Block {
     }
 
     /// Recomputes the root the header claims in `transactions_root`.
+    ///
+    /// The coinbase's leaf is its identifier, which is already the hash of its
+    /// whole encoding: a coinbase has no witness and no signature. A
+    /// transfer's leaf is its [`transfer_commitment`].
     pub fn transactions_root(&self) -> Hash32 {
         let mut leaves = Vec::with_capacity(self.transfers.len().saturating_add(1));
         leaves.push(merkle_leaf(self.coinbase.id().as_bytes()));
         leaves.extend(
             self.transfers
                 .iter()
-                .map(|t| merkle_leaf(t.id().as_bytes())),
+                .map(|t| merkle_leaf(transfer_commitment(t).as_bytes())),
         );
         merkle_root(&leaves)
     }
+}
+
+/// What a block commits to for one transfer: its whole encoding as it
+/// travels, hashed under a domain of its own.
+///
+/// Not the transfer's identifier. The identifier leaves signatures and
+/// witnesses out on purpose, so that a stale proof can be refreshed without
+/// making a different transfer and so that it is known before signing. A
+/// block that committed to identifiers alone named every body that differed
+/// from its own in those, and some of them were valid: inside the grace window
+/// a note can be spent with or without its proof. The transfer stays the same
+/// transfer; the block names the version its miner carried.
+pub fn transfer_commitment(transfer: &Transfer) -> Hash32 {
+    cairn_primitives::hash::hash(Domain::TransferCommitment, &transfer.encode())
 }
 
 impl Encode for Block {

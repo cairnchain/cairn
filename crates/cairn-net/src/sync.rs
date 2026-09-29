@@ -1754,10 +1754,10 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
         // A block below this one failed, not this one. It was held aside
         // unjudged, which is every block of a branch lighter than the one
         // followed, and this delivery made its branch the heaviest, so the
-        // switch read its body and the body did not hold. An identifier is
-        // taken over a header alone, so that body can be a copy another peer
-        // sent ahead of the real block, and the peer here, which built on or
-        // relayed the real one, is the last to blame for it.
+        // switch read its body and the body did not hold. A body is held only
+        // if it is the one its header names, so the block below is a mined
+        // block that is invalid, and the peer known to have relayed it is the
+        // one that handed it in, which need not be the peer here.
         //
         // It used to be the one blamed: disconnected and its host refused,
         // while the sender of the body had been answered `SideBranch`. So the

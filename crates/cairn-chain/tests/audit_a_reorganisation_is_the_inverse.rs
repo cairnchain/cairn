@@ -335,10 +335,15 @@ fn a_switch_that_fails_partway_leaves_the_node_where_it_stood() {
     // Three blocks on this side against five on the rival's, so the rival
     // wins on its fourth. Break that one: the switch rewinds three, applies
     // three, and fails on the block that asked for it.
+    // The header names the body it carries, so the broken block is mined
+    // again over its own root: a block the door lets in, and whose body fails
+    // only when it is applied.
     let breaks_at = 3;
     let mut broken = theirs.clone();
     broken[breaks_at].transfers[0].inputs[0].signature =
         cairn_crypto::Signature::from_bytes(&[7u8; 64]);
+    broken[breaks_at].header.transactions_root = broken[breaks_at].transactions_root();
+    broken[breaks_at] = mine_block(broken[breaks_at].clone(), ATTEMPTS).expect("a nonce exists");
 
     for block in &broken[..breaks_at] {
         assert_eq!(

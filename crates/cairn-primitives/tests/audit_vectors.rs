@@ -28,7 +28,7 @@ const PROBE: &[u8] = b"cairn audit vector";
 ///
 /// The pairing matters as much as the values: a swap between two arms of
 /// `key_for` would keep every digest distinct and still be a fork.
-const DOMAIN_VECTORS: [(Domain, &str); 23] = [
+const DOMAIN_VECTORS: [(Domain, &str); 24] = [
     (
         Domain::TransferId,
         "8903a92f6a8473eb072c6c73ba4f3e71322010ddf3a6d961d1256bfa4e19e908",
@@ -108,6 +108,10 @@ const DOMAIN_VECTORS: [(Domain, &str); 23] = [
     (
         Domain::GraceWindow,
         "deb7354cfac902db43130ba979205b8dcaaf4627869cff3afa4b20ab05356336",
+    ),
+    (
+        Domain::TransferCommitment,
+        "01d20850e32948d9dea503e6a7e12e1f5d9de1414eca7ed8c8dd72bc0e0f87cf",
     ),
     (
         Domain::SamplingDraw,

@@ -145,6 +145,7 @@ thing it exists for.
     <tr><td>header history leaf</td><td><code>cairn v1 header history leaf</code></td></tr>
     <tr><td>sampling seed</td><td><code>cairn v1 sampling seed</code></td></tr>
     <tr><td>grace window</td><td><code>cairn v1 grace window</code></td></tr>
+    <tr><td>transfer commitment</td><td><code>cairn v1 transfer commitment</code></td></tr>
     <tr><td>sampling draw</td><td><code>cairn v1 sampling draw</code></td></tr>
     <tr><td>forest empty</td><td><code>cairn v1 forest empty</code></td></tr>
   </tbody>
@@ -281,7 +282,10 @@ known before the transaction is signed.
 It is an instance of the case section 3 names: a field left out of an
 identifier's encoding is a field the identifier does not commit to. Two nodes
 can hold the same transfer identifier over different bytes, differing in
-signatures and witnesses, and that is intended rather than tolerated.
+signatures and witnesses, and that is intended rather than tolerated. A block
+does commit to those bytes: its `transactions_root` is taken over each
+transfer's whole encoding, so a block names the version of the transfer its
+miner carried.
 
 ### What a signature commits to
 
@@ -451,12 +455,19 @@ else in this protocol.
 
 A block is its header, its coinbase, and its sequence of transfers. The
 identifier of a block is the identifier of its header, and the header commits
-to the body through `transactions_root`.
+to every byte of the body through `transactions_root`.
 
 `transactions_root` is the Merkle root, under the merkle domains, of one leaf
 per transaction: the coinbase first, then the transfers in the order they
-appear in the block. Each leaf is the hash under the merkle leaf domain of that
-transaction's identifier. An interior node is the hash under the merkle node
+appear in the block. The coinbase's leaf is the hash under the merkle leaf
+domain of its identifier, which is already the hash of its whole encoding. A
+transfer's leaf is the hash under the merkle leaf domain of its commitment, and
+a transfer's commitment is the hash under the transfer commitment domain of its
+whole encoding as it travels: every input with its witness and signature, and
+the outputs. Not its identifier, which leaves signatures and witnesses out: a
+root over identifiers would name every body that differed from the real one in
+those, and some of them are valid, since inside the grace window a note can be
+spent with or without its proof. An interior node is the hash under the merkle node
 domain of its two children in order, and a level with an odd count carries the
 last node up unchanged rather than duplicating it, which is what stops two
 different bodies producing one root. The root of no leaves is the hash under
@@ -868,7 +879,10 @@ question about the state, and this is the answer.
 Inside the window both tags are accepted and they reach the same state: either
 way the note is taken out of the accumulator at its position, and either way
 the transfer has the same identifier, because a transfer's identifier leaves
-its witnesses out. A node MUST NOT treat the two as different transfers.
+its witnesses out. A node MUST NOT treat the two as different transfers. A
+block names which of the two it carried, since its `transactions_root` commits
+to each transfer's whole encoding, and a copy of the block carrying the other
+tag is a body its header does not name.
 
 `MissingProof` names two situations a node cannot tell apart: a note that fell
 and whose spender did not prove it, and a note that never existed. A node

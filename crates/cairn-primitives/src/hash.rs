@@ -149,6 +149,7 @@ domains! {
     HeaderHistoryLeaf => header_history_leaf, "cairn v1 header history leaf";
     SamplingSeed => sampling_seed, "cairn v1 sampling seed";
     GraceWindow => grace_window, "cairn v1 grace window";
+    TransferCommitment => transfer_commitment, "cairn v1 transfer commitment";
     SamplingDraw => sampling_draw, "cairn v1 sampling draw";
     ForestEmpty => forest_empty, "cairn v1 forest empty";
     WalletHistory => wallet_history, "cairn v1 wallet history";

@@ -1743,13 +1743,15 @@ struct Shared {
 ///
 /// A block that loses the fork choice is held without being applied, and its
 /// body is tried only when its branch becomes the heaviest, which is usually
-/// the delivery of a later block by some other peer. Its identifier is taken
-/// over the header alone, so the body tried can be a copy with its signatures
-/// broken that one connection sent ahead of the real block. Without this, the
-/// refusal reached only the peer that delivered the later block, which was the
-/// one carrying the real chain, and the sender of the copy could send it again
-/// after every failure and keep a node off the heavier branch for as long as
-/// it liked.
+/// the delivery of a later block by some other peer. A body that is not the
+/// one its header names is refused before it is held, so a body that fails is
+/// a mined block that is invalid, and the connection that handed it in
+/// relayed a block it had not validated. Without this, the refusal reached
+/// only the peer that delivered the later block, and the sender of the body
+/// could send it again after every failure. It was written when the body
+/// tried could be a copy of a real block with its signatures broken, sent
+/// ahead of the real one and able to keep a node off the heavier branch for as
+/// long as its sender liked; the root now refuses such a copy on arrival.
 #[derive(Debug)]
 struct HeldAside {
     by: HashMap<Hash32, HandedIn>,

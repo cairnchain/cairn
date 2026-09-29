@@ -4,9 +4,11 @@
 //! asked only for the heights above its own tip, so a branch that parts from
 //! it below the tip never arrived in full. And a block that loses the fork
 //! choice is held without being applied, under an identifier taken over its
-//! header alone, which does not commit to the signatures in the body: anybody
-//! can copy the block, break a signature, and have the copy held in place of
-//! the real one if it arrives first.
+//! header alone. The header did not commit to the signatures in the body, so
+//! anybody could copy the block, break a signature, and have the copy held in
+//! place of the real one if it arrived first. It commits to every byte of the
+//! body now and such a copy is refused on arrival; what is still held
+//! unjudged is a mined block whose body fails when it is applied.
 
 #![allow(
     clippy::unwrap_used,
@@ -30,7 +32,7 @@ use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
 use cairn_net::message::{Handshake, Keeps, Message, MAX_REQUESTED, PROTOCOL_VERSION};
-use cairn_net::sync::{on_message, tick, Local, PeerState, BATCH_PATIENCE};
+use cairn_net::sync::{on_message, tick, DropReason, Local, PeerState, BATCH_PATIENCE};
 use cairn_net::wire::{read_message, write_message, Incoming, MAX_FRAME_BYTES};
 use cairn_net::Node;
 use cairn_primitives::codec::Encode;
@@ -81,7 +83,18 @@ impl Forge {
 
     /// The next block, its reward paid out as `outputs`.
     fn mine_paying(&mut self, outputs: Vec<Note>, transfers: Vec<Transfer>) -> Block {
-        let params = params();
+        self.mine_under(&params(), outputs, transfers)
+    }
+
+    /// The next block, built and mined under `params` rather than the rules
+    /// every node here judges by.
+    fn mine_under(
+        &mut self,
+        params: &ConsensusParams,
+        outputs: Vec<Note>,
+        transfers: Vec<Transfer>,
+    ) -> Block {
+        let params = *params;
         let height = self.state.next_height().unwrap();
         self.clock += 600;
         let coinbase = CoinbaseTransaction::new(height, outputs);
@@ -104,15 +117,22 @@ impl Forge {
 /// rival of three whose first block pays somebody.
 ///
 /// The copy is that first block with its one signature made by the wrong key:
-/// the same header, so the same identifier and the same work, and a body that
-/// produces the same transaction root, since a transfer's identifier leaves
-/// its signatures out. Nothing short of applying it tells it from the real
-/// one.
+/// the same header, so the same identifier and the same work. A transfer's
+/// identifier leaves its signatures out, and the body used to produce the
+/// transaction root the header names, so nothing short of applying it told it
+/// from the real one. The root commits to every byte of each transfer now, and
+/// the copy does not produce it.
+///
+/// The forged branch is what a node can still be made to hold aside and fail
+/// on: three mined blocks off the same eleven whose first claims twice the
+/// reward, so its body is the one its header names and is refused only when
+/// it is applied.
 struct Fork {
     shared: Vec<Block>,
     followed: Vec<Block>,
     rival: Vec<Block>,
     copy: Block,
+    forged: Vec<Block>,
 }
 
 fn a_fork() -> Fork {
@@ -124,6 +144,7 @@ fn a_fork() -> Fork {
     };
     let shared: Vec<Block> = (0..11).map(|_| trunk.mine(&miner, Vec::new())).collect();
     let mut aside = trunk.fork();
+    let mut forging = trunk.fork();
     let followed = (0..2).map(|_| trunk.mine(&miner, Vec::new())).collect();
 
     let spent = Note::new(params.initial_reward, miner.public_key());
@@ -143,17 +164,40 @@ fn a_fork() -> Fork {
     let mut copy = rival[0].clone();
     copy.transfers[0] = copied;
     assert_eq!(copy.id(), rival[0].id(), "the copy shares the identifier");
-    assert_eq!(
+    assert_ne!(
         copy.transactions_root(),
         copy.header.transactions_root,
         "and produces the transaction root its header commits to"
     );
     assert_ne!(copy.encode(), rival[0].encode(), "yet is a different block");
+
+    let generous = ConsensusParams {
+        initial_reward: params
+            .initial_reward
+            .checked_add(params.initial_reward)
+            .unwrap(),
+        ..params
+    };
+    let forged = vec![
+        forging.mine_under(
+            &generous,
+            vec![Note::new(generous.initial_reward, wallet(9).public_key())],
+            Vec::new(),
+        ),
+        forging.mine(&wallet(9), Vec::new()),
+        forging.mine(&wallet(9), Vec::new()),
+    ];
+    assert_eq!(
+        forged[0].transactions_root(),
+        forged[0].header.transactions_root,
+        "the premise: the forged block's body is the one its header names"
+    );
     Fork {
         shared,
         followed,
         rival,
         copy,
+        forged,
     }
 }
 
@@ -503,7 +547,7 @@ fn blocks_another_peer_delivered_first_count_as_arrived_from_the_next() {
 ///
 /// A body that fails a switch is dropped, and the blocks above it are kept.
 /// Asking from past what that peer delivered would never ask for the height
-/// where the real body belongs, which is the very block the switch needs.
+/// where the dropped block sat, which is the very block the switch needs.
 /// Nothing asked this, so a node that trusted the last block a peer sent
 /// without looking below it passed.
 #[test]
@@ -514,27 +558,28 @@ fn a_branch_held_aside_with_a_hole_in_it_is_asked_for_from_where_it_parts() {
     let _ = on_message(
         &mut local(&mut victim),
         &mut forwarder,
-        Message::Block(Box::new(fork.copy.clone())),
+        Message::Block(Box::new(fork.forged[0].clone())),
         NOW,
     );
-    let mut honest = greeted(victim.total_work(), 12);
-    for block in &fork.rival {
+    let mut relay = greeted(victim.total_work(), 12);
+    for block in &fork.forged[1..] {
         let _ = on_message(
             &mut local(&mut victim),
-            &mut honest,
+            &mut relay,
             Message::Block(Box::new(block.clone())),
             NOW,
         );
     }
     assert_eq!(victim.height(), Some(12), "the premise: the switch failed");
     assert!(
-        victim.block(&fork.rival[0].id()).is_none() && victim.block(&fork.rival[1].id()).is_some(),
+        victim.block(&fork.forged[0].id()).is_none()
+            && victim.block(&fork.forged[1].id()).is_some(),
         "the premise: the body that failed is gone and the one above it is held"
     );
 
     let asked = on_message(
         &mut local(&mut victim),
-        &mut honest,
+        &mut relay,
         Message::Chain { from: 11, count: 3 },
         NOW,
     );
@@ -542,8 +587,8 @@ fn a_branch_held_aside_with_a_hole_in_it_is_asked_for_from_where_it_parts() {
         asked.reply,
         vec![Message::GetBlocks(vec![11, 12, 13])],
         "a node whose switch failed on a body held aside asked the peer carrying the branch \
-         only past the blocks it still held above that body, so the real one was never \
-         asked for"
+         only past the blocks it still held above that body, so the height it lost was \
+         never asked for"
     );
 }
 
@@ -602,20 +647,99 @@ fn a_block_of_a_branch_parting_lower_than_the_one_offered_does_not_steer_the_ask
 /// blamed when the switch fails on a body somebody else sent first, and is
 /// asked again for its chain.
 ///
-/// The copy is held without being judged, and the block above it arrives from
-/// an honest peer. The switch reads the copy, fails, and the refusal names the
-/// copied block rather than the one delivered. Every such refusal became
-/// `BadBlock` against the peer in hand, which is misbehaviour: the honest peer
-/// was disconnected and its host refused, and the sender of the copy had been
-/// answered `SideBranch`. Nothing asked this, so a node that turned away the
-/// peers carrying the heavier branch for a body none of them sent passed.
+/// The forged block is held without being judged, and the block above it
+/// arrives from another peer. The switch reads the forged body, fails, and the
+/// refusal names the forged block rather than the one delivered. Every such
+/// refusal became `BadBlock` against the peer in hand, which is misbehaviour:
+/// that peer was disconnected and its host refused, and the sender of the body
+/// that failed had been answered `SideBranch`. Nothing asked this, so a node
+/// that turned away whoever delivered a block above a body another peer sent
+/// passed.
 ///
-/// The honest peer is greeted at this node's own work, which is how every
-/// long-lived connection of a node at the tip was greeted. This greeted it
-/// with all the work there is, so a node that asked a peer greeted as an
-/// equal nothing after the switch failed passed as well.
+/// It was written against a copy of a real block, which the body's root now
+/// refuses on arrival; a mined block whose body fails when applied is what is
+/// left to be held aside and fail. The peer in hand is greeted at this node's
+/// own work, which is how every long-lived connection of a node at the tip
+/// was greeted. This greeted it with all the work there is, so a node that
+/// asked a peer greeted as an equal nothing after the switch failed passed as
+/// well.
 #[test]
-fn the_peer_that_delivers_a_valid_block_is_not_blamed_for_a_body_another_sent() {
+fn the_peer_that_delivers_the_block_above_is_not_blamed_for_a_body_another_sent() {
+    let fork = a_fork();
+    let mut victim = holding(&[&fork.shared, &fork.followed]);
+
+    let mut forwarder = greeted(1, 12);
+    let forged = on_message(
+        &mut local(&mut victim),
+        &mut forwarder,
+        Message::Block(Box::new(fork.forged[0].clone())),
+        NOW,
+    );
+    assert!(
+        forged.drop_peer.is_none(),
+        "the premise: the forged block is held aside unjudged"
+    );
+    assert_eq!(
+        forged.held_aside,
+        Some(fork.forged[0].id()),
+        "the node did not name the body it now holds aside, so nothing could say who sent it"
+    );
+
+    let mut relay = greeted(victim.total_work(), 12);
+    let again = on_message(
+        &mut local(&mut victim),
+        &mut relay,
+        Message::Block(Box::new(fork.forged[0].clone())),
+        NOW,
+    );
+    assert_eq!(
+        again.held_aside, None,
+        "a body the node did not keep was named as held, against the peer that sent it"
+    );
+    let _ = on_message(
+        &mut local(&mut victim),
+        &mut relay,
+        Message::Block(Box::new(fork.forged[1].clone())),
+        NOW,
+    );
+    let delivered = on_message(
+        &mut local(&mut victim),
+        &mut relay,
+        Message::Block(Box::new(fork.forged[2].clone())),
+        NOW,
+    );
+    assert_eq!(victim.height(), Some(12), "the premise: the switch failed");
+    assert!(
+        delivered.drop_peer.is_none(),
+        "the peer that delivered the block above was disconnected for a body another peer \
+         sent first"
+    );
+    assert!(
+        delivered
+            .reply
+            .iter()
+            .any(|message| matches!(message, Message::GetChain { .. })),
+        "and it was not asked again for the branch it carries: a peer greeted as an equal \
+         was not counted as ahead for the work the block it delivered claims"
+    );
+    assert_eq!(
+        delivered.failed_below,
+        Some(fork.forged[0].id()),
+        "the block whose held body failed was not named, so its sender could not be refused"
+    );
+}
+
+/// A copy of a side block that changes only a signature is refused on the
+/// delivery that brings it, and the real branch is then taken with no switch
+/// failing on the way.
+///
+/// The copy used to produce the root its header names, since a transfer's
+/// identifier leaves its signatures out, so it was held aside unjudged, the
+/// real block delivered after it was turned away, and the switch onto the
+/// heavier branch failed on the copy. Nothing asked this, so a node that held a
+/// copy nobody mined in place of the block it copied passed.
+#[test]
+fn a_copy_that_changes_only_a_signature_is_refused_on_the_delivery_that_brings_it() {
     let fork = a_fork();
     let mut victim = holding(&[&fork.shared, &fork.followed]);
 
@@ -627,57 +751,32 @@ fn the_peer_that_delivers_a_valid_block_is_not_blamed_for_a_body_another_sent() 
         NOW,
     );
     assert!(
-        copied.drop_peer.is_none(),
-        "the premise: the copy is held aside unjudged"
+        matches!(copied.drop_peer, Some(DropReason::BadBlock { id }) if id == fork.copy.id()),
+        "the peer that sent a copy with one signature changed was not dropped for it"
     );
-    assert_eq!(
-        copied.held_aside,
-        Some(fork.copy.id()),
-        "the node did not name the body it now holds aside, so nothing could say who sent it"
+    assert_eq!(copied.held_aside, None, "and the copy was named as held");
+    assert!(
+        victim.block(&fork.copy.id()).is_none(),
+        "and a body is held under the identifier it copied"
     );
 
     let mut honest = greeted(victim.total_work(), 12);
-    let real = on_message(
-        &mut local(&mut victim),
-        &mut honest,
-        Message::Block(Box::new(fork.rival[0].clone())),
-        NOW,
-    );
+    for block in &fork.rival {
+        let delivered = on_message(
+            &mut local(&mut victim),
+            &mut honest,
+            Message::Block(Box::new(block.clone())),
+            NOW,
+        );
+        assert!(
+            delivered.drop_peer.is_none() && delivered.failed_below.is_none(),
+            "a switch failed on the way to the real branch, after the copy was refused"
+        );
+    }
     assert_eq!(
-        real.held_aside, None,
-        "a body the node did not keep was named as held, against the peer that sent it"
-    );
-    let _ = on_message(
-        &mut local(&mut victim),
-        &mut honest,
-        Message::Block(Box::new(fork.rival[1].clone())),
-        NOW,
-    );
-    let delivered = on_message(
-        &mut local(&mut victim),
-        &mut honest,
-        Message::Block(Box::new(fork.rival[2].clone())),
-        NOW,
-    );
-    assert_eq!(victim.height(), Some(12), "the premise: the switch failed");
-    assert!(
-        delivered.drop_peer.is_none(),
-        "the peer that delivered a valid block was disconnected for a body another peer \
-         sent first"
-    );
-    assert!(
-        delivered
-            .reply
-            .iter()
-            .any(|message| matches!(message, Message::GetChain { .. })),
-        "and it was not asked again for the branch it carries, which is where the real \
-         body is: a peer greeted as an equal was not counted as ahead for the work the \
-         block it delivered claims"
-    );
-    assert_eq!(
-        delivered.failed_below,
-        Some(fork.rival[0].id()),
-        "the block whose held body failed was not named, so its sender could not be refused"
+        victim.tip(),
+        Some(fork.rival[2].id()),
+        "the real branch was not taken after its copy was refused"
     );
 }
 
@@ -722,17 +821,19 @@ fn answer_from(
     rounds
 }
 
-/// After a switch fails on a copy, the node's own asking brings the real
-/// block back, with the sender of the copy gone.
+/// After a switch fails on a body held aside, the node's own asking brings it
+/// onto the heavier valid branch, with the sender of that body gone.
 ///
-/// The copy is dropped when it fails, and the real block it stood in for has
-/// then to be asked for again. The node asked a peer for its chain and then
-/// only for the heights above its own tip, so the height where the branches
-/// part was never asked for again: one copy, sent once, kept a node off the
-/// heavier branch for good, however many honest peers offered it afterwards.
-/// Nothing asked this, so that node passed.
+/// The body is dropped when it fails, and the blocks above it are kept, so the
+/// node holds a branch with a hole at the height where the valid one parts
+/// from its own. The node asked a peer for its chain and then only for the
+/// heights above its own tip, so that height was never asked for again: one
+/// body, sent once, kept a node off the heavier branch for good, however many
+/// honest peers offered it afterwards. Nothing asked this, so that node passed.
+/// It was written against a copy of the real block, which is refused on arrival
+/// now; the hole a failed switch leaves is the same.
 #[test]
-fn after_a_switch_fails_on_a_copy_the_nodes_own_asking_brings_the_real_block_back() {
+fn after_a_switch_fails_on_a_held_body_the_nodes_own_asking_brings_the_heavier_branch() {
     let fork = a_fork();
     let mut victim = holding(&[&fork.shared, &fork.followed]);
     let honest = holding(&[&fork.shared, &fork.rival]);
@@ -741,11 +842,11 @@ fn after_a_switch_fails_on_a_copy_the_nodes_own_asking_brings_the_real_block_bac
     let _ = on_message(
         &mut local(&mut victim),
         &mut forwarder,
-        Message::Block(Box::new(fork.copy.clone())),
+        Message::Block(Box::new(fork.forged[0].clone())),
         NOW,
     );
     let mut first = greeted(honest.total_work(), 13);
-    for block in &fork.rival[1..] {
+    for block in &fork.forged[1..] {
         let _ = on_message(
             &mut local(&mut victim),
             &mut first,
@@ -755,8 +856,8 @@ fn after_a_switch_fails_on_a_copy_the_nodes_own_asking_brings_the_real_block_bac
     }
     assert_eq!(victim.height(), Some(12), "the premise: the switch failed");
 
-    // Another honest peer, met afterwards, and nothing from the sender of the
-    // copy from here on.
+    // An honest peer, met afterwards, and nothing from the sender of the
+    // forged block from here on.
     let mut second = PeerState::new(None);
     let hello = Message::Welcome(cairn_net::sync::local_handshake(
         &honest,
@@ -773,7 +874,7 @@ fn after_a_switch_fails_on_a_copy_the_nodes_own_asking_brings_the_real_block_bac
     assert_eq!(
         victim.tip(),
         Some(fork.rival[2].id()),
-        "after one copy failed a switch, an honest peer answering everything the node \
+        "after one held body failed a switch, an honest peer answering everything the node \
          asked for {rounds} rounds did not bring it onto the heavier branch"
     );
 }
@@ -893,29 +994,39 @@ fn a_node_on_a_lighter_branch_takes_a_heavier_one_from_peers_it_meets_afterwards
     }
 }
 
-/// One connection sending a copy of a block ahead of every delivery does not
-/// keep a node off the heavier branch, and is the one that loses its
-/// connection for it.
+/// One connection sending a copy of a block ahead of every delivery is hung up
+/// on the first, before any switch, and the node takes the heavier branch.
 ///
-/// The copy is held first, and the switch onto the heavier branch fails on it.
-/// The node used to blame the honest peer that delivered the block above and
-/// did nothing to the sender of the copy, which could send it again and have
-/// it held again before the real block came back. Nothing asked this, so a
-/// node that one connection could keep off the heavier branch for as long as
-/// it cared to keep sending passed.
+/// The copy used to be held first, and the switch onto the heavier branch
+/// failed on it. The node blamed the honest peer that delivered the block
+/// above and did nothing to the sender of the copy, which could send it again
+/// and have it held again before the real block came back. Nothing asked this,
+/// so a node that one connection could keep off the heavier branch for as long
+/// as it cared to keep sending passed. The copy no longer produces the root its
+/// header names, so it is refused on arrival and its sender with it, and
+/// nothing is held under the identifier it copied for a switch to fail on.
 #[test]
-fn a_copy_sent_ahead_of_every_delivery_does_not_keep_a_node_off_the_heavier_branch() {
+fn a_copy_sent_ahead_of_every_delivery_is_hung_up_on_before_any_switch() {
     let fork = a_fork();
     let (victim, honest) = three_nodes(&fork);
 
     let forwarder = Forwarder::start(victim.address(), fork.shared[0].id(), fork.copy.clone());
-    wait_for("the copy to be held ahead of the real block", || {
-        victim.with_chain(|chain| {
-            chain
-                .block(&fork.copy.id())
-                .is_some_and(|held| held.encode() == fork.copy.encode())
-        })
-    });
+    // Counted in copies rather than waited for, so a sender left connected
+    // fails this in a few seconds rather than at the patience.
+    wait_for(
+        "the sender of the copy to notice, or to send two hundred copies",
+        || forwarder.hung_up.load(Ordering::SeqCst) || forwarder.sent.load(Ordering::SeqCst) >= 200,
+    );
+    assert!(
+        forwarder.hung_up.load(Ordering::SeqCst),
+        "the connection that sent a copy with one signature changed was left open to send it \
+         again"
+    );
+    assert!(
+        victim.with_chain(|chain| chain.block(&fork.copy.id()).is_none()),
+        "a body is held under the identifier the copy took, for a switch to fail on"
+    );
+    drop(forwarder);
 
     for node in &honest {
         victim.connect(node.address()).unwrap();
@@ -924,23 +1035,6 @@ fn a_copy_sent_ahead_of_every_delivery_does_not_keep_a_node_off_the_heavier_bran
     wait_for("the node to take the heavier branch", || {
         victim.with_chain(ChainStore::tip) == Some(rival)
     });
-    // The copy failed a switch before the node could take the branch, so its
-    // sender has been hung up by now; its thread notices at its next write.
-    // Counted in copies rather than waited for, so a sender left connected
-    // fails this in a few seconds rather than at the patience.
-    let sent = forwarder.sent.load(Ordering::SeqCst);
-    wait_for(
-        "the sender of the copy to notice, or to send two hundred more",
-        || {
-            forwarder.hung_up.load(Ordering::SeqCst)
-                || forwarder.sent.load(Ordering::SeqCst) >= sent + 200
-        },
-    );
-    assert!(
-        forwarder.hung_up.load(Ordering::SeqCst),
-        "the connection whose copy failed a switch was left open to send it again"
-    );
-    drop(forwarder);
     victim.shutdown();
     for node in &honest {
         node.shutdown();

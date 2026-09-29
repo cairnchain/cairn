@@ -197,20 +197,24 @@ fn spec_block_bytes(block: &Block) -> Vec<u8> {
 /// `transactions_root`, built from *What a block is* and from nothing else.
 ///
 /// The document's words: one leaf per transaction, the coinbase first and then
-/// the transfers in the order they appear; each leaf the hash under the merkle
-/// leaf domain of that transaction's identifier; an interior node the hash
-/// under the merkle node domain of its two children in order; a level with an
-/// odd count carries the last node up unchanged rather than duplicating it;
-/// and the root of no leaves the hash under the merkle empty domain.
+/// the transfers in the order they appear; the coinbase's leaf the hash under
+/// the merkle leaf domain of its identifier; a transfer's leaf the hash under
+/// the merkle leaf domain of its commitment, which is the hash under the
+/// transfer commitment domain of its whole encoding as it travels; an interior
+/// node the hash under the merkle node domain of its two children in order; a
+/// level with an odd count carries the last node up unchanged rather than
+/// duplicating it; and the root of no leaves the hash under the merkle empty
+/// domain.
 ///
 /// The last of those cannot arise for a block, which always has its coinbase,
 /// and is written here because the document states it and a helper that
 /// quietly left it out would be agreeing with the code about a case the
 /// document covers.
 fn spec_transactions_root(block: &Block) -> Hash32 {
-    let mut level: Vec<Hash32> = Vec::new();
-    for id in std::iter::once(block.coinbase.id()).chain(block.transfers.iter().map(Transfer::id)) {
-        level.push(hash(Domain::MerkleLeaf, id.as_bytes()));
+    let mut level: Vec<Hash32> = vec![hash(Domain::MerkleLeaf, block.coinbase.id().as_bytes())];
+    for transfer in &block.transfers {
+        let commitment = hash(Domain::TransferCommitment, &spec_transfer_bytes(transfer));
+        level.push(hash(Domain::MerkleLeaf, commitment.as_bytes()));
     }
     if level.is_empty() {
         return hash(Domain::MerkleEmpty, &[]);
@@ -515,6 +519,41 @@ fn the_transactions_root_is_built_the_way_the_document_says() {
         4,
         "four different bodies gave four different roots, or this agreed about \
          one value four times"
+    );
+}
+
+/// A block's root moves with every byte of a transfer it carries, a signature
+/// and a witness included, and the transfer's identifier does not.
+///
+/// The root used to be taken over transfer identifiers, which leave both out,
+/// so a block with one signature or one proof changed produced the root its
+/// header names. Nothing asked this, so a header that named many bodies
+/// passed: the vector above was built from the same words the code was.
+#[test]
+fn a_changed_signature_or_witness_changes_the_transactions_root() {
+    let block = Block {
+        header: sample_header(),
+        coinbase: CoinbaseTransaction::new(11, vec![note(42, 2)]),
+        transfers: vec![sample_transfer()],
+    };
+    let root = block.transactions_root();
+
+    let mut resigned = block.clone();
+    resigned.transfers[0].inputs[0].signature = Signature::from_bytes(&[0x5c; 64]);
+    assert_eq!(resigned.transfers[0].id(), block.transfers[0].id());
+    assert_ne!(
+        resigned.transactions_root(),
+        root,
+        "a block with a signature changed produces the same root"
+    );
+
+    let mut rewitnessed = block.clone();
+    rewitnessed.transfers[0].inputs[1].witness = Witness::Hot;
+    assert_eq!(rewitnessed.transfers[0].id(), block.transfers[0].id());
+    assert_ne!(
+        rewitnessed.transactions_root(),
+        root,
+        "a block with a cold witness swapped for the hot tag produces the same root"
     );
 }
 

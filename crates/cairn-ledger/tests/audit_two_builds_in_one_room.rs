@@ -294,7 +294,7 @@ fn the_encodings_two_builds_share_still_produce_the_bytes_they_did() {
     assert_eq!(
         transfer.id().to_string(),
         "dc60dc4c6f2aa1941f55437b8d5630084f1537bbb9c63a28ec6bdde60c55a14c",
-        "and a transfer identifier is what a header commits to"
+        "and a transfer identifier is what names the notes it creates"
     );
 
     let block = Block {
@@ -304,8 +304,9 @@ fn the_encodings_two_builds_share_still_produce_the_bytes_they_did() {
     };
     assert_eq!(
         block.transactions_root().to_string(),
-        "57b2a079a7cf3856d70730bda6b2aa7b9899026f5bc8d4c4ec7d73d05e1da610",
-        "the coinbase leads the transfers, and the order is consensus"
+        "db64daae6d167eddc57d4d7e3bd5e6b3374c1996c6a48c64560c25a2639dfeb3",
+        "the coinbase leads the transfers, each transfer is committed to by its whole \
+         encoding, and the order is consensus"
     );
 }
 

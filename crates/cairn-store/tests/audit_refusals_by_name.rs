@@ -1,4 +1,4 @@
-//! Two refusals of the store, produced for their cause.
+//! Refusals of the store, produced for their cause.
 //!
 //! `StoreError::Unrooted` was only ever counted by a fuzz campaign whose tally
 //! nothing asserts, and `StoreError::MissingNode`, returned from eleven places
@@ -27,8 +27,8 @@ use std::path::{Path, PathBuf};
 
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader};
-use cairn_ledger::note::Note;
-use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
+use cairn_ledger::note::{Note, NoteId};
+use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
 use cairn_primitives::codec::Encode;
@@ -131,6 +131,84 @@ fn a_record_carrying_a_body_its_header_does_not_name_is_refused_for_it() {
     assert!(
         matches!(answer, Err(StoreError::Unrooted { height: 2 })),
         "a record whose body its header does not name was answered {answer:?}"
+    );
+    assert_eq!(
+        neighbours,
+        (true, true),
+        "the records either side were refused too"
+    );
+}
+
+/// A record whose one damaged byte is inside a signature is refused as a body
+/// its header does not name.
+///
+/// A header named its transactions by their identifiers, which leave out
+/// signatures and witnesses, so the root check read none of those bytes and
+/// the link to the next record reads the header alone. A byte flipped inside a
+/// signature on the disk came back from `read_at` as the block and was served
+/// to peers as what the miner produced. Nothing asked this, so a log that
+/// served a block nobody mined passed. The root now commits to every byte of
+/// each transfer, so the same check refuses it.
+#[test]
+fn a_record_whose_signature_was_damaged_is_refused() {
+    let params = ConsensusParams::testnet().with_coinbase_maturity(0);
+    let miner = SecretKey::from_bytes(&[1; 32]);
+    let payee = SecretKey::from_bytes(&[2; 32]);
+    let mut state = LedgerState::new();
+    let mut clock = 1_000u64;
+    let mut blocks: Vec<Block> = Vec::new();
+    for height in 0..5u64 {
+        clock += 600;
+        let coinbase = CoinbaseTransaction::new(
+            height,
+            vec![Note::new(params.initial_reward, miner.public_key())],
+        );
+        let mut transfers = Vec::new();
+        if height == 2 {
+            let spent = Note::new(params.initial_reward, miner.public_key());
+            let mut payment = Transfer::new(
+                vec![Input::hot(NoteId::new(blocks[1].coinbase.id(), 0))],
+                vec![Note::new(spent.value, payee.public_key())],
+            );
+            payment.sign_input(params.network, 0, &spent, &miner);
+            transfers.push(payment);
+        }
+        let block = assemble_block(&state, coinbase, transfers, &params, clock, 0).unwrap();
+        let block = mine_block(block, ATTEMPTS).unwrap();
+        connect_block(&mut state, &block, &params, NOW).unwrap();
+        blocks.push(block);
+    }
+
+    let directory = scratch("signature");
+    {
+        let (mut log, _) = BlockLog::open(&directory).unwrap();
+        for block in &blocks {
+            log.append(block).unwrap();
+        }
+    }
+
+    // Where the signature sits in the block's own encoding, found rather than
+    // counted, so this does not depend on the width of what comes before it.
+    let encoded = blocks[2].encode();
+    let signature = blocks[2].transfers[0].inputs[0].signature.to_bytes();
+    let within = encoded
+        .windows(signature.len())
+        .position(|window| window == signature.as_slice())
+        .expect("the block's encoding carries the signature");
+    let path = directory.join(BLOCK_LOG);
+    let whole = std::fs::read(&path).unwrap();
+    let at = records(&whole)[2] + 4 + within + 7;
+    put(&path, at as u64, &[whole[at] ^ 0x01]);
+
+    let (log, _) = BlockLog::open(&directory).unwrap();
+    let answer = log.read_at(2).map(|found| found.map(|block| block.id()));
+    let neighbours = (log.read_at(1).is_ok(), log.read_at(3).is_ok());
+    drop(log);
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert!(
+        matches!(answer, Err(StoreError::Unrooted { height: 2 })),
+        "a record with a byte of a signature damaged was answered {answer:?}"
     );
     assert_eq!(
         neighbours,

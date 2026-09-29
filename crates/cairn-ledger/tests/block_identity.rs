@@ -1,33 +1,19 @@
-//! AUDIT SCRATCH TEST.
+//! A block and a copy of it with one signature changed.
 //!
-//! A block header commits to `transactions_root`, a Merkle root over the
-//! coinbase id and each `Transfer::id()`. `Transfer::id()` hashes `encode_body`,
-//! which deliberately EXCLUDES the input signatures and witnesses. Nothing else
-//! in the header commits to them either. Therefore a block's identifier does not
-//! commit to the signatures that make the block valid.
+//! A block's identifier is the identifier of its header, so a copy that keeps
+//! the header keeps the identifier, whatever its body. What a header says
+//! about its body is `transactions_root`. That root used to be taken over the
+//! coinbase identifier and each `Transfer::id()`, which leaves signatures and
+//! witnesses out, so a copy with a signature turned to garbage produced the
+//! root its header names and failed only when its signatures were checked.
+//! `ChainStore` keys what it holds and what it remembers as bad by identifier,
+//! and an attacker delivering that copy first could have it stand in for the
+//! real block; `cairn-chain/tests/forged_twin.rs` holds what was done about
+//! that in the chain.
 //!
-//! Consequence: given any block B, anyone can build a twin B' that is byte-for-
-//! byte B with one input signature replaced by garbage. B' has the SAME block
-//! id as B (the header is untouched and the transfer id ignores the signature),
-//! passes the transactions_root check, and fails only at signature validation.
-//!
-//! `ChainStore` dedups and caches invalidity BY BLOCK ID: `add_block` answers
-//! `Duplicate` for an identifier the followed branch already names, `follow`
-//! records the identifier in `invalid` when applying it failed on something
-//! this build can judge, and `add_block` consults that set before anything
-//! else.
-//!
-//! Named rather than numbered. This carried three `lib.rs` line numbers and
-//! all three had moved; the first was also stale in substance, since the
-//! duplicate answer is no longer a plain `contains_key` but a question about
-//! the followed branch, so a body held off the branch is not turned away as a
-//! duplicate any more.
-//! An attacker who delivers B' before the honest B therefore poisons those
-//! caches so the honest B is refused, which is a work-free, targeted relay DoS.
-//!
-//! This test asserts the property the design NEEDS to defend against that: a
-//! block and its signature-corrupted twin must not share an identifier. It
-//! FAILS on current code, which is the finding.
+//! The root now commits to each transfer's whole encoding, so the copy still
+//! shares the identifier and no longer produces the root: it is refused on
+//! arrival as a body its header does not name.
 
 #![allow(
     clippy::doc_markdown,
@@ -144,32 +130,34 @@ fn a_block_and_its_signature_corrupted_twin_share_an_identifier() {
         "precondition: the twin's signature does not verify"
     );
 
-    // The twin still passes the header's transactions_root check, because the
-    // transfer id excludes the signature.
-    assert_eq!(
+    // The twin does not produce the root its header names, because the root
+    // is taken over each transfer's whole encoding, signatures included. It
+    // used to, since the leaf was the transfer's identifier, which leaves the
+    // signature out, and a copy nothing short of applying told from the real
+    // block could stand in for it.
+    assert_ne!(
         twin.transactions_root(),
         twin.header.transactions_root,
-        "the corrupted twin passes the transactions_root check"
+        "a copy with one signature changed produces the root its header names"
     );
 
     // A valid block and a forged, invalid copy of it share one identifier, and
     // that is the property, not the defect.
     //
-    // An identifier is taken over a header. A header commits to its
-    // transactions by their identifiers, and those leave out signatures and
-    // proofs on purpose: refreshing a proof must not make a different
-    // transfer, and anything already built on one would otherwise stop being
-    // valid. Committing to the witnesses as well was written and taken back
-    // out: it can only live in the header or in the coinbase, and in the
-    // coinbase it does not change the identifier at all, which is the thing
-    // that was supposed to move.
+    // An identifier is taken over a header, and the header is the one thing
+    // the copy did not change. What moved is the root inside the header, which
+    // is what a body is checked against, so the copy is refused as a body its
+    // header does not name. The transfer's own identifier still leaves out
+    // signatures and proofs on purpose: refreshing a proof must not make a
+    // different transfer, and anything already built on one would otherwise
+    // stop being valid. The block names the version its miner carried.
     //
-    // So the identifier stays shared and what was done about it lives in the
-    // chain, where the harm was: a held block is a duplicate only if it is the
-    // same block, an identifier is remembered as bad only for a failure the
-    // header alone settles, and a block that did not apply is not kept to be
-    // handed to the next person who asks. Those three are held by
-    // `cairn-chain/tests/forged_twin.rs`.
+    // What the chain does about a shared identifier still stands, because
+    // anybody can send a header with a body that is not its own: a held block
+    // is a duplicate only if it is the same block, an identifier is remembered
+    // as bad only for a failure the header alone settles, and a block that did
+    // not apply is not kept to be handed to the next person who asks. Those
+    // are held by `cairn-chain/tests/forged_twin.rs`.
     assert_eq!(
         honest.id(),
         twin.id(),

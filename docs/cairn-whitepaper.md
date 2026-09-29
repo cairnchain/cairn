@@ -447,6 +447,15 @@ block already mined. The test network took the next number when they
 landed, which cost nothing at the time and would have cost everything
 later.
 
+A header also commits to every byte of its body. Its transaction root is
+taken over each transfer's whole encoding, signatures and proofs included,
+so a block has one body. A transfer's identifier leaves both out, so that a proof can
+be refreshed without making it a different transfer; the block commits to
+the version its miner carried. Before testnet-7 the root was taken over
+identifiers, and anybody relaying a block could make a copy with another
+signature or another proof under the same header, which a node could hold,
+and inside the grace window even apply, in place of the real one.
+
 ### What sampling does not settle
 
 Weighing settles which chain carries the most work. It settles nothing
