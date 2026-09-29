@@ -165,6 +165,11 @@ const DIAL_BUDGET: Duration = Duration::from_secs(3);
 /// is [`DIAL_TIMEOUT`] at most.
 const DIALS_AT_ONCE: usize = 2 * TARGET_PEERS;
 /// How long a read waits before the loop looks up to check on things.
+///
+/// Also how long a connection this node has shut can go on being read, on
+/// Windows. Shutting a socket wakes a read already waiting on it on Linux and
+/// macOS, and not on Windows: there the read goes on until the far end
+/// closes or this deadline passes, and the one after it fails at once.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a write may block before the peer is treated as gone.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -2454,9 +2459,11 @@ fn room_made_in(peers: &mut HashMap<PeerId, Peer>, host: IpAddr, salt: u64) -> b
 /// ceiling left it still full, and the visitor was turned away after somebody
 /// had been let go of for it. And one at a time. The connection chosen stops
 /// holding a slot the moment it is chosen, and leaves the table once its
-/// threads have wound down, which a shut socket makes a matter of moments;
-/// until it has, nobody else is let go of, so the table holds at most one more
-/// than [`MAX_PEERS`], and only for those moments.
+/// threads have wound down: a matter of moments once its socket is shut, and
+/// up to [`READ_TIMEOUT`] on Windows, where shutting it does not wake the read
+/// waiting on it. Until it has, nobody else is let go of, so the connections
+/// holding a place are at most one more than [`MAX_PEERS`], and only for that
+/// long.
 ///
 /// Which one goes is [`to_let_go`], and it may be none. A visitor waiting for
 /// its own introduction is never one: it holds no place to give up.
@@ -3384,7 +3391,9 @@ impl Shared {
     /// The socket is shut rather than the entry taken out of the table, so
     /// what happens next is what happens to any peer that goes away: the
     /// reading loop fails, the writer is freed, and the slot is given up once
-    /// both are finished with it.
+    /// both are finished with it. At once on Linux and macOS; on Windows the
+    /// read already waiting ends at the far end's answer or at
+    /// [`READ_TIMEOUT`], so the slot can stay taken that long.
     fn hang_up(&self, id: PeerId) {
         if let Some(peer) = self.peers().get(&id) {
             let _ = peer.stream.shutdown(Shutdown::Both);
@@ -9746,7 +9755,8 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
     // Under the thread table, so a connection taken while a shutdown is
     // emptying it is not left with a thread nobody joins. A shutdown that got
     // here first has already cleared `running`, and the socket is shut so the
-    // read fails at once rather than waiting out a deadline.
+    // read fails at once rather than waiting out a deadline; on Windows, a read
+    // the reader had already begun waits it out: see `READ_TIMEOUT`.
     let mut threads = shared.threads();
     if !shared.running.load(Ordering::SeqCst) {
         let _ = closing_end.shutdown(Shutdown::Both);
@@ -10142,7 +10152,9 @@ fn read_loop(
 
     note_the_ending(shared, remote, dialled, &parting, peer.greeted, unix_now());
     // Always, however the loop ended. It is what frees the writing thread: a
-    // write on a socket just shut fails at once, wherever in a frame it was.
+    // write begun on a socket just shut fails at once, wherever in a frame it
+    // was. One already waiting for the far end to take its bytes is sure to end
+    // only at `WRITE_TIMEOUT` on Windows, where a shut socket need not wake it.
     let _ = stream.shutdown(Shutdown::Both);
 }
 

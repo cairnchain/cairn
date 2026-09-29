@@ -178,48 +178,79 @@ fn long_waits_on_the_chain(node: &Node, over: Duration, long: Duration) -> Vec<D
 
 /// **The ceiling on connections, under a storm rather than one at a time.**
 ///
-/// `has_room_for` and the insertion that follows it are two separate takings
+/// `has_room_for` and the insertion that follows it were two separate takings
 /// of the peer table, and three threads reach that pair: the accept loop, the
 /// maintenance loop dialling, and any caller of `Node::connect`.
+///
+/// Counted all through the storm rather than once after it. Past a full table
+/// one connection at a time is let go of to make room for a visitor, and it
+/// stays in the table until its threads have wound down: moments on Linux and
+/// macOS, and up to the read deadline on Windows, where shutting a socket does
+/// not wake the read waiting on it. Counted once, half a second after the
+/// storm, the Windows runner saw that one and failed a table that was right.
+///
+/// What bounds it here. A node that has dialled nobody keeps `TARGET_PEERS`
+/// places for its own dials, so visitors hold at most `MAX_PEERS` less those;
+/// as many as it keeps may wait past a full table for their introduction,
+/// holding no place; and one is on its way out. That is `MAX_PEERS`, and the
+/// one.
 #[test]
 fn a_connect_storm_does_not_push_the_peer_table_far_past_its_ceiling() {
     let node = Node::bind(params(), loopback()).unwrap();
     let address = node.address();
     let stop = Arc::new(AtomicBool::new(false));
+    let counting = AtomicBool::new(true);
 
-    // Held open, silent. A silent peer keeps its slot until `PEER_SILENCE`,
-    // which is far longer than this test runs.
-    let mut held = Vec::new();
-    let mut hands = Vec::new();
-    for _ in 0..6 {
-        let stop = Arc::clone(&stop);
-        hands.push(thread::spawn(move || {
-            let mut mine = Vec::new();
-            for _ in 0..30 {
-                if stop.load(Ordering::SeqCst) {
-                    break;
-                }
-                if let Ok(stream) = TcpStream::connect(address) {
-                    mine.push(stream);
-                }
+    let (most, held) = thread::scope(|scope| {
+        let most = scope.spawn(|| {
+            let mut most = 0;
+            while counting.load(Ordering::SeqCst) {
+                most = most.max(node.peer_count());
+                thread::sleep(Duration::from_millis(1));
             }
-            mine
-        }));
-    }
-    for hand in hands {
-        held.extend(hand.join().unwrap());
-    }
+            most
+        });
 
-    // Let the accept loop work through whatever the kernel queued.
-    thread::sleep(Duration::from_millis(500));
-    let peers = node.peer_count();
+        // Held open, silent. A silent peer keeps its slot until
+        // `PEER_SILENCE`, which is far longer than this test runs.
+        let mut held = Vec::new();
+        let mut hands = Vec::new();
+        for _ in 0..6 {
+            let stop = Arc::clone(&stop);
+            hands.push(thread::spawn(move || {
+                let mut mine = Vec::new();
+                for _ in 0..30 {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    if let Ok(stream) = TcpStream::connect(address) {
+                        mine.push(stream);
+                    }
+                }
+                mine
+            }));
+        }
+        for hand in hands {
+            held.extend(hand.join().unwrap());
+        }
+
+        // Let the accept loop work through whatever the kernel queued.
+        thread::sleep(Duration::from_millis(500));
+        counting.store(false, Ordering::SeqCst);
+        (most.join().unwrap(), held)
+    });
     println!(
-        "{} connections offered, {peers} taken, ceiling {MAX_PEERS}",
+        "{} connections offered, at most {most} held at once, ceiling {MAX_PEERS}",
         held.len()
     );
     assert!(
-        peers <= MAX_PEERS,
-        "the peer table reached {peers} against a ceiling of {MAX_PEERS}"
+        most <= MAX_PEERS + 1,
+        "the peer table reached {most} against a ceiling of {MAX_PEERS} and one on its way out"
+    );
+    wait_for(
+        "the connection let go of for a visitor to leave the table",
+        Duration::from_secs(30),
+        || node.peer_count() <= MAX_PEERS,
     );
 
     stop.store(true, Ordering::SeqCst);
