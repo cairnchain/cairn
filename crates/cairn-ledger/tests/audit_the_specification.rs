@@ -2023,6 +2023,7 @@ fn the_published_network_parameters_are_what_the_networks_carry() {
     let public = ConsensusParams::for_network("testnet-6").expect("the network the draft names");
     assert_eq!(public.hot_capacity, 131_072);
     assert_eq!(public.max_evictions_per_block, 1_024);
+    assert_eq!(public.place_price.as_pebbles(), 6_000);
     assert_eq!(public.coinbase_maturity, 1_024);
     assert_eq!(public.burial, 1_024);
     assert_eq!(public.target_block_time, 60);
@@ -2039,7 +2040,8 @@ fn the_published_network_parameters_are_what_the_networks_carry() {
 
     let devnet = ConsensusParams::for_network("devnet").expect("the throwaway network");
     assert_eq!(devnet.hot_capacity, 64);
-    assert_eq!(devnet.max_evictions_per_block, 1_024);
+    assert_eq!(devnet.max_evictions_per_block, 32);
+    assert_eq!(devnet.place_price.as_pebbles(), 6_000);
     assert_eq!(devnet.coinbase_maturity, 32);
     assert_eq!(devnet.burial, 32);
     assert_eq!(devnet.genesis_difficulty, 1 << 23);

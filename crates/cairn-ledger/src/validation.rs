@@ -59,6 +59,49 @@ const TAIL_REWARD: Amount = reward_of(emission::TAIL_REWARD_PEBBLES);
 /// raise this.
 const DEFAULT_HOT_CAPACITY: usize = 1 << 17;
 
+/// Pebbles destroyed for each place a transfer takes in the hot set, on every
+/// named network.
+///
+/// A place is taken from somebody: on a full tier every note a transfer adds
+/// pushes the oldest untouched one out, and its owner then spends it with a
+/// cold witness, which is bytes they pay for. So the price answers to that
+/// harm: pushing a note out costs the pusher at least what spending it
+/// afterwards costs the note's owner, in extra bytes at the pool's floor rate.
+/// It is paid once, as part of the fee, by whoever takes the place, when the
+/// transfer is made. Nothing is ever charged to a note for sitting where it
+/// is.
+///
+/// The burn is destroyed rather than paid to the miner, and that is the whole
+/// point of it. A fee paid to the block's miner is a price for everybody but
+/// the miner, who pays it to itself: before this, a miner filled its own
+/// blocks with outputs for nothing and emptied the tier at the eviction cap's
+/// pace for free.
+///
+/// Measured rather than chosen, by `cairn-chain/examples/flood.rs`, which
+/// fills and flushes a public network's tier through the pool and measures
+/// what the displaced owners' spends grow by. The rule is
+/// `ceil(delta_w * MIN_FEE_PER_WEIGHT / 1000) * 1000`, with `delta_w` the
+/// median growth in bytes and ten pebbles a byte. Measured on 29 September
+/// 2026: a payment of one input grew from 191 bytes to 787 for all sixteen
+/// displaced owners, the cold witness of a note in a tree of height seventeen
+/// against a one-byte tag, so `delta_w` is 596 and the price
+/// `ceil(5.96) * 1000`. The pool's older price of a place, 5 120, and an
+/// ordinary payment's floor land within a third of it, which is the check
+/// that the order is right. Mainnet derives it again, by the same rule, on a
+/// forest of the depth it expects.
+pub const PLACE_PRICE: Amount = price_of(6_000);
+
+/// A price written in pebbles, as an amount, for the same reason and in the
+/// same way as [`reward_of`]: a constant the monetary ceiling cannot hold stops
+/// the build.
+#[allow(clippy::panic)]
+const fn price_of(pebbles: u64) -> Amount {
+    match Amount::from_pebbles(pebbles) {
+        Some(amount) => amount,
+        None => panic!("a place price above the monetary ceiling could never be paid"),
+    }
+}
+
 /// Seconds a block is meant to take, which is the network's value and the
 /// one the specification states.
 const DEFAULT_TARGET_BLOCK_TIME: u64 = 60;
@@ -165,9 +208,10 @@ pub struct ConsensusParams {
     /// How fast the hot set turns over is a shared resource: every note pushed
     /// out is somebody's money now needing a proof to spend, and the pusher
     /// chooses who by choosing nothing, since it is always the oldest that
-    /// falls. Fees make that churn cost something, but a fee is only a price,
-    /// and a miner includes its own transfers for free. This is the bound that
-    /// holds whatever anyone pays.
+    /// falls. [`Self::place_price`] makes that churn cost something, the same
+    /// for a miner as for anybody, since what it charges is destroyed. But a
+    /// price is only a price, and whoever will pay it can buy any rate. This
+    /// is the bound on the rate, whatever anyone pays.
     ///
     /// The number is a judgement. Full blocks of ordinary payments push out
     /// about six hundred and eighty six notes each, so honest traffic never
@@ -178,11 +222,24 @@ pub struct ConsensusParams {
     /// works both figures out from measured sizes.
     ///
     /// Those two sentences are about this number and [`Self::hot_capacity`]
-    /// together, and only the public networks hold both: devnet takes the tier
-    /// down and inherits this, so there the cap is larger than the tier and
-    /// one block empties it. Said where devnet is built, and pinned for every
-    /// network in `tests/network_rules.rs`.
+    /// together. Devnet takes the tier down to sixty four and the cap down to
+    /// thirty two with it, so there the cap is below the tier as it is
+    /// everywhere, and one block can no longer empty it. Said where devnet is
+    /// built, and pinned for every network in `tests/network_rules.rs`.
     pub max_evictions_per_block: usize,
+    /// Pebbles destroyed for each place a transfer takes in the hot set.
+    ///
+    /// A transfer's places are its outputs less the inputs it spends out of
+    /// the hot set, or none if it spends more than it makes. Its fee must be
+    /// at least this times its places, and that much of the fee is destroyed:
+    /// the coinbase may claim the reward and the fees less their burns, so a
+    /// miner filling its own block pays the price like anyone else. See
+    /// [`PLACE_PRICE`] for where the number comes from.
+    ///
+    /// A fee, paid once, by whoever takes the place, when the transfer is
+    /// made. A note is never charged for staying in the hot set or for leaving
+    /// it, and spending a note gives its place back for nothing.
+    pub place_price: Amount,
     /// Blocks a handed over ledger must sit below the tip it belongs to.
     ///
     /// See [`crate::handover::BURIAL`] for what it buys. Here because it is a
@@ -389,6 +446,7 @@ impl ConsensusParams {
                 genesis: crate::genesis::pinned(NetworkId::TESTNET_6),
                 opens_at: crate::genesis::opens_at(NetworkId::TESTNET_6),
                 genesis_difficulty: 1 << 27,
+                place_price: PLACE_PRICE,
                 ..Self::testnet()
             }),
             // A throwaway network, so its hot set is small enough that notes
@@ -396,18 +454,20 @@ impl ConsensusParams {
             // block is found in seconds. Everything else is the same, which is
             // the point of having it.
             //
-            // Everything else but one, and it is the one the small hot set
-            // takes with it. `max_evictions_per_block` is written as a hundred
-            // and twenty eighth of the *default* tier, so a tier of sixty four
-            // inherits a cap sixteen times its own size and a single block
-            // empties the whole thing, where on a public network the same
-            // number buys a hundred and twenty eight blocks.
+            // Everything else but the eviction cap, which the small hot set
+            // takes with it. The public cap is a hundred and twenty eighth of
+            // the *default* tier, and inherited here it was sixteen times
+            // devnet's own: a single block emptied the tier, so the one rule
+            // bounding how fast the hot set turns over was the one rule a
+            // throwaway network did not rehearse.
             //
-            // Said rather than mended, because no number keeps the relation at
-            // this size: a hundred and twenty eighth of sixty four is nought,
-            // and a cap of one refuses an ordinary devnet payment, which
-            // evicts two. So the one rule bounding how fast the hot set turns
-            // over is the one rule a throwaway network does not rehearse.
+            // Thirty two, because no smaller number keeps the network usable.
+            // A hundred and twenty eighth of sixty four is nought, and a miner
+            // building a block keeps room for a full coinbase, sixteen notes,
+            // out of the cap, so any cap of sixteen or less leaves a full
+            // devnet tier carrying no payment at all. Thirty two leaves sixteen
+            // places a block, sixteen ordinary payments every five seconds,
+            // and emptying the tier takes two blocks rather than one.
             // `tests/network_rules.rs` writes down what each network's cap
             // actually buys, so that moving either number fails a test rather
             // than a network.
@@ -426,6 +486,8 @@ impl ConsensusParams {
                 // network.
                 max_timestamp_drift: drift_allowance(5),
                 hot_capacity: 64,
+                max_evictions_per_block: 32,
+                place_price: PLACE_PRICE,
                 // A throwaway network reaches this in minutes rather than in
                 // most of a day, which is the whole point of having one.
                 burial: 32,
@@ -450,9 +512,9 @@ impl ConsensusParams {
 
     /// The rule set, with nothing tying it to a live network.
     ///
-    /// No pinned first block and a trivial opening difficulty, which is what
-    /// tests want and what no public network should ever run. Public networks
-    /// come from [`Self::for_network`].
+    /// No pinned first block, a trivial opening difficulty and no place price,
+    /// which is what tests want and what no public network should ever run.
+    /// Public networks come from [`Self::for_network`].
     pub const fn testnet() -> Self {
         Self {
             network: NetworkId::TESTNET,
@@ -465,6 +527,12 @@ impl ConsensusParams {
             // A hundred and twenty eighth of the tier, so however the blocks
             // are stuffed, emptying it takes at least that many of them.
             max_evictions_per_block: DEFAULT_HOT_CAPACITY >> 7,
+            // Nought here, for the reason the opening difficulty below is the
+            // floor: this is what the tests build on, most of them pay no fee,
+            // and none of those is about fees. Every named network and
+            // `mineable_network` charge `PLACE_PRICE`, and the tests that are
+            // about the price ask for it with `with_place_price`.
+            place_price: Amount::ZERO,
             burial: crate::handover::BURIAL,
             coinbase_maturity: COINBASE_MATURITY,
             target_block_time: DEFAULT_TARGET_BLOCK_TIME,
@@ -584,6 +652,29 @@ impl ConsensusParams {
         self
     }
 
+    /// The same, for what a place in the hot set destroys. For tests about
+    /// fees, since [`Self::testnet`] charges nothing.
+    #[must_use]
+    pub const fn with_place_price(mut self, price: Amount) -> Self {
+        self.place_price = price;
+        self
+    }
+
+    /// What `places` places in the hot set destroy under these rules, or
+    /// nothing if the amount cannot be held, which no transfer the rules allow
+    /// comes near.
+    ///
+    /// One definition for the rule and for everything that quotes it: the
+    /// pool's floor and a wallet's quote read it here, so none of them can
+    /// price a place differently from the block that burns it.
+    #[must_use]
+    pub fn burn_for(&self, places: usize) -> Option<Amount> {
+        u64::try_from(places)
+            .ok()
+            .and_then(|places| self.place_price.as_pebbles().checked_mul(places))
+            .and_then(Amount::from_pebbles)
+    }
+
     /// The same, for how deep a handed over ledger must sit. For tests, which
     /// would otherwise have to mine a thousand blocks to reach one.
     #[must_use]
@@ -637,8 +728,9 @@ impl ConsensusParams {
     /// constant.
     ///
     /// So this is not a fourth set of numbers nobody runs. It is
-    /// [`Self::testnet`] with the opening difficulty lifted off the floor and
-    /// the two depths set together, and `tests/network_rules.rs` compares it
+    /// [`Self::testnet`] with the opening difficulty lifted off the floor, the
+    /// two depths set together and the place price a public network charges,
+    /// and `tests/network_rules.rs` compares it
     /// field by field against `testnet-6`: a rule that moves on a public
     /// network and not here fails a test rather than leaving the fixtures
     /// rehearsing a shape no network has.
@@ -655,6 +747,7 @@ impl ConsensusParams {
         params.genesis_difficulty = MINEABLE_DIFFICULTY;
         params.burial = burial;
         params.coinbase_maturity = burial;
+        params.place_price = PLACE_PRICE;
         params
     }
 }
@@ -714,6 +807,18 @@ pub enum TransferError {
     OutputsExceedInputs {
         available: Amount,
         requested: Amount,
+    },
+    /// A rule, not a pool's price: a block carrying it is refused. The burn
+    /// is the place price times the places, and it is destroyed, so paying it
+    /// in one's own block buys nothing back.
+    #[error(
+        "transfer takes {places} new places in the hot set, which destroys {burn}, \
+         and gives up only {fee}"
+    )]
+    PlacesUnpaid {
+        places: usize,
+        burn: Amount,
+        fee: Amount,
     },
     #[error("signature on input {input_index} does not verify")]
     InvalidSignature { input_index: usize },
@@ -829,7 +934,11 @@ pub enum BlockError {
 /// What a valid transfer contributes to the block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransferOutcome {
+    /// Everything the transfer gave up: its inputs less its outputs.
     pub fee: Amount,
+    /// The part of the fee destroyed for the places it takes, which no
+    /// coinbase may claim. Never more than the fee.
+    pub burn: Amount,
     pub spent_hot: Vec<NoteId>,
     pub spent_cold: Vec<ColdSpend>,
 }
@@ -1244,8 +1353,20 @@ fn resolve_transfer(
             requested,
         })?;
 
+    // Only a note spent out of the hot set gives a place back. One spent
+    // through the grace window or with a proof had already left the tier, so
+    // every output beside it is a note pushed out of a full one.
+    let places = transfer.outputs.len().saturating_sub(from_hot.len());
+    let burn = params
+        .burn_for(places)
+        .ok_or(TransferError::ValueOverflow)?;
+    if fee < burn {
+        return Err(TransferError::PlacesUnpaid { places, burn, fee });
+    }
+
     Ok(TransferOutcome {
         fee,
+        burn,
         spent_hot: from_hot,
         spent_cold: from_cold,
     })
@@ -1305,6 +1426,7 @@ pub fn evaluate_block_body(
     let mut spent_cold: BTreeMap<NoteId, ColdSpend> = BTreeMap::new();
     let mut created: Vec<(NoteId, Note)> = Vec::new();
     let mut total_fees = Amount::ZERO;
+    let mut total_burns = Amount::ZERO;
 
     // Collected across the whole block and checked once below, rather than one
     // at a time here. A full block carries over a thousand of them, every one
@@ -1335,6 +1457,9 @@ pub fn evaluate_block_body(
         total_fees = total_fees
             .checked_add(outcome.fee)
             .ok_or(BlockError::ValueOverflow)?;
+        total_burns = total_burns
+            .checked_add(outcome.burn)
+            .ok_or(BlockError::ValueOverflow)?;
     }
 
     if let Some(failed) = first_failure(&pending) {
@@ -1347,10 +1472,14 @@ pub fn evaluate_block_body(
     }
 
     // What the schedule pays at this height, plus what the transfers paid to
-    // be carried.
-    let allowed = params
-        .reward_at(height)
-        .checked_add(total_fees)
+    // be carried, less what they paid for their places. The burn is destroyed
+    // whoever mined the block: a miner that could claim it back would pay
+    // itself for the places its own transfers take, which is paying nothing.
+    // Every transfer's fee covers its own burn, so the subtraction cannot
+    // fail on a block that got this far.
+    let allowed = total_fees
+        .checked_sub(total_burns)
+        .and_then(|kept| params.reward_at(height).checked_add(kept))
         .ok_or(BlockError::ValueOverflow)?;
     let claimed = coinbase.total_output().ok_or(BlockError::ValueOverflow)?;
     if claimed > allowed {
@@ -1361,8 +1490,9 @@ pub fn evaluate_block_body(
     let evicted = state.plan_evictions(&spent_hot, &created, params.hot_capacity);
     // Falling is what a full tier does to make room, so how many fall is
     // decided by what the block creates, and a block can be stuffed with
-    // outputs for exactly that purpose. Fees put a price on it; this puts a
-    // ceiling on it, because a miner pays no fee to itself.
+    // outputs for exactly that purpose. The place price puts a price on it,
+    // the same for a miner as for anyone; this puts a ceiling on the rate,
+    // because whoever will pay the price can otherwise buy any rate at all.
     if evicted.len() > params.max_evictions_per_block {
         return Err(BlockError::TooManyEvictions {
             count: evicted.len(),
