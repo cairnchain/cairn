@@ -126,7 +126,7 @@ fn a_connection_this_node_let_go_of_is_not_a_peer_reached() {
     // crowded node's table holds.
     let crowded = Node::bind(params(), loopback()).unwrap();
     let mut held = Vec::new();
-    for _ in 0..MAX_PEERS {
+    for _ in 0..MOST_FROM_OUTSIDE {
         held.push(TcpStream::connect(crowded.address()).unwrap());
     }
     // As full as somebody else can make it, which is `MOST_FROM_OUTSIDE`: a
@@ -359,6 +359,111 @@ fn nothing_is_broadcast_to_a_peer_that_has_not_introduced_itself() {
     }
     drop(quiet);
     drop(sender);
+}
+
+/// A port that takes every connection and never writes a byte, holding each
+/// socket until the test lets go: what an address in a book looks like once
+/// it has gone to another service, or to somebody holding sockets open.
+struct Silent {
+    address: SocketAddr,
+    held: std::sync::Arc<std::sync::Mutex<Vec<TcpStream>>>,
+}
+
+fn silent() -> Silent {
+    let listener = std::net::TcpListener::bind(loopback()).unwrap();
+    let address = listener.local_addr().unwrap();
+    let held = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let holding = std::sync::Arc::clone(&held);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            holding.lock().unwrap().push(stream);
+        }
+    });
+    Silent { address, held }
+}
+
+/// A connection this node dialled is not a peer introduced until the far end
+/// has introduced itself, and a transfer written down it is not counted as
+/// taken by anybody.
+///
+/// A wallet decides from this count whether its own address book brought it
+/// enough peers to leave the seed alone, whether it has caught up, and
+/// whether its payment was handed on. A dialled connection counted from the
+/// moment it was in the table, whether or not the far end ever said a word,
+/// so a wallet whose book held two addresses that took a connection and then
+/// said nothing counted two peers, never asked the seed, and answered from
+/// the chain on its disk without a warning. Nothing asked this, so a count of
+/// sockets this node had opened passed as a count of peers.
+#[test]
+fn a_dialled_connection_that_never_speaks_is_no_peer_introduced() {
+    let (first, second) = (silent(), silent());
+    let directory = scratch("silent-book");
+    std::fs::write(
+        directory.join("peers.txt"),
+        format!("{}\n{}\n", first.address, second.address),
+    )
+    .unwrap();
+    let key = wallet(13);
+    let mut source = Chain::new();
+    for _ in 0..3 {
+        source.mine(&key);
+    }
+    let (node, _) = Node::open(params(), loopback(), &directory).unwrap();
+    for block in &source.blocks {
+        node.submit_block(block.clone()).unwrap();
+    }
+    let (spending, held) = source.first_reward(&key);
+    let mut transfer = Transfer::new(
+        vec![Input::hot(spending)],
+        vec![Note::new(
+            held.value
+                .checked_sub(Amount::from_pebbles(10_000).unwrap())
+                .unwrap(),
+            wallet(14).public_key(),
+        )],
+    );
+    transfer.sign_input(params().network, 0, &held, &key);
+    let id = transfer.id();
+    assert!(
+        node.submit_transaction(transfer).unwrap(),
+        "the pool took it"
+    );
+
+    // The node dials its book by itself, as a wallet's does when it starts.
+    assert!(
+        until(Duration::from_secs(30), || node.peer_count() == 2),
+        "the node never dialled the two addresses in its book, so nothing below is \
+         being tested"
+    );
+    let mut counted = Vec::new();
+    let mut offered = Vec::new();
+    for _ in 0..10 {
+        counted.push(node.peers_introduced());
+        offered.push(node.offer_again(&id));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let still_held = node.peer_count();
+    node.shutdown();
+    drop(first.held.lock().unwrap().drain(..));
+    drop(second.held.lock().unwrap().drain(..));
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert_eq!(
+        still_held, 2,
+        "fixture: the two silent connections were let go of"
+    );
+    assert!(
+        counted.iter().all(|peers| *peers == 0),
+        "two connections this node dialled, on which nobody has said a word, were \
+         counted as peers that introduced themselves: a wallet whose book holds two such \
+         addresses leaves the seed alone and answers from the chain on its disk"
+    );
+    assert!(
+        offered.iter().all(|taken| *taken == 0),
+        "a transfer queued only on connections nobody has spoken on was counted as \
+         taken by a peer"
+    );
 }
 
 // ---------------------------------------------------------------------------

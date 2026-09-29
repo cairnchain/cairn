@@ -1175,6 +1175,77 @@ fn an_announcement_does_not_hold_a_batch_past_its_patience() {
     );
 }
 
+/// What is left of a batch that stopped arriving part way is asked for again
+/// once a window of the peer's allowance has turned, long before the batch's
+/// patience runs out, and once a window at most.
+///
+/// A peer serves a batch only as far as the asker's window pays for, which of
+/// full blocks is about forty of the hundred and twenty eight asked for, and
+/// stops. Nothing asked for the rest: the next question goes out only once
+/// nothing is awaited, and the heights left stayed awaited until the patience
+/// gave them up, a minute after the last block arrived. A node catching up on
+/// full blocks moved one window a minute. Nothing asked this, since every
+/// batch in the suite was served whole.
+#[test]
+fn the_rest_of_a_batch_cut_short_is_asked_for_again_once_a_window_has_turned() {
+    let params = params();
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(6);
+    let mut node = store_with(params, &blocks[..1]);
+    let mut peer = greeted_peer(blocks[5].header.total_work, 5);
+    on_message(
+        &mut solo(&mut node),
+        &mut peer,
+        Message::Chain { from: 1, count: 5 },
+        NOW,
+    );
+    // Two of the five arrive, and then nothing: the peer's window is spent.
+    let arrived = NOW + 1;
+    for block in &blocks[1..3] {
+        on_message(
+            &mut solo(&mut node),
+            &mut peer,
+            Message::Block(Box::new(block.clone())),
+            arrived,
+        );
+    }
+    assert_eq!(
+        node.height(),
+        Some(2),
+        "fixture: two blocks of the batch landed"
+    );
+    let rest: Vec<u64> = vec![3, 4, 5];
+    assert_eq!(peer.awaiting.iter().copied().collect::<Vec<u64>>(), rest);
+
+    let at_once = tick(&node, &mut peer, arrived);
+    assert!(
+        at_once.reply.is_empty(),
+        "the rest was asked for in the same second the last block arrived, before any \
+         window could turn"
+    );
+    let later = arrived + BATCH_PATIENCE / 2;
+    let again = tick(&node, &mut peer, later);
+    assert!(
+        matches!(again.reply.as_slice(), [Message::GetBlocks(heights)] if *heights == rest),
+        "half a patience after the last block of a batch cut short, the rest of it was not \
+         asked for: the node waits out the whole patience for the next window of blocks"
+    );
+    assert_eq!(peer.awaiting.len(), 3, "asking again gave the batch up");
+    let twice = tick(&node, &mut peer, later + 1);
+    assert!(
+        twice.reply.is_empty(),
+        "the rest of a batch was asked for again a second after it was asked for"
+    );
+    // Asking again does not renew the patience: a peer that serves nothing
+    // more is still given up on a patience after its last block.
+    let past = tick(&node, &mut peer, arrived + BATCH_PATIENCE);
+    assert!(
+        asks_for_the_chain(&past.reply) && peer.awaiting.is_empty(),
+        "asking again for the rest of a batch kept a peer that serves nothing more from \
+         ever being given up on"
+    );
+}
+
 #[test]
 fn a_peer_sending_an_invalid_block_is_dropped() {
     let params = params();

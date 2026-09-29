@@ -5,11 +5,13 @@
 //! compiled in. A body is read only for a POST and only up to
 //! [`MAX_BODY_BYTES`]; anything larger is refused with a 413 before a byte of
 //! it is taken, and one framed by a transfer coding rather than a length is
-//! refused with a 501. And only by a server that takes bodies at all: one started
-//! with [`serve_without_bodies`], which is the explorer, refuses a POST with a
-//! 405 as soon as its head is read. One thread per connection, the same choice the node makes for
-//! its peers and for the same reason: a reader can hold the whole thing in
-//! their head.
+//! refused with a 501. That is a server that takes bodies. One started with
+//! [`serve_without_bodies`], which is the explorer, answers GET and HEAD and
+//! says so: a POST is refused with a 405 naming those two as soon as its head
+//! is read, and a transfer coding on anything else with a 501 saying it takes
+//! no body. One thread per connection, the same choice the node makes for its
+//! peers and for the same reason: a reader can hold the whole thing in their
+//! head.
 //!
 //! This said "answers GET and HEAD, reads no request body" for as long as it
 //! has answered POST and read bodies, which is since three minutes after the
@@ -154,6 +156,12 @@ pub const MAX_BODY_BYTES: usize = 4096;
 /// together, and held to the `match` that decides them by
 /// `the_405_names_every_method_this_answers`.
 const ANSWERS: &str = "only GET, HEAD and POST are served";
+/// What a 405 tells a stranger a server that takes no bodies answers: see
+/// [`serve_without_bodies`].
+///
+/// Apart from [`ANSWERS`], because such a server does not serve POST, and it
+/// used to send one of the two lists to a POST and the other to a PUT.
+const ANSWERS_WITHOUT_BODIES: &str = "only GET and HEAD are served here";
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bytes one read of [`drain`] takes off the socket.
 const DRAIN_CHUNK: usize = 2 * 1024;
@@ -613,8 +621,12 @@ where
         // is the sentence the module header was corrected for: the correction
         // reached the comment a maintainer reads and not the line a stranger
         // is sent.
-        Ok(None) => (Response::error(405, ANSWERS), false, false),
-        Err(status) => (Response::error(status, refusal(status)), false, true),
+        Ok(None) => (Response::error(405, answers(bodies)), false, false),
+        Err(status) => (
+            Response::error(status, refusal(status, bodies)),
+            false,
+            true,
+        ),
     };
     let sent = if response.1 { 0 } else { response.0.body.len() };
     let until = deadline(accepted, answering(sent).saturating_add(thought));
@@ -1074,6 +1086,7 @@ fn read_request_as<R: io::Read>(reader: &mut R, bodies: Bodies) -> Result<Option
     let mut host = String::new();
     let mut origin = String::new();
     let mut length: Option<usize> = None;
+    let mut coded = false;
     loop {
         let line = read_line(reader, &mut consumed)?;
         if line.is_empty() {
@@ -1115,7 +1128,14 @@ fn read_request_as<R: io::Read>(reader: &mut R, bodies: Bodies) -> Result<Option
             // A body framed by a coding this server does not take. Read by
             // its length it was the chunk framing handed on as the form, and
             // with no length it was no body at all (RFC 9112, 6.1 and 6.3).
-            return Err(501);
+            //
+            // A server that takes no bodies waits for the method, so a POST is
+            // told the method is not served rather than how a body is framed
+            // here, when none is taken at all.
+            if bodies == Bodies::Read {
+                return Err(501);
+            }
+            coded = true;
         }
     }
     let length = length.unwrap_or(0);
@@ -1164,6 +1184,9 @@ fn read_request_as<R: io::Read>(reader: &mut R, bodies: Bodies) -> Result<Option
     // a server that takes no bodies it costs nothing past the head.
     if post && bodies == Bodies::Refused {
         return Err(405);
+    }
+    if coded {
+        return Err(501);
     }
     let mut body = String::new();
     if post {
@@ -1346,14 +1369,27 @@ fn reason(status: u16) -> &'static str {
 /// form body was. The status line was right in each case and the sentence
 /// under it was about a different failure, which is the one thing a person
 /// reading an error has to go on.
-fn refusal(status: u16) -> &'static str {
-    match status {
-        408 => "the request did not arrive in time",
-        405 => "only GET and HEAD are served here",
-        413 => "the form body is larger than this server takes",
-        431 => "the request head is larger than this server takes",
-        501 => "a body is taken here with a content-length and no transfer coding",
+///
+/// And about the server it came from: a server that takes no bodies told a
+/// caller how a body is framed here.
+fn refusal(status: u16, bodies: Bodies) -> &'static str {
+    match (status, bodies) {
+        (408, _) => "the request did not arrive in time",
+        (405, _) => ANSWERS_WITHOUT_BODIES,
+        (413, _) => "the form body is larger than this server takes",
+        (431, _) => "the request head is larger than this server takes",
+        (501, Bodies::Read) => "a body is taken here with a content-length and no transfer coding",
+        (501, Bodies::Refused) => "no request body is taken here, however it is framed",
         _ => "malformed request",
+    }
+}
+
+/// What a 405 for a method no server here answers says, by the server that
+/// sends it.
+const fn answers(bodies: Bodies) -> &'static str {
+    match bodies {
+        Bodies::Read => ANSWERS,
+        Bodies::Refused => ANSWERS_WITHOUT_BODIES,
     }
 }
 
@@ -1412,7 +1448,7 @@ pub fn bind(address: SocketAddr) -> io::Result<TcpListener> {
 mod tests {
     use super::{
         answering, drain, let_go_of_the_done, one_machine, percent_decode, reason, refusal,
-        start_or_refuse, wait_on, would_wait, Request, Slots, Waiting, ANSWER_DEADLINE,
+        start_or_refuse, wait_on, would_wait, Bodies, Request, Slots, Waiting, ANSWER_DEADLINE,
         DRAIN_BYTES, DRAIN_CHUNK, MAX_CONNECTIONS, MAX_PER_HOST, REFUSALS_QUEUED,
     };
     use std::collections::VecDeque;
@@ -1792,8 +1828,8 @@ mod tests {
             "a chunked body with no length was read as no body at all"
         );
         assert_ne!(
-            refusal(501),
-            refusal(400),
+            refusal(501, Bodies::Read),
+            refusal(400, Bodies::Read),
             "a coding this server does not take was called a malformed request"
         );
     }
@@ -1991,7 +2027,10 @@ mod tests {
     /// request was malformed.
     #[test]
     fn a_late_request_is_told_it_was_late() {
-        assert_eq!(refusal(408), "the request did not arrive in time");
+        assert_eq!(
+            refusal(408, Bodies::Read),
+            "the request did not arrive in time"
+        );
     }
 
     /// The loopback is the proxy carrying the whole public site, so counting

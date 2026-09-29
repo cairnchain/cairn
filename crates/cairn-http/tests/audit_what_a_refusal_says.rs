@@ -130,6 +130,83 @@ fn a_refusal_says_what_went_wrong_and_not_what_went_wrong_elsewhere() {
     assert!(nonsense.contains("malformed request"), "{nonsense}");
 }
 
+/// A server that takes no bodies, as the explorer's is.
+fn start_without_bodies() -> SocketAddr {
+    let listener = cairn_http::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+    let address = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let running = Arc::new(AtomicBool::new(true));
+        cairn_http::serve_without_bodies(&listener, &running, |_| {
+            Response::asset("text/plain; charset=utf-8", "ok")
+        });
+    });
+    address
+}
+
+/// **A server that takes no bodies says so, and names only the methods it
+/// answers.**
+///
+/// The explorer's server answers a POST with "only GET and HEAD are served
+/// here", and answered a PUT with "only GET, HEAD and POST are served", the
+/// sentence of the server that reads forms: two lists of methods from one
+/// server, one of them false. And a request carrying a transfer coding was
+/// told "a body is taken here with a content-length", by a server that takes
+/// no body at all. Nothing asked what this server says; every refusal test
+/// ran on the one that reads bodies.
+#[test]
+fn a_server_that_takes_no_bodies_names_only_what_it_answers() {
+    let address = start_without_bodies();
+    for (request, status) in [
+        (
+            "PUT / HTTP/1.1\r\nhost: cairn\r\ncontent-length: 0\r\n\r\n",
+            "405",
+        ),
+        (
+            "POST / HTTP/1.1\r\nhost: cairn\r\ncontent-length: 0\r\n\r\n",
+            "405",
+        ),
+        (
+            "POST / HTTP/1.1\r\nhost: cairn\r\ntransfer-encoding: chunked\r\n\r\n0\r\n\r\n",
+            "405",
+        ),
+        (
+            "GET / HTTP/1.1\r\nhost: cairn\r\ntransfer-encoding: chunked\r\n\r\n0\r\n\r\n",
+            "501",
+        ),
+    ] {
+        let said = ask(address, request.as_bytes());
+        let first = request.lines().next().unwrap_or_default();
+        assert!(
+            said.starts_with(&format!("HTTP/1.1 {status} ")),
+            "`{first}` on a server that takes no bodies was answered: {said}"
+        );
+        assert!(
+            !said.contains("POST") && !said.contains("content-length and"),
+            "a server that takes no bodies said it takes one, or that it serves POST: {said}"
+        );
+        if status == "405" {
+            assert!(
+                said.contains("only GET and HEAD are served here"),
+                "a 405 from a server that takes no bodies does not name what it serves: {said}"
+            );
+        } else {
+            assert!(
+                said.contains("no request body is taken here"),
+                "a 501 from a server that takes no bodies does not say it takes none: {said}"
+            );
+        }
+    }
+    // And the server that reads forms still names the three it answers.
+    let said = ask(
+        start(),
+        b"PUT / HTTP/1.1\r\nhost: cairn\r\ncontent-length: 0\r\n\r\n",
+    );
+    assert!(
+        said.starts_with("HTTP/1.1 405 ") && said.contains("only GET, HEAD and POST are served"),
+        "{said}"
+    );
+}
+
 /// **And the one answer a full server gives is a whole message.**
 ///
 /// Every slot taken, one more caller, and what comes back has to be a message

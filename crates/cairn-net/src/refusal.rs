@@ -387,6 +387,28 @@ mod tests {
 
     /// Otherwise a node, a wallet and an explorer on one machine would lock
     /// each other out.
+    /// Refusing one IPv4 machine reached through NAT64 refuses that machine
+    /// and no other.
+    ///
+    /// Every translated address was one machine, so a peer on the IPv4
+    /// network that sent one bad frame turned the whole of it away from a node
+    /// on an IPv6-only network for ten minutes. Nothing asked it.
+    #[test]
+    fn a_refusal_through_nat64_is_of_the_one_machine() {
+        let carried = |last: u16| IpAddr::V6(Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0xc000, last));
+        let mut refusals = Refusals::new();
+        refusals.refuse(carried(0x0201), 1_000);
+        assert!(refusals.refuses(carried(0x0201), 1_000));
+        assert!(
+            refusals.refuses(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 1_000),
+            "the machine was not refused when it arrived without the translation"
+        );
+        assert!(
+            !refusals.refuses(carried(0x0202), 1_000),
+            "a refusal of one machine reached through NAT64 refused another"
+        );
+    }
+
     #[test]
     fn the_loopback_address_is_never_refused() {
         let mut refusals = Refusals::new();

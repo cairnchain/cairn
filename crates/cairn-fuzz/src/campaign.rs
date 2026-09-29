@@ -141,14 +141,15 @@ impl Campaign {
     /// run's seven failures in September were each a seed, a case number and a
     /// sentence in a log kept for ninety days, and several of the messages
     /// did not carry the case number at all. What is written here is enough to
-    /// run that one case again with nothing but the variables it names, and
+    /// run that one case again with the variables and the command it names, and
     /// it is written to a file so a workflow can keep it after the log is
     /// gone. It is also printed, because the file is not always read.
     fn keep(&self, case: usize, said: &str) {
         let replay = format!(
-            "CAIRN_FUZZ_SEED={:#x} CAIRN_FUZZ_CASES={}",
+            "CAIRN_FUZZ_SEED={:#x} CAIRN_FUZZ_CASES={} {}",
             self.seed,
-            case.saturating_add(1)
+            case.saturating_add(1),
+            this_test()
         );
         let record = format!(
             "campaign: {}\nseed: {:#x} ({} in decimal)\ncase: {case}\nreplay: {replay}\nfailed with: {said}\n",
@@ -234,6 +235,55 @@ fn not_a_seed(given: &OsString) -> u64 {
         "CAIRN_FUZZ_SEED is \"{}\", which is neither a decimal number nor 0x and \
          hexadecimal digits; a replay that ran some other seed would pass and prove nothing",
         given.display()
+    )
+}
+
+/// The command that runs the one test a campaign is in, from what the running
+/// test can tell about itself: the package cargo names in `CARGO_PKG_NAME`, the
+/// test binary, named after the file it was built from with a hash after it,
+/// and the thread the test harness runs each test on, named after the test.
+///
+/// A replay line gave the two variables and nothing else. They are read by
+/// every campaign in the binary, so running the binary under them failed
+/// every other campaign's floor on its own case count beside the one being
+/// replayed. Whatever cannot be told is left out rather than guessed.
+fn replay_command(package: Option<&str>, binary: Option<&str>, test: Option<&str>) -> String {
+    let Some(package) = package else {
+        return "cargo test".to_owned();
+    };
+    let mut command = format!("cargo test -p {package}");
+    if let Some(binary) = binary {
+        let stem = binary
+            .rsplit_once('-')
+            .filter(|(_, hash)| !hash.is_empty() && hash.chars().all(|c| c.is_ascii_hexdigit()))
+            .map_or(binary, |(stem, _)| stem);
+        if stem == package.replace('-', "_") {
+            command.push_str(" --lib");
+        } else {
+            command.push_str(" --test ");
+            command.push_str(stem);
+        }
+    }
+    if let Some(test) = test.filter(|name| *name != "main") {
+        command.push_str(" -- --exact ");
+        command.push_str(test);
+    }
+    command
+}
+
+/// [`replay_command`] for the test running on this thread.
+fn this_test() -> String {
+    let package = std::env::var("CARGO_PKG_NAME").ok();
+    let binary = std::env::args_os().next().and_then(|path| {
+        Path::new(&path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_owned)
+    });
+    replay_command(
+        package.as_deref(),
+        binary.as_deref(),
+        std::thread::current().name(),
     )
 }
 
@@ -419,6 +469,25 @@ mod tests {
             .unwrap()
             .count();
         assert_eq!(held, 1, "cases that passed were kept too");
+        let replay_line = record
+            .lines()
+            .find(|line| line.starts_with("replay: "))
+            .unwrap_or_default();
+        assert!(
+            replay_line.contains("cargo test -p cairn-fuzz --lib"),
+            "the replay line does not say which test binary the campaign is in: {record}"
+        );
+        if std::thread::current()
+            .name()
+            .is_some_and(|name| name != "main")
+        {
+            assert!(
+                replay_line
+                    .contains("-- --exact campaign::tests::a_failing_case_is_written_down_with_what_replays_it"),
+                "the replay line does not name the one test to run, so every other campaign \
+                 in the binary runs under its variables and fails its own floor: {record}"
+            );
+        }
 
         // And what it says to run does reach that case, with that stream.
         let replay = record
@@ -457,6 +526,53 @@ mod tests {
         );
         assert_eq!(drawn_again, drawn_there, "the replay drew another case");
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The command a replay line gives names the package, the test binary and
+    /// the one test, whichever kind of test the campaign is in.
+    ///
+    /// It named the two variables and nothing else, and they are read by every
+    /// campaign in the binary, whose floors on their own case counts then
+    /// failed beside the one being replayed. Nothing asked what the line
+    /// runs.
+    #[test]
+    fn a_replay_line_runs_the_one_test_the_campaign_is_in() {
+        assert_eq!(
+            replay_command(
+                Some("cairn-wallet"),
+                Some("fuzz_history-2ec1b7e32afcc5a1"),
+                Some("histories_hold")
+            ),
+            "cargo test -p cairn-wallet --test fuzz_history -- --exact histories_hold"
+        );
+        assert_eq!(
+            replay_command(
+                Some("cairn-explorer"),
+                Some("cairn_explorer-0badc0de"),
+                Some("api::tests::owners")
+            ),
+            "cargo test -p cairn-explorer --lib -- --exact api::tests::owners"
+        );
+        assert_eq!(
+            replay_command(Some("cairn-net"), Some("fuzz_wire-00ff"), Some("main")),
+            "cargo test -p cairn-net --test fuzz_wire",
+            "a test run on the main thread has no name to give"
+        );
+        assert_eq!(
+            replay_command(None, None, None),
+            "cargo test",
+            "what cannot be told is left out, not guessed"
+        );
+        assert_eq!(
+            replay_command(Some("cairn-net"), Some("fuzz_wire"), None),
+            "cargo test -p cairn-net --test fuzz_wire",
+            "a binary name with no hash after it is taken whole"
+        );
+        assert_eq!(
+            replay_command(Some("cairn-net"), Some("fuzz_wire-after"), None),
+            "cargo test -p cairn-net --test fuzz_wire-after",
+            "what follows the last hyphen was cut off as a hash when it is not one"
+        );
     }
 
     /// Failing cases go under the workspace's own `target`, one folder a

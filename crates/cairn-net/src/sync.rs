@@ -189,6 +189,14 @@ pub struct PeerState {
     /// brings nothing to hold leaves nothing here, and the next is asked
     /// from where the branches part.
     pub aside: Option<Located>,
+    /// When the outstanding batch last came in part: the moment a block of
+    /// it arrived and left some of it still awaited, or the moment what was
+    /// left was last asked for again.
+    ///
+    /// What tells a batch that stopped arriving part way from one that never
+    /// began, and what keeps the asking again to once a window: see
+    /// [`ask_again_for_the_rest`].
+    pub came_in_part_at: Option<u64>,
     /// The moment this node's clock allows a block this peer sent that it
     /// refused for being dated ahead of it, while that moment is still to
     /// come.
@@ -704,10 +712,11 @@ impl PeerState {
     /// Called as a batch is served rather than after it, so a peer that has
     /// spent its window is handed what it could afford and the rest is not
     /// read, not encoded and not queued. A peer that gets a short batch asks
-    /// for the rest of it once its patience with the batch runs out, which is
-    /// what it already does about the heights this node no longer holds, and
-    /// from past what arrived, whether that went onto the branch it follows
-    /// or was held aside: see [`PeerState::aside`].
+    /// for the rest of it once a window has turned: see
+    /// [`ask_again_for_the_rest`]. Heights this node no longer holds stay
+    /// unanswered until its patience with the batch runs out, and the round
+    /// after that is asked from past what arrived, whether that went onto the
+    /// branch it follows or was held aside: see [`PeerState::aside`].
     pub(crate) fn afford_serving(&mut self, bytes: usize, now: u64) -> bool {
         self.afford(what_the_wire_costs(bytes), now)
     }
@@ -1527,8 +1536,9 @@ fn give_up_on_a_stalled_batch(peer: &mut PeerState, now: u64) -> bool {
 }
 
 /// What the passing of time alone owes one peer: a batch past its patience
-/// given up on and the chain asked for again, and the chain asked for once
-/// the clock allows a block it refused.
+/// given up on and the chain asked for again, the chain asked for once the
+/// clock allows a block it refused, and the rest of a batch that stopped
+/// arriving part way asked for again once a window has turned.
 ///
 /// Run after every message this layer answers, and by the connection's loop
 /// whenever a read comes back with nothing to read. The patience used to be
@@ -1542,7 +1552,39 @@ pub fn tick(chain: &ChainStore, peer: &mut PeerState, now: u64) -> Reaction {
     if gave_up || allowed {
         return follow_up(chain, peer, now);
     }
-    Reaction::idle()
+    ask_again_for_the_rest(peer, now)
+}
+
+/// Asks again for what is left of a batch that stopped arriving part way,
+/// once a window of the peer's allowance has turned since the last of it
+/// came, and once a window at most.
+///
+/// A peer serves a batch only as far as the asker's window pays for, which of
+/// full blocks is about forty of the hundred and twenty eight asked for, and
+/// the rest is served against a later window if it is asked for. Nothing asked
+/// for it: [`follow_up`] asks only once nothing is awaited, and the heights
+/// left were awaited until [`BATCH_PATIENCE`] gave them up, a minute after the
+/// last block arrived. A node catching up on full blocks moved one window of
+/// them a minute.
+///
+/// Only a batch part of which arrived, and nothing since: a peer that sent
+/// none of it may not hold it, and has the patience as before. Asking again
+/// renews nothing, so a peer that has stopped for good is still given up on a
+/// patience after its last block, asked once a window until then. A window
+/// with nothing in it is a whole one: the peer's windows turn on its own
+/// clock, and a window of silence has seen one turn wherever it fell.
+fn ask_again_for_the_rest(peer: &mut PeerState, now: u64) -> Reaction {
+    // Not older than the ask outstanding, which a batch asked for since, and
+    // nothing of which has arrived, is newer than.
+    let cut_short = peer
+        .came_in_part_at
+        .is_some_and(|at| at >= peer.asked_at && now.saturating_sub(at) >= WINDOW_SECONDS);
+    if !cut_short || peer.awaiting.is_empty() {
+        return Reaction::idle();
+    }
+    peer.came_in_part_at = Some(now);
+    let rest = peer.awaiting.iter().copied().take(MAX_REQUESTED).collect();
+    Reaction::reply(vec![Message::GetBlocks(rest)])
 }
 
 /// Whether a block whose parent this node does not hold is one it can never
@@ -1572,6 +1614,7 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
     // [`PeerState::asked_at`].
     if peer.awaiting.remove(&height) {
         peer.asked_at = now;
+        peer.came_in_part_at = (!peer.awaiting.is_empty()).then_some(now);
     }
     peer.offered.remove(&height);
     // Whether a body is already held under this identifier, in which case the

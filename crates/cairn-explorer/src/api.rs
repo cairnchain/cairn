@@ -2367,11 +2367,17 @@ fn readable(bytes: &[u8]) -> Option<String> {
 }
 
 /// The zero width and directional formatting characters: the marks, the
-/// embeddings and overrides, and the isolates.
+/// embeddings and overrides, and the isolates, with the Arabic letter mark,
+/// which is a directional mark of its own outside those runs, and the zero
+/// width no-break space.
 fn moves_text(character: char) -> bool {
     matches!(
         character,
-        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
     )
 }
 
@@ -2626,7 +2632,9 @@ mod tests {
     /// right to left override in a miner's sixty four bytes reversed the
     /// message on the page, and a zero width space made two messages that
     /// read the same compare different. Nothing asked about any character
-    /// that is not a control.
+    /// that is not a control, and the list of those that move text left out
+    /// the Arabic letter mark, a directional mark of its own, and the zero
+    /// width no-break space.
     #[test]
     fn a_coinbase_message_that_moves_the_text_around_it_is_not_shown_as_text() {
         for (bytes, what) in [
@@ -2634,6 +2642,8 @@ mod tests {
             ("\u{202E}dehs a ni denim", "a right to left override"),
             ("mined\u{2066}in a shed", "a directional isolate"),
             ("mined\u{200B}in a shed", "a zero width space"),
+            ("mined\u{061C}in a shed", "an Arabic letter mark"),
+            ("\u{FEFF}mined in a shed", "a zero width no-break space"),
         ] {
             assert_eq!(
                 readable(bytes.as_bytes()),
