@@ -124,10 +124,10 @@ fn a_script_can_answer_yes_in_advance() {
         .output()
         .expect("the wallet runs");
     assert!(made.status.success(), "fixture: a key was made");
-    let somebody = cairn_crypto::SecretKey::generate()
-        .unwrap()
-        .public_key()
-        .to_string();
+    let somebody = cairn_ledger::note::Address::from(
+        cairn_crypto::SecretKey::generate().unwrap().public_key(),
+    )
+    .to_text(cairn_ledger::note::NetworkId::DEVNET);
 
     let sent = Command::new(env!("CARGO_BIN_EXE_cairn-wallet"))
         .args([

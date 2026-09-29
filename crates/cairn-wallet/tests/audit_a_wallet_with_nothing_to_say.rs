@@ -105,10 +105,10 @@ fn a_payment_the_wallet_cannot_make_is_not_given_a_fee_of_nothing() {
     let payee = home.join("payee");
     let made = wallet(&["new", payee.to_str().unwrap()]);
     assert!(made.status.success(), "{}", said(&made));
-    let shown = wallet(&["address", payee.to_str().unwrap()]);
+    let shown = wallet(&["address", payee.to_str().unwrap(), "--network", "devnet"]);
     let to = said(&shown)
         .split_whitespace()
-        .find(|word| word.len() == 64)
+        .find(|word| word.starts_with("dcairn1"))
         .expect("the address command prints an address")
         .to_owned();
 

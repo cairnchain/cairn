@@ -322,8 +322,8 @@ fn a_switch_inside_one_turn_leaves_the_index_on_the_branch_that_lost() {
     // nobody has, served with `coverage.whole` true.
     let stranded = walk.locate(&to_alice.id());
     let real = walk.locate(&to_bob.id());
-    let held_by_alice = walk.owner(&alice).map(index::OwnerRecord::balance);
-    let held_by_bob = walk.owner(&bob).map(index::OwnerRecord::balance);
+    let held_by_alice = walk.owner(alice).map(index::OwnerRecord::balance);
+    let held_by_bob = walk.owner(bob).map(index::OwnerRecord::balance);
     let spent_by = walk.note(&reward.0).and_then(|note| note.spent_by);
     println!("the transfer on the branch that lost is at {stranded:?}");
     println!("the transfer on the branch that won  is at {real:?}");

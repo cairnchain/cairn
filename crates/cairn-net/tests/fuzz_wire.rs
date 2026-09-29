@@ -126,6 +126,7 @@ fn a_block(rng: &mut Rng) -> Block {
                     .map(|_| Input {
                         note_id: NoteId::new(a_hash(rng), rng.edgy_u32()),
                         witness: cairn_ledger::transaction::Witness::Hot,
+                        key: rng.array::<32>(),
                         signature: Signature::from_bytes(&rng.array::<64>()),
                     })
                     .collect(),

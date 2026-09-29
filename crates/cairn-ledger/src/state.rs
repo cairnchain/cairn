@@ -17,9 +17,8 @@ use cairn_primitives::hash::{hash, Domain, Hasher};
 use cairn_primitives::{Amount, Hash32};
 
 use crate::block::{BlockHeader, HeaderSummary};
-use crate::note::{Note, NoteId};
+use crate::note::{Address, Note, NoteId};
 use crate::pow::RECENT_HEADERS;
-use cairn_crypto::PublicKey;
 
 /// Where a note sits in either accumulator.
 ///
@@ -1041,7 +1040,7 @@ pub struct LedgerState {
     /// A wallet names itself here and gets back the two things a node cannot
     /// otherwise tell it: where its fallen notes sit, and a proof that is
     /// still current. A node that asked for nobody pays nothing.
-    watching: BTreeSet<PublicKey>,
+    watching: BTreeSet<Address>,
     /// Fallen notes belonging to a watched owner, at most [`WATCHED_NOTES`] of
     /// them once a block has been applied, and at most one grace window more
     /// between a late [`Self::watch_owner`] and that block.
@@ -1148,8 +1147,9 @@ impl LedgerState {
     /// Asks to be told where this owner's notes go when they fall.
     ///
     /// Set before the chain is replayed, since what is learned is learned as
-    /// the notes fall.
-    pub fn watch_owner(&mut self, owner: PublicKey) {
+    /// the notes fall. An owner is an address; a key stands for its own.
+    pub fn watch_owner(&mut self, owner: impl Into<Address>) {
+        let owner = owner.into();
         self.watching.insert(owner);
 
         // And take up the ones that have already fallen and are still in the
@@ -1207,8 +1207,8 @@ impl LedgerState {
         // are the ones already followed.
     }
 
-    pub fn is_watching(&self, owner: &PublicKey) -> bool {
-        self.watching.contains(owner)
+    pub fn is_watching(&self, owner: impl Into<Address>) -> bool {
+        self.watching.contains(&owner.into())
     }
 
     /// Who this ledger is following.
@@ -1216,7 +1216,7 @@ impl LedgerState {
     /// Read when a ledger is replaced by one from somewhere else, because who
     /// a node follows is a fact about the node and not about the chain, and a
     /// ledger arriving from a stranger has no business deciding it.
-    pub fn watching(&self) -> impl Iterator<Item = PublicKey> + '_ {
+    pub fn watching(&self) -> impl Iterator<Item = Address> + '_ {
         self.watching.iter().copied()
     }
 
@@ -2195,7 +2195,7 @@ mod tests {
 
         assert_eq!(
             state.hot_entry(&id).map(|held| held.note.owner),
-            Some(owner),
+            Some(Address::from(owner)),
             "the note it was given, by its own identifier"
         );
         assert_eq!(
@@ -2225,20 +2225,20 @@ mod tests {
         let mut state = LedgerState::new();
 
         assert!(
-            !state.is_watching(&followed),
+            !state.is_watching(followed),
             "a fresh ledger follows nobody"
         );
         assert_eq!(state.watching().count(), 0);
 
         state.watch_owner(followed);
-        assert!(state.is_watching(&followed));
+        assert!(state.is_watching(followed));
         assert!(
-            !state.is_watching(&stranger),
+            !state.is_watching(stranger),
             "and not everybody, which is the other half of the same answer"
         );
         assert_eq!(
             state.watching().collect::<Vec<_>>(),
-            vec![followed],
+            vec![Address::from(followed)],
             "the list is who was named and nobody else"
         );
     }

@@ -530,7 +530,7 @@ fn a_trimmed_log_costs_the_index_only_the_blocks_that_were_trimmed() {
         "the address that mined this chain is on the page, not missing from it"
     );
     assert!(index
-        .owner(&miner.public_key())
+        .owner(miner.public_key())
         .is_some_and(|record| record.balance() > cairn_primitives::Amount::ZERO));
 }
 
@@ -577,7 +577,7 @@ fn a_reorganisation_on_a_trimmed_log_rebuilds_from_where_the_blocks_start() {
     assert_eq!(index.blocks_read(), 1_500);
     assert!(index.reads_from_the_start());
     let before = index
-        .owner(&miner.public_key())
+        .owner(miner.public_key())
         .map(|record| record.balance())
         .unwrap();
     assert!(before > cairn_primitives::Amount::ZERO);
@@ -627,7 +627,7 @@ fn a_reorganisation_on_a_trimmed_log_rebuilds_from_where_the_blocks_start() {
     let kept = cairn_primitives::Amount::from_pebbles(params().initial_reward.as_pebbles() * 1_200)
         .unwrap();
     assert_eq!(
-        index.owner(&miner.public_key()).map(|r| r.balance()),
+        index.owner(miner.public_key()).map(|r| r.balance()),
         Some(kept),
         "the address that held {before:?} is not empty, and what it lost is \
          exactly the blocks this node no longer has"
@@ -1050,7 +1050,7 @@ fn what_a_single_address_can_be_made_to_carry() {
     let took = started.elapsed();
     let grew = rss_kb().saturating_sub(baseline);
 
-    let record = index.owner(&victim).unwrap();
+    let record = index.owner(victim).unwrap();
     println!(
         "{blocks} blocks aimed at one address: {} notes and {} movements on it, \
          built in {took:?}, resident set grew {grew} kB",

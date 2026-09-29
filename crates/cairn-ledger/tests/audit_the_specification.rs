@@ -60,7 +60,7 @@ use std::collections::BTreeSet;
 use cairn_accumulator::{Forest, ForestProof, Key, SparseMerkleTree};
 use cairn_crypto::{PublicKey, SecretKey, Signature};
 use cairn_ledger::block::{BlockHeader, HeaderSummary};
-use cairn_ledger::note::{NetworkId, Note, NoteId};
+use cairn_ledger::note::{Address, NetworkId, Note, NoteId};
 use cairn_ledger::pow::{
     median_time_past, meets_target, next_difficulty, target_for, work_of, MIN_DIFFICULTY,
 };
@@ -129,10 +129,11 @@ fn spec_witness_bytes(witness: &Witness) -> Vec<u8> {
     out
 }
 
-/// An input: the note identifier, the witness, the signature.
+/// An input: the note identifier, the witness, the key, the signature.
 fn spec_input_bytes(input: &Input) -> Vec<u8> {
     let mut out = spec_note_id_bytes(&input.note_id);
     out.extend_from_slice(&spec_witness_bytes(&input.witness));
+    out.extend_from_slice(&input.key);
     out.extend_from_slice(&input.signature.to_bytes());
     out
 }
@@ -376,15 +377,23 @@ fn a_transfer_encodes_as_version_inputs_outputs() {
 
     // The widths the two tables promise, read back out of the bytes rather
     // than taken on trust: two for the version, four for each count, thirty
-    // six then one then sixty four for a hot input.
+    // six then one then thirty two then sixty four for a hot input.
     assert_eq!(&built[..2], &TRANSFER_VERSION.to_le_bytes());
     assert_eq!(&built[2..6], &2u32.to_le_bytes());
     assert_eq!(built[42], 0, "a hot witness is the tag and nothing further");
-    // Version and count, then a hot input of 36 + 1 + 64 bytes, then the
-    // second input's own 36 byte identifier, which puts its tag here.
-    assert_eq!(built[107], 0xb2, "the second input starts with its source");
+    // The key after the witness, the one that signed, and the signature
+    // after the key.
     assert_eq!(
-        built[143], 1,
+        &built[43..75],
+        wallet(3).public_key().as_bytes(),
+        "the key comes after the witness"
+    );
+    assert_eq!(&built[75..139], &subject.inputs[0].signature.to_bytes());
+    // Version and count, then a hot input of 36 + 1 + 32 + 64 bytes, then the
+    // second input's own 36 byte identifier, which puts its tag here.
+    assert_eq!(built[139], 0xb2, "the second input starts with its source");
+    assert_eq!(
+        built[175], 1,
         "a cold witness is the tag and the note after"
     );
 
@@ -763,7 +772,7 @@ fn the_preimage_tables_are_the_bytes_the_code_hashes() {
             spent.value.as_pebbles().to_le_bytes().to_vec()
         }
         "owner" => {
-            assert_eq!(kind, "public key");
+            assert_eq!(kind, "address");
             spent.owner.as_bytes().to_vec()
         }
         other => panic!("the signature's table has a row `{other}` the code does not hash"),
@@ -1891,7 +1900,7 @@ fn the_state_root_is_the_eight_fields_folded_in_that_order() {
             if let Some((id, position, fallen)) = spendable
                 .iter()
                 .find(|(id, _, fallen)| {
-                    fallen.owner == miner.public_key()
+                    fallen.owner == miner.public_key().into()
                         && state.within_grace(id).is_some()
                         && state
                             .coinbase_matures_at(&id.source)
@@ -2310,7 +2319,7 @@ fn every_derivation_a_block_forces_is_the_one_the_document_describes() {
                 .hot
                 .iter()
                 .find(|(id, note, _)| {
-                    note.owner == miner.public_key()
+                    note.owner == miner.public_key().into()
                         && note.value.as_pebbles() > 1_000
                         && state
                             .coinbase_matures_at(&id.source)
@@ -2322,7 +2331,7 @@ fn every_derivation_a_block_forces_is_the_one_the_document_describes() {
                 .iter()
                 .flatten()
                 .find(|(id, _, note)| {
-                    note.owner == miner.public_key()
+                    note.owner == miner.public_key().into()
                         && note.value.as_pebbles() > 1_000
                         && state
                             .coinbase_matures_at(&id.source)
@@ -2811,7 +2820,10 @@ fn the_body_checks_signatures_after_every_transfer_and_the_coinbase_sum_before_i
         transfer
     };
     let signed = spend(coins[0], &miner);
-    let forged = spend(coins[0], &wallet(2));
+    // Signed by somebody else and carrying the owner's key, so the key hashes
+    // to the owner while the input resolves and the signature is what fails.
+    let mut forged = spend(coins[0], &wallet(2));
+    forged.inputs[0].key = miner.public_key().to_bytes();
     let mut shapeless = spend(coins[1], &miner);
     shapeless.outputs.push(Note::new(Amount::ZERO, owner(9)));
     let reward = || vec![Note::new(params.reward_at(height), miner.public_key())];
@@ -3516,4 +3528,81 @@ fn four_block_refusals_the_document_does_not_carry() {
         ),
         "the transfer count limit is a rule the document does not carry"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Addresses.
+// ---------------------------------------------------------------------------
+
+/// A fenced block of the document, the one whose first line starts `first`.
+fn spec_block(first: &str) -> &'static str {
+    SPECIFICATION
+        .split("```")
+        .map(|block| block.strip_prefix("text").unwrap_or(block).trim_start())
+        .find(|block| block.starts_with(first))
+        .unwrap_or_else(|| panic!("the specification has no block starting `{first}`"))
+}
+
+/// **An address is what *Notes* says, and its text is what *Addresses as
+/// text* prints for the key the signature vectors are made with.**
+///
+/// Built from the document's words: the hash under the address domain of the
+/// scheme byte nought and the key, then Bech32m under each prefix the table
+/// names. Nothing pinned an address to a published value, so an address
+/// computed with the scheme byte dropped, or under another domain, or written
+/// under another prefix, passed every test that only compared the code with
+/// itself.
+#[test]
+fn the_address_vectors_are_the_vector_keys_address_under_each_prefix() {
+    let key = spec_block("seed ")
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("public key"))
+        .map(str::trim)
+        .expect("the signature vectors name their public key");
+    let key: [u8; 32] = cairn_primitives::hex::decode_array(key).expect("thirty two bytes");
+    let mut preimage = vec![0x00_u8];
+    preimage.extend_from_slice(&key);
+    let built = hash(Domain::Address, &preimage);
+
+    let networks = [
+        ("cairn", NetworkId::MAINNET),
+        ("tcairn", NetworkId::TESTNET),
+        ("dcairn", NetworkId::DEVNET),
+    ];
+    let vectors: Vec<(&str, &str)> = spec_block("cairn ")
+        .lines()
+        .filter_map(|line| line.split_once(char::is_whitespace))
+        .map(|(prefix, text)| (prefix, text.trim()))
+        .collect();
+    assert_eq!(
+        vectors.len(),
+        3,
+        "the document gives an address under each prefix"
+    );
+    for ((prefix, text), (expected, network)) in vectors.iter().zip(networks) {
+        assert_eq!(
+            *prefix, expected,
+            "the vectors are not in the table's order"
+        );
+        assert_eq!(
+            network.address_prefix(),
+            *prefix,
+            "the code writes this network's addresses under another prefix than the document"
+        );
+        println!(
+            "{prefix:<7} {}",
+            cairn_primitives::bech32m::encode(prefix, built.as_bytes())
+        );
+        assert_eq!(
+            *text,
+            cairn_primitives::bech32m::encode(prefix, built.as_bytes()),
+            "the document's address under this prefix is not H(address, 0x00 || key) in Bech32m"
+        );
+        let public = PublicKey::from_bytes(&key).expect("the vector key is a key");
+        assert_eq!(
+            Address::from_text(text, network),
+            Ok(Address::from(public)),
+            "the code does not read the document's address as the vector key's"
+        );
+    }
 }

@@ -30,6 +30,7 @@ const FR: &str = include_str!("../../../web/i18n/fr.json");
 const SCRIPT: &str = include_str!("../../../web/cairn.js");
 const PAGE: &str = include_str!("../../../web/index.html");
 const PAPER: &str = include_str!("../../../docs/cairn-whitepaper.html");
+const QUESTIONS: &str = include_str!("../../../docs/cairn-open-questions.html");
 
 /// The crates the workspace is made of, read from the workspace.
 fn members() -> Vec<String> {
@@ -828,4 +829,37 @@ fn the_threat_model_names_only_what_the_repository_holds() {
         MODEL.contains(&format!("Now: {grouped} samples")),
         "the threat model does not give the draw count this build uses"
     );
+}
+
+/// **Each of the four decisions of 31 August says where it stands.**
+///
+/// The open questions paper took four positions on 31 August: a fresh key per
+/// payment, the address as the hash of a key, an exported notebook of a
+/// wallet's fallen notes, and an archive carried in pieces. The paper itself
+/// said the second had to enter the format before a chain of value existed,
+/// and nothing tracked it or the other three: a position written down and
+/// then left is a promise nobody is keeping (44-F3). Each now carries a status
+/// line under its own decision, and the one that is done says in which
+/// release and on which network. A line taken out, or moved under another
+/// decision, fails here.
+#[test]
+fn each_of_the_four_decisions_of_31_august_says_where_it_stands() {
+    for (decision, state) in [
+        ("La réutilisation d'adresse", "Statut : pas commencé."),
+        ("L'adresse", "Statut : fait dans la 0.10.0, sur testnet-7."),
+        ("Le carnet du portefeuille", "Statut : pas commencé."),
+        ("Qui porte quoi", "Statut : pas commencé."),
+    ] {
+        let block = QUESTIONS
+            .split_once(&format!("<span class=\"q\">{decision}</span>"))
+            .unwrap_or_else(|| panic!("the open questions paper no longer holds `{decision}`"))
+            .1
+            .split_once("</div>")
+            .expect("a decision ends")
+            .0;
+        assert!(
+            block.contains(&format!("<span class=\"state\">{state}")),
+            "the decision `{decision}` does not say where it stands"
+        );
+    }
 }

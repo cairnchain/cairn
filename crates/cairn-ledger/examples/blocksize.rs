@@ -346,6 +346,7 @@ fn cold_input(owner: cairn_crypto::PublicKey) -> Input {
                 siblings: vec![Hash32::ZERO; PROOF_HASHES],
             },
         })),
+        key: owner.to_bytes(),
         signature: Signature::unsigned(),
     }
 }

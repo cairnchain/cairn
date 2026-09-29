@@ -127,7 +127,7 @@ impl Bodies for Shelf {
 fn one_note(state: &LedgerState, owner: &SecretKey) -> (NoteId, Note) {
     state
         .hot_notes()
-        .find(|(_, entry)| entry.note.owner == owner.public_key())
+        .find(|(_, entry)| entry.note.owner == owner.public_key().into())
         .map(|(id, entry)| (id, entry.note))
         .expect("the miner was paid")
 }

@@ -640,9 +640,11 @@ impl BlockLog {
     /// it.
     ///
     /// For a caller that has to price a block before it pays for reading it:
-    /// [`BlockLog::read_at`] decodes the whole record, and decoding a block
-    /// decompresses a key off the curve for every owner in it, which for a
-    /// full block is tens of milliseconds. This is two offsets off the index.
+    /// [`BlockLog::read_at`] reads and decodes the whole record and hashes its
+    /// transactions to hold them to the header. While a note's owner was a
+    /// key, decoding also decompressed a key off the curve for every owner in
+    /// it, tens of milliseconds for a full block. This is two offsets off the
+    /// index.
     ///
     /// The index is derived and can be wrong, so this is the index's word and
     /// not the record's. `read_at` checks the one against the other and

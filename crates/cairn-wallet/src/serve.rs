@@ -23,8 +23,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use cairn_crypto::{random_bytes, PublicKey};
+use cairn_crypto::random_bytes;
 use cairn_http::{Request, Response, Writer};
+use cairn_ledger::note::{Address, NetworkId};
 use cairn_primitives::Amount;
 
 use crate::{not_carried_note, parse_address, undone_note, Waiting, Wallet, WalletError};
@@ -309,7 +310,7 @@ fn state(wallet: &Wallet) -> Response {
 
     let mut json = Writer::new();
     json.begin_object();
-    json.field_str("address", &wallet.address().to_string());
+    json.field_str("address", &wallet.address_text());
     json.field_str("network", wallet.params().network_name());
     match progress.height {
         Some(height) => json.field_u64("height", height),
@@ -519,7 +520,7 @@ fn payments(json: &mut Writer, wallet: &Wallet, waiting: &[Waiting]) {
 
 /// What a person typed into the send form, read once.
 struct Asked {
-    recipient: PublicKey,
+    recipient: Address,
     amount: Amount,
     fee: Amount,
 }
@@ -540,22 +541,23 @@ fn amount_of(field: Option<String>) -> Result<Amount, &'static str> {
     parse_amount(&text).ok_or("that is not an amount of CAIRN")
 }
 
-/// The recipient a spend names, or the sentence that says what is wrong with
-/// it.
-fn recipient_of(field: Option<String>) -> Result<PublicKey, String> {
+/// The recipient a spend names on `network`, or the sentence that says what is
+/// wrong with it.
+fn recipient_of(field: Option<String>, network: NetworkId) -> Result<Address, String> {
     let Some(to) = field else {
         return Err("who is being paid?".to_owned());
     };
-    // The reader's own words, which say what is wrong: the length, a
-    // character that is not hexadecimal, or sixty four good characters that
-    // are not a key. The command line printed them and this threw them away
-    // for a sentence about the length, which is the one thing a mistyped
-    // address usually has right.
-    parse_address(&to).map_err(|error| error.to_string())
+    // The reader's own words, which say what is wrong: a checksum that does
+    // not match, a character an address is not written with, another
+    // network's prefix, or a public key in the old form. The command line
+    // printed them and this threw them away for a sentence about the length,
+    // which is the one thing a mistyped address usually has right.
+    parse_address(&to, network).map_err(|error| error.to_string())
 }
 
 fn asked(wallet: &Wallet, request: &Request) -> Result<Asked, Response> {
-    let recipient = recipient_of(request.field("to")).map_err(|why| refusal(&why))?;
+    let recipient =
+        recipient_of(request.field("to"), wallet.params().network).map_err(|why| refusal(&why))?;
     let amount = amount_of(request.field("amount")).map_err(refusal)?;
     // Left blank means what the network asks, worked out from the transfer
     // this would build, with the margin `Wallet::fee_for` sets out. Nothing is
@@ -605,7 +607,7 @@ fn quote(wallet: &Wallet, request: &Request) -> Response {
     // same browser can still mount is writing the clipboard on a click, and
     // what is pasted into "To" is then somebody else's key. The sentence read
     // before pressing Send named an amount and a fee, and nobody.
-    json.field_str("to", &asked.recipient.to_string());
+    json.field_str("to", &asked.recipient.to_text(wallet.params().network));
     // A payment to this wallet's own address, which is what pasting the
     // address shown under Receive does, and which only moves the fee.
     json.field_bool("toItself", asked.recipient == wallet.address());
@@ -641,7 +643,7 @@ fn send(wallet: &Wallet, request: &Request) -> Response {
             let mut json = Writer::new();
             json.begin_object();
             json.field_bool("sent", true);
-            json.field_str("to", &asked.recipient.to_string());
+            json.field_str("to", &asked.recipient.to_text(wallet.params().network));
             json.field_str("id", &sent.id.to_string());
             json.field_str("amount", &sent.amount.to_string());
             json.field_str("fee", &sent.fee.to_string());
@@ -717,6 +719,7 @@ fn text(status: u16, message: &str) -> Response {
 mod tests {
     use super::{amount_of, constant_time_eq, parse_address, recipient_of, turned_away, Opened};
     use cairn_http::Request;
+    use cairn_ledger::note::{Address, NetworkId};
 
     fn opened() -> Opened {
         Opened {
@@ -833,53 +836,39 @@ mod tests {
 
     /// An address, written out of a key rather than typed.
     ///
-    /// The accepting half of this used to be `"11".repeat(32)`, a string of
-    /// bytes that happened to decompress to a point on the curve. It is not an
-    /// address and never was: it carries a torsion component, so no secret
-    /// reaches it and nothing could ever be spent from it. The parser took it
-    /// until the subgroup check went in, and then this test was asserting that
-    /// the parser accepted a thing nobody holds.
+    /// The accepting half of these tests used to be `"11".repeat(32)`, a
+    /// string of bytes that happened to decompress to a point on the curve,
+    /// and then a key printed as hexadecimal. Neither is an address now: an
+    /// address is the hash of a key, written as Bech32m for its network.
     fn an_address() -> String {
-        cairn_crypto::SecretKey::from_bytes(&[5; 32])
-            .public_key()
-            .to_string()
+        Address::from(cairn_crypto::SecretKey::from_bytes(&[5; 32]).public_key())
+            .to_text(NetworkId::TESTNET)
     }
 
-    /// And the spellings a sign makes, which one of the two readers took.
+    /// A public key in the form an address used to have is refused, and the
+    /// refusal says what to ask for.
     ///
-    /// `u8::from_str_radix("+a", 16)` is ten. Walking a key two characters at
-    /// a time through it read `"+a"` as the byte `0a`, so a key carrying that
-    /// byte had a second spelling at this endpoint, and the spelling the
-    /// command line refuses was the one accepted here.
-    ///
-    /// The bend has to land on a pair that already reads `0a`. Bend any other
-    /// pair and the bent string is a different key, the subgroup check refuses
-    /// it, and the test passes green on the parser it was written to catch.
+    /// Hashing it would be right for a key and would destroy the money for
+    /// anything else sixty four hexadecimal characters long, the hash of an
+    /// address among them, since no key hashes to that.
     #[test]
-    fn a_sign_is_not_a_hex_digit() {
-        let carrying = (0u8..=255).find_map(|seed| {
-            let text = cairn_crypto::SecretKey::from_bytes(&[seed; 32])
-                .public_key()
-                .to_string();
-            let at = (0..32)
-                .map(|pair: usize| pair.saturating_mul(2))
-                .find(|&at| text.get(at..at.saturating_add(2)) == Some("0a"))?;
-            Some((text, at))
-        });
+    fn a_public_key_in_the_old_form_is_refused_with_what_to_ask_for() {
+        let key = cairn_crypto::SecretKey::from_bytes(&[5; 32])
+            .public_key()
+            .to_string();
+        let why = parse_address(&key, NetworkId::TESTNET)
+            .unwrap_err()
+            .to_string();
         assert!(
-            carrying.is_some(),
-            "no key in two hundred and fifty six seeds carries the byte 0a, so this \
-             test no longer reaches the parser at all"
+            why.contains(
+                "that is a public key, the old form of an address; ask for the address, \
+                          which starts tcairn1"
+            ),
+            "a public key in the old form was refused without saying what to ask for instead"
         );
-        let (real, at) = carrying.unwrap();
-
-        let mut bent = real.clone();
-        bent.replace_range(at..at.saturating_add(2), "+a");
-        assert_ne!(bent, real, "the bend has to change the string");
-        assert!(parse_address(&real).is_ok(), "the key itself");
         assert!(
-            parse_address(&bent).is_err(),
-            "a sign was read as a digit at {at}, so this key has a second spelling"
+            parse_address(&key.to_uppercase(), NetworkId::TESTNET).is_err(),
+            "and in capitals"
         );
     }
 
@@ -915,46 +904,57 @@ mod tests {
     ///
     /// Both faces read an address with the same reader, and the page threw
     /// its answer away and said "it is 64 hexadecimal characters" whatever
-    /// was wrong. Nothing asked, so sixty four hexadecimal characters that are
-    /// not a key, which is what a one-character typo in a real address
-    /// usually is, were answered with the length the person had already
-    /// typed.
+    /// was wrong. Nothing asked, so a mistyped address was answered with the
+    /// length the person had already typed.
     #[test]
     fn a_recipient_the_page_refuses_is_refused_with_the_reason() {
-        let off_the_curve = "11".repeat(32);
-        let why = parse_address(&off_the_curve).unwrap_err().to_string();
+        let mut typo = an_address();
+        let last = typo.pop().unwrap();
+        typo.push(if last == 'q' { 'p' } else { 'q' });
+        let why = parse_address(&typo, NetworkId::TESTNET)
+            .unwrap_err()
+            .to_string();
         assert_eq!(
-            recipient_of(Some(off_the_curve)),
+            recipient_of(Some(typo), NetworkId::TESTNET),
             Err(why),
-            "sixty four hexadecimal characters that are not a key were refused for their \
-             length rather than for what is wrong with them"
+            "an address with a typo in it was refused for something other than what is \
+             wrong with it"
         );
         let short = "ab".to_owned();
-        let why = parse_address(&short).unwrap_err().to_string();
-        assert_eq!(recipient_of(Some(short)), Err(why));
+        let why = parse_address(&short, NetworkId::TESTNET)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(recipient_of(Some(short), NetworkId::TESTNET), Err(why));
         assert_eq!(
-            recipient_of(None),
+            recipient_of(None, NetworkId::TESTNET),
             Err("who is being paid?".to_owned()),
             "and a recipient left out is asked for"
         );
-        assert!(recipient_of(Some(an_address())).is_ok());
+        assert!(recipient_of(Some(an_address()), NetworkId::TESTNET).is_ok());
     }
 
     #[test]
     fn an_address_is_read_only_when_it_is_one() {
         let real = an_address();
-        assert!(parse_address(&real).is_ok());
-        assert!(parse_address(&format!("  {real}  ")).is_ok());
-        assert!(parse_address("").is_err());
-        assert!(parse_address(&real[..62]).is_err(), "too short");
-        assert!(parse_address(&"zz".repeat(32)).is_err(), "not hexadecimal");
-        assert!(parse_address(&"00".repeat(32)).is_err(), "not a usable key");
-        // And the whole reason the line above says "usable" rather than
-        // "decodable": a string can be a point on the curve and still be an
-        // address nobody holds.
+        let testnet = NetworkId::TESTNET;
+        assert!(parse_address(&real, testnet).is_ok());
+        assert!(parse_address(&format!("  {real}  "), testnet).is_ok());
         assert!(
-            parse_address(&"11".repeat(32)).is_err(),
-            "a point outside the prime order subgroup is not an address"
+            parse_address(&real.to_uppercase(), testnet).is_ok(),
+            "an address in capitals, as a QR code carries it"
+        );
+        assert!(parse_address("", testnet).is_err());
+        assert!(
+            parse_address(&real[..real.len() - 1], testnet).is_err(),
+            "too short"
+        );
+        assert!(
+            parse_address(&real, NetworkId::DEVNET).is_err(),
+            "a test network's address on devnet"
+        );
+        assert!(
+            parse_address(&real, NetworkId::MAINNET).is_err(),
+            "a test network's address on mainnet"
         );
     }
 }

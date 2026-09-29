@@ -161,6 +161,12 @@ impl Running {
     }
 }
 
+/// An address as the page takes it: written for the network the wallet here
+/// follows.
+fn written(key: cairn_crypto::PublicKey) -> String {
+    cairn_ledger::note::Address::from(key).to_text(cairn_ledger::note::NetworkId::TESTNET)
+}
+
 #[test]
 fn the_page_answers_its_own_and_nothing_else() {
     let running = Running::start("locks", 1, 2);
@@ -249,6 +255,7 @@ fn money_sent_from_the_page_leaves_the_wallet() {
     let host = running.host();
     let secret = running.secret().to_owned();
     let recipient = SecretKey::from_bytes(&[9; 32]).public_key();
+    let to = written(recipient);
 
     let before = running.wallet.holdings().spendable;
     let head = format!("POST /api/send HTTP/1.1\r\nhost: {host}\r\norigin: http://{host}");
@@ -257,7 +264,7 @@ fn money_sent_from_the_page_leaves_the_wallet() {
         .wallet
         .floor_for(recipient, Amount::from_cairn("60").unwrap());
     let floor = floor.to_string().replace(" CAIRN", "");
-    let body = format!("k={secret}&to={recipient}&amount=60&fee={floor}");
+    let body = format!("k={secret}&to={to}&amount=60&fee={floor}");
     let (status, answer) = running.ask(&head, &body);
     assert_eq!(status, 200);
     assert!(answer.contains("\"sent\":true"), "{answer}");
@@ -293,9 +300,12 @@ fn money_sent_from_the_page_leaves_the_wallet() {
     let (status, answer) = running.ask(&head, &format!("k={secret}&to=nonsense&amount=1"));
     assert_eq!(status, 200);
     assert!(answer.contains("\"sent\":false"), "{answer}");
-    assert!(answer.contains("not 32 bytes of hexadecimal"), "{answer}");
+    assert!(
+        answer.contains("has no `1` between its prefix and its data"),
+        "{answer}"
+    );
 
-    let (status, answer) = running.ask(&head, &format!("k={secret}&to={recipient}&amount=99999"));
+    let (status, answer) = running.ask(&head, &format!("k={secret}&to={to}&amount=99999"));
     assert!(answer.contains("\"sent\":false"), "{answer}");
     assert!(answer.contains("more than"), "{answer}");
     assert_eq!(status, 200);
@@ -304,11 +314,7 @@ fn money_sent_from_the_page_leaves_the_wallet() {
     // behind something a page can be made to follow.
     assert_eq!(
         running
-            .get(
-                &format!("/api/send?k={secret}&to={recipient}&amount=1"),
-                &host,
-                ""
-            )
+            .get(&format!("/api/send?k={secret}&to={to}&amount=1"), &host, "")
             .0,
         405
     );
@@ -329,7 +335,8 @@ fn a_fee_typed_into_the_page_is_the_one_quoted_and_paid_once_said_again() {
     let host = running.host();
     let secret = running.secret().to_owned();
     let recipient = SecretKey::from_bytes(&[9; 32]).public_key();
-    let asked = format!("k={secret}&to={recipient}&amount=1&fee=5");
+    let to = written(recipient);
+    let asked = format!("k={secret}&to={to}&amount=1&fee=5");
 
     let quote = format!("POST /api/quote HTTP/1.1\r\nhost: {host}\r\norigin: http://{host}");
     let (status, answer) = running.ask(&quote, &asked);
@@ -377,10 +384,11 @@ fn a_quote_past_the_ceiling_is_refused_as_sending_it_is_and_not_totalled() {
     let host = running.host();
     let secret = running.secret().to_owned();
     let recipient = SecretKey::generate().unwrap().public_key();
+    let to = written(recipient);
 
     // One whole CAIRN under the ceiling, and a fee that takes the two past it.
     let most = Amount::MAX_MONEY.as_pebbles() / cairn_primitives::amount::PEBBLES_PER_CAIRN;
-    let asked = format!("k={secret}&to={recipient}&amount={}&fee=5", most - 1);
+    let asked = format!("k={secret}&to={to}&amount={}&fee=5", most - 1);
     let refused = cairn_wallet::WalletError::TooLarge.to_string();
 
     let send = format!("POST /api/send HTTP/1.1\r\nhost: {host}\r\norigin: http://{host}");
@@ -423,13 +431,14 @@ fn a_quote_for_more_than_the_wallet_holds_is_refused_as_sending_it_is() {
     let host = running.host();
     let secret = running.secret().to_owned();
     let recipient = SecretKey::generate().unwrap().public_key();
+    let to = written(recipient);
     let held = running.wallet.holdings().spendable;
     assert!(
         held > Amount::ZERO,
         "the wallet has to hold something to be short of"
     );
     let asked = format!(
-        "k={secret}&to={recipient}&amount={}",
+        "k={secret}&to={to}&amount={}",
         held.as_pebbles() / cairn_primitives::amount::PEBBLES_PER_CAIRN + 1
     );
 

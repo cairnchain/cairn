@@ -536,7 +536,7 @@ fn a_note_the_block_spends_is_never_a_note_the_block_pushes_down() {
         }
         for transfer in &block.transfers {
             for (id, note) in transfer.created_notes() {
-                if note.owner == miner.public_key() {
+                if note.owner == miner.public_key().into() {
                     purse.push((id, note));
                 }
             }

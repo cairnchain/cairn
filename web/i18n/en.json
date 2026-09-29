@@ -41,7 +41,7 @@
     "placeholder": "Block height, block, transaction, address, note",
     "action": "Look up",
     "nothing": "Nothing on this chain matches that.",
-    "guessed": "Nothing this site has read matches that. It could be an address, so an address is what you were shown. If you pasted a transaction, it may be in the part of the chain this site has not read yet."
+    "guessed": "This site has not read the whole chain yet, so what it shows for this address may be short of what the address holds."
   },
 
   "common": {
@@ -364,7 +364,7 @@
     },
     "outputs": {
       "plain": "These are the new notes. Each belongs to one address and can be spent exactly once, later, by whoever holds the matching secret.",
-      "curious": "Each output is a value locked to a public key. Its identifier comes from the transaction that made it plus its position in the list.",
+      "curious": "Each output is a value locked to an address, which is the hash of a public key: the key itself appears only when the note is spent. Its identifier comes from the transaction that made it plus its position in the list.",
       "technical": "Note identifiers are the source transaction identifier and an index. Ordering over identifiers is defined so the note set has one canonical enumeration, which the state commitment depends on."
     },
     "address": {
@@ -390,7 +390,7 @@
     "holders": {
       "plain": "Who holds the most. On a test network this says very little: it is mostly whoever left a computer mining the longest.",
       "curious": "Computed from the explorer index, counting unspent notes per owner. An owner can hold any number of addresses, so this is a view of addresses, not of people.",
-      "technical": "Balances are the sum of unspent notes per public key over the followed branch. A reorganisation is unwound block by block; only one deeper than the 128 blocks the index keeps the means to take back makes it read the chain again."
+      "technical": "Balances are the sum of unspent notes per address over the followed branch. A reorganisation is unwound block by block; only one deeper than the 128 blocks the index keeps the means to take back makes it read the chain again."
     },
     "emission": {
       "plain": "New money appears only as payment for the work of finding blocks. The amount halves every so often, then stops falling and stays at a small figure forever, so there is always a reason to keep the network running.",
@@ -448,7 +448,7 @@
           "This sounds like a detail. It is not: because a note is never modified, only created and destroyed, a computer can forget an old note entirely and still be certain about the ones that are left."
         ],
         "curious": [
-          "The unspent output model, as in Bitcoin, rather than accounts. A note is a value locked to a public key, identified by the transaction that made it and its index in the outputs.",
+          "The unspent output model, as in Bitcoin, rather than accounts. A note is a value locked to an address, the hash of a public key, identified by the transaction that made it and its index in the outputs.",
           "Immutability is the reason this model was chosen here. An account balance has to be read and written, so the account must be held. A note is created once and consumed once, which lets a node hold a commitment rather than the note itself."
         ],
         "technical": [
@@ -675,7 +675,7 @@
       "title": "Mine",
       "body": {
         "plain": ["This is how you get CAIRN on a test network. Your computer starts looking for blocks, and when it finds one the reward goes to your address. There is no other way to get any: nobody has a stock to hand out."],
-        "curious": ["Mining inside the node, on every core but one, which is enough for a test network. Rewards go to the key you name, and that key can live anywhere: the node is told an address and never sees the secret behind it."],
+        "curious": ["Mining inside the node, on every core but one, which is enough for a test network. Rewards go to the address you name, and the key behind it can live anywhere: the node is told an address and never sees the secret behind it."],
         "technical": ["The opening difficulty of testnet-6 is 2^27, calibrated so the first block takes roughly the target block time on one ordinary core."]
       }
     },

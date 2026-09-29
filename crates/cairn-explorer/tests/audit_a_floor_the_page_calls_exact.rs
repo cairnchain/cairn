@@ -209,7 +209,7 @@ fn an_index_that_has_not_reached_the_tip_still_calls_its_figures_exact() {
     feed(&explorer, &blocks[..4]);
     explorer.refresh();
 
-    let address = miner.public_key().to_string();
+    let address = cairn_ledger::note::Address::from(miner.public_key()).to_text(params.network);
     let whole = ask(&explorer, &format!("address/{address}"));
     assert!(says(&whole, "counted", "true"), "{}", body(&whole));
     assert!(says(&whole, "unspentNotes", "4"), "{}", body(&whole));
@@ -275,6 +275,7 @@ fn an_address_the_index_has_not_reached_is_told_its_nought_is_exact() {
     explorer.refresh();
     feed(&explorer, &blocks[4..]);
 
+    let alice = cairn_ledger::note::Address::from(alice).to_text(params.network);
     let answer = ask(&explorer, &format!("address/{alice}"));
     let page = body(&answer);
     assert!(says(&answer, "balance", "\"0\""), "{page}");

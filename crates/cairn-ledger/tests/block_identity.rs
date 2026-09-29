@@ -62,8 +62,8 @@ fn signed_block() -> Block {
     // The signature is real and verifies against the spent note.
     let message = transfer.signature_message(NetworkId::TESTNET, 0, &spent);
     assert!(
-        spent
-            .owner
+        miner
+            .public_key()
             .verify(message.as_bytes(), &transfer.inputs[0].signature)
             .is_ok(),
         "precondition: the honest block carries a valid signature"
@@ -123,8 +123,8 @@ fn a_block_and_its_signature_corrupted_twin_share_an_identifier() {
     );
     let message = twin.transfers[0].signature_message(NetworkId::TESTNET, 0, &spent);
     assert!(
-        spent
-            .owner
+        wallet(1)
+            .public_key()
             .verify(message.as_bytes(), &twin.transfers[0].inputs[0].signature)
             .is_err(),
         "precondition: the twin's signature does not verify"

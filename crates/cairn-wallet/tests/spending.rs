@@ -341,7 +341,7 @@ fn the_address_is_the_key_file_and_nothing_else() {
     cairn_wallet::keyfile::write(&key_file, &secret).unwrap();
 
     let (wallet, _) = Wallet::open(&key_file, params(), &directory.join("data")).unwrap();
-    assert_eq!(wallet.address(), secret.public_key());
+    assert_eq!(wallet.address(), secret.public_key().into());
     assert_eq!(
         format!("{wallet:?}"),
         "Wallet(<key withheld>)",

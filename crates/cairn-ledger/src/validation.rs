@@ -7,14 +7,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cairn_crypto::{PublicKey, Signature};
+use cairn_crypto::{PublicKey, Signature, PUBLIC_KEY_LEN};
 use cairn_primitives::codec::Encode;
 use cairn_primitives::{Amount, Hash32};
 
 use crate::emission;
 
 use crate::block::{Activation, Block, BlockHeader, BLOCK_VERSION};
-use crate::note::{NetworkId, Note, NoteId};
+use crate::note::{Address, NetworkId, Note, NoteId};
 use crate::pow::{median_time_past, meets_target, next_difficulty, work_of, MIN_DIFFICULTY};
 use crate::state::{cold_leaf, BlockUndo, ColdSpend, LedgerState, StateTransition};
 use crate::transaction::{
@@ -312,8 +312,8 @@ const _: () = assert!(
 ///
 /// [`MOST_INPUTS`] and the ceilings beside it let a frame be turned away for
 /// the price of reading its declared length, instead of after every note in it
-/// has been built and every public key in it decompressed. That is only sound
-/// while they sit at or above what the rules allow. Every shipped network is
+/// has been built. That is only sound while they sit at or above what the
+/// rules allow. Every shipped network is
 /// [`ConsensusParams::testnet`] with a few fields replaced, and none of the
 /// replacements raises one of these, so checking it covers all of them.
 ///
@@ -694,6 +694,13 @@ pub enum TransferError {
     MissingProof { note_id: NoteId },
     #[error("the proof for note {note_id:?} does not match the cold commitment")]
     InvalidProof { note_id: NoteId },
+    /// The key an input carries is not the one whose address owns the note.
+    ///
+    /// Asked with one hash, as soon as the input has resolved and before its
+    /// signature is collected, so a key that is not the owner's is never
+    /// decoded and never verified against.
+    #[error("the key on input {input_index} is not the one the note it spends is paid to")]
+    KeyNotOwner { input_index: usize },
     #[error(
         "note {note_id:?} was paid by a coinbase and cannot be spent before height \
          {matures_at}, because until then the block that paid it can still be undone"
@@ -837,8 +844,13 @@ pub struct TransferOutcome {
 /// check would have named. Which of two bad signatures is reported changes
 /// nothing any node agrees on, but a validator that names a different one on
 /// every run is one nobody can debug.
+///
+/// The key is the input's, as the bytes it carried, and it is only here once
+/// its hash has been found to be the note's owner. It is decoded where the
+/// signature is verified, on whichever thread verifies it, which is the one
+/// place in the whole of validation that does curve arithmetic.
 struct Pending {
-    owner: PublicKey,
+    key: [u8; PUBLIC_KEY_LEN],
     message: Hash32,
     signature: Signature,
     transfer: usize,
@@ -846,9 +858,16 @@ struct Pending {
 }
 
 impl Pending {
+    /// Whether the key is one a signer can hold and the signature verifies
+    /// under it.
+    ///
+    /// A key that hashes to its note's owner and is not a usable point fails
+    /// here, as a signature that does not verify. Only whoever chose to be
+    /// paid at the hash of bytes that are not a key can present one, and
+    /// nobody can sign under it.
     fn holds(&self) -> bool {
-        self.owner
-            .verify(self.message.as_bytes(), &self.signature)
+        PublicKey::from_bytes(&self.key)
+            .and_then(|key| key.verify(self.message.as_bytes(), &self.signature))
             .is_ok()
     }
 }
@@ -1124,7 +1143,9 @@ pub fn check_transfer(
 /// transaction that made the note together with a position in it, and that
 /// identifier commits to the note. So the message a signature covers cannot be
 /// moved by the chain, and one that held once holds for as long as the transfer
-/// names the same notes.
+/// names the same notes. The same goes for the key each input carries, which
+/// is the transfer's own bytes and was found to hash to the note's owner when
+/// the signature was first checked; `KeyNotOwner` is not asked again here.
 ///
 /// What the chain does move is everything else: whether a note is still there,
 /// whether it has been spent, which of the two sets it sits in, and what the
@@ -1182,8 +1203,21 @@ fn resolve_transfer(
 
         let position = u32::try_from(index).unwrap_or(u32::MAX);
         if let (Some(collected), Some(signing)) = (pending.as_deref_mut(), signing.as_ref()) {
+            // One hash and no curve arithmetic, before the signature is
+            // collected: a key that is not the owner's is refused without ever
+            // being decoded. It is the whole of what ties the key an input
+            // carries to the note, since the identifier leaves the key out.
+            //
+            // Asked wherever a signature is, and not by the pool's second look,
+            // for the reason that look checks no signature: the note's owner
+            // is settled by its identifier and the key by the transfer's
+            // bytes, so a key that hashed to the owner once does for as long
+            // as the transfer names the same notes.
+            if Address::of_ed25519(&input.key) != spent.owner {
+                return Err(TransferError::KeyNotOwner { input_index: index });
+            }
             collected.push(Pending {
-                owner: spent.owner,
+                key: input.key,
                 message: signing.message(position, &spent),
                 signature: input.signature,
                 transfer: position_in_block,
@@ -1998,13 +2032,13 @@ mod tests {
         let message = Hash32::from_bytes([seed; 32]);
         let signature = key.sign(message.as_bytes());
         Pending {
-            owner: if good {
-                key.public_key()
+            key: if good {
+                key.public_key().to_bytes()
             } else {
                 // A key that did not sign this: the signature is well formed
                 // and does not hold, which is what a forged transfer looks
                 // like and what a corrupted one looks like too.
-                SecretKey::from_bytes(&[0xAB; 32]).public_key()
+                SecretKey::from_bytes(&[0xAB; 32]).public_key().to_bytes()
             },
             message,
             signature,

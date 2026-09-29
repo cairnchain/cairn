@@ -166,6 +166,7 @@ fn an_input(rng: &mut Rng) -> Input {
     Input {
         note_id: a_note_id(rng),
         witness: a_witness(rng),
+        key: rng.array::<32>(),
         signature: Signature::from_bytes(&rng.array::<64>()),
     }
 }

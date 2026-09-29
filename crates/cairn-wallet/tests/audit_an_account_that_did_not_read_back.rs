@@ -148,10 +148,11 @@ fn an_account_from_a_newer_version_is_kept_whole_when_an_older_one_runs() {
     let directory = scratch("newer");
     let (key_file, data, secret) = a_key(&directory);
 
-    // What a newer version writes: a body this build cannot decode, under a
-    // stamp that holds over it.
-    let body = [0xEE_u8; 5];
-    let mut newer = body.to_vec();
+    // What a newer version writes: the magic, then a body this build cannot
+    // decode, under a stamp that holds over both.
+    let mut body = cairn_wallet::history::MAGIC.to_vec();
+    body.extend_from_slice(&[0xEE_u8; 5]);
+    let mut newer = body.clone();
     newer.extend_from_slice(hash(Domain::WalletHistory, &body).as_bytes());
     std::fs::write(data.join("history.dat"), &newer).unwrap();
 

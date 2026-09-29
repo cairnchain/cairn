@@ -98,7 +98,7 @@ impl Chain {
     fn first_reward(&self, miner: &SecretKey) -> (NoteId, Note) {
         let block = self.blocks.first().unwrap();
         let (id, note) = block.coinbase.created_notes().into_iter().next().unwrap();
-        assert_eq!(note.owner, miner.public_key());
+        assert_eq!(note.owner, miner.public_key().into());
         (id, note)
     }
 }

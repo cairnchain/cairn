@@ -13,8 +13,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cairn_chain::{Accepted, ChainStore};
-use cairn_crypto::PublicKey;
 use cairn_ledger::block::Block;
+use cairn_ledger::note::Address;
 use cairn_ledger::note::Note;
 use cairn_ledger::pow::{median_time_past, meets_target};
 use cairn_ledger::transaction::CoinbaseTransaction;
@@ -368,7 +368,7 @@ impl Mined {
 pub(crate) fn run(
     node: &Node,
     params: &ConsensusParams,
-    reward_to: PublicKey,
+    reward_to: Address,
     alone: bool,
     running: &AtomicBool,
     mut report: impl FnMut(Report<'_>),
@@ -451,7 +451,7 @@ pub(crate) fn run(
 fn build(
     node: &Node,
     params: &ConsensusParams,
-    reward_to: PublicKey,
+    reward_to: Address,
 ) -> Result<(Block, Option<Hash32>), Waiting> {
     node.with_chain(|chain| candidate(chain, params, reward_to, unix_now()))
 }
@@ -460,7 +460,7 @@ fn build(
 fn candidate(
     chain: &ChainStore,
     params: &ConsensusParams,
-    reward_to: PublicKey,
+    reward_to: Address,
     now: u64,
 ) -> Result<(Block, Option<Hash32>), Waiting> {
     if chain.is_empty() && params.genesis.is_some() {
@@ -710,8 +710,9 @@ mod tests {
 mod saying {
     use super::{candidate, held_back, run, Mined, Report, Saying, Waiting, PAUSE};
     use cairn_chain::{Accepted, ChainStore};
-    use cairn_crypto::{PublicKey, SecretKey};
+    use cairn_crypto::SecretKey;
     use cairn_ledger::block::{Activation, BLOCK_VERSION};
+    use cairn_ledger::note::Address;
     use cairn_ledger::pow::median_time_past;
     use cairn_ledger::validation::{mine_block, ConsensusParams};
     use cairn_net::Node;
@@ -723,8 +724,8 @@ mod saying {
 
     const NOW: u64 = 2_000_000_000;
 
-    fn reward_key() -> PublicKey {
-        SecretKey::generate().unwrap().public_key()
+    fn reward_key() -> Address {
+        SecretKey::generate().unwrap().public_key().into()
     }
 
     /// What the miner reported, owned, so it can cross to the test's thread.

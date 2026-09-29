@@ -1,7 +1,10 @@
-//! Notes and the identifiers that address them.
+//! Notes, the addresses that may spend them, and the identifiers that name
+//! them.
 
-use cairn_crypto::PublicKey;
+use cairn_crypto::{PublicKey, PUBLIC_KEY_LEN};
+use cairn_primitives::bech32m::{self, Bech32mError};
 use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
+use cairn_primitives::hash::{Domain, Hasher, HASH_LEN};
 use cairn_primitives::{Amount, Hash32};
 
 /// Identifies which chain a message belongs to.
@@ -138,6 +141,22 @@ impl NetworkId {
             _ => None,
         }
     }
+
+    /// What an address on this network starts with, before its `1`.
+    ///
+    /// The kind of network rather than the network: every test network
+    /// shares one, so an address stays the same across the restarts a test
+    /// network goes through, and mainnet has one no test network can be
+    /// mistaken for. A marker this build does not name is a test network
+    /// here, since the one network whose money is real is named above.
+    #[must_use]
+    pub const fn address_prefix(self) -> &'static str {
+        match self {
+            Self::MAINNET => "cairn",
+            Self::DEVNET => "dcairn",
+            _ => "tcairn",
+        }
+    }
 }
 
 /// The name, or the marker when there is no name.
@@ -199,16 +218,160 @@ impl Decode for NoteId {
     }
 }
 
-/// A unit of value locked to one public key.
+/// The scheme byte of an Ed25519 key, hashed in front of it.
+///
+/// Inside the hash so that a key of another scheme with the same thirty two
+/// bytes can never name the same owner: SLH-DSA-128s keys are thirty two bytes
+/// too. A scheme to come arrives as a transfer version that names its own.
+pub const ED25519: u8 = 0x00;
+
+/// Who may spend a note: the hash of a key, never the key.
+///
+/// A note locked to a key shows that key to everybody for as long as it is
+/// unspent, which is what a quantum computer would need and all of the supply
+/// would offer it. Locked to the hash, the key appears on the chain once, in
+/// the input that spends the note, and the owner is thirty two bytes whatever
+/// guards it.
+///
+/// Reading one is copying thirty two bytes. A key is decoded, with the three
+/// refusals `cairn_crypto::PublicKey::from_bytes` makes, only when an input
+/// presents one whose hash is already known to match, which is at
+/// verification, so no frame buys curve arithmetic by carrying notes.
+///
+/// No `Display`, on purpose. An address is written with its network's prefix
+/// and a checksum, by [`Address::to_text`], and every face that prints one has
+/// to say which network it is on to do it. A bare hexadecimal address cannot be
+/// printed by accident, so none can be typed back in by someone who read one.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Address([u8; HASH_LEN]);
+
+/// Why a string is not an address on this network.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum AddressError {
+    #[error("{0}")]
+    Text(#[from] Bech32mError),
+    #[error(
+        "it is an address for another network: it starts {found}1, and addresses here \
+         start {expected}1"
+    )]
+    OtherNetwork {
+        found: String,
+        expected: &'static str,
+    },
+    #[error("it carries {0} bytes, and an address carries 32")]
+    WrongLength(usize),
+}
+
+impl Address {
+    pub const fn from_bytes(bytes: [u8; HASH_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn as_bytes(&self) -> &[u8; HASH_LEN] {
+        &self.0
+    }
+
+    pub const fn to_bytes(self) -> [u8; HASH_LEN] {
+        self.0
+    }
+
+    /// The address of an Ed25519 key given as its thirty two bytes, decoded
+    /// or not.
+    ///
+    /// What an input is checked against: the key it carries is hashed as it
+    /// stands, before anything has asked whether it is a point, so a key that
+    /// is not the owner's costs one hash to refuse and no curve arithmetic.
+    #[must_use]
+    pub fn of_ed25519(key: &[u8; PUBLIC_KEY_LEN]) -> Self {
+        let mut hasher = Hasher::new(Domain::Address);
+        hasher.update(&[ED25519]);
+        hasher.update(key);
+        Self(hasher.finalize().to_bytes())
+    }
+
+    /// The address written for `network`: its prefix, `1`, fifty two
+    /// characters of Bech32m data and six of checksum.
+    #[must_use]
+    pub fn to_text(&self, network: NetworkId) -> String {
+        bech32m::encode(network.address_prefix(), &self.0)
+    }
+
+    /// Reads an address written for `network`, and nothing else.
+    ///
+    /// Refused: anything Bech32m refuses, which is every typo of up to four
+    /// characters; a prefix other than this network's; and any length but
+    /// thirty two bytes. The same string in capitals throughout is read, which
+    /// is how a QR code carries it. Surrounding space is not trimmed here:
+    /// what a face does with what was pasted is the face's to say.
+    pub fn from_text(text: &str, network: NetworkId) -> Result<Self, AddressError> {
+        let (prefix, bytes) = bech32m::decode(text)?;
+        let expected = network.address_prefix();
+        if prefix != expected {
+            return Err(AddressError::OtherNetwork {
+                found: prefix,
+                expected,
+            });
+        }
+        let bytes: [u8; HASH_LEN] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| AddressError::WrongLength(bytes.len()))?;
+        Ok(Self(bytes))
+    }
+}
+
+impl From<PublicKey> for Address {
+    fn from(key: PublicKey) -> Self {
+        Self::of_ed25519(key.as_bytes())
+    }
+}
+
+impl From<&PublicKey> for Address {
+    fn from(key: &PublicKey) -> Self {
+        Self::of_ed25519(key.as_bytes())
+    }
+}
+
+impl From<&Address> for Address {
+    fn from(address: &Address) -> Self {
+        *address
+    }
+}
+
+/// Hexadecimal, for a developer reading a derived `Debug`; a person is shown
+/// [`Address::to_text`].
+impl core::fmt::Debug for Address {
+    fn fmt(&self, out: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(out, "Address({})", Hash32::from_bytes(self.0))
+    }
+}
+
+impl Encode for Address {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.0);
+    }
+}
+
+impl Decode for Address {
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        Ok(Self(reader.take_array::<HASH_LEN>()?))
+    }
+}
+
+/// A unit of value locked to one address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Note {
     pub value: Amount,
-    pub owner: PublicKey,
+    pub owner: Address,
 }
 
 impl Note {
-    pub const fn new(value: Amount, owner: PublicKey) -> Self {
-        Self { value, owner }
+    /// A note paid to `owner`, an address or the key whose address it is.
+    pub fn new(value: Amount, owner: impl Into<Address>) -> Self {
+        Self {
+            value,
+            owner: owner.into(),
+        }
     }
 }
 
@@ -223,7 +386,27 @@ impl Decode for Note {
     fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
         Ok(Self {
             value: Amount::decode_from(reader)?,
-            owner: PublicKey::decode_from(reader)?,
+            owner: Address::decode_from(reader)?,
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::{Address, Note};
+
+    /// An owner in a note is thirty two bytes and nothing beside them, and a
+    /// note is forty.
+    ///
+    /// What a node holds for every hot note rests on this: 68 MB at the
+    /// ceiling the rules impose, as `examples/footprint.rs` reads it. It
+    /// rested on a public key being thirty two bytes while a note held one,
+    /// and the check stayed with the key when the owner became an address, so
+    /// an address that carried anything more would have passed.
+    #[test]
+    fn an_owner_in_a_note_is_thirty_two_bytes_and_a_note_forty() {
+        assert_eq!(std::mem::size_of::<Address>(), 32);
+        assert_eq!(std::mem::size_of::<Note>(), 40);
     }
 }

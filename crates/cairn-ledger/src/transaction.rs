@@ -6,7 +6,7 @@
 //! code path can mint money by handing a transfer an empty input list.
 
 use cairn_accumulator::ForestProof;
-use cairn_crypto::{SecretKey, Signature};
+use cairn_crypto::{SecretKey, Signature, PUBLIC_KEY_LEN};
 use cairn_primitives::codec::{take_at_most, CodecError, Decode, Encode, Reader};
 use cairn_primitives::hash::{Domain, Hasher};
 use cairn_primitives::{Amount, Hash32};
@@ -32,12 +32,12 @@ pub const MAX_COINBASE_EXTRA: usize = 64;
 /// stops a build where that stops being true.
 ///
 /// It is here because decoding is not free and happens before any rule has
-/// looked at the frame. Every note carries a public key, and reading one is an
-/// Edwards decompression: 7.7 microseconds on the machine
-/// `cairn-crypto/examples/verify.rs` was last run on, for forty bytes on the
-/// wire. Without a ceiling the only bound was the frame, so a megabyte of
-/// repeated notes bought a fifth of a second of curve arithmetic and was then
-/// refused for its shape, having been built in full first.
+/// looked at the frame. Without a ceiling the only bound was the frame, so a
+/// megabyte of repeated inputs was built in full and then refused for its
+/// shape. Reading one no longer does curve arithmetic, since a note's owner is
+/// an address and an input's key is carried as bytes, but building what was
+/// read still costs an allocation for each, and the rules already say how many
+/// can be worth building.
 pub const MOST_INPUTS: usize = 256;
 
 /// The most outputs a transfer's decoder will build. See [`MOST_INPUTS`].
@@ -111,27 +111,41 @@ impl Decode for Witness {
     }
 }
 
-/// One spent note, with what a validator needs to see it and the signature
-/// authorising the spend.
+/// One spent note, with what a validator needs to see it, the key that owns
+/// it and the signature authorising the spend.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Input {
     pub note_id: NoteId,
     pub witness: Witness,
+    /// The Ed25519 key whose address owns the note, as its thirty two bytes.
+    ///
+    /// Carried as bytes and decoded nowhere on the wire. A validator hashes
+    /// it and compares the hash with the note's owner first, which costs one
+    /// hash, and decodes it only to verify the signature, once the hash has
+    /// matched. A key of another scheme would arrive in another transfer
+    /// version, which names its own encoding.
+    ///
+    /// Not in the transfer's identifier, for the reason the signature is not:
+    /// the identifier is known before anything is signed. It cannot be swapped
+    /// for another key either way, since only one key hashes to the owner.
+    pub key: [u8; PUBLIC_KEY_LEN],
     pub signature: Signature,
 }
 
 impl Input {
-    /// Spends a note the nodes still hold. Signed afterwards.
+    /// Spends a note the nodes still hold. Signed afterwards, which is also
+    /// when the key is filled in.
     pub fn hot(note_id: NoteId) -> Self {
         Self {
             note_id,
             witness: Witness::Hot,
+            key: [0u8; PUBLIC_KEY_LEN],
             signature: Signature::unsigned(),
         }
     }
 
     /// Spends a note from the cold set, carrying it, where it sits, and the
-    /// proof. Signed afterwards.
+    /// proof. Signed afterwards, which is also when the key is filled in.
     pub fn cold(note_id: NoteId, note: Note, position: u64, proof: ForestProof) -> Self {
         Self {
             note_id,
@@ -140,6 +154,7 @@ impl Input {
                 position,
                 proof,
             })),
+            key: [0u8; PUBLIC_KEY_LEN],
             signature: Signature::unsigned(),
         }
     }
@@ -149,6 +164,7 @@ impl Encode for Input {
     fn encode_to(&self, out: &mut Vec<u8>) {
         self.note_id.encode_to(out);
         self.witness.encode_to(out);
+        out.extend_from_slice(&self.key);
         self.signature.encode_to(out);
     }
 }
@@ -158,6 +174,7 @@ impl Decode for Input {
         Ok(Self {
             note_id: NoteId::decode_from(reader)?,
             witness: Witness::decode_from(reader)?,
+            key: reader.take_array::<PUBLIC_KEY_LEN>()?,
             signature: Signature::decode_from(reader)?,
         })
     }
@@ -185,10 +202,11 @@ impl Transfer {
     /// Encodes everything the identifier commits to: the version, the notes
     /// being spent, and the notes being created.
     ///
-    /// Signatures and witnesses are both left out. A stale proof has to be
-    /// refreshable without changing the transaction identifier, for the same
-    /// reason a signature must not change it: everything already built on top
-    /// of this transaction would otherwise become invalid.
+    /// Signatures, keys and witnesses are all left out. A stale proof has to
+    /// be refreshable without changing the transaction identifier, for the
+    /// same reason a signature must not change it: everything already built
+    /// on top of this transaction would otherwise become invalid. The key goes
+    /// with the signature, which is made with it.
     fn encode_body(&self, out: &mut Vec<u8>) {
         self.version.encode_to(out);
         let input_count = u32::try_from(self.inputs.len()).unwrap_or(u32::MAX);
@@ -229,7 +247,8 @@ impl Transfer {
     /// The value and owner of the spent note are committed to alongside the
     /// transaction body. Without that, a wallet shown a false input value would
     /// sign a transaction whose real fee is the difference, and the signature
-    /// would be perfectly valid.
+    /// would be perfectly valid. The owner is the note's address, the hash of
+    /// the key that signs.
     ///
     /// One input's worth. Anything asking for several should take a [`Signing`]
     /// once and derive them from it.
@@ -237,7 +256,8 @@ impl Transfer {
         self.signing(network).message(input_index, spent)
     }
 
-    /// Signs input `input_index` with `secret`, which must own `spent`.
+    /// Signs input `input_index` with `secret`, which must own `spent`, and
+    /// puts its public key in the input beside the signature.
     pub fn sign_input(
         &mut self,
         network: NetworkId,
@@ -251,6 +271,7 @@ impl Transfer {
             .ok()
             .and_then(|i| self.inputs.get_mut(i))
         {
+            input.key = secret.public_key().to_bytes();
             input.signature = signature;
         }
     }

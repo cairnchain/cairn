@@ -969,11 +969,13 @@ fn spend_oldest(
     let (id, (note, fallen)) = alive
         .iter()
         .find(|(id, (note, fallen))| {
-            note.owner == owner.public_key() && fallen.is_some() && state.hot_note(id).is_none()
+            note.owner == owner.public_key().into()
+                && fallen.is_some()
+                && state.hot_note(id).is_none()
         })
         .or_else(|| {
             alive.iter().find(|(id, (note, _))| {
-                note.owner == owner.public_key() && state.hot_note(id).is_some()
+                note.owner == owner.public_key().into() && state.hot_note(id).is_some()
             })
         })?;
 

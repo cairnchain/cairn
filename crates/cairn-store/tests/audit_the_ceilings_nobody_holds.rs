@@ -497,9 +497,9 @@ fn the_ceiling_is_where_it_says_on_a_log_larger_than_itself() {
 /// A block whose encoding is exactly `bytes` long, for asking a ceiling about
 /// both sides of itself.
 ///
-/// Filled with inputs rather than notes. Both decode, and a note carries a
-/// public key whose decoding is a curve decompression, which over four
-/// megabytes of notes is time spent on nothing the question needs. The last
+/// Filled with inputs rather than notes. Both decode, and while a note carried
+/// a public key its decoding was a curve decompression, which over four
+/// megabytes of notes was time spent on nothing the question needs. The last
 /// few bytes go in the coinbase's `extra`, the one field that grows a byte at
 /// a time, with a note or two taking what it cannot hold.
 fn a_block_of_exactly(bytes: usize) -> Block {

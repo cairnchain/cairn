@@ -15,6 +15,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 use cairn_crypto::PublicKey;
+use cairn_ledger::note::{Address, NetworkId};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_net::{seeds, KEEP_BLOCK_BYTES};
 
@@ -93,8 +94,15 @@ cairnd, a Cairn node
                          error if a setting is one this build does not
                          accept, which is how a script can find out that a
                          network it was told to use has been retired
-  --mine <public key|off>
-                         produce blocks, paying rewards to this key. `off`
+  --mine <address|off>
+                         produce blocks, paying rewards to this address, as
+                         `cairn-wallet address` prints it. A public key in
+                         the form an address had before this release, sixty
+                         four hexadecimal characters, is still taken for now
+                         and converted to its address, which is printed:
+                         write that down instead. Only a key is converted;
+                         anything else of that length is refused, or names
+                         an address nobody holds. `off`
                          mines nothing, whatever cairn.conf says. It waits
                          for a peer, and for the chain to stop arriving,
                          before it builds anything: a chain mined alone
@@ -154,7 +162,7 @@ pub(crate) struct Options {
     /// written into the program.
     pub(crate) seeds_asked_for: bool,
     pub(crate) params: ConsensusParams,
-    pub(crate) mine_to: Option<PublicKey>,
+    pub(crate) mine_to: Option<MineTo>,
     pub(crate) status_period: u64,
     /// Stops the node after this long. A node is meant to run until it is
     /// stopped; this exists so a test or a demonstration can bound it.
@@ -444,12 +452,12 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         Vec::new()
     };
 
-    // `off` for the same reason `--archive no` exists: a key in the file was
-    // otherwise a miner nothing typed could stop for a run.
+    // `off` for the same reason `--archive no` exists: an address in the file
+    // was otherwise a miner nothing typed could stop for a run.
     let mine_to = match setting("mine") {
         None => None,
         Some(text) if text.trim().eq_ignore_ascii_case("off") => None,
-        Some(text) => Some(parse_key(&text).map_err(misread)?),
+        Some(text) => Some(parse_mining_address(&text, params.network).map_err(misread)?),
     };
 
     let status_period = match setting("status") {
@@ -547,6 +555,52 @@ pub(crate) fn size(bytes: u64) -> String {
     }
 }
 
+/// Where a miner's rewards go, and whether it was named in the old form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MineTo {
+    pub(crate) address: Address,
+    /// Named as a public key, the form an address had before a note's owner
+    /// was the hash of a key, and converted to that key's address.
+    ///
+    /// Taken so that a miner's unit file and `cairn.conf`, which an update
+    /// carries across, keep working through the release that changed the
+    /// form. Said at every start, so the operator writes the address down.
+    pub(crate) was_a_key: bool,
+}
+
+/// Reads `--mine`: an address on `network`, or a public key in the old form.
+///
+/// A key is sixty four hexadecimal characters that pass the three refusals a
+/// key must pass. It is converted, which is right for a key and only for a
+/// key: the hash of anything else is an address nobody holds. So a string of
+/// that length that is not a usable key is refused, and the words say what
+/// was expected, which is what stops most pasted hashes. One in sixteen byte
+/// strings is a usable key, and those cannot be told from a key by anything
+/// but where they came from, which is why the help says only keys belong
+/// here.
+fn parse_mining_address(text: &str, network: NetworkId) -> Result<MineTo, String> {
+    if text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        let key = parse_key(text).map_err(|why| {
+            format!(
+                "`{text}` is sixty four hexadecimal characters, which --mine reads as a public \
+                 key, and {why}. Give the address instead, which starts {}1: `cairn-wallet \
+                 address <key file>` prints it",
+                network.address_prefix()
+            )
+        })?;
+        return Ok(MineTo {
+            address: Address::from(key),
+            was_a_key: true,
+        });
+    }
+    let address = Address::from_text(text, network)
+        .map_err(|why| format!("`{text}` is not an address on this network: {why}"))?;
+    Ok(MineTo {
+        address,
+        was_a_key: false,
+    })
+}
+
 fn parse_key(text: &str) -> Result<PublicKey, String> {
     let bytes = cairn_primitives::hex::decode_array::<32>(text)
         .ok_or_else(|| format!("`{text}` is not 32 bytes of hexadecimal"))?;
@@ -641,8 +695,17 @@ pub(crate) fn describe(options: &Options) -> String {
         );
     }
     match options.mine_to {
-        Some(key) => {
-            let _ = writeln!(text, "mining       rewards to {key}");
+        Some(to) => {
+            let address = to.address.to_text(options.params.network);
+            let _ = writeln!(text, "mining       rewards to {address}");
+            if to.was_a_key {
+                let _ = writeln!(
+                    text,
+                    "             --mine was given a public key; mining to its address \
+                     {address}. Write the address in its place: a later release will take \
+                     only the address"
+                );
+            }
         }
         None => {
             let _ = writeln!(text, "mining       off");
@@ -835,7 +898,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
 
         assert!(
-            HELP.contains("--archive [yes|no]") && HELP.contains("--mine <public key|off>"),
+            HELP.contains("--archive [yes|no]") && HELP.contains("--mine <address|off>"),
             "the help does not say how to turn either off"
         );
     }
@@ -1057,12 +1120,115 @@ mod tests {
         let secret = cairn_crypto::SecretKey::from_bytes(&[3; 32]);
         let text = secret.public_key().to_string();
         let options = resolve_options(&args(&["--mine", &text])).unwrap().unwrap();
-        assert_eq!(options.mine_to, Some(secret.public_key()));
+        assert_eq!(
+            options.mine_to,
+            Some(MineTo {
+                address: Address::from(secret.public_key()),
+                was_a_key: true,
+            })
+        );
 
         let zeroes = "0".repeat(64);
         assert!(
             resolve_options(&args(&["--mine", &zeroes])).is_err(),
             "a weak key is refused"
+        );
+    }
+
+    /// `--mine` takes the address a wallet prints, and takes a public key in
+    /// the old form by converting it to that key's address and saying so.
+    ///
+    /// A note's owner is the hash of a key, so a miner's unit file and
+    /// `cairn.conf` naming a key would otherwise stop the node at the first
+    /// start after the update, or, taken as it stood, pay every reward to an
+    /// address nobody holds. Nothing read either form before this.
+    #[test]
+    fn mining_takes_an_address_and_converts_a_key_in_the_old_form() {
+        let secret = cairn_crypto::SecretKey::from_bytes(&[4; 32]);
+        let address = Address::from(secret.public_key());
+        let network = ConsensusParams::for_network("testnet").unwrap().network;
+        let text = address.to_text(network);
+
+        let options = resolve_options(&args(&["--mine", &text])).unwrap().unwrap();
+        assert_eq!(
+            options.mine_to,
+            Some(MineTo {
+                address,
+                was_a_key: false,
+            }),
+            "the address a wallet prints is not what --mine mines to"
+        );
+        let summary = describe(&options);
+        assert!(
+            summary.contains(&format!("mining       rewards to {text}")),
+            "the summary does not name the address mined to: {summary}"
+        );
+        assert!(!summary.contains("was given a public key"), "{summary}");
+
+        let key = secret.public_key().to_string();
+        let options = resolve_options(&args(&["--mine", &key])).unwrap().unwrap();
+        let summary = describe(&options);
+        assert!(
+            summary.contains(&format!(
+                "--mine was given a public key; mining to its address {text}"
+            )),
+            "a key in the old form was not converted to its address and said so: {summary}"
+        );
+
+        let devnet = ConsensusParams::for_network("devnet").unwrap().network;
+        assert!(
+            resolve_options(&args(&["--mine", &address.to_text(devnet)])).is_err(),
+            "an address for devnet was taken on a test network"
+        );
+        let mut typo = text.clone();
+        let last = typo.pop().unwrap();
+        typo.push(if last == 'q' { 'p' } else { 'q' });
+        assert!(
+            resolve_options(&args(&["--mine", &typo])).is_err(),
+            "an address with a typo in it was taken"
+        );
+    }
+
+    /// Sixty four hexadecimal characters that are not a usable key are
+    /// refused, and the hash of an address is refused as often as it is not
+    /// a key, which is fifteen times in sixteen.
+    ///
+    /// Converting anything of that length would take the hash of an address,
+    /// pasted where a key was meant, and mine to the hash of that hash: an
+    /// address nobody holds. What stops it is that most such strings are not
+    /// keys; the rest cannot be told from a key, and the help says so.
+    #[test]
+    fn the_hash_of_an_address_is_refused_unless_it_happens_to_be_a_key() {
+        let mut refused = 0usize;
+        let tried = 256usize;
+        for seed in 0..tried {
+            let mut bytes = [0u8; 32];
+            bytes[..8].copy_from_slice(&(seed as u64).to_le_bytes());
+            let address = Address::from(cairn_crypto::SecretKey::from_bytes(&bytes).public_key());
+            let hex = cairn_primitives::hex::encode(address.as_bytes());
+            match resolve_options(&args(&["--mine", &hex])) {
+                Err(_) => refused += 1,
+                Ok(options) => {
+                    let to = options.unwrap().mine_to.unwrap();
+                    assert!(
+                        to.was_a_key,
+                        "sixty four hexadecimal characters were not read as a key"
+                    );
+                    assert_ne!(
+                        to.address, address,
+                        "the hash of an address was taken as the address itself"
+                    );
+                }
+            }
+        }
+        assert!(
+            refused * 8 > tried * 7,
+            "{refused} of {tried} address hashes were refused, where about fifteen in sixteen \
+             are not usable keys"
+        );
+        assert!(
+            HELP.contains("Only a key is converted"),
+            "the help does not say that only a key is converted"
         );
     }
 

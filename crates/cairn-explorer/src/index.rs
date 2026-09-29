@@ -9,9 +9,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
-use cairn_crypto::PublicKey;
 use cairn_ledger::block::Block;
-use cairn_ledger::note::NoteId;
+use cairn_ledger::note::{Address, NoteId};
 use cairn_primitives::{Amount, Hash32};
 
 /// Where a transaction sits on the followed branch.
@@ -26,7 +25,7 @@ pub(crate) struct Location {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NoteRecord {
     pub(crate) value: Amount,
-    pub(crate) owner: PublicKey,
+    pub(crate) owner: Address,
     /// Height of the block that created it.
     pub(crate) created_at: u64,
     /// Height of the block that spent it, once one has.
@@ -168,7 +167,7 @@ pub(crate) struct Index {
     /// movement with no date.
     times: Vec<u64>,
     notes: BTreeMap<NoteId, NoteRecord>,
-    owners: HashMap<PublicKey, OwnerRecord>,
+    owners: HashMap<Address, OwnerRecord>,
     totals: Totals,
     /// Movements over every owner, counted as they are recorded.
     ///
@@ -176,7 +175,7 @@ pub(crate) struct Index {
     /// says what this index costs should not cost a pass over it.
     movements: u64,
     /// Worked out once per refresh rather than once per request.
-    richest: Vec<(PublicKey, Amount)>,
+    richest: Vec<(Address, Amount)>,
     holders: usize,
     /// Whether anything has gone into the index, or been thrown out of it,
     /// since the two above were last worked out.
@@ -847,7 +846,7 @@ impl Index {
 
     /// Takes back the newest block this index read, which `undo` describes.
     fn take_back(&mut self, undo: &Undo) {
-        let mut touched: Vec<PublicKey> = Vec::new();
+        let mut touched: Vec<Address> = Vec::new();
         for id in undo.spent.iter().rev() {
             let Some(record) = self.notes.get_mut(id) else {
                 continue;
@@ -929,7 +928,7 @@ impl Index {
             .unwrap_or(Amount::ZERO);
     }
 
-    fn credit(&mut self, id: NoteId, value: Amount, owner: PublicKey, height: u64) {
+    fn credit(&mut self, id: NoteId, value: Amount, owner: Address, height: u64) {
         self.notes.insert(
             id,
             NoteRecord {
@@ -1036,8 +1035,10 @@ impl Index {
         self.notes.get(id).copied()
     }
 
-    pub(crate) fn owner(&self, owner: &PublicKey) -> Option<&OwnerRecord> {
-        self.owners.get(owner)
+    /// What `owner` has been paid, if anything. A key stands for its own
+    /// address.
+    pub(crate) fn owner(&self, owner: impl Into<Address>) -> Option<&OwnerRecord> {
+        self.owners.get(&owner.into())
     }
 
     /// Owners holding anything, heaviest first.
@@ -1045,7 +1046,7 @@ impl Index {
     /// Read from what the last refresh worked out. Sorting every owner in
     /// order to answer one page was work any caller could ask for at will;
     /// now it happens once per block, whether anyone is looking or not.
-    pub(crate) fn richest(&self) -> &[(PublicKey, Amount)] {
+    pub(crate) fn richest(&self) -> &[(Address, Amount)] {
         &self.richest
     }
 
@@ -1087,7 +1088,7 @@ impl Index {
         }
         self.stock_due = false;
         self.stock_at = Some(tip);
-        let mut held: Vec<(PublicKey, Amount)> = self
+        let mut held: Vec<(Address, Amount)> = self
             .owners
             .iter()
             .map(|(owner, record)| (*owner, record.balance()))
@@ -1155,7 +1156,7 @@ mod tests {
     /// stopped counting at the ceiling passed.
     #[test]
     fn an_owner_whose_money_has_gone_round_past_the_ceiling_is_told_what_it_holds() {
-        let owner = SecretKey::generate().unwrap().public_key();
+        let owner = super::Address::from(SecretKey::generate().unwrap().public_key());
         let half = Amount::from_pebbles(Amount::MAX_MONEY.as_pebbles() / 2).unwrap();
         let mut index = Index::new();
 
@@ -1170,7 +1171,7 @@ mod tests {
             }
         }
 
-        let record = index.owner(&owner).unwrap();
+        let record = index.owner(owner).unwrap();
         assert_eq!(
             record.balance(),
             half,
@@ -1204,7 +1205,7 @@ mod tests {
     /// way passed.
     #[test]
     fn an_owner_whose_turnover_passes_what_a_count_can_hold_keeps_its_balance() {
-        let owner = SecretKey::generate().unwrap().public_key();
+        let owner = super::Address::from(SecretKey::generate().unwrap().public_key());
         let half = Amount::from_pebbles(Amount::MAX_MONEY.as_pebbles() / 2).unwrap();
         let mut index = Index::new();
 
@@ -1222,7 +1223,7 @@ mod tests {
             index.credit(held, half, owner, payment);
         }
 
-        let record = index.owner(&owner).unwrap();
+        let record = index.owner(owner).unwrap();
         assert_eq!(
             record.balance(),
             half,

@@ -56,9 +56,9 @@ pub(crate) const HTML: &str = r#"<!doctype html>
         <code class="mono" id="address">…</code>
         <button class="quiet" id="copy" type="button">Copy</button>
       </div>
-      <p class="note-line">Anyone paying you needs these 64 characters and
-        nothing else. Anyone who has them can also read on the chain
-        everything paid to them and everything spent from them: this wallet
+      <p class="note-line">Anyone paying you needs this address and
+        nothing else. Anyone who has it can also read on the chain
+        everything paid to it and everything spent from it: this wallet
         uses the one address for everything.</p>
     </section>
 
@@ -67,7 +67,7 @@ pub(crate) const HTML: &str = r#"<!doctype html>
       <form id="send">
         <label>To
           <input class="mono" name="to" id="to" autocomplete="off"
-                 spellcheck="false" placeholder="64 hexadecimal characters">
+                 spellcheck="false" placeholder="the address being paid">
         </label>
         <div class="row">
           <label>Amount

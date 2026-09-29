@@ -500,7 +500,10 @@ fn the_routes_that_never_page_fit_what_a_connection_carries() {
         ("a transfer at both ceilings", format!("/api/tx/{worst_id}")),
         (
             "an address holding a page of them",
-            format!("/api/address/{}", miner.public_key()),
+            format!(
+                "/api/address/{}",
+                cairn_ledger::note::Address::from(miner.public_key()).to_text(params.network)
+            ),
         ),
     ] {
         let request = asking(&path, "");

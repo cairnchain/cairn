@@ -798,9 +798,9 @@ fn the_page_is_told_what_became_of_its_payments() {
         std::thread::spawn(move || cairn_wallet::serve::run(&wallet, &listener, &opened, &alive))
     };
 
-    let to = recipient();
+    let to = cairn_ledger::note::Address::from(recipient()).to_text(params().network);
     let quote = ask_the_page(&opened, "/api/quote", &format!("to={to}&amount=10"));
-    let own = wallet.address();
+    let own = wallet.address_text();
     let to_itself = ask_the_page(&opened, "/api/quote", &format!("to={own}&amount=10"));
     let sent = ask_the_page(
         &opened,

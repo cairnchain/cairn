@@ -1138,8 +1138,8 @@ impl ChainStore {
     /// keep their proofs current.
     ///
     /// Set before any block is applied, since what is learned is learned as
-    /// the notes fall.
-    pub fn watch_owner(&mut self, owner: cairn_crypto::PublicKey) {
+    /// the notes fall. An owner is an address; a key stands for its own.
+    pub fn watch_owner(&mut self, owner: impl Into<cairn_ledger::note::Address>) {
         self.state.watch_owner(owner);
     }
 

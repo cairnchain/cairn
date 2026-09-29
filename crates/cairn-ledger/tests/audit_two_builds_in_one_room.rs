@@ -287,13 +287,13 @@ fn the_encodings_two_builds_share_still_produce_the_bytes_they_did() {
     let coinbase = pinned_coinbase();
     assert_eq!(
         coinbase.id().to_string(),
-        "cb5b3dd74f41df01bda701eab2ea36258b464afb81a98b6adfdd6dd0a9038a4a",
+        "770c3f6e50b78d2fe8edd6d913889d4d29ab85c024aeb3ff684b4d81021b12e9",
         "a coinbase identifier names every note it paid"
     );
     let transfer = pinned_transfer();
     assert_eq!(
         transfer.id().to_string(),
-        "dc60dc4c6f2aa1941f55437b8d5630084f1537bbb9c63a28ec6bdde60c55a14c",
+        "8c3cfc8c709b462ed817f5de8c79aecbabebfb9cc510f554e7a51a383d1d006d",
         "and a transfer identifier is what names the notes it creates"
     );
 
@@ -304,7 +304,7 @@ fn the_encodings_two_builds_share_still_produce_the_bytes_they_did() {
     };
     assert_eq!(
         block.transactions_root().to_string(),
-        "db64daae6d167eddc57d4d7e3bd5e6b3374c1996c6a48c64560c25a2639dfeb3",
+        "1456ffec07a66b3e02fa496cb49f2896e132f30030833e4bca62fc96ba32bba2",
         "the coinbase leads the transfers, each transfer is committed to by its whole \
          encoding, and the order is consensus"
     );
@@ -332,19 +332,19 @@ fn twenty_blocks_still_come_to_what_they_came_to() {
 
     assert_eq!(
         state.state_root().to_string(),
-        "dcd7b35dff5a30246a7f6b6a228c346a90f5d0102bbb05b55561f7ba74209d55",
+        "c76b3db4b5604af3106c720c5a505b9379d56a1c55c16e6aeb1fb1b767c83375",
         "the hot set, the cold set and the grace window, which a header commits \
          to together"
     );
     assert_eq!(
         state.grace_root().to_string(),
-        "57773bcff524663db470f2660e9597f8dec1fc39f0a9b878c3e65d46d734292a",
+        "5f7349ad1ba8075627d8974559b0f04c029d154488fb337e193d8cfba7bdfbce",
         "and the window on its own, which only overflows because the hot set here \
          holds eight"
     );
     assert_eq!(
         state.history_root().to_string(),
-        "e61f2c2a8670d9f62b29164ddad40cd9343a2ee2a5598c8a1622bf5ac2370083"
+        "5ba935da97f969c8763ef0e45498302e5999cb10021ceeef91cd0145f7068c77"
     );
     assert_eq!(
         state.supply().as_pebbles(),
@@ -358,7 +358,7 @@ fn twenty_blocks_still_come_to_what_they_came_to() {
     );
     assert_eq!(
         state.tip().unwrap().id.to_string(),
-        "70165d17ee2ab5fe1f15fb8fad9907df387721d5dd3bd5903a6eb90eb777a88f"
+        "63a501dd540570e042f85e138b49d111246c6f432edb8b0c980791cf18fb2329"
     );
 }
 

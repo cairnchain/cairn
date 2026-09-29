@@ -249,7 +249,11 @@ fn a_transfer_refused_for_want_of_room_looks_exactly_like_one_already_held() {
         );
         let size = transfer.encode().len();
         let fee = note.value.as_pebbles() - transfer.total_output().unwrap().as_pebbles();
-        if store.pool_bytes() + size > MAX_POOL_BYTES || store.pool_len() >= MAX_POOLED {
+        // What the pool counts, not the wire form: it was the wire form, and
+        // that only worked while the sizes happened to leave room for the
+        // bookkeeping.
+        let cost = pooled_cost(size, transfer.inputs.len());
+        if store.pool_bytes() + cost > MAX_POOL_BYTES || store.pool_len() >= MAX_POOLED {
             return false;
         }
         assert_eq!(store.accept_transfer(transfer), Ok(true));
@@ -262,15 +266,15 @@ fn a_transfer_refused_for_want_of_room_looks_exactly_like_one_already_held() {
     // And now the last of the room, in payment sized pieces.
     while fill(&mut store, &mut purse, 2) {}
 
-    let room = MAX_POOL_BYTES - store.pool_bytes();
-    assert!(
-        room < 200,
-        "the pool should have no room left: {room} bytes"
-    );
-
     // The victim's ordinary payment, paying the floor, on the same chain.
     let (id, note) = purse.pop().unwrap();
     let payment = at_rate(&params, id, note, &attacker, 2, MIN_FEE_PER_WEIGHT);
+
+    let room = MAX_POOL_BYTES - store.pool_bytes();
+    assert!(
+        room < pooled_cost(payment.encode().len(), payment.inputs.len()),
+        "the pool should have no room left for a payment: {room} bytes"
+    );
     let refused = store.accept_transfer(payment);
     assert_eq!(
         refused,
