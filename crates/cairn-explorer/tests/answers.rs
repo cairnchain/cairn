@@ -457,6 +457,97 @@ fn a_note_from_an_abandoned_branch_is_not_called_cold() {
     );
 }
 
+/// A block says what it destroyed, and the supply what has been destroyed in
+/// all, so the issued total is explained against the schedule.
+///
+/// Every place a transfer takes in the hot set burns the place price, which
+/// no coinbase may claim, so the issued total falls short of what the
+/// schedule has paid by exactly what was burned. Nothing on the site said so:
+/// a block showed its fees and what its miner was paid, and the difference
+/// was nowhere, and the supply sat below the schedule with no word why.
+#[test]
+fn a_block_says_what_it_destroyed_and_the_supply_what_has_been_destroyed_in_all() {
+    let price = cairn_ledger::validation::PLACE_PRICE;
+    let params = params().with_place_price(price);
+    let miner = wallet(1);
+    let alice = wallet(3).public_key();
+
+    let mut forge = Forge::new(params);
+    let early = forge.mine_many(&miner, 3);
+
+    // One note in, the payment and its change out: one new place, so the
+    // burn is the price, and a thousand pebbles over it for the miner.
+    let (id, note) = reward(&early, 0);
+    let fee = price.as_pebbles() + 1_000;
+    let half = note.value.as_pebbles() / 2;
+    let mut transfer = Transfer::new(
+        vec![Input::hot(id)],
+        vec![
+            Note::new(Amount::from_pebbles(half).unwrap(), alice),
+            Note::new(
+                Amount::from_pebbles(note.value.as_pebbles() - half - fee).unwrap(),
+                miner.public_key(),
+            ),
+        ],
+    );
+    transfer.sign_input(params.network, 0, &note, &miner);
+
+    // The miner claims the reward and everything the rules let it keep.
+    let height = forge.state.next_height().unwrap();
+    forge.clock += 600;
+    let claimed = params.reward_at(height).as_pebbles() + 1_000;
+    let coinbase = CoinbaseTransaction::new(
+        height,
+        vec![Note::new(
+            Amount::from_pebbles(claimed).unwrap(),
+            miner.public_key(),
+        )],
+    );
+    let carrying = assemble_block(
+        &forge.state,
+        coinbase,
+        vec![transfer],
+        &params,
+        forge.clock,
+        0,
+    )
+    .unwrap();
+    let carrying = mine_block(carrying, ATTEMPTS).unwrap();
+    connect_block(&mut forge.state, &carrying, &params, NOW).unwrap();
+
+    let explorer = explorer(params);
+    feed(&explorer, &early);
+    feed(&explorer, std::slice::from_ref(&carrying));
+    explorer.refresh();
+
+    let burn = price.as_pebbles().to_string();
+    let answer = ask(&explorer, &format!("block/{height}"));
+    assert!(
+        says(&answer, "destroyed", &format!("\"{burn}\"")),
+        "the block does not say it destroyed the price of its one place: {}",
+        body(&answer)
+    );
+    let quiet = ask(&explorer, "block/1");
+    assert!(
+        says(&quiet, "destroyed", "\"0\""),
+        "a block that took no place and claimed its reward destroyed something: {}",
+        body(&quiet)
+    );
+
+    let status = ask(&explorer, "status");
+    assert!(
+        says(&status, "destroyed", &format!("\"{burn}\"")),
+        "the supply does not say what has been destroyed in all: {}",
+        body(&status)
+    );
+    let issued = (params.emitted_by(height).as_pebbles() - price.as_pebbles()).to_string();
+    assert!(
+        says(&status, "issued", &format!("\"{issued}\"")),
+        "the issued total is not the schedule less the burn: {}",
+        body(&status)
+    );
+}
+
 /// A fee nobody worked out is not printed as a fee.
 ///
 /// `transfer_object` accumulated only the inputs it found in the index, so

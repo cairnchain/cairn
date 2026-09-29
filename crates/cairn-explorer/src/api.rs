@@ -908,6 +908,8 @@ fn status(context: &Context<'_>) -> Response {
     // and nothing would say which, and the chain's own answer is the one a
     // header commits to.
     json.field_str("issued", &state.supply().as_pebbles().to_string());
+    let destroyed = destroyed_by(params, state.supply(), tip_height);
+    json.field_str("destroyed", &destroyed.as_pebbles().to_string());
     // What the index made of the same chain, kept so the two can be compared
     // rather than trusted. They are computed from different things: the
     // ledger from emission accounting, this from the notes themselves.
@@ -1504,11 +1506,52 @@ fn block_summary(json: &mut Writer, context: &Context<'_>, block: &Block) {
         Some(output) => json.field_str("miner", &context.text_of(&output.owner)),
         None => json.field_null("miner"),
     }
-    match block_fees(context, block) {
+    let fees = block_fees(context, block);
+    match fees {
         Some(fees) => json.field_str("fees", &fees.as_pebbles().to_string()),
         None => json.field_null("fees"),
     }
+    field_destroyed(json, context, block, fees);
     json.end_object();
+}
+
+/// What the schedule has paid out by `tip` and a ledger holding `supply` does
+/// not hold: the burn of every place a transfer took, and whatever a miner
+/// declined to claim.
+///
+/// Worked out from the two numbers every node agrees on rather than added up
+/// block by block, so it needs nothing the index might not have read.
+fn destroyed_by(params: &ConsensusParams, supply: Amount, tip: Option<u64>) -> Amount {
+    tip.map_or(Amount::ZERO, |height| params.emitted_by(height))
+        .checked_sub(supply)
+        .unwrap_or(Amount::ZERO)
+}
+
+/// What a block took out of existence: the reward and the fees its coinbase
+/// was owed, less what it claimed.
+///
+/// That is the burn of every place its transfers took, which no coinbase may
+/// claim, and whatever else its miner declined. Unknown where the fees are,
+/// and said so rather than printed as nought.
+fn field_destroyed(json: &mut Writer, context: &Context<'_>, block: &Block, fees: Option<Amount>) {
+    let params = context.params();
+    let owed = fees.and_then(|fees| {
+        reward_at(
+            block.header.height,
+            params.halving_interval,
+            params.initial_reward,
+            params.tail_reward,
+        )
+        .checked_add(fees)
+    });
+    let claimed = block.coinbase.total_output();
+    match owed
+        .zip(claimed)
+        .and_then(|(owed, claimed)| owed.checked_sub(claimed))
+    {
+        Some(destroyed) => json.field_str("destroyed", &destroyed.as_pebbles().to_string()),
+        None => json.field_null("destroyed"),
+    }
 }
 
 /// What senders paid in this block, measured from the transfers rather than
@@ -1616,10 +1659,12 @@ fn block(context: &Context<'_>, request: &Request, reference: &str) -> Response 
         None => json.field_null("next"),
     }
 
-    match block_fees(context, &block) {
+    let fees = block_fees(context, &block);
+    match fees {
         Some(fees) => json.field_str("fees", &fees.as_pebbles().to_string()),
         None => json.field_null("fees"),
     }
+    field_destroyed(&mut json, context, &block, fees);
     json.field_str(
         "reward",
         &reward_at(
