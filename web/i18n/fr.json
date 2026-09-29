@@ -707,8 +707,10 @@
 
   "destroyed": {
     "block": "Détruit",
-    "block.note": "le prix de chaque nouvelle place dans l'ensemble chaud, payé une seule fois et retiré de la circulation, et ce que le mineur n'a pas réclamé",
-    "supply.note": "{reward} CAIRN par bloc en ce moment, {destroyed} CAIRN détruits à ce jour"
+    "block.note": "le prix de chaque nouvelle place dans l'ensemble chaud, payé une seule fois par qui l'a prise et retiré de la circulation",
+    "unclaimed": "Non réclamé",
+    "unclaimed.note": "récompense et frais que le mineur de ce bloc n'a pas pris, et qui n'ont jamais été émis",
+    "supply.note": "{reward} CAIRN par bloc en ce moment, {destroyed} CAIRN détruits à ce jour pour des places dans l'ensemble chaud"
   },
 
   "warn": {

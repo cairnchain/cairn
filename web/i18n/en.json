@@ -707,8 +707,10 @@
 
   "destroyed": {
     "block": "Destroyed",
-    "block.note": "the price of every new place in the hot set, paid once and taken out of existence, and anything the miner did not claim",
-    "supply.note": "{reward} CAIRN per block right now, {destroyed} CAIRN destroyed so far"
+    "block.note": "the price of every new place in the hot set, paid once by whoever took it and taken out of existence",
+    "unclaimed": "Left unclaimed",
+    "unclaimed.note": "reward and fees this block's miner did not take, which were never issued",
+    "supply.note": "{reward} CAIRN per block right now, {destroyed} CAIRN destroyed so far for places in the hot set"
   },
 
   "warn": {
