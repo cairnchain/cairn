@@ -492,9 +492,9 @@ pub struct Outdated {
 impl ChainError {
     /// Whether this failure condemns the header itself.
     ///
-    /// A block's identifier is taken over its header, and a header does not
-    /// commit to the signatures that make its body valid. Two different blocks
-    /// can therefore share an identifier, so only a failure the header alone
+    /// A block's identifier is taken over its header, and anybody can send a
+    /// real header with a body that is not its own. Two different blocks can
+    /// therefore share an identifier, so only a failure the header alone
     /// settles may be remembered against one: a timestamp out of range, a
     /// parent that is not there, work that was not done.
     ///
@@ -2136,13 +2136,12 @@ impl ChainStore {
         // Already held and on the branch this node follows: it was applied, so
         // it was valid, and whatever body arrives under that identifier this
         // node is already following the one it checked. An identifier is taken
-        // over a header and a header does not commit to the signatures in its
-        // body, so anyone can copy a block, break one signature, and send the
-        // twin; it costs them nothing, since the twin inherits the work of the
-        // block it copies. Asking the branch first is what stops the copy
-        // taking the place of a block already on it: the twin used to fall
-        // through, pass the work and floor checks, and have `hold` write its
-        // body over the real one, after which `block_at` answered with the
+        // over a header alone, so anyone can copy a block, change its body,
+        // and send the twin; it costs them nothing, since the twin inherits the
+        // work of the block it copies. Asking the branch first is what stops
+        // the copy taking the place of a block already on it: the twin used to
+        // fall through, pass the work and floor checks, and have `hold` write
+        // its body over the real one, after which `block_at` answered with the
         // forgery for a height the node was still following. That accessor is
         // what a node serves blocks from and writes its log from.
         //
@@ -2318,12 +2317,16 @@ impl ChainStore {
         // peer that delivered the block above it was the one blamed.
         //
         // Whether a body is the one its header names needs no ledger: it is
-        // the root over the coinbase and every transfer. Asked here, a copy
-        // with any other coinbase, transfers or order is refused on arrival
-        // and charged to whoever sent it. A copy that changes only signatures
-        // or proofs, which a transfer's identifier leaves out, still passes,
-        // and what answers that is `cairn-net` refusing the sender of a body
-        // that fails a switch.
+        // the root over the coinbase and the commitment to every transfer,
+        // which covers every byte of the body. Asked here, a copy with any
+        // other coinbase, transfers, order, signatures or proofs is refused on
+        // arrival and charged to whoever sent it. A copy that changed only
+        // signatures or proofs used to pass, since the root was taken over
+        // transfer identifiers and those leave both out, and some such copies
+        // were valid: inside the grace window a note can be spent with or
+        // without its proof. A body held aside that fails a switch is now a
+        // mined block that is invalid, and `cairn-net` refuses whoever handed
+        // it in.
         let root = block.transactions_root();
         if root != block.header.transactions_root {
             return Err(ChainError::InvalidBlock {

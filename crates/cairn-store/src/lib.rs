@@ -587,8 +587,8 @@ impl BlockLog {
     /// check in.
     ///
     /// Two more checks, and both read bytes that are here already. A header
-    /// names its transactions through `transactions_root`, so the body answers
-    /// to its own header. And a block carries its parent's identifier, which
+    /// names every byte of its body through `transactions_root`, signatures
+    /// and proofs included, so the body answers to its own header. And a block carries its parent's identifier, which
     /// makes this file the same hash chain the header log is, so the record
     /// after this one has to name it; a block encodes its header first and a
     /// header is a fixed width, so that neighbour costs one seek and
@@ -624,7 +624,9 @@ impl BlockLog {
         // Before the neighbour, because the neighbour covers the header alone
         // and the header is not the record: with the link check by itself the
         // 1681 wrong answers fell to 572, and every one of those 572 was a
-        // byte of a transaction.
+        // byte of a transaction. The root once covered only what a transfer's
+        // identifier does, so a byte of a signature or a proof still came
+        // back as the block; it covers each transfer's whole encoding now.
         if block.transactions_root() != block.header.transactions_root {
             return Err(StoreError::Unrooted { height });
         }

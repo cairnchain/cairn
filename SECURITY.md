@@ -59,7 +59,7 @@ its invented work does not spend: about forty, at 40%. A newcomer now refuses a
 tip more than 32 times below the hardest header of its run, which puts a floor
 under a tip at the band the draw leaves unresolved over 2^18: measured, 2^18
 hashes on testnet-6 and 2^14 on the devnet at their opening difficulties, where
-tying the tip to the pinned header alone would have left 2^10.3 and 2^7.3. The
+tying the tip to the pinned header alone would have left 2^10.2 and 2^7.4. The
 40% figure is quoted against a budget: 2^-161.9 a tip, which holds under
 2^-128 against 2^33 tips and not 2^34, and nothing at all at the measured
 42.96%. The specification's section on what the bound is worth says so and

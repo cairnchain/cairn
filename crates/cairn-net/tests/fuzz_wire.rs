@@ -154,7 +154,6 @@ fn a_handshake(rng: &mut Rng) -> Handshake {
         version: rng.edgy_u32(),
         network: NetworkId::new(rng.edgy_u32()),
         genesis: a_hash(rng),
-        tip: a_hash(rng),
         height: rng.edgy_u64(),
         total_work: u128::from(rng.edgy_u64()),
         listen: u16::try_from(rng.below(65_536)).unwrap_or(0),
@@ -732,11 +731,12 @@ fn a_tag_past_the_last_variant_is_refused() {
     assert!(ran.cases >= 100, "the campaign ran {} cases", ran.cases);
     // A tripwire rather than a fact about the version: a protocol change that
     // adds a message has to move the tag this campaign calls the last one.
-    // Seven and eight changed which positions a chain is asked about, and
-    // nine what a weighing carries. None of them added a variant, so
-    // seventeen still is.
+    // Seven and eight changed which positions a chain is asked about, nine
+    // what a weighing carries, and ten the handshake, the draw and what a
+    // block's root covers. None of them added a variant, so seventeen still
+    // is.
     assert_eq!(
-        PROTOCOL_VERSION, 9,
+        PROTOCOL_VERSION, 10,
         "a protocol change should read this file"
     );
 }

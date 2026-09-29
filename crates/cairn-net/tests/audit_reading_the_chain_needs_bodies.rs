@@ -183,7 +183,6 @@ fn a_handshake(listen: u16, nonce: u64) -> Message {
         // A newcomer holds nothing, so it has no first block to name and no
         // work to claim. This is what one looks like on the wire.
         genesis: Hash32::ZERO,
-        tip: Hash32::ZERO,
         height: 0,
         total_work: 0,
         listen,

@@ -38,8 +38,12 @@ pub fn forest_leaf(item: &[u8]) -> Hash32 {
 }
 
 /// What sits where a leaf was removed.
+///
+/// Under a domain of its own. Under the leaf domain it was what
+/// [`forest_leaf`] gives an empty item, and whether any caller could hand one
+/// in was a fact about the callers rather than about this crate.
 pub fn empty_leaf() -> Hash32 {
-    hash(Domain::ForestLeaf, &[])
+    hash(Domain::ForestEmpty, &[])
 }
 
 /// Hashes two children into the node above them.

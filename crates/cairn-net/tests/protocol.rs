@@ -219,7 +219,6 @@ fn a_message_roundtrips_through_the_wire_format() {
             version: PROTOCOL_VERSION,
             network: NetworkId::TESTNET,
             genesis: block.id(),
-            tip: block.id(),
             height: 0,
             total_work: u128::MAX,
             listen: 4242,

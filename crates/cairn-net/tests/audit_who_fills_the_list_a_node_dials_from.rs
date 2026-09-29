@@ -75,7 +75,6 @@ fn hello(nonce: u64, listen: u16) -> Message {
         version: cairn_net::message::PROTOCOL_VERSION,
         network: params().network,
         genesis: cairn_primitives::Hash32::ZERO,
-        tip: cairn_primitives::Hash32::ZERO,
         height: 0,
         total_work: 0,
         listen,

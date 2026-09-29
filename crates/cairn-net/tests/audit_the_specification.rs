@@ -436,7 +436,6 @@ fn a_handshake() -> Handshake {
         version: PROTOCOL_VERSION,
         network: params().network,
         genesis: Hash32::ZERO,
-        tip: Hash32::ZERO,
         height: 0,
         total_work: 0,
         listen: 9,
@@ -528,10 +527,10 @@ fn every_message_is_sent_under_the_tag_the_table_gives_it() {
         "the message table is not one row for each message, in the order of its tags"
     );
 
-    assert!(document.contains("A handshake is 108 bytes"));
+    assert!(document.contains("A handshake is 76 bytes"));
     assert_eq!(
         Message::Hello(a_handshake()).encode().len(),
-        1 + 108,
-        "a handshake is not the 108 bytes the document says, after its tag"
+        1 + 76,
+        "a handshake is not the 76 bytes the document says, after its tag"
     );
 }

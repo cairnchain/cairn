@@ -197,20 +197,24 @@ fn spec_block_bytes(block: &Block) -> Vec<u8> {
 /// `transactions_root`, built from *What a block is* and from nothing else.
 ///
 /// The document's words: one leaf per transaction, the coinbase first and then
-/// the transfers in the order they appear; each leaf the hash under the merkle
-/// leaf domain of that transaction's identifier; an interior node the hash
-/// under the merkle node domain of its two children in order; a level with an
-/// odd count carries the last node up unchanged rather than duplicating it;
-/// and the root of no leaves the hash under the merkle empty domain.
+/// the transfers in the order they appear; the coinbase's leaf the hash under
+/// the merkle leaf domain of its identifier; a transfer's leaf the hash under
+/// the merkle leaf domain of its commitment, which is the hash under the
+/// transfer commitment domain of its whole encoding as it travels; an interior
+/// node the hash under the merkle node domain of its two children in order; a
+/// level with an odd count carries the last node up unchanged rather than
+/// duplicating it; and the root of no leaves the hash under the merkle empty
+/// domain.
 ///
 /// The last of those cannot arise for a block, which always has its coinbase,
 /// and is written here because the document states it and a helper that
 /// quietly left it out would be agreeing with the code about a case the
 /// document covers.
 fn spec_transactions_root(block: &Block) -> Hash32 {
-    let mut level: Vec<Hash32> = Vec::new();
-    for id in std::iter::once(block.coinbase.id()).chain(block.transfers.iter().map(Transfer::id)) {
-        level.push(hash(Domain::MerkleLeaf, id.as_bytes()));
+    let mut level: Vec<Hash32> = vec![hash(Domain::MerkleLeaf, block.coinbase.id().as_bytes())];
+    for transfer in &block.transfers {
+        let commitment = hash(Domain::TransferCommitment, &spec_transfer_bytes(transfer));
+        level.push(hash(Domain::MerkleLeaf, commitment.as_bytes()));
     }
     if level.is_empty() {
         return hash(Domain::MerkleEmpty, &[]);
@@ -515,6 +519,41 @@ fn the_transactions_root_is_built_the_way_the_document_says() {
         4,
         "four different bodies gave four different roots, or this agreed about \
          one value four times"
+    );
+}
+
+/// A block's root moves with every byte of a transfer it carries, a signature
+/// and a witness included, and the transfer's identifier does not.
+///
+/// The root used to be taken over transfer identifiers, which leave both out,
+/// so a block with one signature or one proof changed produced the root its
+/// header names. Nothing asked this, so a header that named many bodies
+/// passed: the vector above was built from the same words the code was.
+#[test]
+fn a_changed_signature_or_witness_changes_the_transactions_root() {
+    let block = Block {
+        header: sample_header(),
+        coinbase: CoinbaseTransaction::new(11, vec![note(42, 2)]),
+        transfers: vec![sample_transfer()],
+    };
+    let root = block.transactions_root();
+
+    let mut resigned = block.clone();
+    resigned.transfers[0].inputs[0].signature = Signature::from_bytes(&[0x5c; 64]);
+    assert_eq!(resigned.transfers[0].id(), block.transfers[0].id());
+    assert_ne!(
+        resigned.transactions_root(),
+        root,
+        "a block with a signature changed produces the same root"
+    );
+
+    let mut rewitnessed = block.clone();
+    rewitnessed.transfers[0].inputs[1].witness = Witness::Hot;
+    assert_eq!(rewitnessed.transfers[0].id(), block.transfers[0].id());
+    assert_ne!(
+        rewitnessed.transactions_root(),
+        root,
+        "a block with a cold witness swapped for the hot tag produces the same root"
     );
 }
 
@@ -1316,7 +1355,7 @@ fn spec_draw(seed: Hash32, count: usize, total: u128, levels: u32) -> Vec<u128> 
         let mut preimage = Vec::with_capacity(40);
         preimage.extend_from_slice(seed.as_bytes());
         preimage.extend_from_slice(&index.to_le_bytes());
-        let bytes = hash(Domain::SamplingSeed, &preimage);
+        let bytes = hash(Domain::SamplingDraw, &preimage);
         let bytes = bytes.as_bytes();
 
         let mut level_bytes = [0u8; 8];
@@ -1501,6 +1540,49 @@ fn the_draw_is_the_seven_steps_the_document_gives() {
     );
 }
 
+/// Each draw hashes its 40 bytes under the sampling draw domain, and not
+/// under the domain the seed was made in.
+///
+/// The seed is 32 bytes hashed under `sampling seed` and each draw was the
+/// seed and an eight-byte counter hashed under the same domain, so one domain
+/// named two kinds of value and only their lengths told them apart. Nothing
+/// asked which domain step 2 used, so a draw that kept sharing the seed's
+/// passed: the vector above rebuilt it with the same domain the code used.
+#[test]
+fn a_draw_hashes_under_a_domain_the_seed_does_not() {
+    let seed = hash(Domain::SamplingSeed, b"a tip");
+    let total = 1u128 << 40;
+    let levels = spec_levels(30 * 365 * 24 * 60);
+    let drawn = draw(seed, 1, total, levels);
+    assert_eq!(
+        drawn,
+        spec_draw(seed, 1, total, levels),
+        "the first value is not the one step 2 of the document gives"
+    );
+
+    // The same seven steps with the seed's domain at step 2.
+    let mut preimage = Vec::with_capacity(40);
+    preimage.extend_from_slice(seed.as_bytes());
+    preimage.extend_from_slice(&0u64.to_le_bytes());
+    let bytes = hash(Domain::SamplingSeed, &preimage);
+    let bytes = bytes.as_bytes();
+    let mut level_bytes = [0u8; 8];
+    level_bytes.copy_from_slice(&bytes[0..8]);
+    let level = (u128::from(u64::from_le_bytes(level_bytes)) * u128::from(levels)) >> 64;
+    let mut within_bytes = [0u8; 16];
+    within_bytes.copy_from_slice(&bytes[8..24]);
+    let within = u128::from_le_bytes(within_bytes);
+    let far = total >> (level as u32);
+    let near = total >> (level as u32 + 1);
+    let width = far.saturating_sub(near).max(1);
+    let under_the_seeds_domain = (total - far).saturating_add(within % width).min(total - 1);
+    assert_ne!(
+        drawn,
+        vec![under_the_seeds_domain],
+        "the first question was drawn under the domain the seed is hashed in"
+    );
+}
+
 #[test]
 fn a_logarithm_in_place_of_the_leading_zeros_would_draw_different_questions() {
     // The claim the document makes about its own gap, measured: at a power of
@@ -1521,7 +1603,7 @@ fn a_logarithm_in_place_of_the_leading_zeros_would_draw_different_questions() {
                     let mut preimage = Vec::with_capacity(40);
                     preimage.extend_from_slice(seed.as_bytes());
                     preimage.extend_from_slice(&index.to_le_bytes());
-                    let bytes = hash(Domain::SamplingSeed, &preimage);
+                    let bytes = hash(Domain::SamplingDraw, &preimage);
                     let bytes = bytes.as_bytes();
                     let mut level_bytes = [0u8; 8];
                     level_bytes.copy_from_slice(&bytes[0..8]);
@@ -1626,8 +1708,9 @@ fn spec_cold_leaf(id: &NoteId, subject: &Note) -> Hash32 {
     hash(Domain::ForestLeaf, &bytes)
 }
 
+/// "no bytes, under the forest empty domain".
 fn spec_empty_leaf() -> Hash32 {
-    hash(Domain::ForestLeaf, &[])
+    hash(Domain::ForestEmpty, &[])
 }
 
 fn spec_forest_node(left: Hash32, right: Hash32) -> Hash32 {

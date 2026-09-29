@@ -657,7 +657,6 @@ fn a_wallet_waits_while_a_peer_says_its_chain_has_more_work() {
         version: PROTOCOL_VERSION,
         network: funded.params.network,
         genesis: Hash32::ZERO,
-        tip: Hash32::ZERO,
         height: 1_000,
         total_work: u128::from(u64::MAX),
         listen: 0,

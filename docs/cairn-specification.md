@@ -145,6 +145,9 @@ thing it exists for.
     <tr><td>header history leaf</td><td><code>cairn v1 header history leaf</code></td></tr>
     <tr><td>sampling seed</td><td><code>cairn v1 sampling seed</code></td></tr>
     <tr><td>grace window</td><td><code>cairn v1 grace window</code></td></tr>
+    <tr><td>transfer commitment</td><td><code>cairn v1 transfer commitment</code></td></tr>
+    <tr><td>sampling draw</td><td><code>cairn v1 sampling draw</code></td></tr>
+    <tr><td>forest empty</td><td><code>cairn v1 forest empty</code></td></tr>
   </tbody>
 </table>
 
@@ -279,7 +282,10 @@ known before the transaction is signed.
 It is an instance of the case section 3 names: a field left out of an
 identifier's encoding is a field the identifier does not commit to. Two nodes
 can hold the same transfer identifier over different bytes, differing in
-signatures and witnesses, and that is intended rather than tolerated.
+signatures and witnesses, and that is intended rather than tolerated. A block
+does commit to those bytes: its `transactions_root` is taken over each
+transfer's whole encoding, so a block names the version of the transfer its
+miner carried.
 
 ### What a signature commits to
 
@@ -449,12 +455,19 @@ else in this protocol.
 
 A block is its header, its coinbase, and its sequence of transfers. The
 identifier of a block is the identifier of its header, and the header commits
-to the body through `transactions_root`.
+to every byte of the body through `transactions_root`.
 
 `transactions_root` is the Merkle root, under the merkle domains, of one leaf
 per transaction: the coinbase first, then the transfers in the order they
-appear in the block. Each leaf is the hash under the merkle leaf domain of that
-transaction's identifier. An interior node is the hash under the merkle node
+appear in the block. The coinbase's leaf is the hash under the merkle leaf
+domain of its identifier, which is already the hash of its whole encoding. A
+transfer's leaf is the hash under the merkle leaf domain of its commitment, and
+a transfer's commitment is the hash under the transfer commitment domain of its
+whole encoding as it travels: every input with its witness and signature, and
+the outputs. Not its identifier, which leaves signatures and witnesses out: a
+root over identifiers would name every body that differed from the real one in
+those, and some of them are valid, since inside the grace window a note can be
+spent with or without its proof. An interior node is the hash under the merkle node
 domain of its two children in order, and a level with an odd count carries the
 last node up unchanged rather than duplicating it, which is what stops two
 different bodies producing one root. The root of no leaves is the hash under
@@ -866,7 +879,10 @@ question about the state, and this is the answer.
 Inside the window both tags are accepted and they reach the same state: either
 way the note is taken out of the accumulator at its position, and either way
 the transfer has the same identifier, because a transfer's identifier leaves
-its witnesses out. A node MUST NOT treat the two as different transfers.
+its witnesses out. A node MUST NOT treat the two as different transfers. A
+block names which of the two it carried, since its `transactions_root` commits
+to each transfer's whole encoding, and a copy of the block carrying the other
+tag is a body its header does not name.
 
 `MissingProof` names two situations a node cannot tell apart: a note that fell
 and whose spender did not prove it, and a note that never existed. A node
@@ -927,10 +943,14 @@ current from what every block already carries.
   <thead><tr><th>Hash</th><th>Is</th></tr></thead>
   <tbody>
     <tr><td>the leaf of a fallen note</td><td>its 36-byte identifier then its 40-byte encoding, under the forest leaf domain</td></tr>
-    <tr><td>the empty leaf</td><td>no bytes, under the forest leaf domain</td></tr>
+    <tr><td>the empty leaf</td><td>no bytes, under the forest empty domain</td></tr>
     <tr><td>an internal node</td><td>its left child then its right child, under the forest node domain</td></tr>
   </tbody>
 </table>
+
+The empty leaf has a domain of its own, so it is not the leaf of any item: a
+leaf appended is a hash under the forest leaf domain, and the two domains are
+two different hash functions.
 
 The identifier is folded into the leaf because a position carries no meaning
 of its own: without it, a proof for one note would serve for another note of
@@ -1806,10 +1826,10 @@ Both sides derive the same list of work values from the tip alone, so no round
 trip is needed to agree on the questions and nobody has to be trusted to ask
 them honestly. A second implementation MUST reproduce the list exactly.
 
-The seed is the hash, under the sampling domain, of the tip's identifier:
+The seed is the hash, under the sampling seed domain, of the tip's identifier:
 
 ```text
-seed = H(sampling, id(tip))
+seed = H(sampling seed, id(tip))
 ```
 
 Two further quantities come from the tip. The work the draw ranges over is the
@@ -1888,7 +1908,7 @@ Otherwise, for each index `i` from `0` to `count - 1`, in order:
   <thead><tr><th class="n">#</th><th>Step</th></tr></thead>
   <tbody>
     <tr><td class="n">1</td><td>form 40 bytes: the 32 bytes of the seed, then <code>i</code> as a little-endian <code>u64</code></td></tr>
-    <tr><td class="n">2</td><td><code>b = H(sampling, those 40 bytes)</code></td></tr>
+    <tr><td class="n">2</td><td><code>b = H(sampling draw, those 40 bytes)</code></td></tr>
     <tr><td class="n">3</td><td><code>level = (u64 from b[0..8], little-endian) * levels &gt;&gt; 64</code>, in 128-bit arithmetic</td></tr>
     <tr><td class="n">4</td><td><code>within = u128</code> from <code>b[8..24]</code>, little-endian</td></tr>
     <tr><td class="n">5</td><td><code>far = total >> level</code> and <code>near = total >> (level + 1)</code>, both shift counts clamped at 127</td></tr>
@@ -2173,7 +2193,7 @@ over 2<sup>18</sup>, which on a chain that ran to schedule is at least a
 thousandth of an average block. Measured on a thirty year chain at the two
 networks' opening difficulties, the cheapest tip a forger can present costs
 2<sup>18</sup> hashes on testnet-6 and 2<sup>14</sup> on the devnet; held to the
-pinned header alone it would cost 2<sup>10.3</sup> and 2<sup>7.3</sup>. It does
+pinned header alone it would cost 2<sup>10.2</sup> and 2<sup>7.4</sup>. It does
 not cost the chain's difficulty, and no tie of this kind can make it: a run
 whose tip fell by the tie is what an honest chain looks like after a loss.
 
@@ -2518,9 +2538,9 @@ the same either way; read late it is a rule about what to throw away.
 A frame is at most 1 048 576 bytes whatever it carries, so these ceilings bound
 what is built and the frame bounds what is read.
 
-A handshake is 108 bytes and carries the protocol version as a `u32`, the
-network as a `u32`, the first block of the branch this node follows, its tip,
-its height, the work behind that tip as a `u128`, the port it listens on as a
+A handshake is 76 bytes and carries the protocol version as a `u32`, the
+network as a `u32`, the first block of the branch this node follows, the
+height of its tip, the work behind that tip as a `u128`, the port it listens on as a
 `u16`, a `u64` nonce drawn once when the node started, and two `u8` claims about
 what it kept. A node that does not offer itself to be dialled, as a wallet's
 does not, names port `0`, and a peer MUST NOT write an address down for it. A decoder MUST refuse either claim byte if it is neither `0` nor
@@ -2652,7 +2672,7 @@ There are two version numbers in this protocol and they are compared
 differently.
 
 **The protocol version is compared for equality.** It is a `u32` in the
-handshake, it is 9 today, and a node MUST close the connection with a peer
+handshake, it is 10 today, and a node MUST close the connection with a peer
 carrying anything else. What that costs is that a node on one version and a node
 on the next turn each other away rather than talking; what it buys is that a message
 whose meaning changed is never read under the old meaning. The alternative,

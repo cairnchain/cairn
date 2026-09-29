@@ -580,6 +580,17 @@
       later.
     </p>
 
+    <p>
+      A header also commits to every byte of its body. Its transaction root is
+      taken over each transfer's whole encoding, signatures and proofs included,
+      so a block has one body. A transfer's identifier leaves both out, so that a proof can
+      be refreshed without making it a different transfer; the block commits to
+      the version its miner carried. Before testnet-7 the root was taken over
+      identifiers, and anybody relaying a block could make a copy with another
+      signature or another proof under the same header, which a node could hold,
+      and inside the grace window even apply, in place of the real one.
+    </p>
+
     <h3 id="what-sampling-does-not-settle"><span class="sub">7.3</span>What sampling does not settle</h3>
 
     <p>
@@ -761,7 +772,7 @@
       words a forger would be. The cap is kept rather than raised, because
       raising it moves the cliff instead of removing it: the same measurement
       puts the run a thirty year chain needs a year after a four thousand fold
-      loss at 526 033 headers and 96 MB, sixty three times the cap, and nothing
+      loss at 526 027 headers and 96 MB, sixty three times the cap, and nothing
       in the shape of the problem stops the next chain needing more: the run is
       work divided by a difficulty whose only floor is one. Every metre of
       whatever number were chosen instead would be memory a stranger decides a

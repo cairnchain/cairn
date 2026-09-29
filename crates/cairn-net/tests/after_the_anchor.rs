@@ -438,7 +438,6 @@ fn a_node_on_probation_asks_somebody_other_than_its_supplier() {
         version: PROTOCOL_VERSION,
         network: params().network,
         genesis: Hash32::ZERO,
-        tip: Hash32::ZERO,
         // Less work than the anchor claims, so nothing in the handshake gives
         // this node any reason to ask.
         height: 0,
@@ -531,7 +530,6 @@ fn a_bare_peer(node: &Node, nonce: u64) -> TcpStream {
         version: PROTOCOL_VERSION,
         network: params().network,
         genesis: Hash32::ZERO,
-        tip: Hash32::ZERO,
         height: 0,
         total_work: 0,
         listen: 0,

@@ -45,7 +45,6 @@ fn introduction(genesis: Hash32, network: NetworkId) -> Handshake {
         version: PROTOCOL_VERSION,
         network,
         genesis,
-        tip: Hash32::ZERO,
         nonce: 99,
         height: 10,
         total_work: 10,

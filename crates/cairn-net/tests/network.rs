@@ -163,7 +163,6 @@ fn a_greeting(nonce: u64) -> Message {
         version: PROTOCOL_VERSION,
         network: params().network,
         genesis: Hash32::ZERO,
-        tip: Hash32::ZERO,
         height: 0,
         total_work: 0,
         listen: 1,

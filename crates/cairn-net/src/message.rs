@@ -61,7 +61,13 @@ use cairn_primitives::Hash32;
 /// same network number and dated after the opening, was weighed on its work
 /// alone. The field changes the weighing's encoding, so a node on eight could
 /// not read a weighing from nine, and would take it for a peer that is broken.
-pub const PROTOCOL_VERSION: u32 = 9;
+///
+/// Ten comes with testnet-7. A block's transaction root is taken over each
+/// transfer's whole encoding, so a node on nine refuses every block of ten
+/// that carries a transfer; the draw hashes under a domain of its own, so the
+/// two ask a chain different questions; and the handshake no longer carries
+/// the tip nothing read, so neither can read the other's introduction.
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Identifiers one announcement may carry.
 pub const MAX_ANNOUNCED: usize = 512;
@@ -191,11 +197,9 @@ pub struct Handshake {
     /// The first block of the branch this node follows. Two nodes that
     /// disagree here are on unrelated chains and have nothing to exchange.
     pub genesis: Hash32,
-    /// The tip the sender follows. Sent, and read by nothing: a node judges a
-    /// peer's chain by what it serves, not by what it says here. Kept rather
-    /// than dropped because removing a field is a change to the handshake,
-    /// which waits for the next `PROTOCOL_VERSION`.
-    pub tip: Hash32,
+    /// The height of the tip the sender follows. The tip's identifier used to
+    /// travel beside it and nothing read it, since a node judges a peer's chain
+    /// by what it serves and not by what it says here.
     pub height: u64,
     /// Work behind the tip, which is what decides who is behind whom.
     pub total_work: u128,
@@ -224,7 +228,6 @@ impl Encode for Handshake {
         self.version.encode_to(out);
         self.network.encode_to(out);
         self.genesis.encode_to(out);
-        self.tip.encode_to(out);
         self.height.encode_to(out);
         self.total_work.encode_to(out);
         self.listen.encode_to(out);
@@ -239,7 +242,6 @@ impl Decode for Handshake {
             version: u32::decode_from(reader)?,
             network: NetworkId::decode_from(reader)?,
             genesis: Hash32::decode_from(reader)?,
-            tip: Hash32::decode_from(reader)?,
             height: u64::decode_from(reader)?,
             total_work: u128::decode_from(reader)?,
             listen: u16::decode_from(reader)?,

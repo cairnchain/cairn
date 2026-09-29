@@ -404,7 +404,7 @@ fn a_tip_held_to_the_hardest_header_of_its_run_costs_what_the_documents_state() 
     }
     assert_eq!(
         measured,
-        vec![("testnet-6", 5.3, 10.3, 18.0), ("devnet", 5.3, 7.3, 14.0)],
+        vec![("testnet-6", 5.3, 10.2, 18.0), ("devnet", 5.3, 7.4, 14.0)],
         "the price of a seed moved, and the specification, SAMPLES and SECURITY.md quote it"
     );
 }
