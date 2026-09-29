@@ -37,6 +37,7 @@ use cairn_accumulator::key::KEY_LEN;
 use cairn_accumulator::tree::empty_hash;
 use cairn_accumulator::{Archive, Key, Proof, SparseMerkleTree};
 use cairn_primitives::codec::{Decode, Encode};
+use cairn_primitives::hash::{hash, Domain};
 use cairn_primitives::hex;
 use cairn_primitives::merkle::merkle_root;
 use cairn_primitives::Hash32;
@@ -190,24 +191,29 @@ fn the_forest_still_hashes_the_way_it_did() {
     );
     assert_eq!(
         empty_leaf().to_string(),
-        "c48b63c1e0c0918d36f51615358173206ae3f04c20ad3a958438cce4f7d09aa3",
+        "a0e917dbfc6bf88ccb8096803e4166330a2f32ce91c28b2c08b7b0b89e1c43de",
         "the sentinel an emptied place holds changed: this is a hard fork"
     );
     assert_eq!(
         empty_leaf(),
+        hash(Domain::ForestEmpty, &[]),
+        "the sentinel is nothing hashed under its own domain"
+    );
+    assert_ne!(
+        empty_leaf(),
         forest_leaf(&[]),
-        "the sentinel is nothing hashed"
+        "the sentinel is an empty item's leaf"
     );
 
     // Both orders, because a node that swapped its children would otherwise
     // only have to agree with itself.
     assert_eq!(
         node_hash(empty_leaf(), forest_leaf(PROBE)).to_string(),
-        "d71b99128dfd63e9ba34c02a98a3f805143a9f1acb93f6dd3d2c75c05e72fefb"
+        "57b8222800472cb92fb67958cca41e3a554146d35a5636d99272c79e48c5d7c5"
     );
     assert_eq!(
         node_hash(forest_leaf(PROBE), empty_leaf()).to_string(),
-        "29c52cf192e272ebbc256240284387d9a2308d878e42274f38579c0666a8f32d"
+        "d4b5d24d631ee6827a31d1f24844e0756d22b32e728cbb4a7a339c9e6ce2b9a2"
     );
 }
 
@@ -236,7 +242,7 @@ fn a_cold_set_commitment_is_still_what_it_was() {
     assert_eq!(archive.forest().len(), 4);
     assert_eq!(
         archive.commitment().to_string(),
-        "2d586bb3e325c55a98cf14162aedd262c5fc71dc0146b25412f2ea2d21806a9e",
+        "2c1adccf6c38d7c107661b9c75d3dfbcde417b3ef56752de072bdf96415d27f2",
         "the commitment over five places with four standing changed"
     );
 }

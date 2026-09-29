@@ -1316,7 +1316,7 @@ fn spec_draw(seed: Hash32, count: usize, total: u128, levels: u32) -> Vec<u128> 
         let mut preimage = Vec::with_capacity(40);
         preimage.extend_from_slice(seed.as_bytes());
         preimage.extend_from_slice(&index.to_le_bytes());
-        let bytes = hash(Domain::SamplingSeed, &preimage);
+        let bytes = hash(Domain::SamplingDraw, &preimage);
         let bytes = bytes.as_bytes();
 
         let mut level_bytes = [0u8; 8];
@@ -1501,6 +1501,49 @@ fn the_draw_is_the_seven_steps_the_document_gives() {
     );
 }
 
+/// Each draw hashes its 40 bytes under the sampling draw domain, and not
+/// under the domain the seed was made in.
+///
+/// The seed is 32 bytes hashed under `sampling seed` and each draw was the
+/// seed and an eight-byte counter hashed under the same domain, so one domain
+/// named two kinds of value and only their lengths told them apart. Nothing
+/// asked which domain step 2 used, so a draw that kept sharing the seed's
+/// passed: the vector above rebuilt it with the same domain the code used.
+#[test]
+fn a_draw_hashes_under_a_domain_the_seed_does_not() {
+    let seed = hash(Domain::SamplingSeed, b"a tip");
+    let total = 1u128 << 40;
+    let levels = spec_levels(30 * 365 * 24 * 60);
+    let drawn = draw(seed, 1, total, levels);
+    assert_eq!(
+        drawn,
+        spec_draw(seed, 1, total, levels),
+        "the first value is not the one step 2 of the document gives"
+    );
+
+    // The same seven steps with the seed's domain at step 2.
+    let mut preimage = Vec::with_capacity(40);
+    preimage.extend_from_slice(seed.as_bytes());
+    preimage.extend_from_slice(&0u64.to_le_bytes());
+    let bytes = hash(Domain::SamplingSeed, &preimage);
+    let bytes = bytes.as_bytes();
+    let mut level_bytes = [0u8; 8];
+    level_bytes.copy_from_slice(&bytes[0..8]);
+    let level = (u128::from(u64::from_le_bytes(level_bytes)) * u128::from(levels)) >> 64;
+    let mut within_bytes = [0u8; 16];
+    within_bytes.copy_from_slice(&bytes[8..24]);
+    let within = u128::from_le_bytes(within_bytes);
+    let far = total >> (level as u32);
+    let near = total >> (level as u32 + 1);
+    let width = far.saturating_sub(near).max(1);
+    let under_the_seeds_domain = (total - far).saturating_add(within % width).min(total - 1);
+    assert_ne!(
+        drawn,
+        vec![under_the_seeds_domain],
+        "the first question was drawn under the domain the seed is hashed in"
+    );
+}
+
 #[test]
 fn a_logarithm_in_place_of_the_leading_zeros_would_draw_different_questions() {
     // The claim the document makes about its own gap, measured: at a power of
@@ -1521,7 +1564,7 @@ fn a_logarithm_in_place_of_the_leading_zeros_would_draw_different_questions() {
                     let mut preimage = Vec::with_capacity(40);
                     preimage.extend_from_slice(seed.as_bytes());
                     preimage.extend_from_slice(&index.to_le_bytes());
-                    let bytes = hash(Domain::SamplingSeed, &preimage);
+                    let bytes = hash(Domain::SamplingDraw, &preimage);
                     let bytes = bytes.as_bytes();
                     let mut level_bytes = [0u8; 8];
                     level_bytes.copy_from_slice(&bytes[0..8]);
@@ -1626,8 +1669,9 @@ fn spec_cold_leaf(id: &NoteId, subject: &Note) -> Hash32 {
     hash(Domain::ForestLeaf, &bytes)
 }
 
+/// "no bytes, under the forest empty domain".
 fn spec_empty_leaf() -> Hash32 {
-    hash(Domain::ForestLeaf, &[])
+    hash(Domain::ForestEmpty, &[])
 }
 
 fn spec_forest_node(left: Hash32, right: Hash32) -> Hash32 {

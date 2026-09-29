@@ -145,6 +145,8 @@ thing it exists for.
     <tr><td>header history leaf</td><td><code>cairn v1 header history leaf</code></td></tr>
     <tr><td>sampling seed</td><td><code>cairn v1 sampling seed</code></td></tr>
     <tr><td>grace window</td><td><code>cairn v1 grace window</code></td></tr>
+    <tr><td>sampling draw</td><td><code>cairn v1 sampling draw</code></td></tr>
+    <tr><td>forest empty</td><td><code>cairn v1 forest empty</code></td></tr>
   </tbody>
 </table>
 
@@ -927,10 +929,14 @@ current from what every block already carries.
   <thead><tr><th>Hash</th><th>Is</th></tr></thead>
   <tbody>
     <tr><td>the leaf of a fallen note</td><td>its 36-byte identifier then its 40-byte encoding, under the forest leaf domain</td></tr>
-    <tr><td>the empty leaf</td><td>no bytes, under the forest leaf domain</td></tr>
+    <tr><td>the empty leaf</td><td>no bytes, under the forest empty domain</td></tr>
     <tr><td>an internal node</td><td>its left child then its right child, under the forest node domain</td></tr>
   </tbody>
 </table>
+
+The empty leaf has a domain of its own, so it is not the leaf of any item: a
+leaf appended is a hash under the forest leaf domain, and the two domains are
+two different hash functions.
 
 The identifier is folded into the leaf because a position carries no meaning
 of its own: without it, a proof for one note would serve for another note of
@@ -1806,10 +1812,10 @@ Both sides derive the same list of work values from the tip alone, so no round
 trip is needed to agree on the questions and nobody has to be trusted to ask
 them honestly. A second implementation MUST reproduce the list exactly.
 
-The seed is the hash, under the sampling domain, of the tip's identifier:
+The seed is the hash, under the sampling seed domain, of the tip's identifier:
 
 ```text
-seed = H(sampling, id(tip))
+seed = H(sampling seed, id(tip))
 ```
 
 Two further quantities come from the tip. The work the draw ranges over is the
@@ -1888,7 +1894,7 @@ Otherwise, for each index `i` from `0` to `count - 1`, in order:
   <thead><tr><th class="n">#</th><th>Step</th></tr></thead>
   <tbody>
     <tr><td class="n">1</td><td>form 40 bytes: the 32 bytes of the seed, then <code>i</code> as a little-endian <code>u64</code></td></tr>
-    <tr><td class="n">2</td><td><code>b = H(sampling, those 40 bytes)</code></td></tr>
+    <tr><td class="n">2</td><td><code>b = H(sampling draw, those 40 bytes)</code></td></tr>
     <tr><td class="n">3</td><td><code>level = (u64 from b[0..8], little-endian) * levels &gt;&gt; 64</code>, in 128-bit arithmetic</td></tr>
     <tr><td class="n">4</td><td><code>within = u128</code> from <code>b[8..24]</code>, little-endian</td></tr>
     <tr><td class="n">5</td><td><code>far = total >> level</code> and <code>near = total >> (level + 1)</code>, both shift counts clamped at 127</td></tr>
@@ -2173,7 +2179,7 @@ over 2<sup>18</sup>, which on a chain that ran to schedule is at least a
 thousandth of an average block. Measured on a thirty year chain at the two
 networks' opening difficulties, the cheapest tip a forger can present costs
 2<sup>18</sup> hashes on testnet-6 and 2<sup>14</sup> on the devnet; held to the
-pinned header alone it would cost 2<sup>10.3</sup> and 2<sup>7.3</sup>. It does
+pinned header alone it would cost 2<sup>10.2</sup> and 2<sup>7.4</sup>. It does
 not cost the chain's difficulty, and no tie of this kind can make it: a run
 whose tip fell by the tie is what an honest chain looks like after a loss.
 

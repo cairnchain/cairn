@@ -20,6 +20,7 @@
 
 use cairn_accumulator::forest::{empty_leaf, forest_leaf, tree_of, ForestProof, MAX_HEIGHT};
 use cairn_accumulator::{Archive, Forest, PathsBefore};
+use cairn_primitives::hash::{hash, Domain};
 use cairn_primitives::Hash32;
 
 fn leaf(index: u64) -> Hash32 {
@@ -408,22 +409,30 @@ fn the_structure_agrees_with_the_leaves_after_any_sequence() {
     }
 }
 
-/// The empty leaf sentinel lives in the same domain as a real leaf, and the
-/// only thing keeping the two apart is that nothing ever hashes nothing.
+/// The empty leaf is no item's leaf: it hashes under a domain of its own.
 ///
-/// `empty_leaf()` is `hash(ForestLeaf, &[])` and `forest_leaf(item)` is
-/// `hash(ForestLeaf, item)`, so `forest_leaf(&[])` is the sentinel exactly. In
-/// the ledger the only producer of a cold leaf is `cold_leaf`, which hashes a
-/// note identifier followed by a note and is therefore never empty. The
-/// separation holds, and it holds by that one fact rather than by domain.
-/// `Forest::add` refusing the sentinel makes it the structure's rule as well
-/// as the callers'.
+/// It used to be `hash(ForestLeaf, &[])`, and `forest_leaf(item)` is
+/// `hash(ForestLeaf, item)`, so the public function that turns an item into a
+/// leaf turned an empty item into the sentinel exactly. What kept the two apart
+/// was a fact about the callers in another crate: the ledger's only cold leaf
+/// is a note identifier followed by a note, and never empty. Nothing asked
+/// this, so a forest whose sentinel any caller could produce by hashing
+/// nothing passed.
+///
+/// `Forest::add` still refuses the sentinel, so that a leaf handed in from
+/// anywhere, and not only one made by `forest_leaf`, cannot take a place that
+/// nothing could empty again.
 #[test]
-fn the_empty_leaf_is_reachable_only_by_hashing_nothing() {
+fn the_empty_leaf_is_no_items_leaf() {
     assert_eq!(
+        empty_leaf(),
+        hash(Domain::ForestEmpty, &[]),
+        "the sentinel is not nothing hashed under the forest empty domain"
+    );
+    assert_ne!(
         forest_leaf(&[]),
         empty_leaf(),
-        "the sentinel is what hashing an empty item gives"
+        "hashing an empty item into a leaf gives the sentinel an emptied place holds"
     );
     for length in 1..=128usize {
         let item = vec![0u8; length];

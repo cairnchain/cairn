@@ -533,7 +533,7 @@ pub const MOST_TAIL: u64 = 16 * SHALLOWEST + DIFFICULTY_WINDOW as u64;
 /// where its difficulty is low. Held to the pinned header alone, it lays a
 /// cheap stretch where the deepest question lands, climbs out of it to carry
 /// the band, and walks back down to within the tie of the cheap header:
-/// measured the same way, that tip costs 2^10.3 hashes on testnet-6 and 2^7.3
+/// measured the same way, that tip costs 2^10.2 hashes on testnet-6 and 2^7.4
 /// on the devnet.
 ///
 /// What it costs an honest chain is a loss of hash rate it cannot be weighed
@@ -820,6 +820,8 @@ pub fn draw(seed: Hash32, count: usize, total_work: u128, levels: u32) -> Vec<u1
     let mut drawn = Vec::with_capacity(count);
     for index in 0..count {
         // Two numbers from one hash: which halving level, and where inside it.
+        // Under a domain of its own and not the seed's, so that a seed and a
+        // draw are never told apart by their length alone.
         let mut material = [0u8; 40];
         if let Some(head) = material.get_mut(..32) {
             head.copy_from_slice(seed.as_bytes());
@@ -828,7 +830,7 @@ pub fn draw(seed: Hash32, count: usize, total_work: u128, levels: u32) -> Vec<u1
         if let Some(tail) = material.get_mut(32..) {
             tail.copy_from_slice(&counter.to_le_bytes());
         }
-        let bytes = hash(Domain::SamplingSeed, &material);
+        let bytes = hash(Domain::SamplingDraw, &material);
         let bytes = bytes.as_bytes();
 
         // Multiplied and shifted rather than reduced: `chosen` spans the

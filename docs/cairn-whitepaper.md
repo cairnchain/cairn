@@ -597,7 +597,7 @@ it. While that lasts, every honest node answering is refused in the same
 words a forger would be. The cap is kept rather than raised, because
 raising it moves the cliff instead of removing it: the same measurement
 puts the run a thirty year chain needs a year after a four thousand fold
-loss at 526 033 headers and 96 MB, sixty three times the cap, and nothing
+loss at 526 027 headers and 96 MB, sixty three times the cap, and nothing
 in the shape of the problem stops the next chain needing more: the run is
 work divided by a difficulty whose only floor is one. Every metre of
 whatever number were chosen instead would be memory a stranger decides a
