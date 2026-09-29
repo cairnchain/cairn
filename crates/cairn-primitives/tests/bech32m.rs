@@ -177,6 +177,35 @@ fn spare_bits_that_are_not_zero_are_refused() {
     );
 }
 
+/// **Any number of bytes is written as the fewest groups that hold it, and
+/// read back as it went.**
+///
+/// Thirty two bytes leave a last group part filled, which is the only case the
+/// tests above reach. Five bytes, or any multiple of five, fill their last
+/// group exactly, and a writer that added a group of padding anyway wrote a
+/// string its own reader refuses; nothing encoded such a length, so that
+/// passed.
+#[test]
+fn every_length_is_written_in_the_fewest_groups_and_read_back() {
+    for length in 0..=40usize {
+        let bytes: Vec<u8> = (0..length)
+            .map(|index| (index as u8).wrapping_mul(37))
+            .collect();
+        let text = encode("tcairn", &bytes);
+        let (_, groups) = decode_groups(&text).unwrap();
+        assert_eq!(
+            groups.len(),
+            (length * 8).div_ceil(5),
+            "{length} bytes were not written in the fewest groups that hold them"
+        );
+        assert_eq!(
+            decode(&text),
+            Ok(("tcairn".to_owned(), bytes)),
+            "{length} bytes did not come back as they went"
+        );
+    }
+}
+
 /// Every character a person could type in place of another.
 fn printable() -> impl Iterator<Item = char> {
     (0x21u8..=0x7e).map(char::from)

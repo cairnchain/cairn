@@ -59,6 +59,18 @@ exclude_re = [
     # `<` in the function, and CI's gate let it through beside a timeout
     # (audit 07-F3).
     "replace < with <= in Wallet::recover_stranded",
+    # Bech32m's `^` between a checksum shifted five places and the next
+    # five-bit value, as `|`. The shift leaves the low five bits nought and
+    # every value fed in is below thirty two (a group, or a prefix character's
+    # high or low bits), so the two operands never share a set bit and the
+    # operators cannot disagree: the equivalent mutant the hexadecimal reader's
+    # entries above describe, in the checksum rather than a byte.
+    "bech32m\\.rs.*replace \\^ with \\| in polymod",
+    # And its writer's `|` between the bits held, shifted eight places, and the
+    # next byte, as `^`: the low eight bits of the shifted value are nought, so
+    # the same argument. The reader's twin is already covered by the entry for
+    # `decode` above.
+    "bech32m\\.rs.*replace \\| with \\^ in encode",
 ]
 
 # A mutant that makes a loop run forever is one the suite would have caught if
