@@ -4713,6 +4713,23 @@ mod tests {
                 "{refusal:?}, said of a payment already handed over, says to send it again"
             );
         }
+        // A payment short of the burn its places owe is told that the price
+        // is destroyed, which is why paying it again at a miner's discretion
+        // is not on offer, and a payment already handed over is told what
+        // the network now asks.
+        let unpaid = Refused::Transfer(TransferError::PlacesUnpaid {
+            places: 2,
+            burn: fee,
+            fee,
+        });
+        assert!(
+            said_plainly(&unpaid).contains("destroyed"),
+            "a payment short of the burn of its places is not told the price is destroyed"
+        );
+        assert!(
+            held_back_because(&unpaid).contains("now asks"),
+            "a payment handed over and now short of its burn is not told what is asked"
+        );
         // A node still checking the ledger it was handed carries nothing at
         // all, which is not a refusal of any one payment.
         assert!(
