@@ -189,7 +189,7 @@ fn spare_bits_that_are_not_zero_are_refused() {
 fn every_length_is_written_in_the_fewest_groups_and_read_back() {
     for length in 0..=40usize {
         let bytes: Vec<u8> = (0..length)
-            .map(|index| (index as u8).wrapping_mul(37))
+            .map(|index| u8::try_from(index).unwrap().wrapping_mul(37))
             .collect();
         let text = encode("tcairn", &bytes);
         let (_, groups) = decode_groups(&text).unwrap();
