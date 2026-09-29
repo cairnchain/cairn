@@ -23,8 +23,8 @@
 # about swap below if the build is killed partway.
 #
 # A seed node holds no key. If this machine were taken tomorrow, there would be
-# nothing on it to steal. It can still be asked to mine, with MINE set to a
-# public key: what a miner needs is the address rewards are paid to, never the
+# nothing on it to steal. It can still be asked to mine, with MINE set to an
+# address: what a miner needs is the address rewards are paid to, never the
 # key that spends them.
 
 set -eu
@@ -144,10 +144,11 @@ the_settings() {
     resolve NETWORK "$(carried network)" testnet-6
     resolve PORT "${listen##*:}" 9944
     resolve SEED "$(carried seed)" ""
-    # A public key to pay block rewards to. Mining needs the address money
-    # goes to and nothing else: the key that spends it never leaves the
-    # machine that holds it, so this stays true even here, where nothing
-    # worth stealing may sit.
+    # An address to pay block rewards to, or a public key in the form an
+    # address had before 0.10, which the node converts to its address. Mining
+    # needs the address money goes to and nothing else: the key that spends
+    # it never leaves the machine that holds it, so this stays true even
+    # here, where nothing worth stealing may sit.
     resolve MINE "$(carried mine)" ""
     # Not settings this script is told. The directory and the address to
     # listen on are whatever the installed line says, and the defaults on a
@@ -370,21 +371,29 @@ if [ -n "$MINE_SAID" ] && [ -z "$MINE" ]; then
     MINE=off
 fi
 
-# A key that is not a key produces a service that will not start, and systemd
-# reports that as a failure to launch rather than as a bad argument. Asked
-# here as well as by `--check` below, because this is before the build.
+# An address that is not an address produces a service that will not start,
+# and systemd reports that as a failure to launch rather than as a bad
+# argument. Its shape is asked here, because this is before the build; its
+# checksum and its network are the build's to read, at `--check` below.
 if [ -n "$MINE" ] && [ "$MINE" != off ]; then
     case "$MINE" in
+        cairn1* | tcairn1* | dcairn1*)
+            ;;
         *[!0-9a-fA-F]* | "")
-            echo "MINE is not a public key: $MINE" >&2
+            echo "MINE is not an address: $MINE" >&2
+            echo "get it with: cairn-wallet address <your key file>" >&2
             exit 1
             ;;
+        *)
+            # A public key, the form an address had before 0.10. The node
+            # still takes one and converts it to its address.
+            if [ "${#MINE}" -ne 64 ]; then
+                echo "MINE is neither an address nor a 64 character public key: $MINE" >&2
+                echo "get the address with: cairn-wallet address <your key file>" >&2
+                exit 1
+            fi
+            ;;
     esac
-    if [ "${#MINE}" -ne 64 ]; then
-        echo "MINE should be 64 hex characters, this is ${#MINE}" >&2
-        echo "get it with: cairn-wallet address <your key file>" >&2
-        exit 1
-    fi
 fi
 
 case "$DATADIR" in
