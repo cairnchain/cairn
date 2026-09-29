@@ -346,6 +346,9 @@ struct Draft {
     change: Amount,
     bytes: usize,
     floor: Amount,
+    /// What its places destroy, which is the part of the floor no miner
+    /// keeps and so the part a rank in the pool is not measured on.
+    burn: Amount,
     /// What the pool weighs it at, which is what its fee is ranked against.
     weight: usize,
     /// What a note of it falling out of the hot set before a block carries
@@ -1674,11 +1677,12 @@ impl Wallet {
     /// Not the floor. The pool asks the floor again of every transfer it
     /// holds after every block, and the floor moves: a note the payment
     /// spends that falls out of the hot set before a block carries it frees
-    /// no place any more, and the payment weighs a place more. A payment
-    /// paying exactly the floor was let go of by every pool the block after
-    /// that, and on a small hot set that is a matter of seconds. So the quote
-    /// carries a place's worth over the floor for every place a falling note
-    /// can add, which is what [`margin_of`] works out.
+    /// no place any more, and the payment takes a place more, whose burn the
+    /// rules ask and not only the pool. A payment paying exactly the floor
+    /// was let go of by every pool the block after that, and on a small hot
+    /// set that is a matter of seconds. So the quote carries a place's price
+    /// over the floor for every place a falling note can add, which is what
+    /// [`margin_of`] works out.
     ///
     /// And when the pool is full, enough to rank above the cheapest transfer
     /// it holds: a full pool makes room only for a better rate, and a quote at
@@ -1763,9 +1767,11 @@ impl Wallet {
         let bytes = transfer.encode().len();
         let freed = spending.iter().filter(|held| held.fallen.is_none()).count();
         let weight = cairn_chain::transfer_weight(&transfer, bytes, freed);
+        let places = cairn_chain::places_taken(&transfer, freed);
         Ok(Draft {
-            floor: cairn_chain::fee_floor(weight),
-            margin: margin_of(freed, transfer.outputs.len()),
+            floor: cairn_chain::fee_floor(bytes, places, &self.params),
+            burn: self.params.burn_for(places).unwrap_or(Amount::MAX_MONEY),
+            margin: margin_of(freed, transfer.outputs.len(), &self.params),
             weight,
             bytes,
             spending,
@@ -3743,14 +3749,20 @@ fn take_until(sorted: &[Held], needed: Amount, most: usize) -> Option<(Vec<Held>
 }
 
 /// What notes falling out of the hot set before a block carries a spend can
-/// add to the floor the pool asks of it again.
+/// add to what it owes under `rules`.
 ///
 /// A spend is credited a place for every hot note it frees, against the
 /// places its outputs take. A note that falls first frees nothing, so each can
 /// add a place, and never more places than the outputs take: once they are
 /// all paid for, a note falling changes nothing.
-fn margin_of(freed: usize, outputs: usize) -> Amount {
-    cairn_chain::fee_floor(freed.min(outputs).saturating_mul(cairn_chain::NOTE_WEIGHT))
+///
+/// Priced at the consensus place price, because that is what a place adds:
+/// the burn is a rule, so a spend short of it after a note fell is one no
+/// block may carry, not only one a pool lets go of.
+fn margin_of(freed: usize, outputs: usize, rules: &ConsensusParams) -> Amount {
+    rules
+        .burn_for(freed.min(outputs))
+        .unwrap_or(Amount::MAX_MONEY)
 }
 
 /// The `cheapest` rate a pool of `count` transfers taking `bytes` holds, when
@@ -3764,10 +3776,14 @@ fn crowded(count: usize, bytes: usize, cost: usize, cheapest: Option<u128>) -> O
 
 /// The fee a spend shaped like `draft` is quoted when none is named: the
 /// floor and its margin, and past the cheapest rate a full pool holds.
+///
+/// A pool ranks on what a fee leaves its miner once the burn is paid, so
+/// outranking asks the burn and then the rate on top of it.
 fn asking(draft: &Draft, crowded: Option<u128>) -> Amount {
     let quoted = draft.floor.checked_add(draft.margin).unwrap_or(draft.floor);
     crowded.map_or(quoted, |rate| {
-        quoted.max(cairn_chain::fee_to_outrank(rate, draft.weight))
+        let outrank = cairn_chain::fee_to_outrank(rate, draft.weight);
+        quoted.max(draft.burn.checked_add(outrank).unwrap_or(Amount::MAX_MONEY))
     })
 }
 
@@ -3840,6 +3856,13 @@ fn said_plainly(refusal: &Refused) -> String {
         Refused::Transfer(TransferError::FeeBelowFloor { floor, .. }) => format!(
             "the network asks {floor} to carry this payment and this one pays less, so nothing \
              was sent. Send it again paying that."
+        ),
+        // The burn is a rule, so no node carries a payment short of it, and it
+        // is destroyed, so it is not a price any miner can waive.
+        Refused::Transfer(TransferError::PlacesUnpaid { places, burn, fee }) => format!(
+            "this payment adds {places} notes to the set every node keeps, and each one costs a \
+             fixed price that is destroyed, {burn} in all, where it pays {fee}. Nothing was sent. \
+             Send it again paying at least that and the network's floor on top."
         ),
         Refused::Transfer(TransferError::TooLargeForABlock { .. }) => {
             "this payment gathers so many notes that no block would carry it. Nothing was sent. \
@@ -4136,6 +4159,11 @@ fn held_back_because(refusal: &Refused) -> String {
             "it pays {fee} and the network now asks {floor} to carry it. A note it spends has \
              fallen out of the set every node keeps since it was made, and that makes it weigh \
              more"
+        ),
+        Refused::Transfer(TransferError::PlacesUnpaid { burn, fee, .. }) => format!(
+            "it pays {fee} and the network now asks {burn} for the places it takes in the set \
+             every node keeps, which no block may carry for less. A note it spends has fallen \
+             out of that set since it was made, and so gives no place back"
         ),
         Refused::Transfer(
             TransferError::InvalidProof { .. }
@@ -4485,49 +4513,61 @@ mod tests {
     }
 
     /// The quote for a blank fee carries a place's worth over the floor for
-    /// every place a note of the spend falling can add, and no more.
+    /// every place a note of the spend falling can add, and no more, at the
+    /// price the rules burn for a place.
     ///
     /// It quoted the floor exactly, and the pool asks the floor again after
     /// every block: a note the payment spent falling out of the hot set made
-    /// it weigh a place more, and every pool let it go.
+    /// it take a place more, and every pool let it go. Since a place is a
+    /// burn the rules ask, a margin priced at anything less than the place
+    /// price leaves a payment no block may carry once its note falls.
     #[test]
     fn a_blank_fee_is_quoted_a_place_over_the_floor_for_each_note_that_can_fall() {
-        let place = cairn_chain::fee_floor(cairn_chain::NOTE_WEIGHT);
+        let place = cairn_ledger::validation::PLACE_PRICE;
+        let rules = crate::ConsensusParams::testnet().with_place_price(place);
         assert_eq!(
-            margin_of(0, 2),
+            margin_of(0, 2, &rules),
             Amount::ZERO,
             "nothing hot, nothing to fall"
         );
-        assert_eq!(margin_of(1, 2), place);
-        assert_eq!(margin_of(2, 2), place.checked_add(place).unwrap());
         assert_eq!(
-            margin_of(5, 2),
+            margin_of(1, 2, &rules),
+            place,
+            "a note that can fall is not priced at the place price"
+        );
+        assert_eq!(margin_of(2, 2, &rules), place.checked_add(place).unwrap());
+        assert_eq!(
+            margin_of(5, 2, &rules),
             place.checked_add(place).unwrap(),
             "never more places than the outputs take"
         );
 
+        let burn = place;
         let draft = super::Draft {
             spending: Vec::new(),
             change: Amount::ZERO,
             bytes: 150,
-            floor: Amount::from_pebbles(1_500).unwrap(),
-            weight: 150,
+            floor: Amount::from_pebbles(1_500)
+                .unwrap()
+                .checked_add(burn)
+                .unwrap(),
+            burn,
+            weight: 150 + cairn_chain::NOTE_WEIGHT,
             margin: place,
         };
         assert_eq!(
             asking(&draft, None),
-            Amount::from_pebbles(1_500)
-                .unwrap()
-                .checked_add(place)
-                .unwrap(),
+            draft.floor.checked_add(place).unwrap(),
             "the quote is not the floor and its margin"
         );
         // A full pool whose cheapest pays far more per unit than this would.
         let dear = u128::from(u64::MAX >> 20);
         assert_eq!(
             asking(&draft, Some(dear)),
-            cairn_chain::fee_to_outrank(dear, 150),
-            "a quote into a full pool does not outrank the cheapest it holds"
+            burn.checked_add(cairn_chain::fee_to_outrank(dear, draft.weight))
+                .unwrap(),
+            "a quote into a full pool does not outrank the cheapest it holds, \
+             once the burn no miner keeps is paid"
         );
         assert_eq!(
             asking(&draft, Some(0)),
@@ -4642,6 +4682,11 @@ mod tests {
             TransferError::OutputsExceedInputs {
                 available: fee,
                 requested: fee,
+            },
+            TransferError::PlacesUnpaid {
+                places: 2,
+                burn: fee,
+                fee,
             },
             TransferError::InvalidSignature { input_index: 0 },
         ];

@@ -1277,9 +1277,10 @@ pub fn check_transfer_again(
 /// The same, with the signatures written down instead of checked.
 ///
 /// Everything else is decided here: the shape, where each note is, that it is
-/// not already spent, and what it is worth. What is left over is the one part
-/// that needs no state at all, and a block's worth of it is enough work to be
-/// worth doing in one go.
+/// not already spent, what it is worth, and that the fee pays for the places
+/// the transfer takes. What is left over is the one part that needs no state
+/// at all, and a block's worth of it is enough work to be worth doing in one
+/// go.
 fn resolve_transfer(
     transfer: &Transfer,
     position_in_block: usize,

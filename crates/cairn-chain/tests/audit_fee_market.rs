@@ -4,7 +4,9 @@
 //! The pool's ordering is local policy: a block is valid whatever order its
 //! transfers were picked in, and a miner pays no fee to itself. So every
 //! number here has to be read as what it costs a *stranger*, and separately as
-//! what it costs the party writing the block, which is usually nothing.
+//! what it costs the party writing the block, which is the burn of the places
+//! its transfers take and nothing more: the burn is a rule and is destroyed,
+//! and the rest of a fee comes back to whoever mines it.
 
 #![allow(
     clippy::unwrap_used,
@@ -17,13 +19,15 @@
 )]
 
 use cairn_chain::{
-    fee_floor, pooled_cost, transfer_weight, ChainStore, MAX_POOLED, MAX_POOL_BYTES,
-    MIN_FEE_PER_WEIGHT, NOTE_WEIGHT,
+    fee_floor, places_taken, pooled_cost, transfer_weight, ChainStore, MAX_POOLED, MAX_POOL_BYTES,
+    MIN_FEE_PER_WEIGHT,
 };
 use cairn_crypto::SecretKey;
 use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
-use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
+use cairn_ledger::validation::{
+    assemble_block, connect_block, mine_block, ConsensusParams, PLACE_PRICE,
+};
 use cairn_ledger::LedgerState;
 use cairn_primitives::amount::PEBBLES_PER_CAIRN;
 use cairn_primitives::codec::Encode;
@@ -32,8 +36,12 @@ use cairn_primitives::Amount;
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 20;
 
+/// The price a public network charges for a place, with rewards spendable
+/// at once.
 fn params() -> ConsensusParams {
-    ConsensusParams::testnet().with_coinbase_maturity(0)
+    ConsensusParams::testnet()
+        .with_coinbase_maturity(0)
+        .with_place_price(PLACE_PRICE)
 }
 
 fn wallet(seed: u8) -> SecretKey {
@@ -102,7 +110,8 @@ fn split(
     transfer
 }
 
-/// The fee that puts a transfer at exactly `per_weight` pebbles a unit.
+/// The fee that leaves a transfer's miner exactly `per_weight` pebbles a
+/// unit, on top of the burn of its places.
 fn at_rate(
     params: &ConsensusParams,
     id: NoteId,
@@ -115,13 +124,14 @@ fn at_rate(
     // build is enough.
     let probe = split(params, id, note, owner, count, pebbles(1));
     let weight = transfer_weight(&probe, probe.encode().len(), 1);
+    let burn = params.place_price.as_pebbles() * places_taken(&probe, 1) as u64;
     split(
         params,
         id,
         note,
         owner,
         count,
-        pebbles(weight as u64 * per_weight),
+        pebbles(burn + weight as u64 * per_weight),
     )
 }
 
@@ -130,18 +140,18 @@ fn at_rate(
 // ---------------------------------------------------------------------------
 
 /// A full block of ordinary payments at the floor is worth about a thousandth
-/// of the block that carries it.
+/// of the block that carries it, and its miner keeps a quarter of that.
 ///
 /// This is the frame for everything else in this file. `selection` orders by
-/// fee per unit of weight, and a miner that threw the ordering away and filled
-/// the block with its own traffic would forgo this much. At today's reward it
-/// is not a number that changes anybody's behaviour, which means the pool's
-/// ordering is followed because it is the default in the software and not
-/// because it pays. It also means the fee floor deters nothing at all except
-/// on a chain where the reward has halved into irrelevance.
+/// what a transfer leaves its miner per unit of weight, and a miner that threw
+/// the ordering away and filled the block with its own traffic would forgo
+/// what the floor leaves over the burn. At today's reward it is not a number
+/// that changes anybody's behaviour, which means the pool's ordering is
+/// followed because it is the default in the software and not because it
+/// pays. What deters churn is the burn, which nobody keeps.
 #[test]
 fn a_full_block_of_floor_paying_traffic_is_worth_a_thousandth_of_the_reward() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     // One in, two out: a payment and its change. Measured rather than guessed.
     let owner = wallet(1).public_key();
     let payment = Transfer::new(
@@ -153,48 +163,54 @@ fn a_full_block_of_floor_paying_traffic_is_worth_a_thousandth_of_the_reward() {
     );
     let bytes = payment.encode().len();
     let weight = transfer_weight(&payment, bytes, 1);
-    let floor = fee_floor(weight);
+    let floor = fee_floor(bytes, places_taken(&payment, 1), &params);
+    let burn = params.place_price.as_pebbles();
 
     let per_block = params.max_block_bytes / bytes;
     let fees = floor.as_pebbles() * per_block as u64;
+    let kept = (floor.as_pebbles() - burn) * per_block as u64;
     let reward = params.reward_at(0).as_pebbles();
 
     println!("\n  an ordinary payment is {bytes} bytes and weighs {weight}");
     println!(
-        "  its floor is {} pebbles, and {per_block} of them fill a block",
+        "  its floor is {} pebbles, {burn} of them burned, and {per_block} of them fill a block",
         floor.as_pebbles()
     );
     println!(
         "  a full block at the floor carries {fees} pebbles in fees against a\n  \
-         reward of {reward}: {:.4} per cent of what the block pays\n",
+         reward of {reward}: {:.4} per cent of what the block pays, of which\n  \
+         the miner keeps {kept}\n",
         100.0 * fees as f64 / reward as f64
     );
     assert!(
         fees * 500 < reward,
         "fees are {fees} against a reward of {reward}"
     );
+    assert!(kept * 3 < fees, "most of an ordinary floor is the burn");
 }
 
 /// And what it would cost, at the floor, to push the whole hot set out.
 ///
-/// The eviction cap says how fast. Nothing says how much altogether, and the
-/// altogether is small: a fraction of one block's reward buys the tier, spread
-/// over the hundred and twenty eight blocks the cap forces. A miner spending
-/// its own blocks on it pays none of this.
+/// The eviction cap says how fast, and the place price says how much
+/// altogether: every place burns it, so the tier costs its size times the
+/// price, spread over the hundred and twenty eight blocks the cap forces. A
+/// miner spending its own blocks on it pays the burn like anybody, and saves
+/// only the bytes' share, which comes back to it. The altogether is still a
+/// fraction of one block's reward.
 #[test]
 fn the_whole_hot_set_can_be_pushed_out_for_a_fraction_of_one_reward() {
-    let params = ConsensusParams::testnet();
+    let params = params();
     let notes = params.hot_capacity as u64;
-    // Each place taken is NOTE_WEIGHT of weight at the floor rate, plus the
-    // bytes of the output itself, which an output of value and owner makes 40.
-    let places = notes * NOTE_WEIGHT as u64 * MIN_FEE_PER_WEIGHT;
+    // Each place taken burns the price, plus the bytes of the output itself
+    // at the floor rate, which an output of value and owner makes 40.
+    let places = notes * params.place_price.as_pebbles();
     let bytes = notes * 40 * MIN_FEE_PER_WEIGHT;
     let total = places + bytes;
     let reward = params.reward_at(0).as_pebbles();
 
     println!("\n  pushing every one of the {notes} hot notes out, paying the floor:");
     println!(
-        "  {:.2} CAIRN for the places, {:.2} for the bytes, {:.2} altogether",
+        "  {:.2} CAIRN burned for the places, {:.2} for the bytes, {:.2} altogether",
         places as f64 / PEBBLES_PER_CAIRN as f64,
         bytes as f64 / PEBBLES_PER_CAIRN as f64,
         total as f64 / PEBBLES_PER_CAIRN as f64
@@ -207,6 +223,10 @@ fn the_whole_hot_set_can_be_pushed_out_for_a_fraction_of_one_reward() {
         params.hot_capacity.div_ceil(params.max_evictions_per_block)
     );
     assert!(total < reward, "{total} against a reward of {reward}");
+    assert!(
+        places > 7 * PEBBLES_PER_CAIRN,
+        "the burn of a whole tier is some seven CAIRN, destroyed"
+    );
 }
 
 // ---------------------------------------------------------------------------
